@@ -87,6 +87,27 @@ function splitVerbs(list) {
 /** Role attributes that must never appear on an S2 privilege role. */
 const FORBIDDEN_ROLE_ATTRS = ['login', 'superuser', 'createdb', 'createrole', 'replication', 'bypassrls'];
 
+/**
+ * The EXACT ownership marker migration 005 writes on each role it creates, restated here as the
+ * contract rather than read out of the migration. It is the only thing that lets the rollback
+ * tell a role 005 created from one that merely shares the name, so both files must agree on it
+ * character for character — which a rule that derived the marker from either file could not see.
+ */
+const ROLE_MARKERS = {
+  [RUNTIME_ROLE]: 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:tenant-runtime',
+  [AUDIT_ROLE]: 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:audit-append',
+};
+
+/** Any statement that changes state. A preflight placed after one of these is not a preflight:
+ *  the refusal it produces would leave a partially mutated database behind. */
+const MUTATION = /^(create role|comment on|grant|revoke|create policy|alter table|alter default privileges|alter role|drop)\b/;
+
+/** A statement that changes a DATABASE-level privilege — the thing neither file may attempt. */
+const isDatabaseLevelChange = (s) =>
+  /^(grant|revoke)\b[\s\S]*\bon database\b/.test(s)
+  || /^alter database\b/.test(s)
+  || (/\bexecute\b/.test(s) && /\bon database\b/.test(s));
+
 // --- SQL text handling -------------------------------------------------------
 
 /**
@@ -246,6 +267,77 @@ export function validateMigration005({ up, down }) {
         if (new RegExp(`\\s${attr}\\s`).test(positives)) {
           problems.push(`up: privilege role ${role} must never carry ${attr.toUpperCase()}`);
           break;
+        }
+      }
+    }
+  }
+
+  // --- role ownership: 005 owns these two names, and adopts neither ----------
+  // The preflight must be the FIRST executable statement. Anything that mutates before it turns
+  // a refusal into a partial apply, which is exactly the failure this rule exists to prevent.
+  const preflightIdx = upStmts.findIndex((s) =>
+    /^do \$/.test(s)
+    && /pg_catalog\.pg_roles/.test(s)
+    && /raise exception/.test(s)
+    && /duplicate_object/.test(s)
+    && S2_ROLES.every((r) => s.includes(`'${r}'`)));
+  const firstUpMutation = upStmts.findIndex((s) => MUTATION.test(s));
+  if (preflightIdx === -1) {
+    problems.push(`up: no role-ownership preflight refuses a pre-existing ${S2_ROLES.join(' / ')}`);
+  } else if (firstUpMutation !== -1 && preflightIdx > firstUpMutation) {
+    problems.push('up: the role-ownership preflight runs AFTER a mutation — its refusal would not be atomic');
+  }
+  // A tolerant existence guard around CREATE ROLE is precisely the defect the preflight replaces:
+  // it adopts whatever it finds, and the rollback then removes a role 005 never created.
+  for (const s of upStmts) {
+    if (/\bcreate role\b/.test(s) && /\bif not exists\b/.test(s)) {
+      problems.push('up: a privilege role must not be created behind a tolerant existence guard — 005 owns the name or refuses it');
+    }
+  }
+  for (const role of S2_ROLES) {
+    if (!upStmts.some((s) => s === `comment on role ${role} is '${ROLE_MARKERS[role]}'`)) {
+      problems.push(`up: ${role} must carry its exact migration-ownership marker comment`);
+    }
+  }
+
+  // --- the fail-closed effective-privilege gate ------------------------------
+  // 005 cannot CLOSE a database-level privilege (a REVOKE from a non-owner migration principal
+  // is a warning and a no-op), so it must VERIFY the posture the database owner is responsible
+  // for and refuse to apply without it.
+  const gateStmts = upStmts.filter((s) => s.includes('has_database_privilege'));
+  if (gateStmts.length === 0) {
+    problems.push('up: no effective database-privilege gate — 005 must fail closed when owner provisioning is incomplete');
+  } else {
+    const gate = gateStmts.join('\n');
+    for (const priv of ['temporary', 'create']) {
+      if (!gate.includes(`'${priv}'`)) {
+        problems.push(`up: the privilege gate never checks database ${priv.toUpperCase()}`);
+      }
+    }
+    for (const role of S2_ROLES) {
+      if (!gate.includes(`'${role}'`)) problems.push(`up: the privilege gate never covers ${role}`);
+    }
+    if (!/raise exception/.test(gate)) {
+      problems.push('up: the privilege gate observes without refusing — it must raise');
+    }
+  }
+  for (const s of upStmts) {
+    if (isDatabaseLevelChange(s)) {
+      problems.push('up: migration 005 must not attempt a database-level privilege change it may hold no right to make');
+    }
+  }
+
+  // --- catalog functions must be schema-qualified ----------------------------
+  // An unqualified call resolves through search_path, so a shadowing function in a schema that
+  // precedes pg_catalog runs instead. A forged has_database_privilege returning false turns the
+  // fail-closed gate into a silent pass; a forged shobj_description hands the rollback the marker
+  // it is looking for on any role at all. Both are one qualification away from impossible.
+  const MUST_QUALIFY = ['has_database_privilege', 'shobj_description', 'current_database', 'array_agg'];
+  for (const [label, stmts] of [['up', upStmts], ['down', downStmts]]) {
+    for (const s of stmts) {
+      for (const fn of MUST_QUALIFY) {
+        if (new RegExp(`(^|[^.a-z_])${fn}\\s*\\(`).test(s)) {
+          problems.push(`${label}: ${fn}() must be schema-qualified to pg_catalog — an unqualified call resolves through search_path`);
         }
       }
     }
@@ -457,6 +549,40 @@ export function validateMigration005({ up, down }) {
   if (firstRoleDrop !== -1 && lastRevoke > firstRoleDrop) {
     problems.push('down: a grant is revoked AFTER the role that holds it is dropped — unsafe order');
   }
+  // --- the rollback proves OWNERSHIP before it removes anything -------------
+  // A name is not ownership. Without this, a rollback deletes whatever happens to be called
+  // tmpos_app — including a role the operator provisioned and 005 never created.
+  const downPreflightIdx = downStmts.findIndex((s) =>
+    /^do \$/.test(s) && /shobj_description/.test(s) && /raise exception/.test(s)
+    && S2_ROLES.every((r) => s.includes(`'${r}'`)));
+  const firstDownMutation = downStmts.findIndex((s) => MUTATION.test(s));
+  if (downPreflightIdx === -1) {
+    problems.push('down: no ownership preflight — a role would be removed on the strength of its NAME alone');
+  } else {
+    for (const role of S2_ROLES) {
+      if (!downStmts[downPreflightIdx].includes(`'${ROLE_MARKERS[role]}'`)) {
+        problems.push(`down: the ownership preflight does not require ${role}'s exact migration-005 marker`);
+      }
+    }
+    if (firstDownMutation !== -1 && downPreflightIdx > firstDownMutation) {
+      problems.push('down: the ownership preflight runs AFTER a mutation — a refusal would not leave the pre-down state intact');
+    }
+  }
+  for (const s of downStmts) {
+    if (/\bdrop role if exists\b/.test(s)) {
+      problems.push('down: DROP ROLE IF EXISTS accepts a role by name alone and is not ownership proof');
+    }
+    if (/\bdrop owned by\b/.test(s)) {
+      problems.push('down: DROP OWNED BY would remove state 005 never created');
+    }
+    if (/\bcascade\b/.test(s)) {
+      problems.push('down: CASCADE would conceal the ownership or dependency problem it is meant to surface');
+    }
+    if (isDatabaseLevelChange(s)) {
+      problems.push('down: a rollback must not restore or broaden a database-level privilege');
+    }
+  }
+
   // 001-004 protections must survive a 005 rollback.
   for (const s of downStmts) {
     if (/^drop table\b/.test(s)) problems.push('down: 005 rollback must not drop a table created by 001-004');
@@ -506,6 +632,49 @@ test('migration 005 declares exactly the approved role-to-table privilege matrix
   assert.ok(up.includes(`grant insert on table ${AUDIT_TABLE} to ${AUDIT_ROLE}`));
   for (const t of IDENTITY_TABLES) {
     assert.ok(!new RegExp(`grant [^;]* on table (public\\.)?${t} to`).test(up), `${t} must never be granted`);
+  }
+});
+
+test('migration 005 owns its role names, marks them, and verifies the owner-provisioned posture', () => {
+  // Stated as a readable inventory, so the lifecycle contract is visible in this file and not
+  // only implied by the validator's internals.
+  const up = norm(stripSqlComments(readMigration(UP_FILE)));
+  const down = norm(stripSqlComments(readMigration(DOWN_FILE)));
+
+  // The preflight is genuinely FIRST: nothing that mutates state precedes it.
+  assert.ok(up.indexOf('do $$') < up.indexOf('create role'),
+    'the ownership preflight must precede role creation');
+  assert.ok(up.includes("errcode = 'duplicate_object'"),
+    'a pre-existing role must be refused with a deterministic SQLSTATE');
+  assert.ok(!up.includes('if not exists') || !/create role[^;]*if not exists/.test(up),
+    'no role may be created behind a tolerant existence guard');
+
+  for (const role of S2_ROLES) {
+    assert.ok(up.includes(`comment on role ${role} is '${ROLE_MARKERS[role]}'`),
+      `${role} must be marked as migration-owned at CREATE time`);
+    assert.ok(down.includes(`'${ROLE_MARKERS[role]}'`),
+      `the rollback must require ${role}'s exact marker before removing it`);
+    assert.ok(down.includes(`drop role ${role};`),
+      `the rollback must remove ${role} without an existence guard standing in for ownership`);
+  }
+  assert.ok(!down.includes('drop role if exists'), 'a name is not ownership proof');
+  assert.ok(!down.includes('cascade'), 'CASCADE would hide the dependency error that must surface');
+
+  // The gate verifies what the database owner is responsible for, and refuses without it.
+  for (const role of S2_ROLES) {
+    for (const priv of ['temporary', 'create']) {
+      assert.ok(up.includes(`has_database_privilege(r, db, '${priv}')`) || up.includes(`has_database_privilege('${role}', db, '${priv}')`),
+        `the gate must check database ${priv.toUpperCase()}`);
+    }
+  }
+  assert.ok(up.includes("errcode = 'insufficient_privilege'"),
+    'and refuse with a deterministic SQLSTATE when provisioning is incomplete');
+
+  // Neither file attempts the database-level change that a non-owner principal cannot make.
+  for (const [label, text] of [['up', up], ['down', down]]) {
+    assert.ok(!/(grant|revoke)[^;]*on database/.test(text),
+      `${label}: 005 must not attempt a database-level privilege change`);
+    assert.ok(!/alter database/.test(text), `${label}: 005 must not alter the database`);
   }
 });
 
@@ -668,6 +837,108 @@ const DEFECTS = [
     name: 'a down migration that disables RLS established by 001-004',
     mutate: (p) => ({ ...p, down: `${p.down}\nalter table store disable row level security;\n` }),
     expect: /must not disable RLS established by 001-004/,
+  },
+
+  // --- role ownership and the fail-closed privilege gate ---------------------
+  {
+    name: 'an up migration with no role-ownership preflight at all',
+    mutate: (p) => ({ ...p, up: p.up.replace(/do \$\$[\s\S]*?duplicate_object[\s\S]*?\$\$;/, '') }),
+    expect: /no role-ownership preflight/,
+  },
+  {
+    name: 'a preflight that runs after a role has already been created',
+    mutate: (p) => ({ ...p, up: `create role ${RUNTIME_ROLE} nologin;\n${p.up}` }),
+    expect: /preflight runs AFTER a mutation/,
+  },
+  {
+    // The exact shape of the defect this correction removes: tolerate whatever is already there.
+    name: 'a privilege role created behind a tolerant existence guard',
+    mutate: (p) => ({
+      ...p,
+      up: `${p.up}\ndo $$ begin\n  if not exists (select 1 from pg_catalog.pg_roles where rolname = '${RUNTIME_ROLE}') then\n    create role ${RUNTIME_ROLE} nologin;\n  end if;\nend $$;\n`,
+    }),
+    expect: /tolerant existence guard/,
+  },
+  {
+    name: 'a role created without its exact migration-ownership marker',
+    mutate: (p) => ({ ...p, up: p.up.replace(ROLE_MARKERS[RUNTIME_ROLE], 'some other comment') }),
+    expect: /must carry its exact migration-ownership marker/,
+  },
+  {
+    name: 'an up migration with no effective database-privilege gate',
+    mutate: (p) => ({ ...p, up: p.up.replace(/has_database_privilege/g, 'not_a_privilege_check') }),
+    expect: /no effective database-privilege gate/,
+  },
+  {
+    name: 'a privilege gate that never checks database TEMPORARY',
+    mutate: (p) => ({ ...p, up: p.up.replace(/'TEMPORARY'/g, "'CONNECT'") }),
+    expect: /never checks database TEMPORARY/,
+  },
+  {
+    // Reading the privilege and then continuing anyway is not a gate.
+    name: 'a privilege gate that observes without refusing',
+    mutate: (p) => ({
+      ...p,
+      up: p.up.replace(/do \$\$\ndeclare\n  db name[\s\S]*?\n\$\$;/,
+        `do $$ declare ok boolean; begin ok :=
+             has_database_privilege('${RUNTIME_ROLE}', current_database(), 'TEMPORARY')
+          or has_database_privilege('${RUNTIME_ROLE}', current_database(), 'CREATE')
+          or has_database_privilege('${AUDIT_ROLE}', current_database(), 'TEMPORARY')
+          or has_database_privilege('${AUDIT_ROLE}', current_database(), 'CREATE'); end $$;`),
+    }),
+    expect: /observes without refusing/,
+  },
+  {
+    // The cosmetic REVOKE: from a non-owner migration principal PostgreSQL emits only
+    // "no privileges could be revoked" and the privilege survives, so this is a false green.
+    name: 'a database-level REVOKE the migration principal may not be entitled to make',
+    mutate: (p) => ({ ...p, up: `${p.up}\nrevoke temporary on database probe_db from public;\n` }),
+    expect: /must not attempt a database-level privilege change/,
+  },
+  {
+    name: 'the same database-level change smuggled through EXECUTE',
+    mutate: (p) => ({ ...p, up: `${p.up}\ndo $$ begin execute 'revoke temporary on database probe_db from public'; end $$;\n` }),
+    expect: /must not attempt a database-level privilege change/,
+  },
+  {
+    name: 'a shadowable, unqualified catalog function call',
+    mutate: (p) => ({ ...p, up: p.up.replace(/pg_catalog\.has_database_privilege/g, 'has_database_privilege') }),
+    expect: /must be schema-qualified to pg_catalog/,
+  },
+  {
+    name: 'a shadowable, unqualified marker read in the rollback',
+    mutate: (p) => ({ ...p, down: p.down.replace(/pg_catalog\.shobj_description/g, 'shobj_description') }),
+    expect: /shobj_description\(\) must be schema-qualified/,
+  },
+  {
+    name: 'a down migration with no ownership preflight',
+    mutate: (p) => ({ ...p, down: p.down.replace(/do \$\$[\s\S]*?shobj_description[\s\S]*?\$\$;/, '') }),
+    expect: /no ownership preflight/,
+  },
+  {
+    name: 'a down preflight that does not require the exact ownership marker',
+    mutate: (p) => ({ ...p, down: p.down.replace(ROLE_MARKERS[RUNTIME_ROLE], 'some other marker') }),
+    expect: /does not require .* exact migration-005 marker/,
+  },
+  {
+    name: 'a down preflight that runs after a policy has already been dropped',
+    mutate: (p) => ({ ...p, down: `drop policy if exists tmpos_app_tenant_scope on public.tenant;\n${p.down}` }),
+    expect: /ownership preflight runs AFTER a mutation/,
+  },
+  {
+    name: 'a down migration that removes a role by name alone',
+    mutate: (p) => ({ ...p, down: p.down.replace(`drop role ${RUNTIME_ROLE};`, `drop role if exists ${RUNTIME_ROLE};`) }),
+    expect: /is not ownership proof/,
+  },
+  {
+    name: 'a down migration that uses DROP OWNED BY ... CASCADE',
+    mutate: (p) => ({ ...p, down: `${p.down}\ndrop owned by ${RUNTIME_ROLE} cascade;\n` }),
+    expect: /CASCADE would conceal|DROP OWNED BY would remove state/,
+  },
+  {
+    name: 'a down migration that hands a database-level privilege back to PUBLIC',
+    mutate: (p) => ({ ...p, down: `${p.down}\ngrant temporary on database probe_db to public;\n` }),
+    expect: /must not restore or broaden a database-level privilege/,
   },
 ];
 

@@ -13,6 +13,15 @@
 --     roles: they carry permissions, they cannot open a connection. Granting a real LOGIN role
 --     membership in them is an owner/operator responsibility, performed outside this file so
 --     that no credential ever has to live in a migration.
+--   - DATABASE-LEVEL PRIVILEGE IS NOT THIS FILE'S TO SET, AND IT DOES NOT PRETEND OTHERWISE.
+--     PostgreSQL grants the database-level TEMPORARY privilege to PUBLIC by default, and PUBLIC
+--     reaches every role, so a runtime principal inherits it no matter how least-privileged its
+--     own attributes are. Closing it requires database ownership or the grant option. A REVOKE
+--     issued here by a non-owner migration principal does NOT error: PostgreSQL emits only
+--     "WARNING: no privileges could be revoked" and the privilege survives. Shipping that would
+--     be a green that means nothing. So this file VERIFIES the posture and refuses to apply
+--     without it; ESTABLISHING it is the database-owner provisioning step recorded under gate
+--     G-DBROLE (docs/phase-4/08-production-gate-and-risk-register.md).
 --   - NO SECRETS: no credential, connection string, key, or provider identifier appears here.
 --   - The API layer remains the PRIMARY authorization guard. These policies are DEFENSE IN
 --     DEPTH — the layer that still holds when application code forgets a WHERE clause.
@@ -28,8 +37,9 @@
 --
 -- ONCE-ONLY BY CONSTRUCTION: the S1 engine applies each version exactly once, under a checksum
 --   ledger, inside a transaction ('required' mode). This file therefore carries no re-run
---   guards except on CREATE ROLE — roles are CLUSTER-wide, not database-wide, so one may
---   already exist for reasons this database cannot see.
+--   guards at all. Roles are CLUSTER-wide rather than database-wide, so one may already exist
+--   for reasons this database cannot see — but that is handled by REFUSING (section 1), never
+--   by tolerating it, because a role this migration did not create is not a role it may own.
 --
 -- Reversible via the matching down migration (005_principal_separation_rls_foundation.down.sql).
 --
@@ -37,102 +47,129 @@
 -- Postgres), matching the assumption 002 and 004 already make.
 
 -- =============================================================================
--- 1) Privilege roles — NOLOGIN, least-privileged, fail closed if pre-existing
+-- 1) Role-ownership preflight — 005 OWNS these two names and ADOPTS NEITHER
 -- =============================================================================
--- The attribute check is an ASSERTION, not a repair: ALTER ROLE ... NOBYPASSRLS /
+-- This is the FIRST executable statement in the file, and the first thing that can fail.
+--
+-- Migration 005 is the sole owner of tmpos_app and tmpos_audit_writer: it creates them, marks
+-- them, and its rollback removes them. A role already present under either name was created by
+-- somebody else. This migration will not adopt it, re-attribute it, alter it, mark it, or let
+-- its own rollback delete it — the previous revision of this file tolerated a pre-existing role
+-- on the way up and then dropped it blindly on the way down, which destroyed operator-owned
+-- state it never created.
+--
+-- Refusing is therefore the correct outcome, not a limitation, and the refusal is ATOMIC: the S1
+-- engine applies each version inside a transaction, so nothing below this block has run when it
+-- raises, and the pre-existing roles are left EXACTLY as found — not one comment, attribute or
+-- membership of theirs is written, and none is even marked as inspected.
+--
+-- Recovery is an operator decision, never an automatic one: retire the foreign roles, or accept
+-- them and re-plan the milestone. Both are choices this file must not make on anyone's behalf.
+
+-- >>> S2-ROLE-LIFECYCLE-BEGIN — the block between these markers is replayed VERBATIM under a
+--     NOSUPERUSER CREATEROLE principal by tests/db/rlsIsolation.integration.test.mjs (S2-DB-2b),
+--     which is the only way to prove it is portable to the managed deployment it targets.
+-- Every catalog function below is SCHEMA-QUALIFIED to pg_catalog on purpose. An unqualified call
+-- resolves through search_path, so a shadowing function in a schema that precedes pg_catalog
+-- would run instead — and a forged has_database_privilege returning false would turn the gate in
+-- section 3 into a silent pass. Qualifying costs nothing and removes the resolution from
+-- search_path's reach entirely.
+do $$
+declare
+  taken text[];
+begin
+  select pg_catalog.array_agg(rolname::text order by rolname) into taken
+    from pg_catalog.pg_roles
+    where rolname in ('tmpos_app', 'tmpos_audit_writer');
+
+  if taken is not null then
+    raise exception
+      'migration 005 owns the role name(s) % and they already exist; it will not adopt, alter, mark or remove a role it did not create', taken
+      using errcode = 'duplicate_object',
+            hint = 'retire the pre-existing role(s) deliberately, or re-plan this milestone; migration 005 makes no such change itself';
+  end if;
+end
+$$;
+
+-- =============================================================================
+-- 2) The privilege roles — created here, and MARKED as created here
+-- =============================================================================
+-- Unguarded on purpose. The preflight above has already proved neither name is taken, so a
+-- CREATE-time existence guard could now only hide a defect. Because this migration is the
+-- CREATOR it holds ADMIN OPTION on both roles implicitly, so COMMENT ON ROLE succeeds even for
+-- the NOSUPERUSER + CREATEROLE principal a managed deployment actually runs migrations as —
+-- the case that made commenting an inherited role unsafe no longer exists.
+--
+-- The comment is not documentation. It is the OWNERSHIP MARKER the rollback must match EXACTLY
+-- before it removes anything, so a role that merely shares the name can never be deleted by
+-- this migration's down file. Human-readable description stays in these SQL comments, where
+-- editing it cannot weaken the marker.
+--
+-- ATTRIBUTES ARE SET AT CREATE TIME AND NEVER REPAIRED LATER: ALTER ROLE ... NOBYPASSRLS /
 -- NOREPLICATION requires superuser even when the value is unchanged, and the managed Postgres
--- this schema targets does not run migrations as a superuser. Raising is both honest and
--- portable; silently continuing against an elevated role would not be.
+-- this schema targets does not run migrations as a superuser.
 
--- COMMENT ON ROLE is issued ONLY in the branch that created the role. Commenting an existing
--- role requires ADMIN OPTION on it, which CREATEROLE alone does not confer — so commenting a
--- role another administrator created would abort this migration on exactly the managed
--- deployment it is written for.
+create role tmpos_app
+  nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit;
+comment on role tmpos_app is 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:tenant-runtime';
 
-do $$
-declare
-  r record;
-  n int;
-begin
-  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'tmpos_app') then
-    create role tmpos_app
-      nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit;
-    comment on role tmpos_app is
-      'Phase 4.0 M3 S2: NOLOGIN tenant-runtime privilege role. Bound by tenant/store RLS policies; holds NO privilege on platform_identity, app_user, identity_link or audit_event; cannot bypass RLS, cannot create persistent objects, cannot log in.';
-  end if;
-
-  select * into r from pg_catalog.pg_roles where rolname = 'tmpos_app';
-  if r.rolcanlogin or r.rolsuper or r.rolcreatedb or r.rolcreaterole
-     or r.rolreplication or r.rolbypassrls then
-    raise exception
-      'tmpos_app already exists with elevated attributes; refusing to bind tenant policies to it'
-      using errcode = 'insufficient_privilege';
-  end if;
-
-  -- Attributes alone are NOT least privilege. An inheriting role is exactly as privileged as
-  -- whatever it is a member of, so a pre-existing tmpos_app that had been granted an owner or
-  -- admin role would silently bypass every policy below while passing the check above.
-  select count(*) into n from pg_catalog.pg_auth_members m where m.member = r.oid;
-  if n > 0 then
-    raise exception
-      'tmpos_app already holds % role membership(s); refusing to bind tenant policies to an inheriting role', n
-      using errcode = 'insufficient_privilege';
-  end if;
-
-  -- Nor may it already own objects: ownership carries full rights on them regardless of the
-  -- grant matrix, and it is state this migration did not create and must not adopt.
-  select count(*) into n from pg_catalog.pg_class c where c.relowner = r.oid;
-  if n > 0 then
-    raise exception 'tmpos_app already owns % object(s) in this database; refusing to reuse it', n
-      using errcode = 'insufficient_privilege';
-  end if;
-end
-$$;
-
-do $$
-declare
-  r record;
-  n int;
-begin
-  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'tmpos_audit_writer') then
-    create role tmpos_audit_writer
-      nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit;
-    comment on role tmpos_audit_writer is
-      'Phase 4.0 M3 S2: NOLOGIN audit-append privilege role. INSERT-only on audit_event and nothing else — it can never read, amend, or erase the evidence it appends to.';
-  end if;
-
-  select * into r from pg_catalog.pg_roles where rolname = 'tmpos_audit_writer';
-  if r.rolcanlogin or r.rolsuper or r.rolcreatedb or r.rolcreaterole
-     or r.rolreplication or r.rolbypassrls then
-    raise exception
-      'tmpos_audit_writer already exists with elevated attributes; refusing to bind it to audit_event'
-      using errcode = 'insufficient_privilege';
-  end if;
-
-  select count(*) into n from pg_catalog.pg_auth_members m where m.member = r.oid;
-  if n > 0 then
-    raise exception
-      'tmpos_audit_writer already holds % role membership(s); refusing to bind it to audit_event', n
-      using errcode = 'insufficient_privilege';
-  end if;
-
-  select count(*) into n from pg_catalog.pg_class c where c.relowner = r.oid;
-  if n > 0 then
-    raise exception 'tmpos_audit_writer already owns % object(s) in this database; refusing to reuse it', n
-      using errcode = 'insufficient_privilege';
-  end if;
-end
-$$;
+create role tmpos_audit_writer
+  nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit;
+comment on role tmpos_audit_writer is 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:audit-append';
 
 -- =============================================================================
--- 2) Schema privileges — usage without creation
+-- 3) Effective database-privilege gate — fail closed on unfinished provisioning
+-- =============================================================================
+-- The roles now exist, so their EFFECTIVE database privileges can finally be asked about. This
+-- gate is the whole reason the header refuses to issue a REVOKE: it verifies the outcome the
+-- database owner is responsible for, and aborts the migration if that owner step has not run.
+--
+-- has_database_privilege is used rather than reading datacl because it is the only check that
+-- sees ALL grant paths at once — a direct grant, a grant inherited through a role membership,
+-- and the PUBLIC grant PostgreSQL applies by default. Inspecting the PUBLIC path alone would
+-- pass a database where the privilege had simply been re-granted by another route.
+--
+-- It is READABLE by any role, including a non-owner migration principal, which is precisely why
+-- an assertion is possible here where a revocation is not. Both privileges are checked: CREATE
+-- on the database would let the runtime principal create schemas, and TEMPORARY would let it
+-- create temporary objects — the approved requirement is that it can create NEITHER.
+--
+-- This does NOT prove the same for a future LOGIN role: a direct or inherited grant to that
+-- role is invisible from here, so caller cutover must repeat the check against the real
+-- principal. G-DBROLE records that obligation and stays OPEN until it is met.
+do $$
+declare
+  db name := pg_catalog.current_database();
+  r  name;
+begin
+  foreach r in array array['tmpos_app', 'tmpos_audit_writer']::name[] loop
+    if pg_catalog.has_database_privilege(r, db, 'TEMPORARY') then
+      raise exception
+        'database-owner provisioning is incomplete: % still holds the database-level TEMPORARY privilege on %, so the tenant runtime could create temporary objects', r, db
+        using errcode = 'insufficient_privilege',
+              hint = 'gate G-DBROLE: the database owner must close the database-level TEMPORARY grant reaching PUBLIC before migration 005 is applied';
+    end if;
+
+    if pg_catalog.has_database_privilege(r, db, 'CREATE') then
+      raise exception
+        'database-owner provisioning is incomplete: % still holds the database-level CREATE privilege on %, so the tenant runtime could create schemas', r, db
+        using errcode = 'insufficient_privilege',
+              hint = 'gate G-DBROLE: the database owner must close the database-level CREATE grant reaching PUBLIC before migration 005 is applied';
+    end if;
+  end loop;
+end
+$$;
+-- <<< S2-ROLE-LIFECYCLE-END
+
+-- =============================================================================
+-- 4) Schema privileges — usage without creation
 -- =============================================================================
 
 revoke create on schema public from public, anon, authenticated;
 grant usage on schema public to tmpos_app, tmpos_audit_writer;
 
 -- =============================================================================
--- 3) Default privileges — a table added later is closed until granted on purpose
+-- 5) Default privileges — a table added later is closed until granted on purpose
 -- =============================================================================
 -- Applies to objects created LATER by the role running this migration. Note what is NOT here:
 -- no default privilege is granted to tmpos_app or tmpos_audit_writer, so a future table is
@@ -146,7 +183,7 @@ alter default privileges in schema public revoke all on sequences from public, a
 alter default privileges in schema public revoke all on functions from public, anon, authenticated;
 
 -- =============================================================================
--- 4) The REVOKE that 001 omitted
+-- 6) The REVOKE that 001 omitted
 -- =============================================================================
 -- 002 and 004 revoke public/anon/authenticated on every table they create; 001 relies on
 -- "RLS enabled, no policies" alone. That is a real asymmetry: RLS-without-policies denies the
@@ -157,7 +194,7 @@ alter default privileges in schema public revoke all on functions from public, a
 revoke all on table platform_identity from public, anon, authenticated;
 
 -- =============================================================================
--- 5) audit_event scope consistency
+-- 7) audit_event scope consistency
 -- =============================================================================
 -- 002 constrains scope_type's value domain but never ties it to tenant_id/store_id, so a
 -- store-scoped event with no store_id — or a platform-scoped event carrying a tenant — is
@@ -181,7 +218,7 @@ alter table public.audit_event
   );
 
 -- =============================================================================
--- 6) The role-to-table privilege matrix
+-- 8) The role-to-table privilege matrix
 -- =============================================================================
 --   tmpos_app            tenant                      select, update (display_name, legal_name)
 --                        store                       select, insert, update (store_name)
@@ -221,7 +258,7 @@ grant select on table tenant_feature_entitlement to tmpos_app;
 grant insert on table audit_event to tmpos_audit_writer;
 
 -- =============================================================================
--- 7) Tenant/store RLS policies
+-- 9) Tenant/store RLS policies
 -- =============================================================================
 -- CONTEXT CONTRACT — three transaction-local settings, installed with
 -- set_config(name, value, true) inside the transaction that uses them:
@@ -358,7 +395,7 @@ create policy tmpos_app_entitlement_scope on public.tenant_feature_entitlement
     )
   );
 
--- audit_event: FOR INSERT only, and context-independent by design (see section 5). The WITH
+-- audit_event: FOR INSERT only, and context-independent by design (see section 7). The WITH
 -- CHECK is not a formality — it refuses a malformed scope tuple a second time, and it refuses
 -- an advisory dev-sidecar record, so the durable compliance table can only ever receive rows
 -- that claim to be durable compliance evidence.

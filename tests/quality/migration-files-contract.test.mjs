@@ -54,8 +54,22 @@ const PINNED = {
   // matrix and the audit scope constraint. Its SHAPE is judged by
   // tests/quality/migration-005-contract.test.mjs and its SEMANTICS by
   // tests/db/rlsIsolation.integration.test.mjs; here it joins the immutability ratchet.
-  '005_principal_separation_rls_foundation.up.sql': '2dc62eb9602825039da69d9ca55c31b57502c3249d90f2b835f927ad3c25b255',
-  '005_principal_separation_rls_foundation.down.sql': 'cd38cb4a0f0577af1903a9c1e685298e4c1ef0d1c4b40e6891b872a1bc08fa05',
+  //
+  // ONE-TIME OWNER-AUTHORISED CORRECTION (Phase 4.0 M3 S2.2). These two values REPLACE the
+  // checksums first pinned at commit 090818da (up 2dc62eb9…, down cd38cb4a…). The exception was
+  // granted explicitly, on a narrow and verified basis:
+  //   * the old bytes were committed but, per the project record, never applied to a managed,
+  //     production, persistent or application database — only to disposable test clusters — so
+  //     no deployed schema can disagree with the corrected file;
+  //   * they carried two reproduced defects: the tenant runtime could create TEMPORARY objects
+  //     through the database-level privilege PostgreSQL grants to PUBLIC by default, and the
+  //     rollback removed roles on the strength of their NAME, deleting operator-owned state
+  //     migration 005 had never created.
+  // The values below are now the immutable ones. This does NOT relax the forward-only policy:
+  // a migration that has been applied anywhere, or that is not covered by an explicit owner
+  // authorisation of this kind, is still corrected by a NEW migration and never edited.
+  '005_principal_separation_rls_foundation.up.sql': 'bc393fde8daf46fd38f82715e5bb2cbe62207f2b64b28d68fec535ca16b3f709',
+  '005_principal_separation_rls_foundation.down.sql': '7f6ff1c56bd887a9bce1b64bf78d4d00af9a3859c136647f00c0564ef06c5cdb',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);

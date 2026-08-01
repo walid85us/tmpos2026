@@ -62,6 +62,63 @@ const AUDIT_ROLE = 'tmpos_audit_writer';
 const APP_PROBE = 'tmpos_rls_probe_app';
 const AUDIT_PROBE = 'tmpos_rls_probe_audit';
 
+/** Renamed stand-ins for the two privilege roles. Roles are CLUSTER-wide, so a scenario that
+ *  needs to control whether a role pre-exists cannot use the real names — the main apply already
+ *  holds those. Every lifecycle scenario below therefore runs the REAL 005 bytes with only the
+ *  two role names substituted. */
+const NS_APP = 'tmpos_s22_app';
+const NS_AUDIT = 'tmpos_s22_audit';
+
+/** A second disposable database in the same cluster, used only by the lifecycle scenarios so
+ *  they cannot disturb the isolation proof running in the primary one. */
+const LIFECYCLE_DB = 'tmpos_s1b_s22_lifecycle';
+
+/**
+ * The exact ownership markers migration 005 writes at CREATE time, restated rather than parsed
+ * out of the migration: a test that read the marker from the same file it is checking could not
+ * notice the up file and the down file drifting apart, which is the whole point of the marker.
+ */
+const ROLE_MARKERS = {
+  [RUNTIME_ROLE]: 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:tenant-runtime',
+  [AUDIT_ROLE]: 'tmpos:005_principal_separation_rls_foundation:migration-owned-role:audit-append',
+};
+
+/** What an operator's own pre-existing role carries. 005 must never overwrite or remove it. */
+const OPERATOR_MARKER = 'OPERATOR-OWNED: provisioned by the DBA before migration 005';
+
+/**
+ * The DATABASE-OWNER provisioning step that gate G-DBROLE owns and migration 005 refuses to run
+ * without. It is issued HERE, by the disposable database's owner, precisely because it is not
+ * migration 005's to issue: PostgreSQL grants database-level TEMPORARY to PUBLIC by default, and
+ * a REVOKE from a non-owner migration principal does not error — it emits "no privileges could
+ * be revoked" and leaves the privilege in place, which would ship a green that means nothing.
+ *
+ * No database name is hard-coded and the identifier is quoted through format('%I'), so the one
+ * statement is correct for the task-owned socket cluster locally and the loopback service in CI.
+ * Nothing here grants a runtime role any attribute, and the owner keeps its own capabilities.
+ */
+const OWNER_DB_ACL_PREP = `do $$
+begin
+  execute format('revoke temporary on database %I from public', current_database());
+  execute format('revoke create on database %I from public', current_database());
+end
+$$;`;
+
+/** Slice 005's role-lifecycle section out by its own delimiters, so the portability proof
+ *  replays the REAL committed bytes rather than a paraphrase of them. */
+function roleLifecycleSection(sql) {
+  const begin = sql.indexOf('-- >>> S2-ROLE-LIFECYCLE-BEGIN');
+  const end = sql.indexOf('-- <<< S2-ROLE-LIFECYCLE-END');
+  if (begin === -1 || end <= begin) {
+    throw new Error('migration 005 must delimit its role-lifecycle section for the portability proof');
+  }
+  return sql.slice(begin, end);
+}
+
+/** The real 005 bytes with ONLY the two role names substituted. */
+const renamed = (sql) =>
+  sql.replace(new RegExp(AUDIT_ROLE, 'g'), NS_AUDIT).replace(new RegExp(RUNTIME_ROLE, 'g'), NS_APP);
+
 // Fixture identifiers (see tests/db/fixtures/twoTenantTwoStore.setup.sql).
 const T_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const T_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -154,6 +211,8 @@ function probeClient(role) {
 let appProbe = null;
 let auditProbe = null;
 let applyReport = null;
+/** Owner connection to the second database used by the role-lifecycle scenarios. */
+let lifecycleClient = null;
 
 /** Classify a rejection. Both privilege and RLS-check failures are SQLSTATE 42501; treating
  *  them as one is how a missing GRANT gets mistaken for working isolation. */
@@ -193,6 +252,17 @@ await observer.unsafe(`do $$ begin
   if not exists (select 1 from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
 end $$;`);
 
+// The G-DBROLE database-owner step, run BEFORE the migration that verifies it. Both the
+// before and after readings are kept so S2-DB-0 can prove the step actually changed something
+// rather than asserting a posture that happened to be true already.
+const aclBefore = (await observer`select
+    has_database_privilege('public', current_database(), 'TEMPORARY') as public_temp`)[0];
+await observer.unsafe(OWNER_DB_ACL_PREP);
+const aclAfter = (await observer`select
+    has_database_privilege('public', current_database(), 'TEMPORARY') as public_temp,
+    has_database_privilege('public', current_database(), 'CREATE') as public_create,
+    has_database_privilege('anon', current_database(), 'TEMPORARY') as anon_temp`)[0];
+
 {
   const dsn = assertDisposableTestDsn(TARGET_DSN);
   const handle = await createPostgresExecutor(dsn);
@@ -229,8 +299,18 @@ appProbe = probeClient(APP_PROBE);
 auditProbe = probeClient(AUDIT_PROBE);
 
 test.after(async () => {
-  for (const c of [appProbe, auditProbe]) {
+  for (const c of [appProbe, auditProbe, lifecycleClient]) {
     if (c) await c.end({ timeout: 0 }).catch(() => {});
+  }
+  // EVERY cluster-wide role and database this suite created. Locally the whole cluster is removed
+  // below anyway, but in CI the service container outlives this suite within its job — and these
+  // CREATE ROLE statements are unguarded, so a second invocation against a surviving service
+  // would fail with `role already exists` at module load, before a single test ran. The database
+  // goes first: a role that still held a privilege inside it could not be dropped.
+  await observer.unsafe(`drop database if exists ${LIFECYCLE_DB}`).catch(() => {});
+  for (const r of [NS_APP, NS_AUDIT, `${NS_APP}_carrier`, `${NS_APP}_setrole_parent`,
+    `${NS_APP}_setrole_child`, APP_PROBE, AUDIT_PROBE, 'tmpos_s2_nonsuper_migrator']) {
+    await observer.unsafe(`drop role if exists ${r}`).catch(() => {});
   }
   await observer.end({ timeout: 5 }).catch(() => {});
   if (cluster !== null) {
@@ -243,6 +323,24 @@ test.after(async () => {
 // ---------------------------------------------------------------------------
 // foundation
 // ---------------------------------------------------------------------------
+
+test('S2-DB-0: the database-owner ACL step closed the PUBLIC path to database TEMPORARY', async () => {
+  // Proved as a CHANGE, not merely as a state: PostgreSQL hands database-level TEMPORARY to
+  // PUBLIC by default, so a test that only asserted the closed posture could not tell a working
+  // provisioning step from a cluster that happened to ship closed.
+  assert.equal(aclBefore.public_temp, true, 'precondition: PUBLIC starts with database TEMPORARY');
+  assert.equal(aclAfter.public_temp, false, 'the owner step must close the PUBLIC TEMPORARY grant');
+  assert.equal(aclAfter.public_create, false, 'PUBLIC must not hold database CREATE');
+  // anon is a witness for the PUBLIC path: it holds no grant of its own, so its effective
+  // privilege can only have come from PUBLIC.
+  assert.equal(aclAfter.anon_temp, false, 'a role with no grant of its own must inherit nothing');
+
+  // The owner keeps the capability the migration needs. Closing PUBLIC must not close the owner.
+  const [acl] = await observer`select datacl::text as acl from pg_database where datname = current_database()`;
+  assert.match(acl.acl ?? '', /=c\//, 'PUBLIC must retain CONNECT — closing TEMPORARY is not closing the database');
+  await observer.unsafe('create table s2_db_0_owner_probe (id int)');
+  await observer.unsafe('drop table s2_db_0_owner_probe');
+});
 
 test('S2-DB-1: migrations 001-005 apply to a DISPOSABLE database through the trusted engine', async () => {
   assert.equal(applyReport.outcome, 'complete', `apply failed: ${applyReport.code}`);
@@ -269,17 +367,39 @@ test('S2-DB-2: both privilege roles exist and are NOLOGIN and least-privileged',
     assert.equal(r.rolreplication, false, `${r.rolname} REPLICATION`);
     assert.equal(r.rolbypassrls, false, `${r.rolname} BYPASSRLS`);
   }
+
+  // Each role carries the EXACT ownership marker 005 writes. This is not decoration: the down
+  // migration matches it literally before it will remove anything, so a role that merely shares
+  // the name can never be deleted by this migration's rollback.
+  const marks = await observer`
+    select rolname::text as role, shobj_description(oid, 'pg_authid') as marker
+    from pg_catalog.pg_roles where rolname in (${RUNTIME_ROLE}, ${AUDIT_ROLE}) order by rolname`;
+  for (const m of marks) {
+    assert.equal(m.marker, ROLE_MARKERS[m.role], `${m.role} must carry 005's exact ownership marker`);
+  }
+
+  // And neither inherits anything: an inheriting privilege role is as privileged as its parent.
+  const inherited = await observer`
+    select g.rolname::text as member, r.rolname::text as parent
+    from pg_catalog.pg_auth_members m
+    join pg_catalog.pg_roles r on r.oid = m.roleid
+    join pg_catalog.pg_roles g on g.oid = m.member
+    where g.rolname in (${RUNTIME_ROLE}, ${AUDIT_ROLE})`;
+  assert.deepEqual([...inherited], [], 'neither privilege role may hold a role membership');
 });
 
-test("S2-DB-2b: 005's role management succeeds for a NON-superuser holding only CREATEROLE", async () => {
+test("S2-DB-2b: 005's whole role lifecycle succeeds for a NON-superuser holding only CREATEROLE", async () => {
   // S2-DB-1 applies through the cluster's bootstrap SUPERUSER, which accepts statements a
   // managed deployment refuses — so on its own it cannot prove the migration is portable. This
-  // runs 005's role-management blocks verbatim under the REAL production constraint
-  // (NOSUPERUSER + CREATEROLE), which is the only way to catch a statement like COMMENT ON ROLE
-  // that silently needs ADMIN OPTION.
+  // replays 005's ENTIRE role-lifecycle section, sliced out of the real file by its own
+  // delimiters, under the REAL production constraint (NOSUPERUSER + CREATEROLE). That covers
+  // three statements a superuser-only run would never test honestly:
+  //   * the ownership preflight, which reads pg_roles;
+  //   * COMMENT ON ROLE, which needs ADMIN OPTION — held implicitly only because this principal
+  //     is the role's CREATOR, which is exactly why 005 no longer comments an inherited role;
+  //   * has_database_privilege, which the fail-closed gate depends on being readable by a
+  //     non-owner principal.
   const MIGRATOR = 'tmpos_s2_nonsuper_migrator';
-  const NS_APP = 'tmpos_ns_app';
-  const NS_AUDIT = 'tmpos_ns_audit';
   await observer.unsafe(
     `create role ${MIGRATOR} login nosuperuser createrole nocreatedb noreplication nobypassrls inherit`,
   );
@@ -287,27 +407,34 @@ test("S2-DB-2b: 005's role management succeeds for a NON-superuser holding only 
     ssl: false, max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, user: MIGRATOR,
   });
   try {
-    const [{ issuper }] = await asMigrator`select rolsuper as issuper from pg_catalog.pg_roles
-                                           where rolname = current_user`;
+    const [{ issuper, isowner }] = await asMigrator`
+      select rolsuper as issuper,
+             exists (select 1 from pg_catalog.pg_database d
+                     join pg_catalog.pg_roles o on o.oid = d.datdba
+                     where d.datname = current_database() and o.rolname = current_user) as isowner
+      from pg_catalog.pg_roles where rolname = current_user`;
     assert.equal(issuper, false, 'the probe migrator must NOT be a superuser, or this proves nothing');
+    assert.equal(isowner, false, 'nor the database owner — the gate must hold for a non-owner principal');
 
-    const blocks = UP_005.match(/do \$\$[\s\S]*?\$\$;/g) ?? [];
-    assert.equal(blocks.length, 2, 'expected exactly the two role-management DO blocks in 005');
-    for (const block of blocks) {
-      // Renamed so this cannot collide with the roles the main apply already created.
-      const probe = block.replace(/tmpos_audit_writer/g, NS_AUDIT).replace(/tmpos_app/g, NS_APP)
-        .replace(/;\s*$/, '');
-      const r = await refusal(() => asMigrator.unsafe(probe));
-      assert.equal(r.kind, 'none',
-        `a NOSUPERUSER CREATEROLE migrator must be able to run 005 role management: ${r.code} ${r.msg}`);
-    }
+    const section = renamed(roleLifecycleSection(UP_005));
+    assert.match(section, /create role tmpos_s22_app/, 'the sliced section must actually create the roles');
+    assert.match(section, /has_database_privilege/, 'and must carry the fail-closed privilege gate');
+    const r = await refusal(() => asMigrator.unsafe(section).simple());
+    assert.equal(r.kind, 'none',
+      `a NOSUPERUSER CREATEROLE migrator must be able to run 005's role lifecycle: ${r.code} ${r.msg}`);
 
     const created = await observer`
-      select rolname, rolcanlogin, rolsuper, rolbypassrls from pg_catalog.pg_roles
-      where rolname in (${NS_APP}, ${NS_AUDIT}) order by rolname`;
+      select rolname::text as role, rolcanlogin, rolsuper, rolbypassrls,
+             shobj_description(oid, 'pg_authid') as marker
+      from pg_catalog.pg_roles where rolname in (${NS_APP}, ${NS_AUDIT}) order by rolname`;
     assert.equal(created.length, 2, 'both privilege roles were created by the non-superuser');
-    assert.ok(created.every((r) => r.rolcanlogin === false && r.rolsuper === false && r.rolbypassrls === false),
+    assert.ok(created.every((x) => x.rolcanlogin === false && x.rolsuper === false && x.rolbypassrls === false),
       'and they came out least-privileged');
+    // The marker survives the rename of the role itself — it identifies the MIGRATION, not the
+    // role, which is what makes it usable as an ownership proof by the rollback.
+    assert.deepEqual(created.map((x) => x.marker).sort(),
+      [ROLE_MARKERS[AUDIT_ROLE], ROLE_MARKERS[RUNTIME_ROLE]].sort(),
+      'COMMENT ON ROLE must have succeeded for the non-superuser creator');
   } finally {
     await asMigrator.end({ timeout: 0 }).catch(() => {});
     for (const r of [NS_APP, NS_AUDIT, MIGRATOR]) {
@@ -635,12 +762,24 @@ test('S2-DB-19: an independent connection starts with no context of its own', as
 // the runtime role's hard limits
 // ---------------------------------------------------------------------------
 
-test('S2-DB-20: the runtime role cannot CREATE objects or perform DDL', async () => {
+test('S2-DB-20: the runtime role cannot create PERSISTENT OR TEMPORARY objects, or perform DDL', async () => {
+  // Revoking CREATE on schema public stops the persistent battery but NOT a temporary table:
+  // that rides on the database-level TEMPORARY privilege, which PostgreSQL grants to PUBLIC and
+  // which no schema-level or role-level statement can take away. Both halves are asserted here,
+  // in one test, because the approved requirement is "no object" — the earlier revision of this
+  // test named that guarantee in its title while its own body asserted the opposite.
   for (const stmt of [
     'create table probe_should_not_exist (id int)',
     'create index probe_idx on store (store_name)',
     'alter table store add column probe_column text',
     'drop table store',
+    'create schema probe_schema',
+    'create sequence probe_seq',
+    'create view probe_view as select 1 as a',
+    'create materialized view probe_matview as select 1 as a',
+    'create type probe_type as (a int)',
+    'create function probe_fn() returns int as $fn$ select 1 $fn$ language sql',
+    'create temporary table probe_temp (id int)',
   ]) {
     const r = await refusal(() => appProbe.unsafe(stmt));
     assert.notEqual(r.kind, 'none', `DDL must not succeed: ${stmt}`);
@@ -651,20 +790,166 @@ test('S2-DB-20: the runtime role cannot CREATE objects or perform DDL', async ()
   const [{ cols }] = await observer`select count(*)::int as cols from information_schema.columns
                                     where table_name = 'store' and column_name = 'probe_column'`;
   assert.equal(cols, 0, 'no column was added');
+  // No temporary schema was even created for this session — the denial happened before any
+  // pg_temp_* namespace could be materialised.
+  const [{ temps }] = await appProbe`select count(*)::int as temps from pg_catalog.pg_class c
+                                     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+                                     where n.nspname like 'pg_temp%' and c.relname = 'probe_temp'`;
+  assert.equal(temps, 0, 'no temporary object survived');
+});
 
-  // HONEST LIMIT, asserted rather than glossed: revoking CREATE on schema public does NOT stop
-  // CREATE TEMPORARY TABLE, because that rides on the database-level TEMPORARY privilege which
-  // PostgreSQL grants to PUBLIC. So the guarantee is "no PERSISTENT object", not "no object".
-  // The residual is bounded: a temp table lives in a session-local schema, it cannot shadow a
-  // protected relation for anyone else, and 001-005 create no SECURITY DEFINER function whose
-  // search_path such a table could subvert. Recorded here so the claim matches reality.
-  const temp = await refusal(() => appProbe.unsafe('create temporary table probe_temp (id int)'));
-  assert.equal(temp.kind, 'none', 'a temp table IS creatable — the guarantee is about persistent objects');
-  await appProbe.unsafe('drop table if exists probe_temp').catch(() => {});
+test('S2-DB-20b: the runtime principal holds NO effective database TEMPORARY or CREATE privilege', async () => {
+  // EFFECTIVE privilege, not catalog text. has_database_privilege is the only check that sees
+  // every grant path at once — direct, inherited through a membership, and the PUBLIC grant
+  // PostgreSQL applies by default — which is exactly why the migration's own gate uses it.
+  const [eff] = await observer`select
+      has_database_privilege(${RUNTIME_ROLE}, current_database(), 'TEMPORARY') as app_temp,
+      has_database_privilege(${RUNTIME_ROLE}, current_database(), 'CREATE') as app_create,
+      has_database_privilege(${AUDIT_ROLE}, current_database(), 'TEMPORARY') as audit_temp,
+      has_database_privilege(${AUDIT_ROLE}, current_database(), 'CREATE') as audit_create,
+      has_database_privilege(${APP_PROBE}, current_database(), 'TEMPORARY') as login_temp,
+      has_database_privilege(${APP_PROBE}, current_database(), 'CREATE') as login_create`;
+  assert.deepEqual(eff, {
+    app_temp: false, app_create: false, audit_temp: false, audit_create: false,
+    login_temp: false, login_create: false,
+  }, 'no privilege role and no LOGIN principal inheriting one may hold database TEMPORARY or CREATE');
+
+  // Catalog-backed second opinion: PUBLIC appears in the database ACL with CONNECT only.
+  const acl = await observer`select coalesce((select rolname::text from pg_catalog.pg_roles where oid = a.grantee), 'PUBLIC') as grantee,
+      a.privilege_type from pg_catalog.pg_database d,
+      aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+    where d.datname = current_database() and a.privilege_type in ('TEMPORARY', 'CREATE')
+      and coalesce((select rolname::text from pg_catalog.pg_roles where oid = a.grantee), 'PUBLIC') = 'PUBLIC'`;
+  assert.deepEqual([...acl], [], 'PUBLIC must hold neither TEMPORARY nor CREATE on the database');
+});
+
+test('S2-DB-20c: re-opening ANY grant path makes the check fail — PUBLIC is not the only one', async () => {
+  // Mutation evidence for the fail-closed gate. If this test could not be made to fail by
+  // re-granting the privilege, it would not be testing anything. Each path is restored, shown to
+  // re-open temporary-object creation for the runtime principal, and removed again.
+  const CARRIER = `${NS_APP}_carrier`;
+  const dbAcl = (verb, who) =>
+    `do $$ begin execute format('${verb} temporary on database %I ${verb === 'grant' ? 'to' : 'from'} %I',
+       current_database(), '${who}'); end $$;`;
+  const probeTemp = async (name) => {
+    const r = await refusal(() => appProbe.unsafe(`create temporary table ${name} (id int)`));
+    if (r.kind === 'none') await appProbe.unsafe(`drop table ${name}`).catch(() => {});
+    return r;
+  };
+  const effFor = async (role) =>
+    (await observer`select has_database_privilege(${role}, current_database(), 'TEMPORARY') as t`)[0].t;
+
+  assert.equal(await effFor(APP_PROBE), false, 'precondition: the accepted state is closed');
+
+  try {
+    // (a) DIRECT grant to the runtime LOGIN principal.
+    await observer.unsafe(dbAcl('grant', APP_PROBE));
+    assert.equal(await effFor(APP_PROBE), true, 'a direct grant must re-open the privilege');
+    assert.equal((await probeTemp('probe_mut_direct')).kind, 'none',
+      'and a temporary table becomes creatable again');
+    // The migration's own gate watches the PRIVILEGE ROLES, which this path does not touch —
+    // stated here because it is the reason caller cutover must repeat the check for the real
+    // LOGIN role rather than trusting the migration to have covered it (gate G-DBROLE).
+    assert.equal(await effFor(RUNTIME_ROLE), false,
+      'a direct grant to the LOGIN role is invisible to a check that only inspects the privilege roles');
+    await observer.unsafe(dbAcl('revoke', APP_PROBE));
+    assert.equal(await effFor(APP_PROBE), false, 'removing the direct grant restores the accepted state');
+
+    // (b) INHERITED through a carrier role.
+    await observer.unsafe(`create role ${CARRIER} nologin`);
+    await observer.unsafe(dbAcl('grant', CARRIER));
+    await observer.unsafe(`grant ${CARRIER} to ${APP_PROBE}`);
+    assert.equal(await effFor(APP_PROBE), true, 'an inherited grant must re-open the privilege');
+    assert.equal((await probeTemp('probe_mut_carrier')).kind, 'none', 'and again the temp table succeeds');
+    await observer.unsafe(`revoke ${CARRIER} from ${APP_PROBE}`);
+    await observer.unsafe(dbAcl('revoke', CARRIER));
+    assert.equal(await effFor(APP_PROBE), false, 'removing the membership restores the accepted state');
+
+    // (c) The PUBLIC path — the one the defect actually rode in on.
+    await observer.unsafe(dbAcl('grant', 'public'));
+    assert.equal(await effFor(RUNTIME_ROLE), true, 'PUBLIC reaches the privilege roles themselves');
+    assert.equal(await effFor(APP_PROBE), true, 'and every principal inheriting them');
+    assert.equal((await probeTemp('probe_mut_public')).kind, 'none', 'and the temp table succeeds');
+  } finally {
+    await observer.unsafe(dbAcl('revoke', 'public')).catch(() => {});
+    await observer.unsafe(`revoke ${CARRIER} from ${APP_PROBE}`).catch(() => {});
+    await observer.unsafe(dbAcl('revoke', CARRIER)).catch(() => {});
+    await observer.unsafe(dbAcl('revoke', APP_PROBE)).catch(() => {});
+    await observer.unsafe(`drop role if exists ${CARRIER}`).catch(() => {});
+  }
+
+  // Back to the accepted state, proved the same way the acceptance itself is proved.
+  const [restored] = await observer`select
+      has_database_privilege(${RUNTIME_ROLE}, current_database(), 'TEMPORARY') as app_temp,
+      has_database_privilege(${APP_PROBE}, current_database(), 'TEMPORARY') as login_temp`;
+  assert.deepEqual(restored, { app_temp: false, login_temp: false }, 'every test grant was removed');
+  const back = await probeTemp('probe_mut_restored');
+  assert.equal(back.code, '42501', `and CREATE TEMPORARY TABLE is refused again: ${back.code} ${back.msg}`);
+
   const [{ definers }] = await observer`select count(*)::int as definers from pg_catalog.pg_proc p
                                         join pg_catalog.pg_namespace n on n.oid = p.pronamespace
                                         where n.nspname = 'public' and p.prosecdef`;
-  assert.equal(definers, 0, 'no SECURITY DEFINER function exists for a temp object to subvert');
+  assert.equal(definers, 0, 'no SECURITY DEFINER function exists whose search_path a temp object could subvert');
+});
+
+test('S2-DB-20d: a SET-able non-inheriting membership defeats has_database_privilege — asserted, not assumed', async () => {
+  // An HONEST LIMIT, proved rather than glossed. PostgreSQL 16 lets a membership be granted
+  // WITH INHERIT FALSE, SET TRUE: the member does not INHERIT the parent's privileges, so
+  // has_database_privilege reports false for it — and yet it can SET ROLE to the parent and use
+  // them. A single has_database_privilege reading is therefore NOT a complete answer for a
+  // principal that can SET ROLE.
+  //
+  // Migration 005's own gate is unaffected: it inspects tmpos_app and tmpos_audit_writer, which
+  // are NOLOGIN and hold no membership at all (S2-DB-2 asserts that), so there is nothing for
+  // them to SET ROLE to. The principal this DOES reach is the future persistent LOGIN role, which
+  // is precisely why G-DBROLE's caller-cutover criterion cannot be discharged by re-running the
+  // migration's check — it must also establish that the LOGIN role holds no SET-able membership.
+  const PARENT = `${NS_APP}_setrole_parent`;
+  const CHILD = `${NS_APP}_setrole_child`;
+  const dbGrant = (verb, who) =>
+    `do $$ begin execute format('${verb} temporary on database %I ${verb === 'grant' ? 'to' : 'from'} %I',
+       current_database(), '${who}'); end $$;`;
+
+  let child = null;
+  try {
+    await observer.unsafe(`create role ${PARENT} nologin nosuperuser nobypassrls`);
+    await observer.unsafe(`create role ${CHILD} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
+    await observer.unsafe(dbGrant('grant', PARENT));
+    await observer.unsafe(`grant ${PARENT} to ${CHILD} with inherit false, set true`);
+
+    const [seen] = await observer`select
+        has_database_privilege(${CHILD}, current_database(), 'TEMPORARY') as child_temp,
+        has_database_privilege(${PARENT}, current_database(), 'TEMPORARY') as parent_temp`;
+    assert.equal(seen.parent_temp, true, 'the parent really does hold the privilege');
+    assert.equal(seen.child_temp, false,
+      'has_database_privilege reports FALSE for the child — it does not inherit');
+
+    child = probeClient(CHILD);
+    const reached = await refusal(async () => {
+      await child.begin(async (tx) => {
+        await tx.unsafe(`set local role ${PARENT}`);
+        await tx.unsafe('create temporary table probe_setrole (id int)');
+      });
+    });
+    assert.equal(reached.kind, 'none',
+      `SET ROLE reaches the privilege has_database_privilege denied: ${reached.code} ${reached.msg}`);
+  } finally {
+    if (child) await child.end({ timeout: 0 }).catch(() => {});
+    await observer.unsafe(`revoke ${PARENT} from ${CHILD}`).catch(() => {});
+    await observer.unsafe(dbGrant('revoke', PARENT)).catch(() => {});
+    await observer.unsafe(`drop role if exists ${CHILD}`).catch(() => {});
+    await observer.unsafe(`drop role if exists ${PARENT}`).catch(() => {});
+  }
+
+  // The accepted state is restored, and the privilege roles never had a membership to exploit.
+  const [after] = await observer`select
+      has_database_privilege(${RUNTIME_ROLE}, current_database(), 'TEMPORARY') as app_temp,
+      has_database_privilege(${APP_PROBE}, current_database(), 'TEMPORARY') as login_temp,
+      (select count(*)::int from pg_catalog.pg_auth_members m
+       join pg_catalog.pg_roles g on g.oid = m.member
+       where g.rolname in (${RUNTIME_ROLE}, ${AUDIT_ROLE})) as privilege_role_memberships`;
+  assert.deepEqual(after, { app_temp: false, login_temp: false, privilege_role_memberships: 0 },
+    'the accepted state is restored and neither privilege role can SET ROLE anywhere');
 });
 
 test('S2-DB-21: the runtime role cannot bypass RLS, even by asking', async () => {
@@ -850,8 +1135,10 @@ test('S2-DB-28: the 005 rollback removes every S2-owned object and NOTHING from 
   const [{ n: auditBefore }] = await observer`select count(*)::int as n from audit_event`;
   assert.ok(auditBefore > 0, 'precondition: there is audit evidence to preserve');
 
-  // The down migration documents its precondition: a LOGIN role holding membership must be
-  // retired first, or DROP ROLE fails loudly. This follows that documented procedure.
+  // The down migration documents its precondition: a LOGIN principal holding membership must be
+  // retired first. PostgreSQL does NOT enforce it — a membership is a dependency OF the role, so
+  // DROP ROLE removes it silently — which is exactly why following the documented procedure is
+  // the point, rather than a way of avoiding an error that would never have been raised.
   await observer.unsafe(`revoke ${RUNTIME_ROLE} from ${APP_PROBE}`);
   await observer.unsafe(`revoke ${AUDIT_ROLE} from ${AUDIT_PROBE}`);
 
@@ -917,4 +1204,273 @@ test('S2-DB-29: re-applying 005 restores the foundation deterministically', asyn
     const theirs = await tx`select store_id from store where tenant_id = ${T_B}`;
     assert.deepEqual([...theirs], [], 'and still deny the cross-tenant read');
   });
+});
+
+// ---------------------------------------------------------------------------
+// role lifecycle and the fail-closed privilege gate
+//
+// These run in a SECOND disposable database in the same cluster, so nothing here can disturb
+// the isolation proof above. Two things make that necessary:
+//   * the gate must be observed FAILING on a database where the owner step has not run, and the
+//     primary database has (correctly) already had it;
+//   * roles are CLUSTER-wide, so a scenario that controls whether a role pre-exists cannot use
+//     the real names — the primary apply holds those. Every such scenario therefore executes the
+//     REAL 005 bytes with only the two role names substituted, which is why `renamed` touches
+//     nothing else: predicates, grants, markers and error paths are the committed ones.
+// ---------------------------------------------------------------------------
+
+const NS_UP = renamed(UP_005);
+const NS_DOWN = renamed(DOWN_005);
+const NS_MARKERS = { [NS_APP]: ROLE_MARKERS[RUNTIME_ROLE], [NS_AUDIT]: ROLE_MARKERS[AUDIT_ROLE] };
+const lifecycleDsn = () => {
+  const u = new URL(TARGET_DSN);
+  u.pathname = `/${LIFECYCLE_DB}`;
+  return u.toString();
+};
+
+/** Everything a refusal must leave untouched, read in one shot. */
+async function nsState() {
+  const roles = await lifecycleClient`
+    select rolname::text as role, shobj_description(oid, 'pg_authid') as marker
+    from pg_catalog.pg_roles where rolname in (${NS_APP}, ${NS_AUDIT}) order by rolname`;
+  const [counts] = await lifecycleClient`select
+      (select count(*)::int from pg_catalog.pg_policies where schemaname = 'public') as policies,
+      (select count(*)::int from pg_catalog.pg_constraint
+        where conname = 'audit_event_scope_consistency_chk') as scope_chk,
+      (select count(*)::int from pg_catalog.pg_tables where schemaname = 'public') as tables`;
+  return { roles: roles.map((r) => ({ role: r.role, marker: r.marker })), ...counts };
+}
+
+/** Pre-create operator-owned roles under the substituted names, with the operator's own comment
+ *  — the state migration 005 must refuse to adopt, and must leave exactly as it found it. */
+async function preCreateOperatorRoles(names) {
+  for (const n of names) {
+    await lifecycleClient.unsafe(
+      `create role ${n} nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
+    await lifecycleClient.unsafe(`comment on role ${n} is '${OPERATOR_MARKER}'`);
+  }
+}
+
+async function dropRenamedRoles() {
+  for (const n of [NS_APP, NS_AUDIT]) {
+    await lifecycleClient.unsafe(`drop role if exists ${n}`).catch(() => {});
+  }
+}
+
+test('S2-DB-30: on an UNPREPARED database, 005 refuses because the roles already exist — atomically', async () => {
+  // The second database is created WITHOUT the owner ACL step, and the two real privilege roles
+  // already exist cluster-wide from the primary apply. Run through the REAL engine, with the
+  // REAL file names, this is the full end-to-end proof that a pre-existing role stops 005 before
+  // it mutates anything — and that 001-004 still apply, so the refusal is 005's alone.
+  await observer.unsafe(`drop database if exists ${LIFECYCLE_DB}`);
+  await observer.unsafe(`create database ${LIFECYCLE_DB}`);
+  lifecycleClient = postgres(driverDsn(TARGET_DSN), {
+    max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, database: LIFECYCLE_DB,
+  });
+
+  const dsn = assertDisposableTestDsn(lifecycleDsn());
+  assert.equal(dsn.database, LIFECYCLE_DB, 'the lifecycle target must pass the disposable-DSN guard');
+
+  const handle = await createPostgresExecutor(dsn);
+  let report;
+  try {
+    report = await runTrustedApply({
+      fsPort: createNodeFsPort(MIG_DIR, MIG_REL),
+      adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
+      credential: CREDENTIAL, lockKey: LOCK_KEY + 1, now: NOW, deadlineMs: 60_000,
+    });
+  } finally {
+    await handle.dispose();
+  }
+
+  assert.notEqual(report.outcome, 'complete', '005 must not apply where its role names are taken');
+  assert.deepEqual(report.applied, ['001', '002', '003', '004'],
+    'everything before 005 applies; only 005 refuses');
+
+  const state = await nsState();
+  assert.equal(state.policies, 0, 'no policy was created');
+  assert.equal(state.scope_chk, 0, 'no constraint was added');
+  const ledger = await lifecycleClient`select version, dirty from public.schema_migrations order by version`;
+  assert.deepEqual(ledger.filter((r) => r.version === '005' && r.dirty === false), [],
+    'no clean 005 ledger row exists — the migration is recorded as attempted, never as applied');
+
+  // And the roles it refused to adopt — the real ones, in the primary database — are untouched.
+  const marks = await observer`
+    select rolname::text as role, shobj_description(oid, 'pg_authid') as marker
+    from pg_catalog.pg_roles where rolname in (${RUNTIME_ROLE}, ${AUDIT_ROLE}) order by rolname`;
+  for (const m of marks) assert.equal(m.marker, ROLE_MARKERS[m.role], `${m.role} was not re-marked`);
+});
+
+test('S2-DB-31: default PUBLIC TEMPORARY makes 005 fail closed, leaving no role behind', async () => {
+  // Same unprepared database, now with role names that are genuinely free, so execution reaches
+  // the privilege gate. The roles ARE created first and must be gone afterwards: that is what
+  // proves the abort is transactional rather than merely early.
+  const [pre] = await lifecycleClient`select
+      has_database_privilege('public', current_database(), 'TEMPORARY') as public_temp`;
+  assert.equal(pre.public_temp, true, 'precondition: this database has not had the owner ACL step');
+
+  const r = await refusal(() => lifecycleClient.unsafe(NS_UP).simple());
+  assert.notEqual(r.kind, 'none', '005 must refuse to apply against an unprepared database');
+  assert.equal(r.code, '42501', `expected insufficient_privilege, got ${r.code}: ${r.msg}`);
+  assert.match(r.msg, /TEMPORARY/, 'the refusal must name the privilege that is still open');
+  assert.match(r.msg, /provisioning is incomplete/, 'and say whose step is missing');
+
+  const state = await nsState();
+  assert.deepEqual(state.roles, [], 'CREATE ROLE was rolled back — no role, and so no comment, survives');
+  assert.equal(state.policies, 0, 'no policy survives');
+  assert.equal(state.scope_chk, 0, 'no constraint survives');
+});
+
+test('S2-DB-32: after the database-owner ACL step, 005 applies and the gate is satisfied', async () => {
+  await lifecycleClient.unsafe(OWNER_DB_ACL_PREP);
+  const [prepped] = await lifecycleClient`select
+      has_database_privilege('public', current_database(), 'TEMPORARY') as public_temp,
+      has_database_privilege('public', current_database(), 'CREATE') as public_create`;
+  assert.deepEqual(prepped, { public_temp: false, public_create: false }, 'the owner step took effect');
+
+  const r = await refusal(() => lifecycleClient.unsafe(NS_UP).simple());
+  assert.equal(r.kind, 'none', `005 must apply once provisioning is complete: ${r.code} ${r.msg}`);
+
+  const state = await nsState();
+  assert.deepEqual(state.roles.map((x) => [x.role, x.marker]).sort(),
+    [[NS_APP, NS_MARKERS[NS_APP]], [NS_AUDIT, NS_MARKERS[NS_AUDIT]]].sort(),
+    'both roles exist and carry the exact ownership marker');
+  assert.equal(state.policies, 5, 'all five policies are in place');
+  assert.equal(state.scope_chk, 1, 'the scope constraint is in place');
+
+  const [eff] = await lifecycleClient`select
+      has_database_privilege(${NS_APP}, current_database(), 'TEMPORARY') as app_temp,
+      has_database_privilege(${NS_APP}, current_database(), 'CREATE') as app_create,
+      has_database_privilege(${NS_AUDIT}, current_database(), 'TEMPORARY') as audit_temp,
+      has_database_privilege(${NS_AUDIT}, current_database(), 'CREATE') as audit_create`;
+  assert.deepEqual(eff, { app_temp: false, app_create: false, audit_temp: false, audit_create: false },
+    'the posture the gate verified is the posture that actually holds');
+});
+
+test('S2-DB-33: a valid rollback removes exactly the migration-owned state, then re-applies', async () => {
+  const before = await nsState();
+  assert.equal(before.roles.length, 2, 'precondition: 005 is applied');
+
+  const down = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+  assert.equal(down.kind, 'none', `a valid rollback must succeed: ${down.code} ${down.msg}`);
+
+  const after = await nsState();
+  assert.deepEqual(after.roles, [], 'both migration-owned roles are gone');
+  assert.equal(after.policies, 0, 'every policy is gone');
+  assert.equal(after.scope_chk, 0, 'the constraint is gone');
+  assert.equal(after.tables, before.tables, 'and NOTHING from 001-004 was removed');
+
+  // Deterministic round trip: down then up returns the same state, marker included.
+  const up = await refusal(() => lifecycleClient.unsafe(NS_UP).simple());
+  assert.equal(up.kind, 'none', `re-applying after a rollback must succeed: ${up.code} ${up.msg}`);
+  const restored = await nsState();
+  assert.deepEqual(restored, before, 'down -> up is deterministic');
+});
+
+test('S2-DB-34: a pre-existing role stops 005 atomically — either role, or both', async () => {
+  // Runs the WHOLE up file, not just the preflight, so "atomic" means what it says: on refusal
+  // the operator's role keeps its own comment and attributes, the other name is never created,
+  // and not one policy, grant or constraint is left behind.
+  // One asserted rollback clears the applied state; after that every scenario below REFUSES, so
+  // no migration-owned state accumulates and the roles can simply be recreated per scenario.
+  const rollback = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+  assert.equal(rollback.kind, 'none', `precondition rollback failed: ${rollback.code} ${rollback.msg}`);
+
+  for (const scenario of [[NS_APP], [NS_AUDIT], [NS_APP, NS_AUDIT]]) {
+    const label = scenario.join('+');
+    await dropRenamedRoles();
+    await preCreateOperatorRoles(scenario);
+
+    const r = await refusal(() => lifecycleClient.unsafe(NS_UP).simple());
+    assert.notEqual(r.kind, 'none', `${label}: 005 must refuse a name it does not own`);
+    assert.equal(r.code, '42710', `${label}: expected duplicate_object, got ${r.code}: ${r.msg}`);
+    for (const name of scenario) {
+      assert.ok(r.msg.includes(name), `${label}: the refusal must name ${name}`);
+    }
+
+    const state = await nsState();
+    assert.deepEqual(state.roles.map((x) => x.role), [...scenario].sort(),
+      `${label}: the un-taken name must NOT have been created`);
+    for (const role of state.roles) {
+      assert.equal(role.marker, OPERATOR_MARKER,
+        `${label}: the operator's own comment on ${role.role} must survive untouched`);
+    }
+    assert.equal(state.policies, 0, `${label}: no policy was created`);
+    assert.equal(state.scope_chk, 0, `${label}: no constraint was added`);
+
+    const attrs = await lifecycleClient`
+      select rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit
+      from pg_catalog.pg_roles where rolname in (${NS_APP}, ${NS_AUDIT})`;
+    for (const a of attrs) {
+      assert.deepEqual(a, {
+        rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
+        rolreplication: false, rolbypassrls: false, rolinherit: true,
+      }, `${label}: the operator's role attributes must be unchanged`);
+    }
+  }
+  await dropRenamedRoles();
+});
+
+test('S2-DB-35: a rollback refuses a role that does not carry the migration-005 marker', async () => {
+  const up = await refusal(() => lifecycleClient.unsafe(NS_UP).simple());
+  assert.equal(up.kind, 'none', `precondition apply failed: ${up.code} ${up.msg}`);
+  const before = await nsState();
+
+  await lifecycleClient.unsafe(`comment on role ${NS_APP} is '${OPERATOR_MARKER}'`);
+  const r = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+  assert.notEqual(r.kind, 'none', 'a marker mismatch must stop the rollback');
+  assert.equal(r.code, '42501', `expected insufficient_privilege, got ${r.code}: ${r.msg}`);
+  assert.match(r.msg, /ownership marker/, 'and say why');
+
+  const after = await nsState();
+  assert.equal(after.roles.length, 2, 'no role was removed');
+  assert.equal(after.policies, before.policies, 'no policy was dropped');
+  assert.equal(after.scope_chk, before.scope_chk, 'no constraint was dropped');
+  const [{ still }] = await lifecycleClient`select has_table_privilege(${NS_APP}, 'public.tenant', 'select') as still`;
+  assert.equal(still, true, 'and no grant was revoked — the refusal preceded every mutation');
+
+  await lifecycleClient.unsafe(`comment on role ${NS_APP} is '${NS_MARKERS[NS_APP]}'`);
+});
+
+test('S2-DB-36: an external dependency stops the rollback rather than being destroyed by it', async () => {
+  const before = await nsState();
+  assert.equal(before.roles.length, 2, 'precondition: 005 is applied');
+
+  // A privilege 005 never granted and therefore never revokes. DROP ROLE must fail on it — the
+  // whole point of refusing CASCADE and DROP OWNED BY, which would have silently removed it.
+  await lifecycleClient.unsafe(`grant select on table public.platform_identity to ${NS_APP}`);
+  try {
+    const r = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+    assert.notEqual(r.kind, 'none', 'an outstanding dependency must stop the rollback');
+    assert.equal(r.code, '2BP01', `expected dependent_objects_still_exist, got ${r.code}: ${r.msg}`);
+
+    const after = await nsState();
+    assert.deepEqual(after, before, 'the whole rollback rolled back — nothing was partially removed');
+    const [{ kept }] = await lifecycleClient`
+      select has_table_privilege(${NS_APP}, 'public.platform_identity', 'select') as kept`;
+    assert.equal(kept, true, 'and the external grant was not destroyed');
+  } finally {
+    await lifecycleClient.unsafe(`revoke select on table public.platform_identity from ${NS_APP}`);
+  }
+
+  // With the dependency withdrawn, the same rollback succeeds.
+  const ok = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+  assert.equal(ok.kind, 'none', `the rollback must succeed once the dependency is gone: ${ok.msg}`);
+  assert.deepEqual((await nsState()).roles, [], 'both migration-owned roles are gone');
+});
+
+test('S2-DB-37: a rollback refuses a database that does not hold the state 005 created', async () => {
+  // "Silently succeed when there is nothing to reverse" is the promise that let a name-only DROP
+  // through. Absence is now a refusal.
+  const r = await refusal(() => lifecycleClient.unsafe(NS_DOWN).simple());
+  assert.notEqual(r.kind, 'none', 'a rollback with no 005 state must refuse');
+  assert.equal(r.code, '42501', `expected insufficient_privilege, got ${r.code}: ${r.msg}`);
+  assert.match(r.msg, /does not exist/, 'and say which role is missing');
+
+  // The database-level posture the owner established is NOT handed back by any rollback.
+  const [acl] = await lifecycleClient`select
+      has_database_privilege('public', current_database(), 'TEMPORARY') as public_temp,
+      has_database_privilege('public', current_database(), 'CREATE') as public_create`;
+  assert.deepEqual(acl, { public_temp: false, public_create: false },
+    'rolling 005 back must never re-open a database-level privilege');
 });
