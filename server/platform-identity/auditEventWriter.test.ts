@@ -70,14 +70,23 @@ function recorder(behaviour: { fail?: Error; defer?: boolean } = {}) {
 const T1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const S1 = 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1';
 const ACTOR = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const BEHALF = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
-/** A well-formed event; individual tests patch exactly the field under test. */
+/**
+ * A well-formed event; individual tests patch exactly the field under test.
+ *
+ * EVERY field carries a DISTINCT non-null value on purpose — including traceId and
+ * onBehalfOfInternalUserId, which are the two the shipped builders always leave null. The
+ * complete positional assertion in S3-W-10 can only catch a transposed column when no two
+ * expected values are interchangeable, and a field left null in every fixture is a column whose
+ * binding nothing checks at all.
+ */
 const baseEvent = (): AuditEventWriteInput => ({
   requestId: 'req-s3-0001',
-  traceId: null,
+  traceId: 'trace-s3-0001',
   actorInternalUserId: ACTOR,
   actorAuthProvider: 'supabase',
-  onBehalfOfInternalUserId: null,
+  onBehalfOfInternalUserId: BEHALF,
   scopeType: 'store',
   tenantId: T1,
   storeId: S1,
@@ -236,10 +245,10 @@ test('S3-W-9: validateAuditEventInput enforces the same tuple standalone', () =>
 // parameterisation
 // ---------------------------------------------------------------------------
 
-test('S3-W-10: every dynamic value is a template parameter, never concatenated text', async () => {
+test('S3-W-10: every column is bound to its own value, parameterised, never concatenated', async () => {
   const r = recorder();
   const event = baseEvent();
-  await writeAuditEvent(event, { executor: r.executor });
+  const receipt = await writeAuditEvent(event, { executor: r.executor });
   const { strings, values } = r.calls[0];
 
   // 20 columns, 20 interpolations, 21 literal fragments — the shape a fully parameterised
@@ -251,11 +260,38 @@ test('S3-W-10: every dynamic value is a template parameter, never concatenated t
   for (const secret of [event.requestId, event.actionId, event.reasonCode, T1, S1, ACTOR]) {
     assert.ok(!literal.includes(secret), `${secret} must travel as a parameter, not as SQL text`);
   }
-  assert.equal(values[1], AUDIT_CONTRACT_VERSION);
-  assert.equal(values[2], event.requestId);
-  assert.equal(values[7], event.scopeType);
-  assert.equal(values[8], T1);
-  assert.equal(values[9], S1);
+
+  // The COMPLETE positional map, in column order, not a spot-check.
+  //
+  // A sample cannot catch a transposition: `action_id` and `required_permission` are both plain
+  // `text not null` with no distinguishing CHECK, so swapping their bindings compiles, satisfies
+  // every constraint, and silently records the permission as the action in every audit row
+  // forever. The same is true of source_of_truth/evaluated_by and of the two nullable uuid actor
+  // columns. Verified: with only a sample asserted, that swap passed all 46 tests in this slice.
+  assert.equal(values[0], receipt.eventId, 'event_id is the id handed back in the receipt');
+  assert.deepEqual(values.slice(1, 19), [
+    AUDIT_CONTRACT_VERSION,           // 1  audit_version
+    event.requestId,                  // 2  request_id
+    event.traceId,                    // 3  trace_id
+    event.actorInternalUserId,        // 4  actor_internal_user_id
+    event.actorAuthProvider,          // 5  actor_auth_provider
+    event.onBehalfOfInternalUserId,   // 6  on_behalf_of_internal_user_id
+    event.scopeType,                  // 7  scope_type
+    event.tenantId,                   // 8  tenant_id
+    event.storeId,                    // 9  store_id
+    event.actionId,                   // 10 action_id
+    event.requiredPermission,         // 11 required_permission
+    event.decision,                   // 12 decision
+    event.reasonCode,                 // 13 reason_code
+    event.humanReadableReason,        // 14 human_readable_reason
+    event.resultStatus,               // 15 result_status
+    event.sourceOfTruth,              // 16 source_of_truth
+    event.evaluatedBy,                // 17 evaluated_by
+    event.evidenceLevel,              // 18 evidence_level
+  ]);
+  // Every expected value must be DISTINCT, or a swap between two of them is invisible here.
+  const positional = values.slice(1, 19);
+  assert.equal(new Set(positional.map(String)).size, positional.length, 'fixture values must be distinguishable');
   // metadata is handed to the driver's json helper, never string-built.
   assert.deepEqual(values[19], { __json: { phase: 'phase-4.0-m3-s3' } });
 });

@@ -369,8 +369,12 @@ test('S3-DB-3: the corrected writer succeeds with no SELECT privilege at all', a
   assert.equal(receipt.requestId, rid);
 
   // The row really landed — read by the OWNER, because the writer's principal cannot read it.
+  // Selected by event_id, never by request_id: request_id is deliberately NOT unique, audit rows
+  // are never deleted, and this suite supports running against a surviving database. A read-back
+  // keyed on a repeatable request_id can return a PRIOR run's row, which for assertions phrased
+  // against constants would mask exactly the corruption they exist to catch.
   const [row] = await observer`select event_id, request_id, scope_type, audit_version
-    from audit_event where request_id = ${rid}`;
+    from audit_event where event_id = ${receipt.eventId}`;
   assert.equal(row.event_id, receipt.eventId, 'the receipt id is the id that was persisted');
   assert.equal(row.scope_type, 'none');
   assert.equal(row.audit_version, 'audit.v1');
@@ -448,7 +452,7 @@ test('S3-DB-5: mutation and audit commit together, in ONE transaction on ONE bac
   // Out of band, after the transaction ended: BOTH became visible to the owner.
   assert.equal(await storeNameAsOwner(), NEW_NAME);
   const [audited] = await observer`select event_id, scope_type, tenant_id, store_id
-    from audit_event where request_id = ${rid}`;
+    from audit_event where event_id = ${outcome.audit.eventId}`;
   assert.equal(audited.event_id, outcome.audit.eventId);
   assert.equal(audited.scope_type, 'store');
   assert.equal(audited.tenant_id, T_E);
@@ -457,7 +461,7 @@ test('S3-DB-5: mutation and audit commit together, in ONE transaction on ONE bac
   // The strongest available evidence that it was ONE transaction and not two well-timed ones:
   // both committed row versions carry the same inserting xid.
   const [{ xmin: storeXmin }] = await observer`select xmin::text::bigint as xmin from store where store_id = ${S_E1}`;
-  const [{ xmin: auditXmin }] = await observer`select xmin::text::bigint as xmin from audit_event where request_id = ${rid}`;
+  const [{ xmin: auditXmin }] = await observer`select xmin::text::bigint as xmin from audit_event where event_id = ${outcome.audit.eventId}`;
   assert.equal(String(storeXmin), String(auditXmin), 'both rows must carry the same inserting xid');
 
   // And the principal that wrote the audit row still cannot read it.
@@ -575,7 +579,10 @@ test('S3-DB-8: every valid canonical scope form inserts through the runtime writ
     const rid = `s3-atomic-scope-${label}`;
     const receipt = await writeAuditEvent(storeScopeEvent(rid, patch), { executor: fullProbe });
     assert.ok(receipt.eventId, label);
-    const [row] = await observer`select scope_type, tenant_id, store_id from audit_event where request_id = ${rid}`;
+    // By event_id: this assertion compares against the same constants the event was BUILT from,
+    // so a stale row from a previous run would look correct and hide a live tenant/store swap.
+    const [row] = await observer`select scope_type, tenant_id, store_id
+      from audit_event where event_id = ${receipt.eventId}`;
     assert.equal(row.scope_type, patch.scopeType, label);
     assert.equal(row.tenant_id, patch.tenantId, label);
     assert.equal(row.store_id, patch.storeId, label);
@@ -636,6 +643,64 @@ test('S3-DB-11: a scope-less denial is recordable with no tenant context at all'
   );
 });
 
+test('S3-DB-17: every column round-trips into the column it names', async () => {
+  // The unit suite asserts the parameter POSITIONS; only a real server can show that those
+  // positions land in the columns the INSERT names. Both halves are needed: `action_id` and
+  // `required_permission` are plain `text not null` with no distinguishing CHECK, so a swapped
+  // binding is accepted by PostgreSQL and every audit row silently records the permission as the
+  // action. Measured before this test existed: that swap passed all 46 tests in this slice.
+  //
+  // Every value below is DISTINCT and non-null — including trace_id, actor and on-behalf-of,
+  // which the shipped builders always leave null, so a transposition has nowhere to hide.
+  const rid = 's3-atomic-roundtrip-1';
+  const ACTOR = 'ea000000-0000-4000-8000-00000000ac01';
+  const BEHALF = 'eb000000-0000-4000-8000-00000000be02';
+  const event = storeScopeEvent(rid, {
+    traceId: 'trace-s3-roundtrip',
+    actorInternalUserId: ACTOR,
+    actorAuthProvider: 'firebase',
+    onBehalfOfInternalUserId: BEHALF,
+    actionId: 's3.roundtrip.action',
+    requiredPermission: 's3.roundtrip.permission',
+    decision: 'deferred',
+    reasonCode: 's3_roundtrip_reason',
+    humanReadableReason: 'S3 round-trip human readable reason.',
+    resultStatus: 'n_a',
+    sourceOfTruth: 's3_roundtrip_source',
+    evaluatedBy: 's3_roundtrip_evaluator',
+  });
+  const receipt = await writeAuditEvent(event, { executor: fullProbe });
+
+  const [row] = await observer`select
+      event_id, audit_version, request_id, trace_id, actor_internal_user_id, actor_auth_provider,
+      on_behalf_of_internal_user_id, scope_type, tenant_id, store_id, action_id,
+      required_permission, decision, reason_code, human_readable_reason, result_status,
+      source_of_truth, evaluated_by, evidence_level, metadata
+    from audit_event where event_id = ${receipt.eventId}`;
+
+  assert.deepEqual(
+    [
+      row.event_id, row.audit_version, row.request_id, row.trace_id, row.actor_internal_user_id,
+      row.actor_auth_provider, row.on_behalf_of_internal_user_id, row.scope_type, row.tenant_id,
+      row.store_id, row.action_id, row.required_permission, row.decision, row.reason_code,
+      row.human_readable_reason, row.result_status, row.source_of_truth, row.evaluated_by,
+      row.evidence_level, row.metadata,
+    ],
+    [
+      receipt.eventId, 'audit.v1', event.requestId, event.traceId, event.actorInternalUserId,
+      event.actorAuthProvider, event.onBehalfOfInternalUserId, event.scopeType, event.tenantId,
+      event.storeId, event.actionId, event.requiredPermission, event.decision, event.reasonCode,
+      event.humanReadableReason, event.resultStatus, event.sourceOfTruth, event.evaluatedBy,
+      event.evidenceLevel, event.metadata,
+    ],
+  );
+
+  // occurred_at is the DATABASE's, never the caller's.
+  const [{ set_by_db }] = await observer`select occurred_at is not null as set_by_db
+    from audit_event where event_id = ${receipt.eventId}`;
+  assert.equal(set_by_db, true);
+});
+
 test('S3-DB-12: the audit policy refuses an advisory evidence level the CHECK would allow', async () => {
   // The two layers are not the same rule: `dev_sidecar_log_advisory` satisfies every CHECK on
   // the table and is refused only by the policy's WITH CHECK. Proved by the owner accepting the
@@ -664,7 +729,7 @@ test('S3-DB-12: the audit policy refuses an advisory evidence level the CHECK wo
 
 test('S3-DB-13: the runtime role is refused UPDATE/DELETE by PRIVILEGE, the owner by the TRIGGER', async () => {
   const rid = 's3-atomic-append-1';
-  await writeAuditEvent(
+  const appended = await writeAuditEvent(
     storeScopeEvent(rid, { scopeType: 'none', tenantId: null, storeId: null }),
     { executor: fullProbe },
   );
@@ -687,8 +752,8 @@ test('S3-DB-13: the runtime role is refused UPDATE/DELETE by PRIVILEGE, the owne
     assert.match(r.msg, /audit_event is append-only/, label);
   }
 
-  // The row is untouched by any of it.
-  const [row] = await observer`select reason_code from audit_event where request_id = ${rid}`;
+  // The row is untouched by any of it — the row this test wrote, identified by its own event_id.
+  const [row] = await observer`select reason_code from audit_event where event_id = ${appended.eventId}`;
   assert.equal(row.reason_code, 's3_atomic');
 
   // HONEST LIMIT, asserted rather than implied: the trigger is ordinary schema the OWNER may
@@ -747,6 +812,9 @@ test('S3-DB-15: a WITH INHERIT FALSE, SET TRUE membership is not treated as harm
   assert.equal(before.kind, 'privilege', before.msg);
 
   // With SET ROLE, in one transaction, it can — which is why a cutover check must probe both.
+  // Counted as a DELTA, not an absolute: audit rows are never deleted and this suite supports a
+  // surviving database, so `=== 1` would fail spuriously on the second run against one.
+  const setroleBefore = await auditCountAsOwner('s3-atomic-setrole-after');
   await setroleProbe.begin(async (tx) => {
     await tx.unsafe(`set local role ${AUDIT_ROLE}`);
     const [q] = await tx`select current_user as who, has_table_privilege('public.audit_event', 'INSERT') as ins`;
@@ -757,7 +825,7 @@ test('S3-DB-15: a WITH INHERIT FALSE, SET TRUE membership is not treated as harm
       { executor: tx },
     );
   });
-  assert.equal(await auditCountAsOwner('s3-atomic-setrole-after'), 1);
+  assert.equal(await auditCountAsOwner('s3-atomic-setrole-after'), setroleBefore + 1);
 
   // WHAT THIS DOES NOT CLOSE: gate G-DBROLE. These are throwaway probe roles in a disposable
   // cluster. No persistent LOGIN role has been provisioned, and the cutover check for a real one
