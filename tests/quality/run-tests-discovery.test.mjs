@@ -153,6 +153,11 @@ test('the sentinel inventory covers every required control, by literal path', ()
     // else. Renaming either file must break this test, which is the point.
     'database principal separation + tenant context': 'server/platform-identity/dbPrincipals.test.ts',
     'migration 005 privilege-role/RLS contract': 'tests/quality/migration-005-contract.test.mjs',
+    // S3: the durable audit transactional contract. Pinned by literal path for the same reason
+    // as the S2 pair — the count alone would be met by any other addition, so dropping either
+    // registration has to fail loudly rather than leave the audit contract uncollected.
+    'INSERT-only audit writer + scope truth table': 'server/platform-identity/auditEventWriter.test.ts',
+    'mutation + required audit in one transaction': 'server/platform-identity/auditTransaction.test.ts',
   };
   for (const [control, path] of Object.entries(required)) {
     assert.ok(REQUIRED_SENTINELS.includes(path), `${control} must be a sentinel (${path})`);

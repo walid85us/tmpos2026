@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 80;
+export const MIN_SUITES = 82;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -47,6 +47,8 @@ export const REQUIRED_SENTINELS = [
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context
+  'server/platform-identity/auditEventWriter.test.ts',         // INSERT-only audit writer (no RETURNING) + scope truth table
+  'server/platform-identity/auditTransaction.test.ts',         // mutation + required audit in ONE transaction, fail-closed
   'tests/quality/migration-executor-containment.test.mjs',     // executor unreachable from the production import graph
   'tests/quality/migration-files-contract.test.mjs',           // historical-migration byte-fingerprint immutability
   'tests/quality/migration-005-contract.test.mjs',             // migration 005 privilege-role / RLS / grant-matrix contract

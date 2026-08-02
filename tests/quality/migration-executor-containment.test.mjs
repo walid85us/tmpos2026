@@ -190,6 +190,14 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // already permitted here, and it changes nothing about the decisive containment property
     // asserted above — that the production import graph reaches no driver and no executor.
     'tests/db/rlsIsolation.integration.test.mjs',
+    // S3: the durable-audit atomicity proof needs the real 001-005 schema before it can say
+    // anything about audit privileges or transaction behaviour, and it obtains it the same way
+    // the S2 suite does — through the SAME trusted executor. The alternative is executing the
+    // .sql files directly, which is the second apply path the entry above exists to avoid.
+    // Same category (a tests/db/ suite), same reasoning, and the decisive containment property
+    // asserted above is untouched: the production import graph still reaches no driver and no
+    // executor.
+    'tests/db/auditAtomicity.integration.test.mjs',
   ]);
   const unexpected = importers.filter((f) => !allowed.has(f));
   assert.deepEqual(unexpected, [], `unexpected importer(s) of the executor: ${unexpected.join(', ')}`);

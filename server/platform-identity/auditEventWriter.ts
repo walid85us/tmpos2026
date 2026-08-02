@@ -14,6 +14,20 @@
 //     hardcoded literal — never caller-supplied. The DB also enforces append-only
 //     via a reject-update/delete trigger; this writer simply never attempts either.
 //
+// INSERT-ONLY MEANS NO `RETURNING` (Phase 4.0 M3 S3):
+//   `RETURNING` is not a free rider on an INSERT — PostgreSQL requires SELECT privilege
+//   on every column it names. The approved runtime capability for the audit principal is
+//   INSERT and nothing else: migration 005 grants exactly `insert on table audit_event to
+//   tmpos_audit_writer` and records that any SELECT/UPDATE/DELETE for that role would
+//   contradict append-only. Measured against real PostgreSQL as that principal, the
+//   identical INSERT succeeds without the clause and fails with SQLSTATE 42501,
+//   "permission denied for table audit_event", with it. So the clause is gone and NOTHING
+//   replaces it — no follow-up SELECT, no count, no re-read. Both receipt fields are
+//   values this module already holds before the statement is sent: `event_id` is generated
+//   here and `request_id` is caller-supplied and validated here. They are returned only
+//   after the INSERT promise RESOLVES, so a receipt still means "the row was accepted",
+//   never "the row was attempted".
+//
 // REDACTION (binding): metadata is ALLOW-LISTED and SCALAR-ONLY. Forbidden keys
 //   (token/JWT/JWKS/service-role/DB-URL/connection-string/password/PAN/raw-DB-error/
 //   provider-secret — see AUDIT_FORBIDDEN_FIELDS) are stripped, never stored. The
@@ -52,8 +66,25 @@ import {
   type ResultStatusValue,
   type EvidenceLevel,
 } from './authorizationConstants';
-// type-only — erased at compile time, NO runtime coupling to the repository.
-import type { SqlExecutor } from './authorizationRepository';
+/**
+ * The executor seam, stated STRUCTURALLY: a parameterised tagged template plus the driver's
+ * `json` helper, which is all this writer uses.
+ *
+ * It deliberately does NOT name postgres.js's `Sql`. The driver declares a transaction handle as
+ * a SEPARATE interface (`TransactionSql`) that is not assignable to `Sql` — measured against the
+ * pinned version — so an `executor: Sql` option would make the one thing S3 exists to do (run
+ * the audit INSERT on the caller's TRANSACTION handle) fail to compile for any typed caller.
+ * Both `Sql` and `TransactionSql` satisfy the shape below, so nothing that compiled before stops
+ * compiling, and the transaction case now compiles too. Naming the driver here would also enrol
+ * this module in the executor-containment scanner's driver-importer inventory, which is a
+ * containment fact, not a typing convenience.
+ */
+export interface AuditSqlExecutor {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the driver's own generics
+  (strings: TemplateStringsArray, ...values: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the driver's own generics
+  json(value: any): any;
+}
 
 // Re-export the strategy/intent markers so callers/diagnostics can reference the
 // same binding constants the contract declares.
@@ -211,6 +242,37 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
     throw new AuditEventValidationError('audit event storeId must be a UUID or null');
   }
 
+  // Scope fields must be MUTUALLY consistent, not merely well-typed. Reaching the database
+  // to learn this is not equivalent: the failure would arrive as a raw constraint error from
+  // inside a caller's transaction, having already sent a statement, and — when the event is
+  // the required half of a mutation-plus-audit transaction — would abort a business mutation
+  // over an input that could have been refused before anything was executed.
+  //
+  // The truth table below is `audit_event_scope_consistency_chk` (migration 005), restated
+  // rather than derived: a check that read the migration would agree with whatever the file
+  // said, including a wrong version of it. The audit-writer RLS policy
+  // (tmpos_audit_writer_append) re-asserts the same tuple in its WITH CHECK, so this one rule
+  // covers the constraint and the policy alike.
+  //
+  //   platform | none  ->  tenant_id NULL      and store_id NULL
+  //   tenant           ->  tenant_id NOT NULL  and store_id NULL
+  //   store            ->  tenant_id NOT NULL  and store_id NOT NULL
+  //
+  // Deliberately NOT a context check. An audit row records the scope that was TARGETED —
+  // including by a denied or cross-scope attempt — so well-formedness is enforced here and
+  // provenance is not, exactly as the migration states.
+  const scopeConsistent =
+    ((event.scopeType === 'platform' || event.scopeType === 'none')
+      && event.tenantId === null && event.storeId === null)
+    || (event.scopeType === 'tenant' && event.tenantId !== null && event.storeId === null)
+    || (event.scopeType === 'store' && event.tenantId !== null && event.storeId !== null);
+  if (!scopeConsistent) {
+    // The label names the scope TYPE only; tenant/store ids are never echoed.
+    throw new AuditEventValidationError(
+      `audit event scope fields are inconsistent with scopeType '${event.scopeType}'`,
+    );
+  }
+
   // Metadata must be allow-listed, scalar-only, and free of any forbidden key.
   const metadata = event.metadata ?? {};
   for (const key of Object.keys(metadata)) {
@@ -319,7 +381,7 @@ export function buildAuthorizationDecisionAuditEvent(
 
 /** Options for writeAuditEvent. `executor` lets a caller pass a transaction handle. */
 export interface WriteAuditEventOptions {
-  executor?: SqlExecutor;
+  executor?: AuditSqlExecutor;
 }
 
 /** The persisted-row identifiers returned by a successful insert. */
@@ -329,24 +391,31 @@ export interface WrittenAuditEvent {
 }
 
 /**
- * Persist exactly ONE durable audit_event row (INSERT only). Redacts metadata,
- * validates the event, then runs a single parameterized tagged-template INSERT via
- * the supplied executor (or the shared getDb() client). Returns the new event_id +
- * request_id. Never UPDATEs/DELETEs; never logs; never prints a secret/UID/email.
+ * Persist exactly ONE durable audit_event row (INSERT only). Redacts metadata, validates
+ * the event — including its cross-field scope consistency — and only then runs a single
+ * parameterized tagged-template INSERT via the supplied executor (or the shared getDb()
+ * client). No `RETURNING`, no follow-up SELECT: see the INSERT-ONLY note in the file header.
+ *
+ * Returns the event_id generated here and the validated request_id, and does so ONLY after
+ * the INSERT promise resolves. A rejected INSERT propagates unchanged — the caller sees a
+ * failure and no receipt, which is what lets a caller that must fail closed do so. Never
+ * UPDATEs/DELETEs; never logs; never prints a secret/UID/email.
  */
 export async function writeAuditEvent(
   event: AuditEventWriteInput,
   options: WriteAuditEventOptions = {},
 ): Promise<WrittenAuditEvent> {
-  const executor: SqlExecutor = options.executor ?? getDb();
+  const executor: AuditSqlExecutor = options.executor ?? getDb();
 
   // Redact first, then assert — the persisted metadata is always the sanitized form.
   const metadata = sanitizeAuditMetadata(event.metadata);
   const validated = validateAuditEventInput({ ...event, metadata });
 
+  // Generated BEFORE the statement is sent, so the receipt never depends on reading a row
+  // back. randomUUID() is crypto-grade, matching the column's gen_random_uuid() default.
   const eventId = randomUUID();
 
-  const rows = await executor`
+  await executor`
     insert into audit_event (
       event_id,
       audit_version,
@@ -390,11 +459,11 @@ export async function writeAuditEvent(
       ${validated.evidenceLevel},
       ${executor.json(metadata)}
     )
-    returning event_id, request_id
   `;
 
-  const row = rows[0];
-  return { eventId: row.event_id, requestId: row.request_id };
+  // Reached only when the INSERT above resolved. Both values were already in hand and
+  // already validated, so nothing is read back from a table this principal cannot SELECT.
+  return { eventId, requestId: validated.requestId };
 }
 
 /** Re-export the contract DTO type so a future runtime caller can map to it. */
