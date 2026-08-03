@@ -86,6 +86,16 @@ export function isLiveSessionAuthorizationEnabled(): boolean {
 export const SUPABASE_DATABASE_URL_VAR = 'SUPABASE_DATABASE_URL';
 export const APP_DATABASE_URL_VAR = 'APP_DATABASE_URL';
 
+/**
+ * Phase 4.0 M3 S4.1a — the certificate authority every database endpoint is verified against.
+ *
+ * Deliberately provider-neutral and deliberately SHARED by both principals: they address the
+ * same cluster, so a per-principal CA would be two names for one fact and would invite the two
+ * to drift apart. The name follows the existing `*_DATABASE_*` vocabulary and encodes no vendor,
+ * because the trust anchor is a property of the deployment, not of whoever operates it.
+ */
+export const DATABASE_CA_CERT_VAR = 'DATABASE_CA_CERT';
+
 /** Presence-only view of the relevant secrets. Booleans only — never values. */
 export interface ConfigPresence {
   supabaseUrl: boolean;
@@ -94,6 +104,8 @@ export interface ConfigPresence {
   anonKey: boolean;
   /** S2: the tenant-runtime principal. Reported for visibility; see isServerConfigComplete. */
   appDatabaseUrl: boolean;
+  /** S4.1a: the database trust anchor. Reported for visibility; enforced at construction. */
+  databaseCaCert: boolean;
 }
 
 export function getConfigPresence(): ConfigPresence {
@@ -103,7 +115,25 @@ export function getConfigPresence(): ConfigPresence {
     serviceRoleKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
     anonKey: !!process.env.SUPABASE_ANON_KEY,
     appDatabaseUrl: !!process.env[APP_DATABASE_URL_VAR],
+    databaseCaCert: !!getDatabaseCaConfig(),
   };
+}
+
+/**
+ * Phase 4.0 M3 S4.1a — the PEM CA material for the database endpoints, or null when it is not
+ * usably configured.
+ *
+ * A whitespace-only value counts as ABSENT, not present. `!!process.env.X` would report a blank
+ * secret as configured, and the connection would then be attempted with an empty trust anchor —
+ * a presence check that passes while the property it stands for does not hold.
+ *
+ * Callers MUST NOT log the returned value.
+ */
+export function getDatabaseCaConfig(): { ca: string } | null {
+  const raw = process.env[DATABASE_CA_CERT_VAR];
+  if (typeof raw !== 'string') return null;
+  const ca = raw.trim();
+  return ca === '' ? null : { ca };
 }
 
 /**

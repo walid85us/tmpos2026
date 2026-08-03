@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 82;
+export const MIN_SUITES = 83;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -52,6 +52,7 @@ export const REQUIRED_SENTINELS = [
   'tests/quality/migration-executor-containment.test.mjs',     // executor unreachable from the production import graph
   'tests/quality/migration-files-contract.test.mjs',           // historical-migration byte-fingerprint immutability
   'tests/quality/migration-005-contract.test.mjs',             // migration 005 privilege-role / RLS / grant-matrix contract
+  'tests/quality/db-client-containment.test.mjs',              // database client containment + verified-TLS policy boundary
   'tests/quality/run-tests-discovery.test.mjs',                // the Node ratchet's own guard test
   'tests/quality/run-frontend-tests-contract.test.mjs',        // the frontend ratchet's own guard test
   'tests/quality/shipping-sidecar-containment.test.mjs',       // sidecar elimination / SSRF containment

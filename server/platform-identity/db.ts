@@ -23,8 +23,10 @@ import postgres from 'postgres';
 import {
   getRequiredServerConfig,
   getRuntimePrincipalConfig,
+  getDatabaseCaConfig,
   SUPABASE_DATABASE_URL_VAR,
   APP_DATABASE_URL_VAR,
+  DATABASE_CA_CERT_VAR,
 } from './config';
 
 type Sql = ReturnType<typeof postgres>;
@@ -70,21 +72,171 @@ export interface TransactionCapable {
   begin(fn: (tx: SqlTag) => Promise<unknown>): Promise<unknown>;
 }
 
+// --- transport policy (Phase 4.0 M3 S4.1a) ----------------------------------
+//
+// The previous policy was `ssl: 'require'`. In the installed driver that string does NOT mean
+// "verified TLS": postgres.js maps 'require' | 'allow' | 'prefer' to rejectUnauthorized:false,
+// so the connection was encrypted and then accepted ANY certificate. That defeats a passive
+// eavesdropper and nothing else — an active attacker who can answer for the endpoint (DNS,
+// routing, a hijacked pooler address) presents any certificate at all, the client accepts it,
+// and the very first packet after the handshake carries the database password.
+//
+// The policy below is therefore an explicit TLS options OBJECT, never a string: a pinned CA,
+// chain verification ON, and hostname verification left to Node's default `checkServerIdentity`
+// — which is why nothing here sets that field. It is resolved BEFORE the driver is called, so a
+// configuration that cannot be verified produces no client at all rather than an unverified one.
+
 /**
- * Shared client options. `prepare: false` is required by a transaction-mode pooler.
+ * The environment variable the driver consults as a fallback for the `ssl` option.
  *
- * TLS IS UNCONDITIONAL, and stays that way deliberately. Deriving it from the DSN was tried and
- * removed: postgres.js resolves the endpoint from the `host` OPTION, never from a `?host=`
- * query parameter, so a URL that *looks* like a Unix socket (`postgres:///db?host=/run/pg`)
- * actually dials localhost over TCP — a rule keyed on that shape would have switched TLS off
- * for a real network connection. A hostname is not a trust boundary either: a pooler sidecar on
- * 127.0.0.1 still carries credentials over a socket someone else can bind. Callers that must
- * reach a genuinely plaintext endpoint — only the disposable-PostgreSQL suites do — pass their
- * own `ssl: false` at the call site, where the decision is visible in review.
+ * postgres.js resolves each option as `explicit ?? url query ?? env['PG' + KEY] ?? default`, so
+ * a value here can select transport security from entirely outside the repository. The explicit
+ * object below already outranks it, but silently outranking an operator who believes they have
+ * configured TLS is its own failure: the refusal is what makes the conflict visible.
  */
-function clientOptions(_rawUrl: string, max: number) {
+export const DRIVER_TLS_ENV_VAR = 'PGSSL';
+
+/** DSN query keys the installed driver resolves into its `ssl` option. Verified against 3.4.9. */
+const TLS_URL_KEYS = Object.freeze(['ssl', 'sslmode']);
+
+/**
+ * Values that select a weaker transport in the installed driver.
+ *
+ * 'disable' and 'false' resolve to PLAINTEXT; 'require', 'allow' and 'prefer' resolve to TLS
+ * with certificate verification switched off. Exactly these five — the set is the driver's, not
+ * a guess, and it is matched case-insensitively because the driver does not normalise case.
+ */
+const TLS_DOWNGRADE_VALUES = Object.freeze(['require', 'allow', 'prefer', 'disable', 'false']);
+
+/** The repository-owned TLS options. `rejectUnauthorized` is `true` by type, not by convention. */
+export interface DatabaseTlsOptions {
+  readonly ca: string;
+  readonly rejectUnauthorized: true;
+}
+
+/**
+ * One complete PEM CERTIFICATE block, capturing its body.
+ *
+ * DELIBERATELY STRUCTURAL, NOT A FULL X.509 PARSE. Parsing every certificate with
+ * `crypto.X509Certificate` would be stronger, but it needs a genuine certificate as the
+ * success-path fixture and this slice may not generate certificate material. What matters is
+ * that the security property does not rest on this check: a structurally-valid-but-bogus CA was
+ * measured against a real TLS handshake, and Node loads ZERO trust anchors from it — the
+ * handshake then FAILS ("self-signed certificate") with no fallback to the bundled root store.
+ * So this is not what stands between an attacker and the connection; it exists to refuse the two
+ * shapes an operator actually produces — an empty block from a truncated copy-paste, and a file
+ * path or non-PEM blob pasted where PEM was expected — HERE, with a bounded message, instead of
+ * hours later as an opaque driver-level TLS error. A real parse is a follow-up, not a gap.
+ */
+const PEM_BEGIN = '-----BEGIN CERTIFICATE-----';
+const PEM_END = '-----END CERTIFICATE-----';
+/** The base64 alphabet with optional padding. An empty body is not certificate material. */
+const PEM_BODY = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * True when `ca` holds at least one PEM CERTIFICATE block with a well-formed base64 body.
+ *
+ * Scanned with indexOf rather than a regex ON PURPOSE. The obvious pattern —
+ * `/BEGIN([\s\S]*?)END/g` — is QUADRATIC on input that repeats BEGIN without ever supplying END:
+ * every BEGIN restarts a lazy scan that runs to the end of the string. Measured on this build,
+ * 200/400/800 repeats cost 0.6/2.7/9.9 ms — doubling the input roughly quadrupled the time. The
+ * value is operator-supplied and read once, so this is a self-inflicted startup stall rather than
+ * a remote hazard, but a linear scan costs nothing and removes the shape entirely.
+ */
+function hasPemCertificate(ca: string): boolean {
+  let from = 0;
+  for (;;) {
+    const begin = ca.indexOf(PEM_BEGIN, from);
+    if (begin === -1) return false;
+    const bodyStart = begin + PEM_BEGIN.length;
+    const end = ca.indexOf(PEM_END, bodyStart);
+    if (end === -1) return false; // a BEGIN with no closing END is a truncated paste
+    const body = ca.slice(bodyStart, end).replace(/\s+/g, '');
+    // Length %4 is a property of every real base64 body; requiring it rejects the truncated
+    // bodies that a delimiter-only check would wave through.
+    if (body.length > 0 && body.length % 4 === 0 && PEM_BODY.test(body)) return true;
+    from = end + PEM_END.length;
+  }
+}
+
+/**
+ * A bounded refusal. It names the configuration CATEGORY at fault and never its value — no DSN,
+ * no password, no certificate body — because these messages reach logs and operator terminals.
+ */
+function tlsRefusal(reason: string): Error {
+  return new Error(`refusing to open a database connection: ${reason}`);
+}
+
+/**
+ * Resolve the verified-TLS options for `rawUrl`, or throw before any client can be built.
+ *
+ * Order matters and is deliberate: the two configuration-level checks run BEFORE the URL is even
+ * parsed, so a refusal is never pre-empted by the driver's own `Invalid URL`. Nothing here
+ * mutates or deletes an environment variable — a process-wide edit would be invisible to every
+ * other consumer in the process and would "fix" the symptom by hiding it.
+ */
+export function resolveDatabaseTls(rawUrl: string): DatabaseTlsOptions {
+  // 1. An explicit trust anchor. Falling back to the platform trust store here would succeed in
+  //    most environments, which is precisely what makes it dangerous: a private CA that was
+  //    never configured would go unnoticed until an endpoint changed hands.
+  const configured = getDatabaseCaConfig();
+  if (!configured) {
+    throw tlsRefusal(`${DATABASE_CA_CERT_VAR} is not configured, and no default trust store may stand in for it`);
+  }
+  if (!hasPemCertificate(configured.ca)) {
+    throw tlsRefusal(`${DATABASE_CA_CERT_VAR} does not contain PEM certificate material`);
+  }
+
+  // 2. The driver's environment fallback.
+  // `!== ''` and NOT `.trim() !== ''`: the driver resolves this fallback as `env[KEY] || default`,
+  // so the empty string alone falls through to the default while a whitespace-only value is
+  // TRUTHY and really does become `options.ssl` (measured: PGSSL="   " resolves to ssl:"   ").
+  // Trimming here would permit exactly the values the driver would honour.
+  const ambient = process.env[DRIVER_TLS_ENV_VAR];
+  if (typeof ambient === 'string' && ambient !== '') {
+    throw tlsRefusal(`${DRIVER_TLS_ENV_VAR} must not select transport security — this repository owns that decision`);
+  }
+
+  // 3. The DSN's own TLS inputs.
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    // The unparsable value is a connection string and is NOT echoed.
+    throw tlsRefusal(`${SUPABASE_DATABASE_URL_VAR}/${APP_DATABASE_URL_VAR} is not a parsable URL`);
+  }
+  for (const key of TLS_URL_KEYS) {
+    for (const value of url.searchParams.getAll(key)) {
+      if (TLS_DOWNGRADE_VALUES.includes(value.trim().toLowerCase())) {
+        // The KEY is one of two fixed literals; the VALUE is operator input and stays out.
+        throw tlsRefusal(`the database URL selects a weaker transport through '${key}'`);
+      }
+    }
+  }
+
+  // A fresh object per call, frozen: the two principals must never share one options object, and
+  // the resolved policy must not be editable through `client.options.ssl` after the fact — the
+  // driver connects lazily, so there is a real window between construction and the handshake.
+  return Object.freeze({ ca: configured.ca, rejectUnauthorized: true });
+}
+
+/**
+ * Shared client options — everything EXCEPT transport.
+ *
+ * Transport is resolved separately, at each construction site, by resolveDatabaseTls(). Keeping
+ * it out of here is what lets the disposable-PostgreSQL lanes reuse these options for a
+ * task-owned socket or a plaintext loopback service while supplying their own `ssl: false` at
+ * the call site. Folding the policy in would fail those lanes closed for want of a CA that their
+ * endpoints could never present — and the alternative, inferring plaintext from the endpoint
+ * shape, is exactly the heuristic this slice exists to remove: postgres.js resolves the endpoint
+ * from the `host` OPTION, so `postgres:///db?host=/run/pg` only LOOKS like a Unix socket and
+ * actually dials localhost over TCP, and a pooler sidecar on 127.0.0.1 still carries credentials
+ * over a socket someone else can bind.
+ *
+ * `prepare: false` is required by a transaction-mode pooler.
+ */
+function clientOptions(max: number) {
   return {
-    ssl: 'require' as const,
     max,
     idle_timeout: 20,
     connect_timeout: 10,
@@ -97,16 +249,18 @@ function clientOptions(_rawUrl: string, max: number) {
 const RUNTIME_POOL_MAX = 10;
 
 /**
- * The EXACT options getRuntimeDb() applies, for a caller that must supply its own transport.
+ * The runtime principal's non-transport options, for a caller that supplies its own transport.
  *
  * getRuntimeDb() addresses an endpoint by URL, which cannot name a Unix socket — postgres.js
  * derives the socket path from the `host` OPTION, and silently ignores a `?host=` query
  * parameter. The disposable-PostgreSQL proof therefore builds its own client, and takes the
  * runtime principal's configuration from HERE rather than restating it: a copied constant would
  * drift from the real one and the proof would quietly stop proving anything.
+ *
+ * `rawUrl` is accepted and unused so this stays a drop-in for those call sites.
  */
-export function runtimeClientOptions(rawUrl: string) {
-  return clientOptions(rawUrl, RUNTIME_POOL_MAX);
+export function runtimeClientOptions(_rawUrl: string) {
+  return clientOptions(RUNTIME_POOL_MAX);
 }
 
 let adminSql: Sql | null = null;
@@ -122,7 +276,9 @@ export function getDb(): Sql {
   if (!cfg) {
     throw new Error(`${SUPABASE_DATABASE_URL_VAR} is not configured (server-side secret missing).`);
   }
-  adminSql = postgres(cfg.databaseUrl, clientOptions(cfg.databaseUrl, 3));
+  // Resolved FIRST: an unverifiable configuration must produce no client, not an unverified one.
+  const ssl = resolveDatabaseTls(cfg.databaseUrl);
+  adminSql = postgres(cfg.databaseUrl, { ...clientOptions(3), ssl });
   return adminSql;
 }
 
@@ -138,7 +294,8 @@ export function getRuntimeDb(): Sql {
   if (!cfg) {
     throw new Error(`${APP_DATABASE_URL_VAR} is not configured (runtime-principal secret missing).`);
   }
-  runtimeSql = postgres(cfg.databaseUrl, runtimeClientOptions(cfg.databaseUrl));
+  const ssl = resolveDatabaseTls(cfg.databaseUrl);
+  runtimeSql = postgres(cfg.databaseUrl, { ...runtimeClientOptions(cfg.databaseUrl), ssl });
   return runtimeSql;
 }
 

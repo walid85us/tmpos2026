@@ -33,12 +33,15 @@ import {
   assertTenantContext,
   DB_SESSION_BOUNDS,
   CONTEXT_SETTINGS,
+  runtimeClientOptions,
+  DRIVER_TLS_ENV_VAR,
   type TenantContext,
   type SqlTag,
 } from './db';
 import {
   SUPABASE_DATABASE_URL_VAR,
   APP_DATABASE_URL_VAR,
+  DATABASE_CA_CERT_VAR,
   getConfigPresence,
   getRequiredServerConfig,
   getRuntimePrincipalConfig,
@@ -51,18 +54,58 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ADMIN_DSN = 'postgres://127.0.0.1:5432/tmpos_unit_admin';
 const RUNTIME_DSN = 'postgres://127.0.0.1:5432/tmpos_unit_runtime';
 
-/** Run `fn` with an exact environment, restoring the previous one and both clients after. */
+// --- S4.1a synthetic secret markers -----------------------------------------
+// Distinctive on purpose: every failure path below is checked for these exact strings, so a
+// message that ever grew to include a DSN, a password or CA material fails loudly here rather
+// than in a log aggregator.
+// Taken from the exported constants rather than inlined, exactly as S2-7 requires of the DSN
+// variable names; their literal values are pinned once, in S4.1a-13.
+const CA_VAR = DATABASE_CA_CERT_VAR;
+const DRIVER_TLS_ENV = DRIVER_TLS_ENV_VAR;
+// Base64 alphabet only: the repository's accepted CA format requires a base64 block body, so a
+// hyphenated marker would be rejected as malformed and could never exercise the success path.
+const CA_MARKER = 'TMPOSSYNTHETICCAMARKERNOTAREALCERTIFICATEXYZ';
+const SYNTHETIC_CA = ['-----BEGIN CERTIFICATE-----', CA_MARKER, '-----END CERTIFICATE-----'].join('\n');
+const PASSWORD_MARKER = ['tmpos', 'synthetic', 'password', 'marker'].join('-');
+/** A DSN carrying a credential — the shape whose leakage would matter most. */
+const CREDENTIALED_DSN = `postgres://tmpos_unit:${PASSWORD_MARKER}@db.example.invalid:5432/tmpos_unit_secret`;
+
+/** Every marker that must never appear in a thrown error, in any order. */
+const SECRET_MARKERS = [CA_MARKER, SYNTHETIC_CA, PASSWORD_MARKER, CREDENTIALED_DSN];
+
+/** Inspect the WHOLE error, not just its message: a stack frame or an attached property carries
+ *  just as far into a log aggregator as the message does. */
+const assertNoSecret = (err: Error | string, label: string): void => {
+  const surface = typeof err === 'string'
+    ? err
+    : [err.message, err.stack ?? '', JSON.stringify(err, Object.getOwnPropertyNames(err))].join('\n');
+  for (const marker of SECRET_MARKERS) {
+    assert.ok(!surface.includes(marker), `${label}: a synthetic secret marker leaked into the error`);
+  }
+};
+
+/**
+ * Run `fn` with an exact environment, restoring the previous one and both clients after.
+ *
+ * The CA is supplied BY DEFAULT so that suites about principal separation stay about principal
+ * separation; the S4.1a cases below override it (including to `undefined`) when the CA itself is
+ * what is under test.
+ */
 async function withEnv(
   vars: Readonly<Record<string, string | undefined>>,
   fn: () => Promise<void> | void,
 ): Promise<void> {
-  const keys = [SUPABASE_DATABASE_URL_VAR, APP_DATABASE_URL_VAR, 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY'];
+  const keys = [
+    SUPABASE_DATABASE_URL_VAR, APP_DATABASE_URL_VAR, 'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', CA_VAR, DRIVER_TLS_ENV,
+  ];
   const saved = new Map(keys.map((k) => [k, process.env[k]]));
+  const merged: Record<string, string | undefined> = { [CA_VAR]: SYNTHETIC_CA, ...vars };
   await closeDb();
   await closeRuntimeDb();
   try {
     for (const k of keys) delete process.env[k];
-    for (const [k, v] of Object.entries(vars)) if (v !== undefined) process.env[k] = v;
+    for (const [k, v] of Object.entries(merged)) if (v !== undefined) process.env[k] = v;
     await fn();
   } finally {
     await closeDb();
@@ -330,34 +373,281 @@ test('S2-18: the owner-backed admin client keeps its existing connection contrac
     const admin = getDb();
     assert.equal(admin.options.max, 3, 'the admin pool size is unchanged');
     assert.equal(admin.options.prepare, false, 'prepare:false is unchanged (pooler-safe)');
-    assert.equal(admin.options.ssl, 'require', 'a remote owner endpoint still requires TLS');
   });
 });
 
-test('S2-19: TLS is unconditional — no DSN shape can switch it off', async () => {
-  // Every shape, including the two that invite an exemption. Loopback is still a real network
-  // hop (a pooler sidecar on 127.0.0.1 carries the same credentials), and a `?host=` URL only
-  // LOOKS like a Unix socket — postgres.js resolves the endpoint from the host OPTION and would
-  // dial localhost over TCP, so treating that shape as a socket would drop TLS for a real
-  // network connection. A caller needing plaintext passes ssl:false itself, in the open.
+// --- S4.1a: verified transport, fail-closed ---------------------------------
+//
+// The defect this section replaces: both principals were built with `ssl: 'require'`. In the
+// installed driver that string means "encrypt, then accept ANY certificate" — postgres.js maps
+// 'require' | 'allow' | 'prefer' to rejectUnauthorized:false. Encryption without authentication
+// stops a passive eavesdropper and does nothing at all against an active one, so a DSN that
+// resolved to an attacker-controlled endpoint would connect happily and hand over the password.
+// The contract below is the repair: an explicit CA, chain verification ON, hostname verification
+// left to Node, and every driver-controlled downgrade input refused BEFORE the client is built.
+
+/** The exact TLS shape both principals must resolve to. Derived from the security contract,
+ *  not read back from the implementation. */
+const EXPECTED_TLS = { ca: SYNTHETIC_CA, rejectUnauthorized: true };
+
+test('S4.1a-1: both principals get an explicit verified-TLS object, never a string policy', async () => {
+  // Catches: reverting to `ssl: 'require'`, or any string policy, at either construction site.
+  await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN, [APP_DATABASE_URL_VAR]: RUNTIME_DSN }, () => {
+    for (const [label, client] of [['admin', getDb()], ['runtime', getRuntimeDb()]] as const) {
+      const ssl = client.options.ssl as Record<string, unknown>;
+      assert.equal(typeof ssl, 'object', `${label}: a string TLS policy is never the contract`);
+      assert.deepEqual(ssl, EXPECTED_TLS, `${label}: exact verified-TLS options`);
+    }
+  });
+});
+
+test('S4.1a-2: no DSN shape can weaken the policy', async () => {
+  // Catches: a hostname/loopback/socket-shaped heuristic that quietly drops verification.
+  // Loopback is still a real network hop (a pooler sidecar on 127.0.0.1 carries the same
+  // credentials), and a `?host=` URL only LOOKS like a Unix socket — postgres.js resolves the
+  // endpoint from the host OPTION, so that shape actually dials localhost over TCP.
   const shapes = {
     remote: 'postgres://db.example.invalid:5432/tmpos_unit_remote',
     loopback: ADMIN_DSN,
+    'localhost by name': 'postgres://localhost:5432/tmpos_unit_localhost',
     'socket-shaped URL': 'postgres:///tmpos_unit_socket?host=/tmp/tmpos-fixture-socket',
   };
   for (const [label, dsn] of Object.entries(shapes)) {
     await withEnv({ [SUPABASE_DATABASE_URL_VAR]: dsn, [APP_DATABASE_URL_VAR]: dsn }, () => {
-      assert.equal(getDb().options.ssl, 'require', `${label}: admin endpoint must require TLS`);
-      assert.equal(getRuntimeDb().options.ssl, 'require', `${label}: runtime endpoint must require TLS`);
+      assert.deepEqual(getDb().options.ssl, EXPECTED_TLS, `${label}: admin`);
+      assert.deepEqual(getRuntimeDb().options.ssl, EXPECTED_TLS, `${label}: runtime`);
     });
   }
-  // Comment-stripped: db.ts documents the call-site `ssl: false` opt-out in prose, and a naive
-  // scan would flag its own explanation.
+});
+
+/** Both principals resolve the policy INDEPENDENTLY, so every property is proved on both. */
+const PRINCIPALS = [['admin', getDb], ['runtime', getRuntimeDb]] as const;
+/** Configure both DSN variables at once, so a single case can exercise either principal. */
+const bothDsns = (dsn: string) => ({ [SUPABASE_DATABASE_URL_VAR]: dsn, [APP_DATABASE_URL_VAR]: dsn });
+
+test('S4.1a-3: hostname verification is left to Node — it is never replaced or disabled', async () => {
+  // Catches: a `checkServerIdentity: () => undefined` "fix" for a certificate-name mismatch,
+  // which silently re-opens the impersonation hole an explicit CA was added to close.
+  await withEnv(bothDsns(ADMIN_DSN), () => {
+    for (const [label, get] of PRINCIPALS) {
+      const ssl = get().options.ssl as Record<string, unknown>;
+      assert.deepEqual(Object.keys(ssl).sort(), ['ca', 'rejectUnauthorized'], `${label}: no extra TLS knobs`);
+      assert.equal(ssl.rejectUnauthorized, true, `${label}: chain verification stays on`);
+      assert.equal(ssl[['check', 'ServerIdentity'].join('')], undefined, `${label}: no hostname-check override`);
+      assert.ok(Object.isFrozen(ssl), `${label}: the resolved policy must not be editable after construction`);
+    }
+  });
+});
+
+test('S4.1a-4: a missing CA fails closed, for BOTH principals, naming the variable only', async () => {
+  // Catches: falling back to the platform trust store when the CA variable is unset — which
+  // would connect successfully in most environments and hide the misconfiguration entirely.
+  await withEnv({ ...bothDsns(CREDENTIALED_DSN), [CA_VAR]: undefined }, async () => {
+    for (const [label, get] of PRINCIPALS) {
+      const err = await errorOf(() => get());
+      assert.ok(err.message.includes(CA_VAR), `${label}: the error must name the missing variable`);
+      assertNoSecret(err, label);
+    }
+  });
+});
+
+test('S4.1a-5: a blank CA is absent, and a malformed CA is refused — on BOTH principals', async () => {
+  // Catches: `!!value` presence checks that accept an empty secret; accepting a file path or a
+  // truncated paste where PEM certificate material is required; and — the sharpest one — an
+  // EMPTY certificate block, which is well-formed to a delimiter check yet installs zero trust
+  // anchors, turning a verified connection into one that can never succeed.
+  for (const [label, ca] of [
+    ['empty', ''],
+    ['whitespace', '   \n\t '],
+    ['not PEM', 'this-is-not-certificate-material'],
+    ['a file path', '/etc/ssl/certs/ca.pem'],
+    ['begin without end', '-----BEGIN CERTIFICATE-----\nQUJD'],
+    ['end before begin', '-----END CERTIFICATE-----\nQUJD\n-----BEGIN CERTIFICATE-----'],
+    ['empty block', '-----BEGIN CERTIFICATE-----\n\n-----END CERTIFICATE-----'],
+    ['non-base64 body', '-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----'],
+    ['truncated base64 body', '-----BEGIN CERTIFICATE-----\nQUJDR\n-----END CERTIFICATE-----'],
+    // Repeated BEGIN with no END: the shape a backtracking matcher scans quadratically.
+    ['many unterminated blocks', '-----BEGIN CERTIFICATE-----'.repeat(500)],
+  ] as const) {
+    await withEnv({ ...bothDsns(CREDENTIALED_DSN), [CA_VAR]: ca }, async () => {
+      for (const [principal, get] of PRINCIPALS) {
+        const err = await errorOf(() => get());
+        assert.ok(err.message.includes(CA_VAR), `${principal} ${label}: must name the CA variable`);
+        assertNoSecret(err, `${principal} ${label}`);
+      }
+    });
+  }
+});
+
+test('S4.1a-6: every driver-recognised downgrade value in the DSN is refused', async () => {
+  // Derived from the installed driver's own resolution, verified independently: `?ssl=` and
+  // `?sslmode=` both feed the driver's `ssl` option; 'disable'/'false' resolve to PLAINTEXT and
+  // 'require'/'allow'/'prefer' resolve to unauthenticated TLS. Catches: an operator "fixing" a
+  // certificate error by appending ?sslmode=disable to the connection string.
+  //
+  // The DSN carries a CREDENTIAL on purpose. Without one the no-leak assertions here are
+  // vacuous — there would be no password in the environment for a message to leak — and the
+  // realistic regression is exactly interpolating the raw DSN into this refusal.
+  const values = ['require', 'allow', 'prefer', 'disable', 'false'];
+  const variants = (v: string) => [v, v.toUpperCase(), `${v[0].toUpperCase()}${v.slice(1)}`, ` ${v} `];
+  const cases: Array<{ key: string; value: string; dsn: string }> = [];
+  for (const key of ['ssl', 'sslmode']) {
+    for (const base of values) {
+      for (const value of variants(base)) {
+        cases.push({
+          key,
+          value,
+          dsn: `postgres://tmpos_unit:${PASSWORD_MARKER}@db.example.invalid:5432/tmpos_unit_dg`
+            + `?${key}=${encodeURIComponent(value)}`,
+        });
+      }
+    }
+    // A safe-looking FIRST value must not shield a downgrade in a repeated key: the driver
+    // resolves last-wins, so a rule that read only the first value would miss this entirely.
+    cases.push({
+      key,
+      value: 'disable',
+      dsn: `postgres://tmpos_unit:${PASSWORD_MARKER}@db.example.invalid:5432/tmpos_unit_dup`
+        + `?${key}=verify-full&${key}=disable`,
+    });
+  }
+  for (const { key, value, dsn } of cases) {
+    await withEnv(bothDsns(dsn), async () => {
+      for (const [label, get] of PRINCIPALS) {
+        const where = `${label} ${key}=${value}`;
+        const err = await errorOf(() => get());
+        assert.ok(err.message.includes(key), `${where}: must name the offending key`);
+        assert.ok(!err.message.includes(value.trim()), `${where}: must not echo the value`);
+        assertNoSecret(err, where);
+      }
+    });
+  }
+});
+
+test('S4.1a-7: a secure DSN value cannot override or replace the repository-owned policy', async () => {
+  // Catches: treating the DSN as authoritative when it happens to LOOK safe. `verify-full` is
+  // not a downgrade, so it is not refused — but it must be inert, because it carries no CA and
+  // the repository, not the connection string, owns this decision. An empty `?ssl=` is likewise
+  // not a downgrade value and must not be mistaken for one.
+  for (const dsn of [
+    'postgres://db.example.invalid:5432/tmpos_unit_vf?sslmode=verify-full',
+    'postgres://db.example.invalid:5432/tmpos_unit_empty?ssl=',
+  ]) {
+    await withEnv(bothDsns(dsn), () => {
+      for (const [label, get] of PRINCIPALS) {
+        assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: the repository object must win`);
+      }
+    });
+  }
+});
+
+test(`S4.1a-8: a defined ${DRIVER_TLS_ENV} cannot select driver TLS policy, and is never mutated`, async () => {
+  // The driver falls back to env['PG' + KEY] for an unset option, so this variable can select
+  // transport security from outside the repository. Catches: deleting or overwriting it as the
+  // "fix" — mutating process-wide state is invisible to every other consumer in the process.
+  // '   ' belongs on the REFUSED list, not the ignored one: the driver resolves this fallback as
+  // `env[KEY] || default`, so a whitespace-only value is truthy and really does become the ssl
+  // option. Only the empty string falls through.
+  for (const value of ['require', 'disable', 'prefer', 'verify-full', '   ']) {
+    await withEnv({ ...bothDsns(CREDENTIALED_DSN), [DRIVER_TLS_ENV]: value }, async () => {
+      for (const [label, get] of PRINCIPALS) {
+        const err = await errorOf(() => get());
+        assert.ok(err.message.includes(DRIVER_TLS_ENV), `${label} ${value}: must name the variable`);
+        assertNoSecret(err, `${label} ${value}`);
+      }
+      assert.equal(process.env[DRIVER_TLS_ENV], value, 'the environment must not be mutated');
+    });
+  }
+  // The EMPTY STRING selects nothing — `'' || default` is the default — so refusing it would
+  // strand deployments that inject empty environment variables for no security gain.
+  await withEnv({ ...bothDsns(ADMIN_DSN), [DRIVER_TLS_ENV]: '' }, () => {
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: an empty fallback is not a policy`);
+    }
+  });
+});
+
+test('S4.1a-9: every refusal happens BEFORE the driver is invoked, on BOTH principals', async () => {
+  // A DSN the DRIVER itself rejects with `Invalid URL`. If the repository guard ran second we
+  // would see the driver's TypeError instead of ours, which is exactly how a "validate after
+  // constructing" ordering bug would present. Catches: moving the policy call below postgres().
+  const unparsable = 'postgres://[';
+  for (const [label, vars, expected] of [
+    ['missing CA', { [CA_VAR]: undefined }, CA_VAR],
+    ['malformed CA', { [CA_VAR]: 'not-pem' }, CA_VAR],
+    ['driver env fallback', { [DRIVER_TLS_ENV]: 'disable' }, DRIVER_TLS_ENV],
+  ] as const) {
+    await withEnv({ ...bothDsns(unparsable), ...vars }, async () => {
+      for (const [principal, get] of PRINCIPALS) {
+        const err = await errorOf(() => get());
+        assert.ok(err.message.includes(expected), `${principal} ${label}: expected the repository refusal`);
+        assert.ok(!/Invalid URL/i.test(err.message), `${principal} ${label}: the driver was reached first`);
+      }
+    });
+  }
+});
+
+test('S4.1a-10: a refusal leaves no client behind, and recovery works in the SAME session', async () => {
+  // Catches: memoizing a partially-built client on the failure path, which would hand a later
+  // caller a connection whose transport was never validated — and the mirror defect, caching the
+  // FAILURE so that repairing the configuration cannot take effect without a restart.
+  await withEnv({ ...bothDsns(CREDENTIALED_DSN), [CA_VAR]: undefined }, async () => {
+    for (const [label, get] of PRINCIPALS) {
+      await errorOf(() => get());
+      const second = await errorOf(() => get());
+      assert.ok(second.message.includes(CA_VAR), `${label}: a refusal must not be cached into a success`);
+    }
+    // Repair the configuration in place — no closeDb(), no fresh scope — and both principals
+    // must now build from the CURRENT settings.
+    process.env[CA_VAR] = SYNTHETIC_CA;
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: recovery must not require a restart`);
+    }
+  });
+  await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN }, () => {
+    assert.equal(getDb().options.database, 'tmpos_unit_admin', 'the client reflects the current DSN');
+  });
+});
+
+test('S4.1a-11: the shared runtime options carry no transport decision of their own', async () => {
+  // The disposable-PostgreSQL lanes import runtimeClientOptions() and supply their OWN transport
+  // for a task-owned socket / plaintext loopback target. Two properties must hold together: the
+  // helper must not smuggle a TLS decision into those call sites, and it must not fail-closed
+  // there either — the CA contract binds the endpoints the REPOSITORY dials, not a caller that
+  // brings its own. Catches: folding resolveDatabaseTls() into the shared options builder, which
+  // would break every disposable lane the moment a CA is absent.
+  await withEnv({ [CA_VAR]: undefined }, () => {
+    const opts = runtimeClientOptions(ADMIN_DSN) as Record<string, unknown>;
+    assert.ok(!('ssl' in opts), 'the shared options must not decide transport');
+    const conn = opts.connection as Record<string, unknown>;
+    assert.equal(conn.statement_timeout, DB_SESSION_BOUNDS.statement_timeout, 'bounds are preserved');
+    assert.equal(opts.prepare, false, 'pooler-safe prepare:false is preserved');
+  });
+});
+
+test('S4.1a-12: db.ts resolves no string TLS policy and never resolves ssl to false', async () => {
+  // A structural backstop for the behavioural cases above: the two shapes that would silently
+  // undo them are absent from the source itself.
   const code = readFileSync(join(HERE, 'db.ts'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
     .filter((l) => !l.trim().startsWith('//'))
     .join('\n');
   assert.ok(!/ssl:\s*false/.test(code), 'db.ts must never resolve ssl to false');
-  assert.ok(/ssl:\s*'require'/.test(code), 'db.ts must set ssl unconditionally');
+  assert.ok(!/ssl:\s*['"]/.test(code), 'db.ts must never resolve a string TLS policy');
+});
+
+test('S4.1a-13: the S4.1a variable NAMES are exported constants, never inlined literals', async () => {
+  // The counterpart to S2-7 for the transport variables. Pinning the literals HERE is what lets
+  // every case above use the constants without the suite becoming a tautology over a rename.
+  assert.equal(DATABASE_CA_CERT_VAR, 'DATABASE_CA_CERT');
+  assert.equal(DRIVER_TLS_ENV_VAR, ['PG', 'SSL'].join(''));
+  // Presence is reported, never enforced here — and a blank secret reports ABSENT, because
+  // `!!process.env.X` on a whitespace value would claim a trust anchor that does not exist.
+  await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN }, () => {
+    assert.equal(getConfigPresence().databaseCaCert, true);
+  });
+  await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN, [CA_VAR]: '   ' }, () => {
+    assert.equal(getConfigPresence().databaseCaCert, false, 'a blank CA is not a configured CA');
+  });
 });

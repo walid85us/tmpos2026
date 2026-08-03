@@ -16,6 +16,11 @@
 // immediately afterwards. No real/business data is written.
 
 import postgres from 'postgres';
+// Phase 4.0 M3 S4.1a — the transport policy is CONSUMED, never restated. This script addresses
+// the same remote endpoint as the admin principal, so a private copy of the TLS options here
+// would be a second policy that drifts silently and only reveals the drift when a CA rotates.
+import { resolveDatabaseTls, type DatabaseTlsOptions } from '../server/platform-identity/db';
+import { DATABASE_CA_CERT_VAR, getDatabaseCaConfig } from '../server/platform-identity/config';
 
 function present(name: string): boolean {
   return !!process.env[name];
@@ -33,6 +38,10 @@ async function main() {
     SUPABASE_DATABASE_URL: present('SUPABASE_DATABASE_URL'),
     SUPABASE_SERVICE_ROLE_KEY: present('SUPABASE_SERVICE_ROLE_KEY'),
     SUPABASE_ANON_KEY: present('SUPABASE_ANON_KEY'),
+    // S4.1a: the trust anchor every database connection is verified against. Reported through
+    // the same accessor the resolver uses, so a whitespace-only value reports MISSING here rather
+    // than PRESENT — a presence line that disagreed with the resolver would be worse than none.
+    [DATABASE_CA_CERT_VAR]: !!getDatabaseCaConfig(),
   };
   console.log('[validate] Secret presence (values never shown):');
   for (const [k, v] of Object.entries(presence)) {
@@ -40,7 +49,9 @@ async function main() {
   }
   console.log(`[validate] Feature flag ENABLE_SUPABASE_PLATFORM_IDENTITY: ${process.env.ENABLE_SUPABASE_PLATFORM_IDENTITY === 'true' ? 'ON' : 'OFF (default)'}`);
 
-  const required = ['SUPABASE_URL', 'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'] as const;
+  // S4.1a adds the CA: without it no connection can be verified, so reporting "ready" would be
+  // a lie the operator only discovers at the first --connect.
+  const required = ['SUPABASE_URL', 'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', DATABASE_CA_CERT_VAR] as const;
   const missingRequired = required.filter((k) => !present(k));
   if (missingRequired.length) {
     console.error(`[validate] Missing required secrets: ${missingRequired.join(', ')}`);
@@ -59,7 +70,18 @@ async function main() {
     return;
   }
 
-  const sql = postgres(databaseUrl, { ssl: 'require', max: 1, prepare: false, connect_timeout: 10 });
+  // Resolved BEFORE the driver is invoked: an unverifiable transport must produce no client.
+  // Caught here rather than left to propagate — an unhandled rejection would print a stack where
+  // this script's contract is a bounded, secret-free line and a non-zero exit code.
+  let ssl: DatabaseTlsOptions;
+  try {
+    ssl = resolveDatabaseTls(databaseUrl);
+  } catch (err) {
+    console.error(`[validate] ${err instanceof Error ? err.message : 'database TLS policy refused the configuration'}`);
+    process.exitCode = 1;
+    return;
+  }
+  const sql = postgres(databaseUrl, { ssl, max: 1, prepare: false, connect_timeout: 10 });
   try {
     // 2) Connectivity.
     await sql`select 1`;
