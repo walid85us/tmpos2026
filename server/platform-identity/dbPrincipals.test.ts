@@ -19,8 +19,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { X509Certificate } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -62,16 +64,30 @@ const RUNTIME_DSN = 'postgres://127.0.0.1:5432/tmpos_unit_runtime';
 // variable names; their literal values are pinned once, in S4.1a-13.
 const CA_VAR = DATABASE_CA_CERT_VAR;
 const DRIVER_TLS_ENV = DRIVER_TLS_ENV_VAR;
-// Base64 alphabet only: the repository's accepted CA format requires a base64 block body, so a
-// hyphenated marker would be rejected as malformed and could never exercise the success path.
+// Base64 alphabet, correctly framed, and STILL NOT A CERTIFICATE. This is the exact shape the
+// S4.1a correction exists to refuse: it satisfies every delimiter/base64/length check yet decodes
+// to bytes that are not an X.509 certificate, so a trust store built from it holds ZERO anchors
+// and every "verified" connection is doomed to fail hours later at the driver. Only an actual
+// X.509 parse of the block tells this apart from a real certificate.
 const CA_MARKER = 'TMPOSSYNTHETICCAMARKERNOTAREALCERTIFICATEXYZ';
-const SYNTHETIC_CA = ['-----BEGIN CERTIFICATE-----', CA_MARKER, '-----END CERTIFICATE-----'].join('\n');
+const NOT_A_CERTIFICATE_CA = ['-----BEGIN CERTIFICATE-----', CA_MARKER, '-----END CERTIFICATE-----'].join('\n');
+// GENUINE, public, certificate-only fixtures: the first two roots of the runtime's bundled
+// Mozilla store. Nothing secret, no private key exists for them anywhere in this repository, and
+// nothing is generated. They are test INPUT for the explicit-CA path only — the production policy
+// still refuses to fall back to any trust store. Self-checked here so a fixture problem fails as
+// "fixture", never as a false policy verdict.
+assert.ok(rootCertificates.length >= 2, 'fixture: the runtime must bundle at least two root certificates');
+const VALID_CA = rootCertificates[0].trim();
+const SECOND_VALID_CA = rootCertificates[1].trim();
+for (const pem of [VALID_CA, SECOND_VALID_CA]) new X509Certificate(pem);
+/** A distinctive slice of the genuine certificate body, for the no-leak assertions. */
+const VALID_CA_MARKER = VALID_CA.split('\n')[1];
 const PASSWORD_MARKER = ['tmpos', 'synthetic', 'password', 'marker'].join('-');
 /** A DSN carrying a credential — the shape whose leakage would matter most. */
 const CREDENTIALED_DSN = `postgres://tmpos_unit:${PASSWORD_MARKER}@db.example.invalid:5432/tmpos_unit_secret`;
 
 /** Every marker that must never appear in a thrown error, in any order. */
-const SECRET_MARKERS = [CA_MARKER, SYNTHETIC_CA, PASSWORD_MARKER, CREDENTIALED_DSN];
+const SECRET_MARKERS = [CA_MARKER, NOT_A_CERTIFICATE_CA, VALID_CA_MARKER, PASSWORD_MARKER, CREDENTIALED_DSN];
 
 /** Inspect the WHOLE error, not just its message: a stack frame or an attached property carries
  *  just as far into a log aggregator as the message does. */
@@ -100,7 +116,7 @@ async function withEnv(
     'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', CA_VAR, DRIVER_TLS_ENV,
   ];
   const saved = new Map(keys.map((k) => [k, process.env[k]]));
-  const merged: Record<string, string | undefined> = { [CA_VAR]: SYNTHETIC_CA, ...vars };
+  const merged: Record<string, string | undefined> = { [CA_VAR]: VALID_CA, ...vars };
   await closeDb();
   await closeRuntimeDb();
   try {
@@ -388,7 +404,7 @@ test('S2-18: the owner-backed admin client keeps its existing connection contrac
 
 /** The exact TLS shape both principals must resolve to. Derived from the security contract,
  *  not read back from the implementation. */
-const EXPECTED_TLS = { ca: SYNTHETIC_CA, rejectUnauthorized: true };
+const EXPECTED_TLS = { ca: VALID_CA, rejectUnauthorized: true };
 
 test('S4.1a-1: both principals get an explicit verified-TLS object, never a string policy', async () => {
   // Catches: reverting to `ssl: 'require'`, or any string policy, at either construction site.
@@ -453,9 +469,10 @@ test('S4.1a-4: a missing CA fails closed, for BOTH principals, naming the variab
 
 test('S4.1a-5: a blank CA is absent, and a malformed CA is refused — on BOTH principals', async () => {
   // Catches: `!!value` presence checks that accept an empty secret; accepting a file path or a
-  // truncated paste where PEM certificate material is required; and — the sharpest one — an
-  // EMPTY certificate block, which is well-formed to a delimiter check yet installs zero trust
-  // anchors, turning a verified connection into one that can never succeed.
+  // truncated paste where PEM certificate material is required; an EMPTY certificate block,
+  // which is well-formed to a delimiter check yet installs zero trust anchors; and — the S4.1a
+  // correction — any block that is not an actually PARSEABLE X.509 certificate, any bundle with
+  // one unparseable member (first OR last), and any non-whitespace content outside the blocks.
   for (const [label, ca] of [
     ['empty', ''],
     ['whitespace', '   \n\t '],
@@ -468,12 +485,32 @@ test('S4.1a-5: a blank CA is absent, and a malformed CA is refused — on BOTH p
     ['truncated base64 body', '-----BEGIN CERTIFICATE-----\nQUJDR\n-----END CERTIFICATE-----'],
     // Repeated BEGIN with no END: the shape a backtracking matcher scans quadratically.
     ['many unterminated blocks', '-----BEGIN CERTIFICATE-----'.repeat(500)],
+    // The shapes the S4.1a CORRECTION adds: base64-legal and correctly framed, so every
+    // structural check passes — only actually PARSING each block as X.509 refuses them. A trust
+    // store loaded from any of these holds zero (or fewer-than-configured) anchors, and "the
+    // first block parsed" says nothing about the anchors a handshake will actually need.
+    ['base64-legal but not a certificate', NOT_A_CERTIFICATE_CA],
+    ['genuine certificate then non-certificate block', [VALID_CA, NOT_A_CERTIFICATE_CA].join('\n')],
+    ['non-certificate block then genuine certificate', [NOT_A_CERTIFICATE_CA, VALID_CA].join('\n')],
+    ['non-whitespace content outside the blocks', `${VALID_CA}\ntrailing-operator-note`],
+    ['duplicate BEGIN boundary inside a block',
+      ['-----BEGIN CERTIFICATE-----', '-----BEGIN CERTIFICATE-----', 'QUJD', '-----END CERTIFICATE-----'].join('\n')],
+    // Space-joined GENUINE certificates: every block parses in isolation, but a PEM loader only
+    // recognises a marker at the start of a line, so the runtime trust store would SILENTLY load
+    // only the first anchor. The validator sees normalised slices; the loader sees the whole
+    // string — the accepted grammar must therefore be line-canonical at every marker.
+    ['genuine certificate blocks joined on one line', [VALID_CA, SECOND_VALID_CA].join(' ')],
   ] as const) {
     await withEnv({ ...bothDsns(CREDENTIALED_DSN), [CA_VAR]: ca }, async () => {
       for (const [principal, get] of PRINCIPALS) {
         const err = await errorOf(() => get());
         assert.ok(err.message.includes(CA_VAR), `${principal} ${label}: must name the CA variable`);
         assertNoSecret(err, `${principal} ${label}`);
+        // The marker list cannot cover every rejected input (a file path carries no marker), so
+        // the raw value itself is also checked: a refusal may never echo what it refused.
+        if (ca.trim() !== '') {
+          assert.ok(!err.message.includes(ca.trim()), `${principal} ${label}: must not echo the rejected value`);
+        }
       }
     });
   }
@@ -599,7 +636,7 @@ test('S4.1a-10: a refusal leaves no client behind, and recovery works in the SAM
     }
     // Repair the configuration in place — no closeDb(), no fresh scope — and both principals
     // must now build from the CURRENT settings.
-    process.env[CA_VAR] = SYNTHETIC_CA;
+    process.env[CA_VAR] = VALID_CA;
     for (const [label, get] of PRINCIPALS) {
       assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: recovery must not require a restart`);
     }
@@ -649,5 +686,58 @@ test('S4.1a-13: the S4.1a variable NAMES are exported constants, never inlined l
   });
   await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN, [CA_VAR]: '   ' }, () => {
     assert.equal(getConfigPresence().databaseCaCert, false, 'a blank CA is not a configured CA');
+  });
+});
+
+test('S4.1a-14: every accepted CA block is an actually parseable X.509 certificate', async () => {
+  // The success half first: genuine certificates — single and bundled — are ACCEPTED, so the
+  // parser cannot degenerate into reject-all. The fixtures are public roots from the runtime's
+  // bundled store; accepting them proves offline PARSEABILITY and nothing more — no chain trust,
+  // no validity at connection time, no hostname match, no live endpoint behaviour.
+  await withEnv(bothDsns(ADMIN_DSN), () => {
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: a genuine certificate is accepted`);
+    }
+  });
+  const bundle = [VALID_CA, SECOND_VALID_CA].join('\n');
+  await withEnv({ ...bothDsns(ADMIN_DSN), [CA_VAR]: bundle }, () => {
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(
+        get().options.ssl,
+        { ca: bundle, rejectUnauthorized: true },
+        `${label}: a bundle of genuine certificates is accepted whole`,
+      );
+    }
+  });
+  // CRLF line endings are how a Windows operator's paste arrives; '\r' is whitespace to the
+  // outside-block checks and legal inside a PEM body, so the value must be accepted verbatim.
+  const crlf = VALID_CA.replace(/\n/g, '\r\n');
+  await withEnv({ ...bothDsns(ADMIN_DSN), [CA_VAR]: crlf }, () => {
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(get().options.ssl, { ca: crlf, rejectUnauthorized: true }, `${label}: CRLF PEM is accepted`);
+    }
+  });
+
+  // The rejection half happens BEFORE the driver could be invoked: with a DSN the driver itself
+  // rejects, a base64-legal non-certificate CA must still surface the repository's own refusal —
+  // naming the CA variable, not the driver's `Invalid URL` — so ZERO clients are constructed for
+  // either principal. Same construction-ordering technique as S4.1a-9.
+  await withEnv({ ...bothDsns('postgres://['), [CA_VAR]: NOT_A_CERTIFICATE_CA }, async () => {
+    for (const [label, get] of PRINCIPALS) {
+      const err = await errorOf(() => get());
+      assert.ok(err.message.includes(CA_VAR), `${label}: the X.509 refusal must name the CA variable`);
+      assert.ok(!/Invalid URL/i.test(err.message), `${label}: the driver must never be reached`);
+      assertNoSecret(err, label);
+    }
+  });
+
+  // Same-session recovery: replacing the non-certificate value with a genuine one must build a
+  // client without a restart — the X.509 refusal is not cached, mirroring S4.1a-10.
+  await withEnv({ ...bothDsns(CREDENTIALED_DSN), [CA_VAR]: NOT_A_CERTIFICATE_CA }, async () => {
+    for (const [, get] of PRINCIPALS) await errorOf(() => get());
+    process.env[CA_VAR] = VALID_CA;
+    for (const [label, get] of PRINCIPALS) {
+      assert.deepEqual(get().options.ssl, EXPECTED_TLS, `${label}: recovery in the same session`);
+    }
   });
 });

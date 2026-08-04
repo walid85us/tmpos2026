@@ -19,6 +19,7 @@
 // Both clients are created lazily (on first use), so importing this module — or running the
 // isolated API with the feature flag OFF — opens no connection and requires no secret.
 
+import { X509Certificate } from 'node:crypto';
 import postgres from 'postgres';
 import {
   getRequiredServerConfig,
@@ -114,48 +115,79 @@ export interface DatabaseTlsOptions {
   readonly rejectUnauthorized: true;
 }
 
-/**
- * One complete PEM CERTIFICATE block, capturing its body.
- *
- * DELIBERATELY STRUCTURAL, NOT A FULL X.509 PARSE. Parsing every certificate with
- * `crypto.X509Certificate` would be stronger, but it needs a genuine certificate as the
- * success-path fixture and this slice may not generate certificate material. What matters is
- * that the security property does not rest on this check: a structurally-valid-but-bogus CA was
- * measured against a real TLS handshake, and Node loads ZERO trust anchors from it — the
- * handshake then FAILS ("self-signed certificate") with no fallback to the bundled root store.
- * So this is not what stands between an attacker and the connection; it exists to refuse the two
- * shapes an operator actually produces — an empty block from a truncated copy-paste, and a file
- * path or non-PEM blob pasted where PEM was expected — HERE, with a bounded message, instead of
- * hours later as an opaque driver-level TLS error. A real parse is a follow-up, not a gap.
- */
+/** PEM CERTIFICATE block boundaries. Block EXTRACTION below is structural; block ACCEPTANCE is
+ *  not — every extracted block must parse as a real X.509 certificate. */
 const PEM_BEGIN = '-----BEGIN CERTIFICATE-----';
 const PEM_END = '-----END CERTIFICATE-----';
-/** The base64 alphabet with optional padding. An empty body is not certificate material. */
-const PEM_BODY = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /**
- * True when `ca` holds at least one PEM CERTIFICATE block with a well-formed base64 body.
+ * Refuse `ca` unless it is one or more actually parseable X.509 certificates and NOTHING else.
+ *
+ * Every block goes through the runtime's real parser (`crypto.X509Certificate`). Delimiter,
+ * base64-alphabet and length checks are shapes a broken paste can satisfy while carrying zero
+ * certificates — Node then loads ZERO trust anchors from the value and every "verified"
+ * connection fails hours later as an opaque driver-level TLS error. Parsing is what tells
+ * certificate material apart from base64-legal garbage HERE, with a bounded message, before any
+ * client exists. The WHOLE value must be accounted for: non-whitespace content outside the
+ * blocks, an unterminated or nested boundary, or ANY unparseable member — first or last — is
+ * refused, because "the first block parsed" says nothing about the anchors the handshake will
+ * actually need from the rest of a bundle.
  *
  * Scanned with indexOf rather than a regex ON PURPOSE. The obvious pattern —
  * `/BEGIN([\s\S]*?)END/g` — is QUADRATIC on input that repeats BEGIN without ever supplying END:
- * every BEGIN restarts a lazy scan that runs to the end of the string. Measured on this build,
- * 200/400/800 repeats cost 0.6/2.7/9.9 ms — doubling the input roughly quadrupled the time. The
- * value is operator-supplied and read once, so this is a self-inflicted startup stall rather than
- * a remote hazard, but a linear scan costs nothing and removes the shape entirely.
+ * measured on this build, 200/400/800 repeats cost 0.6/2.7/9.9 ms. The linear scan removes the
+ * shape entirely.
+ *
+ * Offline parseability is ALL this proves. Chain trust, certificate validity at connection time
+ * and hostname matching are decided by the TLS handshake against the live endpoint; nothing here
+ * claims them.
  */
-function hasPemCertificate(ca: string): boolean {
+function assertCaCertificates(ca: string): void {
   let from = 0;
+  let blocks = 0;
   for (;;) {
     const begin = ca.indexOf(PEM_BEGIN, from);
-    if (begin === -1) return false;
-    const bodyStart = begin + PEM_BEGIN.length;
-    const end = ca.indexOf(PEM_END, bodyStart);
-    if (end === -1) return false; // a BEGIN with no closing END is a truncated paste
-    const body = ca.slice(bodyStart, end).replace(/\s+/g, '');
-    // Length %4 is a property of every real base64 body; requiring it rejects the truncated
-    // bodies that a delimiter-only check would wave through.
-    if (body.length > 0 && body.length % 4 === 0 && PEM_BODY.test(body)) return true;
+    if (begin === -1) {
+      if (blocks === 0) {
+        throw tlsRefusal(`${DATABASE_CA_CERT_VAR} does not contain a PEM CERTIFICATE block`);
+      }
+      if (ca.slice(from).trim() !== '') {
+        throw tlsRefusal(`${DATABASE_CA_CERT_VAR} carries non-certificate content outside its CERTIFICATE blocks`);
+      }
+      return;
+    }
+    if (ca.slice(from, begin).trim() !== '') {
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} carries non-certificate content outside its CERTIFICATE blocks`);
+    }
+    // Line-canonical markers. This validator reads a SLICE, in which every marker sits at offset
+    // zero of its own string — but the TLS trust-store loader reads the WHOLE value line by line
+    // and only recognises a marker at the start of a line. Two genuine blocks joined by a plain
+    // space would pass every per-block check here and then SILENTLY load only the first anchor
+    // there. The accepted grammar must therefore be exactly the grammar the loader consumes in
+    // full: every BEGIN opens a line, every END closes one.
+    if (begin > 0 && ca[begin - 1] !== '\n') {
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} certificate block does not start at the beginning of a line`);
+    }
+    const end = ca.indexOf(PEM_END, begin + PEM_BEGIN.length);
+    if (end === -1) {
+      // A BEGIN with no closing END is a truncated paste.
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} contains an unterminated CERTIFICATE block`);
+    }
+    if (ca.slice(begin + PEM_BEGIN.length, end).includes(PEM_BEGIN)) {
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} contains a malformed CERTIFICATE boundary`);
+    }
+    blocks += 1;
+    try {
+      // The block ordinal below is a count, never content: these messages reach operator logs.
+      new X509Certificate(ca.slice(begin, end + PEM_END.length));
+    } catch {
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} block ${blocks} is not a parseable X.509 certificate`);
+    }
     from = end + PEM_END.length;
+    const after = ca[from];
+    if (after !== undefined && after !== '\n' && after !== '\r') {
+      throw tlsRefusal(`${DATABASE_CA_CERT_VAR} certificate block does not end at the end of a line`);
+    }
   }
 }
 
@@ -183,9 +215,7 @@ export function resolveDatabaseTls(rawUrl: string): DatabaseTlsOptions {
   if (!configured) {
     throw tlsRefusal(`${DATABASE_CA_CERT_VAR} is not configured, and no default trust store may stand in for it`);
   }
-  if (!hasPemCertificate(configured.ca)) {
-    throw tlsRefusal(`${DATABASE_CA_CERT_VAR} does not contain PEM certificate material`);
-  }
+  assertCaCertificates(configured.ca);
 
   // 2. The driver's environment fallback.
   // `!== ''` and NOT `.trim() !== ''`: the driver resolves this fallback as `env[KEY] || default`,
