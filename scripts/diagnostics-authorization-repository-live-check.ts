@@ -34,6 +34,8 @@ import {
   buildResolverInputForContext,
   type SqlExecutor,
   type DurableRowCounts,
+  type TenantScopeRunner,
+  type TenantSqlExecutor,
 } from '../server/platform-identity/authorizationRepository';
 import {
   resolveAuthorization,
@@ -177,9 +179,15 @@ async function main(): Promise<void> {
     await db.begin(async (tx) => {
       await tx`set transaction read only`;
       const exec = tx as unknown as SqlExecutor;
+      // C1R: this DEV-only live check deliberately runs BOTH planes inside its single read-only
+      // ADMIN transaction — permitted for existing DEV durable-authorization diagnostics. The
+      // override is passed EXPLICITLY so it is visible in source: production keeps the runtime
+      // default, and nothing here silently re-privileges a tenant read.
+      const adminTenantScope: TenantScopeRunner = (_scope, fn) =>
+        fn(tx as unknown as TenantSqlExecutor);
 
       // Platform scope
-      const platIn = await buildResolverInputForContext(identityKey, platformCtx, exec);
+      const platIn = await buildResolverInputForContext(identityKey, platformCtx, exec, adminTenantScope);
       const platR = platIn ? resolveAuthorization(platIn) : null;
       check(
         'P1 platform scope → allow + system_owner',
@@ -192,7 +200,7 @@ async function main(): Promise<void> {
 
       // Tenant scope
       if (tenantCtx) {
-        const tIn = await buildResolverInputForContext(identityKey, tenantCtx, exec);
+        const tIn = await buildResolverInputForContext(identityKey, tenantCtx, exec, adminTenantScope);
         const tR = tIn ? resolveAuthorization(tIn) : null;
         const ent = tR?.authorization?.entitlements ?? {};
         const entKeys = Object.keys(ent);
@@ -216,7 +224,7 @@ async function main(): Promise<void> {
 
       // Store scope
       if (storeCtx) {
-        const sIn = await buildResolverInputForContext(identityKey, storeCtx, exec);
+        const sIn = await buildResolverInputForContext(identityKey, storeCtx, exec, adminTenantScope);
         const sR = sIn ? resolveAuthorization(sIn) : null;
         const ent = sR?.authorization?.entitlements ?? {};
         check(
@@ -232,7 +240,7 @@ async function main(): Promise<void> {
       }
 
       // Negative control
-      const negIn = await buildResolverInputForContext(identityKey, negativeCtx, exec);
+      const negIn = await buildResolverInputForContext(identityKey, negativeCtx, exec, adminTenantScope);
       const negR = negIn ? resolveAuthorization(negIn) : null;
       check(
         'N1 negative control (unseeded tenant) → deny',

@@ -6,9 +6,17 @@
 // (AuthorizationResolverInput). It performs NO authorization logic itself — the
 // inert resolver owns every decision. This module only READS.
 //
+// PHASE 4.0 M3 S4.1b C1R — TWO EXECUTION PLANES (binding):
+//   - The privileged AUTHORIZATION CONTROL PLANE (ADMIN_CLIENT) resolves identity, app_user and
+//     the narrow membership bootstrap that ESTABLISHES scope. It cannot itself be scope-filtered
+//     without circularity, which is why it is classified as control-plane rather than tenant work.
+//   - The TENANT DATA PLANE (RUNTIME_CLIENT under migration-005 RLS) reads tenant/store/
+//     entitlement rows, and only after the scope has been validated against the verified user's
+//     own membership rows. Its executor is a REQUIRED parameter — there is no getDb() fallback.
+//
 // READ-ONLY (binding):
-//   - SELECT-only, parameterized tagged-template SQL via the existing getDb()
-//     helper. No INSERT/UPDATE/DELETE/UPSERT/ON CONFLICT/ALTER/DROP/TRUNCATE, no
+//   - SELECT-only, parameterized tagged-template SQL. No INSERT/UPDATE/DELETE/UPSERT/ON
+//     CONFLICT/ALTER/DROP/TRUNCATE, no
 //     sql.unsafe, no dynamic/string-concatenated SQL, no schema/RLS change, no
 //     audit write. Table names are hardcoded literals — never caller-supplied.
 //
@@ -30,7 +38,8 @@
 // this module itself logs nothing.
 
 import postgres from 'postgres';
-import { getDb } from './db';
+import { getDb, getRuntimeDb, withTenantContext } from './db';
+import type { TenantContext, TransactionCapable, SqlTag } from './db';
 import type {
   AuthProviderValue,
   AccountStatusValue,
@@ -51,6 +60,51 @@ import type {
 // (e.g. a READ ONLY transaction opened by the diagnostic). TransactionSql extends
 // Sql, so a transaction handle is accepted wherever this type is expected.
 export type SqlExecutor = postgres.Sql<Record<string, never>>;
+
+// =============================================================================
+// C1R — the two execution planes are now distinct TYPES, not one threaded client
+// =============================================================================
+//
+// AUTHORIZATION CONTROL PLANE (privileged, ADMIN_CLIENT): platform_identity, app_user and the
+// narrow user_membership bootstrap. Migration 005 deliberately grants tmpos_app NOTHING on the
+// identity store, and the membership read is what ESTABLISHES scope — it cannot itself be
+// scope-filtered without circularity. It is therefore classified as control-plane work.
+//
+// TENANT DATA PLANE (RUNTIME_CLIENT under RLS): tenant, store, tenant_feature_entitlement. These
+// run only AFTER a trusted scope exists, inside withTenantContext(), and their executor is a
+// REQUIRED parameter with no `= getDb()` default — a tenant read cannot silently fall back to the
+// privileged client, because there is no fallback to fall back to.
+
+/**
+ * The tagged-template capability a tenant read needs. Deliberately narrower than SqlExecutor:
+ * both a postgres.js client and a `withTenantContext` transaction handle satisfy it, so a tenant
+ * reader can be handed a scoped transaction without widening its type to a full client.
+ */
+export type TenantSqlExecutor = (strings: TemplateStringsArray, ...values: any[]) => Promise<any[]>;
+
+/**
+ * Runs `fn` inside a transaction-local tenant context on the RUNTIME principal. The scope must
+ * already be TRUSTED (validated against the verified user's memberships by the control plane).
+ */
+export type TenantScopeRunner = <T>(
+  scope: TenantContext,
+  fn: (tx: TenantSqlExecutor) => Promise<T>,
+) => Promise<T>;
+
+/**
+ * The production runner: RUNTIME_CLIENT + transaction-local RLS context. It never consults the
+ * admin client, and `getRuntimeDb()` throws when APP_DATABASE_URL is absent — so with no runtime
+ * credential this fails closed rather than degrading to the privileged principal.
+ */
+export const runInTenantScope: TenantScopeRunner = <T>(
+  scope: TenantContext,
+  fn: (tx: TenantSqlExecutor) => Promise<T>,
+): Promise<T> =>
+  withTenantContext(
+    getRuntimeDb() as unknown as TransactionCapable,
+    scope,
+    (tx: SqlTag) => fn(tx as unknown as TenantSqlExecutor),
+  );
 
 /** The durable identity reference key (NEVER a client-asserted internal id). */
 export interface IdentityKey {
@@ -171,10 +225,14 @@ export async function getMembershipsForUser(
   return rows.map(mapMembership);
 }
 
-/** Read the durable tenant row by id (or null). */
+/**
+ * Read the durable tenant row by id (or null). TENANT DATA PLANE: the executor is REQUIRED and
+ * must be a scoped handle from withTenantContext() — there is deliberately no `= getDb()` default
+ * to fall back to.
+ */
 export async function getTenant(
   tenantId: string,
-  executor: SqlExecutor = getDb(),
+  executor: TenantSqlExecutor,
 ): Promise<TenantSnapshot | null> {
   const rows = await executor`
     select tenant_id, plan_key, status
@@ -185,10 +243,10 @@ export async function getTenant(
   return rows.length ? mapTenant(rows[0]) : null;
 }
 
-/** Read the durable store row by id (or null). */
+/** Read the durable store row by id (or null). TENANT DATA PLANE — executor REQUIRED. */
 export async function getStore(
   storeId: string,
-  executor: SqlExecutor = getDb(),
+  executor: TenantSqlExecutor,
 ): Promise<StoreSnapshot | null> {
   const rows = await executor`
     select store_id, tenant_id, status
@@ -205,7 +263,7 @@ export async function getStore(
  */
 export async function getEntitlementsForTenant(
   tenantId: string,
-  executor: SqlExecutor = getDb(),
+  executor: TenantSqlExecutor,
 ): Promise<EntitlementSnapshot[]> {
   const rows = await executor`
     select tenant_id, feature_key, enabled, source
@@ -269,37 +327,145 @@ export async function countDurableAuthorizationRows(
  *   - store:    load tenant + store + the tenant's entitlements
  * A null tenant/store row is returned verbatim (the resolver denies honestly).
  */
-export async function buildResolverInputForContext(
+export interface AuthorizationBootstrap {
+  identity: ResolverIdentity;
+  appUser: AppUserSnapshot | null;
+  memberships: MembershipSnapshot[];
+}
+
+/**
+ * AUTHORIZATION CONTROL PLANE (privileged). Resolve the durable identity for an already
+ * cryptographically-verified provider key, then load the app_user row and the membership set that
+ * BELONGS TO THAT IDENTITY.
+ *
+ * The internal user id is never taken from a caller: it is produced here, from the verified
+ * (auth_provider, auth_provider_uid) key, and every subsequent read is keyed on it. That is what
+ * makes this bootstrap safe to run privileged — it cannot be steered at another user's rows.
+ *
+ * Returns null when no durable identity matches (the caller fails closed).
+ */
+export async function loadAuthorizationBootstrap(
   identityKey: IdentityKey,
-  requestedContext: RequestedContext,
-  executor: SqlExecutor = getDb(),
-): Promise<AuthorizationResolverInput | null> {
+  controlPlaneExecutor: SqlExecutor = getDb(),
+): Promise<AuthorizationBootstrap | null> {
   const identity = await getIdentityByProviderUid(
     identityKey.authProvider,
     identityKey.authProviderUid,
-    executor,
+    controlPlaneExecutor,
   );
   if (!identity) return null;
 
-  const appUser = await getAppUser(identity.internalUserId, executor);
-  const memberships = await getMembershipsForUser(identity.internalUserId, executor);
+  const appUser = await getAppUser(identity.internalUserId, controlPlaneExecutor);
+  const memberships = await getMembershipsForUser(identity.internalUserId, controlPlaneExecutor);
+  return { identity, appUser, memberships };
+}
 
-  let tenant: TenantSnapshot | null = null;
-  let store: StoreSnapshot | null = null;
-  let entitlements: EntitlementSnapshot[] = [];
+export interface TenantScopeSnapshot {
+  tenant: TenantSnapshot | null;
+  store: StoreSnapshot | null;
+  entitlements: EntitlementSnapshot[];
+}
 
-  if (requestedContext.scopeType === 'tenant' && requestedContext.tenantId) {
-    tenant = await getTenant(requestedContext.tenantId, executor);
-    entitlements = await getEntitlementsForTenant(requestedContext.tenantId, executor);
-  } else if (
-    requestedContext.scopeType === 'store' &&
-    requestedContext.tenantId &&
-    requestedContext.storeId
-  ) {
-    tenant = await getTenant(requestedContext.tenantId, executor);
-    store = await getStore(requestedContext.storeId, executor);
-    entitlements = await getEntitlementsForTenant(requestedContext.tenantId, executor);
+/**
+ * TENANT DATA PLANE. Load the tenant/store/entitlement rows for an ALREADY TRUSTED scope, on a
+ * scoped executor. Platform scope reads nothing here by design: migration 005 states the runtime
+ * principal never operates at platform scope, so a platform decision stays entirely on the
+ * control plane and this returns the empty snapshot without touching the runtime client.
+ */
+export async function loadTenantScopeSnapshot(
+  trustedScope: RequestedContext,
+  executor: TenantSqlExecutor,
+): Promise<TenantScopeSnapshot> {
+  if (trustedScope.scopeType === 'tenant' && trustedScope.tenantId) {
+    return {
+      tenant: await getTenant(trustedScope.tenantId, executor),
+      store: null,
+      entitlements: await getEntitlementsForTenant(trustedScope.tenantId, executor),
+    };
   }
+  if (trustedScope.scopeType === 'store' && trustedScope.tenantId && trustedScope.storeId) {
+    return {
+      tenant: await getTenant(trustedScope.tenantId, executor),
+      store: await getStore(trustedScope.storeId, executor),
+      entitlements: await getEntitlementsForTenant(trustedScope.tenantId, executor),
+    };
+  }
+  return { tenant: null, store: null, entitlements: [] };
+}
 
-  return { identity, appUser, memberships, tenant, store, entitlements, requestedContext };
+/** True when the scope requires RLS-protected tenant data (i.e. the runtime plane must run). */
+export function scopeNeedsTenantPlane(scope: RequestedContext): boolean {
+  return (
+    (scope.scopeType === 'tenant' && !!scope.tenantId)
+    || (scope.scopeType === 'store' && !!scope.tenantId && !!scope.storeId)
+  );
+}
+
+/**
+ * TRUST GATE — is this scope backed by an ACTIVE membership of the verified user?
+ *
+ * This is not the authorization decision; the inert resolver still owns that. It decides only
+ * whether the runtime plane may run AT ALL, and it is load-bearing rather than belt-and-braces:
+ * the migration-005 policies filter tenant rows by the DECLARED context (`tenant_id =
+ * current_setting('app.tenant_id')`), NOT by the caller's memberships. RLS therefore prevents
+ * cross-context leakage but would happily serve tenant X's rows to anyone who declares tenant X.
+ * Binding the declared scope to the verified user's own membership rows — which only the
+ * privileged bootstrap can read — is what stops an unvalidated scope from becoming trusted.
+ */
+export function isScopeBackedByActiveMembership(
+  scope: RequestedContext,
+  memberships: MembershipSnapshot[],
+): boolean {
+  if (scope.scopeType === 'platform') {
+    return memberships.some((m) => m.scope_type === 'platform' && m.status === 'active');
+  }
+  if (scope.scopeType === 'tenant') {
+    return !!scope.tenantId && memberships.some(
+      (m) => m.scope_type === 'tenant' && m.status === 'active' && m.tenant_id === scope.tenantId,
+    );
+  }
+  if (scope.scopeType === 'store') {
+    return !!scope.tenantId && !!scope.storeId && memberships.some(
+      (m) => m.scope_type === 'store'
+        && m.status === 'active'
+        && m.tenant_id === scope.tenantId
+        && m.store_id === scope.storeId,
+    );
+  }
+  return false;
+}
+
+export async function buildResolverInputForContext(
+  identityKey: IdentityKey,
+  requestedContext: RequestedContext,
+  controlPlaneExecutor: SqlExecutor = getDb(),
+  tenantScope: TenantScopeRunner = runInTenantScope,
+): Promise<AuthorizationResolverInput | null> {
+  // Phase 1 — privileged control plane. Identity + app_user + the membership bootstrap.
+  const bootstrap = await loadAuthorizationBootstrap(identityKey, controlPlaneExecutor);
+  if (!bootstrap) return null;
+  const { identity, appUser, memberships } = bootstrap;
+
+  // TRUST GATE — the requested scope becomes trusted only once it is backed by an ACTIVE
+  // membership of THIS verified user, read privileged in phase 1. An unbacked scope never
+  // reaches the runtime plane, so no tenant SQL is issued for it at all.
+  const scopeIsTrusted = isScopeBackedByActiveMembership(requestedContext, memberships);
+
+  // Phase 2 — tenant data plane, on the RUNTIME principal inside transaction-local RLS context.
+  // The privileged executor is NOT threaded here: `tenantScope` owns its own client, so there is
+  // no path by which an admin handle reaches a tenant table.
+  const snapshot: TenantScopeSnapshot = scopeIsTrusted && scopeNeedsTenantPlane(requestedContext)
+    ? await tenantScope(requestedContext as TenantContext, (tx) =>
+      loadTenantScopeSnapshot(requestedContext, tx))
+    : { tenant: null, store: null, entitlements: [] };
+
+  return {
+    identity,
+    appUser,
+    memberships,
+    tenant: snapshot.tenant,
+    store: snapshot.store,
+    entitlements: snapshot.entitlements,
+    requestedContext,
+  };
 }

@@ -9,7 +9,7 @@
 // APPEND-ONLY (binding):
 //   - INSERT into `audit_event` ONLY. No UPDATE / DELETE / UPSERT / ON CONFLICT /
 //     ALTER / DROP / TRUNCATE. No schema/RLS change. Parameterized tagged-template
-//     SQL via the existing getDb() helper (or a caller-supplied executor/tx). No
+//     SQL via the RUNTIME client (or a caller-supplied executor/tx). No
 //     sql.unsafe, no dynamic SQL, no string-concatenated SQL. Table name is a
 //     hardcoded literal — never caller-supplied. The DB also enforces append-only
 //     via a reject-update/delete trigger; this writer simply never attempts either.
@@ -42,7 +42,7 @@
 // there). Consumed by the M11.3 live diagnostic only; it changes no runtime path.
 
 import { randomUUID } from 'crypto';
-import { getDb } from './db';
+import { getRuntimeDb } from './db';
 // Reuse the M9 inert audit contract (types + redaction/append-only DATA only).
 import {
   type DurableAuditEventV1,
@@ -393,8 +393,14 @@ export interface WrittenAuditEvent {
 /**
  * Persist exactly ONE durable audit_event row (INSERT only). Redacts metadata, validates
  * the event — including its cross-field scope consistency — and only then runs a single
- * parameterized tagged-template INSERT via the supplied executor (or the shared getDb()
+ * parameterized tagged-template INSERT via the supplied executor (or the shared RUNTIME
  * client). No `RETURNING`, no follow-up SELECT: see the INSERT-ONLY note in the file header.
+ *
+ * DEPLOYMENT ORDER (Stage C2): the runtime LOGIN must hold membership in BOTH tmpos_app and
+ * tmpos_audit_writer before APP_DATABASE_URL is provisioned. Migration 005 grants INSERT on
+ * audit_event to tmpos_audit_writer ONLY, so a login carrying just tmpos_app would be refused
+ * every audit write — and because an unaudited allow is forced to deny, that fails closed into
+ * a total authorization outage rather than a leak. Provision both memberships together.
  *
  * Returns the event_id generated here and the validated request_id, and does so ONLY after
  * the INSERT promise resolves. A rejected INSERT propagates unchanged — the caller sees a
@@ -405,7 +411,12 @@ export async function writeAuditEvent(
   event: AuditEventWriteInput,
   options: WriteAuditEventOptions = {},
 ): Promise<WrittenAuditEvent> {
-  const executor: AuditSqlExecutor = options.executor ?? getDb();
+  // C1R: the DEFAULT append path is the RUNTIME principal, which will inherit tmpos_audit_writer
+  // (INSERT-only on audit_event) in Stage C2. An explicit `options.executor` still wins, which is
+  // what keeps runAuditedMutation's same-transaction guarantee and every injected test executor
+  // working unchanged. There is deliberately no admin fallback: with no runtime credential this
+  // throws, the caller sees an unaudited write, and a fail-closed caller denies.
+  const executor: AuditSqlExecutor = options.executor ?? getRuntimeDb();
 
   // Redact first, then assert — the persisted metadata is always the sanitized form.
   const metadata = sanitizeAuditMetadata(event.metadata);

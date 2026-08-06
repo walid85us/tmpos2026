@@ -27,7 +27,8 @@ import {
   getConfigPresence,
   isServerConfigComplete,
 } from './config';
-import { getDb } from './db';
+import { getDb, getRuntimeDb, closeDb, closeRuntimeDb } from './db';
+import { createLifecycle } from '../runtime/lifecycle';
 import { withProtectedAction } from './protectedAction';
 import { createSupabaseWhoamiHandler } from './verifiedWhoami';
 import { createSessionResolveHandler } from './sessionResolve';
@@ -47,6 +48,10 @@ import { getBcpC07DataSourceBoundaryItems } from '../bcp-pilot/bcpC07DataSourceB
 import { createBcpActionAcknowledgeReadinessReviewHandler, BCP_ACTION_ACK_ROUTE_PATH } from '../bcp-pilot/bcpActionAcknowledgeReadinessReviewExpressAdapter';
 import { createBcpActionEligibilityHandler, BCP_ELIGIBILITY_ROUTE_PATH } from '../bcp-pilot/bcpActionEligibilityExpressAdapter';
 
+// Set once by the graceful-shutdown coordinator so readiness stops advertising this instance
+// while connections drain. Module-scoped because the route closure outlives the entry block.
+let draining = false;
+
 export function createPlatformIdentityApp() {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
@@ -63,7 +68,16 @@ export function createPlatformIdentityApp() {
   });
 
   // --- Readiness: flag ON + config present + DB reachable -------------------
+  // C1R: the probe uses the RUNTIME principal, because readiness must answer "can this process do
+  // its NORMAL work?" — not "is the privileged migration principal reachable?". Those differ, and
+  // answering with the admin client would report ready while every tenant request still failed.
+  // With APP_DATABASE_URL absent (its state until Stage C2 provisions the runtime credential)
+  // getRuntimeDb() throws and this reports not-ready, which is the intended fail-closed answer.
   app.get('/readiness', async (_req, res) => {
+    if (draining) {
+      res.status(503).json({ ready: false, reason: 'shutting_down' });
+      return;
+    }
     if (!isPlatformIdentityEnabled()) {
       res.status(503).json({ ready: false, reason: 'feature_flag_off' });
       return;
@@ -73,8 +87,11 @@ export function createPlatformIdentityApp() {
       return;
     }
     try {
-      const sql = getDb();
-      await sql`select 1`;
+      // BOTH clients, because both are unconditionally required to serve a request: identity and
+      // the membership bootstrap run on the control plane, tenant data on the runtime plane.
+      // Probing only one would report ready while the other half of every request still failed.
+      const sql = getRuntimeDb();
+      await Promise.all([sql`select 1`, getDb()`select 1`]);
       res.json({ ready: true });
     } catch (err) {
       safeLog.error('[platform-identity] readiness DB check failed', sanitizeError(err));
@@ -303,13 +320,34 @@ export function createPlatformIdentityApp() {
 const PORT = parseInt(process.env.PLATFORM_IDENTITY_API_PORT || '5002', 10);
 const app = createPlatformIdentityApp();
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     const presence = getConfigPresence();
     safeLog.info(
       `[platform-identity] isolated API on port ${PORT} | featureEnabled=${isPlatformIdentityEnabled()} | ` +
       `config present: url=${presence.supabaseUrl} db=${presence.databaseUrl} serviceRole=${presence.serviceRoleKey}`,
     );
   });
+
+  // C1R: close EVERY client this process can construct. Both are lazy singletons, so a hook for a
+  // client that was never built is a no-op — but omitting closeRuntimeDb() would strand the
+  // runtime pool the moment the first tenant request creates it. Bounded termination is the
+  // clients' own `end({ timeout: 5 })`; the coordinator adds the forced deadline around it.
+  createLifecycle({
+    server,
+    readiness: { setUnavailable: () => { draining = true; } },
+    // allSettled, not a sequential pair: the coordinator runs hooks in order with no per-hook
+    // catch, so a rejecting closeDb() would skip closeRuntimeDb() entirely and strand the runtime
+    // pool until the forced deadline. Both are attempted; a failure is still surfaced afterwards
+    // so the coordinator can exit non-zero rather than reporting a clean drain.
+    hooks: [async () => {
+      const outcomes = await Promise.allSettled([closeDb(), closeRuntimeDb()]);
+      if (outcomes.some((o) => o.status === 'rejected')) {
+        throw new Error('database client shutdown failed');
+      }
+    }],
+    proc: process,
+    exit: (code) => process.exit(code),
+  }).install();
 }
 
 export default app;

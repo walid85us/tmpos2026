@@ -358,16 +358,28 @@ test('S2-16: a malformed context is refused BEFORE any transaction is opened', a
 
 // --- S2 does not move any existing caller ------------------------------------
 
-test('S2-17: no existing platform-identity caller was moved to the runtime principal', () => {
-  // Caller cutover is a LATER milestone and is why G-DBROLE stays open. If this ever fails, a
-  // caller was migrated without the gate being reassessed.
-  //
-  // The guard looks for USE, not mention. migrationExecutor.ts names APP_DATABASE_URL in a
-  // comment stating it is never read, and migrationExecutor.test.ts carries it as a
-  // negative-control fixture proving the executor ignores an ambient application DSN. Both are
-  // evidence the boundary holds, so a substring match on the variable name would fail this test
-  // for exactly the files that prove the opposite of a cutover.
-  const exempt = new Set(['db.ts', 'config.ts', 'dbPrincipals.test.ts']);
+// S2-17 (the pre-cutover guard) is RETIRED and DELIBERATELY REPLACED here by C1R-1..C1R-4.
+//
+// S2-17 asserted that NO platform-identity file used the runtime seam, because the cutover had
+// not happened. C1R performs that cutover, so keeping S2-17 would mean either deleting the lock
+// outright — losing the protection — or exempting every file that changed, which is the same
+// thing written longer. The replacement locks the SHAPE of the cutover instead of its absence:
+// the runtime seam may appear, but only where it belongs, and the privileged client may not
+// reappear underneath a tenant read.
+
+test('C1R-1: the runtime seam appears ONLY in the files that legitimately own it', () => {
+  // Still a USE, not mention, guard: migrationExecutor.ts names APP_DATABASE_URL in a comment
+  // stating it never reads it, and its test carries it as a negative-control fixture. A
+  // substring match on the name would fail exactly the files proving the boundary holds.
+  const OWNS_RUNTIME_SEAM = new Set([
+    'db.ts', // constructs both clients
+    'config.ts', // reads the two DSNs
+    'authorizationRepository.ts', // owns runInTenantScope (the tenant data plane)
+    'auditEventWriter.ts', // default audit append is the runtime principal
+    'server.ts', // readiness probe + shutdown
+    'dbPrincipals.test.ts',
+    'runtimeRoutingBoundary.test.ts',
+  ]);
   const USES_RUNTIME_PRINCIPAL = [
     /\bgetRuntimeDb\s*\(/,
     /\bwithTenantContext\s*\(/,
@@ -377,11 +389,87 @@ test('S2-17: no existing platform-identity caller was moved to the runtime princ
   ];
   const offenders: string[] = [];
   for (const name of readdirSync(HERE)) {
-    if (!name.endsWith('.ts') || exempt.has(name)) continue;
+    if (!name.endsWith('.ts') || OWNS_RUNTIME_SEAM.has(name)) continue;
     const src = readFileSync(join(HERE, name), 'utf8');
     if (USES_RUNTIME_PRINCIPAL.some((re) => re.test(src))) offenders.push(name);
   }
-  assert.deepEqual(offenders, [], `S2 must not convert any caller: ${offenders.join(', ')}`);
+  assert.deepEqual(offenders, [], `unexpected runtime-seam user: ${offenders.join(', ')}`);
+});
+
+test('C1R-2: no tenant-data reader carries a silent getDb() executor default', () => {
+  // The fallback this prevents is the dangerous one: a tenant read whose executor argument is
+  // optional silently re-acquires the OWNER client, which migration 005 exempts from RLS
+  // (FORCE ROW LEVEL SECURITY is deliberately not set), so the query would succeed while
+  // reading every tenant's rows. Requiring the parameter removes the fallback entirely.
+  const src = readFileSync(join(HERE, 'authorizationRepository.ts'), 'utf8');
+  for (const fn of ['getTenant', 'getStore', 'getEntitlementsForTenant']) {
+    const m = new RegExp(`export async function ${fn}\\s*\\(([\\s\\S]*?)\\)\\s*:`).exec(src);
+    assert.ok(m, `${fn} not found`);
+    assert.ok(
+      !/=\s*getDb\s*\(\s*\)/.test(m![1]),
+      `${fn} must not default its executor to the privileged client`,
+    );
+    assert.ok(
+      /executor:\s*TenantSqlExecutor/.test(m![1]),
+      `${fn} must take a REQUIRED scoped executor`,
+    );
+  }
+});
+
+test('C1R-3: the tenant plane runs on the runtime client inside a tenant context', () => {
+  const src = readFileSync(join(HERE, 'authorizationRepository.ts'), 'utf8');
+  const runner = /export const runInTenantScope[\s\S]*?withTenantContext\(([\s\S]*?)\);/.exec(src);
+  assert.ok(runner, 'runInTenantScope must wrap withTenantContext');
+  assert.ok(/getRuntimeDb\s*\(\s*\)/.test(runner![1]), 'the tenant plane must use the runtime client');
+  assert.ok(!/getDb\s*\(\s*\)/.test(runner![1]), 'the tenant plane must never use the admin client');
+});
+
+test('C1R-5: the tenant readers are called ONLY from the tenant plane', () => {
+  // Removing the `= getDb()` default kills the SILENT fallback, but a required parameter is not
+  // by itself a security boundary: the tenant readers take a tagged-template function, and the
+  // admin client satisfies that type just as well as a scoped transaction does. A future caller
+  // could therefore hand them getDb() explicitly and bypass RLS entirely — the owner is exempt
+  // from every 005 policy. So constrain the CALL SITES too: inside authorizationRepository.ts
+  // (which routes them through runInTenantScope) and nowhere else in production.
+  const TENANT_READERS = /\b(getTenant|getStore|getEntitlementsForTenant)\s*\(/;
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!entry.name.endsWith('.ts') || entry.name.endsWith('.test.ts')) continue;
+      if (entry.name === 'authorizationRepository.ts') continue; // the tenant plane itself
+      const code = readFileSync(full, 'utf8')
+        .replace(/\/\/.*$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      if (TENANT_READERS.test(code)) offenders.push(entry.name);
+    }
+  };
+  walk(join(HERE, '..'));
+  assert.deepEqual(
+    offenders,
+    [],
+    `tenant readers called outside the tenant plane: ${offenders.join(', ')}`,
+  );
+});
+
+test('C1R-4: exactly two database URLs and two clients exist — no third credential', () => {
+  const cfg = readFileSync(join(HERE, 'config.ts'), 'utf8');
+  const dsnVars = new Set(
+    [...cfg.matchAll(/export const ([A-Z_]*DATABASE_URL[A-Z_]*)_VAR\s*=/g)].map((m) => m[1]),
+  );
+  assert.deepEqual(
+    [...dsnVars].sort(),
+    ['APP_DATABASE_URL', 'SUPABASE_DATABASE_URL'],
+    'a third database DSN variable would be a third credential',
+  );
+  const db = readFileSync(join(HERE, 'db.ts'), 'utf8');
+  assert.equal(
+    (db.match(/=\s*postgres\(/g) ?? []).length,
+    2,
+    'db.ts must construct exactly two clients',
+  );
+  assert.ok(!/AUDIT_DATABASE_URL/.test(cfg + db), 'no separate audit credential may exist');
 });
 
 test('S2-18: the owner-backed admin client keeps its existing connection contract', async () => {
