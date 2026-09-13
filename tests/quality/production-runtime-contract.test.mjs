@@ -5,7 +5,14 @@
 // tsx/vite/watch); (2) an emitting server tsconfig that excludes tests; (3) the
 // runtime source imports no legacy sidecar / provider / business module; (4) the
 // compiled artifact emits runnable JS, no test files, and no forbidden import;
-// (5) generated output is gitignored so it can never be staged.
+// (5) generated output is gitignored so it can never be staged; (6) routes reach
+// the runtime only through the central route table and the shared enforcement
+// chain, and that chain ships in the artifact; (7) request bodies reach handlers
+// only through the per-route body policy (no body parser, no parsed-body property);
+// (8) the production entry composes no session boundary, store or DEV adapter, and a
+// session identifier is read from the Cookie header only; (9) the in-memory session
+// store is test support that never ships in the artifact and is unreachable from the
+// provider-aware production composition root.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -78,6 +85,7 @@ test('runtime source imports no legacy sidecar, provider, or business module', (
       // The forbidden-name check applies to EVERY specifier, relative or bare
       // (a same-directory ./credential-store.js must fail too).
       for (const bad of FORBIDDEN) assert.ok(!spec.includes(bad), `${f}: forbidden import ${spec}`);
+      assert.ok(f.endsWith('.testkit.ts') || !spec.includes('.testkit'), `${f}: a production module imports test support: ${spec}`);
       if (spec.startsWith('.')) {
         assert.ok(!spec.includes('..'), `${f}: relative import escapes server/runtime: ${spec}`);
         continue;
@@ -107,11 +115,17 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
     const js = emitted.filter((f) => f.endsWith('.js'));
     assert.ok(js.length > 0, 'server build must emit JavaScript');
     assert.ok(js.some((f) => /(^|\/)server\.js$/.test(f)), 'the production entry server.js must be emitted');
+    for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js']) {
+      assert.ok(js.some((f) => f.endsWith(`/${mod}`)), `the shared enforcement chain must ship in the artifact: ${mod}`);
+    }
     assert.ok(!emitted.some((f) => /\.test\.js$/.test(f)), 'test files must not be compiled into the artifact');
+    assert.ok(!emitted.some((f) => /\.testkit\.js$/.test(f)), 'test support (the in-memory session store and rate limiter) must not be compiled into the artifact');
 
     for (const f of js) {
       const src = readFileSync(f, 'utf8');
       for (const bad of FORBIDDEN) assert.ok(!src.includes(bad), `${f}: emitted artifact references forbidden ${bad}`);
+      assert.ok(!src.includes('createMemorySessionStore'), `${f}: the artifact carries no in-memory session store`);
+      assert.ok(!/createMemoryRateLimiter|assertRateLimiterContract/.test(src), `${f}: the artifact carries no per-process rate limiter`);
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -144,4 +158,172 @@ test('generated server output is gitignored so it can never be staged', () => {
   const gi = readFileSync(join(REPO, '.gitignore'), 'utf8');
   assert.match(gi, /^dist-server\/?\s*$/m, 'dist-server must be gitignored');
   assert.ok(existsSync(join(REPO, 'tsconfig.server.json')), 'server build config must exist');
+});
+
+test('routes reach the runtime only through the central route table and shared chain', () => {
+  // Static half of the route inventory (the behavioural half lives in
+  // server/runtime/enforcement.test.ts): no runtime source registers an Express route,
+  // a Router, or a path-mounted middleware — each would sit outside the enforced chain.
+  const REGISTRATION = /\b(?:app|router)\s*\.\s*(?:get|post|put|patch|delete|all|options|head|route)\s*\(\s*['"`]\/|\bRouter\s*\(|\.use\s*\(\s*['"`]\//;
+  for (const f of runtimeSourceFiles()) {
+    assert.doesNotMatch(readFileSync(f, 'utf8'), REGISTRATION, `${f}: routes may only be declared through defineRoutes`);
+  }
+  assert.match(readFileSync(join(RUNTIME_DIR, 'app.ts'), 'utf8'), /\bdefineRoutes\(/, 'app.ts must build its surface from the central route table');
+});
+
+test('request bodies reach handlers only through the per-route body policy', () => {
+  // No body parser and no parsed-body property anywhere in the runtime: a JSON body is
+  // read only by the bounded, post-authorization reader in the shared chain.
+  const PARSER = /\bexpress\s*\.\s*(?:json|raw|text|urlencoded)\b|\bbody-?parser\b|\breq\s*\.\s*body\b/i;
+  for (const f of runtimeSourceFiles()) {
+    assert.doesNotMatch(readFileSync(f, 'utf8'), PARSER, `${f}: bodies may only be read through the per-route policy`);
+  }
+  assert.match(readFileSync(join(RUNTIME_DIR, 'app.ts'), 'utf8'), /\breadBoundedBody\(/, 'app.ts must read bodies through the bounded reader');
+});
+
+test('the production entry composes no session boundary, store or DEV adapter', () => {
+  // The provider-free entry serves the operational routes only; the provider-aware composition
+  // root (server/composition) is the one production path to a session boundary (next test).
+  const entry = readFileSync(join(RUNTIME_DIR, 'server.ts'), 'utf8');
+  assert.doesNotMatch(entry, /\bsessions\s*:|createMemorySessionStore|DevDiagnostic|devActor|stubFirebase/,
+    'server.ts must compose no session boundary, session store or DEV adapter');
+  // A session identifier is read from the Cookie header only — never a URL, parameter or body.
+  const sessions = readFileSync(join(RUNTIME_DIR, 'sessions.ts'), 'utf8');
+  assert.doesNotMatch(sessions, /\breq(?:uest)?\s*\.\s*(?:query|params|url|originalUrl|body)\b/, 'sessions.ts must read identifiers from the Cookie header only');
+});
+
+test('the provider-aware production composition root reaches no test module, testkit or in-memory store', () => {
+  // Static proof, not an identity check: walk every relative import from the composition root
+  // and require that no test file, test support module or test double is reachable from it.
+  const COMPOSITION_DIR = join(REPO, 'server', 'composition');
+  const roots = readdirSync(COMPOSITION_DIR).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).map((f) => join(COMPOSITION_DIR, f));
+  assert.ok(roots.length >= 1, 'the production composition root exists');
+  const graph = new Set();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (graph.has(file)) continue;
+    graph.add(file);
+    assert.doesNotMatch(file, /\.test\.[cm]?[jt]s$|\.testkit\.ts$/, `${file}: a test module in the production graph`);
+    const src = readFileSync(file, 'utf8');
+    assert.doesNotMatch(src, /createMemorySessionStore|createMemoryRateLimiter|devDiagnosticAuthAdapter|stubFirebaseAuthAdapter/, `${file}: a test or DEV double in the production graph`);
+    for (const spec of importSpecifiers(src)) {
+      if (!spec.startsWith('.')) continue;
+      const base = resolve(dirname(file), spec);
+      const target = [base.replace(/\.js$/, '.ts'), `${base}.ts`].find((p) => existsSync(p));
+      assert.ok(target, `${file}: unresolved import ${spec}`);
+      pending.push(target);
+    }
+  }
+  const reached = [...graph].map((f) => f.slice(REPO.length + 1));
+  assert.ok(reached.includes('server/runtime/sessions.ts'), 'the root composes through the runtime session ports');
+  assert.ok(reached.includes('server/platform-identity/firebaseAdminAuthAdapter.ts'), 'the root composes the existing identity-provider adapter');
+});
+
+test('the in-memory session store is imported by test files only, anywhere in the server tree', () => {
+  // Covers any future entry outside server/composition that might hand the test store to assembleSessions.
+  const offenders = [];
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+      if (!/\.[cm]?[jt]s$/.test(p) || /\.test\.[cm]?[jt]s$/.test(p) || p.endsWith('.testkit.ts')) continue;
+      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('memorySessionStore.testkit') || s.includes('rateLimiter.testkit'))) offenders.push(p);
+    }
+  })(join(REPO, 'server'));
+  assert.deepEqual(offenders, [], 'only test files may import the in-memory session store or rate limiter');
+});
+
+test('no per-process limiter, fallback or second proxy contract exists in the production runtime or composition', () => {
+  // M6-RATE-P1: the distributed limiter port is the only way the runtime counts requests, and the
+  // trusted-proxy contract (clientAddress.ts) is the only reader of forwarding headers.
+  const production = [...runtimeSourceFiles().filter((f) => !f.endsWith('.testkit.ts')),
+    ...readdirSync(join(REPO, 'server', 'composition')).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).map((f) => join(REPO, 'server', 'composition', f))];
+  for (const f of production) {
+    const src = readFileSync(f, 'utf8');
+    assert.doesNotMatch(src, /createMemoryRateLimiter|\bclientKeyOf\b|\bloginClientLimiter\b|\bloginAccountLimiter\b/, `${f}: a per-process or per-boundary limiter`);
+    assert.doesNotMatch(src, /\breq(?:uest)?\s*\.\s*ips?\b/, `${f}: req.ip follows Express trust-proxy, never the contract`);
+    if (!/[\\/](?:app|clientAddress)\.ts$/.test(f)) {
+      assert.doesNotMatch(src, /['"`](?:x-forwarded-for|forwarded|x-real-ip)['"`]/i, `${f}: forwarding headers are read by the trusted-proxy contract alone`);
+    }
+  }
+  const app = readFileSync(join(RUNTIME_DIR, 'app.ts'), 'utf8');
+  assert.deepEqual([...app.matchAll(/\bset\(\s*'trust proxy'\s*,\s*([^)]*)\)/g)].map((m) => m[1].trim()), ['false'], 'Express trust proxy is off, unconditionally');
+  // Only the composition root hands the runtime its limiter: nothing else assembles production parts.
+  const assemblers = [];
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+      if (/\.[cm]?[jt]s$/.test(p) && !/\.test\.[cm]?[jt]s$/.test(p) && /\bassembleSessions\s*\(/.test(readFileSync(p, 'utf8'))) assemblers.push(p.slice(REPO.length + 1));
+    }
+  })(join(REPO, 'server'));
+  assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
+});
+
+test('the production entry and composition root compose no Command Center route or reader', () => {
+  // The Command Center read model stays uncomposed until an authoritative reader exists and the
+  // admin boundary has its production adapters (durable store, admission, authorizer, and the
+  // store compare-and-set that closes the admission-revalidation race): only tests build it.
+  // Every relative import is followed, so a transitive import fails too; a computed specifier
+  // would hide from the walk, so the production graph may hold none.
+  const roots = [join(RUNTIME_DIR, 'server.ts')];
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.[cm]?[jt]s$/.test(p) && !/\.test\.[cm]?[jt]s$/.test(p)) roots.push(p);
+    }
+  })(join(REPO, 'server', 'composition'));
+  assert.ok(roots.length >= 2, 'the production entry and the composition root exist');
+  const COMMAND_CENTER = /command[-_]?center/i;
+  const COMPUTED = /\b(?:import|require)\s*\(\s*[^'"\s)]/;
+  const reached = new Set();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (reached.has(file)) continue;
+    reached.add(file);
+    assert.doesNotMatch(file, COMMAND_CENTER, `${file}: the Command Center is in the production graph`);
+    const src = readFileSync(file, 'utf8');
+    assert.doesNotMatch(src, COMPUTED, `${file}: a computed import could hide a module from this walk`);
+    for (const spec of importSpecifiers(src)) {
+      assert.doesNotMatch(spec, COMMAND_CENTER, `${file} must not import the Command Center read model`);
+      if (!spec.startsWith('.')) continue;
+      const base = resolve(dirname(file), spec);
+      const target = [base.replace(/\.js$/, '.ts'), `${base}.ts`].find((p) => existsSync(p));
+      assert.ok(target, `${file}: unresolved import ${spec}`);
+      pending.push(target);
+    }
+  }
+  assert.ok(reached.has(join(RUNTIME_DIR, 'app.ts')), 'the walk reaches the runtime it guards');
+});
+
+test('the admin console and admin web server write no HTML string into the page and evaluate no strings', () => {
+  // G-WEBHARDEN (M4-ADMIN-UI-P2): React renders every value as text, and nothing on the admin
+  // surface may bypass that. A positive control runs first, so a broken pattern cannot pass.
+  const SINKS = [
+    /dangerouslySetInnerHTML/, /\b(?:inner|outer)HTML\b/, /\binsertAdjacentHTML\b/, /\bdocument\.write(?:ln)?\b/,
+    /\bcreateContextualFragment\b/, /\bsrcdoc\b/i, /\beval\s*\(/, /\bFunction\s*\(/, /\bset(?:Timeout|Interval)\s*\(\s*['"`]/,
+    /javascript:/i,
+  ];
+  const control = [
+    '<div dangerouslySetInnerHTML={x} />', 'el.innerHTML = x', "el['innerHTML'] = x", 'el.outerHTML = x',
+    "el.insertAdjacentHTML('beforeend', x)", 'document.write(x)', 'range.createContextualFragment(x)',
+    '<iframe srcdoc={x} />', '<iframe srcDoc={x} />', 'eval(x)', "new Function('return 1')", "Function('return 1')()",
+    "setTimeout('run()', 10)", 'setInterval(`tick()`, 10)', '<a href="javascript:void 0">',
+  ];
+  for (const sample of control) assert.ok(SINKS.some((re) => re.test(sample)), `the scan must catch: ${sample}`);
+  const consoleDir = join(REPO, 'src', 'backend-control-plane', 'console');
+  const files = [
+    join(REPO, 'src', 'main.tsx'),
+    ...['adminWeb.ts', 'adminWebServer.ts', 'commandCenter.ts'].map((f) => join(RUNTIME_DIR, f)),
+    ...readdirSync(consoleDir, { recursive: true }).filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f)).map((f) => join(consoleDir, f)),
+  ];
+  assert.ok(files.some((f) => f.endsWith('CommandCenterPage.tsx')) && files.some((f) => f.endsWith('SignInScreen.tsx')), 'the console sources are scanned');
+  const hits = files.flatMap((f) => {
+    const src = readFileSync(f, 'utf8');
+    return SINKS.filter((re) => re.test(src)).map((re) => `${f.slice(REPO.length + 1)}: ${re}`);
+  });
+  assert.deepEqual(hits, [], 'no unsafe-HTML sink or string evaluation on the admin surface');
 });

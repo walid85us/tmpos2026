@@ -20,7 +20,7 @@ test('accepts a valid production configuration', () => {
   assert.equal(r.config?.env, 'production');
   assert.equal(r.config?.port, 8080);
   assert.equal(r.config?.isProduction, true);
-  assert.equal(r.config?.trustProxy, false);
+  assert.deepEqual(Object.keys(r.config ?? {}).sort(), ['env', 'isProduction', 'port']);
 });
 
 test('accepts the test/development/staging classifications', () => {
@@ -75,13 +75,11 @@ test('rejects a port with a trailing or leading newline', () => {
   }
 });
 
-test('accepts the explicit boolean vocabulary and rejects everything else', () => {
-  assert.equal(loadConfig(base({ TRUST_PROXY: 'true' })).config?.trustProxy, true);
-  assert.equal(loadConfig(base({ TRUST_PROXY: 'false' })).config?.trustProxy, false);
-  for (const v of ['yes', '1', 'TRUE', 'on', 'y']) {
+test('TRUST_PROXY is not read: no hop-count trust switch exists (trusted proxies are composition configuration)', () => {
+  for (const v of ['true', 'false', '1', 'yes']) {
     const r = loadConfig(base({ TRUST_PROXY: v }));
-    assert.equal(r.ok, false, `TRUST_PROXY=${v} must be rejected`);
-    assert.ok(r.errors.some((e) => e.field === 'TRUST_PROXY' && e.code === 'bool_invalid'));
+    assert.equal(r.ok, true, `TRUST_PROXY=${v}`);
+    assert.deepEqual(Object.keys(r.config ?? {}).sort(), ['env', 'isProduction', 'port'], `TRUST_PROXY=${v} configures nothing`);
   }
 });
 

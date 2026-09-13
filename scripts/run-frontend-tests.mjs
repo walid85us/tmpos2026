@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 13;
-export const MIN_FRONTEND_CASES = 114;
+export const MIN_FRONTEND_FILES = 17;
+export const MIN_FRONTEND_CASES = 199;
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated
@@ -57,6 +57,10 @@ export const REQUIRED_FRONTEND_SUITES = [
   'src/components/ShippingCenter.test.tsx',         // probe sites + label/webhook surfaces
   'src/components/ReturnsPortal.test.tsx',          // label URL: text/clipboard/mailto channel
   'src/context/StoreLocalState.test.tsx',           // availability vs. configured state
+  'src/backend-control-plane/console/AdminConsole.test.tsx',          // admin console states, token/CSRF lifecycle, shell
+  'src/backend-control-plane/console/firebaseAdminIdentity.test.tsx', // in-memory provider, one token, discarded session
+  'src/backend-control-plane/console/CommandCenter.test.tsx',         // read-only command center states and refusals
+  'src/backend-control-plane/console/ApiPathNotFound.test.tsx',       // an API address loads a bounded page, never the console shell
 ];
 
 /** A case vitest actually ran. Skipped and todo cases are not executed. */

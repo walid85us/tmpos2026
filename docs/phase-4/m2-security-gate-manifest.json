@@ -191,6 +191,32 @@
       "status": "open"
     },
     {
+      "id": "TMPOS-SYNTHETIC-JWT-TEST-FIXTURES",
+      "evidenceType": "gitleaks",
+      "scanner": "gitleaks",
+      "rule": "jwt",
+      "path": "src/backend-control-plane/console",
+      "fingerprint": "testfixture:synthetic-jwt-shaped-id-token:admin-console-tests",
+      "severity": "low",
+      "blocker": false,
+      "gate": "G-APPSEC",
+      "milestone": "M4",
+      "expectedFindingCount": 2,
+      "expectedFindings": [
+        { "rule": "jwt", "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "line": 15 },
+        { "rule": "jwt", "file": "src/backend-control-plane/console/adminSessionClient.test.ts", "line": 9 }
+      ],
+      "containingFiles": [
+        { "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "blobOid": "35b0ad7cc8a6ba59e7c9dbb49e6a6eb27f2ad441" },
+        { "file": "src/backend-control-plane/console/adminSessionClient.test.ts", "blobOid": "77fd6139cd803c18613431c1be4aea117a8f512c" }
+      ],
+      "rationale": "Two JWT-shaped strings that the admin console unit tests use as the Firebase ID token handed to in-memory fakes (the ID_TOKEN constant in AdminConsole.test.tsx and adminSessionClient.test.ts). They are synthetic fixtures, not tokens: the header is only {alg: RS256}, the payload is only a synthetic subject (uid-synthetic-7f3a / uid-synthetic) with no issuer, audience, expiry or project, and the signature segment is the base64url encoding of the literal word 'signature', so no key signed them and no identity provider would accept them. Reconciled EXACTLY by rule id + repository-relative path + line and bound to each test file's whole-file Git blob OID; the jwt rule itself stays active everywhere.",
+      "compensatingControl": "Test-only files that no application module imports; the strings carry no valid signature, issuer, audience or expiry, so they cannot authenticate anywhere. Exact reconciliation keeps this entry from acting as a path or rule waiver: any other jwt finding, a new line, or any change to either containing file fails the gate.",
+      "removalCriterion": "Remove when the fixtures no longer match the jwt rule (for example, restructured into a non-JWT placeholder) or the tests are deleted. A real token introduced at either location changes the containing-file OID and fails the gate.",
+      "expiry": "2027-06-30",
+      "status": "open"
+    },
+    {
       "id": "TMPOS-DEP-POSTCSS-HIGH",
       "evidenceType": "dependency_audit",
       "scanner": "npm-audit",

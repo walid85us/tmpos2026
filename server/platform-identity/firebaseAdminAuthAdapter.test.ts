@@ -3,12 +3,16 @@
 // init, NO real credential, NO network. Proves Bearer parsing, sanitized error mapping, no token/claim leakage,
 // and credential-structure validation. Server-side only.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
 import {
   extractBearerCredential,
   verifyFirebaseBearer,
   parseServiceAccountJson,
   getDefaultFirebaseVerifier,
   FIREBASE_ID_TOKEN_MAX_LEN,
+  createRuntimeIdentityVerifier,
+  IdentityCompositionError,
   type FirebaseIdTokenVerifier,
 } from './firebaseAdminAuthAdapter';
 
@@ -118,6 +122,88 @@ test('default verifier fails closed as unavailable when the service-account secr
     );
   } finally {
     if (saved !== undefined) process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON = saved;
+  }
+});
+
+// ---------- runtime composition: the production authenticator in the runtime's port shape ----------
+// A freshly generated key (never a real credential): composition parses the key locally.
+const PEM = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+const SA_ENV = { FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: sa({ private_key: PEM }) };
+test('runtime verifier refuses to compose without a valid service-account configuration', () => {
+  // The last case has every field but a key that does not parse ('PK').
+  for (const env of [{}, { FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: '' }, { FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: '{nope' }, { FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: sa({ private_key: undefined }) }, { FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: sa() }]) {
+    assert.throws(() => createRuntimeIdentityVerifier(env, { verifier: NEVER_CALLED }),
+      (e: unknown) => e instanceof IdentityCompositionError && e.code === 'identity_verifier_unconfigured' && !e.message.includes('proj-a'));
+  }
+});
+test('runtime verifier yields only a verified firebase identity key and its (absent) evidence', async () => {
+  const v = createRuntimeIdentityVerifier(SA_ENV, { verifier: okVerifier });
+  assert.deepEqual(await v.verify(Object.freeze({ bearerToken: 'good.token' })),
+    { verified: true, authProvider: 'firebase', authProviderUid: 'fbuid_stub_abc', authenticatedAt: null, secondFactor: null });
+});
+test('runtime verifier reports the provider-verified sign-in time and second factor, and nothing malformed', async () => {
+  const withClaims = (authTime: unknown, secondFactor: unknown): FirebaseIdTokenVerifier => ({ verify: async () => ({ uid: 'fbuid_stub_abc', authTime, secondFactor }) });
+  assert.deepEqual(await createRuntimeIdentityVerifier(SA_ENV, { verifier: withClaims(1_700_000_000, 'totp') }).verify({ bearerToken: 't' }),
+    { verified: true, authProvider: 'firebase', authProviderUid: 'fbuid_stub_abc', authenticatedAt: 1_700_000_000_000, secondFactor: 'totp' });
+  for (const [authTime, secondFactor] of [[undefined, undefined], ['1700000000', 42], [1.5, null], [-1, {}], [0, ['totp']]] as const) {
+    const r = await createRuntimeIdentityVerifier(SA_ENV, { verifier: withClaims(authTime, secondFactor) }).verify({ bearerToken: 't' });
+    assert.equal(r?.authenticatedAt, null, `auth_time ${String(authTime)}`);
+    assert.equal(r?.secondFactor, null, `second factor ${JSON.stringify(secondFactor)}`);
+  }
+});
+test('the DEV pilot result carries no evidence: verifyFirebaseBearer still returns only ok + firebaseUid', async () => {
+  const r = await verifyFirebaseBearer('Bearer t', { verifier: { verify: async () => ({ uid: 'fbuid_stub_abc', authTime: 1_700_000_000, secondFactor: 'totp' }) } });
+  assert.deepEqual(r, { ok: true, firebaseUid: 'fbuid_stub_abc' });
+});
+test('runtime verifier refuses an already-cancelled call without consulting the provider', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(createRuntimeIdentityVerifier(SA_ENV, { verifier: NEVER_CALLED }).verify({ bearerToken: 't' }, controller.signal),
+    (e: unknown) => e instanceof Error && e.message === 'firebase_admin_unavailable');
+});
+test('provider outages and configuration faults → authentication_unavailable, never a credential verdict', async () => {
+  for (const code of ['app/network-error', 'app/network-timeout', 'app/internal-error', 'app/invalid-credential', 'auth/invalid-credential', 'auth/insufficient-permission']) {
+    assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: throwing(code) })).code, 'authentication_unavailable', code);
+  }
+});
+test('an unlisted provider code or a bare fault → unavailable; only the enumerated verdicts are credential failures', async () => {
+  for (const code of ['auth/quota-exceeded', 'auth/some-future-code', 'app/no-app', '']) {
+    assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: throwing(code) })).code, 'authentication_unavailable', code || '(no code)');
+  }
+  const fault: FirebaseIdTokenVerifier = { verify: async () => { throw new TypeError('sdk fault'); } };
+  assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: fault })).code, 'authentication_unavailable');
+  for (const code of ['auth/user-not-found', 'auth/invalid-id-token', 'auth/mismatching-tenant-id']) {
+    assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: throwing(code) })).code, 'authentication_invalid', code);
+  }
+});
+const throwingWith = (code: string, message: string): FirebaseIdTokenVerifier => ({
+  verify: async () => { const e: any = new Error(message); e.code = code; throw e; },
+});
+test('a signing-key fetch failure the SDK reports as argument-error → unavailable; a malformed token stays invalid', async () => {
+  for (const message of ['Error fetching public keys for Google certs: 503 Service Unavailable', 'Error while making request: connect ECONNREFUSED. Error code: ECONNREFUSED']) {
+    assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: throwingWith('auth/argument-error', message) })).code, 'authentication_unavailable', message);
+  }
+  for (const message of ['Decoding Firebase ID token failed.', 'Firebase ID token has invalid signature.', 'Firebase ID token has incorrect "aud" (audience) claim.', 'x Error fetching public keys']) {
+    assert.equal((await verifyFirebaseBearer('Bearer t', { verifier: throwingWith('auth/argument-error', message) })).code, 'authentication_invalid', message);
+  }
+});
+test('the installed SDK still reports key-fetch failures with those message prefixes (guards the mapping on upgrade)', () => {
+  const lib = (p: string): string => readFileSync(new URL(`../../node_modules/firebase-admin/lib/${p}`, import.meta.url), 'utf8');
+  assert.ok(lib('utils/jwt.js').includes("'Error fetching public keys for Google certs: '"), 'key-fetch HTTP failure prefix');
+  assert.ok(lib('utils/api-request.js').includes('`Error while making request: '), 'network failure prefix');
+  // Why the prefixes are needed: the token verifier folds a key-fetch failure into INVALID_ARGUMENT.
+  assert.ok(lib('auth/token-verifier.js').includes('return new error_1.FirebaseAuthError(error_1.AuthClientErrorCode.INVALID_ARGUMENT, error.message);'));
+});
+test('runtime verifier fails closed with null, never detail, on every credential failure', async () => {
+  for (const code of ['auth/id-token-expired', 'auth/id-token-revoked', 'auth/user-disabled', 'auth/argument-error']) {
+    assert.equal(await createRuntimeIdentityVerifier(SA_ENV, { verifier: throwing(code) }).verify({ bearerToken: 't' }), null, code);
+  }
+  assert.equal(await createRuntimeIdentityVerifier(SA_ENV, { verifier: { verify: async () => ({ uid: '' }) } }).verify({ bearerToken: 't' }), null);
+});
+test('runtime verifier throws on an outage, so an outage never reads as a bad credential', async () => {
+  for (const code of ['firebase_admin_unavailable', 'auth/internal-error', 'auth/network-error']) {
+    await assert.rejects(createRuntimeIdentityVerifier(SA_ENV, { verifier: throwing(code) }).verify({ bearerToken: 't' }),
+      (e: unknown) => e instanceof Error && e.message === 'firebase_admin_unavailable', code);
   }
 });
 

@@ -419,11 +419,88 @@ export function validateMigration005({ up, down }) {
   }
 
   // --- default privileges ---------------------------------------------------
+  //
+  // C2B-M005-B1. A new object's ACL is merge(GLOBAL row when one exists else acldefault(),
+  // per-schema row): the global entry SUBSTITUTES for the hard-wired default, the per-schema entry
+  // is only ADDED on top of whichever base was chosen. `acldefault()` grants EXECUTE to PUBLIC for
+  // FUNCTIONS, so an `IN SCHEMA` revoke can never remove it and only a GLOBAL row displaces it. The
+  // migration therefore carries exactly one global FUNCTIONS revoke and the three schema revokes,
+  // and NOTHING wider: a global TABLES or SEQUENCES revoke would silently repair evidence that
+  // something outside 005 widened the defaults, which must stay a fail-closed blocker instead.
   const upDefaults = upStmts.filter((s) => s.startsWith('alter default privileges'));
   if (upDefaults.length === 0) problems.push('up: least-privilege ALTER DEFAULT PRIVILEGES handling is missing');
   for (const objType of ['tables', 'sequences', 'functions']) {
-    if (!upDefaults.some((s) => new RegExp(`revoke [^;]* on ${objType} from [^;]*\\bpublic\\b`).test(s))) {
-      problems.push(`up: default privileges on ${objType} are not revoked from PUBLIC`);
+    if (!upDefaults.some((s) => new RegExp(`in schema public revoke [^;]* on ${objType} from [^;]*\\bpublic\\b`).test(s))) {
+      problems.push(`up: default privileges on ${objType} are not revoked from PUBLIC in schema public`);
+    }
+  }
+  // DYNAMIC SQL IS A BYPASS OF EVERY RULE IN THIS SECTION, and it is closed here.
+  //
+  // Each rule below inspects statements whose TOP LEVEL begins `alter default privileges`. A
+  // dollar-quoted body is one statement beginning `do`, so
+  // `do $$ begin execute 'alter default privileges ...'; end $$;` is invisible to all of them — and
+  // a mutation proving it appended the exact compensating GRANT this stage exists to remove while
+  // every suite stayed green. This file already carried the same threat model for database-level
+  // changes (`isDatabaseLevelChange`, and the "smuggled through EXECUTE" defect case); the
+  // default-privilege rules were written without it.
+  for (const s of [...upStmts, ...downStmts]) {
+    if (/^alter default privileges\b/.test(s)) continue;
+    if (/alter default privileges/.test(s)) {
+      problems.push('a default-privilege change is smuggled through dynamic SQL — every shape rule in this contract inspects top-level statements only, so it must be written as one');
+    }
+  }
+  const isGlobalDefault = (s) => !/^alter default privileges in schema /.test(s);
+  const upGlobalDefaults = upDefaults.filter(isGlobalDefault);
+  const upSchemaDefaults = upDefaults.filter((s) => /^alter default privileges in schema public /.test(s));
+  if (upGlobalDefaults.length !== 1) {
+    problems.push('up: migration 005 must issue exactly ONE global default-privilege statement, the FUNCTIONS revoke that displaces PostgreSQL\'s hard-wired PUBLIC EXECUTE');
+  }
+  for (const s of upDefaults) {
+    // `REVOKE ALL`, not merely `REVOKE`. `revoke usage on functions` is valid SQL that removes
+    // nothing PostgreSQL grants PUBLIC on a function, so the global statement would leave the
+    // built-in EXECUTE exactly where it was while still reading as the required revoke.
+    if (/\brevoke\b/.test(s) && !/\brevoke all on \w+ from /.test(s)) {
+      problems.push('a default-privilege REVOKE must revoke ALL — a narrower privilege list can leave the built-in grant in place');
+    }
+  }
+  for (const s of upGlobalDefaults) {
+    if (!/^alter default privileges revoke all on functions from /.test(s)) {
+      problems.push('up: the GLOBAL default-privilege statement must be exactly a REVOKE ALL ON FUNCTIONS');
+    }
+    if (/\bon (tables|sequences)\b/.test(s)) {
+      problems.push('up: no GLOBAL default-privilege statement may name tables or sequences — an unexpected global grant on those classes must stay a fail-closed blocker');
+    }
+  }
+  if (upSchemaDefaults.length !== 3) {
+    problems.push('up: the three IN SCHEMA public default-privilege revokes must all remain');
+  }
+  const lastGlobalDefault = upDefaults.map(isGlobalDefault).lastIndexOf(true);
+  const firstSchemaDefault = upDefaults.findIndex((s) => /^alter default privileges in schema public /.test(s));
+  if (lastGlobalDefault !== -1 && firstSchemaDefault !== -1 && lastGlobalDefault > firstSchemaDefault) {
+    problems.push('up: the global FUNCTIONS revoke must PRECEDE the IN SCHEMA public statements');
+  }
+  for (const s of [...upDefaults, ...downStmts.filter((d) => d.startsWith('alter default privileges'))]) {
+    if (/\bfor role\b/.test(s)) {
+      problems.push('default privileges must carry no FOR ROLE clause — the statement binds the executing principal and no other');
+    }
+    // VERB-ANCHORED, so the legal `REVOKE GRANT OPTION FOR ...` is not misread as a GRANT. A bare
+    // `\bgrant\b` scan over the whole statement reported that form as a compensating grant while the
+    // parser in the deterministic suite classified the same text as a clean revoke — two files
+    // disagreeing about one statement.
+    if (/^alter default privileges (?:for role \S+ )?(?:in schema \w+ )?(?:for role \S+ )?grant\b/.test(s)) {
+      problems.push('neither migration file may contain a default-privilege GRANT');
+    }
+    if (/\bon (types|schemas)\b/.test(s)) {
+      problems.push('TYPES and SCHEMAS are deliberately outside migration 005\'s contract and must carry no statement');
+    }
+    // A MISSING CLAUSE IS A FAILURE, NOT A SKIP. `?? ''` followed by `grantees !== ''` silently
+    // exempted any statement with no trailing `from ...` — including every GRANT-shaped one — from
+    // the grantee rule.
+    const grantees = /\bfrom ([^;]+)$/.exec(s)?.[1];
+    if (grantees === undefined) {
+      problems.push('a default-privilege statement names no grantee list');
+    } else if (grantees.split(',').map((g) => g.trim()).sort().join(',') !== 'anon,authenticated,public') {
+      problems.push('default privileges must name exactly public, anon and authenticated');
     }
   }
   for (const s of upDefaults) {
@@ -525,14 +602,22 @@ export function validateMigration005({ up, down }) {
       !downStmts.some((s) => new RegExp(`^alter table (public\\.)?${AUDIT_TABLE} drop constraint if exists ${AUDIT_SCOPE_CONSTRAINT}$`).test(s))) {
     problems.push(`down: ${AUDIT_SCOPE_CONSTRAINT} is never dropped`);
   }
+  // THE ROLLBACK ISSUES NO DEFAULT-PRIVILEGE STATEMENT AT ALL, and that is the corrected rule.
+  //
+  // The previous revision REQUIRED one and got a per-schema `grant execute on functions to public`,
+  // described as "restoring the built-in default". It restored nothing: the built-in lives in
+  // `acldefault()`, which only a GLOBAL row substitutes for, so a per-schema GRANT WRITES A NEW,
+  // POSITIVE, PERSISTENT grant that is wider than the pre-005 posture. And no faithful inverse is
+  // available either — the prior global default-ACL state is recorded nowhere, so a
+  // catalog-identical restoration is not something this rollback can claim. The hardening is
+  // therefore RETAINED, exactly like the platform_identity REVOKE, and any compensating statement
+  // is a defect.
   const downDefaults = downStmts.filter((s) => s.startsWith('alter default privileges'));
-  if (downDefaults.length === 0) {
-    problems.push("down: the up migration's default-privilege change is never reversed");
+  if (downDefaults.length !== 0) {
+    problems.push('down: the rollback must issue NO default-privilege statement — the hardening is retained, and no compensating grant may re-open a future object');
   }
-  for (const s of downDefaults) {
-    if (/grant [^;]* on (tables|sequences) to [^;]*\b(public|anon|authenticated)\b/.test(s)) {
-      problems.push('down: reversal must not grant future tables or sequences to public/anon/authenticated');
-    }
+  if (downStmts.some((s) => /pg_default_acl/.test(s))) {
+    problems.push('down: the rollback must not manipulate the default-ACL catalog directly to simulate a restoration');
   }
   for (const role of S2_ROLES) {
     if (!downStmts.some((s) => new RegExp(`\\bdrop role ${role}\\b`).test(s))) {
@@ -814,9 +899,89 @@ const DEFECTS = [
     expect: /is never revoked/,
   },
   {
-    name: 'a down migration that does not reverse the default privileges',
-    mutate: (p) => ({ ...p, down: p.down.replace(/alter default privileges[^;]*;/g, '') }),
-    expect: /default-privilege change is never reversed/,
+    name: 'a down migration that hands EXECUTE on future functions back to PUBLIC',
+    mutate: (p) => ({ ...p, down: `${p.down}\nalter default privileges in schema public grant execute on functions to public;\n` }),
+    expect: /rollback must issue NO default-privilege statement/,
+  },
+  {
+    name: 'a down migration that simulates a restoration by writing the catalog directly',
+    mutate: (p) => ({ ...p, down: `${p.down}\ninsert into pg_default_acl (defaclrole) values (0);\n` }),
+    expect: /must not manipulate the default-ACL catalog/,
+  },
+  {
+    name: 'a global TABLES revoke smuggled through dynamic SQL',
+    mutate: (p) => ({ ...p, up: `${p.up}\ndo $$ begin execute 'alter default privileges revoke all on tables from public, anon, authenticated'; end $$;\n` }),
+    expect: /smuggled through dynamic SQL/,
+  },
+  {
+    name: 'a compensating GRANT smuggled through dynamic SQL in the rollback',
+    mutate: (p) => ({ ...p, down: `${p.down}\ndo $$ begin execute 'alter default privileges in schema public grant execute on functions to public'; end $$;\n` }),
+    expect: /smuggled through dynamic SQL/,
+  },
+  {
+    name: 'a FOR ROLE clause smuggled through dynamic SQL',
+    mutate: (p) => ({ ...p, up: `${p.up}\ndo $$ begin execute 'alter default privileges for role tmpos_app revoke all on functions from public'; end $$;\n` }),
+    expect: /smuggled through dynamic SQL/,
+  },
+  {
+    name: 'a global functions revoke that revokes a privilege PostgreSQL never grants PUBLIC',
+    mutate: (p) => ({
+      ...p,
+      up: p.up.replace('alter default privileges revoke all on functions from public, anon, authenticated;',
+        'alter default privileges revoke usage on functions from public, anon, authenticated;'),
+    }),
+    expect: /must revoke ALL|must be exactly a REVOKE ALL ON FUNCTIONS/,
+  },
+  {
+    name: 'an up migration with no GLOBAL functions revoke',
+    mutate: (p) => ({ ...p, up: p.up.replace(/alter default privileges revoke all on functions[^;]*;/, '') }),
+    expect: /exactly ONE global default-privilege statement/,
+  },
+  {
+    name: 'an up migration that also revokes global TABLES defaults',
+    mutate: (p) => ({ ...p, up: `${p.up}\nalter default privileges revoke all on tables from public, anon, authenticated;\n` }),
+    expect: /exactly ONE global default-privilege statement|may name tables or sequences/,
+  },
+  {
+    name: 'an up migration that also revokes global SEQUENCES defaults',
+    mutate: (p) => ({ ...p, up: `${p.up}\nalter default privileges revoke all on sequences from public, anon, authenticated;\n` }),
+    expect: /exactly ONE global default-privilege statement|may name tables or sequences/,
+  },
+  {
+    name: 'an up migration whose global statement is placed after the schema statements',
+    mutate: (p) => ({
+      ...p,
+      up: `${p.up.replace(/alter default privileges revoke all on functions[^;]*;/, '')}\nalter default privileges revoke all on functions from public, anon, authenticated;\n`,
+    }),
+    expect: /must PRECEDE the IN SCHEMA public statements/,
+  },
+  {
+    name: 'an up migration that couples a default-privilege statement to a named role',
+    mutate: (p) => ({
+      ...p,
+      up: p.up.replace('alter default privileges revoke all on functions',
+        'alter default privileges for role tmpos_app revoke all on functions'),
+    }),
+    expect: /no FOR ROLE clause/,
+  },
+  {
+    name: 'an up migration that extends the contract to TYPES',
+    mutate: (p) => ({ ...p, up: `${p.up}\nalter default privileges revoke all on types from public, anon, authenticated;\n` }),
+    expect: /TYPES and SCHEMAS are deliberately outside/,
+  },
+  {
+    name: 'an up migration that narrows the grantee set',
+    mutate: (p) => ({
+      ...p,
+      up: p.up.replace('alter default privileges revoke all on functions from public, anon, authenticated;',
+        'alter default privileges revoke all on functions from public;'),
+    }),
+    expect: /exactly public, anon and authenticated/,
+  },
+  {
+    name: 'an up migration that drops one of the three IN SCHEMA public statements',
+    mutate: (p) => ({ ...p, up: p.up.replace(/alter default privileges in schema public revoke all on sequences[^;]*;/, '') }),
+    expect: /three IN SCHEMA public default-privilege revokes must all remain|are not revoked from PUBLIC in schema public/,
   },
   {
     name: 'a down migration that does not drop the privilege roles',

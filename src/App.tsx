@@ -1,3 +1,4 @@
+import './tenantFonts.css'; // Tenant surface only; the admin origin fetches no web font (G-WEBHARDEN).
 import React from 'react';
 import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
 import { AccessProvider } from './context/AccessContext';

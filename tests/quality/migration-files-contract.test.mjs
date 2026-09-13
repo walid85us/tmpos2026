@@ -68,8 +68,8 @@ const PINNED = {
   // The values below are now the immutable ones. This does NOT relax the forward-only policy:
   // a migration that has been applied anywhere, or that is not covered by an explicit owner
   // authorisation of this kind, is still corrected by a NEW migration and never edited.
-  '005_principal_separation_rls_foundation.up.sql': 'bc393fde8daf46fd38f82715e5bb2cbe62207f2b64b28d68fec535ca16b3f709',
-  '005_principal_separation_rls_foundation.down.sql': '7f6ff1c56bd887a9bce1b64bf78d4d00af9a3859c136647f00c0564ef06c5cdb',
+  '005_principal_separation_rls_foundation.up.sql': 'a4a61385beedf98194fb427bcd528704b068d7ca2947a9713d7a1a1c87157bda',
+  '005_principal_separation_rls_foundation.down.sql': 'c198c0fa9c481cb2fe99c7f841aba4023bfbbef06663e2948755abca1d74db64',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);

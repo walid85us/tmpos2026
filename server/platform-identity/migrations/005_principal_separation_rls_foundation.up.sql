@@ -171,12 +171,69 @@ grant usage on schema public to tmpos_app, tmpos_audit_writer;
 -- =============================================================================
 -- 5) Default privileges — a table added later is closed until granted on purpose
 -- =============================================================================
--- Applies to objects created LATER by the role running this migration. Note what is NOT here:
--- no default privilege is granted to tmpos_app or tmpos_audit_writer, so a future table is
--- unreachable by the runtime principal until a migration grants it deliberately.
--- The FUNCTIONS line is the only one that tightens a PostgreSQL built-in default (EXECUTE to
--- PUBLIC); the TABLES and SEQUENCES lines assert a posture PostgreSQL already has, so that a
--- previously-loosened default in an existing project is corrected on apply.
+-- SCOPE, STATED EXACTLY. These statements bind future objects to which THIS PRINCIPAL'S DEFAULT
+-- PRIVILEGES APPLY — that is, objects whose OWNER AT CREATION is the role whose default ACL is
+-- being altered here. Owner, not issuer: PostgreSQL matches pg_default_acl on the new object's
+-- owner, so an object created under `CREATE SCHEMA ... AUTHORIZATION other` or an identity/serial
+-- sequence generated on another role's table takes THAT role's defaults, not this one's, and a
+-- later `ALTER ... OWNER TO` does not re-derive an ACL already computed. Nothing here is
+-- owner-independent hardening, and nothing here reaches a role this principal is merely a member
+-- of. Note also what is NOT here: no default privilege is granted to tmpos_app or
+-- tmpos_audit_writer, so a future table is unreachable by the runtime principal until a migration
+-- grants it deliberately.
+--
+-- WHY A GLOBAL FUNCTIONS STATEMENT EXISTS. A new object's ACL is
+-- merge(global row when one exists else acldefault(), per-schema row). The GLOBAL entry
+-- SUBSTITUTES for the hard-wired `acldefault()`; the per-schema entry is ADDED to whatever base was
+-- chosen, by an add-only union seeded from an EMPTY acl. For FUNCTIONS `acldefault()` grants
+-- EXECUTE to PUBLIC, so an `IN SCHEMA public` revoke can never remove it: there is nothing in the
+-- per-schema entry to subtract from, and the built-in base survives untouched. Only a GLOBAL row
+-- displaces it. A live read-only diagnostic against the development target confirmed exactly that
+-- state for the executing principal — all three global bases were the built-in default, and the
+-- three IN SCHEMA statements below could not have closed the functions class on their own.
+--
+-- HOW WIDE THE GLOBAL STATEMENT REALLY IS, stated rather than left to be discovered. It carries no
+-- IN SCHEMA clause, so it writes a `defaclnamespace = 0` entry that governs future functions owned
+-- by this principal IN EVERY SCHEMA, not only `public`. There is no schema-scoped way to displace
+-- `acldefault()`, so that breadth is unavoidable rather than chosen. Two consequences follow and
+-- neither is hypothetical: the `f` object class is PostgreSQL's ROUTINES class, so PROCEDURES and
+-- AGGREGATES are covered as well as functions; and any routine this principal creates afterwards
+-- anywhere — including one an extension installs into its own schema — starts with no PUBLIC
+-- EXECUTE, so a caller that relied on the built-in grant needs an explicit one.
+--
+-- ORDER IS A CONTRACT LOCK, NOT A SEMANTIC REQUIREMENT. The global and per-schema entries are
+-- separate `pg_default_acl` rows keyed by (role, namespace, objtype), and a per-schema row is
+-- always seeded from an EMPTY acl rather than from the global one, so the final catalog state is
+-- the same in either order — the merge happens at object creation, long after both statements
+-- commit. The global statement is placed first, and a contract test enforces it, purely so the
+-- file reads in the order the reasoning does: base first, then what is added on top of it.
+--
+-- WHY FUNCTIONS ONLY. `acldefault()` grants PUBLIC nothing for TABLES and for SEQUENCES, so for
+-- those two classes "no global row" is ALREADY the closed posture and a global revoke would assert
+-- a change that is not needed. More importantly, an UNEXPECTED global table or sequence grant is
+-- evidence that something outside this migration widened the defaults, and repairing it silently
+-- here would destroy that evidence. It must remain a FAIL-CLOSED BLOCKER.
+--
+-- WHAT "FAIL-CLOSED" MEANS HERE, EXACTLY — and it is narrower than "rolls back". The default-ACL
+-- postcondition is evaluated by the managed run's POST-COMMIT policy, on the same pinned session
+-- while the run lock is still held, AFTER `commit_tx` has already succeeded. A surviving global
+-- table or sequence grant therefore makes the RUN fail with a bounded postcondition refusal and no
+-- clean verdict; it does NOT undo this migration's DDL, which is durable by then. Nothing in this
+-- file inspects `pg_default_acl` inside the transaction, so no statement here can abort on it.
+-- Making the refusal transactional would mean moving that verification before the commit, which is
+-- a change to the managed apply path and not to this migration.
+--
+-- THE ASYMMETRY IS DELIBERATE. The three IN SCHEMA statements below DO silently correct a
+-- previously-loosened per-schema default, and the global class deliberately does not. The
+-- difference is what each one can hide: a per-schema grant is exactly what this migration exists to
+-- revoke and correcting it is the stated job, while a GLOBAL grant on a class 005 issues no global
+-- statement for could only have come from outside this migration, and is worth more as evidence
+-- than as a repair.
+--
+-- TYPES and SCHEMAS are deliberately outside this contract and get no statement, global or
+-- scoped; that residual is recorded by the verifier, not closed here.
+
+alter default privileges revoke all on functions from public, anon, authenticated;
 
 alter default privileges in schema public revoke all on tables from public, anon, authenticated;
 alter default privileges in schema public revoke all on sequences from public, anon, authenticated;

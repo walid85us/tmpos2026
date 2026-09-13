@@ -377,10 +377,29 @@ test('baseline refuses a non-empty ledger', () => {
 
 test('baseline refuses a version allowlist mismatch and records checksums + postconditions otherwise', () => {
   const pairs = PAIRS();
-  assert.equal(codeOf(() => planBaseline(pairs, [], ['001'])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED);
+  // C2B-R2: a non-empty IN-ORDER PREFIX is now a candidate — a legacy database may legitimately
+  // hold only the first k migrations while the rest are genuinely pending. Everything that is
+  // not a prefix stays refused.
+  assert.equal(codeOf(() => planBaseline(pairs, [], ['002'])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED, 'not anchored at the first version');
+  assert.equal(codeOf(() => planBaseline(pairs, [], ['002', '001'])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED, 'reordered');
+  assert.equal(codeOf(() => planBaseline(pairs, [], ['001', '002', '003'])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED, 'longer than discovery');
+  assert.equal(codeOf(() => planBaseline(pairs, [], [])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED, 'empty allowlist is not an adoption');
+  assert.equal(codeOf(() => planBaseline(pairs, [], ['001', '999'])), ENGINE_CODES.BASELINE_PRECONDITION_FAILED, 'unknown version');
   const plan = planBaseline(pairs, [], ['001', '002']);
   assert.deepEqual(plan.versions.map((v) => v.version), ['001', '002']);
   assert.deepEqual(plan.requiredPostconditions, ['verify_schema_postcondition:001', 'verify_schema_postcondition:002']);
+});
+
+test('C2B-R2: a shorter in-order prefix is adopted, and NOTHING beyond it is recorded', () => {
+  const pairs = PAIRS();
+  const plan = planBaseline(pairs, [], ['001']);
+  // The decisive property. Widening candidacy to a prefix while the construction loop still
+  // walked every DISCOVERED pair would silently record '002' here — and on the real tree that
+  // is migration 005, a version that never executed, written into the ledger as applied.
+  assert.deepEqual(plan.versions.map((v) => v.version), ['001']);
+  assert.deepEqual(plan.requiredPostconditions, ['verify_schema_postcondition:001']);
+  assert.deepEqual(plan.plannedAudit.versions, ['001']);
+  assert.equal(plan.versions[0].checksum, pairs[0].up.checksum, 'the adopted checksum is the committed one');
 });
 
 test('a baseline plan carries an append-preserving planned operator/audit record', () => {
@@ -393,10 +412,14 @@ test('a baseline plan carries an append-preserving planned operator/audit record
   });
 });
 
-test('baseline candidacy is an explicit pure state: empty ledger + exact allowlist', () => {
+test('baseline candidacy is an explicit pure state: empty ledger + in-order prefix', () => {
   const pairs = PAIRS();
-  assert.equal(isBaselineCandidate(pairs, [], ['001', '002']), true);
-  assert.equal(isBaselineCandidate(pairs, [], ['001']), false, 'allowlist mismatch is not a candidate');
+  assert.equal(isBaselineCandidate(pairs, [], ['001', '002']), true, 'the full set is a prefix of itself');
+  assert.equal(isBaselineCandidate(pairs, [], ['001']), true, 'a shorter in-order prefix IS a candidate (C2B-R2)');
+  assert.equal(isBaselineCandidate(pairs, [], ['002']), false, 'a prefix must start at the first version');
+  assert.equal(isBaselineCandidate(pairs, [], ['002', '001']), false, 'reordering is not a prefix');
+  assert.equal(isBaselineCandidate(pairs, [], ['001', '002', '003']), false, 'longer than discovery is not a prefix');
+  assert.equal(isBaselineCandidate(pairs, [], []), false, 'an empty allowlist must not pass vacuously');
   const applied: LedgerRow[] = [{ version: '001', checksum: pairs[0].up.checksum, dirty: false, resolution: null }];
   assert.equal(isBaselineCandidate(pairs, applied, ['001', '002']), false, 'a non-empty ledger is not a candidate');
 });

@@ -1,12 +1,31 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import {defineConfig, loadEnv, type Plugin} from 'vite';
+import {createApiPathGuard} from './server/runtime/adminWeb';
+
+// Phase 4.0 M4 — an /api/v1/* or /admin/v1/* request reaching this frontend server gets the
+// runtime's bounded JSON 404, never the SPA document (G-WEBHARDEN). The guard is registered
+// directly in each hook, so it runs before Vite's own middlewares and its SPA fallback. No
+// framing header (X-Frame-Options / frame-ancestors) is added to the dev or preview server:
+// the Replit Preview shows it inside an iframe.
+function apiPathGuard(): Plugin {
+  const guard = createApiPathGuard({https: false});
+  return {
+    name: 'tmpos-api-path-guard',
+    configureServer(server) {
+      server.middlewares.use(guard);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(guard);
+    },
+  };
+}
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [apiPathGuard(), react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },
@@ -40,6 +59,7 @@ export default defineConfig(({mode}) => {
           '**/.mcp/**',
           // Non-product top-level trees (plugins, assets, build output, docs, scripts):
           '**/knowledge-work-plugins/**',
+          '**/agency-agents/**',
           '**/attached_assets/**',
           '**/dist/**',
           '**/docs/**',

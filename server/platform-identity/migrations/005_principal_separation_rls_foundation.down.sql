@@ -145,16 +145,33 @@ revoke all on table public.audit_event from tmpos_audit_writer;
 revoke usage on schema public from tmpos_audit_writer;
 
 -- =============================================================================
--- 4) Default privileges.
+-- 4) Default privileges — RETAINED, and this file does not pretend otherwise.
 -- =============================================================================
--- Exactly ONE of the three up-migration statements changed a PostgreSQL built-in default:
--- EXECUTE on future FUNCTIONS is granted to PUBLIC out of the box, and 005 revoked it.
--- Restoring that built-in default is the faithful reversal of an S2-owned change; it is not a
--- 001-004 protection and it grants nothing on any table.
--- The TABLES and SEQUENCES statements asserted a posture PostgreSQL already holds (no default
--- grant to PUBLIC at all), so there is nothing to restore for them — re-granting would CREATE
--- access that never existed, which is why no such statement appears here.
-alter default privileges in schema public grant execute on functions to public;
+-- THIS SECTION EXECUTES NOTHING, AND THAT IS THE CORRECTION.
+--
+-- A previous revision issued a per-schema default-privilege GRANT of EXECUTE on functions to
+-- PUBLIC here, and described it as "restoring the built-in default". Both halves of that were
+-- wrong. It was not a restoration: PostgreSQL's function default lives in `acldefault()`,
+-- which a GLOBAL pg_default_acl row substitutes for, while a per-schema row is only ADDED on top
+-- of the chosen base. A per-schema GRANT therefore does not put the built-in default back — it
+-- WRITES A NEW, POSITIVE, PERSISTENT pg_default_acl ROW that did not exist before 005 ran, granting
+-- EXECUTE to PUBLIC on every future function in schema public. The catalog is the claim, not the
+-- effective privilege: because per-schema entries are ADD-ONLY and are merged on top of whatever
+-- base is in force at creation time, that row would survive any later global tightening and
+-- silently re-open PUBLIC EXECUTE against it.
+--
+-- Nor could a faithful inverse be written. The up migration's global FUNCTIONS statement
+-- displaces whatever base was in effect, and the PRIOR global default-ACL state is NOT RECORDED
+-- ANYWHERE — neither by this file, nor by the ledger, nor by the engine. Reconstructing a
+-- catalog-identical pg_default_acl row is therefore impossible, and any statement claiming to do
+-- it would be asserting knowledge this rollback does not have.
+--
+-- So the default-privilege hardening is INTENTIONALLY RETAINED, exactly like the platform_identity
+-- REVOKE and the schema-CREATE revocation below: reversing a security tightening is a regression,
+-- not a rollback. Nothing in 001-004 depends on PUBLIC holding EXECUTE on future functions.
+--
+-- NO COMPENSATING GRANT of any kind appears in this file — not for functions, not for tables, not
+-- for sequences, and not via catalog manipulation.
 
 -- =============================================================================
 -- 5) The S2-owned audit scope constraint.

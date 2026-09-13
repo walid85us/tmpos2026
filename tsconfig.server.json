@@ -19,5 +19,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["server/runtime/**/*.ts"],
-  "exclude": ["server/runtime/**/*.test.ts"]
+  "exclude": ["server/runtime/**/*.test.ts", "server/runtime/**/*.testkit.ts"]
 }

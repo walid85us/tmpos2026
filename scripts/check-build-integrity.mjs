@@ -7,7 +7,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // M2 baseline: current main bundle ~3.95MB. Ceiling is a ratchet, not a target.
 const MAX_MAIN_BUNDLE_BYTES = 4_100_000;
@@ -22,6 +22,9 @@ const SECRET_PATTERNS = [
   /SUPABASE_SERVICE_ROLE/,
 ];
 const SERVER_ONLY = [/firebase-admin/, /\bpg\b\s*from|from ['"]postgres['"]/];
+// Development-only code that Vite must compile out of a production build (import.meta.env.DEV):
+// the console's local-development badge (src/backend-control-plane/console/AdminConsoleApp.tsx).
+const DEV_ONLY = [/Local development build/];
 
 function hasCardData(text) {
   // Magnetic-track / CHD-marker patterns specific enough to avoid false positives
@@ -47,18 +50,48 @@ try {
   let mainBytes = 0;
   for (const f of files) {
     const buf = readFileSync(f);
-    if (/assets\/index-.*\.js$/.test(f)) mainBytes = Math.max(mainBytes, buf.length);
+    // The largest emitted script: since M4 the tenant app is a lazy chunk beside a small entry.
+    if (/assets\/[^/]+\.js$/.test(f)) mainBytes = Math.max(mainBytes, buf.length);
     if (!/\.(js|css|html|json)$/.test(f)) continue;
     const text = buf.toString('utf8');
     const rel = f.slice(out.length);
     for (const p of SECRET_PATTERNS) if (p.test(text)) problems.push(`secret pattern ${p} in <dist>${rel}`);
     for (const p of SERVER_ONLY) if (p.test(text)) problems.push(`server-only module ${p} in <dist>${rel}`);
+    for (const p of DEV_ONLY) if (p.test(text)) problems.push(`development-only code ${p} in <dist>${rel}`);
     const card = hasCardData(text);
     if (card) problems.push(`card-data (${card}) in <dist>${rel}`);
   }
   console.log(`[build-integrity] main bundle bytes=${mainBytes} ceiling=${MAX_MAIN_BUNDLE_BYTES} maps=${maps.length}`);
   if (mainBytes === 0) problems.push('no main index-*.js chunk found (unexpected output shape)');
   if (mainBytes > MAX_MAIN_BUNDLE_BYTES) problems.push(`main bundle ${mainBytes} exceeds ceiling ${MAX_MAIN_BUNDLE_BYTES} (bundle grew — investigate before raising ceiling)`);
+
+  // Phase 4.0 M4 — G-WEBHARDEN: the admin origin runs no inline or cross-origin script and
+  // fetches no web font. index.html names no external origin (http(s):// or protocol-relative)
+  // and no Google Fonts host; neither may any file it references (entry, stylesheet, preloads),
+  // the admin console chunk and its stylesheet, or any chunk the console chunk statically imports,
+  // transitively. Only the lazy tenant chunk's stylesheet may (src/tenantFonts.css). The entry's
+  // own graph is not followed: its preload lists name the tenant chunk, which the admin never runs.
+  const FONT_HOST = /fonts\.(?:googleapis|gstatic)\.com/;
+  const html = readFileSync(join(out, 'index.html'), 'utf8');
+  if (/<script\b(?![^>]*\ssrc\s*=)[^>]*>/i.test(html)) problems.push('inline <script> (no src) in <dist>/index.html');
+  if (/https?:\/\/|\s(?:src|href)\s*=\s*["']?\/\//i.test(html)) problems.push('<dist>/index.html references an external origin');
+  if (FONT_HOST.test(html)) problems.push('Google Fonts host in <dist>/index.html');
+  const entryFiles = new Set([...html.matchAll(/\s(?:src|href)\s*=\s*["']([^"']+)["']/gi)].map((m) => join(out, m[1])));
+  const consoleFiles = files.filter((f) => /\/assets\/AdminConsoleApp-[^/]+\.(?:js|css)$/.test(f));
+  if (!consoleFiles.some((f) => f.endsWith('.js'))) problems.push('no assets/AdminConsoleApp-*.js chunk found (unexpected output shape)');
+  const queue = [...entryFiles, ...consoleFiles];
+  const seen = new Set();
+  while (queue.length) {
+    const f = queue.shift();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    if (!files.includes(f)) { problems.push(`admin-origin file missing from the build: ${f.slice(out.length)}`); continue; }
+    const text = readFileSync(f, 'utf8');
+    if (FONT_HOST.test(text)) problems.push(`Google Fonts host in admin-origin file <dist>${f.slice(out.length)}`);
+    if (f.endsWith('.js') && !entryFiles.has(f)) {
+      for (const m of text.matchAll(/(?:\bfrom|\bimport)\s*["']\.\/([\w.-]+\.js)["']/g)) queue.push(join(dirname(f), m[1]));
+    }
+  }
 
   if (problems.length) { console.error('BUILD INTEGRITY: FAIL\n' + problems.map((p) => ' - ' + p).join('\n')); process.exit(1); }
   console.log('BUILD INTEGRITY: PASS');

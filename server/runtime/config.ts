@@ -11,7 +11,6 @@ export type ConfigReason =
   | 'env_invalid'
   | 'port_missing'
   | 'port_invalid'
-  | 'bool_invalid'
   | 'production_dev_flag_conflict';
 
 export interface ConfigError {
@@ -23,7 +22,6 @@ export interface RuntimeConfig {
   env: NodeEnvClass;
   port: number;
   isProduction: boolean;
-  trustProxy: boolean;
 }
 
 // Single-interface (optional `config`) form: this repo is non-strict TS where
@@ -58,14 +56,6 @@ function parsePort(raw: string | undefined, errors: ConfigError[]): number | und
   return n;
 }
 
-function parseBool(field: string, raw: string | undefined, errors: ConfigError[]): boolean {
-  if (raw === undefined) return false;
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  errors.push({ field, code: 'bool_invalid' });
-  return false;
-}
-
 export function loadConfig(env: Record<string, string | undefined>): ConfigResult {
   const errors: ConfigError[] = [];
 
@@ -80,7 +70,8 @@ export function loadConfig(env: Record<string, string | undefined>): ConfigResul
   }
 
   const port = parsePort(env.PORT, errors);
-  const trustProxy = parseBool('TRUST_PROXY', env.TRUST_PROXY, errors);
+  // TRUST_PROXY (a hop-count trust switch) is no longer read: which proxies are trusted is the
+  // composition root's configuration, judged by the one trusted-proxy contract (clientAddress.ts).
   const isProduction = envClass === 'production';
 
   if (isProduction) {
@@ -95,5 +86,5 @@ export function loadConfig(env: Record<string, string | undefined>): ConfigResul
   if (errors.length > 0 || envClass === undefined || port === undefined) {
     return { ok: false, errors };
   }
-  return { ok: true, errors: [], config: { env: envClass, port, isProduction, trustProxy } };
+  return { ok: true, errors: [], config: { env: envClass, port, isProduction } };
 }

@@ -1266,8 +1266,24 @@ export function planApply(
 }
 
 /**
- * Baseline candidacy is an EXPLICIT pure state: the ledger is empty AND the discovered
- * versions exactly equal the operator allowlist. Anything else is not a candidate.
+ * Baseline candidacy is an EXPLICIT pure state: the ledger is empty AND the operator allowlist
+ * is a non-empty, in-order PREFIX of the discovered versions, beginning at the first one.
+ *
+ * PREFIX, not equality (Phase 4.0 M3 S4.1b C2B-R2). A database whose history was applied by
+ * legacy means may legitimately hold only the FIRST k migrations while the remainder are
+ * genuinely pending — adopting 001-004 on a tree that also discovers 005 is exactly that case.
+ * Requiring equality forced the operator to choose between refusing a truthful adoption and
+ * recording an UNEXECUTED version as applied. The second option fabricates execution history,
+ * which is the one outcome this whole mechanism exists to prevent.
+ *
+ * What a prefix still forbids, and why each one matters:
+ *   - a GAP ('001','003'): the skipped version would later be planned as a backfill BELOW an
+ *     applied head, which planApply refuses outright — leaving the database unmigratable.
+ *   - REORDERING ('002','001'): the recorded head would not be the real head.
+ *   - LONGER than discovery: a recorded version with no committed artifact can never be
+ *     checksum-verified again.
+ *   - EMPTY: "adopt nothing" is not an adoption, and an empty allowlist would satisfy an index
+ *     loop that never executes — a vacuous pass.
  */
 export function isBaselineCandidate(
   pairs: readonly MigrationPair[],
@@ -1280,8 +1296,11 @@ export function isBaselineCandidate(
   // enforce. An unexpected own property is IGNORED here (never consulted), so it grants nothing.
   if (boundedLength(ledger, 'ledger_length') !== 0) return false;
   const n = boundedLength(pairs, 'pairs_length');
-  if (n !== boundedLength(allowlist, 'allowlist_length')) return false;
-  for (let i = 0; i < n; i += 1) {
+  const k = boundedLength(allowlist, 'allowlist_length');
+  // Refused BEFORE the loop. With k === 0 the comparison below never runs, so EVERY input would
+  // pass vacuously and planBaseline would record an empty adoption as a success.
+  if (k === 0 || k > n) return false;
+  for (let i = 0; i < k; i += 1) {
     let v: unknown;
     let a: unknown;
     try {
@@ -1312,12 +1331,18 @@ export interface BaselinePlan {
 }
 
 /**
- * Plan a one-time baseline. Refuses unless `isBaselineCandidate` holds: the ledger is
- * empty AND the discovered versions exactly equal the caller's allowlist. Baseline
+ * Plan a one-time baseline. Refuses unless `isBaselineCandidate` holds: the ledger is empty AND
+ * the caller's allowlist is a non-empty in-order PREFIX of the discovered versions. Baseline
  * RECORDS checksums plus an append-only operator/audit record; it never executes SQL,
  * never infers success from table existence, and never deletes or overwrites history.
  * Live baseline additionally requires separate owner authorization and verified schema
  * postconditions (S1b/operator).
+ *
+ * PROVENANCE, stated exactly (C2B-R2). `record_baseline` is an ADOPTION record. It asserts only
+ * that these versions' postconditions were verified present and that their committed bytes are
+ * unchanged since the application records were written. It does NOT assert which tool applied
+ * them: for 001 and 004 the repository records no execution channel at all, and inventing one
+ * here would be the fabrication this mechanism exists to prevent.
  */
 export function planBaseline(
   pairs: readonly MigrationPair[],
@@ -1331,9 +1356,16 @@ export function planBaseline(
   // ONE canonical snapshot, read by index under guards and validated to bounded canonical primitives.
   // All three outputs are built from THAT snapshot — never from a fresh walk of the caller's array,
   // whose `map` is an overridable own property that could widen or fabricate a recorded baseline.
-  const n = boundedLength(pairs, 'pairs_length');
+  //
+  // The bound is the ACCEPTED ALLOWLIST length, never the discovered length (C2B-R2). Widening
+  // `isBaselineCandidate` to a prefix while this loop still walked every discovered pair would
+  // record versions the operator never authorized — on the real tree that is migration 005, an
+  // unexecuted version, written into the ledger as applied. The candidacy predicate has already
+  // proved allowlist[i] === pairs[i].version for every i < k, so indexing `pairs` by the SAME i
+  // reads exactly the authorized prefix and nothing beyond it.
+  const k = boundedLength(allowlist, 'allowlist_length');
   const snap: { version: string; checksum: string }[] = [];
-  for (let i = 0; i < n; i += 1) {
+  for (let i = 0; i < k; i += 1) {
     let version: unknown;
     let checksum: unknown;
     try {
@@ -1352,7 +1384,7 @@ export function planBaseline(
   const versions: { version: string; checksum: string }[] = [];
   const requiredPostconditions: string[] = [];
   const auditVersions: string[] = [];
-  for (let i = 0; i < n; i += 1) {
+  for (let i = 0; i < k; i += 1) {
     versions[i] = freeze({ version: snap[i].version, checksum: snap[i].checksum });
     requiredPostconditions[i] = `verify_schema_postcondition:${snap[i].version}`;
     auditVersions[i] = snap[i].version;

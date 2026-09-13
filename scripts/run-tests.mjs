@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 84;
+export const MIN_SUITES = 105;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -44,6 +44,11 @@ export const REQUIRED_SENTINELS = [
   'server/bcp-pilot/bcpActionRequestSecurityGuard.test.ts',    // controlled-action request security
   'server/bcp-pilot/bcpPilot.test.ts',                         // BCP security corpus
   'server/platform-identity/identityUnauthenticatedSurfaceElimination.test.ts', // unauth identity-surface elimination + bounded 404/500
+  'server/runtime/enforcement.test.ts',                        // shared enforced runtime chain: authn/authz/CSRF/rate-limit/security headers
+  'server/runtime/sessions.test.ts',                           // M4 session boundaries: login/current/logout, cookies, session CSRF, login limits, revalidation, MFA, deadlines
+  'server/composition/productionSessions.test.ts',             // production session composition refuses until every production adapter exists
+  'server/runtime/clientAddress.test.ts',                      // M6 trusted-proxy client address: right-to-left walk, spoof resistance, /64 grouping
+  'server/runtime/rateLimit.test.ts',                          // M6 distributed limiter port: keyed pseudonyms, strict outcomes, adapter conformance
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context
@@ -53,6 +58,9 @@ export const REQUIRED_SENTINELS = [
   'tests/quality/migration-files-contract.test.mjs',           // historical-migration byte-fingerprint immutability
   'tests/quality/migration-005-contract.test.mjs',             // migration 005 privilege-role / RLS / grant-matrix contract
   'tests/quality/db-client-containment.test.mjs',              // database client containment + verified-TLS policy boundary
+  'tests/quality/managed-m005-launcher.test.mjs',              // single-purpose migration-005 launcher: redaction, sink, artifact gate, output bound
+  'tests/quality/managed-default-acl-preflight.test.mjs',      // fixed read-only default-ACL diagnostic: argv, READ ONLY ordering, output containment
+  'tests/quality/managed-m005-comprehensive-preflight.test.mjs', // fixed read-only comprehensive migration-005 preflight: snapshot bracket, sealed five-key child env, residue and ledger classification, output containment
   'tests/quality/run-tests-discovery.test.mjs',                // the Node ratchet's own guard test
   'tests/quality/run-frontend-tests-contract.test.mjs',        // the frontend ratchet's own guard test
   'tests/quality/shipping-sidecar-containment.test.mjs',       // sidecar elimination / SSRF containment
@@ -68,6 +76,14 @@ export const REQUIRED_SENTINELS = [
   'src/components/ShippingCenter.test.tsx',            // label URL: DOM/attribute/request channel
   'src/components/ShippingProvidersPage.test.tsx',     // provider action result handling
   'src/context/StoreLocalState.test.tsx',              // availability vs. configured state
+  'src/backend-control-plane/console/AdminConsole.test.tsx',      // admin console: sign-in states, token/CSRF lifecycle, shell, no action
+  'src/backend-control-plane/console/adminSessionClient.test.ts', // admin session client: exchange, CSRF in memory, stale-response suppression, logout
+  'src/backend-control-plane/console/adminSurface.test.ts',       // production admin-host enforcement
+  'src/backend-control-plane/console/navigation.test.ts',         // navigation vocabulary + strict return path
+  'src/backend-control-plane/console/commandCenterClient.test.ts', // Command Center client: no bearer, strict schema, abort/race, statuses
+  'server/runtime/adminWeb.test.ts',                          // admin web policy: canonical API path, document CSP/headers, HSTS flag
+  'server/runtime/adminWebServer.test.ts',                    // admin host web entry: preloaded build, API/health paths never the SPA
+  'server/runtime/commandCenter.test.ts',                     // Command Center read model: session + view_command_center, fail closed, no reader string
 ];
 
 export const isTestPath = (f) =>

@@ -157,8 +157,8 @@ test('a required suite reported as failed is flagged even if it executed cases',
 test('the floors match the exact verified counts of the current suite', () => {
   // A guard on the guard: these must be the real numbers, not placeholders. If the suite
   // legitimately grows, both are raised deliberately and this updates with them.
-  assert.equal(MIN_FRONTEND_FILES, 13);
-  assert.equal(MIN_FRONTEND_CASES, 114);
+  assert.equal(MIN_FRONTEND_FILES, 17);
+  assert.equal(MIN_FRONTEND_CASES, 199);
   assert.ok(REQUIRED_FRONTEND_SUITES.length >= 4);
 });
 

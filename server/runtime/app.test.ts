@@ -14,6 +14,11 @@ import {
   createApp, createReadinessState, createBoundedServer, HTTP_SERVER_LIMITS,
   classifyRoute, notFoundHandler, errorHandler,
 } from './app.js';
+import { EnforcementSetupError } from './routes.js';
+import type { RouteDefinition } from './routes.js';
+import type { DistributedRateLimiter } from './rateLimit.js';
+import { testRequestLimits, TEST_RATE_LIMIT_KEY } from './rateLimiter.testkit.js';
+import { createLifecycle } from './lifecycle.js';
 
 const silent = { log: () => {} };
 
@@ -97,6 +102,24 @@ test('a dependency check that throws yields 503, not a 500 leak', async () => {
     const res = await fetch(`${base}/readiness`);
     assert.equal(res.status, 503);
     assert.deepEqual(await res.json(), { status: 'unavailable' });
+  });
+});
+
+test('a hanging dependency check is cut off at the port deadline and cancelled: readiness answers 503', async () => {
+  const readiness = createReadinessState();
+  readiness.setReady();
+  let signal: AbortSignal | undefined;
+  const app = createApp({
+    readiness, log: silent, portDeadlineMs: 50,
+    dependencyChecks: [(s?: AbortSignal) => { signal = s; return new Promise<boolean>(() => {}); }],
+  });
+  await withServer(app, async (base) => {
+    const started = Date.now();
+    const res = await fetch(`${base}/readiness`);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { status: 'unavailable' });
+    assert.ok(Date.now() - started < 2_000, 'the deadline, not the probe, ended the check');
+    assert.equal(signal?.aborted, true, 'the probe is told to cancel');
   });
 });
 
@@ -361,14 +384,54 @@ const rawHasConnClose = (text: string): boolean => /\r\nconnection:\s*close\r\n/
 const noLeak = (text: string): boolean => !/Error|at Object|node_modules|\/home\/|NODE_ENV|PORT=|internal_error/.test(text);
 
 /** Boot a bounded server for the duration of `fn`; ready by default. */
-async function withBoundedServer(fn: (port: number) => Promise<void>, appOverride?: http.RequestListener): Promise<void> {
+async function withBoundedServer(
+  fn: (port: number) => Promise<void>, appOverride?: http.RequestListener, options?: { hsts?: boolean },
+): Promise<void> {
   const readiness = createReadinessState(); readiness.setReady();
   const app = appOverride ?? createApp({ readiness, log: silent });
-  const server = createBoundedServer(app);
+  const server = createBoundedServer(app, options);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as AddressInfo).port;
   try { await fn(port); } finally { await new Promise<void>((r) => server.close(() => r())); }
 }
+
+// Phase 4.0 M4 — HSTS is a deployment-boundary flag: absent unless the app and server are
+// built with `hsts: true` (server.ts: the production classification, behind TLS termination),
+// then present on every response class — the chain's lock and the pre-Express 400 alike.
+test('HSTS is absent by default and present on 200, 404, refusal, 500 and the absolute-form 400 with hsts: true', async () => {
+  // A handler can neither add HSTS outside production nor weaken it inside, by setHeader or inline.
+  const sts: RouteDefinition = {
+    method: 'GET', path: '/sts', policy: { access: 'public' }, body: { kind: 'none' },
+    handler: (_req, res) => {
+      res.setHeader('Strict-Transport-Security', 'max-age=1');
+      res.writeHead(200, { 'Strict-Transport-Security': 'max-age=2', 'Content-Type': 'application/json' });
+      res.end('{}');
+    },
+  };
+  const boom: RouteDefinition = {
+    method: 'GET', path: '/boom', policy: { access: 'public' }, body: { kind: 'none' }, handler: () => { throw new Error('boom'); },
+  };
+  const exchanges: Array<[string, number, string]> = [
+    ['health 200', 200, 'GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
+    ['unknown 404', 404, 'GET /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
+    ['body refusal 400', 400, 'GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx'],
+    ['handler 500', 500, 'GET /boom HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
+    ['absolute-form 400', 400, 'GET http://x/health HTTP/1.1\r\nHost: x\r\n\r\n'],
+    ['handler-set HSTS 200', 200, 'GET /sts HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
+  ];
+  for (const hsts of [undefined, false, true]) {
+    const readiness = createReadinessState(); readiness.setReady();
+    const app = createApp({ readiness, log: silent, routes: [boom, sts], limits: testRequestLimits(), ...(hsts === undefined ? {} : { hsts }) });
+    await withBoundedServer(async (port) => {
+      for (const [label, status, payload] of exchanges) {
+        const { text } = await rawExchange(port, payload);
+        assert.equal(rawStatus(text), status, `${label} (hsts=${hsts})`);
+        const sent = [...text.matchAll(/\r\nstrict-transport-security: ([^\r]*)/gi)].map((m) => m[1]);
+        assert.deepEqual(sent, hsts === true ? ['max-age=31536000; includeSubDomains'] : [], `${label}: HSTS (hsts=${hsts})`);
+      }
+    }, app, hsts === undefined ? undefined : { hsts });
+  }
+});
 
 test('operational GET body policy: absent/zero-length allowed; declared/transfer-encoded body -> bounded 400 + closed', async () => {
   await withBoundedServer(async (port) => {
@@ -499,17 +562,19 @@ test('an over-limit header COUNT is rejected 431 — a body-framing header canno
   });
 });
 
-test('an unsupported Expect receives Node’s bounded transport response and leaves the server healthy', async () => {
+test('an Expect is refused by the chain with a bounded 417 and leaves the server healthy', async () => {
   await withBoundedServer(async (port) => {
-    // `Expect: <unsupported>` is answered by Node (417) before Express — a bounded
-    // transport response under the F6 exception; we do NOT add fragile custom code.
-    const weird = await rawExchange(port, 'GET /health HTTP/1.1\r\nHost: x\r\nExpect: weird-thing\r\nConnection: close\r\n\r\n');
-    assert.match(weird.text, /^HTTP\/1\.1 4\d\d/, 'unsupported Expect -> a bounded 4xx (417)');
-    assert.ok(weird.text.length < 512, 'the transport response is bounded');
-    assert.ok(noLeak(weird.text), 'no stack/env/path/secret leak');
-    // `Expect: 100-continue` on a bodyless GET is still served normally.
-    const cont = await rawExchange(port, 'GET /health HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n');
-    assert.ok(/ 200 | 100 /.test(cont.text) || /"status":"alive"/.test(cont.text), 'a bodyless GET with Expect: 100-continue still succeeds');
+    // No expectation is supported (bodyPolicy.test.ts holds the full contract): the
+    // chain answers a bounded JSON 417 with the header policy — never Node's bare 417,
+    // and never a 100 Continue, which would invite a body before any check.
+    for (const expect of ['weird-thing', '100-continue']) {
+      const r = await rawExchange(port, `GET /health HTTP/1.1\r\nHost: x\r\nExpect: ${expect}\r\nConnection: close\r\n\r\n`);
+      assert.match(r.text, /^HTTP\/1\.1 417 /, `${expect}: a 417 and no interim 100 Continue`);
+      assert.match(r.text, /\r\nContent-Security-Policy: default-src 'none'/i, `${expect}: the header policy`);
+      assert.match(r.text, /"error":"expectation_failed"/, expect);
+      assert.ok(r.text.length < 1024, `${expect}: the refusal is bounded`);
+      assert.ok(noLeak(r.text), 'no stack/env/path/secret leak');
+    }
     const ok = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(ok.status, 200, 'server remains healthy');
   });
@@ -664,4 +729,194 @@ test('classifyRoute collapses unknown paths to a single bounded class', () => {
   assert.equal(classifyRoute('/readiness'), '/readiness');
   assert.equal(classifyRoute('/secret/tenant/42?token=abc'), 'other');
   assert.equal(classifyRoute('/'), 'other');
+});
+
+// --- Phase 4.0 M6: the rate-limit port composed into createApp ------------------------------
+
+const NO_TRUSTED_PROXIES: readonly string[] = [];
+
+test('GET /health is prompt and independent of the limiter store', async () => {
+  const counts = { consume: 0, probe: 0 };
+  const hangingLimiter: DistributedRateLimiter = {
+    consume: () => { counts.consume++; return new Promise(() => {}); },
+    probe: () => { counts.probe++; return new Promise(() => {}); },
+  };
+  const readiness1 = createReadinessState(); readiness1.setReady();
+  const app1 = createApp({ readiness: readiness1, log: silent, limits: { limiter: hangingLimiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES } });
+  await withServer(app1, async (base) => {
+    const started = Date.now();
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.status, 200);
+    assert.ok(Date.now() - started < 1_000, 'a hanging limiter must not delay /health');
+    assert.equal(counts.consume, 0);
+    assert.equal(counts.probe, 0);
+  });
+
+  const throwingLimiter: DistributedRateLimiter = {
+    consume: () => { counts.consume++; throw new Error('limiter boom'); },
+    probe: () => { counts.probe++; throw new Error('limiter boom'); },
+  };
+  const readiness2 = createReadinessState(); readiness2.setReady();
+  const app2 = createApp({ readiness: readiness2, log: silent, limits: { limiter: throwingLimiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES } });
+  await withServer(app2, async (base) => {
+    const started = Date.now();
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.status, 200);
+    assert.ok(Date.now() - started < 1_000, 'a throwing limiter must not fail /health');
+    assert.equal(counts.consume, 0, 'the limiter is never called for a probe');
+    assert.equal(counts.probe, 0);
+  });
+});
+
+test('GET /readiness is honest about protected traffic and never spends the limiter', async () => {
+  const makeApp = (probe: (signal: AbortSignal) => unknown, extra: { portDeadlineMs?: number } = {}) => {
+    const consumeCalls = { n: 0 };
+    const limiter: DistributedRateLimiter = { consume: () => { consumeCalls.n++; return { outcome: 'allowed', remaining: 1 }; }, probe };
+    const readiness = createReadinessState(); readiness.setReady();
+    const app = createApp({
+      readiness, log: silent, limits: { limiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES }, ...extra,
+    });
+    return { app, consumeCalls };
+  };
+
+  {
+    const { app, consumeCalls } = makeApp(() => true);
+    await withServer(app, async (base) => {
+      const res = await fetch(`${base}/readiness`);
+      assert.equal(res.status, 200);
+      assert.equal(consumeCalls.n, 0, 'readiness never spends the limiter');
+    });
+  }
+  for (const bad of [() => false, () => 'true', (): never => { throw new Error('probe boom'); }]) {
+    const { app, consumeCalls } = makeApp(bad);
+    await withServer(app, async (base) => {
+      const res = await fetch(`${base}/readiness`);
+      assert.equal(res.status, 503, String(bad));
+      assert.equal(consumeCalls.n, 0);
+    });
+  }
+  {
+    let signal: AbortSignal | undefined;
+    const { app, consumeCalls } = makeApp((s) => { signal = s; return new Promise(() => {}); }, { portDeadlineMs: 50 });
+    await withServer(app, async (base) => {
+      const started = Date.now();
+      const res = await fetch(`${base}/readiness`);
+      assert.equal(res.status, 503);
+      assert.ok(Date.now() - started < 2_000, 'the deadline, not the probe, ended the check');
+      assert.equal(signal?.aborted, true, 'the hanging probe is cancelled');
+      assert.equal(consumeCalls.n, 0);
+    });
+  }
+});
+
+test('readiness shares one limiter probe for 1000ms of the injected clock', async () => {
+  let probeCalls = 0;
+  let clock = 0;
+  const limiter: DistributedRateLimiter = {
+    consume: () => ({ outcome: 'allowed', remaining: 1 }),
+    probe: () => { probeCalls++; return true; },
+  };
+  const readiness = createReadinessState(); readiness.setReady();
+  const app = createApp({
+    readiness, log: silent, now: () => clock,
+    limits: { limiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES },
+  });
+  await withServer(app, async (base) => {
+    const results = await Promise.all(Array.from({ length: 20 }, () => fetch(`${base}/readiness`)));
+    for (const r of results) assert.equal(r.status, 200);
+    assert.equal(probeCalls, 1, '20 concurrent readiness requests share one probe call');
+
+    clock += 1_000;
+    const res = await fetch(`${base}/readiness`);
+    assert.equal(res.status, 200);
+    assert.equal(probeCalls, 2, 'once the reuse window has passed, the next readiness request probes again');
+  });
+});
+
+test('startup: limits are required once a route exists beyond the two probes, and malformed limits fail closed', () => {
+  assert.doesNotThrow(() => createApp({ readiness: createReadinessState() }), 'a probe-only app starts without limits');
+
+  const publicRoute: RouteDefinition = {
+    method: 'GET', path: '/m6-probe-route', policy: { access: 'public' }, body: { kind: 'none' },
+    handler: (_req, res) => { res.status(200).json({ ok: true }); },
+  };
+  const assertSetupCode = (deps: Record<string, unknown>, code: string): void => {
+    assert.throws(() => createApp(deps as never),
+      (err: unknown) => err instanceof EnforcementSetupError && err.code === code, code);
+  };
+  assertSetupCode({ readiness: createReadinessState(), routes: [publicRoute] }, 'rate_limit_required');
+
+  const good = testRequestLimits();
+  assertSetupCode({ readiness: createReadinessState(), routes: [publicRoute], limits: { ...good, limiter: {} } }, 'rate_limit_invalid');
+  assertSetupCode({ readiness: createReadinessState(), routes: [publicRoute], limits: { ...good, limiter: { consume: () => {} } } }, 'rate_limit_invalid');
+  assertSetupCode(
+    { readiness: createReadinessState(), routes: [publicRoute], limits: { ...good, keySecret: new Uint8Array(10) } },
+    'rate_limit_key_invalid',
+  );
+  assertSetupCode(
+    { readiness: createReadinessState(), routes: [publicRoute], limits: { ...good, trustedProxies: ['0.0.0.0/0'] } },
+    'trusted_proxies_invalid',
+  );
+});
+
+test('a limiter timeout blocks neither socket cleanup nor shutdown', async () => {
+  const hangingLimiter: DistributedRateLimiter = { consume: () => new Promise(() => {}), probe: () => true };
+  const publicRoute: RouteDefinition = {
+    method: 'GET', path: '/m6-slow-limited', policy: { access: 'public' }, body: { kind: 'none' },
+    handler: (_req, res) => { res.status(200).json({ ok: true }); },
+  };
+  const logs: string[] = [];
+  const readiness = createReadinessState(); readiness.setReady();
+  const app = createApp({
+    readiness, log: { log: (l: string) => logs.push(l) }, routes: [publicRoute],
+    limits: { limiter: hangingLimiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES },
+  });
+  const server = createBoundedServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as AddressInfo).port;
+  let exitCode: number | undefined;
+  const lifecycle = createLifecycle({
+    server, readiness, proc: new EventEmitter(), exit: (code) => { exitCode = code; }, forceTimeoutMs: 10_000,
+  });
+  try {
+    const exchangePromise = rawExchange(port, 'GET /m6-slow-limited HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n', 4000);
+    // Give the request time to reach and park on the limiter before shutting down.
+    await new Promise((r) => setTimeout(r, 20));
+    const shutdownPromise = lifecycle.shutdown('signal_sigterm', 0);
+    const { text } = await exchangePromise;
+    assert.equal(rawStatus(text), 503, 'the timed-out limiter call ends the in-flight request');
+
+    const started = Date.now();
+    for (let i = 0; i < 300 && exitCode === undefined; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(Date.now() - started < 3_000, 'exit(0) arrives well inside the force timeout');
+    assert.equal(exitCode, 0);
+    assert.equal(readiness.isReady(), false, 'readiness becomes unavailable during shutdown');
+    await shutdownPromise;
+  } finally {
+    if (server.listening) await new Promise<void>((r) => server.close(() => r()));
+  }
+  const reqLog = logs.map((l) => JSON.parse(l) as Record<string, unknown>).find((r) => r.event === 'request');
+  assert.equal(reqLog?.reason, 'rate_limit_timeout');
+});
+
+test('the probe exemption holds only for the exact GET /health and GET /readiness routes', async () => {
+  let consumeCalls = 0;
+  const limiter: DistributedRateLimiter = {
+    consume: () => { consumeCalls++; return { outcome: 'allowed', remaining: 1 }; },
+    probe: () => true,
+  };
+  const readiness = createReadinessState(); readiness.setReady();
+  const app = createApp({ readiness, log: silent, limits: { limiter, keySecret: TEST_RATE_LIMIT_KEY, trustedProxies: NO_TRUSTED_PROXIES } });
+  await withServer(app, async (base) => {
+    for (const [method, path] of [['HEAD', '/health'], ['GET', '/health/'], ['GET', '/HEALTH']] as const) {
+      consumeCalls = 0;
+      const res = await fetch(`${base}${path}`, { method });
+      assert.equal(res.status, 404, `${method} ${path}`);
+      assert.equal(consumeCalls, 1, `${method} ${path} must spend the limiter`);
+    }
+    consumeCalls = 0;
+    const ok = await fetch(`${base}/health`);
+    assert.equal(ok.status, 200);
+    assert.equal(consumeCalls, 0, 'the exact GET /health probe never spends the limiter');
+  });
 });

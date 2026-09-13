@@ -16,8 +16,9 @@
 //     response (fixed 4xx status line, socket closed, no echo of bytes). Proven
 //     bounded/non-leaking/non-crashing by the raw-socket suite; no fragile custom
 //     socket code is added.
-//   - HSTS is intentionally NOT set here: it is a deployment-boundary control that
-//     belongs with the TLS-termination/proxy contract in a later M3 staging slice.
+//   - HSTS (Phase 4.0 M4): sent on every response only under the production
+//     classification (`hsts: config.isProduction`), which runs only behind the
+//     platform's TLS termination; a browser ignores it over plain HTTP (RFC 6797 §8.1).
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
@@ -38,10 +39,15 @@ function main(): void {
   const config = result.config;
 
   const readiness = createReadinessState();
-  const app = createApp({ readiness, trustProxy: config.trustProxy });
+  // No session boundary is composed here: this provider-free entry serves the operational
+  // routes only. Production ports are bound by the provider-aware composition root outside
+  // this artifact (server/composition), which refuses to compose until a durable session store
+  // and the admission and authorization sources exist (docs/phase-4/08 G-CPLOGIN, G-UNAUTH).
+  // Nor a rate limiter: only protected routes need one, and the probes never touch it (app.ts).
+  const app = createApp({ readiness, hsts: config.isProduction });
   // Bounded request handling: explicit finite header-size/timeout/count limits
   // (see HTTP_SERVER_LIMITS) instead of Node defaults.
-  const server = createBoundedServer(app);
+  const server = createBoundedServer(app, { hsts: config.isProduction });
 
   const lifecycle = createLifecycle({
     server,
