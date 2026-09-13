@@ -1,5 +1,6 @@
 // Phase 4.0 M4 — the Command Center page in jsdom: the real routes, shell, session client and
-// Command Center client over scripted servers (contract v2, .workflow/scratch/m4ui-p2-cc-contract.md).
+// Command Center client over scripted servers
+// (docs/phase-4/03-backend-control-plane-login-session-blueprint.md §2a).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';

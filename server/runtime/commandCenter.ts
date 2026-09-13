@@ -6,8 +6,9 @@
 // handler runs, so a 401, a 403 or an authorization outage never reaches it, and hiding the page
 // is never the control. The handler asks one injected reader port, under the port deadline and
 // with nothing but its AbortSignal (no request, principal or session data), for the four summary
-// sections, and answers with the bounded view of contract v2
-// (.workflow/scratch/m4ui-p2-cc-contract.md). A reader that throws or overruns is a bounded 503
+// sections, and answers with the bounded view described in
+// docs/phase-4/03-backend-control-plane-login-session-blueprint.md §2a and defined by
+// commandCenterView below. A reader that throws or overruns is a bounded 503
 // whose reason (command_center_unavailable / command_center_timeout) goes to the request log
 // alone. There is no other method or path, so the route has no state-changing operation.
 //

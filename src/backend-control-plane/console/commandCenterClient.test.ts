@@ -1,6 +1,7 @@
-// Phase 4.0 M4 — the Command Center client against a scripted fetch (contract v2,
-// .workflow/scratch/m4ui-p2-cc-contract.md): the one request it sends, the outcome each answer
-// becomes, the exact view schema it accepts, and that it touches no storage, cookie or log.
+// Phase 4.0 M4 — the Command Center client against a scripted fetch
+// (docs/phase-4/03-backend-control-plane-login-session-blueprint.md §2a): the one request it sends,
+// the outcome each answer becomes, the exact view schema it accepts, and that it touches no
+// storage, cookie or log.
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMMAND_CENTER_PATH, MAX_BODY_CHARS, createCommandCenterClient, parseCommandCenterView } from './commandCenterClient';

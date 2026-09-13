@@ -1,6 +1,6 @@
 // Phase 4.0 M4 — the Command Center: the console home. One read-only summary of the platform —
 // posture, the work that needs attention, governance signals and service health — read through
-// the one bounded client (commandCenterClient.ts, contract v2). It holds no authority and offers
+// the one bounded client (commandCenterClient.ts). It holds no authority and offers
 // no action: the server decides what this session may read, the only buttons are Refresh and
 // Try again, and every link opens an existing console workspace.
 //
@@ -83,7 +83,7 @@ const SEVERITY: Record<AttentionSeverity, { label: string; word: (count: number)
   info: { label: 'Info', word: () => 'info', icon: PATH.info, tone: 'border-sky-700 bg-sky-950 text-sky-100' },
 };
 
-/** Each attention area opens its existing console workspace (contract v2 area→workspace paths). */
+/** Each attention area opens its existing console workspace (the fixed area→workspace paths). */
 const AREA_WORKSPACE: Record<AttentionArea, ConsoleModule> = {
   tenants: workspace('tenant-management'),
   provisioning: workspace('provisioning'),

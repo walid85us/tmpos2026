@@ -1,5 +1,5 @@
-// Hermetic browser tests for the administration console — the UI contracts in
-// .workflow/LEDGER-m4-admin-ui.md (P1) and .workflow/LEDGER-m4-admin-ui-p2.md (P2) — against a
+// Hermetic browser tests for the administration console — the M4-ADMIN-UI-P1 and P2 contracts in
+// docs/phase-4/03-backend-control-plane-login-session-blueprint.md §2a — against a
 // PRODUCTION build. Chromium never reaches a network: CDP Fetch interception answers every request.
 // Admin-host pages, assets and unknown API paths are forwarded to the REAL production listener
 // (server/runtime/adminWebServer.ts) on a loopback port and fulfilled with its exact status, headers
@@ -102,7 +102,8 @@ function idToken({ mfa }) {
   return `${b64u({ alg: 'RS256', kid: 'synthetic', typ: 'JWT' })}.${b64u(payload)}.${randomBytes(64).toString('base64url')}`;
 }
 
-// A contract-v2 Command Center view (.workflow/scratch/m4ui-p2-cc-contract.md), relative to now.
+// A Command Center view in the shape commandCenterView emits (server/runtime/commandCenter.ts),
+// relative to now.
 const ATTENTION = [{ severity: 'critical', area: 'security', count: 1 }, { severity: 'warning', area: 'provisioning', count: 3 }, { severity: 'info', area: 'billing', count: 2 }];
 const SERVICES = [['auth', 'healthy'], ['pos', 'healthy'], ['repairs', 'warning'], ['inventory', 'healthy'], ['identity_link', 'healthy'], ['audit', 'healthy'], ['worker', 'unknown']];
 function ccView({ tenants = 12, items = ATTENTION, stale = [], absent = {} } = {}) {
@@ -1047,7 +1048,7 @@ scenario('k-responsive', 'k. responsive navigation: sidebar at 1440, drawer at 3
 });
 
 // ---------------------------------------------------------------------------------------------
-// Command Center (contract v2): every state through the real page, read over the session cookie.
+// Command Center: every state through the real page, read over the session cookie.
 scenario('cc-full', 'Command Center: the full view, contrast, and no horizontal overflow at 1440, 768 and 390', {}, async (page) => {
   await openShell(page);
   await waitCcLoaded(page);

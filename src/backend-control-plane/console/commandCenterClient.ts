@@ -1,6 +1,7 @@
 // Phase 4.0 M4 — the console's Command Center client: the one place the browser reads the
-// read-only administrative summary, GET /admin/v1/command-center (contract v2,
-// .workflow/scratch/m4ui-p2-cc-contract.md; the server side is server/runtime/commandCenter.ts).
+// read-only administrative summary, GET /admin/v1/command-center
+// (docs/phase-4/03-backend-control-plane-login-session-blueprint.md §2a; the server side is
+// server/runtime/commandCenter.ts).
 //
 //   - One bounded GET per load. Accept is its only header — never the provider bearer, never a
 //     CSRF token — and the HttpOnly session cookie rides on credentials "include".

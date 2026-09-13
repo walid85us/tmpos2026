@@ -2,7 +2,7 @@
 //
 // A synthetic reader, verifier, admission and authorizer cross a real loopback socket
 // (127.0.0.1, ephemeral port) into createApp, with the administrative session boundary composed
-// from test ports only. The suite pins (contract v2):
+// from test ports only. The suite pins:
 //   - the admin session and the server authorizer gate every read: a 401, 403 or authz outage
 //     comes from the shared chain, and the reader is never called before both have passed;
 //   - a reader failure or overrun is a bounded 503 with its own log reason, and an overrun read
