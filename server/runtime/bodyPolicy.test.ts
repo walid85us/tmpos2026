@@ -60,12 +60,12 @@ function probeRoutes(seen: Seen): RouteDefinition[] {
     res.status(200).json({ ok: true });
   };
   return [
-    { method: 'POST', path: '/v1/json-required', policy: WRITE, body: JSON_REQUIRED, handler: record('required') },
-    { method: 'POST', path: '/v1/json-optional', policy: WRITE, body: JSON_OPTIONAL, handler: record('optional') },
-    { method: 'POST', path: '/v1/no-body', policy: WRITE, body: NONE, handler: record('noBody') },
-    { method: 'GET', path: '/v1/smuggled', policy: { access: 'public' }, body: NONE, handler: record('smuggled') },
-    { method: 'GET', path: '/v1/slow-keep', policy: { access: 'public' }, body: NONE, handler: slow(false) },
-    { method: 'GET', path: '/v1/slow-close', policy: { access: 'public' }, body: NONE, handler: slow(true) },
+    { method: 'POST', path: '/v1/json-required', policy: WRITE, body: JSON_REQUIRED, idempotency: 'none', handler: record('required') },
+    { method: 'POST', path: '/v1/json-optional', policy: WRITE, body: JSON_OPTIONAL, idempotency: 'none', handler: record('optional') },
+    { method: 'POST', path: '/v1/no-body', policy: WRITE, body: NONE, idempotency: 'none', handler: record('noBody') },
+    { method: 'GET', path: '/v1/smuggled', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: record('smuggled') },
+    { method: 'GET', path: '/v1/slow-keep', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: slow(false) },
+    { method: 'GET', path: '/v1/slow-close', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: slow(true) },
   ];
 }
 

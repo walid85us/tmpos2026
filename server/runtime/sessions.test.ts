@@ -256,12 +256,12 @@ function probeRoutes(probe: Probe): RouteDefinition[] {
   const tenant = (permission: string) => ({ access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission } }) as const;
   const admin = (permission: string) => ({ access: 'session', audience: 'admin', authorization: { scope: 'platform', permission } }) as const;
   return [
-    { method: 'POST', path: '/api/v1/probe', body: NONE, handler: handle('tenantWrite'), policy: tenant('probe.write') },
-    { method: 'GET', path: '/api/v1/probe', body: NONE, handler: handle('tenantRead'), policy: tenant('probe.read') },
-    { method: 'GET', path: '/api/v1/probe/denied', body: NONE, handler: handle('tenantDenied'), policy: tenant('probe.denied') },
-    { method: 'GET', path: '/api/v1/probe/fail', body: NONE, handler: () => { throw new Error('handler-secret-detail'); }, policy: tenant('probe.read') },
-    { method: 'POST', path: '/admin/v1/probe', body: NONE, handler: handle('adminWrite'), policy: admin('probe.admin') },
-    { method: 'GET', path: '/admin/v1/probe', body: NONE, handler: handle('adminRead'), policy: admin('probe.admin') },
+    { method: 'POST', path: '/api/v1/probe', body: NONE, idempotency: 'none', handler: handle('tenantWrite'), policy: tenant('probe.write') },
+    { method: 'GET', path: '/api/v1/probe', body: NONE, idempotency: 'none', handler: handle('tenantRead'), policy: tenant('probe.read') },
+    { method: 'GET', path: '/api/v1/probe/denied', body: NONE, idempotency: 'none', handler: handle('tenantDenied'), policy: tenant('probe.denied') },
+    { method: 'GET', path: '/api/v1/probe/fail', body: NONE, idempotency: 'none', handler: () => { throw new Error('handler-secret-detail'); }, policy: tenant('probe.read') },
+    { method: 'POST', path: '/admin/v1/probe', body: NONE, idempotency: 'none', handler: handle('adminWrite'), policy: admin('probe.admin') },
+    { method: 'GET', path: '/admin/v1/probe', body: NONE, idempotency: 'none', handler: handle('adminRead'), policy: admin('probe.admin') },
   ];
 }
 
@@ -602,13 +602,13 @@ test('a session boundary cannot start without every port, a distinct host or a b
     }, 'session_origins_shared'],
     ['a route standing in for a session endpoint', {
       sessions: { tenant: full },
-      routes: [{ method: 'POST', path: TENANT.login, policy: { access: 'login', audience: 'tenant' }, body: NONE, handler: () => {} }],
+      routes: [{ method: 'POST', path: TENANT.login, policy: { access: 'login', audience: 'tenant' }, body: NONE, idempotency: 'none', handler: () => {} }],
     }, 'route_duplicate'],
     ['a session route whose boundary is not composed', { routes: probeRoutes(newProbe()) }, 'session_boundary_unconfigured'],
     ['a business route borrowing the logout path with another method', {
       sessions: { tenant: full },
       routes: [{
-        method: 'GET', path: TENANT.logout, body: NONE, handler: () => {},
+        method: 'GET', path: TENANT.logout, body: NONE, idempotency: 'none', handler: () => {},
         policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'probe.read' } },
       }],
     }, 'route_session_endpoint_invalid'],

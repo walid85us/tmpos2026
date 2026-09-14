@@ -237,6 +237,7 @@ export function commandCenterRoutes(
     path: COMMAND_CENTER_PATH,
     policy: Object.freeze({ access: 'session', audience: 'admin', authorization: COMMAND_CENTER_REQUIREMENT }),
     body: Object.freeze({ kind: 'none' }),
+    idempotency: 'none',
     handler,
   };
   return Object.freeze([Object.freeze(route)]);

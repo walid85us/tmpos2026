@@ -187,9 +187,9 @@ const newHits = (): Hits => ({ open: 0, secret: 0, secureSubmit: 0, principal: u
 function probeRoutes(hits: Hits, extra: RouteDefinition[] = []): RouteDefinition[] {
   const ok = (res: Response): void => { res.status(200).json({ ok: true }); };
   return [
-    { method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: NONE, handler: (_q, res, ctx) => { hits.open++; hits.principal = ctx.principal; ok(res); } },
-    { method: 'GET', path: '/v1/open/secret', policy: READ, body: NONE, handler: (_q, res, ctx) => { hits.secret++; hits.principal = ctx.principal; ok(res); } },
-    { method: 'POST', path: '/v1/secure-submit', policy: WRITE, body: NONE, handler: (_q, res) => { hits.secureSubmit++; ok(res); } },
+    { method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res, ctx) => { hits.open++; hits.principal = ctx.principal; ok(res); } },
+    { method: 'GET', path: '/v1/open/secret', policy: READ, body: NONE, idempotency: 'none', handler: (_q, res, ctx) => { hits.secret++; hits.principal = ctx.principal; ok(res); } },
+    { method: 'POST', path: '/v1/secure-submit', policy: WRITE, body: NONE, idempotency: 'none', handler: (_q, res) => { hits.secureSubmit++; ok(res); } },
     ...extra,
   ];
 }
@@ -468,7 +468,7 @@ test('every response class carries the full, closed security-header policy', asy
     async consume(r: RateLimitRequest) { return limited ? { outcome: 'limited', retryAfterMs: 6_500 } : { outcome: 'allowed', remaining: r.limit - 1 }; },
     probe: () => true,
   };
-  const boom: RouteDefinition = { method: 'GET', path: '/v1/boom', policy: { access: 'public' }, body: NONE, handler: () => { throw new Error('boom'); } };
+  const boom: RouteDefinition = { method: 'GET', path: '/v1/boom', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: () => { throw new Error('boom'); } };
   const { deps } = chain(newHits(), { limits: testRequestLimits({ limiter: asyncLimiter }) }, [boom]);
   await withApp(deps, async ({ port }) => {
     const cases: Array<[string, number, () => Promise<Reply>]> = [
@@ -501,26 +501,26 @@ test('every response class carries the full, closed security-header policy', asy
 
 test('a handler cannot remove or override a mandatory security header', async () => {
   const tamper: RouteDefinition[] = [
-    { method: 'GET', path: '/v1/tamper-object', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+    { method: 'GET', path: '/v1/tamper-object', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
       res.removeHeader('X-Frame-Options');
       res.setHeader('Content-Security-Policy', 'default-src *');
       res.writeHead(200, { 'X-Frame-Options': 'ALLOWALL', 'content-security-policy': "script-src 'unsafe-inline'", 'x-probe': 'kept' });
       res.end('{}');
     } },
-    { method: 'GET', path: '/v1/tamper-array', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+    { method: 'GET', path: '/v1/tamper-array', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
       res.writeHead(200, ['X-Content-Type-Options', 'sniff', 'Cache-Control', 'public, max-age=86400', 'x-probe', 'kept']);
       res.end('{}');
     } },
-    { method: 'GET', path: '/v1/tamper-trailing', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+    { method: 'GET', path: '/v1/tamper-trailing', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
       // Node takes the header map from the SECOND argument when the third is undefined.
       (res.writeHead as unknown as (...args: unknown[]) => void)(200, { 'X-Frame-Options': 'ALLOWALL', 'x-probe': 'kept' }, undefined);
       res.end('{}');
     } },
-    { method: 'GET', path: '/v1/tamper-message', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+    { method: 'GET', path: '/v1/tamper-message', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
       (res.writeHead as unknown as (...args: unknown[]) => void)(200, 'OK', { 'Referrer-Policy': 'unsafe-url', 'x-probe': 'kept' }, undefined);
       res.end('{}');
     } },
-    { method: 'GET', path: '/v1/tamper-json', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+    { method: 'GET', path: '/v1/tamper-json', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
       for (const name of Object.keys(SECURITY_HEADERS)) res.removeHeader(name);
       res.setHeader('x-probe', 'kept');
       res.status(200).json({ ok: true });
@@ -539,8 +539,8 @@ test('a handler cannot remove or override a mandatory security header', async ()
 
 test('a throwing or rejecting handler fails closed with a bounded 500 and no leak', async () => {
   const boom: RouteDefinition[] = [
-    { method: 'GET', path: '/v1/boom-sync', policy: { access: 'public' }, body: NONE, handler: () => { throw new Error('secret-internal-detail'); } },
-    { method: 'GET', path: '/v1/boom-async', policy: { access: 'public' }, body: NONE, handler: async () => { throw new Error('secret-internal-detail'); } },
+    { method: 'GET', path: '/v1/boom-sync', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: () => { throw new Error('secret-internal-detail'); } },
+    { method: 'GET', path: '/v1/boom-async', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: async () => { throw new Error('secret-internal-detail'); } },
   ];
   const { deps } = chain(newHits(), {}, boom);
   await withApp(deps, async ({ port, logs }) => {
@@ -637,7 +637,7 @@ test('an out-of-contract limiter answer is a 503, never an allowance or a guesse
 });
 
 test('a handler that fails after its response started is cut off without printing raw error text', async () => {
-  const partial: RouteDefinition = { method: 'GET', path: '/v1/partial', policy: { access: 'public' }, body: NONE, handler: (_q, res) => {
+  const partial: RouteDefinition = { method: 'GET', path: '/v1/partial', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: (_q, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.write('{"partial":');
     throw new Error('secret-partial-detail');
@@ -706,9 +706,9 @@ test('startup fails closed on a route without policy metadata or an unconfigured
     }
     return undefined;
   };
-  const guarded = { method: 'GET', path: '/v1/p', policy: READ, body: NONE, handler: () => {} } as RouteDefinition;
-  const unsafe = { method: 'POST', path: '/v1/u', policy: WRITE, body: NONE, handler: () => {} } as RouteDefinition;
-  const publicWrite = { method: 'POST', path: '/v1/u', policy: { access: 'public' }, body: NONE, handler: () => {} } as RouteDefinition;
+  const guarded = { method: 'GET', path: '/v1/p', policy: READ, body: NONE, idempotency: 'none', handler: () => {} } as RouteDefinition;
+  const unsafe = { method: 'POST', path: '/v1/u', policy: WRITE, body: NONE, idempotency: 'none', handler: () => {} } as RouteDefinition;
+  const publicWrite = { method: 'POST', path: '/v1/u', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: () => {} } as RouteDefinition;
   assert.equal(startupCode({ routes: [publicWrite], trustedOrigins: [TRUSTED] }), 'route_public_unsafe');
   assert.equal(startupCode({ routes: [{ method: 'GET', path: '/v1/x', handler: () => {} } as unknown as RouteDefinition] }), 'route_policy_missing');
   assert.equal(startupCode({ routes: [{ method: 'GET', path: '/v1/x', policy: { access: 'public' }, handler: () => {} } as unknown as RouteDefinition] }), 'route_body_policy_missing');
@@ -721,7 +721,7 @@ test('startup fails closed on a route without policy metadata or an unconfigured
   for (const portDeadlineMs of [0, -1, 1.5, 30_001, Number.NaN]) {
     assert.equal(startupCode({ portDeadlineMs }), 'port_deadline_invalid', `port deadline ${portDeadlineMs}`);
   }
-  assert.equal(startupCode({ routes: [{ method: 'GET', path: '/health', policy: { access: 'public' }, body: NONE, handler: () => {} }] }), 'route_duplicate');
+  assert.equal(startupCode({ routes: [{ method: 'GET', path: '/health', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: () => {} }] }), 'route_duplicate');
   assert.equal(startupCode({
     routes: [guarded, unsafe], authenticator: tokenAuthenticator(), authorizer: membershipAuthorizer(), trustedOrigins: [TRUSTED],
   }), 'rate_limit_required');
@@ -759,10 +759,10 @@ test('route inventory: the production table is operational-only and every route 
   assert.equal(stack.filter((layer) => layer.route !== undefined).length, 0, 'no Express route layer may bypass the chain');
   assert.deepEqual(stack.map((layer) => layer.name),
     ['query', 'expressInit', 'frame', 'enforce', 'notFoundHandler', 'errorHandler', 'abortStartedResponse']);
-  const routes = app.locals.routes as Array<{ method: string; path: string; access: string; body: string }>;
+  const routes = app.locals.routes as Array<{ method: string; path: string; access: string; body: string; idempotency: string }>;
   assert.deepEqual(routes, [
-    { method: 'GET', path: '/health', access: 'public', body: 'none' },
-    { method: 'GET', path: '/readiness', access: 'public', body: 'none' },
+    { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
+    { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
   ]);
   for (const { method, path } of routes) {
     const refusals: Array<[string, DistributedRateLimiter['consume']]> = [

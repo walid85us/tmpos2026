@@ -18,7 +18,7 @@ const NONE = { kind: 'none' };
 const JSON_BODY = { kind: 'json', maxBytes: 1024, required: true };
 
 const route = (over: Record<string, unknown>): Record<string, unknown> =>
-  ({ method: 'GET', path: '/v1/probe', policy: PUBLIC, body: NONE, handler, ...over });
+  ({ method: 'GET', path: '/v1/probe', policy: PUBLIC, body: NONE, idempotency: 'none', handler, ...over });
 
 /** The setup-error code a registration throws, or undefined when it registers. */
 function setupCode(defs: unknown[]): string | undefined {
@@ -260,4 +260,80 @@ test('an unknown, partial or contradictory login or session policy is rejected',
   ]) {
     assert.equal(setupCode([route({ method: 'POST', path: '/api/v1/session/login', policy })]), 'route_policy_invalid', JSON.stringify(policy));
   }
+});
+
+// --- the idempotency policy (Phase 4.0 M6-IDEMPOT-P2) ------------------------------------------
+
+const outcome = (): { status: number; body: unknown } => ({ status: 200, body: { ok: true } });
+const BARE_SESSION = (audience: string): Record<string, unknown> => ({ access: 'session', audience, authorization: null });
+/** An idempotency-required definition: a `perform`, and no handler. */
+const required = (over: Record<string, unknown>): Record<string, unknown> =>
+  ({ method: 'POST', path: '/v1/probe', policy: AUTHED, body: NONE, idempotency: 'required', perform: outcome, ...over });
+
+test('a route without an idempotency policy is rejected at registration', () => {
+  const undeclared = route({});
+  delete undeclared.idempotency;
+  for (const def of [undeclared, route({ idempotency: undefined }), route({ idempotency: null })]) {
+    assert.equal(setupCode([def]), 'route_idempotency_policy_missing');
+  }
+});
+
+test('the idempotency policy is a closed vocabulary of none and required', () => {
+  for (const idempotency of ['None', 'REQUIRED', 'optional', '', 'true', true, 1, {}, { kind: 'required' }, ['required']]) {
+    assert.equal(setupCode([required({ idempotency })]), 'route_idempotency_policy_invalid', JSON.stringify(idempotency));
+  }
+  const table = defineRoutes([route({}), required({})]);
+  assert.equal(table.lookup('GET', '/v1/probe')?.idempotency, 'none');
+  assert.equal(table.lookup('POST', '/v1/probe')?.idempotency, 'required');
+});
+
+test('only a state-changing route of a verified principal under a declared authorization may require idempotency', () => {
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    assert.equal(setupCode([required({ method })]), undefined, `authenticated ${method}`);
+  }
+  assert.equal(setupCode([required({ path: '/api/v1/probe', policy: SESSION('tenant', { scope: 'platform', permission: 'probe.write' }) })]), undefined,
+    'a tenant-boundary session route under a platform-scope requirement');
+  for (const scope of ['tenant', 'store']) {
+    assert.equal(setupCode([required({ policy: { access: 'authenticated', authorization: { scope, permission: 'probe.write' } } })]),
+      'route_idempotency_policy_invalid', `a ${scope}-scoped route: no ${scope} context exists to bind before M5`);
+  }
+  assert.equal(setupCode([required({ path: '/api/v1/probe', policy: SESSION('tenant') })]), 'route_idempotency_policy_invalid', 'a tenant-scoped session route');
+  assert.equal(setupCode([required({ method: 'PATCH', path: '/admin/v1/probe', policy: SESSION('admin', { scope: 'platform', permission: 'probe.write' }) })]),
+    undefined, 'an admin session route');
+  for (const [label, def] of [
+    ['an authenticated read', required({ method: 'GET' })],
+    ['a public read', required({ method: 'GET', policy: PUBLIC })],
+    ['a session read', required({ method: 'GET', path: '/api/v1/probe', policy: SESSION('tenant') })],
+    ['a login', required({ path: sessionPaths('tenant').login, policy: LOGIN('tenant') })],
+    ['a logout', required({ path: sessionPaths('admin').logout, policy: BARE_SESSION('admin') })],
+    ['a current-session read', required({ method: 'GET', path: sessionPaths('tenant').current, policy: BARE_SESSION('tenant') })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_idempotency_policy_invalid', label);
+  }
+});
+
+test("a route's operation matches its idempotency policy: a handler for none, a perform for required, never both", () => {
+  const { handler: _handler, ...noHandler } = route({});
+  const { perform: _perform, ...noPerform } = required({});
+  for (const [label, def] of [
+    ['none with a perform instead of a handler', { ...noHandler, perform: outcome }],
+    ['none with both', route({ perform: outcome })],
+    ['required with a handler instead of a perform', { ...noPerform, handler }],
+    ['required with both', required({ handler })],
+    ['required without an operation', noPerform],
+    ['required with a non-function perform', required({ perform: 'outcome' })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_handler_invalid', label);
+  }
+  const registered = defineRoutes([required({})]).lookup('POST', '/v1/probe');
+  assert.ok(registered?.idempotency === 'required' && registered.perform === outcome && !('handler' in registered));
+});
+
+test('the idempotency policy is read once, so a getter cannot validate one value and register another', () => {
+  let reads = 0;
+  const def = { ...route({}), get idempotency() { reads++; return reads === 1 ? 'none' : 'required'; } };
+  const registered = defineRoutes([def]).lookup('GET', '/v1/probe');
+  assert.equal(registered?.idempotency, 'none', 'the value validated is the value registered');
+  assert.equal(reads, 1);
+  assert.ok(registered !== undefined && Object.isFrozen(registered));
 });

@@ -1,4 +1,4 @@
-// Phase 4.0 M3/M4 — deny-by-default application factory and the shared enforced chain.
+// Phase 4.0 M3/M4/M6 — deny-by-default application factory and the shared enforced chain.
 //
 // Every request runs ONE fixed chain, and no route reaches a handler any other way:
 //   frame   — correlation ID, the bounded request log, the closed security-header
@@ -43,8 +43,18 @@
 //             7. body: only now is a declared JSON body read, capped on the bytes
 //                actually streamed (readBoundedBody), and parsed as strict UTF-8
 //                JSON -> 413 / 400 (trailer fields -> 400);
-//             8. the handler, exactly once, with the principal, the session view and
-//                the parsed value as ctx.body; a throw or rejection -> bounded 500.
+//             8. idempotency, on a route that requires it (idempotency.ts): exactly one
+//                valid Idempotency-Key (400), then the durable store under its own deadline —
+//                a completed operation replays its recorded response, another request under
+//                the key is a 422, one still in progress a 409, a store that cannot answer a
+//                503 — and only an acquisition goes on;
+//             9. the operation: a `required` route's `perform` once for its acquired lease (it can
+//                run again only after that lease expires and is reclaimed — idempotency.ts: the
+//                crash window), under the port deadline, handed its IdempotentContext only, its
+//                outcome recorded before it is sent (a malformed outcome -> 500, an overrun or a
+//                store that cannot record -> 503; neither is recorded); any other route's handler
+//                exactly once, with the principal, the session view and the parsed value as
+//                ctx.body; a throw or rejection -> bounded 500.
 //   notFoundHandler / errorHandler — the terminal bounded 404 / 500;
 //   abortStartedResponse — cuts a response that failed after it had started.
 // createBoundedServer refuses any request-target that is not origin-form (bounded
@@ -59,20 +69,22 @@
 // table holds only the public, body-free operational routes; each composed session
 // boundary adds its login, current-session and logout routes, and `routes` adds more,
 // all through the SAME table and chain. Startup fails closed (EnforcementSetupError)
-// if any route lacks a valid access or body policy, a public route is not GET, an
-// authenticated route has no authenticator or authorizer, a login or session route's
-// boundary is not composed with every port, the port deadline is not a whole number of
+// if any route lacks a valid access, body or idempotency policy, a public route is not
+// GET, an authenticated route has no authenticator or authorizer, a login or session
+// route's boundary is not composed with every port, a route requires idempotency with
+// no durable store and key composed, the port deadline is not a whole number of
 // milliseconds up to its cap, or an unsafe route has no trusted origin.
 //
 // There is NO body parser: a body reaches a handler only through its route's declared
 // policy, and the parsed value stays untrusted input for route-specific validation.
-// No body byte, parser message, credential, cookie or CSRF token is ever logged or
-// echoed. No HTML error page, no stack/secret leakage, no route-existence disclosure.
+// No body byte, parser message, credential, cookie, CSRF token or idempotency key is ever
+// logged or echoed. No HTML error page, no stack/secret leakage, no route-existence disclosure.
 // Express derives nothing from forwarding headers (`trust proxy` is off): X-Forwarded-For is read
 // only by the trusted-proxy contract, and only from a configured trusted proxy. Startup refuses
 // any route but the two probes without the distributed limiter (`rate_limit_required`).
 import express from 'express';
 import type { Express, Request, Response, NextFunction, RequestHandler, ErrorRequestHandler } from 'express';
+import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 import type { RequestListener } from 'node:http';
 import type { Readable } from 'node:stream';
@@ -83,13 +95,18 @@ import type { LogSink } from './logging.js';
 import { applySecurityHeaders, lockSecurityHeaders } from './securityHeaders.js';
 import { limiterSubjectOf, resolveClientAddress } from './clientAddress.js';
 import { LIMITER_DEADLINE_MS, RATE_LIMITS, consumeRateLimit, createRequestLimits } from './rateLimit.js';
-import type { DistributedRateLimiter, RateLimitDimension, RateLimitNamespace, RateLimitPolicy, RequestLimitDeps } from './rateLimit.js';
+import type { RateLimitDimension, RateLimitNamespace, RateLimitPolicy, RequestLimitDeps } from './rateLimit.js';
 import { UNSAFE_METHODS, evaluateRequestSecurity, parseTrustedOrigins } from './requestSecurity.js';
 import { authenticate, authorize } from './access.js';
 import type { RequestAuthenticator, RouteAuthorizer, RouteView } from './access.js';
-import { PORT_DEADLINE_MS, withDeadline } from './deadline.js';
+import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
 import { createSessionBoundaries, principalKeyOf, sessionCsrfRefusal } from './sessions.js';
 import type { SessionBoundary, SessionDeps } from './sessions.js';
+import {
+  IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, acquireIdempotency, completeIdempotency, createIdempotency, envelopeFromOutcome, readIdempotencyKey,
+} from './idempotency.js';
+import type { Idempotency, IdempotencyDeps, IdempotencyRefusal, ReplayEnvelope } from './idempotency.js';
+import { sameKeyMaterial } from './keyMaterial.js';
 import { EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
 import type { BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 
@@ -146,10 +163,12 @@ export const HTTP_SERVER_LIMITS = {
   maxQueuedRequests: 16,
 } as const;
 
-// The longest chain makes seven sequential port calls (a login presenting a session: the
+// The longest chains make eight sequential bounded calls: a login presenting a session (the
 // request and login client limits, the verifier, the account limit, admission, revoke, create),
-// and the socket's inactivity timeout runs through all of them. So a port deadline is capped at one eighth of
-// that timeout: however slow every port is, the request ends in a bounded 503, never a reset.
+// and an idempotency-required session route (the request limit, the session read, admission,
+// the session update, authorization, acquisition, the operation itself, completion). The
+// socket's inactivity timeout runs through all of them, so a port deadline is capped at one
+// eighth of that timeout: however slow every port is, the request ends in a bounded 503, never a reset.
 const MAX_SEQUENTIAL_PORT_CALLS = 8;
 const MAX_PORT_DEADLINE_MS = Math.floor(HTTP_SERVER_LIMITS.socketTimeoutMs / MAX_SEQUENTIAL_PORT_CALLS);
 
@@ -392,6 +411,28 @@ function refusalOf(res: Response): string | undefined {
   return typeof reason === 'string' ? reason : undefined;
 }
 
+/** A durable store's refusal: one still in progress 409, another request under the key 422, anything else a 503. */
+function idempotencyRefusal(req: Request, res: Response, reason: IdempotencyRefusal): void {
+  if (reason === 'idempotency_in_progress') return refuse(req, res, 409, 'request_in_progress', reason);
+  if (reason === 'idempotency_conflict') return refuse(req, res, 422, 'idempotency_key_reused', reason);
+  refuse(req, res, 503, 'service_unavailable', reason);
+}
+
+/**
+ * Send a recorded response exactly as recorded — its status, the approved content type, the
+ * allowlisted Location and the body — beside the request's own security headers and fresh
+ * X-Request-Id from the frame. A replay is marked so, and carries nothing else.
+ */
+function sendRecorded(res: Response, envelope: ReplayEnvelope, replayed: boolean): void {
+  if (envelope.headers.location !== undefined) res.setHeader('Location', envelope.headers.location);
+  if (replayed) {
+    res.setHeader('Idempotent-Replayed', 'true');
+    (res.locals as Record<string, unknown>).refusal = 'idempotency_replayed'; // the request log's reason marks a replay
+  }
+  res.setHeader('Content-Type', envelope.contentType);
+  res.status(envelope.status).end(envelope.body);
+}
+
 /** A boundary's routes are limited in its own namespace; everything else, unknown paths included, in `runtime`. */
 const requestNamespace = (route: RouteDefinition | undefined): RateLimitNamespace =>
   route !== undefined && (route.policy.access === 'login' || route.policy.access === 'session') ? route.policy.audience : 'runtime';
@@ -399,8 +440,10 @@ const requestNamespace = (route: RouteDefinition | undefined): RateLimitNamespac
 /** Each boundary's login exchange is limited in a namespace of its own. */
 const LOGIN_NAMESPACES: Readonly<Record<SessionAudience, RateLimitNamespace>> = Object.freeze({ tenant: 'tenant-login', admin: 'admin-login' });
 
-// How long one limiter-store probe answers readiness for an instance (createApp).
+// How long one store probe answers readiness for an instance (createApp).
 const PROBE_REUSE_MS = 1_000;
+
+const NO_BYTES = Buffer.alloc(0);
 
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
 function forwardedForOf(req: Request): string | string[] | undefined {
@@ -432,6 +475,11 @@ export interface AppDeps {
    * once any route but the two probes exists: no default, no per-process stand-in, no fallback.
    */
   limits?: RequestLimitDeps;
+  /**
+   * The durable idempotency store and its own keyed-hash secret (idempotency.ts). Required once any
+   * route requires idempotency: no default, no per-process stand-in, no fallback.
+   */
+  idempotency?: IdempotencyDeps;
   /** The session boundaries composed, each from its own ports (sessions.ts). */
   sessions?: SessionDeps;
   /** The bound on every port call in ms (deadline.ts): a whole number up to MAX_PORT_DEADLINE_MS. */
@@ -455,30 +503,38 @@ export function createApp(deps: AppDeps): Express {
     res.status(200).json({ status: 'alive' });
   };
 
-  // Validated first: a malformed limiter, secret or proxy list refuses startup.
+  // Validated first: a malformed limiter, secret, proxy list or idempotency store refuses startup.
   const limits = deps.limits === undefined ? null : createRequestLimits(deps.limits);
+  const idempotency = deps.idempotency === undefined ? null : createIdempotency(deps.idempotency);
+  // The idempotency secret is its own — never the limiter's, however either is padded (keyMaterial.ts).
+  if (idempotency !== null && limits !== null
+    && sameKeyMaterial((deps.idempotency as IdempotencyDeps).keySecret, (deps.limits as RequestLimitDeps).keySecret)) {
+    throw new EnforcementSetupError('idempotency_key_shared');
+  }
 
-  // Readiness: ready only after local init completes, every injected dependency check passes and,
-  // when a limiter is composed, its store answers the probe with exactly `true` — so readiness says
-  // whether protected traffic can be served. Each check runs under the port deadline, and the
-  // limiter probe touches no bucket.
-  // However many readiness requests arrive, an instance asks the limiter's store at most once per
+  // Readiness: ready only after local init completes, every injected dependency check passes and
+  // every composed store — the limiter's and, when composed, the idempotency store — answers its
+  // probe with exactly `true`, so readiness says whether protected traffic can be served. Each
+  // check runs under the port deadline, and no probe touches a client bucket or record.
+  // However many readiness requests arrive, an instance asks each store at most once per
   // PROBE_REUSE_MS: concurrent and repeated requests share one probe, so a flood of probes never
-  // becomes a flood of store calls. The shared probe runs under its own limiter deadline, never a
+  // becomes a flood of store calls. A shared probe runs under its store's own deadline, never a
   // request's, so an answer that arrives late is no answer; a store that fails just after a good
   // probe reads as ready for at most PROBE_REUSE_MS — the price of the bound, accepted.
-  let lastProbe: { readonly at: number; readonly ready: Promise<boolean> } | null = null;
-  const limiterReady = (limiter: DistributedRateLimiter): Promise<boolean> => {
-    const t = now();
-    if (lastProbe === null || t < lastProbe.at || t - lastProbe.at >= PROBE_REUSE_MS) {
-      const ready = withDeadline(Math.min(deadlineMs, LIMITER_DEADLINE_MS), (own) => limiter.probe(own)).then((v) => v === true, () => false);
-      lastProbe = { at: t, ready };
-    }
-    return lastProbe.ready;
+  const sharedProbe = (probe: (signal: AbortSignal) => unknown, storeDeadlineMs: number): (() => Promise<boolean>) => {
+    let last: { readonly at: number; readonly ready: Promise<boolean> } | null = null;
+    return () => {
+      const t = now();
+      if (last === null || t < last.at || t - last.at >= PROBE_REUSE_MS) {
+        last = { at: t, ready: withDeadline(Math.min(deadlineMs, storeDeadlineMs), probe).then((v) => v === true, () => false) };
+      }
+      return last.ready;
+    };
   };
   const readinessChecks: Array<(signal: AbortSignal) => unknown> = [
     ...(deps.dependencyChecks ?? []),
-    ...(limits === null ? [] : [(): Promise<boolean> => limiterReady(limits.limiter)]),
+    ...(limits === null ? [] : [sharedProbe((signal) => limits.limiter.probe(signal), LIMITER_DEADLINE_MS)]),
+    ...(idempotency === null ? [] : [sharedProbe((signal) => idempotency.store.probe(signal), IDEMPOTENCY_DEADLINE_MS)]),
   ];
   const readinessHandler: RouteHandler = async (_req, res) => {
     try {
@@ -504,12 +560,13 @@ export function createApp(deps: AppDeps): Express {
   // The two operational probes, known by the handlers this factory owns — never by path text —
   // answer without the limiter: a limiter-store outage neither hangs nor limits them, and they
   // spend no bucket.
-  const isProbe = (route: RouteDefinition): boolean => route.handler === health || route.handler === readinessHandler;
+  const isProbe = (route: RouteDefinition): boolean =>
+    route.idempotency === 'none' && (route.handler === health || route.handler === readinessHandler);
 
   const boundaries = createSessionBoundaries(deps.sessions, { now, deadlineMs });
   const table = defineRoutes([
-    { method: 'GET', path: '/health', policy: PUBLIC, body: NO_BODY, handler: health },
-    { method: 'GET', path: '/readiness', policy: PUBLIC, body: NO_BODY, handler: readinessHandler },
+    { method: 'GET', path: '/health', policy: PUBLIC, body: NO_BODY, idempotency: 'none', handler: health },
+    { method: 'GET', path: '/readiness', policy: PUBLIC, body: NO_BODY, idempotency: 'none', handler: readinessHandler },
     ...Object.values(boundaries).flatMap((boundary) => boundary?.routes ?? []),
     ...(deps.routes ?? []),
   ]);
@@ -531,14 +588,16 @@ export function createApp(deps: AppDeps): Express {
   }
   // Protected traffic is never served unlimited: every route but the probes needs the limiter.
   if (limits === null && routes.some((r) => !isProbe(r))) throw new EnforcementSetupError('rate_limit_required');
+  // An operation that requires idempotency never runs without its durable store and key.
+  if (idempotency === null && routes.some((r) => r.idempotency === 'required')) throw new EnforcementSetupError('idempotency_required');
 
   const app = express();
   app.disable('x-powered-by');
   // Express derives nothing from forwarding headers: the trusted-proxy contract alone reads them.
   app.set('trust proxy', false);
-  // Non-secret inventory of the admitted surface: method, literal path, access and body class.
+  // Non-secret inventory of the admitted surface: method, literal path, access, body and idempotency class.
   app.locals.routes = Object.freeze(
-    routes.map((r) => Object.freeze({ method: r.method, path: r.path, access: r.policy.access, body: r.body.kind })),
+    routes.map((r) => Object.freeze({ method: r.method, path: r.path, access: r.policy.access, body: r.body.kind, idempotency: r.idempotency })),
   );
 
   // Correlation ID + locked security headers + bounded request log (all responses).
@@ -698,6 +757,7 @@ export function createApp(deps: AppDeps): Express {
         session = active.context;
       }
       let parsed: unknown;
+      let bytes: Buffer = NO_BYTES;
       if (body && route.body.kind === 'json') {
         // Every check has passed and no port was handed the request, so the stream is
         // untouched: only now is a byte read.
@@ -709,6 +769,7 @@ export function createApp(deps: AppDeps): Express {
         }
         // Trailer fields would reach the handler outside the header checks and the cap.
         if (req.rawTrailers.length > 0) return refuse(req, res, 400, 'invalid_request', 'body_trailers_unsupported');
+        bytes = read.bytes;
         if (read.bytes.length > 0) {
           const json = parseJson(read.bytes);
           if (json === undefined) return refuse(req, res, 400, 'invalid_request', 'body_malformed');
@@ -716,6 +777,40 @@ export function createApp(deps: AppDeps): Express {
         } else if (route.body.required) {
           return refuse(req, res, 400, 'invalid_request', 'body_required'); // an empty chunked body
         }
+      }
+      if (route.idempotency === 'required') {
+        // Startup proved the store and key composed, and registration that this route has a
+        // verified principal (`authenticated`, or a session with a declared authorization).
+        const store = idempotency as Idempotency;
+        const key = readIdempotencyKey(req.rawHeaders);
+        if (typeof key === 'string') return refuse(req, res, 400, 'invalid_request', key);
+        const audience = policy.access === 'session' ? policy.audience : null;
+        const operation = store.keyring.operationOf(key.key, principal as VerifiedPrincipal, {
+          method: route.method, path: route.path, audience, tenant: null, store: null, body: bytes,
+        });
+        const lease = randomBytes(32).toString('base64url');
+        const acquired = await acquireIdempotency(store, Object.freeze({ ...operation, lease, ...IDEMPOTENCY_POLICY }), deadlineMs);
+        if (typeof acquired === 'string') return idempotencyRefusal(req, res, acquired);
+        if (acquired.outcome === 'replay') return sendRecorded(res, acquired.response, true);
+        if (acquired.reclaimed) emitLog('warn', { event: 'idempotency_reclaimed', requestId: requestIdOf(res) }, deps.log);
+        let outcome: unknown;
+        try {
+          outcome = await withDeadline(deadlineMs, (signal) => route.perform(Object.freeze({
+            principal: principal as VerifiedPrincipal, audience, body: parsed, attempt: Object.freeze({ reclaimed: acquired.reclaimed }), signal,
+          })));
+        } catch (err) {
+          // Nothing is recorded: the reservation waits out its lease (idempotency.ts: the crash window).
+          const failure = outage('idempotent_operation', err);
+          if (failure === 'idempotent_operation_timeout') return refuse(req, res, 503, 'service_unavailable', failure);
+          return refuse(req, res, 500, 'internal_error', 'idempotent_operation_failed');
+        }
+        const envelope = envelopeFromOutcome(outcome);
+        if (envelope === null) return refuse(req, res, 500, 'internal_error', 'idempotent_outcome_invalid');
+        // Completion runs under the runtime's own deadline, whatever the client's connection does,
+        // and the response is sent only once the store has recorded it.
+        const unrecorded = await completeIdempotency(store, Object.freeze({ scope: operation.scope, lease, response: store.keyring.seal(envelope, operation) }), deadlineMs);
+        if (unrecorded !== null) return refuse(req, res, 503, 'service_unavailable', unrecorded);
+        return sendRecorded(res, envelope, false);
       }
       await route.handler(req, res, Object.freeze({ requestId: requestIdOf(res), principal, session, body: parsed }));
     } catch (err) {

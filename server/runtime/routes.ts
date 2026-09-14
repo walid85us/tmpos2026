@@ -1,10 +1,15 @@
-// Phase 4.0 M3/M4 — the central, closed route table: the ONLY way a route reaches the runtime.
+// Phase 4.0 M3/M4/M6 — the central, closed route table: the ONLY way a route reaches the runtime.
 //
-// Every definition declares exactly one access policy and exactly one body policy — `none`,
-// or bounded JSON with a source-defined byte cap (at most MAX_JSON_BODY_BYTES) that is
-// required or optional — plus an allowed method, a literal path and a handler, and nothing
-// else: a missing, unknown, partial or contradictory field fails startup with a bounded
-// EnforcementSetupError code (never the offending input). The access policies are:
+// Every definition declares exactly one access policy, exactly one body policy — `none`, or
+// bounded JSON with a source-defined byte cap (at most MAX_JSON_BODY_BYTES) that is required or
+// optional — and exactly one idempotency policy — `none`, or `required` (idempotency.ts), which
+// only a state-changing route with a verified principal and a declared authorization may take —
+// plus an allowed method, a literal path and its operation, and nothing else: a missing,
+// unknown, partial or contradictory field fails startup with a bounded EnforcementSetupError code
+// (never the offending input). The operation matches the idempotency policy: a `none` route's
+// handler writes its own response; a `required` route's `perform` is handed only its
+// IdempotentContext and returns its outcome, which the runtime records before sending — a route
+// has one or the other, never both. The access policies are:
 //   public        — GET only, so no unauthenticated state-changing route can register (G-UNAUTH);
 //   authenticated — a Bearer credential verified per request, plus the authorization it requires;
 //   login         — the one pre-session exchange of a session boundary (M4): only that
@@ -24,7 +29,7 @@
 // slash or encoding variant can inherit another route's policy. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
-// handler only as the parsed ctx.body.
+// handler only as the parsed ctx.body. A `perform` receives no request or response at all.
 import type { Request, Response } from 'express';
 
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -47,6 +52,9 @@ export type RoutePolicy =
 export type BodyPolicy =
   | { readonly kind: 'none' }
   | { readonly kind: 'json'; readonly maxBytes: number; readonly required: boolean };
+
+/** Whether a route's requests run under a durable Idempotency-Key (idempotency.ts): never, or always. */
+export type IdempotencyPolicy = 'none' | 'required';
 
 /** The largest byte cap any route may declare for a JSON body (1 MiB). */
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
@@ -80,13 +88,44 @@ export interface RouteContext {
 
 export type RouteHandler = (req: Request, res: Response, ctx: RouteContext) => void | Promise<void>;
 
-export interface RouteDefinition {
+/**
+ * What an idempotency-required operation learns — and nothing else, so nothing outside its
+ * fingerprint (a header, the query, a CSRF token, the request ID) can shape a response that is
+ * recorded and replayed.
+ */
+export interface IdempotentContext {
+  readonly principal: VerifiedPrincipal;
+  /** The session boundary the request came through; null on a Bearer-authenticated route. */
+  readonly audience: SessionAudience | null;
+  /** The parsed JSON body — still untrusted input — or undefined when none was taken. */
+  readonly body: unknown;
+  /** `reclaimed`: an earlier attempt's lease expired unfinished, so its business write may or may not have happened. */
+  readonly attempt: Readonly<{ reclaimed: boolean }>;
+  /** Aborts at the operation's deadline: stop, and commit nothing, once it fires. */
+  readonly signal: AbortSignal;
+}
+
+/** What an idempotency-required operation returns; the runtime validates, records and sends it (idempotency.ts). */
+export interface IdempotentOutcome {
+  readonly status: number;
+  /** A JSON value, serialized once and replayed byte for byte. */
+  readonly body: unknown;
+  /** Allowlisted response headers only: `location`. */
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+export type IdempotentOperation = (ctx: IdempotentContext) => IdempotentOutcome | Promise<IdempotentOutcome>;
+
+interface RouteDefinitionBase {
   readonly method: RouteMethod;
   readonly path: string;
   readonly policy: RoutePolicy;
   readonly body: BodyPolicy;
-  readonly handler: RouteHandler;
 }
+
+export type RouteDefinition =
+  | (RouteDefinitionBase & { readonly idempotency: 'none'; readonly handler: RouteHandler })
+  | (RouteDefinitionBase & { readonly idempotency: 'required'; readonly perform: IdempotentOperation });
 
 export interface RouteTable {
   lookup(method: string, path: string): RouteDefinition | undefined;
@@ -121,7 +160,13 @@ export type EnforcementSetupCode =
   | 'session_store_required'
   | 'session_authorizer_required'
   | 'session_origins_shared'
-  | 'port_deadline_invalid';
+  | 'port_deadline_invalid'
+  | 'route_idempotency_policy_missing'
+  | 'route_idempotency_policy_invalid'
+  | 'idempotency_required'
+  | 'idempotency_invalid'
+  | 'idempotency_key_invalid'
+  | 'idempotency_key_shared';
 
 /** Startup refusal. Carries a bounded code only — never the rejected input. */
 export class EnforcementSetupError extends Error {
@@ -236,6 +281,22 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
   throw new EnforcementSetupError('route_body_policy_invalid');
 }
 
+/**
+ * The idempotency policy. Only a state-changing request of a verified principal under a declared
+ * platform-scope authorization runs under a key: never a read, a public or login route, or a
+ * session's own current-session and logout endpoints (whose authorization is null). A tenant- or
+ * store-scoped route may not require one until the runtime has server-derived tenant and store
+ * context to bind into the operation's fingerprint (M5): without it, one tenant's recorded
+ * response could replay in another's context.
+ */
+function parseIdempotency(raw: unknown, method: string, policy: RoutePolicy): IdempotencyPolicy {
+  if (raw === undefined || raw === null) throw new EnforcementSetupError('route_idempotency_policy_missing');
+  if (raw === 'none') return 'none';
+  const requirement = policy.access === 'authenticated' || policy.access === 'session' ? policy.authorization : null;
+  if (raw === 'required' && method !== 'GET' && requirement !== null && requirement.scope === 'platform') return 'required';
+  throw new EnforcementSetupError('route_idempotency_policy_invalid');
+}
+
 /** The session-boundary rules in the header: a path's namespace and its policy's audience agree. */
 function checkBoundary(method: string, path: string, policy: RoutePolicy, body: BodyPolicy): void {
   const audience = policy.access === 'login' || policy.access === 'session' ? policy.audience : null;
@@ -257,10 +318,10 @@ function checkBoundary(method: string, path: string, policy: RoutePolicy, body: 
 }
 
 function parseDefinition(raw: unknown): RouteDefinition {
-  if (!isPlainObject(raw) || !hasOnlyKeys(raw, ['method', 'path', 'policy', 'body', 'handler'])) {
+  if (!isPlainObject(raw) || !hasOnlyKeys(raw, ['method', 'path', 'policy', 'body', 'idempotency', 'handler', 'perform'])) {
     throw new EnforcementSetupError('route_definition_invalid');
   }
-  const { method, path, handler } = raw;
+  const { method, path, handler, perform } = raw;
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH || !PATH_RE.test(path)) {
     throw new EnforcementSetupError('route_path_invalid');
@@ -269,8 +330,14 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (policy.access === 'public' && method !== 'GET') throw new EnforcementSetupError('route_public_unsafe');
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
-  if (typeof handler !== 'function') throw new EnforcementSetupError('route_handler_invalid');
-  return Object.freeze({ method: method as RouteMethod, path, policy, body, handler: handler as RouteHandler });
+  const idempotency = parseIdempotency(raw.idempotency, method, policy);
+  // The operation matches the policy: a handler for `none`, a `perform` for `required` — one, never both.
+  if (idempotency === 'none') {
+    if (typeof handler !== 'function' || 'perform' in raw) throw new EnforcementSetupError('route_handler_invalid');
+    return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, handler: handler as RouteHandler });
+  }
+  if (typeof perform !== 'function' || 'handler' in raw) throw new EnforcementSetupError('route_handler_invalid');
+  return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, perform: perform as IdempotentOperation });
 }
 
 /** Validate every definition and build the closed, frozen table (key: `METHOD path`). */

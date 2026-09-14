@@ -63,11 +63,51 @@ test('limiter grouping: IPv4 per address, IPv6 per /64, and adjacent /64s never 
   assert.equal(subjectOf('2001:db8:0:1::1'), subjectOf('2001:db8:0:1:ffff:ffff:ffff:ffff'), 'one /64 is one client');
   assert.notEqual(subjectOf('2001:db8:0:1:ffff:ffff:ffff:ffff'), subjectOf('2001:db8:0:2::'), 'the next /64 is another client');
   assert.notEqual(subjectOf('2001:db8:0:1::1'), subjectOf('2001:db8:0:0:ffff::1'), 'the /64 below is another client');
-  assert.equal(subjectOf('::ffff:198.51.100.4'), subjectOf('198.51.100.4'), 'an IPv4-mapped client is its IPv4 client');
   assert.notEqual(subjectOf('::ffff:198.51.100.4'), subjectOf('::198.51.100.4'), 'an IPv4-compatible address is not mapped');
-  assert.equal(subjectOf('64:ff9b::198.51.100.7'), '4:198.51.100.7', 'a NAT64 client is the IPv4 client it carries');
-  assert.equal(subjectOf('2002:c633:6407::1'), '4:198.51.100.7', 'a 6to4 client is the IPv4 address its prefix carries');
-  assert.equal(subjectOf('2002:c633:6407:1::1'), subjectOf('2002:c633:6407:2::1'), 'every /64 of one 6to4 prefix is one client');
+});
+
+// M6-IDEMPOT-P2 correction: only ::ffff:0:0/96 carries a client's IPv4 identity. A NAT64 (64:ff9b::/96)
+// or 6to4 (2002::/16) address is an IPv6 client, grouped by its /64 like any other — never by the
+// IPv4 bits it embeds.
+
+test('an IPv4-mapped address and its IPv4 address are one client in one bucket', () => {
+  for (const mapped of ['::ffff:198.51.100.4', '::FFFF:198.51.100.4', '0:0:0:0:0:ffff:c633:6404', '::ffff:c633:6404']) {
+    assert.equal(subjectOf(mapped), subjectOf('198.51.100.4'), mapped);
+  }
+  assert.equal(subjectOf('198.51.100.4'), '4:198.51.100.4');
+  assert.equal(subjectOf('::ffff:0:198.51.100.4'), '6:0000000000000000', 'an IPv4-translated address (::ffff:0:0:0/96) is not mapped');
+});
+
+test('a NAT64 address and the IPv4 address it embeds never share a bucket', () => {
+  assert.equal(subjectOf('64:ff9b::198.51.100.7'), '6:0064ff9b00000000', 'grouped by its /64');
+  assert.notEqual(subjectOf('64:ff9b::198.51.100.7'), subjectOf('198.51.100.7'));
+  assert.notEqual(subjectOf('64:ff9b::198.51.100.7'), subjectOf('::ffff:198.51.100.7'));
+});
+
+test('NAT64 addresses share a bucket exactly when they share an IPv6 /64', () => {
+  assert.equal(subjectOf('64:ff9b::198.51.100.7'), subjectOf('64:ff9b::203.0.113.9'), 'the well-known /96 lies inside one /64');
+  assert.notEqual(subjectOf('64:ff9b::198.51.100.7'), subjectOf('64:ff9b:1::198.51.100.7'), 'a local-use NAT64 prefix is another /64');
+  assert.equal(subjectOf('64:ff9b:1::198.51.100.7'), subjectOf('64:ff9b:1:0:1::198.51.100.8'), 'one /64 of the local-use prefix');
+  assert.notEqual(subjectOf('64:ff9b:1::198.51.100.7'), subjectOf('64:ff9b:1:1::198.51.100.7'), 'the next /64 of the local-use prefix');
+});
+
+test('6to4 addresses share a bucket exactly when they share an IPv6 /64', () => {
+  assert.equal(subjectOf('2002:c633:6407:1::1'), '6:2002c63364070001');
+  assert.equal(subjectOf('2002:c633:6407:1::1'), subjectOf('2002:c633:6407:1:ffff:ffff:ffff:ffff'), 'one /64');
+  assert.notEqual(subjectOf('2002:c633:6407:1::1'), subjectOf('2002:c633:6407:2::1'), 'another /64 under the same 6to4 prefix');
+  assert.notEqual(subjectOf('2002:c633:6407::1'), subjectOf('198.51.100.7'), 'never the IPv4 address its prefix embeds');
+});
+
+test('equivalent IPv6 textual forms normalize to one subject', () => {
+  for (const forms of [
+    ['2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001', '2001:DB8:0:0:0:0:0:1', '2001:db8:0::1', '2001:db8::0:1'],
+    ['64:ff9b::198.51.100.7', '64:ff9b::c633:6407', '0064:FF9B:0000:0000:0000:0000:C633:6407', '64:ff9b:0:0:0:0:198.51.100.7'],
+    ['2002:c633:6407::', '2002:C633:6407:0::0', '2002:c633:6407:0:0:0:0:0'],
+  ]) {
+    const subjects = forms.map(subjectOf);
+    assert.ok(subjects.every((s) => s !== null), forms[0]);
+    assert.equal(new Set(subjects).size, 1, forms[0]);
+  }
 });
 
 // --- the trusted-proxy list ----------------------------------------------------------------------
@@ -159,7 +199,7 @@ test('entries left of the client are never examined: whatever the client wrote t
 // --- real loopback sockets ---------------------------------------------------------------------------
 
 const OPEN: RouteDefinition = {
-  method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: { kind: 'none' },
+  method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none',
   handler: (_req, res) => { res.status(200).json({ ok: true }); },
 };
 const keyring = createLimiterKeyring(TEST_RATE_LIMIT_KEY);
@@ -302,5 +342,30 @@ test('IPv6 clients group by /64 through the proxy, and a mapped client is its IP
     assert.equal(v4, bucket('4:198.51.100.7'));
     assert.ok(requests.every((r) => /^[A-Za-z0-9_-]{43}$/.test(r.key)), 'the port sees pseudonymous keys only');
     assert.doesNotMatch(JSON.stringify(requests), /2001|198\.51|127\.0\.0/, 'no raw address crosses the limiter port');
+  });
+});
+
+test('NAT64 and 6to4 clients are bucketed as their IPv6 /64 through the proxy, and no raw address reaches a key, a response or the log', async () => {
+  await withProxyApp(['127.0.0.1/32'], async ({ port, requests, logs }) => {
+    const chains = ['64:ff9b::198.51.100.7', '198.51.100.7', '::ffff:198.51.100.7', '64:ff9b::203.0.113.9', '2002:c633:6407:1::1', '2002:c633:6407:2::1'];
+    const seen: string[] = [];
+    for (const chain of chains) {
+      const r = await send(port, '/v1/open', { 'x-forwarded-for': chain });
+      assert.equal(r.status, 200, chain);
+      seen.push(r.body, JSON.stringify(r.headers));
+    }
+    const [nat64, v4, mapped, nat64Other, sixToFour, sixToFourNext] = requests.map((r) => r.key);
+    assert.equal(nat64, bucket('6:0064ff9b00000000'), 'a NAT64 client spends its /64 bucket');
+    assert.equal(v4, bucket('4:198.51.100.7'));
+    assert.equal(mapped, v4, 'a mapped client spends its IPv4 bucket');
+    assert.notEqual(nat64, v4, 'never the bucket of the IPv4 address it embeds');
+    assert.equal(nat64Other, nat64, 'NAT64 clients in one /64 share its bucket');
+    assert.equal(sixToFour, bucket('6:2002c63364070001'), 'a 6to4 client spends its /64 bucket');
+    assert.notEqual(sixToFourNext, sixToFour, 'the next /64 of one 6to4 prefix is another bucket');
+    assert.ok(requests.every((r) => /^[A-Za-z0-9_-]{43}$/.test(r.key)), 'the port sees pseudonymous keys only');
+    for (let i = 0; i < 200 && logs.length < chains.length; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(logs.length, chains.length, 'one request log line each');
+    assert.doesNotMatch(`${JSON.stringify(requests)}${seen.join('')}${logs.join('')}`, /64:ff9b|2002:c633|198\.51\.100|203\.0\.113|::ffff|127\.0\.0\.1/i,
+      'no raw address in a limiter key, a response or a log line');
   });
 });

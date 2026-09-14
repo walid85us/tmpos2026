@@ -401,7 +401,7 @@ async function withBoundedServer(
 test('HSTS is absent by default and present on 200, 404, refusal, 500 and the absolute-form 400 with hsts: true', async () => {
   // A handler can neither add HSTS outside production nor weaken it inside, by setHeader or inline.
   const sts: RouteDefinition = {
-    method: 'GET', path: '/sts', policy: { access: 'public' }, body: { kind: 'none' },
+    method: 'GET', path: '/sts', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none',
     handler: (_req, res) => {
       res.setHeader('Strict-Transport-Security', 'max-age=1');
       res.writeHead(200, { 'Strict-Transport-Security': 'max-age=2', 'Content-Type': 'application/json' });
@@ -409,7 +409,7 @@ test('HSTS is absent by default and present on 200, 404, refusal, 500 and the ab
     },
   };
   const boom: RouteDefinition = {
-    method: 'GET', path: '/boom', policy: { access: 'public' }, body: { kind: 'none' }, handler: () => { throw new Error('boom'); },
+    method: 'GET', path: '/boom', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none', handler: () => { throw new Error('boom'); },
   };
   const exchanges: Array<[string, number, string]> = [
     ['health 200', 200, 'GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
@@ -837,7 +837,7 @@ test('startup: limits are required once a route exists beyond the two probes, an
   assert.doesNotThrow(() => createApp({ readiness: createReadinessState() }), 'a probe-only app starts without limits');
 
   const publicRoute: RouteDefinition = {
-    method: 'GET', path: '/m6-probe-route', policy: { access: 'public' }, body: { kind: 'none' },
+    method: 'GET', path: '/m6-probe-route', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none',
     handler: (_req, res) => { res.status(200).json({ ok: true }); },
   };
   const assertSetupCode = (deps: Record<string, unknown>, code: string): void => {
@@ -862,7 +862,7 @@ test('startup: limits are required once a route exists beyond the two probes, an
 test('a limiter timeout blocks neither socket cleanup nor shutdown', async () => {
   const hangingLimiter: DistributedRateLimiter = { consume: () => new Promise(() => {}), probe: () => true };
   const publicRoute: RouteDefinition = {
-    method: 'GET', path: '/m6-slow-limited', policy: { access: 'public' }, body: { kind: 'none' },
+    method: 'GET', path: '/m6-slow-limited', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none',
     handler: (_req, res) => { res.status(200).json({ ok: true }); },
   };
   const logs: string[] = [];

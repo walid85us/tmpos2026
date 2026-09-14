@@ -285,8 +285,8 @@ test('the route is one bodiless GET behind an admin session and the view_command
   const defs = commandCenterRoutes({ read: () => ({}) });
   assert.equal(defs.length, 1);
   const [def] = defs;
-  assert.deepEqual({ method: def.method, path: def.path, policy: def.policy, body: def.body }, {
-    method: 'GET', path: P, body: { kind: 'none' },
+  assert.deepEqual({ method: def.method, path: def.path, policy: def.policy, body: def.body, idempotency: def.idempotency }, {
+    method: 'GET', path: P, body: { kind: 'none' }, idempotency: 'none',
     policy: { access: 'session', audience: 'admin', authorization: { scope: 'platform', permission: 'view_command_center' } },
   });
   assert.ok(Object.isFrozen(defs) && Object.isFrozen(def), 'the definitions are frozen');
@@ -344,6 +344,7 @@ test('the handler reads nothing of the request, principal or session', async () 
       json(payload: unknown) { sent.push(payload); return this; },
     };
     const [route] = commandCenterRoutes({ read }, { now: () => T0 });
+    assert.ok(route.idempotency === 'none', 'the read model requires no idempotency');
     await route.handler(req as never, res as never, ctx);
     assert.deepEqual(touched, [], `${label}: no request, principal or session access`);
     assert.deepEqual(sent, [status, body], label);

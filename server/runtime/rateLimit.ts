@@ -35,10 +35,11 @@
 // allowance passes; an in-contract limit is a 429 whose Retry-After is the wait in whole seconds;
 // anything else, a throw, a rejection or a deadline overrun is `rate_limit_unavailable` or
 // `rate_limit_timeout` — a 503.
-import { createHmac, createSecretKey } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { parseTrustedProxies } from './clientAddress.js';
 import type { TrustedProxies } from './clientAddress.js';
 import { outage, withDeadline } from './deadline.js';
+import { parseKeyMaterial, secretKeyOf } from './keyMaterial.js';
 import { EnforcementSetupError } from './routes.js';
 
 /** Where a limit applies: every request per boundary (or outside both), and each boundary's login exchange. */
@@ -90,30 +91,22 @@ export const RATE_LIMIT_BOUNDS = Object.freeze({ maxLimit: 1_000_000, minWindowM
  */
 export const LIMITER_DEADLINE_MS = 500;
 
-const KEY_SECRET_BYTES = Object.freeze({ min: 32, max: 64 });
-
 export interface LimiterKeyring {
   keyOf(namespace: RateLimitNamespace, dimension: RateLimitDimension, subject: string): string;
 }
 
 /** Keyed pseudonyms under `secret` (32–64 bytes): the one way a subject becomes a limiter key. */
 export function createLimiterKeyring(secret: unknown): LimiterKeyring {
-  if (!(secret instanceof Uint8Array) || secret.byteLength < KEY_SECRET_BYTES.min || secret.byteLength > KEY_SECRET_BYTES.max) {
-    throw new EnforcementSetupError('rate_limit_key_invalid');
-  }
-  const key = createSecretKey(Buffer.from(secret)); // a copy, held as a KeyObject: the caller's bytes may change
+  const key = secretKeyOf(secret, 'rate_limit_key_invalid'); // a private copy: the caller's bytes may change
   return Object.freeze({
     keyOf: (namespace: RateLimitNamespace, dimension: RateLimitDimension, subject: string): string =>
       createHmac('sha256', key).update(`tmpos-rate-limit:v1\n${namespace}\n${dimension}\n${subject}`).digest('base64url'),
   });
 }
 
-/** The keyed-hash secret from its configured text — unpadded base64url of 32–64 bytes — or null. */
+/** The keyed-hash secret from its configured text — unpadded, canonical base64url of 32–64 bytes — or null. */
 export function parseRateLimitKey(text: unknown): Buffer | null {
-  if (typeof text !== 'string' || !/^[A-Za-z0-9_-]{43,86}$/.test(text)) return null;
-  const bytes = Buffer.from(text, 'base64url');
-  // The round trip refuses non-canonical text: stray bits in the last character are no key material.
-  return bytes.length >= KEY_SECRET_BYTES.min && bytes.length <= KEY_SECRET_BYTES.max && bytes.toString('base64url') === text ? bytes : null;
+  return parseKeyMaterial(text);
 }
 
 /** The limits a runtime is composed with. */
@@ -122,7 +115,10 @@ export interface RequestLimitDeps {
   readonly limiter: DistributedRateLimiter;
   /** The keyed-hash secret (32–64 bytes), identical on every instance. */
   readonly keySecret: Uint8Array;
-  /** Exact CIDRs of the proxies whose X-Forwarded-For is believed; empty when clients connect directly. */
+  /**
+   * Exact CIDRs of the proxies whose X-Forwarded-For is believed. Empty means clients connect
+   * directly — a development or test deployment only: production composition refuses it.
+   */
   readonly trustedProxies: readonly string[];
 }
 

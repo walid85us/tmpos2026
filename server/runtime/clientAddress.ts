@@ -21,13 +21,13 @@
 // hop overwrites or appends to the chain — never passes a client's through untouched — and every
 // hop between it and the runtime is trusted.
 //
-// One canonical form: strict dotted-quad IPv4 (no leading zeros) or RFC 4291 IPv6 text, and an
-// IPv4-mapped IPv6 address (::ffff:a.b.c.d) folds to its IPv4 address before it is matched or
+// One canonical form: strict dotted-quad IPv4 (no leading zeros) or RFC 4291 IPv6 text, and only an
+// IPv4-mapped IPv6 address (::ffff:0:0/96) folds to its IPv4 address before it is matched or
 // grouped, so one client never holds two buckets. Grouping (limiterSubjectOf): an IPv4 client is
 // its own address; an IPv6 client is its /64, the smallest prefix a subscriber is routinely
-// assigned — except that NAT64 (64:ff9b::/96) and 6to4 (2002::/16) addresses group by the IPv4
-// address they carry. No address leaves this module except as a limiter subject, which
-// rateLimit.ts keys with a secret before any storage; none is logged, rendered or returned.
+// assigned. A NAT64 (64:ff9b::/96) or 6to4 (2002::/16) address is an IPv6 client like any other:
+// the IPv4 bits it embeds are never an identity. No address leaves this module except as a limiter
+// subject, which rateLimit.ts keys with a secret before any storage; none is logged, rendered or returned.
 import { isIPv6 } from 'node:net';
 import { EnforcementSetupError } from './routes.js';
 
@@ -71,9 +71,6 @@ const CIDR_RE = /^([^/]+)\/(0|[1-9][0-9]{0,2})$/;
 const OWS_RE = /^[ \t]+|[ \t]+$/g;
 // The top 96 bits of ::ffff:0:0/96, where IPv6 carries an IPv4 address.
 const MAPPED = 0xffffn;
-// The top 96 bits of the NAT64 well-known prefix 64:ff9b::/96, and the top 16 of 6to4, 2002::/16.
-const NAT64 = 0x64ff9b0000000000000000n;
-const SIX_TO_FOUR = 0x2002n;
 
 const addressOf = (family: Family, value: bigint): ClientAddress => Object.freeze({ family, value });
 
@@ -119,15 +116,9 @@ export function parseAddress(text: unknown): ClientAddress | null {
 
 /** The subject a client is limited as: an IPv4 address or an IPv6 /64. Never stored as is (rateLimit.ts keys it). */
 export function limiterSubjectOf(address: ClientAddress): string {
-  let v4: bigint | null = address.family === 4 ? address.value : null;
-  // IPv4 clients behind a transition prefix group by the address they carry: NAT64 would put every
-  // translated client in one /64, and 6to4 hands the holder of one IPv4 address 65 536 /64s.
-  if (address.family === 6 && (address.value >> 32n) === NAT64) v4 = address.value & 0xffffffffn;
-  if (address.family === 6 && (address.value >> 112n) === SIX_TO_FOUR) v4 = (address.value >> 80n) & 0xffffffffn;
-  if (v4 !== null) {
-    const ipv4 = v4;
-    return `4:${[24n, 16n, 8n, 0n].map((shift) => String((ipv4 >> shift) & 0xffn)).join('.')}`;
-  }
+  if (address.family === 4) return `4:${[24n, 16n, 8n, 0n].map((shift) => String((address.value >> shift) & 0xffn)).join('.')}`;
+  // Every IPv6 client is its /64, a NAT64 (64:ff9b::/96) or 6to4 (2002::/16) one included: the
+  // IPv4 bits such an address embeds are not the client's, so they are never its identity.
   return `6:${(address.value >> 64n).toString(16).padStart(16, '0')}`;
 }
 

@@ -115,7 +115,7 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
     const js = emitted.filter((f) => f.endsWith('.js'));
     assert.ok(js.length > 0, 'server build must emit JavaScript');
     assert.ok(js.some((f) => /(^|\/)server\.js$/.test(f)), 'the production entry server.js must be emitted');
-    for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js']) {
+    for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js', 'idempotency.js', 'keyMaterial.js']) {
       assert.ok(js.some((f) => f.endsWith(`/${mod}`)), `the shared enforcement chain must ship in the artifact: ${mod}`);
     }
     assert.ok(!emitted.some((f) => /\.test\.js$/.test(f)), 'test files must not be compiled into the artifact');
@@ -126,6 +126,7 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
       for (const bad of FORBIDDEN) assert.ok(!src.includes(bad), `${f}: emitted artifact references forbidden ${bad}`);
       assert.ok(!src.includes('createMemorySessionStore'), `${f}: the artifact carries no in-memory session store`);
       assert.ok(!/createMemoryRateLimiter|assertRateLimiterContract/.test(src), `${f}: the artifact carries no per-process rate limiter`);
+      assert.ok(!/createMemoryIdempotencyStore|assertIdempotencyStoreContract/.test(src), `${f}: the artifact carries no per-process idempotency store`);
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -206,7 +207,7 @@ test('the provider-aware production composition root reaches no test module, tes
     graph.add(file);
     assert.doesNotMatch(file, /\.test\.[cm]?[jt]s$|\.testkit\.ts$/, `${file}: a test module in the production graph`);
     const src = readFileSync(file, 'utf8');
-    assert.doesNotMatch(src, /createMemorySessionStore|createMemoryRateLimiter|devDiagnosticAuthAdapter|stubFirebaseAuthAdapter/, `${file}: a test or DEV double in the production graph`);
+    assert.doesNotMatch(src, /createMemorySessionStore|createMemoryRateLimiter|createMemoryIdempotencyStore|devDiagnosticAuthAdapter|stubFirebaseAuthAdapter/, `${file}: a test or DEV double in the production graph`);
     for (const spec of importSpecifiers(src)) {
       if (!spec.startsWith('.')) continue;
       const base = resolve(dirname(file), spec);
@@ -228,7 +229,7 @@ test('the in-memory session store is imported by test files only, anywhere in th
       const p = join(d, e.name);
       if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
       if (!/\.[cm]?[jt]s$/.test(p) || /\.test\.[cm]?[jt]s$/.test(p) || p.endsWith('.testkit.ts')) continue;
-      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('memorySessionStore.testkit') || s.includes('rateLimiter.testkit'))) offenders.push(p);
+      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => ['memorySessionStore.testkit', 'rateLimiter.testkit', 'idempotencyStore.testkit'].some((kit) => s.includes(kit)))) offenders.push(p);
     }
   })(join(REPO, 'server'));
   assert.deepEqual(offenders, [], 'only test files may import the in-memory session store or rate limiter');
@@ -259,6 +260,28 @@ test('no per-process limiter, fallback or second proxy contract exists in the pr
     }
   })(join(REPO, 'server'));
   assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
+});
+
+test('durable idempotency has no production store, no production route that requires it, and no database or provider adapter', () => {
+  // M6-IDEMPOT-P2: the port is provider-independent; its only store is test support, the composition
+  // root binds none, and nothing in the production graph registers a route that requires one.
+  const production = [...runtimeSourceFiles().filter((f) => !f.endsWith('.testkit.ts')),
+    ...readdirSync(join(REPO, 'server', 'composition')).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).map((f) => join(REPO, 'server', 'composition', f))];
+  // A registration, never the type that names the value or a comment that explains it.
+  const REQUIRED_ROUTE = /(?<!readonly )\bidempotency\s*:\s*['"`]required['"`]/;
+  for (const sample of ["{ idempotency: 'required', perform }", 'idempotency:"required"']) assert.match(sample, REQUIRED_ROUTE, `the scan must catch: ${sample}`);
+  for (const f of production) {
+    const code = readFileSync(f, 'utf8').replace(/\/\/.*$/gm, ''); // code only: a comment may name what it explains
+    assert.doesNotMatch(code, /createMemoryIdempotencyStore|assertIdempotencyStoreContract|idempotencyStore\.testkit/, `${f}: a per-process idempotency store in production`);
+    assert.doesNotMatch(code, REQUIRED_ROUTE, `${f}: a production route requires idempotency`);
+  }
+  const root = readFileSync(join(REPO, 'server', 'composition', 'productionSessions.ts'), 'utf8');
+  assert.match(root, /\bidempotencyStore:\s*null,/, 'the approved-adapter table binds no idempotency store');
+  const port = readFileSync(join(RUNTIME_DIR, 'idempotency.ts'), 'utf8');
+  assert.deepEqual(importSpecifiers(port).filter((s) => !s.startsWith('node:')).sort(), ['./deadline.js', './keyMaterial.js', './routes.js', './routes.js'],
+    'the idempotency port imports node built-ins and the runtime only: no database, migration or provider adapter');
+  const entry = readFileSync(join(RUNTIME_DIR, 'server.ts'), 'utf8');
+  assert.doesNotMatch(entry, /\bidempotency\b|\broutes\s*:/, 'the production entry composes no idempotency and no further route: the probes and the bounded fallback only');
 });
 
 test('the production entry and composition root compose no Command Center route or reader', () => {

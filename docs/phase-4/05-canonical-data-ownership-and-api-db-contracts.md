@@ -66,7 +66,7 @@ For each domain: canonical tables, aggregate root, tenant/store ownership, lifec
 | Auth errors | 401 (unauthenticated), sanitized |
 | Authz errors | 403 (authenticated but not permitted), sanitized reason code |
 | Validation | 422 with field-level codes (no echoed secrets) |
-| Conflicts | 409 (version/idempotency conflict) |
+| Conflicts | 409 (version conflict, or an idempotent request still in progress); 422 (an `Idempotency-Key` reused for a different request — [08](./08-production-gate-and-risk-register.md) G-IDEMPOT) |
 | Rate limits | 429 + `Retry-After` |
 | Unavailable/degraded | 503 with retry guidance; provider failure surfaces as a bounded upstream-unavailable code, never the raw provider error |
 

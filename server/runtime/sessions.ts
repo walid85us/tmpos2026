@@ -469,9 +469,9 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
   };
 
   const routes: RouteDefinition[] = [
-    { method: 'POST', path: paths.login, policy: { access: 'login', audience }, body: NO_BODY, handler: login },
-    { method: 'GET', path: paths.current, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, handler: current },
-    { method: 'POST', path: paths.logout, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, handler: logout },
+    { method: 'POST', path: paths.login, policy: { access: 'login', audience }, body: NO_BODY, idempotency: 'none', handler: login },
+    { method: 'GET', path: paths.current, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, idempotency: 'none', handler: current },
+    { method: 'POST', path: paths.logout, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, idempotency: 'none', handler: logout },
   ];
   return Object.freeze({
     audience,
