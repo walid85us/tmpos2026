@@ -42,10 +42,11 @@ test('a record schema is flat, closed and bounded, and refuses a field named for
   ] as const) {
     assert.equal(parseRecordSchema(schema), null, label);
   }
-  for (const name of [...AUDIT_FORBIDDEN_FIELDS, 'sessionId', 'csrfToken', 'idempotencyKey', 'apiKey', 'bearerToken', 'cookieValue', 'connectionUri', 'dsn', 'rawBody', 'cvv', 'pin', 'otp', 'jwt']) {
+  for (const name of [...AUDIT_FORBIDDEN_FIELDS, 'credential', 'clientCredentials', 'sessionId', 'csrfToken', 'idempotencyKey', 'apiKey', 'bearerToken', 'cookieValue', 'connectionUri', 'dsn', 'rawBody', 'cvv', 'pin', 'otp', 'jwt']) {
     assert.equal(parseRecordSchema({ [name]: { type: 'boolean' } }), null, `a field named ${name} is refused`);
   }
   assert.ok(parseRecordSchema({ company: { type: 'boolean' }, footprint: { type: 'boolean' } }), 'short names are refused whole, never as a part of another word');
+  assert.ok(parseRecordSchema({ credentia: { type: 'boolean' }, redential: { type: 'boolean' } }), 'a denylist part is refused whole: a fragment of it is no secret name');
 });
 
 test('a record carries exactly its fields in bounds, and at most MAX_RECORD_BYTES whatever its fields allow', () => {
