@@ -123,10 +123,12 @@ const AUDIENCES: readonly SessionAudience[] = ['tenant', 'admin'];
 //     backing store (docs/phase-4/02 §8 names one only as an example; every ADR is proposed), so
 //     none is bound and there is no per-process limiter to fall back to. An adapter must pass the
 //     port's conformance suite (assertRateLimiterContract) before it is approved here;
-//   - the durable idempotency store (G-IDEMPOT, M6): none may be approved until the business
-//     mutation, the lease-checked completion, the audit record and the outbox record commit in
-//     one transaction (idempotency.ts: the crash window), and an adapter must first pass
-//     assertIdempotencyStoreContract. There is no per-process store to fall back to.
+//   - the durable idempotency store, the command-transaction port and the outbox delivery store
+//     (G-IDEMPOT, M6; docs/phase-4/10 ADR-17): one PostgreSQL adapter must serve all three over one
+//     database — the lease a commit checks is the idempotency record's — and first pass
+//     assertIdempotencyStoreContract, assertCommandTransactionContract and assertOutboxDeliveryContract
+//     there, with fault injection. None exists, so the table binds none of them, and this root composes
+//     no transaction port, outbox or worker. There is no per-process store to fall back to.
 const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter' | 'idempotencyStore'> = Object.freeze({
   store: Object.freeze({ tenant: null, admin: null }),
   admission: Object.freeze({ tenant: null, admin: null }),

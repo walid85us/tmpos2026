@@ -312,21 +312,33 @@ test('only a state-changing route of a verified principal under a declared autho
   }
 });
 
-test("a route's operation matches its idempotency policy: a handler for none, a perform for required, never both", () => {
+test("a route's operation matches its idempotency policy: a handler for none, a perform or a command for required, never two", () => {
   const { handler: _handler, ...noHandler } = route({});
   const { perform: _perform, ...noPerform } = required({});
+  const command = { contract: {}, plan: () => ({}) };
   for (const [label, def] of [
     ['none with a perform instead of a handler', { ...noHandler, perform: outcome }],
     ['none with both', route({ perform: outcome })],
+    ['none with a command', route({ command })],
     ['required with a handler instead of a perform', { ...noPerform, handler }],
     ['required with both', required({ handler })],
     ['required without an operation', noPerform],
     ['required with a non-function perform', required({ perform: 'outcome' })],
+    ['required with a perform and a command', required({ command })],
+    ['required with a command without a planner', { ...noPerform, command: { contract: {} } }],
+    ['required with a command whose planner is not a function', { ...noPerform, command: { contract: {}, plan: 'plan' } }],
+    ['required with a command without a contract', { ...noPerform, command: { plan: () => ({}) } }],
+    ['required with a command carrying more than its contract and planner', { ...noPerform, command: { ...command, sql: 'select 1' } }],
+    ['required with a command that is a function', { ...noPerform, command: () => ({}) }],
   ] as const) {
     assert.equal(setupCode([def]), 'route_handler_invalid', label);
   }
   const registered = defineRoutes([required({})]).lookup('POST', '/v1/probe');
-  assert.ok(registered?.idempotency === 'required' && registered.perform === outcome && !('handler' in registered));
+  assert.ok(registered?.idempotency === 'required' && 'perform' in registered && registered.perform === outcome && !('handler' in registered));
+  const commandRoute = defineRoutes([{ ...noPerform, command }]).lookup('POST', '/v1/probe');
+  assert.ok(commandRoute?.idempotency === 'required' && 'command' in commandRoute && (commandRoute.command.plan as unknown) === command.plan
+    && Object.isFrozen(commandRoute.command) && !('perform' in commandRoute) && !('handler' in commandRoute),
+  'a command registers as its contract and planner only; createApp validates the contract');
 });
 
 test('the idempotency policy is read once, so a getter cannot validate one value and register another', () => {

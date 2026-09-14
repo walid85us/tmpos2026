@@ -115,7 +115,7 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
     const js = emitted.filter((f) => f.endsWith('.js'));
     assert.ok(js.length > 0, 'server build must emit JavaScript');
     assert.ok(js.some((f) => /(^|\/)server\.js$/.test(f)), 'the production entry server.js must be emitted');
-    for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js', 'idempotency.js', 'keyMaterial.js']) {
+    for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js', 'idempotency.js', 'keyMaterial.js', 'commandTransaction.js', 'outbox.js']) {
       assert.ok(js.some((f) => f.endsWith(`/${mod}`)), `the shared enforcement chain must ship in the artifact: ${mod}`);
     }
     assert.ok(!emitted.some((f) => /\.test\.js$/.test(f)), 'test files must not be compiled into the artifact');
@@ -127,6 +127,8 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
       assert.ok(!src.includes('createMemorySessionStore'), `${f}: the artifact carries no in-memory session store`);
       assert.ok(!/createMemoryRateLimiter|assertRateLimiterContract/.test(src), `${f}: the artifact carries no per-process rate limiter`);
       assert.ok(!/createMemoryIdempotencyStore|assertIdempotencyStoreContract/.test(src), `${f}: the artifact carries no per-process idempotency store`);
+      assert.ok(!/createMemoryCommandTransaction|createMemoryOutboxDeliveryStore|assertCommandTransactionContract|assertOutboxDeliveryContract/.test(src),
+        `${f}: the artifact carries no per-process transaction port or outbox`);
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -207,7 +209,7 @@ test('the provider-aware production composition root reaches no test module, tes
     graph.add(file);
     assert.doesNotMatch(file, /\.test\.[cm]?[jt]s$|\.testkit\.ts$/, `${file}: a test module in the production graph`);
     const src = readFileSync(file, 'utf8');
-    assert.doesNotMatch(src, /createMemorySessionStore|createMemoryRateLimiter|createMemoryIdempotencyStore|devDiagnosticAuthAdapter|stubFirebaseAuthAdapter/, `${file}: a test or DEV double in the production graph`);
+    assert.doesNotMatch(src, /createMemorySessionStore|createMemoryRateLimiter|createMemoryIdempotencyStore|createMemoryCommandTransaction|createMemoryOutboxDeliveryStore|devDiagnosticAuthAdapter|stubFirebaseAuthAdapter/, `${file}: a test or DEV double in the production graph`);
     for (const spec of importSpecifiers(src)) {
       if (!spec.startsWith('.')) continue;
       const base = resolve(dirname(file), spec);
@@ -229,7 +231,7 @@ test('the in-memory session store is imported by test files only, anywhere in th
       const p = join(d, e.name);
       if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
       if (!/\.[cm]?[jt]s$/.test(p) || /\.test\.[cm]?[jt]s$/.test(p) || p.endsWith('.testkit.ts')) continue;
-      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => ['memorySessionStore.testkit', 'rateLimiter.testkit', 'idempotencyStore.testkit'].some((kit) => s.includes(kit)))) offenders.push(p);
+      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => ['memorySessionStore.testkit', 'rateLimiter.testkit', 'idempotencyStore.testkit', 'transactionalOutbox.testkit'].some((kit) => s.includes(kit)))) offenders.push(p);
     }
   })(join(REPO, 'server'));
   assert.deepEqual(offenders, [], 'only test files may import the in-memory session store or rate limiter');
@@ -281,7 +283,66 @@ test('durable idempotency has no production store, no production route that requ
   assert.deepEqual(importSpecifiers(port).filter((s) => !s.startsWith('node:')).sort(), ['./deadline.js', './keyMaterial.js', './routes.js', './routes.js'],
     'the idempotency port imports node built-ins and the runtime only: no database, migration or provider adapter');
   const entry = readFileSync(join(RUNTIME_DIR, 'server.ts'), 'utf8');
-  assert.doesNotMatch(entry, /\bidempotency\b|\broutes\s*:/, 'the production entry composes no idempotency and no further route: the probes and the bounded fallback only');
+  assert.doesNotMatch(entry, /\bidempotency\b|\btransactions\b|\bevents\s*:|\broutes\s*:/,
+    'the production entry composes no idempotency, transaction port, event contract or further route: the probes and the bounded fallback only');
+});
+
+test('the transactional outbox has no production adapter, worker, database, network client or SQL, and the adapter table stays closed', () => {
+  // M6-OUTBOX-P3: the transaction and delivery ports are provider-independent; their only adapters are test
+  // support; the composition root binds neither; no production module names a delivery entry point or holds an
+  // interval timer (a self-rescheduling setTimeout is left to review); and a command route — which must declare
+  // idempotency: 'required' — is already refused by the scan above.
+  // Every production source file under server/, recursively — the runtime, the composition root and every other tree —
+  // tests and testkits aside, so a new module anywhere is scanned too.
+  const production = [];
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.[cm]?[jt]s$/.test(p) && !/\.(test|testkit)\.[cm]?[jt]s$/.test(p)) production.push(p);
+    }
+  })(join(REPO, 'server'));
+  assert.ok(production.includes(join(RUNTIME_DIR, 'outbox.ts')) && production.includes(join(REPO, 'server', 'composition', 'productionSessions.ts')),
+    'the scan reaches the runtime and the composition root');
+  const codeOf = (file) => readFileSync(file, 'utf8').replace(/\/\/.*$/gm, ''); // code only: a comment may name what it explains
+  const DOUBLES = /createMemoryCommandTransaction|createMemoryOutboxDeliveryStore|createMemoryTransactionalHarness|assertCommandTransactionContract|assertOutboxDeliveryContract|transactionalOutbox\.testkit/;
+  const WORKER = /\b(?:deliverOutboxBatch|claimOutbox|acknowledgeOutbox|retryOutbox|deadLetterOutbox|createOutboxDelivery)\b/;
+  const TIMER = /\bsetInterval\b/;
+  const SQL = /\binsert\s+into\b|\bdelete\s+from\b|\bupdate\s+\w+\s+set\b|\bselect\s+[\w*,\s]+\bfrom\b|\bsql\s*`|\.unsafe\s*\(/i;
+  for (const sample of ['deliverOutboxBatch(delivery, publish)', "import { deliverOutboxBatch as pass } from './outbox.js'", 'claimOutbox(delivery, request, 1000)',
+    "const endpoint = 'https://broker'; deliverOutboxBatch(delivery, publish);"]) {
+    assert.match(sample, WORKER, `the scan must catch: ${sample}`);
+  }
+  for (const sample of ['setInterval(tick, 1000)', 'const every = setInterval;', "import { setInterval as every } from 'node:timers/promises'"]) {
+    assert.match(sample, TIMER, `the scan must catch: ${sample}`);
+  }
+  for (const sample of ['INSERT INTO outbox', 'update item set name = $1', 'select id, name from item', 'sql`select 1`', 'db.unsafe(query)']) assert.match(sample, SQL, `the scan must catch: ${sample}`);
+  for (const f of production) {
+    const code = codeOf(f);
+    assert.doesNotMatch(code, DOUBLES, `${f}: an in-memory transaction port or outbox in production`);
+    // outbox.ts defines the delivery entry points; no other production module names one (an aliased import included),
+    // and no production module, outbox.ts included, holds an interval timer. Both scans read the whole source — comments
+    // and strings included, since stripping `//` would also strip a URL's tail — and no production file names either.
+    const source = readFileSync(f, 'utf8');
+    if (f !== join(RUNTIME_DIR, 'outbox.ts')) assert.doesNotMatch(source, WORKER, `${f}: a delivery pass in production`);
+    assert.doesNotMatch(source, TIMER, `${f}: an interval timer in production`);
+  }
+  // The two contracts import node built-ins and the runtime only — no database, network or provider client — and hold no SQL.
+  const imports = (name) => importSpecifiers(readFileSync(join(RUNTIME_DIR, name), 'utf8')).sort();
+  assert.deepEqual(imports('outbox.ts'), ['./deadline.js', './routes.js', 'node:crypto']);
+  assert.deepEqual(imports('commandTransaction.ts'), ['./deadline.js', './idempotency.js', './idempotency.js', './outbox.js', './outbox.js', './routes.js', './routes.js', 'node:crypto', 'node:util']);
+  for (const name of ['outbox.ts', 'commandTransaction.ts']) assert.doesNotMatch(codeOf(join(RUNTIME_DIR, name)), SQL, `${name}: SQL text in a provider-independent contract`);
+  // The approved-adapter table stays closed: no transaction port or outbox slot, nothing bound, nothing composed.
+  const root = readFileSync(join(REPO, 'server', 'composition', 'productionSessions.ts'), 'utf8');
+  const table = /const PRODUCTION_ADAPTERS[^=]*=\s*Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(root);
+  assert.ok(table, 'the approved-adapter table exists');
+  assert.deepEqual([...table[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), ['store', 'admission', 'authorizer', 'limiter', 'idempotencyStore'],
+    'the approved-adapter table holds no transaction or outbox adapter');
+  assert.match(table[1], /\blimiter:\s*null,\s*idempotencyStore:\s*null,/, 'and binds no limiter or idempotency store');
+  for (const f of readdirSync(join(REPO, 'server', 'composition')).filter((n) => /\.[cm]?[jt]s$/.test(n) && !/\.test\./.test(n))) {
+    assert.doesNotMatch(codeOf(join(REPO, 'server', 'composition', f)), /commandTransaction|outbox|transactions\s*:|events\s*:/i,
+      `${f}: no composition file composes a transaction port, outbox or event contract`);
+  }
 });
 
 test('the production entry and composition root compose no Command Center route or reader', () => {

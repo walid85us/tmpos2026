@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 106;
+export const MIN_SUITES = 108;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -50,6 +50,8 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/clientAddress.test.ts',                      // M6 trusted-proxy client address: right-to-left walk, spoof resistance, /64 grouping
   'server/runtime/rateLimit.test.ts',                          // M6 distributed limiter port: keyed pseudonyms, strict outcomes, adapter conformance
   'server/runtime/idempotency.test.ts',                        // M6 durable idempotency: key grammar, sealed replay, strict outcomes, store conformance, chain order
+  'server/runtime/commandTransaction.test.ts',                 // M6 atomic command transaction: fencing, all-or-nothing commit, conformance, the chain
+  'server/runtime/outbox.test.ts',                             // M6 transactional outbox: closed contracts, bounded envelope, delivery conformance, one bounded pass
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context

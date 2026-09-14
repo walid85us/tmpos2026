@@ -59,8 +59,8 @@ For each domain: canonical tables, aggregate root, tenant/store ownership, lifec
 | Versioned paths | `/api/v1/...` (tenant), `/admin/v1/...` (Backend CP) |
 | Request/response schemas | typed, validated at the boundary; reject unknown fields on writes |
 | Pagination/filtering/sorting | cursor pagination; explicit allowlisted filter/sort fields |
-| Concurrency | `version`/`updated_at` optimistic concurrency; conflicting write → 409 |
-| Idempotency | `Idempotency-Key` header for retryable/mutating requests; durable key store |
+| Concurrency | `version`/`updated_at` optimistic concurrency; conflicting write → 409 `write_conflict`, never recorded for replay |
+| Idempotency | `Idempotency-Key` header for retryable/mutating requests; durable key store in PostgreSQL, completed in the mutation's own transaction ([ADR-17](./10-architecture-decision-records.md)) |
 | Correlation | server-generated `request_id`/`trace_id`; **no sensitive identifier** in correlation values |
 | Error envelope | bounded `{ error: { code, message, correlationId } }`; **no stack traces, no raw DB/provider errors** |
 | Auth errors | 401 (unauthenticated), sanitized |
@@ -82,7 +82,7 @@ For each domain: canonical tables, aggregate root, tenant/store ownership, lifec
 | Immutable identifiers | UUID PKs; never reuse |
 | Soft-delete/suspension | soft-delete + status; hard purge is a governed retention job |
 | Append-only audit | `audit_event` remains immutable (trigger already enforces for all roles) |
-| Outbox/events | transactional outbox table per bounded context for async/provider effects |
+| Outbox/events | transactional outbox per bounded context for async/provider effects: events created in the mutation's transaction with its idempotency completion and audit record, from a closed, append-only contract registry; immutable; delivered at least once through fenced claims; consumers deduplicate by event ID; no global ordering ([ADR-17](./10-architecture-decision-records.md)). Platform-scope events carry a null tenant until M5 |
 | RLS strategy | enable RLS with **tenant/store-scoped policies**; the API connects as a **scoped app role** (not owner) so RLS is enforced; privileged migration/admin uses a separate role |
 | Server-side scope enforcement | scope derived from the session/membership; **client-provided `tenantId`/`storeId` is request context only and never independently establishes authority** |
 | Connection-role separation | app role (RLS-bound) vs migration/owner role (privileged) |

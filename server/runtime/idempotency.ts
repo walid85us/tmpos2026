@@ -4,8 +4,9 @@
 // each holder of an unexpired lease on its client key, and answers every retry of a completed
 // operation with the response it recorded the first time. The step runs last in the chain
 // (app.ts): after the client and rate limit, CSRF and origin, authentication and authorization,
-// and the bounded body read — so a refusal reserves nothing — and just before the operation,
-// which is handed only its IdempotentContext and returns its outcome for the runtime to record.
+// and the bounded body read — so a refusal reserves nothing — and just before the operation: a
+// `perform`, handed only its IdempotentContext, whose outcome the runtime records; or a `command`,
+// whose plan the runtime commits atomically with its completion (commandTransaction.ts).
 //
 // The key. Exactly one `Idempotency-Key` header line holding a UUID version 4 in its hyphenated
 // hexadecimal text form — case-insensitive on input (RFC 9562), normalized to lowercase. This is
@@ -68,17 +69,18 @@
 // infrastructure error, a timeout, a crash or a malformed outcome, which complete nothing — the
 // reservation then waits out its lease.
 //
-// The crash window — what this does NOT do. The reservation, the operation's own business write
-// and the completion are separate steps, and today the business write is not in the store's
+// The crash window — what `perform` does NOT do. For a `perform` the reservation, the operation's own
+// business write and the completion are separate steps: the business write is not in the store's
 // transaction. An instance that dies, an operation that commits and then fails, or a completion
 // the store refuses leaves an applied operation still in progress; once its lease expires a retry
 // reclaims it (`attempt.reclaimed`) and the operation runs again. An operation that outlives its
-// deadline runs on unless it honours its abort signal, and can then overlap a reclaimer. So the
-// contract guarantees one holder of an unexpired lease per operation and the replay of a completed
-// one — never exactly-once execution. Closing the window is the authoritative implementation's job:
-// the business mutation, the lease-checked completion, the durable audit record and the
-// transactional-outbox record committed in one database transaction. Until it exists no store
-// adapter is approved (server/composition binds none) and no production route requires idempotency.
+// deadline runs on unless it honours its abort signal, and can then overlap a reclaimer. So a
+// `perform` guarantees one holder of an unexpired lease per operation and the replay of a completed
+// one — never exactly-once execution — and is never approved for a production route. A `command`
+// closes the window by contract (commandTransaction.ts): its business mutation, the lease-checked
+// completion, its audit record and its outbox events commit in one transaction of the authoritative
+// store, so at most one attempt commits. No adapter implements that yet: none is approved
+// (server/composition binds none) and no production route requires idempotency.
 //
 // Also bounded: a record lives IDEMPOTENCY_POLICY.retentionMs (24 h) from its acquisition, so a
 // retry with the same key after that is a new operation; and IDEMPOTENCY_KEY and the contract
@@ -120,7 +122,7 @@ const MAX_ENVELOPE_BYTES = 2 * MAX_REPLAY_BODY_BYTES + 1_024;
 export const MAX_SEALED_LENGTH = Math.ceil(((IV_BYTES + MAX_ENVELOPE_BYTES + TAG_BYTES) * 4) / 3);
 
 // The error words only the runtime answers with: an operation's outcome may not borrow one.
-const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused']);
+const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict']);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
 const LOCATION_RE = /^\/(?!\/)(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$/;

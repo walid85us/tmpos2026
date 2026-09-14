@@ -52,9 +52,14 @@
 //                run again only after that lease expires and is reclaimed — idempotency.ts: the
 //                crash window), under the port deadline, handed its IdempotentContext only, its
 //                outcome recorded before it is sent (a malformed outcome -> 500, an overrun or a
-//                store that cannot record -> 503; neither is recorded); any other route's handler
-//                exactly once, with the principal, the session view and the parsed value as
-//                ctx.body; a throw or rejection -> bounded 500.
+//                store that cannot record -> 503; neither is recorded); a `required` route's
+//                `command` planned synchronously from its body alone (a throw or a plan out of its
+//                contract -> 500) and committed atomically — the lease check, the mutation, the
+//                completion, its audit record and its outbox events — through the transaction port
+//                under the runtime's own deadline (commandTransaction.ts), its response sent only once
+//                committed: a conflict -> 409, and anything else -> 503 that assumes no rollback and
+//                releases nothing; any other route's handler exactly once, with the principal, the
+//                session view and the parsed value as ctx.body; a throw or rejection -> bounded 500.
 //   notFoundHandler / errorHandler — the terminal bounded 404 / 500;
 //   abortStartedResponse — cuts a response that failed after it had started.
 // createBoundedServer refuses any request-target that is not origin-form (bounded
@@ -72,7 +77,9 @@
 // if any route lacks a valid access, body or idempotency policy, a public route is not
 // GET, an authenticated route has no authenticator or authorizer, a login or session
 // route's boundary is not composed with every port, a route requires idempotency with
-// no durable store and key composed, the port deadline is not a whole number of
+// no durable store and key composed, a command route has no transaction port or a contract out of
+// line with the event contracts, the transaction port is composed without the idempotency store it
+// fences against, the port deadline is not a whole number of
 // milliseconds up to its cap, or an unsafe route has no trusted origin.
 //
 // There is NO body parser: a body reaches a handler only through its route's declared
@@ -84,7 +91,7 @@
 // any route but the two probes without the distributed limiter (`rate_limit_required`).
 import express from 'express';
 import type { Express, Request, Response, NextFunction, RequestHandler, ErrorRequestHandler } from 'express';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { RequestListener } from 'node:http';
 import type { Readable } from 'node:stream';
@@ -106,9 +113,13 @@ import {
   IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, acquireIdempotency, completeIdempotency, createIdempotency, envelopeFromOutcome, readIdempotencyKey,
 } from './idempotency.js';
 import type { Idempotency, IdempotencyDeps, IdempotencyRefusal, ReplayEnvelope } from './idempotency.js';
+import { COMMAND_TRANSACTION_DEADLINE_MS, commitCommand, createCommandTransactions, defineCommands, prepareCommand } from './commandTransaction.js';
+import type { CommandContract, CommandTransactionDeps, CommandTransactions } from './commandTransaction.js';
+import { defineOutboxEvents } from './outbox.js';
+import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
 import { EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
-import type { BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
+import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 
 export interface ReadinessState {
   isReady(): boolean;
@@ -166,7 +177,8 @@ export const HTTP_SERVER_LIMITS = {
 // The longest chains make eight sequential bounded calls: a login presenting a session (the
 // request and login client limits, the verifier, the account limit, admission, revoke, create),
 // and an idempotency-required session route (the request limit, the session read, admission,
-// the session update, authorization, acquisition, the operation itself, completion). The
+// the session update, authorization, acquisition, the operation itself, completion — a command's
+// planner makes no call, and its one commit takes the completion's place). The
 // socket's inactivity timeout runs through all of them, so a port deadline is capped at one
 // eighth of that timeout: however slow every port is, the request ends in a bounded 503, never a reset.
 const MAX_SEQUENTIAL_PORT_CALLS = 8;
@@ -480,6 +492,13 @@ export interface AppDeps {
    * route requires idempotency: no default, no per-process stand-in, no fallback.
    */
   idempotency?: IdempotencyDeps;
+  /**
+   * The authoritative store's command-transaction port (commandTransaction.ts), served by the same adapter
+   * and database as `idempotency`. Required once any route has a `command`; never composed alone.
+   */
+  transactions?: CommandTransactionDeps;
+  /** The closed event contracts command routes may enqueue (outbox.ts), validated at startup. */
+  events?: readonly EventContract[];
   /** The session boundaries composed, each from its own ports (sessions.ts). */
   sessions?: SessionDeps;
   /** The bound on every port call in ms (deadline.ts): a whole number up to MAX_PORT_DEADLINE_MS. */
@@ -506,6 +525,7 @@ export function createApp(deps: AppDeps): Express {
   // Validated first: a malformed limiter, secret, proxy list or idempotency store refuses startup.
   const limits = deps.limits === undefined ? null : createRequestLimits(deps.limits);
   const idempotency = deps.idempotency === undefined ? null : createIdempotency(deps.idempotency);
+  const transactions = deps.transactions === undefined ? null : createCommandTransactions(deps.transactions);
   // The idempotency secret is its own — never the limiter's, however either is padded (keyMaterial.ts).
   if (idempotency !== null && limits !== null
     && sameKeyMaterial((deps.idempotency as IdempotencyDeps).keySecret, (deps.limits as RequestLimitDeps).keySecret)) {
@@ -513,7 +533,8 @@ export function createApp(deps: AppDeps): Express {
   }
 
   // Readiness: ready only after local init completes, every injected dependency check passes and
-  // every composed store — the limiter's and, when composed, the idempotency store — answers its
+  // every composed store — the limiter's and, when composed, the idempotency store and the
+  // command-transaction port — answers its
   // probe with exactly `true`, so readiness says whether protected traffic can be served. Each
   // check runs under the port deadline, and no probe touches a client bucket or record.
   // However many readiness requests arrive, an instance asks each store at most once per
@@ -535,6 +556,7 @@ export function createApp(deps: AppDeps): Express {
     ...(deps.dependencyChecks ?? []),
     ...(limits === null ? [] : [sharedProbe((signal) => limits.limiter.probe(signal), LIMITER_DEADLINE_MS)]),
     ...(idempotency === null ? [] : [sharedProbe((signal) => idempotency.store.probe(signal), IDEMPOTENCY_DEADLINE_MS)]),
+    ...(transactions === null ? [] : [sharedProbe((signal) => transactions.port.probe(signal), COMMAND_TRANSACTION_DEADLINE_MS)]),
   ];
   const readinessHandler: RouteHandler = async (_req, res) => {
     try {
@@ -590,6 +612,16 @@ export function createApp(deps: AppDeps): Express {
   if (limits === null && routes.some((r) => !isProbe(r))) throw new EnforcementSetupError('rate_limit_required');
   // An operation that requires idempotency never runs without its durable store and key.
   if (idempotency === null && routes.some((r) => r.idempotency === 'required')) throw new EnforcementSetupError('idempotency_required');
+  // A command commits only through the transaction port, whose lease check is the idempotency store's own
+  // (one adapter, one database), so neither is composed without the other; and every command route's
+  // contract is validated against the closed event contracts, one route per kind.
+  const outboxEvents = defineOutboxEvents(deps.events ?? []);
+  const commandRoutes = routes.filter((r) => r.idempotency === 'required' && 'command' in r);
+  // Each route's contract as validated: the runtime never reads a declared contract directly.
+  const validated = defineCommands(commandRoutes.map((r) => ('command' in r ? r.command.contract : null)), outboxEvents).list();
+  const contractOf = new Map(commandRoutes.map((r, i) => [r, validated[i]]));
+  if (transactions === null && commandRoutes.length > 0) throw new EnforcementSetupError('command_transaction_required');
+  if (transactions !== null && idempotency === null) throw new EnforcementSetupError('idempotency_required');
 
   const app = express();
   app.disable('x-powered-by');
@@ -793,6 +825,30 @@ export function createApp(deps: AppDeps): Express {
         if (typeof acquired === 'string') return idempotencyRefusal(req, res, acquired);
         if (acquired.outcome === 'replay') return sendRecorded(res, acquired.response, true);
         if (acquired.reclaimed) emitLog('warn', { event: 'idempotency_reclaimed', requestId: requestIdOf(res) }, deps.log);
+        if ('command' in route) {
+          // Startup proved the transaction port composed beside this store, and the route's contract registered.
+          const contract = contractOf.get(route) as CommandContract;
+          const newAggregateId = randomUUID();
+          let plan: unknown;
+          try {
+            plan = route.command.plan(Object.freeze({ audience, body: parsed, newAggregateId }));
+          } catch {
+            return refuse(req, res, 500, 'internal_error', 'command_plan_failed'); // nothing committed; the lease waits out its time
+          }
+          const requirement = 'authorization' in policy ? policy.authorization : null;
+          const prepared = prepareCommand(contract, outboxEvents, plan, {
+            scope: operation.scope, lease, newAggregateId, authorization: requirement as AuthorizationRequirement,
+            seal: (envelope) => store.keyring.seal(envelope, operation),
+          });
+          if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');
+          // The response goes out only once the authoritative store confirms the commit, which runs under the
+          // runtime's own deadline whatever the client's connection does. A conflict committed nothing; any
+          // other refusal may or may not have committed, so none releases the lease: a retry replays or waits.
+          const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
+          if (refused === 'transaction_conflict') return refuse(req, res, 409, 'write_conflict', refused);
+          if (refused !== null) return refuse(req, res, 503, 'service_unavailable', refused);
+          return sendRecorded(res, prepared.response, false);
+        }
         let outcome: unknown;
         try {
           outcome = await withDeadline(deadlineMs, (signal) => route.perform(Object.freeze({

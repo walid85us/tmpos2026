@@ -7,9 +7,11 @@
 // plus an allowed method, a literal path and its operation, and nothing else: a missing,
 // unknown, partial or contradictory field fails startup with a bounded EnforcementSetupError code
 // (never the offending input). The operation matches the idempotency policy: a `none` route's
-// handler writes its own response; a `required` route's `perform` is handed only its
-// IdempotentContext and returns its outcome, which the runtime records before sending — a route
-// has one or the other, never both. The access policies are:
+// handler writes its own response; a `required` route has exactly one of a `perform`, handed only its
+// IdempotentContext, whose outcome the runtime records before sending (idempotency.ts: the crash
+// window, so never a production route), or a `command` — its command contract and a synchronous
+// planner, whose plan the runtime commits atomically with its completion, audit record and outbox
+// events (commandTransaction.ts). No route has two operations. The access policies are:
 //   public        — GET only, so no unauthenticated state-changing route can register (G-UNAUTH);
 //   authenticated — a Bearer credential verified per request, plus the authorization it requires;
 //   login         — the one pre-session exchange of a session boundary (M4): only that
@@ -29,8 +31,9 @@
 // slash or encoding variant can inherit another route's policy. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
-// handler only as the parsed ctx.body. A `perform` receives no request or response at all.
+// handler only as the parsed ctx.body. A `perform` or a planner receives no request or response at all.
 import type { Request, Response } from 'express';
+import type { CommandContract } from './commandTransaction.js';
 
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type AuthorizationScope = 'platform' | 'tenant' | 'store';
@@ -116,6 +119,38 @@ export interface IdempotentOutcome {
 
 export type IdempotentOperation = (ctx: IdempotentContext) => IdempotentOutcome | Promise<IdempotentOutcome>;
 
+/** What a command's planner learns — no principal, key, credential, cookie, CSRF token or request ID. */
+export interface CommandContext {
+  /** The session boundary the request came through; null on a Bearer-authenticated route. */
+  readonly audience: SessionAudience | null;
+  /** The parsed JSON body — still untrusted input — or undefined when none was taken. */
+  readonly body: unknown;
+  /** A UUID the runtime generated for this attempt: the only aggregate ID a create may name. */
+  readonly newAggregateId: string;
+}
+
+type PlanRecord = Readonly<Record<string, string | number | boolean>>;
+
+/** A command's plan: one aggregate's change, the events it enqueues and the response to send once committed. */
+export interface CommandPlan {
+  /** For a create (expectedVersion null) exactly ctx.newAggregateId; for an update the aggregate's UUID. */
+  readonly aggregateId: string;
+  readonly expectedVersion: number | null;
+  readonly changes: PlanRecord;
+  readonly events: readonly Readonly<{ type: string; payload: PlanRecord }>[];
+  /** 200 or 201 only. */
+  readonly response: IdempotentOutcome;
+}
+
+/** Plans from the body alone: synchronous, no I/O, no write — the runtime commits the plan. */
+export type CommandPlanner = (ctx: CommandContext) => CommandPlan;
+
+/** A command operation: its contract (validated at startup against the event contracts) and its planner. */
+export interface CommandRoute {
+  readonly contract: CommandContract;
+  readonly plan: CommandPlanner;
+}
+
 interface RouteDefinitionBase {
   readonly method: RouteMethod;
   readonly path: string;
@@ -125,7 +160,8 @@ interface RouteDefinitionBase {
 
 export type RouteDefinition =
   | (RouteDefinitionBase & { readonly idempotency: 'none'; readonly handler: RouteHandler })
-  | (RouteDefinitionBase & { readonly idempotency: 'required'; readonly perform: IdempotentOperation });
+  | (RouteDefinitionBase & { readonly idempotency: 'required'; readonly perform: IdempotentOperation })
+  | (RouteDefinitionBase & { readonly idempotency: 'required'; readonly command: CommandRoute });
 
 export interface RouteTable {
   lookup(method: string, path: string): RouteDefinition | undefined;
@@ -166,7 +202,12 @@ export type EnforcementSetupCode =
   | 'idempotency_required'
   | 'idempotency_invalid'
   | 'idempotency_key_invalid'
-  | 'idempotency_key_shared';
+  | 'idempotency_key_shared'
+  | 'command_transaction_required'
+  | 'command_transaction_invalid'
+  | 'command_registry_invalid'
+  | 'outbox_registry_invalid'
+  | 'outbox_delivery_invalid';
 
 /** Startup refusal. Carries a bounded code only — never the rejected input. */
 export class EnforcementSetupError extends Error {
@@ -317,11 +358,22 @@ function checkBoundary(method: string, path: string, policy: RoutePolicy, body: 
   }
 }
 
+/** A command operation's shape; its contract is validated in createApp against the event contracts. */
+function parseCommand(raw: unknown): CommandRoute {
+  if (isPlainObject(raw) && hasOnlyKeys(raw, ['contract', 'plan'])) {
+    const { contract, plan } = raw;
+    // The contract as declared; createApp validates it against the event contracts before any request,
+    // and the runtime reads only that validated copy.
+    if (isPlainObject(contract) && typeof plan === 'function') return Object.freeze({ contract: contract as unknown as CommandContract, plan: plan as CommandPlanner });
+  }
+  throw new EnforcementSetupError('route_handler_invalid');
+}
+
 function parseDefinition(raw: unknown): RouteDefinition {
-  if (!isPlainObject(raw) || !hasOnlyKeys(raw, ['method', 'path', 'policy', 'body', 'idempotency', 'handler', 'perform'])) {
+  if (!isPlainObject(raw) || !hasOnlyKeys(raw, ['method', 'path', 'policy', 'body', 'idempotency', 'handler', 'perform', 'command'])) {
     throw new EnforcementSetupError('route_definition_invalid');
   }
-  const { method, path, handler, perform } = raw;
+  const { method, path, handler, perform, command } = raw;
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH || !PATH_RE.test(path)) {
     throw new EnforcementSetupError('route_path_invalid');
@@ -331,12 +383,14 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
   const idempotency = parseIdempotency(raw.idempotency, method, policy);
-  // The operation matches the policy: a handler for `none`, a `perform` for `required` — one, never both.
+  // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {
-    if (typeof handler !== 'function' || 'perform' in raw) throw new EnforcementSetupError('route_handler_invalid');
+    if (typeof handler !== 'function' || 'perform' in raw || 'command' in raw) throw new EnforcementSetupError('route_handler_invalid');
     return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, handler: handler as RouteHandler });
   }
-  if (typeof perform !== 'function' || 'handler' in raw) throw new EnforcementSetupError('route_handler_invalid');
+  if ('handler' in raw || ('perform' in raw) === ('command' in raw)) throw new EnforcementSetupError('route_handler_invalid');
+  if ('command' in raw) return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, command: parseCommand(command) });
+  if (typeof perform !== 'function') throw new EnforcementSetupError('route_handler_invalid');
   return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, perform: perform as IdempotentOperation });
 }
 
