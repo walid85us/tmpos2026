@@ -426,8 +426,9 @@ export async function writeAuditEvent(
   // back. randomUUID() is crypto-grade, matching the column's gen_random_uuid() default.
   const eventId = randomUUID();
 
+  // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
   await executor`
-    insert into audit_event (
+    insert into public.audit_event (
       event_id,
       audit_version,
       request_id,

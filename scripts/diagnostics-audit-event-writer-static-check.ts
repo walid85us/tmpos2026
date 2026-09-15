@@ -73,10 +73,10 @@ check(
 // Writer — INSERT-only into audit_event; NO other mutation
 // =============================================================================
 
-check('C6 writer INSERTs into audit_event', /insert\s+into\s+audit_event\b/i.test(writerCode), 'insert into audit_event present');
+check('C6 writer INSERTs into audit_event', /insert\s+into\s+(?:public\.)?audit_event\b/i.test(writerCode), 'insert into audit_event present');
 
-// Every executable INSERT must target audit_event (no other insert target).
-const insertTargets = [...writerCode.matchAll(/insert\s+into\s+(\w+)/gi)].map((m) => m[1].toLowerCase());
+// Every executable INSERT must target audit_event (no other insert target; public. is the only qualifier allowed).
+const insertTargets = [...writerCode.matchAll(/insert\s+into\s+(?:public\.)?(\w+)/gi)].map((m) => m[1].toLowerCase());
 const nonAuditInserts = insertTargets.filter((t) => t !== 'audit_event');
 check('C7 every INSERT targets audit_event only', nonAuditInserts.length === 0, nonAuditInserts.join(',') || `targets=[${insertTargets.join(',')}]`);
 

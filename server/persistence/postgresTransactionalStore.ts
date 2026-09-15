@@ -1,7 +1,7 @@
 // Phase 4.0 M6 — the PostgreSQL transactional store: one database, one shared transaction kernel and three
 // separate port implementations — DurableIdempotencyStore (server/runtime/idempotency.ts),
-// CommandTransactionPort (commandTransaction.ts) and OutboxDeliveryStore (outbox.ts) — over the schema of
-// migration 006 (G-IDEMPOT, G-AUDIT; docs/phase-4/10 ADR-17).
+// CommandTransactionPort (commandTransaction.ts) and OutboxDeliveryStore (outbox.ts) — over migration 006's
+// internal schema, tmpos_internal (G-IDEMPOT, G-AUDIT; docs/phase-4/10 ADR-17).
 //
 // NOT COMPOSED. No production module imports this file: the composition root binds no idempotency store,
 // transaction port or outbox, the production entry serves the probes and the bounded fallback only, and the
@@ -16,16 +16,22 @@
 // port; every statement is fixed, schema-qualified text in this file or in a mutator, every value is bound
 // as a parameter, and no caller supplies SQL, an identifier or a fragment.
 //
-// Time. Every expiry, retention and due-time decision reads public.m6_store_clock() — the store's clock at
+// Time. Every expiry, retention and due-time decision reads tmpos_internal.m6_store_clock() — the store's clock at
 // millisecond resolution — only AFTER the row it decides about is locked, except a claim, which never waits on
 // a lock (SKIP LOCKED) and reads it once at the start of its one statement; one reading serves the whole
 // transition. The host clock is never read. A command's stamps (its audit record and each event) are the
 // transaction's start, now(): audit_event.occurred_at's own default.
 //
-// Bounds. Each call is one fresh transaction on one reserved connection, under transaction-local lock and
-// statement timeouts below its port deadline and an idle-in-transaction timeout at twice it, which ends a
-// session its caller has left; an abort cancels the statement in flight and rolls the transaction back. Nothing is retried: a lost race re-reads within the same
-// transaction, and a failed transaction is never run again.
+// Bounds. Each call that reaches the database is one fresh transaction on one reserved connection — a call refused
+// at validation, or handed an already-aborted signal, opens none — under transaction-local lock and statement
+// timeouts below its port deadline and an idle-in-transaction timeout at twice it, which ends a session its caller
+// has left; an abort cancels the statement in flight and rolls the transaction back. Nothing is retried: a lost race
+// re-reads within the same transaction, and a failed transaction is never run again.
+//
+// Delivery policy. An event is claimed at most OUTBOX_DELIVERY_POLICY.maxAttempts (20) times, bound from source: an
+// expired claim at the cap is dead-lettered (attempts_exhausted) by the next claim instead of being reclaimed, and a
+// retry at the cap is refused. Migration 006's 1 000 is a storage-integrity ceiling, and its trigger enforces the
+// delivery transitions themselves.
 //
 // Outcomes. Every precondition is a conditional statement whose row count decides it, so no error is ever
 // read as a business answer: no SQLSTATE and no constraint maps to 'conflict', and a reused event ID is a
@@ -113,8 +119,11 @@ const MAX_LEASE_MS = 24 * 60 * 60_000;
 const MAX_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
-/** The attempt bound migration 006 enforces: an event at it is never claimed again, so no claim can fail on it. */
-const MAX_ATTEMPT = 1_000;
+/**
+ * The delivery policy's cap on claims, bound from source and never from a request: an event is claimed at most this
+ * many times. Migration 006's own ceiling (1 000) is storage integrity only, never this policy.
+ */
+const MAX_ATTEMPTS: number = OUTBOX_DELIVERY_POLICY.maxAttempts;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
 const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'mutation', 'audit', 'events'];
@@ -250,12 +259,14 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
             if (inFlight === query) inFlight = null;
           }
         };
-        // The transaction's bounds, and its search path: an unqualified name (the audit writer's audit_event)
-        // resolves in public, never in a temporary or a same-named schema.
+        // The transaction's bounds, and its search path: pg_catalog, then pg_temp — no schema a less privileged role
+        // could write to, so an operator or function placed there is never a candidate beside pg_catalog's own (an
+        // implicit cast would otherwise let an exact match elsewhere win). Every relation is schema-qualified: the
+        // store's in tmpos_internal, the audit writer's public.audit_event, and a mutator's own tables.
         await sql`select pg_catalog.set_config('lock_timeout', ${limits.lock}, true),
           pg_catalog.set_config('statement_timeout', ${limits.statement}, true),
           pg_catalog.set_config('idle_in_transaction_session_timeout', ${limits.idle}, true),
-          pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`;
+          pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`;
         const result = await work(sql, tx);
         if (signal.aborted) refuse(UNAVAILABLE); // the deadline passed during the last statement: roll back, never commit late
         committing = true;
@@ -291,7 +302,7 @@ const ms = (n: number): string => String(n);
 
 /** The store's clock, read now — after whatever this transaction has locked. */
 async function storeClock(sql: PgStatement): Promise<number> {
-  return integerOf(single(await sql`select (extract(epoch from public.m6_store_clock()) * 1000)::bigint::text as now`).now);
+  return integerOf(single(await sql`select (extract(epoch from tmpos_internal.m6_store_clock()) * 1000)::bigint::text as now`).now);
 }
 
 async function probe(client: PgClient, signal: AbortSignal, statement: (sql: PgStatement) => Promise<PgRows>): Promise<boolean> {
@@ -319,7 +330,7 @@ function acquireRequestOf(raw: unknown): AcquireRequest | null {
 
 /** Record the caller's binding, lease and terms, from `now`: a new record, one past its retention, or a reclaim. */
 async function recordLease(sql: PgStatement, r: AcquireRequest, now: number): Promise<void> {
-  const updated = await sql`update public.idempotency_record
+  const updated = await sql`update tmpos_internal.idempotency_record
     set fingerprint = ${r.fingerprint}, lease = ${r.lease}, response = null,
       lease_expires_at = 'epoch'::timestamptz + (${ms(now + r.leaseMs)}::bigint * interval '1 millisecond'),
       expires_at = 'epoch'::timestamptz + (${ms(now + r.retentionMs)}::bigint * interval '1 millisecond')
@@ -334,10 +345,10 @@ async function acquire(sql: PgStatement, r: AcquireRequest): Promise<Answer> {
     const rows = await sql`select fingerprint, lease, response,
         (extract(epoch from lease_expires_at) * 1000)::bigint::text as lease_expires,
         (extract(epoch from expires_at) * 1000)::bigint::text as expires
-      from public.idempotency_record where scope = ${r.scope} for update`;
+      from tmpos_internal.idempotency_record where scope = ${r.scope} for update`;
     if (rows.length === 0) {
       // Recorded first with placeholder terms, so no clock is read before a wait on a concurrent recording.
-      const inserted = await sql`insert into public.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at)
+      const inserted = await sql`insert into tmpos_internal.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at)
         values (${r.scope}, ${r.fingerprint}, ${r.lease}, '-infinity', '-infinity') on conflict (scope) do nothing`;
       if (inserted.count === 0) continue;
       await recordLease(sql, r, await storeClock(sql));
@@ -375,17 +386,17 @@ function idempotencyPort(client: PgClient): DurableIdempotencyStore {
       if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST; // never a lease the store granted
       if (!isSealed(response) || response.length === 0) return UNAVAILABLE;
       return transact(client, signal, IDEMPOTENCY_BOUNDS, async (sql) => {
-        if ((await sql`select 1 from public.idempotency_record where scope = ${scope} for update`).length === 0) return refuse(LEASE_LOST);
+        if ((await sql`select 1 from tmpos_internal.idempotency_record where scope = ${scope} for update`).length === 0) return refuse(LEASE_LOST);
         // The row is locked, so the clock read below is fresh: completed iff within retention, in progress, under this lease.
-        const done = await sql`update public.idempotency_record set response = ${response}
-          where scope = ${scope} and lease = ${lease} and response is null and expires_at > public.m6_store_clock()`;
+        const done = await sql`update tmpos_internal.idempotency_record set response = ${response}
+          where scope = ${scope} and lease = ${lease} and response is null and expires_at > tmpos_internal.m6_store_clock()`;
         if (done.count === 0) return refuse(LEASE_LOST);
         return done.count === 1 ? COMPLETED : refuse(UNAVAILABLE);
       });
     },
     probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select public.m6_store_clock() is not null
-        and not exists (select from public.idempotency_record where false) as ok`),
+      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
+        and not exists (select from tmpos_internal.idempotency_record where false) as ok`),
   });
 }
 
@@ -467,7 +478,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
 async function commit(sql: PgStatement, tx: PgTransaction, c: Command): Promise<Answer> {
   // 1. The fence, before any business state: lock the record, then read the clock.
   const row = await sql`select lease, response is null as open, (extract(epoch from expires_at) * 1000)::bigint::text as expires
-    from public.idempotency_record where scope = ${c.scope} for update`;
+    from tmpos_internal.idempotency_record where scope = ${c.scope} for update`;
   if (row.length === 0) return refuse(LEASE_LOST);
   const record = single(row);
   const expires = integerOf(record.expires);
@@ -484,7 +495,7 @@ async function commit(sql: PgStatement, tx: PgTransaction, c: Command): Promise<
   await writeAuditEvent(c.audit, { executor });
   // 4. The events: pending, due now by the store's clock, stamped with the transaction's timestamp.
   for (const e of c.events) {
-    const inserted = await sql`insert into public.outbox_event (event_id, event_type, event_version, aggregate_type, aggregate_id,
+    const inserted = await sql`insert into tmpos_internal.outbox_event (event_id, event_type, event_version, aggregate_type, aggregate_id,
         aggregate_version, tenant_digest, store_digest, actor_digest, correlation_id, payload, occurred_at, status, attempt, due_at)
       values (${e.eventId}, ${e.type}, ${e.version}, ${e.aggregateType}, ${e.aggregateId}, ${ms(e.aggregateVersion)}::bigint,
         ${e.tenant}, ${e.store}, ${e.actor}, ${e.correlationId}, ${tx.json(e.payload)}, pg_catalog.now(), 'pending', 0,
@@ -493,7 +504,7 @@ async function commit(sql: PgStatement, tx: PgTransaction, c: Command): Promise<
     if (inserted.count !== 1) return refuse(UNAVAILABLE); // an event ID that is not new is a fault, never a conflict
   }
   // 5. The sealed completion, under the lease this transaction has held since step 1.
-  const completed = await sql`update public.idempotency_record set response = ${c.response}
+  const completed = await sql`update tmpos_internal.idempotency_record set response = ${c.response}
     where scope = ${c.scope} and lease = ${c.lease} and response is null`;
   return completed.count === 1 ? COMMITTED : refuse(UNAVAILABLE);
 }
@@ -506,9 +517,9 @@ function transactionPort(client: PgClient, mutators: ReadonlyMap<string, Aggrega
       return transact(client, signal, TRANSACTION_BOUNDS, (sql, tx) => commit(sql, tx, command as Command));
     },
     probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select public.m6_store_clock() is not null
-        and not exists (select from public.idempotency_record where false)
-        and not exists (select from public.outbox_event where false) as ok`),
+      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
+        and not exists (select from tmpos_internal.idempotency_record where false)
+        and not exists (select from tmpos_internal.outbox_event where false) as ok`),
   });
 }
 
@@ -541,7 +552,7 @@ async function settle(client: PgClient, signal: AbortSignal, raw: unknown, succe
   const { eventId, claim } = fields;
   if (typeof eventId !== 'string' || !UUID_V4_RE.test(eventId) || !isDigest(claim)) return CLAIM_LOST; // never a claim the store granted
   return transact(client, signal, DELIVERY_BOUNDS, async (sql) => {
-    const rows = await sql`select status, claim_token from public.outbox_event where event_id = ${eventId} for update`;
+    const rows = await sql`select status, claim_token from tmpos_internal.outbox_event where event_id = ${eventId} for update`;
     if (rows.length === 0) return refuse(CLAIM_LOST);
     const row = single(rows);
     // Only the claim's current holder settles — an expired claim nobody has reclaimed included.
@@ -561,23 +572,40 @@ function deliveryPort(client: PgClient): OutboxDeliveryStore {
         // ONE statement: one clock reading; the earliest due pending rows and the earliest expired claims, each
         // walked in its own index's order and locked with SKIP LOCKED so concurrent claims never wait on or share a
         // row; merged into (eligibility time, event ID) order and claimed under this token. A row a branch locked
-        // beyond the merged limit stays as it was, and its lock ends at COMMIT.
-        const rows = await sql`with clock as materialized (select public.m6_store_clock() as t),
+        // beyond the merged limit stays as it was, and its lock ends at COMMIT. An expired claim that has already
+        // had MAX_ATTEMPTS is never reclaimed: the same statement dead-letters it (attempts_exhausted), unpublished,
+        // so no event is ever claimed a 21st time and none waits for a worker to retire it.
+        const rows = await sql`with clock as materialized (select tmpos_internal.m6_store_clock() as t),
           due as materialized (
             select e.event_id, e.due_at as eligible_at
-              from public.outbox_event e
-             where e.status = 'pending' and e.due_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPT}
+              from tmpos_internal.outbox_event e
+             where e.status = 'pending' and e.due_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPTS}
              order by e.due_at, e.event_id
              limit ${limit}
              for update of e skip locked
           ),
           expired as materialized (
             select e.event_id, e.claim_expires_at as eligible_at
-              from public.outbox_event e
-             where e.status = 'claimed' and e.claim_expires_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPT}
+              from tmpos_internal.outbox_event e
+             where e.status = 'claimed' and e.claim_expires_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPTS}
              order by e.claim_expires_at, e.event_id
              limit ${limit}
              for update of e skip locked
+          ),
+          spent as materialized (
+            select e.event_id
+              from tmpos_internal.outbox_event e
+             where e.status = 'claimed' and e.claim_expires_at <= (select t from clock) and e.attempt >= ${MAX_ATTEMPTS}
+             order by e.claim_expires_at, e.event_id
+             limit ${limit}
+             for update of e skip locked
+          ),
+          exhausted as (
+            update tmpos_internal.outbox_event o
+               set status = 'dead', claim_token = null, claim_expires_at = null, dead_reason = 'attempts_exhausted'
+              from spent
+             where o.event_id = spent.event_id
+            returning o.event_id
           ),
           eligible as (
             select event_id, eligible_at from due
@@ -587,7 +615,7 @@ function deliveryPort(client: PgClient): OutboxDeliveryStore {
             limit ${limit}
           ),
           claimed as (
-            update public.outbox_event o
+            update tmpos_internal.outbox_event o
                set status = 'claimed', attempt = o.attempt + 1, claim_token = ${claim},
                    claim_expires_at = (select t from clock) + (${ms(claimMs)}::bigint * interval '1 millisecond')
               from eligible
@@ -596,31 +624,42 @@ function deliveryPort(client: PgClient): OutboxDeliveryStore {
               o.aggregate_version::text as aggregate_version, o.tenant_digest, o.store_digest, o.actor_digest, o.correlation_id, o.payload,
               floor(extract(epoch from o.occurred_at) * 1000)::bigint::text as occurred_at
           )
-          select * from claimed order by eligible_at, event_id`;
-        if (rows.length === 0) return refuse(EMPTY);
-        if (rows.length > limit) return refuse(UNAVAILABLE);
-        return Object.freeze({ outcome: 'claimed', events: Object.freeze(rows.map(claimedOf)) });
+          select x.spent, c.* from (select count(*)::int as spent from exhausted) x
+            left join claimed c on true
+           order by c.eligible_at, c.event_id`;
+        // Always at least one row: how many spent claims the statement dead-lettered, beside each event it claimed.
+        const spent: unknown = rows.length === 0 ? null : rows[0].spent;
+        if (!isInteger(spent, 0, MAX_CLAIM_BATCH)) return refuse(UNAVAILABLE);
+        const events = rows.filter((row) => row.event_id !== null);
+        // Nothing claimed and nothing dead-lettered rolls back, so an idle claim is never indeterminate; a claim that
+        // dead-lettered a spent event commits even when it hands nothing out.
+        if (events.length === 0) return spent === 0 ? refuse(EMPTY) : EMPTY;
+        if (events.length !== rows.length || events.length > limit) return refuse(UNAVAILABLE);
+        return Object.freeze({ outcome: 'claimed', events: Object.freeze(events.map(claimedOf)) });
       });
     },
     acknowledge: (raw: unknown, signal: AbortSignal): Promise<Answer> => settle(client, signal, raw, answer('acknowledged'), (sql, eventId) =>
-      sql`update public.outbox_event set status = 'delivered', claim_token = null, claim_expires_at = null where event_id = ${eventId}`),
+      sql`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null, claim_expires_at = null where event_id = ${eventId}`),
     async retry(raw: unknown, signal: AbortSignal): Promise<Answer> {
       const delayMs = fieldsOf(raw, ['delayMs'])?.delayMs;
       if (!isInteger(delayMs, 1, OUTBOX_DELIVERY_POLICY.maxDelayMs)) return UNAVAILABLE;
+      // An event that has spent its attempts is never pending again: the retry changes nothing ('unavailable'), and
+      // once its claim expires the next claim dead-letters it.
       return settle(client, signal, raw, answer('scheduled'), (sql, eventId) =>
-        sql`update public.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null,
-          due_at = public.m6_store_clock() + (${ms(delayMs)}::bigint * interval '1 millisecond') where event_id = ${eventId}`);
+        sql`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null,
+          due_at = tmpos_internal.m6_store_clock() + (${ms(delayMs)}::bigint * interval '1 millisecond')
+          where event_id = ${eventId} and attempt < ${MAX_ATTEMPTS}`);
     },
     async deadLetter(raw: unknown, signal: AbortSignal): Promise<Answer> {
       const reason = fieldsOf(raw, ['reason'])?.reason;
       if (typeof reason !== 'string' || !DEAD_REASONS.includes(reason)) return UNAVAILABLE;
       return settle(client, signal, raw, answer('dead_lettered'), (sql, eventId) =>
-        sql`update public.outbox_event set status = 'dead', claim_token = null, claim_expires_at = null, dead_reason = ${reason}
+        sql`update tmpos_internal.outbox_event set status = 'dead', claim_token = null, claim_expires_at = null, dead_reason = ${reason}
           where event_id = ${eventId}`);
     },
     probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select public.m6_store_clock() is not null
-        and not exists (select from public.outbox_event where false) as ok`),
+      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
+        and not exists (select from tmpos_internal.outbox_event where false) as ok`),
   });
 }
 

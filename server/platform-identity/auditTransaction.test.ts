@@ -340,7 +340,7 @@ test('S3-TX-9: the default writer is invoked with the transaction handle, never 
   assert.equal(state.begins, 1);
   assert.equal(state.committed, true);
   assert.equal(state.tx!.statements.length, 1, 'the real writer sent exactly one statement');
-  assert.ok(state.tx!.statements[0].toLowerCase().includes('insert into audit_event'));
+  assert.ok(state.tx!.statements[0].toLowerCase().includes('insert into public.audit_event'));
   assert.ok(!/\breturning\b/i.test(state.tx!.statements[0]));
   assert.equal(outcome.audit.requestId, 'req-s3-tx-1');
   assert.match(outcome.audit.eventId, /^[0-9a-f]{8}-/i);

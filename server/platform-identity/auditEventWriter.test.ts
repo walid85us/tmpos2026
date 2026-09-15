@@ -128,7 +128,7 @@ test('S3-W-2: the emitted statement carries NO returning clause and NO select', 
   const r = recorder();
   await writeAuditEvent(baseEvent(), { executor: r.executor });
   const sql = r.calls[0].sql.toLowerCase();
-  assert.ok(sql.includes('insert into audit_event'), sql.slice(0, 80));
+  assert.ok(sql.includes('insert into public.audit_event'), sql.slice(0, 80));
   assert.ok(!/\breturning\b/.test(sql), 'RETURNING requires SELECT privilege — it must be gone');
   assert.ok(!/\bselect\b/.test(sql), 'no read may substitute for the removed RETURNING');
   assert.ok(!/\b(update|delete|truncate|on conflict)\b/.test(sql), 'append-only');

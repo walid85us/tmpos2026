@@ -74,8 +74,8 @@ const PINNED = {
   // Its SEMANTICS are proved by tests/db/transactionalStore.integration.test.mjs against disposable PostgreSQL
   // only; it has been applied to no managed, persistent or application database. While it is pending, the
   // managed apply of 005 refuses at its exact-[005] plan gate (tests/quality/managed-m005-launcher.test.mjs).
-  '006_m6_transactional_store.up.sql': '66d0110a3aa6b465c02459b15b4b5158f8b63b9844e0fdd8addd5936b6acdcd1',
-  '006_m6_transactional_store.down.sql': 'd5cffbc0f141470025ac3e102f17163022ab9639624d1ff7e566ed61ebaca4d9',
+  '006_m6_transactional_store.up.sql': '717ea0044e4f216c879fc4cee2537661bac74b8b6f6ce6efd0ad555bbdaf44d7',
+  '006_m6_transactional_store.down.sql': '7a08681943a8fdff45f619bf33a3903782ea21d05f2651d2b88c769d4c73b57d',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);

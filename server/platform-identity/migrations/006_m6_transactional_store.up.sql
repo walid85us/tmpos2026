@@ -8,6 +8,10 @@
 --     (OutboxDeliveryStore), served by server/persistence/postgresTransactionalStore.ts. No business
 --     table lives here: a command's aggregate is written by the source-defined mutator of its kind,
 --     against the table that mutator names.
+--   - ITS OWN INTERNAL SCHEMA, tmpos_internal. Every object this file creates lives there and none in
+--     public, the schema a platform's data API exposes. The schema belongs to the principal that applies
+--     this file, never to the runtime login, and only tmpos_app is granted USAGE on it. audit_event stays
+--     in public: it is 002's, and the store only appends to it.
 --   - MIGRATION FILE ONLY. Nothing here is applied automatically. It has been applied only to
 --     disposable test databases — never to a managed, persistent, production or application database.
 --     Migration 005 is itself unexecuted there, and while this file is pending the managed apply of 005
@@ -21,6 +25,10 @@
 --     client's key, never by tenant; tenant/store isolation needs M5's server-derived context. The
 --     policies below admit the runtime role to every row ON PURPOSE and admit no other role: defense
 --     in depth against a stray grant, not isolation between tenants.
+--   - DIRECT GRANTS, NOT ROLE TOPOLOGY. Section 6 proves the direct object grants on this file's objects.
+--     It does not see effective privilege through membership (a member of tmpos_app, or of the owner,
+--     reaches what they reach without a grant of its own) or the ownership or superuser bypass; the runtime
+--     login's memberships and attributes are verified live under G-DBROLE (docs/phase-4/08).
 --   - NO SECRET, NO DYNAMIC SQL, NO EXTENSION. Times are timestamptz on the store's own clock.
 --
 -- Reversible via 006_m6_transactional_store.down.sql, which refuses while the store holds work it
@@ -28,6 +36,20 @@
 --
 -- Assumes the roles `anon` and `authenticated` exist, as 002, 004 and 005 already do, and that 005 has
 -- created tmpos_app.
+
+-- =============================================================================
+-- 0) This transaction's search path, and the internal schema
+-- =============================================================================
+-- The applier's search_path is never relied on. Every relation below is schema-qualified, and SET LOCAL
+-- pins operator and function resolution to pg_catalog until this transaction ends, so an operator or
+-- function that an earlier schema of the applier's path defines answers neither a constraint below nor
+-- section 6's check.
+set local search_path = pg_catalog, pg_temp;
+
+create schema tmpos_internal;
+
+comment on schema tmpos_internal is
+  'Phase 4.0 M6: the transactional store (migration 006). Internal: USAGE to tmpos_app alone, owned by the migration principal.';
 
 -- =============================================================================
 -- 1) The store's clock
@@ -40,14 +62,14 @@
 -- would read stale. The stamps a command carries (audit_event.occurred_at and each event's
 -- occurred_at) ARE the transaction start — one timestamp for the whole commit — and are never an
 -- input to a decision.
-create function public.m6_store_clock()
+create function tmpos_internal.m6_store_clock()
 returns timestamptz
 language sql
 volatile
 set search_path = pg_catalog, pg_temp
 as $$ select pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) $$;
 
-comment on function public.m6_store_clock() is
+comment on function tmpos_internal.m6_store_clock() is
   'Phase 4.0 M6: the transactional store''s clock — clock_timestamp() at millisecond resolution. Every expiry, retention and due-time decision reads it after locking the row it decides about.';
 
 -- =============================================================================
@@ -58,7 +80,7 @@ comment on function public.m6_store_clock() is
 -- A row is IN PROGRESS while response is null and COMPLETED once the sealed response is stored: an
 -- opaque base64url string of at most 45 094 characters (MAX_SEALED_LENGTH), kept byte for byte.
 -- A row past expires_at is absent to the ports and is overwritten in place by the next acquisition.
-create table public.idempotency_record (
+create table tmpos_internal.idempotency_record (
   scope            text        not null,
   fingerprint      text        not null,
   lease            text        not null,
@@ -76,27 +98,31 @@ create table public.idempotency_record (
   )
 );
 
-comment on table public.idempotency_record is
+comment on table tmpos_internal.idempotency_record is
   'Phase 4.0 M6: durable idempotency records (DurableIdempotencyStore). Keyed digests and a fencing token only — no raw key, principal, request or body. RLS enabled; tmpos_app only.';
-comment on column public.idempotency_record.response is
+comment on column tmpos_internal.idempotency_record.response is
   'The sealed response (AES-256-GCM under a subkey of IDEMPOTENCY_KEY, bound to scope and fingerprint): opaque to the store. Null while in progress.';
 
 -- Retention: a later purge pass finds the records past their retention by this index.
-create index idx_idempotency_record_expires_at on public.idempotency_record (expires_at);
+create index idx_idempotency_record_expires_at on tmpos_internal.idempotency_record (expires_at);
 
 -- =============================================================================
 -- 3) outbox_event — one row per event, its immutable envelope and its delivery state
 -- =============================================================================
--- The envelope columns (event_id … occurred_at) are written once, by the committing transaction, and
--- the runtime role holds no UPDATE on any of them (section 4). Delivery state is the rest:
+-- The envelope columns (event_id … occurred_at) are written once, by the committing transaction: the
+-- runtime role holds no UPDATE on any of them (section 4), and the guard (section 3b) refuses a rewrite
+-- by anyone. Delivery state is the rest:
 --   pending   — due at due_at; never claimed, or retried;
 --   claimed   — held under claim_token until claim_expires_at, then reclaimable;
---   delivered — terminal: no statement of the adapter moves it again;
---   dead      — terminal, with its closed reason. The table keeps each state consistent; it does not stop other
---               SQL run as the runtime role from moving a delivered or dead row back (docs/phase-4/08 DA-16).
--- The state constraint makes every other combination unstorable. attempt counts claims; claims stop
--- at the bound (the adapter never claims an event at 1 000 attempts), so a claim cannot fail on it.
-create table public.outbox_event (
+--   delivered — terminal;
+--   dead      — terminal, with its closed reason.
+-- The state constraint makes every other combination unstorable, and the guard allows only the delivery
+-- transitions. Due and expiry times are finite: an event never due, or a claim that never expires, would be
+-- held forever and block the reverse migration. attempt counts claims. The delivery policy — at most 20
+-- claims (OUTBOX_DELIVERY_POLICY.maxAttempts) — is the adapter's, bound from source: it never claims an event
+-- that has had 20, and dead-letters an expired claim at 20 (attempts_exhausted) instead of reclaiming it.
+-- The 1 000 below is a storage-integrity ceiling only, never that policy.
+create table tmpos_internal.outbox_event (
   event_id          uuid        not null,
   event_type        text        not null,
   event_version     integer     not null,
@@ -132,6 +158,9 @@ create table public.outbox_event (
   ),
   constraint outbox_event_status_chk check (status in ('pending', 'claimed', 'delivered', 'dead')),
   constraint outbox_event_attempt_chk check (attempt between 0 and 1000),
+  constraint outbox_event_time_chk check (
+    pg_catalog.isfinite(due_at) and (claim_expires_at is null or pg_catalog.isfinite(claim_expires_at))
+  ),
   constraint outbox_event_claim_token_chk check (claim_token is null or claim_token ~ '^[A-Za-z0-9_-]{43}$'),
   constraint outbox_event_dead_reason_chk check (
     dead_reason is null or dead_reason in ('attempts_exhausted', 'envelope_invalid')
@@ -147,102 +176,177 @@ create table public.outbox_event (
   )
 );
 
-comment on table public.outbox_event is
-  'Phase 4.0 M6: the transactional outbox (OutboxDeliveryStore). Events are inserted only by the committing command transaction; the envelope columns are immutable to the runtime role. No raw key, identity, token, cookie, body, SQL or connection material has a column. RLS enabled; tmpos_app only.';
-comment on column public.outbox_event.occurred_at is
+comment on table tmpos_internal.outbox_event is
+  'Phase 4.0 M6: the transactional outbox (OutboxDeliveryStore). Events are inserted only by the committing command transaction; the envelope is immutable and the delivery transitions are enforced by a trigger. No raw key, identity, token, cookie, body, SQL or connection material has a column. RLS enabled; tmpos_app only.';
+comment on column tmpos_internal.outbox_event.occurred_at is
   'The committing transaction''s start time — the same timestamp as the command''s audit_event.occurred_at. Never a cursor and never an input to a decision.';
+comment on column tmpos_internal.outbox_event.attempt is
+  'Claims so far. A storage-integrity ceiling of 1 000; the delivery policy (20) is enforced by the adapter.';
 
 -- Due-event claims, then expired claims: each claim walks one of these in (time, event_id) order.
-create index idx_outbox_event_pending_due on public.outbox_event (due_at, event_id) where status = 'pending';
-create index idx_outbox_event_claimed_expiry on public.outbox_event (claim_expires_at, event_id) where status = 'claimed';
+create index idx_outbox_event_pending_due on tmpos_internal.outbox_event (due_at, event_id) where status = 'pending';
+create index idx_outbox_event_claimed_expiry on tmpos_internal.outbox_event (claim_expires_at, event_id) where status = 'claimed';
+
+-- =============================================================================
+-- 3b) The delivery state machine, enforced by the table
+-- =============================================================================
+-- Every insert and update of outbox_event, by any role that writes it (the runtime role, a mutator's
+-- statement run as that role, the owner), passes this guard after the constraints above:
+--   insert  — only as pending, never attempted (attempt 0);
+--   pending — to claimed, once due by the store's clock, the attempt counted (+1);
+--   claimed — to claimed again once its claim has expired by the store's clock (a reclaim), the attempt
+--             counted (+1); or to pending (a retry), delivered or dead, the attempt unchanged;
+--   delivered, dead — terminal: no update at all;
+-- and no update rewrites the envelope. Anything else is refused with one fixed message — no row value, no
+-- detail or hint; PostgreSQL's own CONTEXT line names only this function — which the adapter reads as a
+-- failed statement ('unavailable'): nothing commits. Fixed SQL with a pinned search path; it reads no table,
+-- only the store's clock, and runs with its caller's own privileges. The trigger is ENABLE ALWAYS, so
+-- session_replication_role = replica does not skip it: only disabling or dropping it — the table's owner or a
+-- superuser — bypasses it, never the runtime role. It does not know the delivery policy's number: the adapter
+-- enforces that.
+create function tmpos_internal.outbox_event_transition_guard()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if new.status = 'pending' and new.attempt = 0 then
+      return null;
+    end if;
+  elsif (new.event_id, new.event_type, new.event_version, new.aggregate_type, new.aggregate_id, new.aggregate_version,
+         new.tenant_digest, new.store_digest, new.actor_digest, new.correlation_id, new.payload, new.occurred_at)
+        is distinct from
+        (old.event_id, old.event_type, old.event_version, old.aggregate_type, old.aggregate_id, old.aggregate_version,
+         old.tenant_digest, old.store_digest, old.actor_digest, old.correlation_id, old.payload, old.occurred_at) then
+    null; -- the envelope is immutable: refused below
+  elsif old.status = 'pending' then
+    if new.status = 'claimed' and new.attempt = old.attempt + 1 and old.due_at <= tmpos_internal.m6_store_clock() then
+      return null;
+    end if;
+  elsif old.status = 'claimed' then
+    if (new.status = 'claimed' and new.attempt = old.attempt + 1 and old.claim_expires_at <= tmpos_internal.m6_store_clock())
+       or (new.status in ('pending', 'delivered', 'dead') and new.attempt = old.attempt) then
+      return null;
+    end if;
+  end if;
+  raise exception 'outbox event transition refused' using errcode = 'check_violation';
+end
+$$;
+
+comment on function tmpos_internal.outbox_event_transition_guard() is
+  'Phase 4.0 M6: the outbox delivery state machine. Inserts only as pending at attempt 0; pending to claimed once due; claimed to claimed once expired, or to pending, delivered or dead; a claim counts one attempt, nothing else changes it; the envelope never changes; delivered and dead are terminal.';
+
+create trigger outbox_event_transition_guard
+  after insert or update on tmpos_internal.outbox_event
+  for each row execute function tmpos_internal.outbox_event_transition_guard();
+
+alter table tmpos_internal.outbox_event enable always trigger outbox_event_transition_guard;
 
 -- =============================================================================
 -- 4) Privileges — the runtime role only, and only what the ports need
 -- =============================================================================
 -- Explicit revokes first, whatever the default privileges of the applying principal are; section 6 then
--- refuses to finish while any other role holds a privilege here.
+-- refuses to finish while any direct grant beyond the ones below remains.
 -- UPDATE is COLUMN-SCOPED on both tables, and that is load-bearing:
 --   * idempotency_record — never the scope, the row's identity;
 --   * outbox_event — the delivery-state columns only, so a committed envelope can never be rewritten
 --     through the runtime role, whatever a future statement tries.
--- No DELETE and no TRUNCATE anywhere: an expired record is overwritten in place, and a delivered or
--- dead event is kept (a purge pass is a later, separately reviewed step).
-revoke all on function public.m6_store_clock() from public, anon, authenticated;
-grant execute on function public.m6_store_clock() to tmpos_app;
+-- No DELETE and no TRUNCATE is granted to anyone: an expired record is overwritten in place, and a
+-- delivered or dead event is kept (a purge pass is a later, separately reviewed step). The guard function
+-- is granted to nobody: a trigger runs it without an EXECUTE privilege.
+revoke all on schema tmpos_internal from public, anon, authenticated;
+grant usage on schema tmpos_internal to tmpos_app;
 
-revoke all on table public.idempotency_record from public, anon, authenticated;
-grant select, insert on table public.idempotency_record to tmpos_app;
-grant update (fingerprint, lease, lease_expires_at, expires_at, response) on table public.idempotency_record to tmpos_app;
+revoke all on function tmpos_internal.m6_store_clock() from public, anon, authenticated;
+grant execute on function tmpos_internal.m6_store_clock() to tmpos_app;
+revoke all on function tmpos_internal.outbox_event_transition_guard() from public, anon, authenticated;
 
-revoke all on table public.outbox_event from public, anon, authenticated;
-grant select, insert on table public.outbox_event to tmpos_app;
-grant update (status, attempt, due_at, claim_token, claim_expires_at, dead_reason) on table public.outbox_event to tmpos_app;
+revoke all on table tmpos_internal.idempotency_record from public, anon, authenticated;
+grant select, insert on table tmpos_internal.idempotency_record to tmpos_app;
+grant update (fingerprint, lease, lease_expires_at, expires_at, response) on table tmpos_internal.idempotency_record to tmpos_app;
+
+revoke all on table tmpos_internal.outbox_event from public, anon, authenticated;
+grant select, insert on table tmpos_internal.outbox_event to tmpos_app;
+grant update (status, attempt, due_at, claim_token, claim_expires_at, dead_reason) on table tmpos_internal.outbox_event to tmpos_app;
 
 -- =============================================================================
 -- 5) Row-Level Security — enabled, and open to the runtime role alone
 -- =============================================================================
--- Every public table carries RLS. A role without a policy here sees and writes nothing even if a grant
--- reaches it by mistake. USING (true) is the honest predicate until M5 (see the header).
-alter table public.idempotency_record enable row level security;
-alter table public.outbox_event enable row level security;
+-- Both tables carry RLS. A role without a policy here sees and writes nothing even if a grant reaches it
+-- by mistake. USING (true) is the honest predicate until M5 (see the header).
+alter table tmpos_internal.idempotency_record enable row level security;
+alter table tmpos_internal.outbox_event enable row level security;
 
-create policy tmpos_app_idempotency_record_access on public.idempotency_record
+create policy tmpos_app_idempotency_record_access on tmpos_internal.idempotency_record
   for all
   to tmpos_app
   using (true)
   with check (true);
 
-create policy tmpos_app_outbox_event_access on public.outbox_event
+create policy tmpos_app_outbox_event_access on tmpos_internal.outbox_event
   for all
   to tmpos_app
   using (true)
   with check (true);
 
 -- =============================================================================
--- 6) Verify — tmpos_app is the only grantee, whatever the applier's defaults added
+-- 6) Verify — the direct grants here are the owner's and section 4's, nothing more
 -- =============================================================================
--- The revokes above name the roles this project knows; a platform's default privileges can add others (a
--- service role, say). This refuses to finish while any role but the owner holds a privilege on either table,
--- on one of their columns or on the clock — and while tmpos_app holds more than section 4 grants it, or holds
--- anything with the right to grant it on. Nothing
--- here widens or narrows access: it only refuses.
+-- The revokes above name the roles this project knows; a platform's default privileges can add others.
+-- This refuses to finish while the ACL of the schema, either table, one of their columns or either function
+-- carries a DIRECT OBJECT GRANT to any role but the owner, grants tmpos_app more than section 4 does, or
+-- grants it anything with the right to grant it on. An ACL never set is read as its built-in default, so a
+-- function nobody revoked from PUBLIC is caught too. Every comparison is between exact types (oid with oid,
+-- text with text), so no operator placed in a schema on the applying session's path can outrank
+-- pg_catalog's own.
+-- What it does not see, by design: EFFECTIVE PRIVILEGE THROUGH MEMBERSHIP (a member of tmpos_app, or of the
+-- owner, reaches what they reach without a grant of its own), the OWNERSHIP OR SUPERUSER BYPASS (the owner
+-- and a superuser pass every privilege check and bypass RLS) and any grant made after it ran. Those are role
+-- topology, verified live against the runtime login under G-DBROLE (docs/phase-4/08). Nothing here widens or
+-- narrows access: it only refuses.
 do $$
 declare
   stray text;
 begin
   with objects (kind, name, owner, acl, relname, attname) as (
-    select 'table', c.oid::regclass::text, c.relowner, c.relacl, c.relname::text, null::text
-      from pg_catalog.pg_class c
-     where c.oid in ('public.idempotency_record'::regclass, 'public.outbox_event'::regclass)
+    select 'schema', n.nspname::text, n.nspowner, coalesce(n.nspacl, pg_catalog.acldefault('n', n.nspowner)), n.nspname::text, null::text
+      from pg_catalog.pg_namespace n
+     where n.nspname = 'tmpos_internal'::name
     union all
-    select 'column', c.oid::regclass::text || '.' || a.attname, c.relowner, a.attacl, c.relname::text, a.attname::text
+    select 'table', c.oid::regclass::text, c.relowner, coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner)), c.relname::text, null::text
+      from pg_catalog.pg_class c
+     where c.oid in ('tmpos_internal.idempotency_record'::regclass::oid, 'tmpos_internal.outbox_event'::regclass::oid)
+    union all
+    select 'column', c.oid::regclass::text || '.' || a.attname::text, c.relowner, a.attacl, c.relname::text, a.attname::text
       from pg_catalog.pg_attribute a
       join pg_catalog.pg_class c on c.oid = a.attrelid
-     where a.attrelid in ('public.idempotency_record'::regclass, 'public.outbox_event'::regclass)
-       and a.attnum > 0 and not a.attisdropped
+     where a.attrelid in ('tmpos_internal.idempotency_record'::regclass::oid, 'tmpos_internal.outbox_event'::regclass::oid)
+       and a.attnum > 0::int2 and not a.attisdropped
     union all
-    select 'function', p.oid::regprocedure::text, p.proowner, p.proacl, null::text, null::text
+    select 'function', p.oid::regprocedure::text, p.proowner, coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner)), p.proname::text, null::text
       from pg_catalog.pg_proc p
-     where p.oid = 'public.m6_store_clock()'::regprocedure
+     where p.oid in ('tmpos_internal.m6_store_clock()'::regprocedure::oid, 'tmpos_internal.outbox_event_transition_guard()'::regprocedure::oid)
   )
   select pg_catalog.string_agg(x.privilege_type || ' on ' || o.name || ' to '
-           || case when x.grantee = 0 then 'PUBLIC' else x.grantee::regrole::text end, '; ')
+           || case when x.grantee = 0::oid then 'PUBLIC' else x.grantee::regrole::text end, '; ')
     into stray
     from objects o, pg_catalog.aclexplode(o.acl) x
    where x.grantee <> o.owner
      and not (x.grantee = 'tmpos_app'::regrole::oid and not x.is_grantable and (
-           (o.kind = 'table' and x.privilege_type in ('SELECT', 'INSERT'))
+           (o.kind = 'schema' and x.privilege_type = 'USAGE')
+        or (o.kind = 'table' and x.privilege_type in ('SELECT', 'INSERT'))
         or (o.kind = 'column' and x.privilege_type = 'UPDATE' and (o.relname, o.attname) in (
               ('idempotency_record', 'fingerprint'), ('idempotency_record', 'lease'), ('idempotency_record', 'lease_expires_at'),
               ('idempotency_record', 'expires_at'), ('idempotency_record', 'response'),
               ('outbox_event', 'status'), ('outbox_event', 'attempt'), ('outbox_event', 'due_at'), ('outbox_event', 'claim_token'),
               ('outbox_event', 'claim_expires_at'), ('outbox_event', 'dead_reason')))
-        or (o.kind = 'function' and x.privilege_type = 'EXECUTE')));
+        or (o.kind = 'function' and o.relname = 'm6_store_clock' and x.privilege_type = 'EXECUTE')));
   if stray is not null then
-    raise exception 'migration 006 refused: a role other than tmpos_app holds a privilege on the transactional store'
+    raise exception 'migration 006 refused: an object of the transactional store carries a direct grant beyond the owner''s and tmpos_app''s own'
       using errcode = 'object_not_in_prerequisite_state',
             detail = stray,
-            hint = 'remove the default privileges that granted it, then apply again; this migration never widens access';
+            hint = 'revoke it, or the default privilege that created it, then apply again; this migration never widens access';
   end if;
 end
 $$;
