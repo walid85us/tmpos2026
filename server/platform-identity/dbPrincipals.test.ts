@@ -36,6 +36,7 @@ import {
   DB_SESSION_BOUNDS,
   CONTEXT_SETTINGS,
   runtimeClientOptions,
+  discardNotice,
   DRIVER_TLS_ENV_VAR,
   type TenantContext,
   type SqlTag,
@@ -748,6 +749,18 @@ test('S4.1a-11: the shared runtime options carry no transport decision of their 
     assert.equal(conn.statement_timeout, DB_SESSION_BOUNDS.statement_timeout, 'bounds are preserved');
     assert.equal(opts.prepare, false, 'pooler-safe prepare:false is preserved');
   });
+});
+
+test('DA-17: both principals drop every server NOTICE through the runtime\'s own handler, never the driver\'s printing default', async () => {
+  // Catches: dropping onnotice from the shared options, or replacing it at a construction site — the driver's default
+  // prints each notice whole (message, detail, context, the server's source location) to stdout. M6-PG-27 proves the
+  // handler against a real server; this pins that every construction carries it.
+  await withEnv({ [SUPABASE_DATABASE_URL_VAR]: ADMIN_DSN, [APP_DATABASE_URL_VAR]: RUNTIME_DSN }, () => {
+    for (const [label, client] of [['admin', getDb()], ['runtime', getRuntimeDb()]] as const) {
+      assert.equal(client.options.onnotice, discardNotice, `${label}: the runtime's handler`);
+    }
+  });
+  assert.equal((runtimeClientOptions(ADMIN_DSN) as Record<string, unknown>).onnotice, discardNotice, 'and so do the options the disposable lanes reuse');
 });
 
 test('S4.1a-12: db.ts resolves no string TLS policy and never resolves ssl to false', async () => {

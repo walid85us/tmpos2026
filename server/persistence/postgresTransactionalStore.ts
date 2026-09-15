@@ -238,10 +238,16 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
     if (query !== null) void Promise.resolve().then(() => query.cancel()).catch(() => undefined);
     abandon(UNAVAILABLE);
   };
+  // Once begin has settled, the transaction is over or its connection is gone, and nothing more reaches the driver:
+  // no statement, no ROLLBACK for a body that then fails, no COMMIT for one that then completes — each would be
+  // written to the closed socket, and the pinned driver's write of it throws where nothing can catch it and ends
+  // the process (postgres 3.4.9; doc 08, DA-15). A body still running then simply never finishes.
+  let ended = false;
   const settle = async (): Promise<Answer> => {
     try {
       return (await client.begin(async (tx) => {
         const sql: PgStatement = async (strings, ...values) => {
+          if (ended) return new Promise<PgRows>(() => undefined);
           if (signal.aborted) refuse(UNAVAILABLE);
           const query = tx(strings, ...values);
           inFlight = query;
@@ -267,7 +273,14 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
           pg_catalog.set_config('statement_timeout', ${limits.statement}, true),
           pg_catalog.set_config('idle_in_transaction_session_timeout', ${limits.idle}, true),
           pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`;
-        const result = await work(sql, tx);
+        let result: Answer;
+        try {
+          result = await work(sql, tx);
+        } catch (err) {
+          if (ended) return new Promise<Answer>(() => undefined);
+          throw err;
+        }
+        if (ended) return new Promise<Answer>(() => undefined);
         if (signal.aborted) refuse(UNAVAILABLE); // the deadline passed during the last statement: roll back, never commit late
         committing = true;
         return result;
@@ -276,6 +289,8 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
       if (err instanceof Rollback) return err.answer;
       if (committing && !isStatementError(err)) throw new Error(OUTCOME_UNKNOWN);
       return UNAVAILABLE;
+    } finally {
+      ended = true;
     }
   };
   signal.addEventListener('abort', onAbort, { once: true });

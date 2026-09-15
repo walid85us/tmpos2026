@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createPostgresTransactionalStore } from './postgresTransactionalStore.js';
-import type { AggregateMutator, PgClient, PgTransaction } from './postgresTransactionalStore.js';
+import type { AggregateMutator, PgClient, PgStatement, PgTransaction } from './postgresTransactionalStore.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import type { TransactionCommand } from '../runtime/commandTransaction.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
@@ -55,10 +55,11 @@ async function within(answer: Promise<unknown>, ms: number): Promise<unknown> {
  * One transaction whose statements answer as a healthy store would for a commit held by `lease`, then whose
  * COMMIT succeeds or fails as `commit` says. `failAt` makes the first statement whose text contains it fail with
  * `error`; with `lost` that failure also loses the connection, and then, as the driver does, the transaction is
- * rejected at once — and whatever is written after that is counted: the ROLLBACK the driver sends for a body that
- * rejects, which the real driver writes to the closed socket and crashes on (doc 08, DA-15).
+ * rejected at once. `lose` loses it from outside, between statements. Whatever is written after a loss is counted: a
+ * statement, the ROLLBACK the driver sends for a body that rejects, the COMMIT it sends for one that resolves — each
+ * of which the real driver writes to the closed socket and crashes on (doc 08, DA-15).
  */
-function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error } = {}): PgClient & { readonly writesAfterLoss: () => number } {
+function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error } = {}): PgClient & { readonly writesAfterLoss: () => number; readonly lose: (err: unknown) => void } {
   const rowsFor = (text: string): Record<string, unknown>[] => {
     if (text.includes('for update')) return [{ lease, open: true, expires: String(Date.now() + 60_000) }];
     if (text.includes('as now')) return [{ now: String(Date.now()) }];
@@ -66,27 +67,34 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
     return [{ ok: true }];
   };
   let writesAfterLoss = 0;
+  let loseOpen: (err: unknown) => void = () => undefined;
   return {
     writesAfterLoss: () => writesAfterLoss,
+    lose: (err: unknown) => loseOpen(err),
     async begin(fn) {
       let lost = false;
-      let lose: (err: unknown) => void = () => undefined;
-      const closed = new Promise<never>((_, reject) => { lose = reject; });
+      let reject: (err: unknown) => void = () => undefined;
+      const closed = new Promise<never>((_, r) => { reject = r; });
+      const lose = (err: unknown): void => {
+        lost = true;
+        reject(err);
+      };
+      loseOpen = lose;
       const tx = ((strings: TemplateStringsArray) => {
         if (lost) writesAfterLoss++;
         const text = strings.join('$');
         const failed = options.failAt !== undefined && text.includes(options.failAt);
-        if (failed && options.lost === true) {
-          lost = true;
-          lose(options.error);
-        }
+        if (failed && options.lost === true) lose(options.error);
         const rows = rowsFor(text);
         const answer = failed ? Promise.reject(options.error) : Promise.resolve(Object.assign(rows, { count: rows.length }));
         return Object.assign(answer, { cancel: () => undefined });
       }) as unknown as PgTransaction;
       Object.assign(tx, { json: (value: unknown) => value });
-      const body = Promise.resolve(fn(tx)).catch((err: unknown) => {
-        if (lost) writesAfterLoss++; // the driver's ROLLBACK for the rejected body
+      const body = Promise.resolve(fn(tx)).then((value) => {
+        if (lost) writesAfterLoss++; // the driver's COMMIT for a body that completes
+        return value;
+      }, (err: unknown) => {
+        if (lost) writesAfterLoss++; // the driver's ROLLBACK for a body that rejects
         throw err;
       });
       const result = await Promise.race([body, closed]);
@@ -279,4 +287,29 @@ test('an idle claim rolls back, so it is never indeterminate; one that dead-lett
   spentNow = 1;
   assert.deepEqual(await store.delivery.claim(request, live()), { outcome: 'claimed', events: [] });
   assert.deepEqual(settled, ['ROLLBACK', 'COMMIT'], 'the same empty answer; only the claim that dead-lettered something commits');
+});
+
+test('a connection lost while the mutator waits between statements is handed nothing more — no statement, ROLLBACK or COMMIT — and the call is unavailable', async () => {
+  for (const after of ['a statement', 'a refusal', 'completion'] as const) {
+    const good = command();
+    let inGap: () => void = () => undefined;
+    const waiting = new Promise<void>((resolve) => { inGap = resolve; });
+    let resume: () => void = () => undefined;
+    const gapped: AggregateMutator = Object.freeze({ ...CREATE_MUTATOR, apply: async (sql: PgStatement) => {
+      await sql`select 1`;
+      inGap();
+      await new Promise<void>((resolve) => { resume = resolve; });
+      if (after === 'a statement') await sql`select 2`;
+      if (after === 'a refusal') throw new Error('M6-UNIT-CANARY refused after the gap');
+      return 'applied';
+    } });
+    const client = scripted(good.lease);
+    const answer = createPostgresTransactionalStore({ client, mutators: [gapped] }).transactions.commit(good, live());
+    await waiting;
+    client.lose(connectionError());
+    assert.deepEqual(await within(Promise.resolve(answer), 2_000), UNAVAILABLE, `${after}: nothing committed, and the answer comes at once`);
+    resume();
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(client.writesAfterLoss(), 0, `${after}: nothing reaches the lost connection`);
+  }
 });

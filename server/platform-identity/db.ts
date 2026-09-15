@@ -272,8 +272,17 @@ function clientOptions(max: number) {
     connect_timeout: 10,
     prepare: false,
     connection: { ...DB_SESSION_BOUNDS },
+    onnotice: discardNotice,
   };
 }
+
+/**
+ * Every server NOTICE is dropped. The driver's default prints each one whole — message, detail, context and the
+ * server's source location — to stdout, and although the store raises none of its own, a mutator or a trigger
+ * could (docs/phase-4/08 DA-17). Nothing consumes notices, so nothing is counted either, until a bounded
+ * telemetry sink exists.
+ */
+export function discardNotice(): void {}
 
 /** Request paths need more concurrency than the admin path's 3. */
 const RUNTIME_POOL_MAX = 10;

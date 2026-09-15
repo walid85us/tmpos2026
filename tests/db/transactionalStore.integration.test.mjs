@@ -38,6 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import postgres from 'postgres';
 
@@ -53,6 +54,7 @@ import {
   COMMAND_AUDIT_EVALUATED_BY,
   createPostgresTransactionalStore,
 } from '../../server/persistence/postgresTransactionalStore.ts';
+import { RETIRED_POOL_GRACE_S } from '../../server/persistence/supervisedPgClient.ts';
 import { TEST_IDEMPOTENCY_KEY, assertIdempotencyStoreContract } from '../../server/runtime/idempotencyStore.testkit.ts';
 import {
   TEST_CREATE,
@@ -240,7 +242,6 @@ function storeClient(max = 6, via = relay) {
     ssl: false,
     max,
     idle_timeout: 0,
-    onnotice: () => {},
     onclose: () => {
       via.state.closes += 1;
     },
@@ -1577,4 +1578,74 @@ test('M6-PG-22: an event is claimed at most 20 times — then dead-lettered, nev
   assert.deepEqual(await rowOf(last), before, 'and changes nothing');
   assert.deepEqual(await A.delivery.deadLetter({ eventId: last, claim: held, reason: 'attempts_exhausted' }, live()), { outcome: 'dead_lettered' },
     'the holder dead-letters it');
+});
+
+// ---------------------------------------------------------------------------
+// the pinned driver's connection-loss defects and notices, each in a process of its own (doc 08, DA-15, DA-17)
+// ---------------------------------------------------------------------------
+
+const TSX = fileURLToPath(new URL('../../node_modules/.bin/tsx', import.meta.url));
+const DEFECT_CHILD = fileURLToPath(new URL('./pgDriverDefects.child.mjs', import.meta.url));
+const DEFECT_TARGETS = JSON.stringify({
+  owner: { dsn: driverDsn(TARGET_DSN), options: CLIENT_OPTS },
+  store: { dsn: driverDsn(TARGET_DSN, STORE_PROBE), options: { ...CLIENT_OPTS, user: STORE_PROBE } },
+});
+const WRITE_AFTER_CLOSE = "Cannot read properties of null (reading 'write')";
+
+/** One scenario of the defect child: its exit code, its RESULT, and everything it printed. */
+function inChild(scenario) {
+  return new Promise((done, fail) => {
+    const child = spawn(TSX, [DEFECT_CHILD, scenario], { env: { ...process.env, M6_DEFECT_TARGETS: DEFECT_TARGETS }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let printed = '';
+    child.stdout.on('data', (chunk) => { printed += chunk; });
+    child.stderr.on('data', (chunk) => { printed += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    child.on('error', fail);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const line = printed.split('\n').find((l) => l.startsWith('RESULT '));
+      done({ code, result: line === undefined ? null : JSON.parse(line.slice('RESULT '.length)), printed });
+    });
+  });
+}
+
+test('M6-PG-24: the pinned driver still has both connection-loss defects — a write after close ends the process, and a close in the same turn as a write leaves a slot that never reconnects', async () => {
+  // A witness, not a wish: should a driver change make either assertion fail, DA-15's containment is re-read, never
+  // assumed away.
+  const crashed = await inChild('write-after-close');
+  assert.notEqual(crashed.code, 0, 'defect 1: the ROLLBACK the driver wrote to the closed socket ended the process');
+  assert.equal(crashed.result, null);
+  assert.ok(crashed.printed.includes(WRITE_AFTER_CLOSE), 'defect 1: it died of the write to a null socket');
+  const poisoned = await inChild('poisoned-slot');
+  assert.equal(poisoned.code, 0);
+  assert.deepEqual(poisoned.result.rounds.map((r) => r.code), ['CONNECT_TIMEOUT', 'CONNECT_TIMEOUT'], 'defect 2: every later use of the slot waits out connect_timeout');
+  assert.ok(poisoned.result.endMs < 3_000, 'ending that pool is still bounded');
+});
+
+test('M6-PG-25: a connection lost under a command — mid-statement, or while its mutator waits, then runs a statement, refuses or completes — answers unavailable, writes nothing more, and the process lives', async () => {
+  for (const kind of ['mid-statement', 'gap-statement', 'gap-refusal', 'gap-completion']) {
+    const run = await inChild(kind);
+    assert.equal(run.code, 0, `${kind}: the process survived`);
+    assert.deepEqual(run.result, { kind, acquired: 'acquired', answer: 'unavailable', sleepReturned: false },
+      `${kind}: failed closed, before COMMIT — and mid-statement, the statement itself was cut`);
+    assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE), `${kind}: nothing was written to the closed socket`);
+  }
+});
+
+test('M6-PG-26: the supervised client discards a poisoned pool — the call that met it fails once, unretried; the next opens a fresh pool within its deadline; end is bounded', async () => {
+  const run = await inChild('supervised');
+  assert.equal(run.code, 0);
+  const r = run.result;
+  assert.deepEqual([r.first, r.lost, r.next, r.pools], ['acquired', 'unavailable', 'acquired', 2], 'the poisoned pool failed one call and was replaced');
+  assert.ok(r.nextMs < r.deadlineMs, 'the next call answered within its deadline');
+  assert.ok(r.endMs < (RETIRED_POOL_GRACE_S + 2) * 1_000, 'end waited for the retired pool, within its bound');
+});
+
+test('M6-PG-27: a server NOTICE through the runtime\'s own client options reaches no output; the driver\'s default would print it', async () => {
+  const run = await inChild('notices');
+  assert.equal(run.code, 0);
+  assert.ok(run.printed.includes('M6-NOTICE-CANARY-DEFAULT'), 'control: the driver\'s default handler prints a notice, and this capture sees it');
+  for (const canary of ['M6-NOTICE-CANARY-RUNTIME', 'M6-NOTICE-CANARY-DETAIL']) {
+    assert.ok(!run.printed.includes(canary), `the runtime's handler prints nothing of it: ${canary}`);
+  }
 });
