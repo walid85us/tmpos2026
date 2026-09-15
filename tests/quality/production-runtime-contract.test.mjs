@@ -264,7 +264,7 @@ test('no per-process limiter, fallback or second proxy contract exists in the pr
   assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
 });
 
-test('durable idempotency has no production store, no production route that requires it, and no database or provider adapter', () => {
+test('durable idempotency has no bound production store, no production route that requires it, and its port imports no database or provider adapter', () => {
   // M6-IDEMPOT-P2: the port is provider-independent; its only store is test support, the composition
   // root binds none, and nothing in the production graph registers a route that requires one.
   const production = [...runtimeSourceFiles().filter((f) => !f.endsWith('.testkit.ts')),
@@ -287,7 +287,7 @@ test('durable idempotency has no production store, no production route that requ
     'the production entry composes no idempotency, transaction port, event contract or further route: the probes and the bounded fallback only');
 });
 
-test('the transactional outbox has no production adapter, worker, database, network client or SQL, and the adapter table stays closed', () => {
+test('the transactional outbox has no bound production adapter and no worker, its contracts hold no database, network client or SQL, and the adapter table stays closed', () => {
   // M6-OUTBOX-P3: the transaction and delivery ports are provider-independent; their only adapters are test
   // support; the composition root binds neither; no production module names a delivery entry point or holds an
   // interval timer (a self-rescheduling setTimeout is left to review); and a command route — which must declare
@@ -343,6 +343,44 @@ test('the transactional outbox has no production adapter, worker, database, netw
     assert.doesNotMatch(codeOf(join(REPO, 'server', 'composition', f)), /commandTransaction|outbox|transactions\s*:|events\s*:/i,
       `${f}: no composition file composes a transaction port, outbox or event contract`);
   }
+});
+
+test('the PostgreSQL transactional store is unbound: outside the artifact, unreachable from production, and it builds no client', () => {
+  // M6-PG-P4: server/persistence holds the adapter for the three M6 ports, proven against disposable PostgreSQL only.
+  // Binding it is a later, separately authorized step (G-DBROLE, G-MIGRATE, G-IDEMPOT); until then nothing reaches it.
+  const PERSISTENCE = join(REPO, 'server', 'persistence');
+  const cfg = JSON.parse(readFileSync(join(REPO, 'tsconfig.server.json'), 'utf8'));
+  assert.ok(!(cfg.include || []).some((p) => p.includes('persistence')), 'the emitted server artifact does not contain the store');
+  const roots = [join(RUNTIME_DIR, 'server.ts'), ...readdirSync(join(REPO, 'server', 'composition'))
+    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).map((f) => join(REPO, 'server', 'composition', f))];
+  const reached = new Set();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (reached.has(file)) continue;
+    reached.add(file);
+    for (const spec of importSpecifiers(readFileSync(file, 'utf8'))) {
+      if (!spec.startsWith('.')) continue;
+      const base = resolve(dirname(file), spec);
+      const target = [base.replace(/\.js$/, '.ts'), `${base}.ts`].find((p) => existsSync(p));
+      if (target) pending.push(target);
+    }
+  }
+  assert.ok(reached.has(join(RUNTIME_DIR, 'app.ts')), 'the walk reaches the runtime it guards');
+  assert.ok(![...reached].some((f) => f.startsWith(PERSISTENCE)), 'neither the production entry nor the composition root reaches server/persistence');
+  const importers = [];
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+      if (!/\.[cm]?[jt]s$/.test(p) || /\.test\.[cm]?[jt]s$/.test(p) || p.startsWith(PERSISTENCE)) continue;
+      if (importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('persistence/'))) importers.push(p.slice(REPO.length + 1));
+    }
+  })(join(REPO, 'server'));
+  assert.deepEqual(importers, [], 'no production module imports the store');
+  const store = readFileSync(join(PERSISTENCE, 'postgresTransactionalStore.ts'), 'utf8');
+  assert.doesNotMatch(store, /\bpostgres\s*\(|from\s+['"]postgres['"]|\bgetRuntimeDb\b|\bgetDb\b|process\.env/,
+    'the store builds or looks up no client and reads no environment: the caller hands it one');
 });
 
 test('the production entry and composition root compose no Command Center route or reader', () => {

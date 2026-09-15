@@ -1,0 +1,1198 @@
+// Phase 4.0 M6-PG-P4 — the PostgreSQL transactional store against a REAL disposable PostgreSQL.
+//
+// Everything here runs against a throwaway `tmpos_s1b_*` database: locally a cluster the S1b harness
+// creates on a task-owned Unix socket, in CI the workflow's disposable loopback service
+// (TM_POS_TEST_DATABASE_URL). No managed provider, persistent database or ambient application DSN is ever
+// consulted: the trusted executor's guard refuses anything that is not a disposable local target, and it
+// runs before any statement.
+//
+// WHAT IT PROVES. Migration 006 applies through the trusted engine on top of 001-005, refuses a rollback
+// that would destroy work, reverses cleanly and re-applies; its constraints refuse malformed, oversized and
+// contradictory values; and the adapter (server/persistence/postgresTransactionalStore.ts) passes the three
+// UNCHANGED conformance suites — idempotency, command transaction, outbox delivery — over TWO independent
+// instances, each on its own connection pool, as a non-owner LOGIN holding exactly tmpos_app and
+// tmpos_audit_writer. Then the cases the suites cannot reach: the real clock after a lock wait, a lost COMMIT
+// acknowledgement, aborts, lock and statement timeouts, injected SQLSTATEs, a connection cut mid-transaction,
+// an unexpected null, claim order and the batch limit, and that nothing the driver says leaves the adapter.
+//
+// TEST MACHINERY — all of it in the disposable database or this process, none in a migration or the adapter:
+//   * m6_proof.item: the synthetic business aggregate the two conformance commands mutate, through mutators
+//     defined in this file;
+//   * a FROZEN store clock: public.m6_store_clock() is replaced, in this database only, by one that reads
+//     m6_proof.clock, so the suites' exact millisecond boundaries hold. The migration's own definition is
+//     restored (from pg_get_functiondef) for the real-time cases and at the end. The stamps — audit_event
+//     and outbox_event occurred_at — are the transaction start, now(), which no replacement touches, so an
+//     advance of up to one second also waits that long in real time;
+//   * fault triggers (m6_proof.inject) that raise a chosen SQLSTATE or sleep in the named part's own
+//     statement, armed once through per-part sequences. A sequence is not transactional, so its value is also
+//     the witness that the parts before a failure really ran before the rollback;
+//   * a byte relay on a task-owned socket between the store's clients and the server: it makes the store
+//     unreachable the way a stopping server does (no new connection; the server ends every store session),
+//     severs a dedicated client's connection without a word, and can discard the server's answer to one COMMIT.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, connect } from 'node:net';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+import postgres from 'postgres';
+
+import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import {
+  assertDisposableTestDsn,
+  createPostgresExecutor,
+  runTrustedApply,
+} from '../../server/platform-identity/migrationExecutor.ts';
+import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
+import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
+import {
+  COMMAND_AUDIT_EVALUATED_BY,
+  createPostgresTransactionalStore,
+} from '../../server/persistence/postgresTransactionalStore.ts';
+import { TEST_IDEMPOTENCY_KEY, assertIdempotencyStoreContract } from '../../server/runtime/idempotencyStore.testkit.ts';
+import {
+  TEST_CREATE,
+  TEST_EVENTS,
+  TEST_RENAME,
+  assertCommandTransactionContract,
+  assertOutboxDeliveryContract,
+} from '../../server/runtime/transactionalOutbox.testkit.ts';
+import { MAX_SEALED_LENGTH, createIdempotencyKeyring } from '../../server/runtime/idempotency.ts';
+import { defineCommands, prepareCommand } from '../../server/runtime/commandTransaction.ts';
+import { MAX_CLAIM_BATCH, MAX_EVENTS_PER_COMMAND, defineOutboxEvents } from '../../server/runtime/outbox.ts';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(HERE, '..', '..');
+const MIG_DIR = join(REPO, 'server', 'platform-identity', 'migrations');
+const MIG_REL = 'server/platform-identity/migrations';
+const UP_006 = readFileSync(join(MIG_DIR, '006_m6_transactional_store.up.sql'), 'utf8');
+const DOWN_006 = readFileSync(join(MIG_DIR, '006_m6_transactional_store.down.sql'), 'utf8');
+
+const LOCK_KEY = 720100306;
+const MIGRATOR = { purpose: 'migration', migratorRef: 'm6-migrator', runtimeRef: 'm6-runtime' };
+const NOW = () => new Date().toISOString();
+
+/** The ephemeral non-owner LOGIN every store instance connects as: tmpos_app + tmpos_audit_writer, nothing else. */
+const STORE_PROBE = 'tmpos_m6_store_probe';
+
+/** The G-DBROLE owner step migration 005 verifies. Idempotent: in CI this database is shared with S2 and S3. */
+const OWNER_DB_ACL_PREP = `do $$
+begin
+  execute format('revoke temporary on database %I from public', current_database());
+  execute format('revoke create on database %I from public', current_database());
+end
+$$;`;
+
+const ACQUIRED = { outcome: 'acquired', reclaimed: false };
+const RECLAIMED = { outcome: 'acquired', reclaimed: true };
+const IN_PROGRESS = { outcome: 'in_progress' };
+const COMMITTED = { outcome: 'committed' };
+const CONFLICT = { outcome: 'conflict' };
+const LEASE_LOST = { outcome: 'lease_lost' };
+const UNAVAILABLE = { outcome: 'unavailable' };
+const CLAIM_LOST = { outcome: 'claim_lost' };
+const EMPTY = { outcome: 'claimed', events: [] };
+const OUTCOME_UNKNOWN = 'transactional_store_outcome_unknown';
+
+// ---------------------------------------------------------------------------
+// cluster lifecycle
+// ---------------------------------------------------------------------------
+
+const ambientTestDsn = process.env.TM_POS_TEST_DATABASE_URL;
+let cluster = null;
+let TARGET_DSN = null;
+let CLIENT_OPTS = {};
+
+if (typeof ambientTestDsn === 'string' && ambientTestDsn.trim() !== '') {
+  TARGET_DSN = ambientTestDsn.trim();
+  // A socket-form target (no hostname) names its directory (and role) as parameters, which every client strips from
+  // the URL: carry them as options, so no client falls back to PGHOST, PGUSER or localhost instead of the validated
+  // target. With a hostname, the hostname is what was validated, so a host parameter is never used.
+  const target = new URL(TARGET_DSN);
+  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
+  if (socketDir !== null) {
+    CLIENT_OPTS = { host: socketDir, ...(target.searchParams.get('user') !== null ? { user: target.searchParams.get('user') } : {}) };
+  }
+} else if (localPostgresAvailable()) {
+  cluster = startDisposablePostgres();
+  TARGET_DSN = cluster.dsn;
+  CLIENT_OPTS = cluster.clientOptions;
+} else {
+  throw new Error(
+    'M6-PG INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
+    'Docker and remote databases are not substitutes.',
+  );
+}
+
+// VALIDATE BEFORE TOUCHING ANYTHING: the setup below issues cluster-wide DDL (CREATE ROLE).
+assertDisposableTestDsn(TARGET_DSN);
+const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
+
+/** `host`/`user` travel in client options, never the URL; a named role REPLACES the userinfo. */
+function driverDsn(raw, user) {
+  const u = new URL(raw);
+  u.searchParams.delete('host');
+  u.searchParams.delete('user');
+  if (user !== undefined) {
+    u.username = encodeURIComponent(user);
+    u.password = '';
+  }
+  return u.toString();
+}
+
+/** The OWNER: fixtures, fault arming and out-of-band observation — never a privilege claim. */
+const observer = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+/** A second owner connection that holds row locks while a store call waits on them. */
+const lockHolder = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+
+// ---------------------------------------------------------------------------
+// the relay: the store's only way to the server
+// ---------------------------------------------------------------------------
+
+/** The unnamed-statement Parse of COMMIT, as postgres.js sends it. */
+const COMMIT_PARSE = Buffer.from('\0commit\0');
+
+function startRelay() {
+  const u = new URL(TARGET_DSN);
+  const upstream = CLIENT_OPTS.host
+    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
+    : { host: u.hostname, port: Number(u.port || 5432) };
+  const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6-relay-'));
+  const pairs = new Set();
+  // closes: the connections through this relay that the driver has finished closing, as storeClient counts them.
+  const state = { dropCommit: false, chunks: 0, closes: 0, pairs };
+  const server = createServer((client) => {
+    client.on('error', () => {});
+    const db = connect(upstream);
+    let swallow = false;
+    const pair = {
+      cut: () => {
+        pairs.delete(pair);
+        client.destroy();
+        db.destroy();
+      },
+    };
+    pairs.add(pair);
+    client.on('data', (chunk) => {
+      state.chunks += 1;
+      if (state.dropCommit && chunk.includes(COMMIT_PARSE)) {
+        state.dropCommit = false;
+        swallow = true;
+      }
+      db.write(chunk);
+    });
+    // Once a COMMIT went through on a dropping connection, the server's answer to it is discarded and the
+    // connection cut: the transaction committed, and the client never learns it.
+    db.on('data', (chunk) => (swallow ? pair.cut() : client.write(chunk)));
+    for (const socket of [client, db]) {
+      socket.on('error', pair.cut);
+      socket.on('close', pair.cut);
+    }
+  });
+  const path = join(dir, '.s.PGSQL.5432');
+  const listen = () => new Promise((done) => server.listen(path, done));
+  // No listener, so every new connection is refused; settles once every open pair has closed. (A FATAL answer
+  // to each new connection is NOT used: the driver retries those without end.)
+  const refuse = () => (server.listening ? new Promise((done) => server.close(done)) : Promise.resolve());
+  // Severed: refused, and every open connection cut without a word from the server — a network cut.
+  const sever = async () => {
+    const drained = refuse();
+    for (const pair of [...pairs]) pair.cut();
+    await drained;
+  };
+  return {
+    dir,
+    listening: listen(),
+    state,
+    refuse,
+    restore: async () => {
+      if (!server.listening) await listen();
+    },
+    dropNextCommitAnswer() {
+      state.dropCommit = true;
+    },
+    async close() {
+      await sever();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+const relay = startRelay();
+await relay.listening;
+
+/**
+ * A store client: the runtime principal's own options, through a relay (the shared one unless named), as the
+ * non-owner probe, each close the driver finishes counted on that relay. Six connections, not the runtime's ten:
+ * the local disposable cluster allows twenty in all, and two instances plus the owner's connections must fit — so
+ * concurrent callers also queue in the client, as they would in production.
+ */
+function storeClient(max = 6, via = relay) {
+  return postgres(driverDsn(TARGET_DSN, STORE_PROBE), {
+    ...runtimeClientOptions(TARGET_DSN),
+    // EXPLICIT TLS opt-out at the call site: the disposable target is a task-owned socket or loopback.
+    ssl: false,
+    max,
+    idle_timeout: 0,
+    onnotice: () => {},
+    onclose: () => {
+      via.state.closes += 1;
+    },
+    host: via.dir,
+    port: 5432,
+    user: STORE_PROBE,
+  });
+}
+
+/**
+ * The store goes down the way a server does: the relay refuses new connections and the server itself ends every
+ * store session — its FATAL, then the close — while no statement of the shared instances is in flight. It returns
+ * only once the driver has closed every connection it held through the relay: a call the pinned driver is handed
+ * on a connection whose session has ended, before it has seen the close, is written to it, and the close then
+ * leaves that slot unable to reconnect (doc 08, DA-15). So no call meets one, and no pooled connection is severed
+ * without a word either; the losses under an open transaction are proved on clients and relays of their own
+ * (M6-PG-12).
+ */
+async function storeDown() {
+  const open = relay.state.pairs.size;
+  const closedBefore = relay.state.closes;
+  const drained = relay.refuse();
+  await observer`select pg_catalog.pg_terminate_backend(pid) from pg_catalog.pg_stat_activity where usename = ${STORE_PROBE}`;
+  const bound = new AbortController();
+  const closed = (async () => {
+    while (!bound.signal.aborted && relay.state.closes - closedBefore < open) await sleep(5);
+  })();
+  const late = sleep(5_000, undefined, { signal: bound.signal }).then(() => {
+    throw new Error('the store sessions did not end within 5 s');
+  }, () => {});
+  try {
+    await Promise.race([Promise.all([drained, closed]), late]);
+  } finally {
+    bound.abort();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// setup: real migrations, a real non-owner principal
+// ---------------------------------------------------------------------------
+
+await observer.unsafe(`do $$ begin
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+end $$;`);
+await observer.unsafe(OWNER_DB_ACL_PREP);
+
+// Locally this suite owns a fresh cluster and applies 001-006 itself; in CI S2 applied 001-005 and S3 applied
+// 006 to the shared service database, and the ledger makes this a no-op. The ledger is asserted in M6-PG-01.
+let applyReport;
+{
+  const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
+  try {
+    applyReport = await runTrustedApply({
+      fsPort: createNodeFsPort(MIG_DIR, MIG_REL),
+      adapter: handle.adapter,
+      ledger: handle.ledger,
+      connectionMode: 'session',
+      credential: MIGRATOR,
+      lockKey: LOCK_KEY,
+      now: NOW,
+      deadlineMs: 60_000,
+    });
+  } finally {
+    await handle.dispose();
+  }
+}
+
+// No password: the disposable cluster authenticates locally by trust.
+await observer.unsafe(`drop role if exists ${STORE_PROBE}`);
+await observer.unsafe(`create role ${STORE_PROBE} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
+await observer.unsafe(`grant tmpos_app to ${STORE_PROBE}`);
+await observer.unsafe(`grant tmpos_audit_writer to ${STORE_PROBE}`);
+
+const FIXTURE_SQL = `
+create schema m6_proof;
+create table m6_proof.item (
+  aggregate_id uuid primary key,
+  version bigint not null check (version >= 1),
+  name text not null,
+  quantity integer not null
+);
+create table m6_proof.clock (singleton boolean primary key default true check (singleton), at timestamptz not null);
+insert into m6_proof.clock (at) values (pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()));
+create table m6_proof.fault (
+  component text primary key, fire_at bigint not null, mode text not null, sqlstate text not null, seconds double precision not null
+);
+create sequence m6_proof.fault_mutation;
+create sequence m6_proof.fault_audit;
+create sequence m6_proof.fault_outbox;
+create sequence m6_proof.fault_completion;
+create function m6_proof.inject() returns trigger language plpgsql as $$
+declare
+  n bigint;
+  f record;
+begin
+  n := case tg_argv[0]
+    when 'mutation' then pg_catalog.nextval('m6_proof.fault_mutation')
+    when 'audit' then pg_catalog.nextval('m6_proof.fault_audit')
+    when 'outbox' then pg_catalog.nextval('m6_proof.fault_outbox')
+    when 'completion' then pg_catalog.nextval('m6_proof.fault_completion')
+  end;
+  select * into f from m6_proof.fault where component = tg_argv[0] and fire_at = n;
+  if found then
+    if f.mode = 'sleep' then
+      perform pg_catalog.pg_sleep(f.seconds);
+    else
+      raise exception 'injected % fault M6-DRIVER-CANARY', tg_argv[0] using errcode = f.sqlstate;
+    end if;
+  end if;
+  return new;
+end
+$$;
+create trigger m6_proof_inject before insert or update on m6_proof.item
+  for each row execute function m6_proof.inject('mutation');
+create trigger m6_proof_inject before insert on public.audit_event
+  for each row execute function m6_proof.inject('audit');
+create trigger m6_proof_inject before insert on public.outbox_event
+  for each row execute function m6_proof.inject('outbox');
+create trigger m6_proof_inject before update on public.idempotency_record
+  for each row when (old.response is null and new.response is not null) execute function m6_proof.inject('completion');
+grant usage on schema m6_proof to ${STORE_PROBE};
+grant select, insert, update on m6_proof.item to ${STORE_PROBE};
+grant select on m6_proof.clock, m6_proof.fault to ${STORE_PROBE};
+grant usage on sequence m6_proof.fault_mutation, m6_proof.fault_audit, m6_proof.fault_outbox, m6_proof.fault_completion to ${STORE_PROBE};
+`;
+
+const FROZEN_CLOCK = `create or replace function public.m6_store_clock() returns timestamptz language sql volatile
+  set search_path = pg_catalog, pg_temp as $$ select at from m6_proof.clock $$`;
+let productionClock = null;
+
+/** The fixture, installed once — after M6-PG-01 has reversed and re-applied migration 006. */
+let fixture = null;
+const ready = () => (fixture ??= (async () => {
+  await observer.unsafe(FIXTURE_SQL).simple();
+  productionClock = (await observer`select pg_catalog.pg_get_functiondef('public.m6_store_clock()'::regprocedure) as def`)[0].def;
+  await observer.unsafe(FROZEN_CLOCK);
+})());
+
+/** Move the frozen store clock forward by exactly `ms`; up to a second also waits, for the real now() stamps. */
+async function advance(ms) {
+  await observer`update m6_proof.clock set at = at + (${String(ms)}::bigint * interval '1 millisecond')`;
+  if (ms <= 1_000) await sleep(ms + 2);
+}
+const frozenNowMs = async () => Number((await observer`select (extract(epoch from at) * 1000)::bigint::text as t from m6_proof.clock`)[0].t);
+
+/** Arm the next statement of `component` to raise `sqlstate`, or to sleep `seconds`, once. */
+async function arm(component, mode = 'raise', sqlstate = 'P0001', seconds = 0) {
+  await observer`insert into m6_proof.fault (component, fire_at, mode, sqlstate, seconds)
+    values (${component}, coalesce(pg_catalog.pg_sequence_last_value(${`m6_proof.fault_${component}`}::regclass), 0) + 1, ${mode}, ${sqlstate}, ${seconds})
+    on conflict (component) do update set fire_at = excluded.fire_at, mode = excluded.mode, sqlstate = excluded.sqlstate, seconds = excluded.seconds`;
+}
+/** How many statements each part has run, ever: sequences survive every rollback. */
+async function witness() {
+  const [w] = await observer`select
+    coalesce(pg_catalog.pg_sequence_last_value('m6_proof.fault_mutation'::regclass), 0)::int as mutation,
+    coalesce(pg_catalog.pg_sequence_last_value('m6_proof.fault_audit'::regclass), 0)::int as audit,
+    coalesce(pg_catalog.pg_sequence_last_value('m6_proof.fault_outbox'::regclass), 0)::int as outbox,
+    coalesce(pg_catalog.pg_sequence_last_value('m6_proof.fault_completion'::regclass), 0)::int as completion`;
+  return { mutation: w.mutation, audit: w.audit, outbox: w.outbox, completion: w.completion };
+}
+const ranSince = (before, after) => Object.fromEntries(Object.keys(before).map((k) => [k, after[k] - before[k]]));
+
+/** The synthetic aggregate's two commands, as trusted source defines a kind's mutator: fixed, parameterized SQL. */
+const MUTATORS = Object.freeze([
+  Object.freeze({
+    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item',
+    apply: async (sql, m) => ((await sql`insert into m6_proof.item (aggregate_id, version, name, quantity)
+      values (${m.aggregateId}, 1, ${m.changes.name}, ${m.changes.quantity}) on conflict (aggregate_id) do nothing`).count === 1 ? 'applied' : 'conflict'),
+  }),
+  Object.freeze({
+    kind: TEST_RENAME.kind, mode: 'update', aggregateType: 'item',
+    apply: async (sql, m) => ((await sql`update m6_proof.item set name = ${m.changes.name}, version = version + 1
+      where aggregate_id = ${m.aggregateId} and version = ${m.expectedVersion}`).count === 1 ? 'applied' : 'conflict'),
+  }),
+]);
+
+const clientA = storeClient();
+const clientB = storeClient();
+const A = createPostgresTransactionalStore({ client: clientA, mutators: MUTATORS });
+const B = createPostgresTransactionalStore({ client: clientB, mutators: MUTATORS });
+const extraClients = [];
+
+/** What the store committed, read by the owner outside every port transaction. */
+async function inspect() {
+  const items = await observer`select aggregate_id::text as id, version::text as version, name, quantity from m6_proof.item`;
+  const audit = await observer`select action_id, required_permission, scope_type, tenant_id, store_id, actor_internal_user_id, request_id,
+      floor(extract(epoch from occurred_at) * 1000)::bigint::text as at
+    from public.audit_event where evaluated_by = ${COMMAND_AUDIT_EVALUATED_BY}`;
+  const events = await observer`select event_id::text as event_id, event_type, event_version, aggregate_type, aggregate_id::text as aggregate_id,
+      aggregate_version::text as aggregate_version, tenant_digest, store_digest, actor_digest, correlation_id::text as correlation_id, payload,
+      floor(extract(epoch from occurred_at) * 1000)::bigint::text as occurred_at, status, attempt
+    from public.outbox_event`;
+  return {
+    aggregates: items.map((r) => ({ type: 'item', id: r.id, version: Number(r.version), state: { name: r.name, quantity: r.quantity } })),
+    audit: audit.map((r) => ({
+      action: r.action_id, permission: r.required_permission, scope: r.scope_type, tenant: r.tenant_id, store: r.store_id,
+      actor: r.actor_internal_user_id, correlationId: r.request_id, at: Number(r.at),
+    })),
+    events: events.map((r) => ({
+      envelope: {
+        eventId: r.event_id, type: r.event_type, version: r.event_version, aggregateType: r.aggregate_type, aggregateId: r.aggregate_id,
+        aggregateVersion: Number(r.aggregate_version), tenant: r.tenant_digest, store: r.store_digest, actor: r.actor_digest,
+        correlationId: r.correlation_id, payload: r.payload, occurredAt: Number(r.occurred_at),
+      },
+      status: r.status,
+      attempt: r.attempt,
+    })),
+  };
+}
+
+const harness = () => ({
+  idempotency: A.idempotency,
+  transaction: A.transactions,
+  transactionPeer: B.transactions,
+  delivery: A.delivery,
+  deliveryPeer: B.delivery,
+  advance,
+  breakStore: storeDown,
+  restoreStore: () => relay.restore(),
+  failNextCommit: (component) => arm(component),
+  inspect,
+});
+
+// ---------------------------------------------------------------------------
+// the runtime's own validation and sealing, for the targeted cases
+// ---------------------------------------------------------------------------
+
+const EVENTS = defineOutboxEvents(TEST_EVENTS);
+const COMMANDS = defineCommands([TEST_CREATE, TEST_RENAME], EVENTS);
+const KEYRING = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+const live = () => new AbortController().signal;
+const lease = () => randomBytes(32).toString('base64url');
+const token = () => randomBytes(32).toString('base64url');
+const operation = () => KEYRING.operationOf(randomUUID(), Object.freeze({ authProvider: 'm6-proof', authProviderUid: 'actor' }), {
+  method: 'POST', path: '/v1/m6-proof', audience: null, tenant: null, store: null, body: Buffer.from(randomUUID()),
+});
+const acquireRequest = (op, held, leaseMs = 60_000, retentionMs = 600_000) =>
+  Object.freeze({ scope: op.scope, fingerprint: op.fingerprint, lease: held, leaseMs, retentionMs });
+
+async function begin(store = A, terms = {}) {
+  const op = operation();
+  const held = lease();
+  assert.deepEqual(await store.idempotency.acquire(acquireRequest(op, held, terms.leaseMs, terms.retentionMs), live()), ACQUIRED);
+  return { op, lease: held };
+}
+
+function prepared(kind, attempt, plan, newAggregateId) {
+  const result = prepareCommand(COMMANDS.contract(kind), EVENTS, plan, {
+    scope: attempt.op.scope, lease: attempt.lease, newAggregateId,
+    authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+    seal: (envelope) => KEYRING.seal(envelope, attempt.op),
+  });
+  assert.ok(result !== null, 'the proof plans are in contract');
+  return result.command;
+}
+function creating(attempt, name = `item-${randomUUID().slice(0, 8)}`, aggregateId = randomUUID()) {
+  return prepared(TEST_CREATE.kind, attempt, {
+    aggregateId, expectedVersion: null, changes: { name, quantity: 1 },
+    events: [{ type: 'conformance.item.created', payload: { name, quantity: 1 } }], response: { status: 201, body: { id: aggregateId } },
+  }, aggregateId);
+}
+function renaming(attempt, aggregateId, version, name = `renamed-${randomUUID().slice(0, 8)}`) {
+  return prepared(TEST_RENAME.kind, attempt, {
+    aggregateId, expectedVersion: version, changes: { name },
+    events: [{ type: 'conformance.item.renamed', payload: { name } }], response: { status: 200, body: { id: aggregateId, name } },
+  }, randomUUID());
+}
+
+/** What the store holds of one command: its aggregate's version, its audit rows, its events, and its completion. */
+async function footprint(command) {
+  const [item] = await observer`select version::text as version, name from m6_proof.item where aggregate_id = ${command.mutation.aggregateId}`;
+  const [{ audit }] = await observer`select count(*)::int as audit from public.audit_event
+    where request_id = ${command.audit.correlationId} and evaluated_by = ${COMMAND_AUDIT_EVALUATED_BY}`;
+  const [{ events }] = await observer`select count(*)::int as events from public.outbox_event where correlation_id = ${command.audit.correlationId}`;
+  const [{ completed }] = await observer`select count(*)::int as completed from public.idempotency_record where scope = ${command.scope} and response is not null`;
+  return { version: item === undefined ? null : Number(item.version), audit, events, completed };
+}
+const NOTHING = { version: null, audit: 0, events: 0, completed: 0 };
+
+/** How a statement was refused: its SQLSTATE and constraint, or nulls when it was not. */
+async function refusal(fn) {
+  try {
+    await fn();
+    return { code: null, constraint: null };
+  } catch (e) {
+    if (e instanceof assert.AssertionError) throw e;
+    return { code: e?.code ?? null, constraint: e?.constraint_name ?? null };
+  }
+}
+
+/** Hold the row lock `lockSql` takes for `holdMs`, on the owner's second connection, while `during` runs. */
+async function whileLocked(lockSql, holdMs, during) {
+  let released = false;
+  let result;
+  await lockHolder.begin(async (tx) => {
+    await lockSql(tx);
+    const running = during().then((value) => ({ value, released }));
+    await Promise.race([running, sleep(holdMs)]);
+    released = true;
+    result = running;
+  });
+  return result;
+}
+
+/** The store session asleep in an armed fault, once it is there: its statement is in flight, before COMMIT. */
+async function sleepingStoreSession() {
+  for (let tries = 0; tries < 1_000; tries++) {
+    const [session] = await observer`select pid from pg_catalog.pg_stat_activity where usename = ${STORE_PROBE} and wait_event = 'PgSleep'`;
+    if (session !== undefined) return session.pid;
+    await sleep(5);
+  }
+  throw new Error('no store session reached the armed sleep');
+}
+
+test.after(async () => {
+  await relay.close().catch(() => {});
+  for (const c of [clientA, clientB, ...extraClients]) await c.end({ timeout: 0 }).catch(() => {});
+  if (productionClock !== null) await observer.unsafe(productionClock).catch(() => {});
+  await observer.unsafe('drop schema if exists m6_proof cascade').catch(() => {});
+  await observer.unsafe(`drop role if exists ${STORE_PROBE}`).catch(() => {});
+  await lockHolder.end({ timeout: 5 }).catch(() => {});
+  await observer.end({ timeout: 5 }).catch(() => {});
+  if (cluster !== null) {
+    const life = cluster.stop();
+    assert.equal(life.stopped, true, 'the task-created PostgreSQL process must be stopped');
+    assert.equal(life.removed, true, 'the task-created temporary directory must be removed');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the schema
+// ---------------------------------------------------------------------------
+
+async function assertStorePosture(label) {
+  const tables = await observer`select c.relname::text as name, c.relrowsecurity as rls, c.relforcerowsecurity as forced
+    from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relname in ('idempotency_record', 'outbox_event') order by 1`;
+  assert.deepEqual(tables.map((t) => [t.name, t.rls, t.forced]), [['idempotency_record', true, false], ['outbox_event', true, false]],
+    `${label}: both tables exist with RLS enabled`);
+  const policies = await observer`select tablename::text as t, policyname::text as p, cmd, roles::text as roles, qual, with_check
+    from pg_catalog.pg_policies where schemaname = 'public' and tablename in ('idempotency_record', 'outbox_event') order by 1`;
+  assert.deepEqual(policies.map((p) => [p.t, p.p, p.cmd, p.roles, p.qual, p.with_check]), [
+    ['idempotency_record', 'tmpos_app_idempotency_record_access', 'ALL', '{tmpos_app}', 'true', 'true'],
+    ['outbox_event', 'tmpos_app_outbox_event_access', 'ALL', '{tmpos_app}', 'true', 'true'],
+  ], `${label}: one policy per table, to the runtime role alone`);
+  // Table-level grants beyond the owner's: SELECT and INSERT to tmpos_app, and nothing to anyone else.
+  const grants = await observer`select c.relname::text as t, case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end as grantee,
+      a.privilege_type as p
+    from pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) a
+    where c.oid in ('public.idempotency_record'::regclass, 'public.outbox_event'::regclass) and a.grantee <> c.relowner order by 1, 2, 3`;
+  assert.deepEqual(grants.map((g) => [g.t, g.grantee, g.p]), [
+    ['idempotency_record', 'tmpos_app', 'INSERT'], ['idempotency_record', 'tmpos_app', 'SELECT'],
+    ['outbox_event', 'tmpos_app', 'INSERT'], ['outbox_event', 'tmpos_app', 'SELECT'],
+  ], `${label}: no PUBLIC, anon, authenticated or audit-writer grant`);
+  const [p] = await observer`select
+      has_column_privilege('tmpos_app', 'public.idempotency_record', 'scope', 'UPDATE') as scope_upd,
+      has_column_privilege('tmpos_app', 'public.idempotency_record', 'response', 'UPDATE') as response_upd,
+      has_column_privilege('tmpos_app', 'public.outbox_event', 'payload', 'UPDATE') as payload_upd,
+      has_column_privilege('tmpos_app', 'public.outbox_event', 'event_id', 'UPDATE') as event_id_upd,
+      has_column_privilege('tmpos_app', 'public.outbox_event', 'status', 'UPDATE') as status_upd,
+      has_table_privilege('tmpos_app', 'public.outbox_event', 'DELETE') as outbox_del,
+      has_table_privilege('tmpos_app', 'public.idempotency_record', 'TRUNCATE') as idem_trunc,
+      has_function_privilege('tmpos_app', 'public.m6_store_clock()', 'EXECUTE') as clock_app,
+      has_function_privilege('anon', 'public.m6_store_clock()', 'EXECUTE') as clock_anon,
+      has_function_privilege('authenticated', 'public.m6_store_clock()', 'EXECUTE') as clock_authenticated,
+      has_table_privilege('anon', 'public.idempotency_record', 'SELECT') as anon_idem,
+      has_table_privilege('authenticated', 'public.outbox_event', 'SELECT') as authenticated_outbox,
+      has_table_privilege('tmpos_audit_writer', 'public.outbox_event', 'SELECT') as audit_writer_outbox`;
+  assert.deepEqual(p, {
+    scope_upd: false, response_upd: true, payload_upd: false, event_id_upd: false, status_upd: true, outbox_del: false, idem_trunc: false,
+    clock_app: true, clock_anon: false, clock_authenticated: false, anon_idem: false, authenticated_outbox: false, audit_writer_outbox: false,
+  }, `${label}: column-scoped updates, no delete or truncate, the clock executable by the runtime role alone`);
+}
+
+/** A valid outbox row, as the owner may insert one directly — for the constraint and rollback-guard cases. */
+const baseEvent = () => ({
+  event_id: randomUUID(), event_type: 'conformance.item.created', event_version: 1, aggregate_type: 'item', aggregate_id: randomUUID(),
+  aggregate_version: '1', tenant: null, store: null, actor: null, correlation_id: randomUUID(), payload: { name: 'n', quantity: 1 },
+  status: 'pending', attempt: 0, due_at: '2030-01-01T00:00:00Z', claim_token: null, claim_expires_at: null, dead_reason: null,
+});
+const insertEvent = (e) => observer`insert into public.outbox_event (event_id, event_type, event_version, aggregate_type, aggregate_id,
+    aggregate_version, tenant_digest, store_digest, actor_digest, correlation_id, payload, occurred_at, status, attempt, due_at, claim_token,
+    claim_expires_at, dead_reason)
+  values (${e.event_id}, ${e.event_type}, ${e.event_version}, ${e.aggregate_type}, ${e.aggregate_id}, ${e.aggregate_version}::bigint, ${e.tenant},
+    ${e.store}, ${e.actor}, ${e.correlation_id}, ${observer.json(e.payload)}, pg_catalog.now(), ${e.status}, ${e.attempt}, ${e.due_at}::timestamptz,
+    ${e.claim_token}, ${e.claim_expires_at}::timestamptz, ${e.dead_reason})`;
+const baseRecord = () => ({
+  scope: token(), fingerprint: token(), lease: token(), lease_expires_at: '2030-01-01T00:00:00Z', expires_at: '2030-01-02T00:00:00Z', response: null,
+});
+const insertRecord = (r) => observer`insert into public.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at, response)
+  values (${r.scope}, ${r.fingerprint}, ${r.lease}, ${r.lease_expires_at}::timestamptz, ${r.expires_at}::timestamptz, ${r.response})`;
+
+test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback, reverses cleanly and re-applies', async () => {
+  assert.equal(applyReport.outcome, 'complete', `the trusted apply failed: ${applyReport.code}`);
+  const ledger = await observer`select version, dirty from public.schema_migrations order by version`;
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006'].map((v) => [v, false]),
+    '001-006 are recorded clean in the ledger of the disposable database');
+  await assertStorePosture('after the trusted apply');
+  const [{ roles }] = await observer`select count(*)::int as roles from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')`;
+  assert.equal(roles, 2, 'no role was created or removed');
+
+  // The rollback refuses while it would destroy an undelivered event or a retained record — and drops nothing.
+  const downInTransaction = () => observer.begin((tx) => tx.unsafe(DOWN_006).simple());
+  const pending = baseEvent();
+  await insertEvent(pending);
+  assert.deepEqual(await refusal(downInTransaction), { code: '55006', constraint: null }, 'an undelivered event refuses the rollback');
+  await assertStorePosture('after a refused rollback');
+  await observer`delete from public.outbox_event where event_id = ${pending.event_id}`;
+  const retained = baseRecord();
+  await insertRecord(retained);
+  assert.deepEqual(await refusal(downInTransaction), { code: '55006', constraint: null }, 'a record within its retention refuses the rollback');
+  await observer`delete from public.idempotency_record where scope = ${retained.scope}`;
+
+  await downInTransaction();
+  const [gone] = await observer`select to_regclass('public.idempotency_record') is null as idem, to_regclass('public.outbox_event') is null as outbox,
+    to_regprocedure('public.m6_store_clock()') is null as clock`;
+  assert.deepEqual(gone, { idem: true, outbox: true, clock: true }, 'the rollback removes exactly what 006 created');
+  const [kept] = await observer`select to_regclass('public.audit_event') is not null as audit,
+    (select count(*)::int from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')) as roles,
+    (select count(*)::int from pg_catalog.pg_policies where schemaname = 'public') as policies`;
+  assert.deepEqual(kept, { audit: true, roles: 2, policies: 5 }, '001-005 — audit_event, both roles, the five 005 policies — are untouched');
+
+  await observer.begin((tx) => tx.unsafe(UP_006).simple());
+  await assertStorePosture('after re-applying');
+});
+
+test('M6-PG-02: the database refuses malformed, oversized and contradictory values; the runtime role rewrites no identity or envelope', async () => {
+  const records = [
+    ['a 42-character scope', { scope: 'A'.repeat(42) }, 'idempotency_record_scope_chk'],
+    ['a scope outside base64url', { scope: '+'.repeat(43) }, 'idempotency_record_scope_chk'],
+    ['a malformed fingerprint', { fingerprint: 'x' }, 'idempotency_record_fingerprint_chk'],
+    ['a 44-character lease', { lease: 'A'.repeat(44) }, 'idempotency_record_lease_chk'],
+    ['a lease that outlives its retention', { lease_expires_at: '2030-01-03T00:00:00Z' }, 'idempotency_record_expiry_chk'],
+    ['an empty response', { response: '' }, 'idempotency_record_response_chk'],
+    ['a response one character over MAX_SEALED_LENGTH', { response: 'A'.repeat(MAX_SEALED_LENGTH + 1) }, 'idempotency_record_response_chk'],
+    ['a response outside base64url', { response: 'AAAA=' }, 'idempotency_record_response_chk'],
+  ];
+  for (const [label, over, constraint] of records) {
+    assert.deepEqual(await refusal(() => insertRecord({ ...baseRecord(), ...over })), { code: '23514', constraint }, label);
+  }
+  const largest = { ...baseRecord(), response: 'A'.repeat(MAX_SEALED_LENGTH) };
+  assert.deepEqual(await refusal(() => insertRecord(largest)), { code: null, constraint: null }, 'a response of exactly MAX_SEALED_LENGTH is stored');
+  assert.deepEqual(await refusal(() => insertRecord({ ...baseRecord(), scope: largest.scope })), { code: '23505', constraint: 'idempotency_record_pkey' },
+    'one row per scope');
+
+  const claimedAt = { status: 'claimed', attempt: 1, claim_token: token(), claim_expires_at: '2030-01-01T00:00:00Z' };
+  const events = [
+    ['an uppercase event type', { event_type: 'Conformance.item' }, 'outbox_event_type_chk'],
+    ['a 65-character event type', { event_type: `a${'.b'.repeat(32)}` }, 'outbox_event_type_chk'],
+    ['event version 0', { event_version: 0 }, 'outbox_event_version_chk'],
+    ['event version 1001', { event_version: 1001 }, 'outbox_event_version_chk'],
+    ['an uppercase aggregate type', { aggregate_type: 'Item' }, 'outbox_event_aggregate_type_chk'],
+    ['aggregate version 0', { aggregate_version: '0' }, 'outbox_event_aggregate_version_chk'],
+    ['an aggregate version past MAX_SAFE_INTEGER', { aggregate_version: '9007199254740992' }, 'outbox_event_aggregate_version_chk'],
+    ['a malformed tenant digest', { tenant: 'tenant-a' }, 'outbox_event_digest_chk'],
+    ['a payload that is not an object', { payload: [1] }, 'outbox_event_payload_chk'],
+    ['an oversized payload', { payload: { name: 'x'.repeat(6_000) } }, 'outbox_event_payload_chk'],
+    ['an unknown status, which the state machine refuses too', { status: 'sent' }, ['outbox_event_state_chk', 'outbox_event_status_chk']],
+    ['a negative attempt', { attempt: -1 }, 'outbox_event_attempt_chk'],
+    ['an attempt past the bound', { attempt: 1001 }, 'outbox_event_attempt_chk'],
+    ['a malformed claim token', { ...claimedAt, claim_token: 'short' }, 'outbox_event_claim_token_chk'],
+    ['an unknown dead reason', { status: 'dead', attempt: 1, dead_reason: 'other' }, 'outbox_event_dead_reason_chk'],
+    ['a claimed event without a token', { ...claimedAt, claim_token: null }, 'outbox_event_state_chk'],
+    ['a claimed event never attempted', { ...claimedAt, attempt: 0 }, 'outbox_event_state_chk'],
+    ['a pending event holding a token', { claim_token: token() }, 'outbox_event_state_chk'],
+    ['a delivered event never attempted', { status: 'delivered' }, 'outbox_event_state_chk'],
+    ['a dead event without its reason', { status: 'dead', attempt: 1 }, 'outbox_event_state_chk'],
+  ];
+  for (const [label, over, constraint] of events) {
+    const refused = await refusal(() => insertEvent({ ...baseEvent(), ...over }));
+    assert.ok(refused.code === '23514' && [constraint].flat().includes(refused.constraint), `${label}: ${refused.code} ${refused.constraint}`);
+  }
+  const valid = baseEvent();
+  await insertEvent(valid);
+  assert.deepEqual(await refusal(() => insertEvent({ ...baseEvent(), event_id: valid.event_id })), { code: '23505', constraint: 'outbox_event_pkey' },
+    'one row per event ID');
+  await observer`delete from public.outbox_event where event_id = ${valid.event_id}`;
+  await observer`delete from public.idempotency_record where scope = ${largest.scope}`;
+
+  // The runtime role, through its own LOGIN: the delivery state is writable, an identity or an envelope never is.
+  const direct = postgres(driverDsn(TARGET_DSN, STORE_PROBE), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, user: STORE_PROBE,
+  });
+  extraClients.push(direct);
+  for (const [label, statement] of [
+    ['an envelope payload', () => direct`update public.outbox_event set payload = '{}'::jsonb where false`],
+    ['an event type', () => direct`update public.outbox_event set event_type = 'a.b' where false`],
+    ['a scope', () => direct`update public.idempotency_record set scope = ${token()} where false`],
+    ['an outbox delete', () => direct`delete from public.outbox_event where false`],
+    ['a record delete', () => direct`delete from public.idempotency_record where false`],
+    ['an audit read', () => direct`select 1 from public.audit_event where false`],
+  ]) {
+    assert.equal((await refusal(statement)).code, '42501', `the runtime role is refused ${label}`);
+  }
+  assert.deepEqual(await refusal(() => direct`update public.outbox_event set status = status, attempt = attempt where false`), { code: null, constraint: null },
+    'and holds the delivery-state columns');
+});
+
+// ---------------------------------------------------------------------------
+// the three unchanged conformance suites, over two instances
+// ---------------------------------------------------------------------------
+
+test('M6-PG-03: the unchanged idempotency conformance suite passes over two independent instances on separate connections', async () => {
+  await ready();
+  const [[a], [b]] = await Promise.all([clientA`select pg_catalog.pg_backend_pid() as pid`, clientB`select pg_catalog.pg_backend_pid() as pid`]);
+  assert.notEqual(a.pid, b.pid, 'two pools, two backends');
+  assert.notEqual(A.idempotency, B.idempotency);
+  await assertIdempotencyStoreContract({
+    store: A.idempotency, peer: B.idempotency, advance, breakStore: storeDown, restoreStore: () => relay.restore(),
+  });
+});
+
+test('M6-PG-04: the unchanged command-transaction conformance suite passes over two independent instances', async () => {
+  await ready();
+  await assertCommandTransactionContract(harness());
+});
+
+test('M6-PG-05: the unchanged outbox delivery conformance suite passes over two independent instances', async () => {
+  await ready();
+  await observer`delete from public.outbox_event`; // the suite starts from a store holding only the events it enqueues
+  await assertOutboxDeliveryContract(harness());
+});
+
+// ---------------------------------------------------------------------------
+// time
+// ---------------------------------------------------------------------------
+
+test('M6-PG-06: decisions follow the database clock read after the lock — never the host clock, never the transaction start', async () => {
+  await ready();
+  await observer.unsafe(productionClock); // the migration's own clock_timestamp() for this case
+  const hostNow = Date.now;
+  try {
+    const skew = (days) => { Date.now = () => hostNow() + days * 86_400_000; };
+    const op = operation();
+    assert.deepEqual(await A.idempotency.acquire(acquireRequest(op, lease(), 1_000, 3_000), live()), ACQUIRED);
+    skew(7);
+    assert.deepEqual(await B.idempotency.acquire(acquireRequest(op, lease(), 1_000, 3_000), live()), IN_PROGRESS,
+      'a host clock a week ahead expires nothing');
+    skew(-7);
+    await sleep(1_050);
+    assert.deepEqual(await B.idempotency.acquire(acquireRequest(op, lease(), 1_000, 3_000), live()), RECLAIMED,
+      'a host clock a week behind keeps nothing alive: the lease expired by the database clock');
+    Date.now = hostNow;
+
+    // A lease that expires WHILE the acquisition waits on the row lock: its transaction began before the expiry,
+    // and only a clock read after the lock sees that it has passed.
+    const w = operation();
+    assert.deepEqual(await A.idempotency.acquire(acquireRequest(w, lease(), 300, 3_000), live()), ACQUIRED);
+    const waited = await whileLocked((tx) => tx`select 1 from public.idempotency_record where scope = ${w.scope} for update`, 500,
+      () => B.idempotency.acquire(acquireRequest(w, lease(), 300, 3_000), live()));
+    assert.deepEqual(waited.value, RECLAIMED, 'decided on the clock read after the lock wait, not at the transaction start');
+    assert.equal(waited.released, true, 'and it did wait for the lock');
+
+    // The commit fence the same way: retention ends while the commit waits, so the commit is fenced out.
+    const late = await begin(A, { leaseMs: 100, retentionMs: 300 });
+    const command = creating(late);
+    const fenced = await whileLocked((tx) => tx`select 1 from public.idempotency_record where scope = ${late.op.scope} for update`, 500,
+      () => B.transactions.commit(command, live()));
+    assert.deepEqual(fenced.value, LEASE_LOST, 'retention is judged after the lock, so a commit that waited past it commits nothing');
+    assert.deepEqual(await footprint(command), NOTHING);
+  } finally {
+    Date.now = hostNow;
+    await observer.unsafe(FROZEN_CLOCK);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the transaction: order, rollback, conflict, fault, concurrency, lost acknowledgement
+// ---------------------------------------------------------------------------
+
+test('M6-PG-07: a failure at the mutation, the audit, an event or the completion discards every part that already ran', async () => {
+  await ready();
+  const order = ['mutation', 'audit', 'outbox', 'completion'];
+  for (const [i, component] of order.entries()) {
+    const attempt = await begin(A);
+    const command = creating(attempt);
+    const before = await witness();
+    await arm(component);
+    assert.deepEqual(await A.transactions.commit(command, live()), UNAVAILABLE, `a failure at the ${component} commits nothing`);
+    const ran = ranSince(before, await witness());
+    assert.deepEqual(ran, Object.fromEntries(order.map((part, j) => [part, j <= i ? 1 : 0])),
+      `the parts up to the ${component} really ran, in order, before the rollback`);
+    assert.deepEqual(await footprint(command), NOTHING, `and none of them survived the failure at the ${component}`);
+    assert.deepEqual(await B.idempotency.acquire(acquireRequest(attempt.op, lease()), live()), IN_PROGRESS, 'the lease still holds');
+    assert.deepEqual(await B.transactions.commit(command, live()), COMMITTED, 'the holder commits afterwards, on the other instance');
+    assert.deepEqual(await footprint(command), { version: 1, audit: 1, events: 1, completed: 1 });
+  }
+});
+
+test('M6-PG-08: a fenced attempt runs nothing; a conflict and a reused event ID commit nothing, and neither is mistaken for the other', async () => {
+  await ready();
+  const first = await begin(A);
+  const created = creating(first);
+  assert.deepEqual(await A.transactions.commit(created, live()), COMMITTED);
+
+  // A stale lease: fenced before any business statement.
+  const stale = await begin(A);
+  const before = await witness();
+  assert.deepEqual(await B.transactions.commit(creating({ ...stale, lease: lease() }), live()), LEASE_LOST);
+  assert.deepEqual(ranSince(before, await witness()), { mutation: 0, audit: 0, outbox: 0, completion: 0 }, 'a fenced attempt reaches no business statement');
+
+  // A conflict: the mutation ran and found its precondition false; nothing else ran, nothing stayed.
+  const rival = creating(stale, 'rival', created.mutation.aggregateId);
+  const b2 = await witness();
+  assert.deepEqual(await A.transactions.commit(rival, live()), CONFLICT);
+  assert.deepEqual(ranSince(b2, await witness()), { mutation: 1, audit: 0, outbox: 0, completion: 0 }, 'a conflict stops after the mutation');
+  assert.deepEqual(await footprint(rival), { version: 1, audit: 0, events: 0, completed: 0 }, 'and leaves the existing aggregate as it was');
+  assert.deepEqual(await B.idempotency.acquire(acquireRequest(stale.op, lease()), live()), IN_PROGRESS, 'the lease is kept, to expire');
+
+  // A reused event ID: a fault, detected at the outbox insert, and everything before it is rolled back.
+  const renamed = renaming(stale, created.mutation.aggregateId, 1);
+  const reusing = Object.freeze({ ...renamed, events: Object.freeze([Object.freeze({ ...renamed.events[0], eventId: created.events[0].eventId })]) });
+  const b3 = await witness();
+  assert.deepEqual(await A.transactions.commit(reusing, live()), UNAVAILABLE, 'a reused event ID is a fault, never a conflict');
+  assert.deepEqual(ranSince(b3, await witness()), { mutation: 1, audit: 1, outbox: 1, completion: 0 });
+  assert.deepEqual(await footprint(reusing), { version: 1, audit: 0, events: 0, completed: 0 }, 'the rename and its audit record were rolled back');
+  const [original] = await observer`select status, attempt, payload from public.outbox_event where event_id = ${created.events[0].eventId}`;
+  assert.deepEqual(original, { status: 'pending', attempt: 0, payload: created.events[0].payload }, 'and the event whose ID was reused is untouched');
+  assert.deepEqual(await B.transactions.commit(renamed, live()), COMMITTED, 'the holder then commits the rename');
+  assert.deepEqual(await footprint(renamed), { version: 2, audit: 1, events: 1, completed: 1 });
+});
+
+test('M6-PG-09: of sixteen concurrent commands on one aggregate version across two instances, exactly one mutates', async () => {
+  await ready();
+  const seed = await begin(A);
+  const created = creating(seed);
+  assert.deepEqual(await A.transactions.commit(created, live()), COMMITTED);
+  const attempts = await Promise.all(Array.from({ length: 16 }, () => begin(A)));
+  const renames = attempts.map((attempt) => renaming(attempt, created.mutation.aggregateId, 1));
+  const answers = await Promise.all(renames.map((command, i) => (i % 2 === 0 ? A : B).transactions.commit(command, live())));
+  assert.equal(answers.filter((a) => a.outcome === 'committed').length, 1, 'exactly one commits');
+  assert.ok(answers.every((a) => a.outcome === 'committed' || a.outcome === 'conflict'), 'every other conflicts');
+  const traces = await Promise.all(renames.map(footprint));
+  assert.deepEqual([traces[0].version, traces.reduce((n, t) => n + t.audit, 0), traces.reduce((n, t) => n + t.events, 0), traces.reduce((n, t) => n + t.completed, 0)],
+    [2, 1, 1, 1], 'one version step, one audit record, one event, one completion');
+});
+
+test('M6-PG-10: a COMMIT whose acknowledgement is lost rejects as indeterminate; it landed once, replays, and is never repeated', async () => {
+  await ready();
+  const lossyClient = storeClient(1);
+  extraClients.push(lossyClient);
+  const lossy = createPostgresTransactionalStore({ client: lossyClient, mutators: MUTATORS });
+  const attempt = await begin(A);
+  const command = creating(attempt);
+  relay.dropNextCommitAnswer();
+  let rejection = null;
+  try {
+    await lossy.transactions.commit(command, live());
+  } catch (err) {
+    rejection = err;
+  }
+  assert.ok(rejection instanceof Error, 'the lost acknowledgement is a rejection, never an answer');
+  assert.deepEqual([rejection.message, Object.keys(rejection), rejection.cause], [OUTCOME_UNKNOWN, [], undefined], 'one fixed message, nothing of the driver');
+  assert.deepEqual(await footprint(command), { version: 1, audit: 1, events: 1, completed: 1 }, 'the commit landed, every part of it');
+  assert.deepEqual(await B.idempotency.acquire(acquireRequest(attempt.op, lease()), live()), { outcome: 'replay', response: command.response },
+    'a later request replays the completion');
+  assert.deepEqual(await B.transactions.commit(command, live()), LEASE_LOST, 'and the same command never commits twice');
+  assert.deepEqual(await footprint(command), { version: 1, audit: 1, events: 1, completed: 1 }, 'nothing was duplicated');
+});
+
+// ---------------------------------------------------------------------------
+// aborts, timeouts, SQLSTATEs and connection failure
+// ---------------------------------------------------------------------------
+
+test('M6-PG-11: an aborted call touches nothing; an abort while blocked cancels the wait and rolls everything back', async () => {
+  await ready();
+  const attempt = await begin(A);
+  const command = creating(attempt);
+  const gone = new AbortController();
+  gone.abort();
+  const chunks = relay.state.chunks;
+  for (const call of [
+    () => A.transactions.commit(command, gone.signal),
+    () => A.idempotency.acquire(acquireRequest(operation(), lease()), gone.signal),
+    () => A.idempotency.complete({ scope: attempt.op.scope, lease: attempt.lease, response: command.response }, gone.signal),
+    () => A.delivery.claim({ claim: token(), limit: 1, claimMs: 30_000 }, gone.signal),
+  ]) assert.deepEqual(await call(), UNAVAILABLE);
+  assert.equal(relay.state.chunks, chunks, 'no byte reached the server');
+  assert.deepEqual(await footprint(command), NOTHING);
+
+  const blocked = await whileLocked((tx) => tx`select 1 from public.idempotency_record where scope = ${attempt.op.scope} for update`, 1_200, async () => {
+    const ctl = new AbortController();
+    const answer = A.transactions.commit(command, ctl.signal);
+    await sleep(150);
+    ctl.abort();
+    return answer;
+  });
+  assert.deepEqual(blocked.value, UNAVAILABLE, 'the abort ends the call');
+  assert.equal(blocked.released, false, 'while the lock was still held: the wait was cancelled, not waited out');
+  assert.deepEqual(await footprint(command), NOTHING, 'and nothing was written');
+  assert.deepEqual(await B.transactions.commit(command, live()), COMMITTED, 'the holder commits once the lock is free');
+});
+
+test('M6-PG-12: lock and statement timeouts, deadlock, serialization, unknown SQLSTATEs, a cut connection and an unexpected null all fail closed', async () => {
+  await ready();
+  // A real lock timeout, below each port's deadline.
+  const held = await begin(A);
+  const heldCommand = creating(held);
+  const timedOut = await whileLocked((tx) => tx`select 1 from public.idempotency_record where scope = ${held.op.scope} for update`, 2_500,
+    () => A.transactions.commit(heldCommand, live()));
+  assert.deepEqual([timedOut.value, timedOut.released], [UNAVAILABLE, false], 'the commit gave up on its own lock timeout');
+  const acquired = await whileLocked((tx) => tx`select 1 from public.idempotency_record where scope = ${held.op.scope} for update`, 2_000,
+    () => A.idempotency.acquire(acquireRequest(held.op, lease()), live()));
+  assert.deepEqual([acquired.value, acquired.released], [UNAVAILABLE, false], 'so did the acquisition');
+  assert.deepEqual(await footprint(heldCommand), NOTHING);
+
+  // A real statement timeout: an event insert that sleeps past it.
+  const before = await witness();
+  await arm('outbox', 'sleep', 'P0001', 2.5);
+  assert.deepEqual(await A.transactions.commit(heldCommand, live()), UNAVAILABLE, 'a statement past its timeout is cancelled by the server');
+  assert.deepEqual(ranSince(before, await witness()), { mutation: 1, audit: 1, outbox: 1, completion: 0 });
+  assert.deepEqual(await footprint(heldCommand), NOTHING);
+
+  // Deadlock, serialization failure and an SQLSTATE nobody expects, raised inside the transaction.
+  for (const sqlstate of ['40P01', '40001', 'XX000']) {
+    await arm('audit', 'raise', sqlstate);
+    assert.deepEqual(await B.transactions.commit(heldCommand, live()), UNAVAILABLE, `SQLSTATE ${sqlstate} before COMMIT commits nothing`);
+  }
+  await arm('completion', 'raise', '40001');
+  const done = await begin(A);
+  assert.deepEqual(await A.idempotency.complete({ scope: done.op.scope, lease: done.lease, response: heldCommand.response }, live()), UNAVAILABLE,
+    'a failed completion completes nothing');
+  assert.deepEqual(await B.idempotency.acquire(acquireRequest(done.op, lease()), live()), IN_PROGRESS);
+  assert.deepEqual(await footprint(heldCommand), NOTHING);
+
+  // A connection lost while the transaction's statement runs — the server ends the session, or it is cut without
+  // a word — and then a store that is down: nothing was committed, nothing is, and the process survives each loss
+  // (the pinned driver would crash it on a ROLLBACK sent after the loss — DA-15). Each loss is on a client and
+  // relay of its own, so the shared instances never meet one.
+  for (const loss of ['ended by the server', 'cut']) {
+    const side = startRelay();
+    await side.listening;
+    const sideClient = storeClient(1, side);
+    extraClients.push(sideClient);
+    await arm('outbox', 'sleep', 'P0001', 1.2);
+    const lost = createPostgresTransactionalStore({ client: sideClient, mutators: MUTATORS }).transactions.commit(heldCommand, live());
+    const pid = await sleepingStoreSession();
+    if (loss === 'cut') await side.close();
+    else await observer`select pg_catalog.pg_terminate_backend(${pid})`;
+    assert.deepEqual(await lost, UNAVAILABLE, `a connection ${loss} before COMMIT is a known rollback`);
+    await side.close();
+  }
+  await storeDown();
+  assert.deepEqual(await A.transactions.commit(heldCommand, live()), UNAVAILABLE, 'and an unreachable store answers at once');
+  await relay.restore();
+  assert.deepEqual(await footprint(heldCommand), NOTHING);
+
+  // An unexpected null where the store's clock should be: every decision fails closed.
+  await observer.unsafe(`create or replace function public.m6_store_clock() returns timestamptz language sql volatile
+    set search_path = pg_catalog, pg_temp as $$ select null::timestamptz $$`);
+  try {
+    assert.deepEqual(await A.idempotency.acquire(acquireRequest(operation(), lease()), live()), UNAVAILABLE);
+    assert.deepEqual(await A.transactions.commit(heldCommand, live()), UNAVAILABLE);
+    assert.deepEqual(await footprint(heldCommand), NOTHING);
+  } finally {
+    await observer.unsafe(FROZEN_CLOCK);
+  }
+  assert.deepEqual(await B.transactions.commit(heldCommand, live()), COMMITTED, 'after every failure the holder still commits');
+});
+
+// ---------------------------------------------------------------------------
+// delivery
+// ---------------------------------------------------------------------------
+
+/** Enqueue `n` events by committing `n` creates; their event IDs. */
+async function seed(n) {
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const command = creating(await begin(A));
+    assert.deepEqual(await A.transactions.commit(command, live()), COMMITTED);
+    ids.push(command.events[0].eventId);
+  }
+  return ids;
+}
+const claimOn = (store, held, limit = MAX_CLAIM_BATCH) => store.delivery.claim({ claim: held, limit, claimMs: 30_000 }, live());
+const rowOf = async (eventId) => (await observer`select status, attempt, claim_token, dead_reason,
+    (extract(epoch from due_at) * 1000)::bigint::text as due, (extract(epoch from claim_expires_at) * 1000)::bigint::text as claim_expires
+  from public.outbox_event where event_id = ${eventId}`)[0];
+
+test('M6-PG-13: concurrent claims across two instances take every event exactly once, each held by its claimer, and none waits on a locked row', async () => {
+  await ready();
+  await observer`delete from public.outbox_event`;
+  const ids = await seed(64);
+  const tokens = Array.from({ length: 8 }, token);
+  const answers = await Promise.all(tokens.map((held, i) => claimOn(i % 2 === 0 ? A : B, held, MAX_CLAIM_BATCH)));
+  const taken = answers.flatMap((a, i) => a.events.map((e) => ({ eventId: e.eventId, attempt: e.attempt, claim: tokens[i] })));
+  assert.equal(new Set(taken.map((t) => t.eventId)).size, taken.length, 'no event is held by two claims');
+  assert.deepEqual(taken.map((t) => t.eventId).sort(), [...ids].sort(), 'together they took every eligible event');
+  for (const t of taken) {
+    const row = await rowOf(t.eventId);
+    assert.deepEqual([row.status, row.attempt, row.claim_token, t.attempt], ['claimed', 1, t.claim, 1], 'each is held by exactly the claim that returned it');
+  }
+  for (const t of taken) assert.deepEqual(await A.delivery.acknowledge({ eventId: t.eventId, claim: t.claim }, live()), { outcome: 'acknowledged' });
+
+  // A claim never waits on a row another transaction holds: it passes over it and takes the rest at once.
+  const [held, free] = await seed(2);
+  const passed = await whileLocked((tx) => tx`select 1 from public.outbox_event where event_id = ${held} for update`, 1_500,
+    () => claimOn(B, token(), MAX_CLAIM_BATCH));
+  assert.deepEqual([passed.value.events.map((e) => e.eventId), passed.released], [[free], false], 'the locked row is passed over, and nothing waited');
+  await observer`delete from public.outbox_event where event_id in (${held}, ${free})`;
+});
+
+test('M6-PG-14: a stale claim token settles nothing, and leaves the new holder\'s row exactly as it was', async () => {
+  await ready();
+  await observer`delete from public.outbox_event`;
+  const [eventId] = await seed(1);
+  const old = token();
+  assert.equal((await claimOn(A, old)).events[0].eventId, eventId);
+  await advance(30_000);
+  const next = token();
+  assert.deepEqual((await claimOn(B, next)).events.map((e) => [e.eventId, e.attempt]), [[eventId, 2]], 'reclaimed at its expiry, the attempt counted');
+  const heldRow = await rowOf(eventId);
+  assert.deepEqual(await A.delivery.acknowledge({ eventId, claim: old }, live()), CLAIM_LOST);
+  assert.deepEqual(await A.delivery.retry({ eventId, claim: old, delayMs: 1_000 }, live()), CLAIM_LOST);
+  assert.deepEqual(await A.delivery.deadLetter({ eventId, claim: old, reason: 'attempts_exhausted' }, live()), CLAIM_LOST);
+  assert.deepEqual(await rowOf(eventId), heldRow, 'status, attempt, token, due time and reason are unchanged');
+  assert.deepEqual(await B.delivery.acknowledge({ eventId, claim: next }, live()), { outcome: 'acknowledged' });
+});
+
+test('M6-PG-15: retry, delivery and dead-letter write exactly their transitions, by the store\'s clock', async () => {
+  await ready();
+  await observer`delete from public.outbox_event`;
+  const [r, d] = await seed(2);
+  const first = token();
+  assert.equal((await claimOn(A, first)).events.length, 2);
+  const t0 = await frozenNowMs();
+  assert.deepEqual(await A.delivery.retry({ eventId: r, claim: first, delayMs: 5_000 }, live()), { outcome: 'scheduled' });
+  assert.deepEqual(await rowOf(r), { status: 'pending', attempt: 1, claim_token: null, dead_reason: null, due: String(t0 + 5_000), claim_expires: null },
+    'pending again, due exactly its delay after the store clock, the claim released');
+  assert.deepEqual(await B.delivery.acknowledge({ eventId: d, claim: first }, live()), { outcome: 'acknowledged' });
+  assert.deepEqual({ ...(await rowOf(d)), due: undefined }, { status: 'delivered', attempt: 1, claim_token: null, dead_reason: null, due: undefined, claim_expires: null });
+  await advance(5_000);
+  const second = token();
+  assert.deepEqual((await claimOn(B, second)).events.map((e) => [e.eventId, e.attempt]), [[r, 2]], 'due again once its delay has passed');
+  assert.deepEqual(await A.delivery.deadLetter({ eventId: r, claim: second, reason: 'envelope_invalid' }, live()), { outcome: 'dead_lettered' });
+  assert.deepEqual((await rowOf(r)).dead_reason, 'envelope_invalid');
+  await advance(1_000_000);
+  assert.deepEqual(await claimOn(A, token()), EMPTY, 'neither a delivered nor a dead event is ever claimed again');
+  const out = { eventId: randomUUID(), claim: token() };
+  for (const [label, call] of [
+    ['a zero delay', () => A.delivery.retry({ ...out, delayMs: 0 }, live())],
+    ['a delay past the policy cap', () => A.delivery.retry({ ...out, delayMs: 900_001 }, live())],
+    ['an unknown reason', () => A.delivery.deadLetter({ ...out, reason: 'other' }, live())],
+  ]) assert.deepEqual(await call(), UNAVAILABLE, `${label} is refused before the store is asked`);
+});
+
+test('M6-PG-16: a claim takes at most 32, in due-time then event-ID order, deterministically, and never past the attempt bound', async () => {
+  await ready();
+  await observer`delete from public.outbox_event`;
+  const ids = await seed(40);
+  const t = await frozenNowMs();
+  // Scatter the due times, with ties, so the order is the store's and not insertion order.
+  const offsets = ids.map((_, i) => ((i * 7) % 10) * 3);
+  for (const [i, eventId] of ids.entries()) {
+    await observer`update public.outbox_event set due_at = 'epoch'::timestamptz + (${String(t - offsets[i])}::bigint * interval '1 millisecond')
+      where event_id = ${eventId}`;
+  }
+  const expected = ids.map((eventId, i) => ({ eventId, due: t - offsets[i] }))
+    .sort((x, y) => x.due - y.due || (x.eventId < y.eventId ? -1 : 1)).map((x) => x.eventId);
+  const chunks = relay.state.chunks;
+  for (const limit of [0, 33]) assert.deepEqual(await claimOn(A, token(), limit), UNAVAILABLE, `a limit of ${limit} is refused`);
+  assert.equal(relay.state.chunks, chunks, 'before the store is asked');
+  const firstBatch = (await claimOn(A, token(), 32)).events.map((e) => e.eventId);
+  const secondBatch = (await claimOn(B, token(), 32)).events.map((e) => e.eventId);
+  assert.deepEqual([firstBatch.length, secondBatch.length], [32, 8], 'the limit of 32, then the rest');
+  assert.deepEqual([...firstBatch, ...secondBatch], expected, 'in (due time, event ID) order across both claims');
+
+  // The attempt bound: an event one attempt short of it is claimed once more, and one at it never again.
+  await observer`delete from public.outbox_event`;
+  const [last, spent] = [{ ...baseEvent(), attempt: 999 }, { ...baseEvent(), attempt: 1_000 }];
+  for (const e of [last, spent]) await insertEvent({ ...e, due_at: new Date(t - 1).toISOString() });
+  assert.deepEqual((await claimOn(A, token(), 32)).events.map((e) => [e.eventId, e.attempt]), [[last.event_id, 1_000]], 'the last attempt is claimed');
+  await advance(60_000);
+  assert.deepEqual(await claimOn(B, token(), 32), EMPTY, 'and at the bound nothing is claimed again, its expired claim included');
+});
+
+// ---------------------------------------------------------------------------
+// what leaves the adapter
+// ---------------------------------------------------------------------------
+
+test('M6-PG-17: no statement, identifier, secret, key, payload or driver message leaves the adapter', async () => {
+  await ready();
+  const canary = `M6-CANARY-${randomUUID()}`;
+  const written = [];
+  const saved = { out: process.stdout.write, err: process.stderr.write, console: { ...console } };
+  const record = (write) => function capture(chunk, ...rest) {
+    written.push(String(chunk));
+    return write.call(this, chunk, ...rest);
+  };
+  process.stdout.write = record(saved.out);
+  process.stderr.write = record(saved.err);
+  for (const level of ['log', 'info', 'warn', 'error', 'debug']) console[level] = (...args) => written.push(args.map(String).join(' '));
+  const seen = [];
+  const attempt = await begin(A);
+  const command = creating(attempt, canary);
+  try {
+    await arm('audit', 'raise', 'XX000'); // the server's message carries its own canary
+    seen.push(await A.transactions.commit(command, live()));
+    await storeDown();
+    seen.push(await A.transactions.commit(command, live()));
+    seen.push(await A.idempotency.acquire(acquireRequest(operation(), lease()), live()));
+    seen.push(await A.delivery.claim({ claim: token(), limit: 1, claimMs: 30_000 }, live()));
+    seen.push(await A.transactions.probe(live()));
+    await relay.restore();
+    const lossyClient = storeClient(1);
+    extraClients.push(lossyClient);
+    relay.dropNextCommitAnswer();
+    try {
+      await createPostgresTransactionalStore({ client: lossyClient, mutators: MUTATORS }).transactions.commit(command, live());
+    } catch (err) {
+      seen.push({ message: err.message, fields: Object.keys(err), cause: String(err.cause) });
+    }
+  } finally {
+    await relay.restore();
+    process.stdout.write = saved.out;
+    process.stderr.write = saved.err;
+    Object.assign(console, saved.console);
+  }
+  assert.deepEqual(seen.slice(0, 5), [UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, false], 'bounded answers only');
+  assert.deepEqual(seen[5], { message: OUTCOME_UNKNOWN, fields: [], cause: 'undefined' });
+  const text = `${JSON.stringify(seen)}\n${written.join('\n')}`;
+  for (const needle of [canary, 'M6-DRIVER-CANARY', 'XX000', 'idempotency_record', 'outbox_event', 'audit_event', 'public.', 'm6_store_clock',
+    STORE_PROBE, relay.dir, DATABASE, 'CONNECTION_CLOSED', 'ECONNRESET', 'ENOENT', '57P01', 'administrator command', attempt.op.scope, attempt.lease,
+    command.response]) {
+    assert.ok(!text.includes(needle), `nothing that left the adapter carries ${needle.length > 24 ? 'a secret-length value' : needle}`);
+  }
+});
+
+test('M6-PG-18: a command commits with no events, and with the most — eight — every part exactly once', async () => {
+  await ready();
+  for (const count of [0, MAX_EVENTS_PER_COMMAND]) {
+    const one = creating(await begin(A));
+    const command = { ...one, events: Array.from({ length: count }, () => ({ ...one.events[0], eventId: randomUUID() })) };
+    assert.deepEqual(await B.transactions.commit(command, live()), COMMITTED, `${count} events commit`);
+    assert.deepEqual(await footprint(command), { version: 1, audit: 1, events: count, completed: 1 }, `${count} events: every part once`);
+  }
+});
+
+test('M6-PG-19: a command\'s audit record lands in public.audit_event even when the runtime role\'s path finds another first', async () => {
+  await ready();
+  // A schema named after the runtime login comes first on its default path ("$user", public), so an unqualified
+  // audit_event would resolve to this decoy — unless the transaction pins its own path.
+  await observer.unsafe(`create schema ${STORE_PROBE};
+    create table ${STORE_PROBE}.audit_event (like public.audit_event including all);
+    grant usage on schema ${STORE_PROBE} to ${STORE_PROBE};
+    grant select, insert on ${STORE_PROBE}.audit_event to ${STORE_PROBE}`);
+  try {
+    const command = creating(await begin(A));
+    assert.deepEqual(await A.transactions.commit(command, live()), COMMITTED);
+    assert.deepEqual(await footprint(command), { version: 1, audit: 1, events: 1, completed: 1 }, 'the audit record is in public.audit_event');
+    const [{ n }] = await observer.unsafe(`select count(*)::int as n from ${STORE_PROBE}.audit_event`);
+    assert.equal(n, 0, 'and nothing reached the decoy');
+  } finally {
+    await observer.unsafe(`drop schema ${STORE_PROBE} cascade`);
+  }
+});

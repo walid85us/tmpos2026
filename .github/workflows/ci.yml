@@ -92,6 +92,13 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: npm run test:db
+      # Phase 4.0 M6-PG-P4 — the PostgreSQL transactional store (migration 006 and its adapter) against the SAME
+      # disposable service, after the suites above have applied 001-006 to it. Same binding, no new service, no
+      # secret, no permission change.
+      - name: Transactional store against disposable PostgreSQL (M6-PG-P4)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/transactionalStore.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

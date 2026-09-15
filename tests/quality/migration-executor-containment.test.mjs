@@ -438,6 +438,11 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // asserted above is untouched: the production import graph still reaches no driver and no
     // executor.
     'tests/db/auditAtomicity.integration.test.mjs',
+    // M6-PG-P4: the PostgreSQL transactional-store proof needs 001-006 applied before it can say anything about
+    // the adapter, and applies them the same way the S2 and S3 suites do — through the SAME trusted executor,
+    // never a second apply path. Same category (a tests/db/ suite), same reasoning; the decisive containment
+    // property asserted above is untouched.
+    'tests/db/transactionalStore.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

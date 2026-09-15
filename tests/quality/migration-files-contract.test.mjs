@@ -70,19 +70,25 @@ const PINNED = {
   // authorisation of this kind, is still corrected by a NEW migration and never edited.
   '005_principal_separation_rls_foundation.up.sql': 'a4a61385beedf98194fb427bcd528704b068d7ca2947a9713d7a1a1c87157bda',
   '005_principal_separation_rls_foundation.down.sql': 'c198c0fa9c481cb2fe99c7f841aba4023bfbbef06663e2948755abca1d74db64',
+  // Phase 4.0 M6-PG-P4 — the transactional store for the idempotency, command-transaction and outbox ports.
+  // Its SEMANTICS are proved by tests/db/transactionalStore.integration.test.mjs against disposable PostgreSQL
+  // only; it has been applied to no managed, persistent or application database. While it is pending, the
+  // managed apply of 005 refuses at its exact-[005] plan gate (tests/quality/managed-m005-launcher.test.mjs).
+  '006_m6_transactional_store.up.sql': '66d0110a3aa6b465c02459b15b4b5158f8b63b9844e0fdd8addd5936b6acdcd1',
+  '006_m6_transactional_store.down.sql': 'd5cffbc0f141470025ac3e102f17163022ab9639624d1ff7e566ed61ebaca4d9',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the ten expected files', () => {
+test('the migrations directory holds exactly the twelve expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

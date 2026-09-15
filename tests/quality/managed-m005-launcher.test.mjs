@@ -2865,13 +2865,24 @@ const V2_APPLY_PREFIX = Object.freeze([
   ['session.close'],
   ['stdout', '[migrate] managed apply preflight (advisory): plan is exactly [005]'],
 ]);
-const V2_APPLY_OK_EXECUTION = Object.freeze([
-  ['run.apply'],
-  ['run.settled', 'returned'],
-  ['stdout', '[migrate] apply(up): outcome=complete finalized=1 disposal=closed code=none'],
-  ['stdout', '[migrate] apply(up) mutation: success_commit_and_read_back_verified commit_attempted=true rollback_observed=false'],
-  ['stdout', '[migrate] apply(up) ledger: version=005 marker=clean_verified markerWrite=succeeded cleanVerified=true ddlMayHaveCommitted=true'],
-  ['stdout', '[migrate] apply(up) evidence: commit=resolved submitted=true resolved=true acknowledged=unavailable readBack=true lockRelease=verified'],
+/**
+ * M6-PG-P4: this tree carries migration 006 after 005, so a managed apply over a clean 001-004 ledger re-derives
+ * the plan [005, 006], and the exact-[005] gate (assertExactManagedApplyPlan, unchanged) refuses it — after the
+ * fixed fingerprint reads and the one trusted ledger read, before any runner, lock, transaction, migration
+ * statement or ledger write. While 006 is pending, 005 therefore cannot reach a managed database through this
+ * path at all. Planning to a target version, or authorizing 005 and 006 together, is a separate decision.
+ */
+const V2_APPLY_PLAN_REFUSED = Object.freeze([
+  ...V2_APPLY_PREFIX.slice(0, 9),
+  ['dispose.requested'],
+  ['dispose.settled', true],
+  ['stdout', '[migrate] apply(up) teardown: requested=true completed=true gracefulSocketClose=not_observed code=none'],
+  ['stderr', '[migrate] REFUSED: apply(up) refused before completion: managed_apply_plan_rejected.'],
+  ['exitCode', 2],
+  ['stdout.write', '[migrate] apply(up) terminal: decision=failed cleanup=completed exit=failure code=none\n'],
+  ['returned'],
+  ['write.callback', 'ok'],
+  ['exit', 2],
 ]);
 const V2_TEARDOWN_TEAR_REFUSAL =
   'client teardown NOT ESTABLISHED (client_teardown_failed) — the managed connection was not proved shut '
@@ -2894,43 +2905,32 @@ test('V2/§4: a successful baseline — the whole ordered trace, open to complet
   ]);
 });
 
-test('V2/§4: a successful apply(up) — the whole ordered trace, open to completion', async () => {
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005'], 'the fixture ledger is 001-004 of this tree');
-  const trace = await v2Run('apply(up)', v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK }));
-  assert.deepEqual(trace, [
-    ...V2_APPLY_PREFIX,
-    ...V2_APPLY_OK_EXECUTION,
-    ['dispose.requested'],
-    ['dispose.settled', true],
-    ['stdout', '[migrate] apply(up) teardown: requested=true completed=true gracefulSocketClose=not_observed code=none'],
-    ['exitCode', 0],
-    ['stdout.write', '[migrate] apply(up) terminal: decision=success cleanup=completed exit=success code=none\n'],
-    ['returned'],
-    ['write.callback', 'ok'],
-  ]);
+test('V2/§4 (M6-PG-P4): while 006 is pending, a clean 001-004 ledger apply(up) refuses at the exact-[005] plan gate — the whole ordered trace', async () => {
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006'], 'this tree carries 006 after 005');
+  const w = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK });
+  assert.deepEqual(await v2Run('apply(up)', w), V2_APPLY_PLAN_REFUSED);
+  assert.equal(w.calls.length, 0, 'the trusted apply runner is never reached: no lock, no migration statement, no ledger write');
 });
 
-test('V2/§4: a controlled refusal — the ten ordering points, in order, and nothing after them', async () => {
-  const trace = await v2Run('apply(up)', v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_TIMED_OUT }));
-  assert.deepEqual(trace, [
-    ...V2_APPLY_PREFIX,
-    ['run.apply'],
-    ['run.settled', 'returned'], //                                                  1. the execution outcome settles
-    ['stdout', '[migrate] apply(up): outcome=failed finalized=0 disposal=terminated code=execution_step_timeout'],
-    ['stdout', '[migrate] apply(up) mutation: commit_not_attempted commit_attempted=false rollback_observed=false'],
-    ['stdout', '[migrate] apply(up) ledger: version=005 marker=not_written markerWrite=not_attempted cleanVerified=false ddlMayHaveCommitted=false'],
-    ['stdout', '[migrate] apply(up) evidence: commit=not_submitted submitted=false resolved=false acknowledged=unavailable readBack=false lockRelease=not_acquired'],
+test('V2/§4 (M6-PG-P4): a controlled refusal — the plan gate\'s ordering points, in order, and nothing after them', async () => {
+  // While 006 is pending the apply runner is unreachable, so the refusal a runner would report (here a timed-out
+  // execution) never happens: the plan gate refuses first. The runner-reported refusal keeps its ordering witness on
+  // the baseline path (the next test).
+  const w = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_TIMED_OUT });
+  assert.deepEqual(await v2Run('apply(up)', w), [
+    ...V2_APPLY_PREFIX.slice(0, 9), //                                               1. the fingerprint and the one ledger read; the plan [005, 006] is refused here
     ['dispose.requested'], //                                                        2. disposal is requested
     ['dispose.settled', true], //                                                    3. and completes
     ['stdout', '[migrate] apply(up) teardown: requested=true completed=true gracefulSocketClose=not_observed code=none'], // 4.
     // 5. the verdict is computed here, from everything above; nothing observable happens in between.
-    ['stderr', '[migrate] REFUSED: apply(up) did not complete: execution_step_timeout'], // 6. the refusal
+    ['stderr', '[migrate] REFUSED: apply(up) refused before completion: managed_apply_plan_rejected.'], // 6. the refusal
     ['exitCode', 2], //                                                              7. the exit classification
-    ['stdout.write', '[migrate] apply(up) terminal: decision=refused cleanup=completed exit=failure code=none\n'], // 8.
+    ['stdout.write', '[migrate] apply(up) terminal: decision=failed cleanup=completed exit=failure code=none\n'], // 8.
     ['returned'],
     ['write.callback', 'ok'], //                                                     9. its completion callback
     ['exit', 2], //                                               …ends the process, and 10. nothing follows it
   ]);
+  assert.equal(w.calls.length, 0, 'no runner was reached');
 });
 
 test('V2/§4: controlled refusals on the baseline path — an UNKNOWN commit, and a live-fingerprint mismatch', async () => {
@@ -2973,23 +2973,28 @@ test('V2/§4: controlled refusals on the baseline path — an UNKNOWN commit, an
 });
 
 test('V2/§4: a THROWN execution failure is decision=failed, and its message reaches no stream', async () => {
-  const thrown = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: new Error('synthetic runner failure host=db.example') });
-  const trace = await v2Run('apply(up)', thrown);
+  // M6-PG-P4: the apply runner is unreachable while 006 is pending, so the thrown-runner witness runs on the baseline
+  // runner; an apply world holding the same throwing runner is refused at the plan gate before it is reached.
+  const thrown = v2World({ argv: V2_BASELINE_ARGV, run: new Error('synthetic runner failure host=db.example') });
+  const trace = await v2Run('baseline', thrown);
   assert.deepEqual(trace, [
-    ...V2_APPLY_PREFIX,
-    ['run.apply'],
+    ...V2_BASELINE_PREFIX,
+    ['run.baseline'],
     ['run.settled', 'threw'],
     ['dispose.requested'],
     ['dispose.settled', true],
-    ['stdout', '[migrate] apply(up) teardown: requested=true completed=true gracefulSocketClose=not_observed code=none'],
-    ['stderr', '[migrate] REFUSED: apply(up) refused before completion: migration_engine_pg_validation_required.'],
+    ['stdout', '[migrate] baseline teardown: requested=true completed=true gracefulSocketClose=not_observed code=none'],
+    ['stderr', '[migrate] REFUSED: baseline refused before completion: migration_engine_pg_validation_required.'],
     ['exitCode', 2],
-    ['stdout.write', '[migrate] apply(up) terminal: decision=failed cleanup=completed exit=failure code=none\n'],
+    ['stdout.write', '[migrate] baseline terminal: decision=failed cleanup=completed exit=failure code=none\n'],
     ['returned'],
     ['write.callback', 'ok'],
     ['exit', 2],
   ]);
   assert.ok(!JSON.stringify(trace).includes('synthetic runner failure'), 'no error message crosses the catch');
+  const unreached = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: new Error('synthetic runner failure host=db.example') });
+  assert.deepEqual(await v2Run('apply(up)', unreached), V2_APPLY_PLAN_REFUSED);
+  assert.equal(unreached.calls.length, 0, 'the throwing apply runner is never reached');
 
   // A bounded code thrown by the runner's OWN preconditions keeps its code: the ledger could not be
   // read, which on the baseline path is thrown rather than planned on.
@@ -3029,7 +3034,7 @@ test('V2/§4: a throw BEFORE the client exists — no disposal, no teardown reco
   assert.equal(w.calls.length, 0);
 });
 
-test('V2/§4: a FAILED teardown refuses an otherwise clean run, on both the baseline and the apply verdicts', async () => {
+test('V2/§4: a FAILED teardown refuses an otherwise clean baseline, and joins the apply plan refusal while 006 is pending', async () => {
   assert.deepEqual(await v2Run('baseline', v2World({ argv: V2_BASELINE_ARGV, run: V2_BASELINE_OK, teardown: V2_TEARDOWN_FAILED })), [
     ...V2_BASELINE_PREFIX,
     ...V2_BASELINE_OK_EXECUTION,
@@ -3045,18 +3050,18 @@ test('V2/§4: a FAILED teardown refuses an otherwise clean run, on both the base
   ]);
   const apply = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK, teardown: V2_TEARDOWN_FAILED });
   assert.deepEqual(await v2Run('apply(up)', apply), [
-    ...V2_APPLY_PREFIX,
-    ...V2_APPLY_OK_EXECUTION,
+    ...V2_APPLY_PREFIX.slice(0, 9),
     ['dispose.requested'],
     ['dispose.settled', false],
     ['stdout', '[migrate] apply(up) teardown: requested=true completed=false gracefulSocketClose=not_observed code=client_teardown_failed'],
-    ['stderr', `[migrate] REFUSED: apply(up): ${V2_TEARDOWN_TEAR_REFUSAL}`],
+    ['stderr', `[migrate] REFUSED: apply(up) refused before completion: managed_apply_plan_rejected.. ${V2_TEARDOWN_TEAR_REFUSAL}`],
     ['exitCode', 2],
-    ['stdout.write', '[migrate] apply(up) terminal: decision=refused cleanup=failed exit=failure code=client_teardown_failed\n'],
+    ['stdout.write', '[migrate] apply(up) terminal: decision=failed cleanup=failed exit=failure code=client_teardown_failed\n'],
     ['returned'],
     ['write.callback', 'ok'],
     ['exit', 2],
   ]);
+  assert.equal(apply.calls.length, 0, 'the plan refusal precedes any runner; the failed teardown is reported beside it');
 });
 
 test('V2/§4: an UNEXPECTED teardown code is bounded in the terminal record, never forwarded into it', async () => {
@@ -3179,27 +3184,18 @@ test('V2/§6: no migration version can be widened through the seam — baseline 
 test('V2/§6: the runner opens one client, locks nothing, runs no SQL, and reaches apply or baseline only through its runners', async () => {
   const apply = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK });
   const baseline = v2World({ argv: V2_BASELINE_ARGV, run: V2_BASELINE_OK });
-  for (const [op, w] of [['apply(up)', apply], ['baseline', baseline]]) {
+  // M6-PG-P4: while 006 is pending the apply path is refused at its plan gate, so it reaches NO runner; the
+  // deps the apply runner would be handed (lock key, credential references, the three 005 gates) cannot be
+  // witnessed behaviourally until the 005/006 sequencing decision lands (docs/phase-4/08, Deferred Assurance Register).
+  for (const [op, w, runs] of [['apply(up)', apply, 0], ['baseline', baseline, 1]]) {
     const kinds = (await v2Run(op, w)).map(([k]) => k);
     assert.equal(kinds.filter((k) => k === 'open').length, 1, `${op}: one client, opened once`);
     assert.equal(kinds.filter((k) => k === 'dispose.requested').length, 1, `${op}: disposed once`);
     assert.deepEqual(kinds.filter((k) => k.startsWith('catalog.')), ['catalog.audit', 'catalog.membership'],
       `${op}: the only statements are the two fixed fingerprint reads`);
     assert.ok(!kinds.includes('FORBIDDEN'), `${op}: no lock, SQL, ledger write, adoption write, ACL, owner or diagnostic port`);
-    assert.equal(w.calls.length, 1, `${op}: exactly one trusted-runner call`);
+    assert.equal(w.calls.length, runs, `${op}: ${runs} trusted-runner call(s)`);
   }
-  // The lock and every migration statement belong to the runner, and the runner is reached with the
-  // fixed key, the fixed credential references and ALL THREE 005 gates.
-  const [[applyName, applyDeps]] = apply.calls;
-  assert.equal(applyName, 'apply');
-  assert.equal(applyDeps.lockKey, 720100301);
-  assert.equal(applyDeps.connectionMode, 'session');
-  assert.deepEqual(applyDeps.credential, { purpose: 'migration', migratorRef: 'tmpos-migrator', runtimeRef: 'tmpos-runtime' });
-  for (const gate of ['executionPolicy', 'preCommitPolicy', 'postCommitPolicy']) {
-    assert.equal(typeof applyDeps[gate], 'function', `the 005 path still hands the runner its ${gate}`);
-  }
-  assert.equal(applyDeps.adapter, apply.handle.adapter);
-  assert.equal(applyDeps.ledger, apply.handle.ledger);
   const [[baselineName, baselineDeps]] = baseline.calls;
   assert.equal(baselineName, 'baseline');
   assert.equal(baselineDeps.lockKey, 720100301);
@@ -3264,13 +3260,15 @@ const V2R2_STATUS_PREFIX = Object.freeze([
   ['ledger.read'],
   ['session.close'],
 ]);
-/** Status over 001-004 recorded clean under the checksums on disk, with 005 absent. */
+/** Status over 001-004 recorded clean under the checksums on disk: 005 and 006 (M6-PG-P4) both pending. */
+const V2R2_STATUS_006_PENDING = Object.freeze(['stdout', '  version=006  state=unapplied  ledger=none']);
 const V2R2_STATUS_REPORT_001_004 = Object.freeze([
   ['stdout', '  version=001  state=applied  ledger=recorded'],
   ['stdout', '  version=002  state=applied  ledger=recorded'],
   ['stdout', '  version=003  state=applied  ledger=recorded'],
   ['stdout', '  version=004  state=applied  ledger=recorded'],
   ['stdout', '  version=005  state=unapplied  ledger=none'],
+  V2R2_STATUS_006_PENDING,
 ]);
 const V2R2_STATUS_DISPOSED = Object.freeze([
   ['dispose.requested'],
@@ -3305,7 +3303,7 @@ function v2r2TrappedPorts(world) {
 }
 
 test('V2-R2/status: a successful status — the whole ordered trace, open to completion, exit 0 without forced termination', async () => {
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005'], 'the fixture ledger is 001-004 of this tree');
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006'], 'the fixture ledger is 001-004 of this tree');
   const w = v2World({ argv: V2R2_STATUS_ARGV, ledger: V2_LEDGER_001_004 });
   assert.deepEqual(await v2Run('status', w), [
     ...V2R2_STATUS_PREFIX,
@@ -3326,6 +3324,7 @@ test('V2-R2/status: status selects only its trusted read — one client, no runn
     ...V2R2_STATUS_PREFIX,
     ...V2R2_STATUS_REPORT_001_004.slice(0, 4),
     ['stdout', '  version=005  state=dirty_unresolved  ledger=recorded'],
+    V2R2_STATUS_006_PENDING,
     ...V2R2_STATUS_DISPOSED,
     ...V2R2_STATUS_SUCCESS_TAIL,
   ]);

@@ -263,12 +263,28 @@ const aclAfter = (await observer`select
     has_database_privilege('public', current_database(), 'CREATE') as public_create,
     has_database_privilege('anon', current_database(), 'TEMPORARY') as anon_temp`)[0];
 
+/**
+ * The migration directory as it stood for migration 005: 001-005 and nothing after them. This suite proves
+ * 005 — its roles, policies and grant matrix, and its own down/up round trip (S2-DB-28/29), a sequence that
+ * is only valid while nothing later depends on 005's roles. Migration 006 (M6-PG-P4) grants on its own tables
+ * to tmpos_app, so it is proved on top of 001-005 by tests/db/transactionalStore.integration.test.mjs instead
+ * — and in CI the S3 suite, which runs next against the shared database, applies it through the same engine.
+ */
+function through005(port) {
+  return {
+    list: () => port.list().filter((name) => /^00[1-5]_/.test(name)),
+    entryType: (name) => port.entryType(name),
+    readBytes: (name) => port.readBytes(name),
+    relDir: port.relDir,
+  };
+}
+
 {
   const dsn = assertDisposableTestDsn(TARGET_DSN);
   const handle = await createPostgresExecutor(dsn);
   try {
     applyReport = await runTrustedApply({
-      fsPort: createNodeFsPort(MIG_DIR, MIG_REL),
+      fsPort: through005(createNodeFsPort(MIG_DIR, MIG_REL)),
       adapter: handle.adapter,
       ledger: handle.ledger,
       connectionMode: 'session',
