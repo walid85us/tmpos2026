@@ -247,14 +247,14 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
   // Once begin has settled, the transaction is over or its connection is gone, so nothing further should reach the
   // driver: a statement, or the ROLLBACK or COMMIT the driver's own transaction scope sends, would each be written
   // to the closed socket, and the pinned driver's write of a short payload throws from a scheduled callback where
-  // nothing can catch it, ending the process (postgres 3.4.9; doc 08, DA-15). `ended` stops every statement this
-  // file issues, and a body still running then simply never finishes. It does not reach the driver's own ROLLBACK
-  // or COMMIT: begin() races the body's scope against the connection's close, a close that wins leaves that scope
-  // running, and the scope then sends COMMIT for a body that resolves or ROLLBACK for one that throws — including
-  // the abort refusal three lines below, which throws in exactly that window. A connection lost while a statement
-  // is in flight cannot get there: the driver rejects that statement before it reports the close, and the wrapper
-  // below never settles it. So the exposed window is the microtask tail after the last statement returned, and it
-  // carries both arms (doc 08, DA-19).
+  // nothing can catch it, ending the process (postgres 3.4.9; doc 08, DA-15). `ended` refuses every statement this
+  // file issues from the moment it is set, and a body still running then simply never finishes. It is set late,
+  // though — only once begin's rejection has propagated here — and begin() races the body's scope against the
+  // connection's close, so a close that wins leaves that scope running. A connection lost while a statement is in
+  // flight is safe: the driver rejects that statement before it reports the close, and the wrapper below never
+  // settles it. But a close processed after a statement returned and before `ended` is set leaves the body free to
+  // issue its next statement, and the scope free to send COMMIT for a body that resolves or ROLLBACK for one that
+  // throws — including the abort refusal after `work` below. All three reach the closed socket (doc 08, DA-19).
   let ended = false;
   const settle = async (): Promise<Answer> => {
     try {
