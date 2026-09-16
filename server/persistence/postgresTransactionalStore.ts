@@ -18,9 +18,15 @@
 //
 // Time. Every expiry, retention and due-time decision reads tmpos_internal.m6_store_clock() — the store's clock at
 // millisecond resolution — only AFTER the row it decides about is locked, except a claim, which never waits on
-// a lock (SKIP LOCKED) and reads it once at the start of its one statement; one reading serves the whole
-// transition. The host clock is never read. A command's stamps (its audit record and each event) are the
-// transaction's start, now(): audit_event.occurred_at's own default.
+// a lock (SKIP LOCKED) and reads it once at the start of its one statement, choosing and stamping every row from
+// that one reading. Migration 006's guard then re-checks each claimed row against its own, later reading, which
+// admits everything the statement chose unless the database's clock steps back past a chosen row's eligibility
+// instant — then the guard refuses and the whole claim fails closed; this file never retries it, and only a
+// caller's next claim can try again. This process's clock is never read. A
+// command's stamps (its audit record and each event) are the transaction's start, now(): audit_event.occurred_at's
+// own default. Every stored time this file reads back as epoch milliseconds is bounded by migration 006 — finite
+// and before the year 10 000, and for an event's occurrence also at or after the first readable millisecond, the
+// lower end the envelope contract accepts — so no stored row can fail the read that hands it out.
 //
 // Bounds. Each call that reaches the database is one fresh transaction on one reserved connection — a call refused
 // at validation, or handed an already-aborted signal, opens none — under transaction-local lock and statement
@@ -238,10 +244,17 @@ async function transact(client: PgClient, signal: AbortSignal, limits: Bounds, w
     if (query !== null) void Promise.resolve().then(() => query.cancel()).catch(() => undefined);
     abandon(UNAVAILABLE);
   };
-  // Once begin has settled, the transaction is over or its connection is gone, and nothing more reaches the driver:
-  // no statement, no ROLLBACK for a body that then fails, no COMMIT for one that then completes — each would be
-  // written to the closed socket, and the pinned driver's write of it throws where nothing can catch it and ends
-  // the process (postgres 3.4.9; doc 08, DA-15). A body still running then simply never finishes.
+  // Once begin has settled, the transaction is over or its connection is gone, so nothing further should reach the
+  // driver: a statement, or the ROLLBACK or COMMIT the driver's own transaction scope sends, would each be written
+  // to the closed socket, and the pinned driver's write of a short payload throws from a scheduled callback where
+  // nothing can catch it, ending the process (postgres 3.4.9; doc 08, DA-15). `ended` stops every statement this
+  // file issues, and a body still running then simply never finishes. It does not reach the driver's own ROLLBACK
+  // or COMMIT: begin() races the body's scope against the connection's close, a close that wins leaves that scope
+  // running, and the scope then sends COMMIT for a body that resolves or ROLLBACK for one that throws — including
+  // the abort refusal three lines below, which throws in exactly that window. A connection lost while a statement
+  // is in flight cannot get there: the driver rejects that statement before it reports the close, and the wrapper
+  // below never settles it. So the exposed window is the microtask tail after the last statement returned, and it
+  // carries both arms (doc 08, DA-19).
   let ended = false;
   const settle = async (): Promise<Answer> => {
     try {
@@ -362,9 +375,10 @@ async function acquire(sql: PgStatement, r: AcquireRequest): Promise<Answer> {
         (extract(epoch from expires_at) * 1000)::bigint::text as expires
       from tmpos_internal.idempotency_record where scope = ${r.scope} for update`;
     if (rows.length === 0) {
-      // Recorded first with placeholder terms, so no clock is read before a wait on a concurrent recording.
+      // Recorded first with placeholder terms, so no clock is read before a wait on a concurrent recording. The
+      // placeholder is 'epoch': long past every retention, and — unlike an infinity — a time the ports read back.
       const inserted = await sql`insert into tmpos_internal.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at)
-        values (${r.scope}, ${r.fingerprint}, ${r.lease}, '-infinity', '-infinity') on conflict (scope) do nothing`;
+        values (${r.scope}, ${r.fingerprint}, ${r.lease}, 'epoch', 'epoch') on conflict (scope) do nothing`;
       if (inserted.count === 0) continue;
       await recordLease(sql, r, await storeClock(sql));
       return ACQUIRED;

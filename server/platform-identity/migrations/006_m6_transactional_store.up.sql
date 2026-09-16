@@ -80,6 +80,8 @@ comment on function tmpos_internal.m6_store_clock() is
 -- A row is IN PROGRESS while response is null and COMPLETED once the sealed response is stored: an
 -- opaque base64url string of at most 45 094 characters (MAX_SEALED_LENGTH), kept byte for byte.
 -- A row past expires_at is absent to the ports and is overwritten in place by the next acquisition.
+-- Both times are finite and before the year 10 000: an acquisition reads them back as epoch
+-- milliseconds, and a value outside that range would fail every read of that row.
 create table tmpos_internal.idempotency_record (
   scope            text        not null,
   fingerprint      text        not null,
@@ -91,7 +93,10 @@ create table tmpos_internal.idempotency_record (
   constraint idempotency_record_scope_chk check (scope ~ '^[A-Za-z0-9_-]{43}$'),
   constraint idempotency_record_fingerprint_chk check (fingerprint ~ '^[A-Za-z0-9_-]{43}$'),
   constraint idempotency_record_lease_chk check (lease ~ '^[A-Za-z0-9_-]{43}$'),
-  constraint idempotency_record_expiry_chk check (lease_expires_at <= expires_at),
+  constraint idempotency_record_expiry_chk check (
+    pg_catalog.isfinite(lease_expires_at) and pg_catalog.isfinite(expires_at)
+    and expires_at < timestamptz '10000-01-01 00:00:00+00' and lease_expires_at <= expires_at
+  ),
   constraint idempotency_record_response_chk check (
     response is null
     or (pg_catalog.length(response) between 1 and 45094 and response ~ '^[A-Za-z0-9_-]+$')
@@ -118,7 +123,17 @@ create index idx_idempotency_record_expires_at on tmpos_internal.idempotency_rec
 --   dead      — terminal, with its closed reason.
 -- The state constraint makes every other combination unstorable, and the guard allows only the delivery
 -- transitions. Due and expiry times are finite: an event never due, or a claim that never expires, would be
--- held forever and block the reverse migration. attempt counts claims. The delivery policy — at most 20
+-- held forever and block the reverse migration. occurred_at is bounded to a range every delivery can carry: at
+-- or after the first readable millisecond, and before the year 10 000. Every claim hands it back as epoch
+-- milliseconds, and the envelope contract takes that integer only in [1, 2^53-1]. The two ends fail differently.
+-- An infinity raises 0A000 in the conversion itself, so one such row would fail every claim batch that selects
+-- it, not only its own delivery; a finite time past roughly the year 287 396 converts but leaves the safe range,
+-- and the call answers unavailable; at or below the epoch it converts and stays in range, but the envelope is
+-- refused and the event is dead-lettered as invalid instead of delivered. The lower bound is exact — one
+-- millisecond past the epoch is the first value that reads back as 1, and it is written as a plain literal so
+-- the check stays immutable and adds no operator to the pinned search path. The upper bound is conservative,
+-- far below where the read actually breaks, because a readable calendar limit is the easier rule to keep.
+-- attempt counts claims. The delivery policy — at most 20
 -- claims (OUTBOX_DELIVERY_POLICY.maxAttempts) — is the adapter's, bound from source: it never claims an event
 -- that has had 20, and dead-letters an expired claim at 20 (attempts_exhausted) instead of reclaiming it.
 -- The 1 000 below is a storage-integrity ceiling only, never that policy.
@@ -160,6 +175,8 @@ create table tmpos_internal.outbox_event (
   constraint outbox_event_attempt_chk check (attempt between 0 and 1000),
   constraint outbox_event_time_chk check (
     pg_catalog.isfinite(due_at) and (claim_expires_at is null or pg_catalog.isfinite(claim_expires_at))
+    and occurred_at >= timestamptz '1970-01-01 00:00:00.001+00'
+    and occurred_at < timestamptz '10000-01-01 00:00:00+00'
   ),
   constraint outbox_event_claim_token_chk check (claim_token is null or claim_token ~ '^[A-Za-z0-9_-]{43}$'),
   constraint outbox_event_dead_reason_chk check (

@@ -654,18 +654,20 @@ const baseEvent = () => ({
   event_id: randomUUID(), event_type: 'conformance.item.created', event_version: 1, aggregate_type: 'item', aggregate_id: randomUUID(),
   aggregate_version: '1', tenant: null, store: null, actor: null, correlation_id: randomUUID(), payload: { name: 'n', quantity: 1 },
   status: 'pending', attempt: 0, due_at: '2030-01-01T00:00:00Z', claim_token: null, claim_expires_at: null, dead_reason: null,
+  occurred_at: null, // null: the transaction's own start, as a committing command stamps it
 });
 const insertEvent = (e, sql = observer) => sql`insert into tmpos_internal.outbox_event (event_id, event_type, event_version, aggregate_type, aggregate_id,
     aggregate_version, tenant_digest, store_digest, actor_digest, correlation_id, payload, occurred_at, status, attempt, due_at, claim_token,
     claim_expires_at, dead_reason)
   values (${e.event_id}, ${e.event_type}, ${e.event_version}, ${e.aggregate_type}, ${e.aggregate_id}, ${e.aggregate_version}::bigint, ${e.tenant},
-    ${e.store}, ${e.actor}, ${e.correlation_id}, ${sql.json(e.payload)}, pg_catalog.now(), ${e.status}, ${e.attempt}, ${e.due_at}::text::timestamptz,
-    ${e.claim_token}, ${e.claim_expires_at}::text::timestamptz, ${e.dead_reason})`; // as text: the server, not the driver's Date, reads 'infinity'
+    ${e.store}, ${e.actor}, ${e.correlation_id}, ${sql.json(e.payload)}, coalesce(${e.occurred_at}::text::timestamptz, pg_catalog.now()), ${e.status}, ${e.attempt}, ${e.due_at}::text::timestamptz,
+    ${e.claim_token}, ${e.claim_expires_at}::text::timestamptz, ${e.dead_reason})`; // ::text keeps the server parsing these, whatever a case binds
 const baseRecord = () => ({
   scope: token(), fingerprint: token(), lease: token(), lease_expires_at: '2030-01-01T00:00:00Z', expires_at: '2030-01-02T00:00:00Z', response: null,
 });
 const insertRecord = (r) => observer`insert into tmpos_internal.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at, response)
-  values (${r.scope}, ${r.fingerprint}, ${r.lease}, ${r.lease_expires_at}::timestamptz, ${r.expires_at}::timestamptz, ${r.response})`;
+  values (${r.scope}, ${r.fingerprint}, ${r.lease}, ${r.lease_expires_at}::text::timestamptz, ${r.expires_at}::text::timestamptz,
+    ${r.response})`; // as text: the server, not the driver's Date, reads 'infinity'
 
 test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback, reverses cleanly and re-applies', async () => {
   assert.equal(applyReport.outcome, 'complete', `the trusted apply failed: ${applyReport.code}`);
@@ -779,15 +781,30 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
     ['a malformed fingerprint', { fingerprint: 'x' }, 'idempotency_record_fingerprint_chk'],
     ['a 44-character lease', { lease: 'A'.repeat(44) }, 'idempotency_record_lease_chk'],
     ['a lease that outlives its retention', { lease_expires_at: '2030-01-03T00:00:00Z' }, 'idempotency_record_expiry_chk'],
+    ['a retention that never ends', { expires_at: 'infinity' }, 'idempotency_record_expiry_chk'],
+    ['a lease that expired before time', { lease_expires_at: '-infinity' }, 'idempotency_record_expiry_chk'],
+    ['a retention past the readable range', { expires_at: '10000-01-01T00:00:00Z' }, 'idempotency_record_expiry_chk'],
     ['an empty response', { response: '' }, 'idempotency_record_response_chk'],
     ['a response one character over MAX_SEALED_LENGTH', { response: 'A'.repeat(MAX_SEALED_LENGTH + 1) }, 'idempotency_record_response_chk'],
     ['a response outside base64url', { response: 'AAAA=' }, 'idempotency_record_response_chk'],
   ];
   for (const [label, over, constraint] of records) {
-    assert.deepEqual(await refusal(() => insertRecord({ ...baseRecord(), ...over })), { code: '23514', constraint }, label);
+    const record = { ...baseRecord(), ...over };
+    const refused = await refusal(() => insertRecord(record));
+    // A value the database was meant to refuse but stored would otherwise stay behind for every later case in the
+    // shared database. The delete count also tells a stored row apart from a driver error that carried no code.
+    const stored = refused.code === null
+      ? (await observer`delete from tmpos_internal.idempotency_record where scope = ${record.scope}`).count : 0;
+    assert.deepEqual(refused, { code: '23514', constraint }, `${label} (rows stored: ${stored})`);
   }
   const largest = { ...baseRecord(), response: 'A'.repeat(MAX_SEALED_LENGTH) };
   assert.deepEqual(await refusal(() => insertRecord(largest)), { code: null, constraint: null }, 'a response of exactly MAX_SEALED_LENGTH is stored');
+  // The last storable microsecond, not the last second: a bound tightened to 23:59:59 would still admit that.
+  const lastRecord = { ...baseRecord(), lease_expires_at: '9999-12-31T23:59:59.999999Z', expires_at: '9999-12-31T23:59:59.999999Z' };
+  assert.deepEqual(await refusal(() => insertRecord(lastRecord)), { code: null, constraint: null }, 'the last readable moment is a storable retention');
+  // The delete count is the witness: refusal() cannot tell a stored row from a throw that carried no code.
+  assert.equal((await observer`delete from tmpos_internal.idempotency_record where scope = ${lastRecord.scope}`).count, 1,
+    'the last readable retention was really stored');
   assert.deepEqual(await refusal(() => insertRecord({ ...baseRecord(), scope: largest.scope })), { code: '23505', constraint: 'idempotency_record_pkey' },
     'one row per scope');
 
@@ -807,6 +824,11 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
     ['a negative attempt', { attempt: -1 }, 'outbox_event_attempt_chk'],
     ['an attempt past the bound', { attempt: 1001 }, 'outbox_event_attempt_chk'],
     ['an event never due', { due_at: 'infinity' }, 'outbox_event_time_chk'],
+    ['an event that never occurred', { occurred_at: 'infinity' }, 'outbox_event_time_chk'],
+    ['an event that occurred before time', { occurred_at: '-infinity' }, 'outbox_event_time_chk'],
+    ['an event occurring past the readable range', { occurred_at: '10000-01-01T00:00:00Z' }, 'outbox_event_time_chk'],
+    ['an event occurring at the epoch', { occurred_at: '1970-01-01T00:00:00Z' }, 'outbox_event_time_chk'],
+    ['an event occurring inside the first millisecond', { occurred_at: '1970-01-01T00:00:00.0005Z' }, 'outbox_event_time_chk'],
     ['a claim that never expires', { ...claimedAt, claim_expires_at: 'infinity' }, 'outbox_event_time_chk'],
     ['a malformed claim token', { ...claimedAt, claim_token: 'short' }, 'outbox_event_claim_token_chk'],
     ['an unknown dead reason', { status: 'dead', attempt: 1, dead_reason: 'other' }, 'outbox_event_dead_reason_chk'],
@@ -817,9 +839,26 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
     ['a dead event without its reason', { status: 'dead', attempt: 1 }, 'outbox_event_state_chk'],
   ];
   for (const [label, over, constraint] of events) {
-    const refused = await refusal(() => insertEvent({ ...baseEvent(), ...over }));
-    assert.ok(refused.code === '23514' && [constraint].flat().includes(refused.constraint), `${label}: ${refused.code} ${refused.constraint}`);
+    const event = { ...baseEvent(), ...over };
+    const refused = await refusal(() => insertEvent(event));
+    // A value the database was meant to refuse but stored would otherwise stay behind and fail a later,
+    // unrelated case as well, hiding which constraint actually regressed.
+    // The delete count also tells a stored row apart from a driver error that carried no code.
+    const stored = refused.code === null
+      ? (await observer`delete from tmpos_internal.outbox_event where event_id = ${event.event_id}`).count : 0;
+    assert.ok(refused.code === '23514' && [constraint].flat().includes(refused.constraint),
+      `${label}: ${refused.code} ${refused.constraint} (rows stored: ${stored})`);
   }
+  // The last storable microsecond, not the last second, and each delete count is the witness that the row existed:
+  // refusal() reports the same shape for a stored row and for a throw that carried no code.
+  const lastEvent = { ...baseEvent(), occurred_at: '9999-12-31T23:59:59.999999Z' };
+  assert.deepEqual(await refusal(() => insertEvent(lastEvent)), { code: null, constraint: null }, 'the last readable moment is a storable occurrence');
+  assert.equal((await observer`delete from tmpos_internal.outbox_event where event_id = ${lastEvent.event_id}`).count, 1,
+    'the last readable occurrence was really stored');
+  const firstEvent = { ...baseEvent(), occurred_at: '1970-01-01T00:00:00.001Z' };
+  assert.deepEqual(await refusal(() => insertEvent(firstEvent)), { code: null, constraint: null }, 'the first readable millisecond is a storable occurrence');
+  assert.equal((await observer`delete from tmpos_internal.outbox_event where event_id = ${firstEvent.event_id}`).count, 1,
+    'the first readable millisecond was really stored');
   const valid = baseEvent();
   await insertEvent(valid);
   assert.deepEqual(await refusal(() => insertEvent({ ...baseEvent(), event_id: valid.event_id })), { code: '23505', constraint: 'outbox_event_pkey' },
