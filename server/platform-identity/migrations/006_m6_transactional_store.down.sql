@@ -1,8 +1,9 @@
 -- Phase 4.0 M6 — PostgreSQL transactional store
 -- Migration: 006_m6_transactional_store (DOWN)
 --
--- Removes exactly what the up file created: the two tables (with their indexes, grants, policies and the
--- transition guard's trigger), the store clock, the guard function and the tmpos_internal schema. Roles,
+-- Removes exactly what the up file created: the two tables (with their indexes and the transition guard's
+-- trigger), the nine lifecycle routines (with their grants), the store clock, the guard function and the
+-- tmpos_internal schema. Roles,
 -- audit_event and everything 001-005 created are untouched; the audit records of committed commands stay,
 -- because audit_event is append-only and is not this file's. The schema goes last and without CASCADE: if
 -- anything this file did not create lives in it, the drop fails and the whole rollback with it.
@@ -39,6 +40,15 @@ $$;
 
 drop table tmpos_internal.outbox_event;
 drop table tmpos_internal.idempotency_record;
+drop function tmpos_internal.m6_idempotency_acquire(text, text, text, bigint, bigint);
+drop function tmpos_internal.m6_idempotency_complete(text, text, text);
+drop function tmpos_internal.m6_command_fence(text, text);
+drop function tmpos_internal.m6_command_enqueue(text, text, uuid, text, integer, text, uuid, bigint, text, text, text, uuid, jsonb);
+drop function tmpos_internal.m6_outbox_claim(text, integer, bigint);
+drop function tmpos_internal.m6_outbox_acknowledge(uuid, text);
+drop function tmpos_internal.m6_outbox_retry(uuid, text, bigint);
+drop function tmpos_internal.m6_outbox_dead_letter(uuid, text, text);
+drop function tmpos_internal.m6_store_probe();
 drop function tmpos_internal.outbox_event_transition_guard();
 drop function tmpos_internal.m6_store_clock();
 drop schema tmpos_internal;

@@ -16,17 +16,23 @@
 // port; every statement is fixed, schema-qualified text in this file or in a mutator, every value is bound
 // as a parameter, and no caller supplies SQL, an identifier or a fragment.
 //
-// Time. Every expiry, retention and due-time decision reads tmpos_internal.m6_store_clock() — the store's clock at
-// millisecond resolution — only AFTER the row it decides about is locked, except a claim, which never waits on
-// a lock (SKIP LOCKED) and reads it once at the start of its one statement, choosing and stamping every row from
-// that one reading. Migration 006's guard then re-checks each claimed row against its own, later reading, which
-// admits everything the statement chose unless the database's clock steps back past a chosen row's eligibility
-// instant — then the guard refuses and the whole claim fails closed; this file never retries it, and only a
-// caller's next claim can try again. This process's clock is never read. A
-// command's stamps (its audit record and each event) are the transaction's start, now(): audit_event.occurred_at's
-// own default. Every stored time this file reads back as epoch milliseconds is bounded by migration 006 — finite
-// and before the year 10 000, and for an event's occurrence also at or after the first readable millisecond, the
-// lower end the envelope contract accepts — so no stored row can fail the read that hands it out.
+// Authority. The runtime role holds no privilege on either store table (migration 006, section 4): this file
+// names no table of the store at all, and reaches it only through 006's fixed lifecycle routines, which lock the
+// rows they decide about, decide on the store's clock and change a record or an event only under the lease or
+// claim token presented — a token the runtime role cannot read. So a mutator's SQL, which runs as the same role,
+// can do no more to the store than a call to this adapter could.
+//
+// Time. Every expiry, retention and due-time decision is a routine's, on tmpos_internal.m6_store_clock() — the
+// store's clock at millisecond resolution — read only AFTER the row it decides about is locked, except a claim,
+// which never waits on a lock (SKIP LOCKED) and reads it once at the start of its one statement, choosing and
+// stamping every row from that one reading. Migration 006's guard then re-checks each claimed row against its own,
+// later reading, which admits everything the statement chose unless the database's clock steps back past a chosen
+// row's eligibility instant — then the guard refuses and the whole claim fails closed; this file never retries it,
+// and only a caller's next claim can try again. This process's clock is never read. A command's stamps (its audit
+// record and each event) are the transaction's start, now(): audit_event.occurred_at's own default. Every stored
+// time handed back as epoch milliseconds is bounded by migration 006 — finite and before the year 10 000, and for
+// an event's occurrence also at or after the first readable millisecond, the lower end the envelope contract
+// accepts — so no stored row can fail the read that hands it out.
 //
 // Bounds. Each call that reaches the database is one fresh transaction on one reserved connection — a call refused
 // at validation, or handed an already-aborted signal, opens none — under transaction-local lock and statement
@@ -34,10 +40,10 @@
 // has left; an abort cancels the statement in flight and rolls the transaction back. Nothing is retried: a lost race
 // re-reads within the same transaction, and a failed transaction is never run again.
 //
-// Delivery policy. An event is claimed at most OUTBOX_DELIVERY_POLICY.maxAttempts (20) times, bound from source: an
-// expired claim at the cap is dead-lettered (attempts_exhausted) by the next claim instead of being reclaimed, and a
-// retry at the cap is refused. Migration 006's 1 000 is a storage-integrity ceiling, and its trigger enforces the
-// delivery transitions themselves.
+// Delivery policy. An event is claimed at most OUTBOX_DELIVERY_POLICY.maxAttempts (20) times, fixed in migration 006's
+// claim routine and never passed to it: an expired claim at the cap is dead-lettered (attempts_exhausted) by the next
+// claim instead of being reclaimed, and a retry at the cap is refused. 006's 1 000 is a storage-integrity ceiling,
+// and its trigger enforces the delivery transitions themselves.
 //
 // Outcomes. Every precondition is a conditional statement whose row count decides it, so no error is ever
 // read as a business answer: no SQLSTATE and no constraint maps to 'conflict', and a reused event ID is a
@@ -125,11 +131,6 @@ const MAX_LEASE_MS = 24 * 60 * 60_000;
 const MAX_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
-/**
- * The delivery policy's cap on claims, bound from source and never from a request: an event is claimed at most this
- * many times. Migration 006's own ceiling (1 000) is storage integrity only, never this policy.
- */
-const MAX_ATTEMPTS: number = OUTBOX_DELIVERY_POLICY.maxAttempts;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
 const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'mutation', 'audit', 'events'];
@@ -328,14 +329,11 @@ const nullableTextOf = (v: unknown): string | null => (v === null ? null : textO
 /** Epoch milliseconds as the bigint text a statement binds: exact, never a float. */
 const ms = (n: number): string => String(n);
 
-/** The store's clock, read now — after whatever this transaction has locked. */
-async function storeClock(sql: PgStatement): Promise<number> {
-  return integerOf(single(await sql`select (extract(epoch from tmpos_internal.m6_store_clock()) * 1000)::bigint::text as now`).now);
-}
-
-async function probe(client: PgClient, signal: AbortSignal, statement: (sql: PgStatement) => Promise<PgRows>): Promise<boolean> {
+/** Every port's readiness: 006's probe routine answers exactly true. */
+async function probe(client: PgClient, signal: AbortSignal): Promise<boolean> {
   try {
-    const result = await transact(client, signal, IDEMPOTENCY_BOUNDS, async (sql) => (single(await statement(sql)).ok === true ? READY : UNAVAILABLE));
+    const result = await transact(client, signal, IDEMPOTENCY_BOUNDS, async (sql) =>
+      (single(await sql`select tmpos_internal.m6_store_probe() as ok`).ok === true ? READY : UNAVAILABLE));
     return result === READY;
   } catch {
     return false;
@@ -356,50 +354,24 @@ function acquireRequestOf(raw: unknown): AcquireRequest | null {
     ? { scope, fingerprint, lease, leaseMs, retentionMs } : null;
 }
 
-/** Record the caller's binding, lease and terms, from `now`: a new record, one past its retention, or a reclaim. */
-async function recordLease(sql: PgStatement, r: AcquireRequest, now: number): Promise<void> {
-  const updated = await sql`update tmpos_internal.idempotency_record
-    set fingerprint = ${r.fingerprint}, lease = ${r.lease}, response = null,
-      lease_expires_at = 'epoch'::timestamptz + (${ms(now + r.leaseMs)}::bigint * interval '1 millisecond'),
-      expires_at = 'epoch'::timestamptz + (${ms(now + r.retentionMs)}::bigint * interval '1 millisecond')
-    where scope = ${r.scope}`;
-  if (updated.count !== 1) refuse(UNAVAILABLE);
+/** 006's acquisition routine, answered as the port answers: an acquisition commits; every refusal rolls back, changing nothing. */
+async function acquire(sql: PgStatement, r: AcquireRequest): Promise<Answer> {
+  const row = single(await sql`select o_outcome, o_response from tmpos_internal.m6_idempotency_acquire(${r.scope}::text, ${r.fingerprint}::text,
+    ${r.lease}::text, ${ms(r.leaseMs)}::bigint, ${ms(r.retentionMs)}::bigint)`);
+  switch (row.o_outcome) {
+    case 'acquired': return ACQUIRED;
+    case 'reclaimed': return RECLAIMED;
+    case 'in_progress': return refuse(IN_PROGRESS);
+    case 'conflict': return refuse(CONFLICT);
+    case 'replay': return refuse(Object.freeze({ outcome: 'replay', response: textOf(row.o_response) }));
+    default: return refuse(UNAVAILABLE);
+  }
 }
 
-async function acquire(sql: PgStatement, r: AcquireRequest): Promise<Answer> {
-  // inv: each pass either locks the scope's row or records it; term: at most two passes — a second only after
-  // a concurrent caller recorded the scope first, whose committed row the second pass then locks.
-  for (let pass = 0; pass < 2; pass++) {
-    const rows = await sql`select fingerprint, lease, response,
-        (extract(epoch from lease_expires_at) * 1000)::bigint::text as lease_expires,
-        (extract(epoch from expires_at) * 1000)::bigint::text as expires
-      from tmpos_internal.idempotency_record where scope = ${r.scope} for update`;
-    if (rows.length === 0) {
-      // Recorded first with placeholder terms, so no clock is read before a wait on a concurrent recording. The
-      // placeholder is 'epoch': long past every retention, and — unlike an infinity — a time the ports read back.
-      const inserted = await sql`insert into tmpos_internal.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at)
-        values (${r.scope}, ${r.fingerprint}, ${r.lease}, 'epoch', 'epoch') on conflict (scope) do nothing`;
-      if (inserted.count === 0) continue;
-      await recordLease(sql, r, await storeClock(sql));
-      return ACQUIRED;
-    }
-    const row = single(rows);
-    const fingerprint = textOf(row.fingerprint);
-    const response = nullableTextOf(row.response);
-    const leaseExpires = integerOf(row.lease_expires);
-    const expires = integerOf(row.expires);
-    const now = await storeClock(sql);
-    if (now >= expires) {
-      await recordLease(sql, r, now); // past its retention a record is absent: the operation starts afresh
-      return ACQUIRED;
-    }
-    if (fingerprint !== r.fingerprint) return refuse(CONFLICT);
-    if (response !== null) return refuse(Object.freeze({ outcome: 'replay', response }));
-    if (now < leaseExpires) return refuse(IN_PROGRESS);
-    await recordLease(sql, r, now);
-    return RECLAIMED;
-  }
-  return refuse(UNAVAILABLE);
+/** 006's completion routine: true once the response is stored under exactly this lease, within retention. */
+async function completed(sql: PgStatement, scope: string, lease: string, response: string): Promise<boolean> {
+  const { outcome } = single(await sql`select tmpos_internal.m6_idempotency_complete(${scope}::text, ${lease}::text, ${response}::text) as outcome`);
+  return outcome === 'completed' ? true : outcome === 'lease_lost' ? false : refuse(UNAVAILABLE);
 }
 
 function idempotencyPort(client: PgClient): DurableIdempotencyStore {
@@ -414,18 +386,9 @@ function idempotencyPort(client: PgClient): DurableIdempotencyStore {
       const { scope, lease, response } = fields;
       if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST; // never a lease the store granted
       if (!isSealed(response) || response.length === 0) return UNAVAILABLE;
-      return transact(client, signal, IDEMPOTENCY_BOUNDS, async (sql) => {
-        if ((await sql`select 1 from tmpos_internal.idempotency_record where scope = ${scope} for update`).length === 0) return refuse(LEASE_LOST);
-        // The row is locked, so the clock read below is fresh: completed iff within retention, in progress, under this lease.
-        const done = await sql`update tmpos_internal.idempotency_record set response = ${response}
-          where scope = ${scope} and lease = ${lease} and response is null and expires_at > tmpos_internal.m6_store_clock()`;
-        if (done.count === 0) return refuse(LEASE_LOST);
-        return done.count === 1 ? COMPLETED : refuse(UNAVAILABLE);
-      });
+      return transact(client, signal, IDEMPOTENCY_BOUNDS, async (sql) => ((await completed(sql, scope, lease, response)) ? COMPLETED : refuse(LEASE_LOST)));
     },
-    probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
-        and not exists (select from tmpos_internal.idempotency_record where false) as ok`),
+    probe: (signal: AbortSignal): Promise<boolean> => probe(client, signal),
   });
 }
 
@@ -505,14 +468,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
 
 /** The command in the order the contract fixes: fence, mutation, audit, events, completion — then COMMIT. */
 async function commit(sql: PgStatement, tx: PgTransaction, c: Command): Promise<Answer> {
-  // 1. The fence, before any business state: lock the record, then read the clock.
-  const row = await sql`select lease, response is null as open, (extract(epoch from expires_at) * 1000)::bigint::text as expires
-    from tmpos_internal.idempotency_record where scope = ${c.scope} for update`;
-  if (row.length === 0) return refuse(LEASE_LOST);
-  const record = single(row);
-  const expires = integerOf(record.expires);
-  const now = await storeClock(sql);
-  if (record.open !== true || textOf(record.lease) !== c.lease || now >= expires) return refuse(LEASE_LOST);
+  // 1. The fence, before any business state: the routine locks the record for the rest of the transaction, then reads
+  //    the clock — held iff within retention, in progress and under exactly this lease.
+  if (single(await sql`select tmpos_internal.m6_command_fence(${c.scope}::text, ${c.lease}::text) as held`).held !== true) return refuse(LEASE_LOST);
   // 2. The business mutation, by the kind's own mutator.
   const applied = await c.mutator.apply(sql, c.mutation);
   if (applied === 'conflict') return refuse(CONFLICT);
@@ -522,20 +480,16 @@ async function commit(sql: PgStatement, tx: PgTransaction, c: Command): Promise<
     json: (value: unknown) => tx.json(value),
   });
   await writeAuditEvent(c.audit, { executor });
-  // 4. The events: pending, due now by the store's clock, stamped with the transaction's timestamp.
+  // 4. The events, each under the fence: pending, due now by the store's clock, stamped with the transaction's timestamp.
   for (const e of c.events) {
-    const inserted = await sql`insert into tmpos_internal.outbox_event (event_id, event_type, event_version, aggregate_type, aggregate_id,
-        aggregate_version, tenant_digest, store_digest, actor_digest, correlation_id, payload, occurred_at, status, attempt, due_at)
-      values (${e.eventId}, ${e.type}, ${e.version}, ${e.aggregateType}, ${e.aggregateId}, ${ms(e.aggregateVersion)}::bigint,
-        ${e.tenant}, ${e.store}, ${e.actor}, ${e.correlationId}, ${tx.json(e.payload)}, pg_catalog.now(), 'pending', 0,
-        'epoch'::timestamptz + (${ms(now)}::bigint * interval '1 millisecond'))
-      on conflict (event_id) do nothing`;
-    if (inserted.count !== 1) return refuse(UNAVAILABLE); // an event ID that is not new is a fault, never a conflict
+    const { inserted } = single(await sql`select tmpos_internal.m6_command_enqueue(${c.scope}::text, ${c.lease}::text, ${e.eventId}::uuid,
+      ${e.type}::text, ${e.version}::integer, ${e.aggregateType}::text, ${e.aggregateId}::uuid, ${ms(e.aggregateVersion)}::bigint,
+      ${e.tenant}::text, ${e.store}::text, ${e.actor}::text, ${e.correlationId}::uuid, ${tx.json(e.payload)}::jsonb) as inserted`);
+    if (inserted !== true) return refuse(UNAVAILABLE); // an event ID that is not new is a fault, never a conflict
   }
-  // 5. The sealed completion, under the lease this transaction has held since step 1.
-  const completed = await sql`update tmpos_internal.idempotency_record set response = ${c.response}
-    where scope = ${c.scope} and lease = ${c.lease} and response is null`;
-  return completed.count === 1 ? COMMITTED : refuse(UNAVAILABLE);
+  // 5. The sealed completion, under the lease this transaction has held since step 1. Each routine from step 4 on judges retention
+  //    again: a transaction that outlived it commits nothing ('unavailable') rather than a completion no request could replay.
+  return (await completed(sql, c.scope, c.lease, c.response)) ? COMMITTED : refuse(UNAVAILABLE);
 }
 
 function transactionPort(client: PgClient, mutators: ReadonlyMap<string, AggregateMutator>): CommandTransactionPort {
@@ -545,10 +499,7 @@ function transactionPort(client: PgClient, mutators: ReadonlyMap<string, Aggrega
       if (!('mutator' in command)) return command;
       return transact(client, signal, TRANSACTION_BOUNDS, (sql, tx) => commit(sql, tx, command as Command));
     },
-    probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
-        and not exists (select from tmpos_internal.idempotency_record where false)
-        and not exists (select from tmpos_internal.outbox_event where false) as ok`),
+    probe: (signal: AbortSignal): Promise<boolean> => probe(client, signal),
   });
 }
 
@@ -574,19 +525,20 @@ function claimedOf(row: Readonly<Record<string, unknown>>): Answer {
   });
 }
 
-/** Settle an event held under `claim`: lock it, check the claim, then apply `update` — or change nothing. */
-async function settle(client: PgClient, signal: AbortSignal, raw: unknown, success: Answer, update: (sql: PgStatement, eventId: string) => Promise<PgRows>): Promise<Answer> {
+/**
+ * Settle an event held under `claim` through `routine`, 006's settlement for it, which locks the event, checks the
+ * claim and changes it only under exactly that token: `success` for its `done` word, CLAIM_LOST for claim_lost —
+ * nothing changed — and anything else (a retry at the cap, answered 'exhausted') rolls back as UNAVAILABLE.
+ */
+async function settle(client: PgClient, signal: AbortSignal, raw: unknown, done: string, success: Answer,
+  routine: (sql: PgStatement, eventId: string, claim: string) => Promise<PgRows>): Promise<Answer> {
   const fields = fieldsOf(raw, ['eventId', 'claim']);
   if (fields === null) return UNAVAILABLE;
   const { eventId, claim } = fields;
   if (typeof eventId !== 'string' || !UUID_V4_RE.test(eventId) || !isDigest(claim)) return CLAIM_LOST; // never a claim the store granted
   return transact(client, signal, DELIVERY_BOUNDS, async (sql) => {
-    const rows = await sql`select status, claim_token from tmpos_internal.outbox_event where event_id = ${eventId} for update`;
-    if (rows.length === 0) return refuse(CLAIM_LOST);
-    const row = single(rows);
-    // Only the claim's current holder settles — an expired claim nobody has reclaimed included.
-    if (row.status !== 'claimed' || row.claim_token !== claim) return refuse(CLAIM_LOST);
-    return (await update(sql, eventId)).count === 1 ? success : refuse(UNAVAILABLE);
+    const { outcome } = single(await routine(sql, eventId, claim));
+    return outcome === done ? success : refuse(outcome === 'claim_lost' ? CLAIM_LOST : UNAVAILABLE);
   });
 }
 
@@ -598,64 +550,16 @@ function deliveryPort(client: PgClient): OutboxDeliveryStore {
       const { claim, limit, claimMs } = fields;
       if (!isDigest(claim) || !isInteger(limit, 1, MAX_CLAIM_BATCH) || !isInteger(claimMs, 1, MAX_CLAIM_MS)) return UNAVAILABLE;
       return transact(client, signal, DELIVERY_BOUNDS, async (sql) => {
-        // ONE statement: one clock reading; the earliest due pending rows and the earliest expired claims, each
-        // walked in its own index's order and locked with SKIP LOCKED so concurrent claims never wait on or share a
-        // row; merged into (eligibility time, event ID) order and claimed under this token. A row a branch locked
-        // beyond the merged limit stays as it was, and its lock ends at COMMIT. An expired claim that has already
-        // had MAX_ATTEMPTS is never reclaimed: the same statement dead-letters it (attempts_exhausted), unpublished,
-        // so no event is ever claimed a 21st time and none waits for a worker to retire it.
-        const rows = await sql`with clock as materialized (select tmpos_internal.m6_store_clock() as t),
-          due as materialized (
-            select e.event_id, e.due_at as eligible_at
-              from tmpos_internal.outbox_event e
-             where e.status = 'pending' and e.due_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPTS}
-             order by e.due_at, e.event_id
-             limit ${limit}
-             for update of e skip locked
-          ),
-          expired as materialized (
-            select e.event_id, e.claim_expires_at as eligible_at
-              from tmpos_internal.outbox_event e
-             where e.status = 'claimed' and e.claim_expires_at <= (select t from clock) and e.attempt < ${MAX_ATTEMPTS}
-             order by e.claim_expires_at, e.event_id
-             limit ${limit}
-             for update of e skip locked
-          ),
-          spent as materialized (
-            select e.event_id
-              from tmpos_internal.outbox_event e
-             where e.status = 'claimed' and e.claim_expires_at <= (select t from clock) and e.attempt >= ${MAX_ATTEMPTS}
-             order by e.claim_expires_at, e.event_id
-             limit ${limit}
-             for update of e skip locked
-          ),
-          exhausted as (
-            update tmpos_internal.outbox_event o
-               set status = 'dead', claim_token = null, claim_expires_at = null, dead_reason = 'attempts_exhausted'
-              from spent
-             where o.event_id = spent.event_id
-            returning o.event_id
-          ),
-          eligible as (
-            select event_id, eligible_at from due
-            union all
-            select event_id, eligible_at from expired
-            order by eligible_at, event_id
-            limit ${limit}
-          ),
-          claimed as (
-            update tmpos_internal.outbox_event o
-               set status = 'claimed', attempt = o.attempt + 1, claim_token = ${claim},
-                   claim_expires_at = (select t from clock) + (${ms(claimMs)}::bigint * interval '1 millisecond')
-              from eligible
-             where o.event_id = eligible.event_id
-            returning o.event_id, o.attempt, eligible.eligible_at, o.event_type, o.event_version, o.aggregate_type, o.aggregate_id,
-              o.aggregate_version::text as aggregate_version, o.tenant_digest, o.store_digest, o.actor_digest, o.correlation_id, o.payload,
-              floor(extract(epoch from o.occurred_at) * 1000)::bigint::text as occurred_at
-          )
-          select x.spent, c.* from (select count(*)::int as spent from exhausted) x
-            left join claimed c on true
-           order by c.eligible_at, c.event_id`;
+        // 006's claim routine: ONE statement over one clock reading, SKIP LOCKED, the earliest eligible events in
+        // (eligibility time, event ID) order claimed under this token, an expired claim never reclaimed under the token
+        // that held it, and one at the fixed cap dead-lettered (attempts_exhausted), unpublished, instead of handed out
+        // a 21st time. Its rows come back in that order.
+        const rows = await sql`select o_spent as spent, o_event_id as event_id, o_attempt as attempt, o_event_type as event_type,
+            o_event_version as event_version, o_aggregate_type as aggregate_type, o_aggregate_id as aggregate_id,
+            o_aggregate_version as aggregate_version, o_tenant_digest as tenant_digest, o_store_digest as store_digest,
+            o_actor_digest as actor_digest, o_correlation_id as correlation_id, o_payload as payload, o_occurred_at as occurred_at
+          from tmpos_internal.m6_outbox_claim(${claim}::text, ${limit}::integer, ${ms(claimMs)}::bigint)
+          order by o_eligible_at, o_event_id`;
         // Always at least one row: how many spent claims the statement dead-lettered, beside each event it claimed.
         const spent: unknown = rows.length === 0 ? null : rows[0].spent;
         if (!isInteger(spent, 0, MAX_CLAIM_BATCH)) return refuse(UNAVAILABLE);
@@ -667,28 +571,23 @@ function deliveryPort(client: PgClient): OutboxDeliveryStore {
         return Object.freeze({ outcome: 'claimed', events: Object.freeze(events.map(claimedOf)) });
       });
     },
-    acknowledge: (raw: unknown, signal: AbortSignal): Promise<Answer> => settle(client, signal, raw, answer('acknowledged'), (sql, eventId) =>
-      sql`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null, claim_expires_at = null where event_id = ${eventId}`),
+    acknowledge: (raw: unknown, signal: AbortSignal): Promise<Answer> => settle(client, signal, raw, 'acknowledged', answer('acknowledged'),
+      (sql, eventId, claim) => sql`select tmpos_internal.m6_outbox_acknowledge(${eventId}::uuid, ${claim}::text) as outcome`),
     async retry(raw: unknown, signal: AbortSignal): Promise<Answer> {
       const delayMs = fieldsOf(raw, ['delayMs'])?.delayMs;
       if (!isInteger(delayMs, 1, OUTBOX_DELIVERY_POLICY.maxDelayMs)) return UNAVAILABLE;
       // An event that has spent its attempts is never pending again: the retry changes nothing ('unavailable'), and
       // once its claim expires the next claim dead-letters it.
-      return settle(client, signal, raw, answer('scheduled'), (sql, eventId) =>
-        sql`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null,
-          due_at = tmpos_internal.m6_store_clock() + (${ms(delayMs)}::bigint * interval '1 millisecond')
-          where event_id = ${eventId} and attempt < ${MAX_ATTEMPTS}`);
+      return settle(client, signal, raw, 'scheduled', answer('scheduled'),
+        (sql, eventId, claim) => sql`select tmpos_internal.m6_outbox_retry(${eventId}::uuid, ${claim}::text, ${ms(delayMs)}::bigint) as outcome`);
     },
     async deadLetter(raw: unknown, signal: AbortSignal): Promise<Answer> {
       const reason = fieldsOf(raw, ['reason'])?.reason;
       if (typeof reason !== 'string' || !DEAD_REASONS.includes(reason)) return UNAVAILABLE;
-      return settle(client, signal, raw, answer('dead_lettered'), (sql, eventId) =>
-        sql`update tmpos_internal.outbox_event set status = 'dead', claim_token = null, claim_expires_at = null, dead_reason = ${reason}
-          where event_id = ${eventId}`);
+      return settle(client, signal, raw, 'dead_lettered', answer('dead_lettered'),
+        (sql, eventId, claim) => sql`select tmpos_internal.m6_outbox_dead_letter(${eventId}::uuid, ${claim}::text, ${reason}::text) as outcome`);
     },
-    probe: (signal: AbortSignal): Promise<boolean> =>
-      probe(client, signal, (sql) => sql`select tmpos_internal.m6_store_clock() is not null
-        and not exists (select from tmpos_internal.outbox_event where false) as ok`),
+    probe: (signal: AbortSignal): Promise<boolean> => probe(client, signal),
   });
 }
 

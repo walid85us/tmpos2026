@@ -60,10 +60,10 @@ async function within(answer: Promise<unknown>, ms: number): Promise<unknown> {
  * of which the real driver writes to the closed socket and crashes on (doc 08, DA-15).
  */
 function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error } = {}): PgClient & { readonly writesAfterLoss: () => number; readonly lose: (err: unknown) => void } {
-  const rowsFor = (text: string): Record<string, unknown>[] => {
-    if (text.includes('for update')) return [{ lease, open: true, expires: String(Date.now() + 60_000) }];
-    if (text.includes('as now')) return [{ now: String(Date.now()) }];
-    if (text.includes('insert into tmpos_internal.outbox_event') || text.includes('update tmpos_internal.idempotency_record')) return [{}];
+  const rowsFor = (text: string, values: readonly unknown[]): Record<string, unknown>[] => {
+    if (text.includes('m6_command_fence')) return [{ held: values[1] === lease }];
+    if (text.includes('m6_command_enqueue')) return [{ inserted: true }];
+    if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
     return [{ ok: true }];
   };
   let writesAfterLoss = 0;
@@ -80,12 +80,12 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
         reject(err);
       };
       loseOpen = lose;
-      const tx = ((strings: TemplateStringsArray) => {
+      const tx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
         if (lost) writesAfterLoss++;
         const text = strings.join('$');
         const failed = options.failAt !== undefined && text.includes(options.failAt);
         if (failed && options.lost === true) lose(options.error);
-        const rows = rowsFor(text);
+        const rows = rowsFor(text, values);
         const answer = failed ? Promise.reject(options.error) : Promise.resolve(Object.assign(rows, { count: rows.length }));
         return Object.assign(answer, { cancel: () => undefined });
       }) as unknown as PgTransaction;
@@ -200,13 +200,13 @@ test('a failure before COMMIT is unavailable; after COMMIT is sent, only a serve
     Promise.resolve(createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR] }).transactions.commit(good, live()));
   assert.deepEqual(await commitOn(scripted(good.lease)), COMMITTED, 'the scripted store commits a well-formed command');
   for (const [label, options] of [
-    ['a serialization failure at the fence', { failAt: 'for update', error: serverError('40001') }],
-    ['a deadlock at the event insert', { failAt: 'insert into tmpos_internal.outbox_event', error: serverError('40P01') }],
-    ['an unknown SQLSTATE at the completion', { failAt: 'update tmpos_internal.idempotency_record', error: serverError('XX000') }],
-    ['a value the driver cannot bind', { failAt: 'insert into tmpos_internal.outbox_event', error: driverError('UNDEFINED_VALUE') }],
-    ['a statement the driver cancelled before sending it', { failAt: 'insert into tmpos_internal.outbox_event', error: driverError('57014') }],
-    ['a connection lost mid-transaction', { failAt: 'insert into tmpos_internal.outbox_event', error: connectionError(), lost: true }],
-    ['a session the server ends mid-transaction', { failAt: 'insert into tmpos_internal.outbox_event', error: serverError('25P03', 'FATAL'), lost: true }],
+    ['a serialization failure at the fence', { failAt: 'm6_command_fence', error: serverError('40001') }],
+    ['a deadlock at the event insert', { failAt: 'm6_command_enqueue', error: serverError('40P01') }],
+    ['an unknown SQLSTATE at the completion', { failAt: 'm6_idempotency_complete', error: serverError('XX000') }],
+    ['a value the driver cannot bind', { failAt: 'm6_command_enqueue', error: driverError('UNDEFINED_VALUE') }],
+    ['a statement the driver cancelled before sending it', { failAt: 'm6_command_enqueue', error: driverError('57014') }],
+    ['a connection lost mid-transaction', { failAt: 'm6_command_enqueue', error: connectionError(), lost: true }],
+    ['a session the server ends mid-transaction', { failAt: 'm6_command_enqueue', error: serverError('25P03', 'FATAL'), lost: true }],
     ['a server ERROR at COMMIT, which rolled it back', { commit: serverError('23505') }],
   ] as const) {
     const client = scripted(good.lease, options);
@@ -240,7 +240,7 @@ test('the mutator is handed the values the store validated, read once and frozen
   assert.deepEqual([seen, Object.isFrozen(seen), reads], [{ name: 'n', quantity: 1 }, true, 1], 'the validated copy, read once');
 });
 
-test('the adapter reads no host clock, environment or console, binds no driver, and names every relation of its own in tmpos_internal', () => {
+test('the adapter reads no host clock, environment or console, binds no driver, names no store table, and reaches the store only through 006\'s routines', () => {
   const source = readFileSync(new URL('./postgresTransactionalStore.ts', import.meta.url), 'utf8');
   const code = source.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*\*[\s\S]*?\*\//g, '');
   for (const forbidden of [/\bDate\.now\b/, /\bnew Date\b/, /\bperformance\.now\b/, /\bprocess\.env\b/, /\bconsole\./, /\.unsafe\s*\(/, /from\s+['"]postgres['"]/,
@@ -250,10 +250,15 @@ test('the adapter reads no host clock, environment or console, binds no driver, 
   // Every statement is a tagged template. The one plain call forwards the audit writer's own fixed template to the
   // transaction — never an identifier helper, a fragment or a string.
   assert.deepEqual([...code.matchAll(/\bsql\s*\(([^)]*)\)/g)].map((m) => m[1].trim()), ['strings, ...values']);
-  for (const relation of ['idempotency_record', 'outbox_event', 'm6_store_clock']) {
-    const bare = [...code.matchAll(new RegExp(`(^|[^.\\w])${relation}\\b`, 'g'))];
-    assert.equal(bare.length, 0, `every use of ${relation} is qualified tmpos_internal.${relation}`);
-    assert.ok(code.includes(`tmpos_internal.${relation}`), `and it is used: ${relation}`);
+  // The runtime role holds no privilege on either store table (migration 006, section 4), so the adapter names neither
+  // table nor the clock, and writes nothing itself: every read and change of the store is one of 006's routines.
+  for (const name of ['idempotency_record', 'outbox_event', 'm6_store_clock']) assert.ok(!code.includes(name), `the adapter never names ${name}`);
+  assert.doesNotMatch(code, /\b(?:insert\s+into|update\s+\S+\s+set|delete\s+from)\b/i, 'and issues no write of its own');
+  const routines = ['m6_idempotency_acquire', 'm6_idempotency_complete', 'm6_command_fence', 'm6_command_enqueue', 'm6_outbox_claim',
+    'm6_outbox_acknowledge', 'm6_outbox_retry', 'm6_outbox_dead_letter', 'm6_store_probe'];
+  assert.deepEqual([...new Set([...code.matchAll(/\b(m6_\w+)\s*\(/g)].map((m) => m[1]))].sort(), [...routines].sort(), 'it calls exactly the nine routines');
+  for (const routine of routines) {
+    assert.equal([...code.matchAll(new RegExp(`(^|[^.\\w])${routine}\\b`, 'g'))].length, 0, `every call of ${routine} is qualified tmpos_internal.${routine}`);
   }
   assert.doesNotMatch(code, /\bpublic\./, 'no relation of the store is named in public');
   assert.match(code, /set_config\('search_path', 'pg_catalog, pg_temp', true\)/, 'every transaction pins pg_catalog, pg_temp: no writable schema on its path');
@@ -267,7 +272,7 @@ test('an idle claim rolls back, so it is never indeterminate; one that dead-lett
   const client: PgClient = {
     async begin(fn) {
       const tx = ((strings: TemplateStringsArray) => {
-        const rows = strings.join('$').includes('from exhausted') ? [{ spent: spentNow, event_id: null }] : [];
+        const rows = strings.join('$').includes('m6_outbox_claim') ? [{ spent: spentNow, event_id: null }] : [];
         return Object.assign(Promise.resolve(Object.assign(rows, { count: 0 })), { cancel: () => undefined });
       }) as unknown as PgTransaction;
       Object.assign(tx, { json: (value: unknown) => value });

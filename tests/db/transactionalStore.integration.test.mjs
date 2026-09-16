@@ -576,9 +576,18 @@ test.after(async () => {
 // the schema
 // ---------------------------------------------------------------------------
 
+/** The nine lifecycle routines migration 006 grants to the runtime role, by signature. */
+const ROUTINES = [
+  'm6_command_enqueue(text,text,uuid,text,integer,text,uuid,bigint,text,text,text,uuid,jsonb)', 'm6_command_fence(text,text)',
+  'm6_idempotency_acquire(text,text,text,bigint,bigint)', 'm6_idempotency_complete(text,text,text)', 'm6_outbox_acknowledge(uuid,text)',
+  'm6_outbox_claim(text,integer,bigint)', 'm6_outbox_dead_letter(uuid,text,text)', 'm6_outbox_retry(uuid,text,bigint)', 'm6_store_probe()',
+];
+const ROUTINE_NAMES = ROUTINES.map((r) => r.slice(0, r.indexOf('(')));
+const STORE_FUNCTIONS = [...ROUTINE_NAMES, 'm6_store_clock', 'outbox_event_transition_guard'].sort();
+
 async function assertStorePosture(label) {
-  // Where it lives: the internal schema holds both tables and both functions, all owned by the principal that
-  // applied 006 — never the runtime login — and public holds none of them.
+  // Where it lives: the internal schema holds both tables and every function, all owned by the principal that applied
+  // 006 — never the runtime login — and public holds none of them.
   const [{ me }] = await observer`select current_user::text as me`;
   const objects = await observer`select 'schema' as kind, n.nspname::text as name, n.nspowner::regrole::text as owner
       from pg_catalog.pg_namespace n where n.nspname = 'tmpos_internal'
@@ -588,12 +597,23 @@ async function assertStorePosture(label) {
       where p.pronamespace = 'tmpos_internal'::regnamespace
     order by 1, 2`;
   assert.deepEqual(objects.map((o) => [o.kind, o.name, o.owner]), [
-    ['function', 'm6_store_clock', me], ['function', 'outbox_event_transition_guard', me],
+    ...STORE_FUNCTIONS.map((name) => ['function', name, me]),
     ['schema', 'tmpos_internal', me], ['table', 'idempotency_record', me], ['table', 'outbox_event', me],
-  ], `${label}: the schema, both tables and both functions, owned by the applying principal`);
+  ], `${label}: the schema, both tables and all eleven functions, owned by the applying principal`);
+  const [{ owned }] = await observer`select
+      (select count(*)::int from pg_catalog.pg_class c where c.relowner = ${STORE_PROBE}::regrole)
+    + (select count(*)::int from pg_catalog.pg_proc p where p.proowner = ${STORE_PROBE}::regrole)
+    + (select count(*)::int from pg_catalog.pg_namespace n where n.nspowner = ${STORE_PROBE}::regrole) as owned`;
+  assert.equal(owned, 0, `${label}: the runtime login owns no object`);
   const [{ none }] = await observer`select to_regclass('public.idempotency_record') is null and to_regclass('public.outbox_event') is null
-    and to_regprocedure('public.m6_store_clock()') is null as none`;
+    and to_regprocedure('public.m6_store_clock()') is null and to_regprocedure('public.m6_store_probe()') is null as none`;
   assert.equal(none, true, `${label}: public holds none of them`);
+  // The routines: SECURITY DEFINER, pinned; the clock and the guard: neither definer nor granted.
+  const attributes = await observer`select p.proname::text as name, p.prosecdef as definer, p.proconfig::text as config
+    from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_internal'::regnamespace order by 1`;
+  assert.deepEqual(attributes.map((a) => [a.name, a.definer, a.config]),
+    STORE_FUNCTIONS.map((name) => [name, ROUTINE_NAMES.includes(name), '{"search_path=pg_catalog, pg_temp"}']),
+    `${label}: every routine SECURITY DEFINER, the clock and the guard not, every one pinned to pg_catalog, pg_temp`);
   const schemaGrants = await observer`select case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end as grantee, a.privilege_type as p,
       a.is_grantable as g
     from pg_catalog.pg_namespace n, pg_catalog.aclexplode(n.nspacl) a where n.nspname = 'tmpos_internal' and a.grantee <> n.nspowner order by 1, 2`;
@@ -607,46 +627,49 @@ async function assertStorePosture(label) {
     from pg_catalog.pg_class c where c.relnamespace = 'tmpos_internal'::regnamespace and c.relkind = 'r' order by 1`;
   assert.deepEqual(tables.map((t) => [t.name, t.rls, t.forced]), [['idempotency_record', true, false], ['outbox_event', true, false]],
     `${label}: both tables exist with RLS enabled`);
-  const policies = await observer`select tablename::text as t, policyname::text as p, cmd, roles::text as roles, qual, with_check
-    from pg_catalog.pg_policies where schemaname = 'tmpos_internal' order by 1`;
-  assert.deepEqual(policies.map((p) => [p.t, p.p, p.cmd, p.roles, p.qual, p.with_check]), [
-    ['idempotency_record', 'tmpos_app_idempotency_record_access', 'ALL', '{tmpos_app}', 'true', 'true'],
-    ['outbox_event', 'tmpos_app_outbox_event_access', 'ALL', '{tmpos_app}', 'true', 'true'],
-  ], `${label}: one policy per table, to the runtime role alone`);
-  // Table-level grants beyond the owner's: SELECT and INSERT to tmpos_app, and nothing to anyone else.
-  const grants = await observer`select c.relname::text as t, case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end as grantee,
-      a.privilege_type as p
-    from pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) a
-    where c.oid in ('tmpos_internal.idempotency_record'::regclass, 'tmpos_internal.outbox_event'::regclass) and a.grantee <> c.relowner order by 1, 2, 3`;
-  assert.deepEqual(grants.map((g) => [g.t, g.grantee, g.p]), [
-    ['idempotency_record', 'tmpos_app', 'INSERT'], ['idempotency_record', 'tmpos_app', 'SELECT'],
-    ['outbox_event', 'tmpos_app', 'INSERT'], ['outbox_event', 'tmpos_app', 'SELECT'],
-  ], `${label}: no PUBLIC, anon, authenticated or audit-writer grant`);
+  const policies = await observer`select count(*)::int as n from pg_catalog.pg_policies where schemaname = 'tmpos_internal'`;
+  assert.equal(policies[0].n, 0, `${label}: and no policy, so a stray grant reaches no row`);
+  // Every direct grant in the schema beyond the owner's: the schema's USAGE and the nine routines' EXECUTE, to tmpos_app.
+  const grants = await observer`select o.kind, o.name, case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end as grantee,
+      a.privilege_type as p, a.is_grantable as g
+    from (select 'relation' as kind, c.relname::text as name, c.relowner as owner, c.relacl as acl from pg_catalog.pg_class c
+            where c.relnamespace = 'tmpos_internal'::regnamespace
+          union all select 'column', c.relname::text || '.' || a.attname::text, c.relowner, a.attacl from pg_catalog.pg_attribute a
+            join pg_catalog.pg_class c on c.oid = a.attrelid where c.relnamespace = 'tmpos_internal'::regnamespace and a.attnum > 0
+          union all select 'function', pg_catalog.substring(p.oid::regprocedure::text, '[^.]*$'), p.proowner,
+            coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner)) from pg_catalog.pg_proc p
+            where p.pronamespace = 'tmpos_internal'::regnamespace) o,
+      pg_catalog.aclexplode(o.acl) a
+    where a.grantee <> o.owner order by 1, 2, 3, 4`;
+  assert.deepEqual(grants.map((g) => [g.kind, g.name, g.grantee, g.p, g.g]), ROUTINES.map((r) => ['function', r, 'tmpos_app', 'EXECUTE', false]),
+    `${label}: no table, column, clock or guard grant to anyone, and no routine to PUBLIC, anon, authenticated or the audit writer`);
   const [p] = await observer`select
-      has_column_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'scope', 'UPDATE') as scope_upd,
-      has_column_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'response', 'UPDATE') as response_upd,
-      has_column_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'payload', 'UPDATE') as payload_upd,
-      has_column_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'event_id', 'UPDATE') as event_id_upd,
-      has_column_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'status', 'UPDATE') as status_upd,
-      has_table_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'DELETE') as outbox_del,
-      has_table_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'TRUNCATE') as idem_trunc,
-      has_function_privilege('tmpos_app', 'tmpos_internal.m6_store_clock()', 'EXECUTE') as clock_app,
-      has_function_privilege('anon', 'tmpos_internal.m6_store_clock()', 'EXECUTE') as clock_anon,
-      has_function_privilege('authenticated', 'tmpos_internal.m6_store_clock()', 'EXECUTE') as clock_authenticated,
-      has_table_privilege('anon', 'tmpos_internal.idempotency_record', 'SELECT') as anon_idem,
-      has_table_privilege('authenticated', 'tmpos_internal.outbox_event', 'SELECT') as authenticated_outbox,
-      has_table_privilege('tmpos_audit_writer', 'tmpos_internal.outbox_event', 'SELECT') as audit_writer_outbox,
+      has_table_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'SELECT') as record_select,
+      has_table_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'INSERT') as record_insert,
+      has_column_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'response', 'UPDATE') as response_update,
+      has_column_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'expires_at', 'UPDATE') as expires_update,
+      has_table_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'SELECT') as outbox_select,
+      has_table_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'INSERT') as outbox_insert,
+      has_column_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'status', 'UPDATE') as status_update,
+      has_column_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'claim_token', 'SELECT') as token_select,
+      has_table_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'DELETE') as outbox_delete,
+      has_table_privilege('tmpos_app', 'tmpos_internal.idempotency_record', 'TRUNCATE') as record_truncate,
+      has_function_privilege('tmpos_app', 'tmpos_internal.m6_store_clock()', 'EXECUTE') as clock,
+      has_function_privilege('tmpos_app', 'tmpos_internal.outbox_event_transition_guard()', 'EXECUTE') as guard,
+      has_function_privilege('tmpos_app', 'tmpos_internal.m6_outbox_claim(text, integer, bigint)', 'EXECUTE') as claim,
+      has_function_privilege('anon', 'tmpos_internal.m6_outbox_claim(text, integer, bigint)', 'EXECUTE') as claim_anon,
+      has_function_privilege('authenticated', 'tmpos_internal.m6_idempotency_acquire(text, text, text, bigint, bigint)', 'EXECUTE') as acquire_authenticated,
+      has_function_privilege('tmpos_audit_writer', 'tmpos_internal.m6_idempotency_complete(text, text, text)', 'EXECUTE') as complete_audit_writer,
       has_schema_privilege('tmpos_app', 'tmpos_internal', 'USAGE') as schema_app,
       has_schema_privilege('tmpos_app', 'tmpos_internal', 'CREATE') as schema_create_app,
       has_schema_privilege('anon', 'tmpos_internal', 'USAGE') as schema_anon,
-      has_schema_privilege('authenticated', 'tmpos_internal', 'USAGE') as schema_authenticated,
-      has_function_privilege('tmpos_app', 'tmpos_internal.outbox_event_transition_guard()', 'EXECUTE') as guard_app,
-      has_function_privilege('anon', 'tmpos_internal.outbox_event_transition_guard()', 'EXECUTE') as guard_anon`;
+      has_schema_privilege('authenticated', 'tmpos_internal', 'USAGE') as schema_authenticated`;
   assert.deepEqual(p, {
-    scope_upd: false, response_upd: true, payload_upd: false, event_id_upd: false, status_upd: true, outbox_del: false, idem_trunc: false,
-    clock_app: true, clock_anon: false, clock_authenticated: false, anon_idem: false, authenticated_outbox: false, audit_writer_outbox: false,
-    schema_app: true, schema_create_app: false, schema_anon: false, schema_authenticated: false, guard_app: false, guard_anon: false,
-  }, `${label}: schema USAGE and column-scoped updates to the runtime role, no delete, truncate or CREATE, the guard granted to nobody`);
+    record_select: false, record_insert: false, response_update: false, expires_update: false, outbox_select: false, outbox_insert: false,
+    status_update: false, token_select: false, outbox_delete: false, record_truncate: false, clock: false, guard: false, claim: true,
+    claim_anon: false, acquire_authenticated: false, complete_audit_writer: false,
+    schema_app: true, schema_create_app: false, schema_anon: false, schema_authenticated: false,
+  }, `${label}: the runtime role holds the schema and the routines — no table, column, clock or guard privilege, no CREATE`);
 }
 
 /** A valid outbox row, as the owner may insert one directly — for the constraint and rollback-guard cases. */
@@ -699,7 +722,7 @@ test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback
   await downInTransaction();
   const [gone] = await observer`select to_regnamespace('tmpos_internal') is null as schema,
     (select count(*)::int from pg_catalog.pg_class where relname in ('idempotency_record', 'outbox_event')) as tables,
-    (select count(*)::int from pg_catalog.pg_proc where proname in ('m6_store_clock', 'outbox_event_transition_guard')) as functions`;
+    (select count(*)::int from pg_catalog.pg_proc where proname = any (${STORE_FUNCTIONS})) as functions`;
   assert.deepEqual(gone, { schema: true, tables: 0, functions: 0 }, 'the rollback removes exactly what 006 created, its schema last');
   const [kept] = await observer`select to_regclass('public.audit_event') is not null as audit,
     (select count(*)::int from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')) as roles,
@@ -774,7 +797,64 @@ test('M6-PG-23: migration 006 pins its own search path — an operator planted a
   }
 });
 
-test('M6-PG-02: the database refuses malformed, oversized and contradictory values; the runtime role rewrites no identity or envelope', async () => {
+test('M6-PG-28: section 6 refuses a routine granted beyond tmpos_app, a table granted to it, a routine not defined as 006 defines it, and a project role inside the owner', async () => {
+  const P = `tmpos_m6p6_${randomBytes(4).toString('hex')}_`;
+  const stray = `${P}stray`;
+  const [{ me }] = await observer`select current_user::text as me`;
+  await observer.unsafe(`create role ${stray} nologin`);
+  const sentinel = new Error('rolled back');
+  /**
+   * The down, `setup`, then `up`, in one transaction that is always rolled back: the refusal's code and message, or 'applied'
+   * followed by what `inspect` read inside it.
+   */
+  const applyWith = async (setup, up = UP_006, inspect = async () => '') => {
+    let seen = '';
+    try {
+      await observer.begin(async (tx) => {
+        await tx.unsafe(DOWN_006).simple();
+        if (setup !== '') await tx.unsafe(setup).simple();
+        await tx.unsafe(up).simple();
+        seen = await inspect(tx);
+        throw sentinel;
+      });
+    } catch (err) {
+      return err === sentinel ? `applied${seen}` : `${err.code} ${err.message}`;
+    }
+    return 'not rolled back';
+  };
+  const PROBE_DEFINER = 'create function tmpos_internal.m6_store_probe()\nreturns boolean\nlanguage plpgsql\nvolatile\nsecurity definer\nset search_path = pg_catalog, pg_temp\n';
+  const CLOCK = 'create function tmpos_internal.m6_store_clock()\nreturns timestamptz\nlanguage sql\nvolatile\n';
+  assert.ok(UP_006.includes(PROBE_DEFINER) && UP_006.includes(CLOCK), 'the probe routine and the clock are written as the cases below rewrite them');
+  const GRANT = 'migration 006 refused: an object of the transactional store carries a direct grant beyond the owner\'s and tmpos_app\'s own';
+  const LOOSE = 'migration 006 refused: a function of the transactional store is not one this migration defines as it defines it';
+  const MEMBER = 'migration 006 refused: a role of this project is a member of the transactional store\'s owner';
+  try {
+    assert.equal(await applyWith(''), 'applied', 'control: as written, the down and the up complete');
+    assert.equal(await applyWith(`alter default privileges grant execute on functions to ${stray}`), `55000 ${GRANT}`,
+      'a default privilege handing every new function to another role');
+    // Section 4 revokes every table, clock and guard privilege from tmpos_app by name, so a default privilege handing it one is
+    // removed before section 6 looks — the apply completes without it; what section 4 does not revoke, section 6 refuses.
+    const runtimeReach = async (tx) => ` ${(await tx`select pg_catalog.has_table_privilege('tmpos_app', 'tmpos_internal.outbox_event', 'SELECT')
+      or pg_catalog.has_function_privilege('tmpos_app', 'tmpos_internal.m6_store_clock()', 'EXECUTE') as reach`)[0].reach}`;
+    assert.equal(await applyWith('alter default privileges grant select on tables to tmpos_app; alter default privileges grant execute on functions to tmpos_app',
+      UP_006, runtimeReach), 'applied false', 'a default privilege handing the runtime role a table or the clock is revoked by section 4');
+    assert.equal(await applyWith('alter default privileges grant create on schemas to tmpos_app'), `55000 ${GRANT}`,
+      'a default privilege handing the runtime role CREATE on the schema');
+    assert.equal(await applyWith('alter default privileges grant execute on functions to tmpos_app with grant option'), `55000 ${GRANT}`,
+      'the runtime role handed its routines with the right to grant them on');
+    assert.equal(await applyWith('', UP_006.replace(PROBE_DEFINER, PROBE_DEFINER.replace('security definer\n', ''))), `55000 ${LOOSE}`,
+      'a routine that is not SECURITY DEFINER');
+    assert.equal(await applyWith('', UP_006.replace(PROBE_DEFINER, PROBE_DEFINER.replace('pg_catalog, pg_temp', 'pg_catalog, public, pg_temp'))), `55000 ${LOOSE}`,
+      'a routine whose search path is not pinned to pg_catalog, pg_temp');
+    assert.equal(await applyWith('', UP_006.replace(CLOCK, `${CLOCK}security definer\n`)), `55000 ${LOOSE}`, 'the clock made SECURITY DEFINER');
+    assert.equal(await applyWith(`grant "${me}" to tmpos_app`), `55000 ${MEMBER}`, 'the runtime role made a member of the owner');
+  } finally {
+    await observer.unsafe(`drop role if exists ${stray}`);
+  }
+  await assertStorePosture('after the refused applies');
+});
+
+test('M6-PG-02: the database refuses malformed, oversized and contradictory values; the runtime role reaches neither table nor the clock', async () => {
   const records = [
     ['a 42-character scope', { scope: 'A'.repeat(42) }, 'idempotency_record_scope_chk'],
     ['a scope outside base64url', { scope: '+'.repeat(43) }, 'idempotency_record_scope_chk'],
@@ -866,23 +946,32 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
   await observer`delete from tmpos_internal.outbox_event where event_id = ${valid.event_id}`;
   await observer`delete from tmpos_internal.idempotency_record where scope = ${largest.scope}`;
 
-  // The runtime role, through its own LOGIN: the delivery state is writable, an identity or an envelope never is.
+  // The runtime role, through its own LOGIN, reaches neither table and not the clock: every read and write is refused
+  // before a row is seen — the lifecycle routines are its only way to the store.
   const direct = postgres(driverDsn(TARGET_DSN, STORE_PROBE), {
     ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, user: STORE_PROBE,
   });
   extraClients.push(direct);
   for (const [label, statement] of [
-    ['an envelope payload', () => direct`update tmpos_internal.outbox_event set payload = '{}'::jsonb where false`],
-    ['an event type', () => direct`update tmpos_internal.outbox_event set event_type = 'a.b' where false`],
-    ['a scope', () => direct`update tmpos_internal.idempotency_record set scope = ${token()} where false`],
-    ['an outbox delete', () => direct`delete from tmpos_internal.outbox_event where false`],
+    ['a record read', () => direct`select scope, lease, response from tmpos_internal.idempotency_record where false`],
+    ['a record insert', () => direct`insert into tmpos_internal.idempotency_record (scope, fingerprint, lease, lease_expires_at, expires_at)
+      values (${token()}, ${token()}, ${token()}, now(), now())`],
+    ['a response cleared', () => direct`update tmpos_internal.idempotency_record set response = null where false`],
+    ['a retention shortened', () => direct`update tmpos_internal.idempotency_record set expires_at = now() where false`],
+    ['a lease replaced', () => direct`update tmpos_internal.idempotency_record set lease = ${token()} where false`],
     ['a record delete', () => direct`delete from tmpos_internal.idempotency_record where false`],
+    ['an event read', () => direct`select claim_token from tmpos_internal.outbox_event where false`],
+    ['an event insert', () => insertEvent(baseEvent(), direct)],
+    ['a claim released', () => direct`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null where false`],
+    ['a due time moved', () => direct`update tmpos_internal.outbox_event set due_at = now() where false`],
+    ['an envelope payload', () => direct`update tmpos_internal.outbox_event set payload = '{}'::jsonb where false`],
+    ['an outbox delete', () => direct`delete from tmpos_internal.outbox_event where false`],
+    ['the store clock', () => direct`select tmpos_internal.m6_store_clock()`],
     ['an audit read', () => direct`select 1 from public.audit_event where false`],
   ]) {
     assert.equal((await refusal(statement)).code, '42501', `the runtime role is refused ${label}`);
   }
-  assert.deepEqual(await refusal(() => direct`update tmpos_internal.outbox_event set status = status, attempt = attempt where false`), { code: null, constraint: null },
-    'and holds the delivery-state columns');
+  assert.equal((await direct`select tmpos_internal.m6_store_probe() as ok`)[0].ok, true, 'and executes the routines');
 });
 
 // ---------------------------------------------------------------------------
@@ -1305,6 +1394,7 @@ test('M6-PG-17: no statement, identifier, secret, key, payload or driver message
   assert.deepEqual(seen[5], { message: OUTCOME_UNKNOWN, fields: [], cause: 'undefined' });
   const text = `${JSON.stringify(seen)}\n${written.join('\n')}`;
   for (const needle of [canary, 'M6-DRIVER-CANARY', 'XX000', 'idempotency_record', 'outbox_event', 'audit_event', 'public.', 'tmpos_internal', 'm6_store_clock',
+    ...ROUTINE_NAMES, 'transactional store routine', 'plpgsql',
     STORE_PROBE, relay.dir, DATABASE, 'CONNECTION_CLOSED', 'ECONNRESET', 'ENOENT', '57P01', 'administrator command', attempt.op.scope, attempt.lease,
     command.response]) {
     assert.ok(!text.includes(needle), `nothing that left the adapter carries ${needle.length > 24 ? 'a secret-length value' : needle}`);
@@ -1364,7 +1454,8 @@ test('M6-PG-20: a direct grant is not effective reach — inheritance, nesting, 
     return P + name;
   };
   // What each role reaches, as PostgreSQL itself decides it: schema USAGE, a table read, a table insert, the two kinds of
-  // column update, a delete, the clock, the guard, and the audit table's insert.
+  // column update, a delete, the clock, the guard, the audit table's insert, and the lifecycle routines (every one of the
+  // nine, reported as one bit: all or none).
   const reach = async (who) => {
     const [r] = await observer`select
       has_schema_privilege(${who}::name, 'tmpos_internal', 'USAGE') as usage,
@@ -1375,13 +1466,16 @@ test('M6-PG-20: a direct grant is not effective reach — inheritance, nesting, 
       has_table_privilege(${who}::name, 'tmpos_internal.outbox_event', 'DELETE') as outbox_delete,
       has_function_privilege(${who}::name, 'tmpos_internal.m6_store_clock()', 'EXECUTE') as clock,
       has_function_privilege(${who}::name, 'tmpos_internal.outbox_event_transition_guard()', 'EXECUTE') as guard,
-      has_table_privilege(${who}::name, 'public.audit_event', 'INSERT') as audit_insert`;
+      has_table_privilege(${who}::name, 'public.audit_event', 'INSERT') as audit_insert,
+      (select pg_catalog.array_agg(distinct has_function_privilege(${who}::name, p.oid, 'EXECUTE'))
+         from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_internal'::regnamespace and p.proname = any (${ROUTINE_NAMES})) as routines`;
+    assert.equal(r.routines.length, 1, `${who}: the nine routines are reached all together or not at all`);
     return ['usage', 'outbox_select', 'record_insert', 'status_update', 'payload_update', 'outbox_delete', 'clock', 'guard', 'audit_insert']
-      .map((k) => (r[k] ? '1' : '0')).join('');
+      .map((k) => (r[k] ? '1' : '0')).join('') + (r.routines[0] ? '1' : '0');
   };
   const sessions = [];
-  /** A real read of the outbox in `who`'s own session, after SET ROLE `as` when given. */
-  const reads = async (who, as = null, statement = (s) => s`select count(*) from tmpos_internal.outbox_event`) => {
+  /** A real call of the store's probe routine in `who`'s own session, after SET ROLE `as` when given. */
+  const reads = async (who, as = null, statement = (s) => s`select tmpos_internal.m6_store_probe()`) => {
     const session = sessionAs(who);
     sessions.push(session);
     if (as !== null) {
@@ -1403,7 +1497,7 @@ test('M6-PG-20: a direct grant is not effective reach — inheritance, nesting, 
     const ownerMember = await role('ownermember', `create role ${P}ownermember login inherit; grant "${me}" to ${P}ownermember`);
     const superuser = await role('super', `create role ${P}super login superuser`);
 
-    //                                    usage, read, insert, status, payload, delete, clock, guard, audit insert
+    //                                    usage, read, insert, status, payload, delete, clock, guard, audit insert, routines
     assert.deepEqual(Object.fromEntries(await Promise.all([
       ['the runtime login (tmpos_app + tmpos_audit_writer, inherited)', STORE_PROBE],
       ['PUBLIC', 'public'], ['anon', 'anon'], ['authenticated', 'authenticated'],
@@ -1417,34 +1511,36 @@ test('M6-PG-20: a direct grant is not effective reach — inheritance, nesting, 
       ['a superuser', superuser],
       ['the owner', me],
     ].map(async ([label, who]) => [label, await reach(who)]))), {
-      'the runtime login (tmpos_app + tmpos_audit_writer, inherited)': '111100101',
-      PUBLIC: '000000000', anon: '000000000', authenticated: '000000000',
-      'a role with no membership': '000000000',
-      'a login two inherited memberships from tmpos_app': '111100100',
-      'a membership WITH INHERIT FALSE': '000000000',
-      'a membership WITH INHERIT FALSE, SET FALSE': '000000000',
-      'a direct table and function grant without schema USAGE': '010000100',
-      'schema USAGE alone': '100000000',
-      'a member of the owner': '111111111',
-      'a superuser': '111111111',
-      'the owner': '111111111',
+      'the runtime login (tmpos_app + tmpos_audit_writer, inherited)': '1000000011',
+      PUBLIC: '0000000000', anon: '0000000000', authenticated: '0000000000',
+      'a role with no membership': '0000000000',
+      'a login two inherited memberships from tmpos_app': '1000000001',
+      'a membership WITH INHERIT FALSE': '0000000000',
+      'a membership WITH INHERIT FALSE, SET FALSE': '0000000000',
+      'a direct table and function grant without schema USAGE': '0100001000',
+      'schema USAGE alone': '1000000000',
+      'a member of the owner': '1111111111',
+      'a superuser': '1111111111',
+      'the owner': '1111111111',
     }, 'effective privilege follows membership, inheritance and ownership — never the direct grants alone');
 
     // And in real sessions, where the difference shows.
-    assert.equal(await reads(STORE_PROBE), 'reached', 'the runtime login reads through its inherited tmpos_app');
+    const tableRead = (s) => s`select count(*) from tmpos_internal.outbox_event`;
+    assert.equal(await reads(STORE_PROBE), 'reached', 'the runtime login executes the routines through its inherited tmpos_app');
+    assert.equal(await reads(STORE_PROBE, null, tableRead), '42501', 'and reads no table');
     assert.equal(await reads(nested), 'reached', 'so does a login two inherited memberships away, with no grant of its own');
     assert.equal(await reads(plain), '42501', 'a login with no membership is refused');
     assert.equal(await reads(noInherit), '42501', 'a membership WITH INHERIT FALSE reaches nothing by itself');
     assert.equal(await reads(noInherit, 'tmpos_app'), 'reached', '… until the session sets that role: reachable all along, through SET ROLE');
     assert.equal(await reads(noSet, 'tmpos_app'), 'SET ROLE refused 42501', 'with SET FALSE as well, SET ROLE is refused too');
-    assert.equal(await reads(tableOnly), '42501', 'a direct table grant without USAGE on the schema reaches nothing');
+    assert.equal(await reads(tableOnly, null, tableRead), '42501', 'a direct table grant without USAGE on the schema reaches nothing');
     assert.equal(await reads(tableOnly, null, (s) => s`select tmpos_internal.m6_store_clock()`), '42501', 'nor does a direct function grant');
-    assert.equal(await reads(usageOnly), '42501', 'nor does USAGE on the schema without a table privilege');
-    assert.equal(await reads(ownerMember), 'reached', 'a member of the owner reaches what the owner does, with no grant of its own');
+    assert.equal(await reads(usageOnly), '42501', 'nor does USAGE on the schema without EXECUTE on a routine');
+    assert.equal(await reads(ownerMember, null, tableRead), 'reached', 'a member of the owner reaches what the owner does, with no grant of its own');
     for (const nologin of ['anon', 'authenticated']) {
       const refused = await refusal(() => observer.begin(async (tx) => {
         await tx.unsafe(`set local role ${nologin}`);
-        await tx`select count(*) from tmpos_internal.outbox_event`;
+        await tx`select tmpos_internal.m6_store_probe()`;
       }));
       assert.equal(refused.code, '42501', `${nologin}, as a session's role, is refused`);
     }
@@ -1460,7 +1556,7 @@ test('M6-PG-20: a direct grant is not effective reach — inheritance, nesting, 
   await assertStorePosture('after the privilege cases');
 });
 
-test('M6-PG-21: the table enforces the delivery state machine — on the runtime role\'s own SQL, on the owner\'s, and through the adapter', async () => {
+test('M6-PG-21: the table enforces the delivery state machine — on the owner\'s own SQL and through the adapter — and the runtime role\'s SQL reaches it only through the routines', async () => {
   await ready();
   await observer`delete from tmpos_internal.outbox_event`;
   const direct = sessionAs(STORE_PROBE);
@@ -1488,59 +1584,73 @@ test('M6-PG-21: the table enforces the delivery state machine — on the runtime
       `${label}: no field carries a row value (PostgreSQL's CONTEXT names only the guard)`);
     assert.deepEqual(await states(), before, `${label}: nothing changed`);
   };
+  // The owner is the one role that writes the table directly — the routines run as it — and the guard holds for it too.
   for (const [label, statement] of [
-    ['a delivered event back to pending', () => direct`update tmpos_internal.outbox_event set status = 'pending' where event_id = ${delivered}`],
-    ['a delivered event claimed again', () => direct`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
+    ['a delivered event back to pending', () => observer`update tmpos_internal.outbox_event set status = 'pending' where event_id = ${delivered}`],
+    ['a delivered event claimed again', () => observer`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
       claim_expires_at = ${expiry} where event_id = ${delivered}`],
-    ['a dead event back to pending', () => direct`update tmpos_internal.outbox_event set status = 'pending', dead_reason = null where event_id = ${dead}`],
-    ['a dead event claimed again', () => direct`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
+    ['a dead event back to pending', () => observer`update tmpos_internal.outbox_event set status = 'pending', dead_reason = null where event_id = ${dead}`],
+    ['a dead event claimed again', () => observer`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
       claim_expires_at = ${expiry}, dead_reason = null where event_id = ${dead}`],
-    ['a delivered event touched at all', () => direct`update tmpos_internal.outbox_event set status = status where event_id = ${delivered}`],
-    ['a pending event delivered unclaimed', () => direct`update tmpos_internal.outbox_event set status = 'delivered' where event_id = ${pending}`],
-    ['a pending event dead-lettered unclaimed', () => direct`update tmpos_internal.outbox_event set status = 'dead', dead_reason = 'attempts_exhausted'
+    ['a delivered event touched at all', () => observer`update tmpos_internal.outbox_event set status = status where event_id = ${delivered}`],
+    ['a pending event delivered unclaimed', () => observer`update tmpos_internal.outbox_event set status = 'delivered' where event_id = ${pending}`],
+    ['a pending event dead-lettered unclaimed', () => observer`update tmpos_internal.outbox_event set status = 'dead', dead_reason = 'attempts_exhausted'
       where event_id = ${pending}`],
-    ['a pending event rescheduled', () => direct`update tmpos_internal.outbox_event set due_at = due_at + interval '1 day' where event_id = ${pending}`],
-    ['a claim that counts no attempt', () => direct`update tmpos_internal.outbox_event set status = 'claimed', claim_token = ${token()},
+    ['a pending event rescheduled', () => observer`update tmpos_internal.outbox_event set due_at = due_at + interval '1 day' where event_id = ${pending}`],
+    ['a claim that counts no attempt', () => observer`update tmpos_internal.outbox_event set status = 'claimed', claim_token = ${token()},
       claim_expires_at = ${expiry} where event_id = ${pending}`],
-    ['a claim handed to another token without counting an attempt', () => direct`update tmpos_internal.outbox_event set claim_token = ${token()}
+    ['a claim handed to another token without counting an attempt', () => observer`update tmpos_internal.outbox_event set claim_token = ${token()}
       where event_id = ${claimed}`],
-    ['a retry that resets the attempt count', () => direct`update tmpos_internal.outbox_event set status = 'pending', claim_token = null,
+    ['a retry that resets the attempt count', () => observer`update tmpos_internal.outbox_event set status = 'pending', claim_token = null,
       claim_expires_at = null, attempt = 0 where event_id = ${claimed}`],
-    ['a delivery that rewrites the attempt count', () => direct`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null,
+    ['a delivery that rewrites the attempt count', () => observer`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null,
       claim_expires_at = null, attempt = attempt + 5 where event_id = ${claimed}`],
-    ['an event inserted already claimed', () => insertEvent({ ...baseEvent(), status: 'claimed', attempt: 1, claim_token: token(), claim_expires_at: expiry }, direct)],
-    ['an event inserted with attempts already counted', () => insertEvent({ ...baseEvent(), attempt: 3 }, direct)],
-    ['an event inserted delivered', () => insertEvent({ ...baseEvent(), status: 'delivered', attempt: 1 }, direct)],
-    ['the owner moving a delivered event back', () => observer`update tmpos_internal.outbox_event set status = 'pending' where event_id = ${delivered}`],
+    ['an event inserted already claimed', () => insertEvent({ ...baseEvent(), status: 'claimed', attempt: 1, claim_token: token(), claim_expires_at: expiry })],
+    ['an event inserted with attempts already counted', () => insertEvent({ ...baseEvent(), attempt: 3 })],
+    ['an event inserted delivered', () => insertEvent({ ...baseEvent(), status: 'delivered', attempt: 1 })],
     ['the owner, in a replica session, moving a delivered event back', () => observer.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
       await tx`update tmpos_internal.outbox_event set status = 'pending' where event_id = ${delivered}`;
     })],
     ['the owner rewriting a claimed event\'s envelope', () => observer`update tmpos_internal.outbox_event set payload = '{"forged":true}'::jsonb
       where event_id = ${claimed}`],
-    ['an unexpired claim taken over, its attempt counted', () => direct`update tmpos_internal.outbox_event set claim_token = ${token()},
+    ['an unexpired claim taken over, its attempt counted', () => observer`update tmpos_internal.outbox_event set claim_token = ${token()},
       attempt = attempt + 1 where event_id = ${claimed}`],
-    ['a pending event claimed before it is due', () => direct`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1,
+    ['a pending event claimed before it is due', () => observer`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1,
       claim_token = ${token()}, claim_expires_at = ${expiry} where event_id = ${pending}`],
   ]) await refused(label, statement);
 
-  // The delivery transitions themselves stay open to the runtime role, whoever sends them — once their time has come.
+  // The delivery transitions themselves stay open — once their time has come, and a reclaim only under a new token.
   await advance(30_000); // the claims taken above have expired; the retried event is still not due
-  const moved = async (label, statement) => assert.equal((await statement()).count, 1, `${label}: allowed`);
-  await moved('an expired claim reclaimed, its attempt counted', () => direct`update tmpos_internal.outbox_event set claim_token = ${token()},
-    attempt = attempt + 1 where event_id = ${claimed}`);
-  await moved('a claimed event retried', () => direct`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null
+  await refused('an expired claim reclaimed under its own token', () => observer`update tmpos_internal.outbox_event set attempt = attempt + 1
     where event_id = ${claimed}`);
-  await moved('a due pending event claimed, its attempt counted', () => direct`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1,
+  const moved = async (label, statement) => assert.equal((await statement()).count, 1, `${label}: allowed`);
+  await moved('an expired claim reclaimed under a new token, its attempt counted', () => observer`update tmpos_internal.outbox_event
+    set claim_token = ${token()}, attempt = attempt + 1 where event_id = ${claimed}`);
+  await moved('a claimed event retried', () => observer`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null
+    where event_id = ${claimed}`);
+  await moved('a due pending event claimed, its attempt counted', () => observer`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1,
     claim_token = ${token()}, claim_expires_at = ${expiry} where event_id = ${claimed}`);
-  await moved('a claimed event delivered', () => direct`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null, claim_expires_at = null
+  await moved('a claimed event delivered', () => observer`update tmpos_internal.outbox_event set status = 'delivered', claim_token = null, claim_expires_at = null
     where event_id = ${claimed}`);
   const fresh = { ...baseEvent(), due_at: '2020-01-01T00:00:00Z' };
-  await moved('an event inserted pending, never attempted', () => insertEvent(fresh, direct));
-  await moved('and claimed', () => direct`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
+  await moved('an event inserted pending, never attempted', () => insertEvent(fresh));
+  await moved('and claimed', () => observer`update tmpos_internal.outbox_event set status = 'claimed', attempt = attempt + 1, claim_token = ${token()},
     claim_expires_at = ${expiry} where event_id = ${fresh.event_id}`);
-  await moved('a claimed event dead-lettered', () => direct`update tmpos_internal.outbox_event set status = 'dead', claim_token = null, claim_expires_at = null,
+  await moved('a claimed event dead-lettered', () => observer`update tmpos_internal.outbox_event set status = 'dead', claim_token = null, claim_expires_at = null,
     dead_reason = 'attempts_exhausted' where event_id = ${fresh.event_id}`);
+
+  // The runtime role's own SQL reaches none of it: not a transition the guard would allow, not one it would refuse.
+  for (const [label, statement] of [
+    ['an allowed-shaped retry', () => direct`update tmpos_internal.outbox_event set status = 'pending', claim_token = null, claim_expires_at = null
+      where event_id = ${fresh.event_id}`],
+    ['a delivered event revived', () => direct`update tmpos_internal.outbox_event set status = 'pending' where event_id = ${delivered}`],
+    ['an event inserted pending', () => insertEvent({ ...baseEvent(), due_at: '2020-01-01T00:00:00Z' }, direct)],
+  ]) {
+    const before = await states();
+    assert.equal((await refusal(statement)).code, '42501', `the runtime role: ${label} — refused before the guard is reached`);
+    assert.deepEqual(await states(), before, `the runtime role: ${label} — nothing changed`);
+  }
 
   // A mutator is trusted source and runs as the runtime role: one that tried to revive a delivered event commits nothing.
   const reviving = Object.freeze({
@@ -1554,7 +1664,7 @@ test('M6-PG-21: the table enforces the delivery state machine — on the runtime
   extraClients.push(rogueClient);
   const command = creating(await begin(A));
   assert.deepEqual(await createPostgresTransactionalStore({ client: rogueClient, mutators: [reviving] }).transactions.commit(command, live()), UNAVAILABLE,
-    'the guard\'s refusal is a failed statement to the adapter: it answers unavailable');
+    'the refused statement is a failed statement to the adapter: it answers unavailable');
   assert.deepEqual(await footprint(command), NOTHING, 'and nothing of the command committed');
   assert.equal((await rowOf(delivered)).status, 'delivered', 'the delivered event is still delivered');
 });
@@ -1596,6 +1706,8 @@ test('M6-PG-22: an event is claimed at most 20 times — then dead-lettered, nev
   }
   assert.deepEqual(await A.delivery.claim({ claim: token(), limit: 32, claimMs: 30_000, maxAttempts: 1_000 }, live()), EMPTY,
     'no 21st claim, not even for a request that asks for more attempts');
+  const [{ args }] = await observer`select pg_catalog.pg_get_function_identity_arguments('tmpos_internal.m6_outbox_claim(text, integer, bigint)'::regprocedure) as args`;
+  assert.equal(args, 'p_token text, p_limit integer, p_claim_ms bigint', 'the claim routine takes a token, a limit and a duration — no cap to raise');
   const spent = await rowOf(expiring);
   assert.deepEqual([spent.status, spent.attempt, spent.dead_reason, spent.claim_token], ['dead', cap, 'attempts_exhausted', null],
     'the claim dead-lettered it, unpublished');
@@ -1617,6 +1729,151 @@ test('M6-PG-22: an event is claimed at most 20 times — then dead-lettered, nev
   assert.deepEqual(await rowOf(last), before, 'and changes nothing');
   assert.deepEqual(await A.delivery.deadLetter({ eventId: last, claim: held, reason: 'attempts_exhausted' }, live()), { outcome: 'dead_lettered' },
     'the holder dead-letters it');
+});
+
+test('M6-PG-29: through the runtime role\'s own SQL, the routines change a record only under its lease and an event only under its claim token — on the store\'s clock, within their bounds, telling a stale caller nothing', async () => {
+  await ready();
+  await observer`delete from tmpos_internal.outbox_event`;
+  const direct = sessionAs(STORE_PROBE);
+  const recordOf = async (scope) => (await observer`select fingerprint, lease, response,
+      (extract(epoch from lease_expires_at) * 1000)::bigint::text as lease_expires, (extract(epoch from expires_at) * 1000)::bigint::text as expires
+    from tmpos_internal.idempotency_record where scope = ${scope}`)[0];
+  const acquire = async (scope, fingerprint, held, leaseMs = 60_000, retentionMs = 600_000) => (await direct`select o_outcome as outcome, o_response as response
+    from tmpos_internal.m6_idempotency_acquire(${scope}::text, ${fingerprint}::text, ${held}::text, ${String(leaseMs)}::bigint, ${String(retentionMs)}::bigint)`)[0];
+  const complete = async (scope, held, response) =>
+    (await direct`select tmpos_internal.m6_idempotency_complete(${scope}::text, ${held}::text, ${response}::text) as outcome`)[0].outcome;
+  const fence = async (scope, held) => (await direct`select tmpos_internal.m6_command_fence(${scope}::text, ${held}::text) as held`)[0].held;
+  const enqueue = async (scope, held, eventId) => (await direct`select tmpos_internal.m6_command_enqueue(${scope}::text, ${held}::text, ${eventId}::uuid,
+    'conformance.item.created'::text, 1::integer, 'item'::text, ${randomUUID()}::uuid, 1::bigint, null::text, null::text, null::text, ${randomUUID()}::uuid,
+    '{"name":"n","quantity":1}'::jsonb) as inserted`)[0].inserted;
+
+  // 1. Creation: one open record, its terms from the store's clock.
+  const [scope, fingerprint, mine] = [token(), token(), token()];
+  const t0 = await frozenNowMs();
+  assert.deepEqual(await acquire(scope, fingerprint, mine), { outcome: 'acquired', response: null });
+  const open = await recordOf(scope);
+  assert.deepEqual(open, { fingerprint, lease: mine, response: null, lease_expires: String(t0 + 60_000), expires: String(t0 + 600_000) },
+    'lease and retention measured from the store clock');
+  // 2. A live lease is never replaced, a fingerprint stays in conflict, a foreign lease completes and fences nothing — and none
+  //    of those answers carries anything of the record.
+  assert.deepEqual(await acquire(scope, fingerprint, token()), { outcome: 'in_progress', response: null });
+  assert.deepEqual(await acquire(scope, token(), token(), 1, 1), { outcome: 'conflict', response: null });
+  assert.equal(await complete(scope, token(), 'AAAA'), 'lease_lost');
+  assert.equal(await complete(token(), mine, 'AAAA'), 'lease_lost', 'no record: the same answer as a foreign lease');
+  assert.equal(await fence(scope, token()), false);
+  assert.deepEqual(await recordOf(scope), open, 'no refusal changed the record: its lease, terms and response are as recorded');
+  // 3. Only the current lease completes, and only once.
+  assert.equal(await fence(scope, mine), true);
+  assert.equal(await complete(scope, mine, 'AAAA'), 'completed');
+  const done = await recordOf(scope);
+  assert.equal(await complete(scope, mine, 'BBBB'), 'lease_lost', 'a completed response is never replaced, even by its holder');
+  assert.equal(await fence(scope, mine), false, 'nor fenced for another commit');
+  // 4. Within its retention a completed record is never reopened, re-leased or shortened: a replay to its own fingerprint, a
+  //    conflict to any other — up to the last millisecond, and absent at the boundary, as the port contract says.
+  await advance(599_999);
+  assert.deepEqual(await acquire(scope, fingerprint, token()), { outcome: 'replay', response: 'AAAA' });
+  assert.deepEqual(await acquire(scope, token(), token()), { outcome: 'conflict', response: null });
+  assert.deepEqual(await recordOf(scope), done, 'unchanged by either');
+  await advance(1);
+  assert.deepEqual(await acquire(scope, fingerprint, token()), { outcome: 'acquired', response: null }, 'past its retention: a new operation');
+  // 5. An expired lease is reclaimed under the caller's lease, and the lease it replaced is fenced out of everything.
+  const [s2, f2, old, fresh] = [token(), token(), token(), token()];
+  assert.equal((await acquire(s2, f2, old, 1_000, 10_000)).outcome, 'acquired');
+  await advance(1_000);
+  assert.deepEqual(await acquire(s2, f2, fresh, 1_000, 10_000), { outcome: 'reclaimed', response: null });
+  assert.deepEqual([await complete(s2, old, 'AAAA'), await fence(s2, old)], ['lease_lost', false], 'the replaced lease completes and fences nothing');
+  assert.equal((await refusal(() => enqueue(s2, old, randomUUID()))).code, '55000', 'nor enqueues an event');
+  const eventId = randomUUID();
+  assert.equal(await enqueue(s2, fresh, eventId), true, 'the current lease enqueues');
+  assert.equal(await enqueue(s2, fresh, eventId), false, 'an event ID that is not new is not inserted again');
+  const [queued] = await observer`select status, attempt, (extract(epoch from due_at) * 1000)::bigint::text as due
+    from tmpos_internal.outbox_event where event_id = ${eventId}`;
+  assert.deepEqual(queued, { status: 'pending', attempt: 0, due: String(await frozenNowMs()) }, 'pending, never attempted, due now by the store clock');
+  await observer`delete from tmpos_internal.outbox_event where event_id = ${eventId}`;
+
+  // 6. Every malformed argument is refused before a row is read.
+  const uuid = randomUUID();
+  for (const [label, call] of [
+    ['a lease of 0 ms', () => acquire(token(), token(), token(), 0, 600_000)],
+    ['a lease past 24 h', () => acquire(token(), token(), token(), 86_400_001, 604_800_000)],
+    ['a retention shorter than its lease', () => acquire(token(), token(), token(), 60_000, 59_999)],
+    ['a retention past 7 days', () => acquire(token(), token(), token(), 60_000, 604_800_001)],
+    ['a malformed scope', () => acquire('short', token(), token())],
+    ['a null lease', () => acquire(token(), token(), null)],
+    ['an empty response', () => complete(token(), token(), '')],
+    ['a response past MAX_SEALED_LENGTH', () => complete(token(), token(), 'A'.repeat(MAX_SEALED_LENGTH + 1))],
+    ['a response outside base64url', () => complete(token(), token(), 'AA=A')],
+    ['a fence under a malformed lease', () => fence(token(), 'x')],
+    ['a claim of 0 events', () => direct`select * from tmpos_internal.m6_outbox_claim(${token()}::text, 0::integer, 30000::bigint)`],
+    ['a claim of 33 events', () => direct`select * from tmpos_internal.m6_outbox_claim(${token()}::text, 33::integer, 30000::bigint)`],
+    ['a claim of 0 ms', () => direct`select * from tmpos_internal.m6_outbox_claim(${token()}::text, 1::integer, 0::bigint)`],
+    ['a claim past 1 h', () => direct`select * from tmpos_internal.m6_outbox_claim(${token()}::text, 1::integer, 3600001::bigint)`],
+    ['a malformed claim token', () => direct`select * from tmpos_internal.m6_outbox_claim('short'::text, 1::integer, 30000::bigint)`],
+    ['a retry of 0 ms', () => direct`select tmpos_internal.m6_outbox_retry(${uuid}::uuid, ${token()}::text, 0::bigint)`],
+    ['a retry past 15 min', () => direct`select tmpos_internal.m6_outbox_retry(${uuid}::uuid, ${token()}::text, 900001::bigint)`],
+    ['an unknown dead-letter reason', () => direct`select tmpos_internal.m6_outbox_dead_letter(${uuid}::uuid, ${token()}::text, 'other'::text)`],
+    ['an acknowledgement of no event', () => direct`select tmpos_internal.m6_outbox_acknowledge(null::uuid, ${token()}::text)`],
+  ]) assert.equal((await refusal(call)).code, '22023', `${label} is refused as a malformed argument`);
+  // … and every bound itself is accepted.
+  assert.equal((await acquire(token(), token(), token(), 86_400_000, 604_800_000)).outcome, 'acquired', 'a lease of exactly 24 h, a retention of exactly 7 days');
+  assert.equal((await acquire(token(), token(), token(), 1, 1)).outcome, 'acquired', 'a lease and a retention of 1 ms');
+  assert.deepEqual([...await direct`select o_spent as spent from tmpos_internal.m6_outbox_claim(${token()}::text, 32::integer, 3600000::bigint)`], [{ spent: 0 }],
+    'a claim of 32 events for exactly 1 h');
+
+  // 7. Claims: on the store's clock, never before expiry, never under the token that held the claim; settlement only under the
+  //    current token, whatever a stale or foreign caller presents — and a settled event is settled for good.
+  const claim = async (held) => (await direct`select o_event_id::text as event_id, o_attempt as attempt
+    from tmpos_internal.m6_outbox_claim(${held}::text, 32::integer, 30000::bigint)`).filter((r) => r.event_id !== null);
+  const settle = async (event, held) => [
+    (await direct`select tmpos_internal.m6_outbox_acknowledge(${event}::uuid, ${held}::text) as o`)[0].o,
+    (await direct`select tmpos_internal.m6_outbox_retry(${event}::uuid, ${held}::text, 1000::bigint) as o`)[0].o,
+    (await direct`select tmpos_internal.m6_outbox_dead_letter(${event}::uuid, ${held}::text, 'envelope_invalid'::text) as o`)[0].o,
+  ];
+  const [seeded] = await seed(1);
+  const first = token();
+  const t1 = await frozenNowMs();
+  assert.deepEqual(await claim(first), [{ event_id: seeded, attempt: 1 }]);
+  const heldRow = await rowOf(seeded);
+  assert.deepEqual([heldRow.status, heldRow.claim_token, heldRow.claim_expires], ['claimed', first, String(t1 + 30_000)], 'held until the store clock says');
+  assert.deepEqual(await claim(token()), [], 'no reclaim before the claim expires');
+  assert.deepEqual(await settle(seeded, token()), ['claim_lost', 'claim_lost', 'claim_lost'], 'a foreign token settles and releases nothing');
+  assert.deepEqual(await settle(randomUUID(), first), ['claim_lost', 'claim_lost', 'claim_lost'], 'no such event: the same answer');
+  assert.deepEqual(await rowOf(seeded), heldRow, 'and nothing changed');
+  await advance(30_000);
+  assert.deepEqual(await claim(first), [], 'an expired claim is never reclaimed under the token that held it');
+  const second = token();
+  assert.deepEqual(await claim(second), [{ event_id: seeded, attempt: 2 }], 'a new token reclaims it, the attempt counted');
+  const reclaimed = await rowOf(seeded);
+  assert.deepEqual(await settle(seeded, first), ['claim_lost', 'claim_lost', 'claim_lost'], 'the stale token is fenced out of every settlement');
+  assert.deepEqual(await rowOf(seeded), reclaimed, 'and changed nothing');
+  assert.equal((await direct`select tmpos_internal.m6_outbox_acknowledge(${seeded}::uuid, ${second}::text) as o`)[0].o, 'acknowledged');
+  assert.deepEqual(await settle(seeded, second), ['claim_lost', 'claim_lost', 'claim_lost'], 'a delivered event is settled for good');
+  await advance(1_000_000);
+  assert.deepEqual(await claim(token()), [], 'and never claimed again');
+  assert.equal((await rowOf(seeded)).status, 'delivered');
+
+  // 8. A member of the runtime role that may create temporary objects plants exact-match operators in pg_temp for the
+  //    operators the routines use (bigint * interval, timestamptz >= timestamptz). They work when named — and no routine,
+  //    running as its owner, ever resolves to them: PostgreSQL never looks for a function or an operator in pg_temp.
+  const P = `tmpos_m6p6_${randomBytes(4).toString('hex')}_`;
+  const temp = `${P}temp`;
+  await observer.unsafe(`create role ${temp} login inherit; grant tmpos_app to ${temp}; grant temporary on database "${DATABASE}" to ${temp}`);
+  const planter = sessionAs(temp);
+  try {
+    await planter.unsafe(`create function pg_temp.planted_mul(bigint, interval) returns interval language plpgsql as $$ begin raise exception 'M6-PLANTED'; end $$;
+      create operator pg_temp.* (function = pg_temp.planted_mul, leftarg = bigint, rightarg = interval);
+      create function pg_temp.planted_ge(timestamptz, timestamptz) returns boolean language plpgsql as $$ begin raise exception 'M6-PLANTED'; end $$;
+      create operator pg_temp.>= (function = pg_temp.planted_ge, leftarg = timestamptz, rightarg = timestamptz)`).simple();
+    assert.equal((await refusal(() => planter.unsafe(`select 1::bigint operator(pg_temp.*) interval '1 ms'`))).code, 'P0001', 'control: the planted operator runs when named');
+    const [ps, pf, pl] = [token(), token(), token()];
+    assert.deepEqual((await planter`select o_outcome as outcome from tmpos_internal.m6_idempotency_acquire(${ps}::text, ${pf}::text, ${pl}::text,
+      60000::bigint, 600000::bigint)`)[0], { outcome: 'acquired' }, 'the acquisition resolved pg_catalog\'s operators, not the planted ones');
+    assert.equal((await planter`select tmpos_internal.m6_idempotency_complete(${ps}::text, ${pl}::text, 'AAAA'::text) as o`)[0].o, 'completed');
+    assert.deepEqual([...await planter`select o_spent as spent from tmpos_internal.m6_outbox_claim(${token()}::text, 1::integer, 30000::bigint)`], [{ spent: 0 }]);
+  } finally {
+    await planter.end({ timeout: 5 }).catch(() => {});
+    await observer.unsafe(`revoke temporary on database "${DATABASE}" from ${temp}; drop role if exists ${temp}`).catch(() => {});
+  }
 });
 
 // ---------------------------------------------------------------------------
