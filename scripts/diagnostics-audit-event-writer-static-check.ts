@@ -56,11 +56,11 @@ check('C2 static check exists', read(STATIC).length > 0, STATIC);
 check('C3 live diagnostic exists', liveSrc.length > 0, LIVE);
 
 // =============================================================================
-// Writer — imports getDb + reuses the audit-event contract
+// Writer — imports getRuntimeDb + reuses the audit-event contract
 // =============================================================================
 
 const writerImports = [...writerCode.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-check('C4 writer imports getDb from ./db', /from '\.\/db'/.test(writerCode) && /\bgetDb\b/.test(writerCode), writerImports.join(', '));
+check('C4 writer imports getRuntimeDb from ./db', /from '\.\/db'/.test(writerCode) && /\bgetRuntimeDb\b/.test(writerCode), writerImports.join(', '));
 check(
   'C5 writer reuses the audit-event contract',
   /from '\.\/auditEventContract'/.test(writerCode) &&
@@ -73,12 +73,38 @@ check(
 // Writer — INSERT-only into audit_event; NO other mutation
 // =============================================================================
 
-check('C6 writer INSERTs into audit_event', /insert\s+into\s+(?:public\.)?audit_event\b/i.test(writerCode), 'insert into audit_event present');
+// Every executable INSERT target, normalized: PostgreSQL allows whitespace around a qualifier's dot, so
+// `audit_event . other` names table `other` in schema `audit_event`. A suffix (audit_event.x), a spaced form
+// or a quoted form ("public".audit_event) is a different relation and must not pass as audit_event.
+// A PostgreSQL line comment is not a TypeScript one, so stripTsComments leaves it: inside a SQL template
+// `--` hides the rest of the line, including a qualifier's dot, and `audit_event --x\n . other` would read
+// as a bare audit_event while naming table `other` in schema `audit_event`. Remove them first.
+// Stripping is not safe on its own either: a `--` inside a string literal ('--') would swallow a second
+// insert on the same line. So C7 scans the raw text and the stripped text and flags a target found in
+// either; C6 counts only the stripped text, so a commented-out insert never passes as the writer's.
+// This is a tripwire over source text, not a SQL parser: it fails closed on these forms, not on all SQL.
+const TARGET_RE = /insert\s+into\s+([^\s(;]+(?:\s*\.\s*[^\s(;]+)*)/gi;
+const targetsIn = (text: string): string[] => [...text.matchAll(TARGET_RE)].map((m) => m[1].replace(/\s+/g, '').toLowerCase());
+const insertTargets = targetsIn(writerCode.replace(/--[^\n]*/g, ' '));
+// stripTsComments has the same blind spot one level up: `//` or `/*` inside a SQL string (a URL, say) removes the
+// rest of the line before either scan above runs. So C7 also scans the untouched source, skipping only a complete
+// documentation code span such as `audit_event`. That form can only sit in a comment: in code, a template literal
+// directly followed by a name and a backtick does not compile. Any other capture that begins with a backtick is
+// TypeScript syntax — a template ending right after `insert into`, its target concatenated on — so the real target
+// cannot be read here, and C7 flags it instead of trusting it. Known false rejections, both failing closed:
+// `insert into only public.audit_event`, and a statement split at a template boundary right after the table name.
+const CODE_SPAN = /^`[\w.]+`$/;
+const sourceTargets = targetsIn(writerSrc).filter((t) => !CODE_SPAN.test(t));
+const everyTarget = [...new Set([...insertTargets, ...targetsIn(writerCode), ...sourceTargets])];
+// Qualified only. The store pins search_path to pg_catalog, pg_temp for every transaction, so an unqualified
+// audit_event would resolve through pg_temp — which any statement running as the runtime role can plant — or
+// not at all. The writer qualifies deliberately; this check refuses a future edit that stops doing so.
+const AUDIT_TARGETS = ['public.audit_event'];
+check('C6 writer INSERTs into audit_event', insertTargets.some((t) => AUDIT_TARGETS.includes(t)), `targets=[${insertTargets.join(',')}]`);
 
 // Every executable INSERT must target audit_event (no other insert target; public. is the only qualifier allowed).
-const insertTargets = [...writerCode.matchAll(/insert\s+into\s+(?:public\.)?(\w+)/gi)].map((m) => m[1].toLowerCase());
-const nonAuditInserts = insertTargets.filter((t) => t !== 'audit_event');
-check('C7 every INSERT targets audit_event only', nonAuditInserts.length === 0, nonAuditInserts.join(',') || `targets=[${insertTargets.join(',')}]`);
+const nonAuditInserts = everyTarget.filter((t) => !AUDIT_TARGETS.includes(t));
+check('C7 every INSERT targets audit_event only', nonAuditInserts.length === 0, nonAuditInserts.join(',') || `targets=[${everyTarget.join(',')}]`);
 
 // No UPDATE/DELETE/UPSERT/ON CONFLICT/ALTER/DROP/TRUNCATE in executable code.
 const FORBIDDEN_MUTATIONS: [string, RegExp][] = [
