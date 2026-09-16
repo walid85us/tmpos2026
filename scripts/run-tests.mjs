@@ -53,7 +53,7 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/commandTransaction.test.ts',                 // M6 atomic command transaction: fencing, all-or-nothing commit, conformance, the chain
   'server/runtime/outbox.test.ts',                             // M6 transactional outbox: closed contracts, bounded envelope, delivery conformance, one bounded pass
   'server/persistence/postgresTransactionalStore.test.ts',     // M6 PostgreSQL store: refusals before the database, COMMIT-phase outcomes, source containment
-  'server/persistence/supervisedPgClient.test.ts',             // M6 pool supervisor: a pool retired after a failure its body did not raise, no retry, bounded end
+  'server/persistence/supervisedPgClient.test.ts',             // M6 transaction kernel: one guarded dispatcher, a close gate shut synchronously, no savepoint, no retry, bounded end
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context

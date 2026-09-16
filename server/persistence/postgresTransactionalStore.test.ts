@@ -10,7 +10,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createPostgresTransactionalStore } from './postgresTransactionalStore.js';
-import type { AggregateMutator, PgClient, PgStatement, PgTransaction } from './postgresTransactionalStore.js';
+import type { AggregateMutator, PgStatement } from './postgresTransactionalStore.js';
+import { createSupervisedPgClient } from './supervisedPgClient.js';
+import type { DriverPool, SupervisedPgClient } from './supervisedPgClient.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import type { TransactionCommand } from '../runtime/commandTransaction.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
@@ -29,9 +31,9 @@ const live = (): AbortSignal => new AbortController().signal;
 const CREATE_MUTATOR: AggregateMutator = Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply: async () => 'applied' });
 
 /** A client the adapter must never reach: every transaction it opens is counted and refused. */
-function untouched(): { readonly client: PgClient; readonly begins: () => number } {
+function untouched(): { readonly client: SupervisedPgClient; readonly begins: () => number } {
   let begins = 0;
-  return { client: { begin: async () => { begins++; throw new Error('the store was asked'); } }, begins: () => begins };
+  return { client: { transaction: async () => { begins++; throw new Error('the store was asked'); }, end: async () => undefined }, begins: () => begins };
 }
 
 /** A server error as the driver reports one: a SQLSTATE, a severity, and a message the adapter must never repeat. */
@@ -52,56 +54,68 @@ async function within(answer: Promise<unknown>, ms: number): Promise<unknown> {
 }
 
 /**
- * One transaction whose statements answer as a healthy store would for a commit held by `lease`, then whose
- * COMMIT succeeds or fails as `commit` says. `failAt` makes the first statement whose text contains it fail with
- * `error`; with `lost` that failure also loses the connection, and then, as the driver does, the transaction is
- * rejected at once. `lose` loses it from outside, between statements. Whatever is written after a loss is counted: a
- * statement, the ROLLBACK the driver sends for a body that rejects, the COMMIT it sends for one that resolves — each
- * of which the real driver writes to the closed socket and crashes on (doc 08, DA-15).
+ * The real transaction kernel over a scripted one-connection driver whose statements answer as a healthy store would for a
+ * commit held by `lease`, then whose COMMIT succeeds or fails as `commit` says. `failAt` makes the first statement whose text
+ * contains it fail with `error`; with `lost` that failure also closes the connection, as the driver reports one. `lose` closes
+ * it from outside, between statements. Whatever the driver is handed after a close is counted: each is a write the real
+ * driver would make to a dropped socket (doc 08, DA-15). `texts` is every statement handed over on the reserved connection, in
+ * order; the statement the kernel opens a new pool's connection with answers and is not recorded.
  */
-function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error } = {}): PgClient & { readonly writesAfterLoss: () => number; readonly lose: (err: unknown) => void } {
+function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error; spent?: () => number } = {}) {
+  let writesAfterLoss = 0;
+  const texts: string[] = [];
+  let close: (err: Error) => void = () => undefined;
   const rowsFor = (text: string, values: readonly unknown[]): Record<string, unknown>[] => {
     if (text.includes('m6_command_fence')) return [{ held: values[1] === lease }];
     if (text.includes('m6_command_enqueue')) return [{ inserted: true }];
     if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
+    if (text.includes('m6_outbox_claim')) return [{ spent: options.spent?.() ?? 0, event_id: null }];
     return [{ ok: true }];
   };
-  let writesAfterLoss = 0;
-  let loseOpen: (err: unknown) => void = () => undefined;
-  return {
-    writesAfterLoss: () => writesAfterLoss,
-    lose: (err: unknown) => loseOpen(err),
-    async begin(fn) {
-      let lost = false;
-      let reject: (err: unknown) => void = () => undefined;
-      const closed = new Promise<never>((_, r) => { reject = r; });
-      const lose = (err: unknown): void => {
-        lost = true;
-        reject(err);
+  const driver = (_url: string, driverOptions: Record<string, unknown>): DriverPool => {
+    let closed = false;
+    let inFlight: { reject: (e: unknown) => void } | null = null;
+    close = (err) => {
+      if (closed) return;
+      closed = true;
+      inFlight?.reject(err);
+      (driverOptions.onclose as (id: number) => void)(1);
+    };
+    const build = (reservedConnection: boolean) => (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join('$');
+      let resolveFn: (v: unknown) => void = () => undefined;
+      let rejectFn: (e: unknown) => void = () => undefined;
+      const promise = new Promise((resolve, reject) => { resolveFn = resolve; rejectFn = reject; });
+      let started = false;
+      const query = {
+        handler: (q: typeof query) => {
+          if (closed) { writesAfterLoss++; return; }
+          if (reservedConnection) texts.push(text);
+          inFlight = q;
+          const failed = reservedConnection && options.failAt !== undefined && text.includes(options.failAt);
+          const commitFails = text === 'commit' && options.commit !== undefined;
+          void Promise.resolve().then(() => {
+            inFlight = null;
+            if (failed && options.lost === true) { rejectFn(options.error); close(options.error as Error); } // the statement first, then the close
+            else if (failed) rejectFn(options.error);
+            else if (commitFails) rejectFn(options.commit);
+            else { const rows = rowsFor(text, values); resolveFn(Object.assign(rows, { count: rows.length })); }
+          });
+        },
+        then: (a?: (v: unknown) => unknown, b?: (e: unknown) => unknown) => {
+          if (!started) { started = true; void Promise.resolve().then(() => query.handler(query)); }
+          return promise.then(a, b);
+        },
+        reject: (e: unknown) => rejectFn(e),
+        cancel: () => undefined,
       };
-      loseOpen = lose;
-      const tx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
-        if (lost) writesAfterLoss++;
-        const text = strings.join('$');
-        const failed = options.failAt !== undefined && text.includes(options.failAt);
-        if (failed && options.lost === true) lose(options.error);
-        const rows = rowsFor(text, values);
-        const answer = failed ? Promise.reject(options.error) : Promise.resolve(Object.assign(rows, { count: rows.length }));
-        return Object.assign(answer, { cancel: () => undefined });
-      }) as unknown as PgTransaction;
-      Object.assign(tx, { json: (value: unknown) => value });
-      const body = Promise.resolve(fn(tx)).then((value) => {
-        if (lost) writesAfterLoss++; // the driver's COMMIT for a body that completes
-        return value;
-      }, (err: unknown) => {
-        if (lost) writesAfterLoss++; // the driver's ROLLBACK for a body that rejects
-        throw err;
-      });
-      const result = await Promise.race([body, closed]);
-      if (options.commit !== undefined) throw options.commit;
-      return result;
-    },
+      return query;
+    };
+    const reserved = Object.assign(build(true), { json: (value: unknown) => ({ json: value }), release: () => { if (closed) writesAfterLoss++; } });
+    return Object.assign(build(false), { reserve: async () => reserved, end: async () => { closed = true; } }) as unknown as DriverPool;
   };
+  const client = createSupervisedPgClient(driver, 'postgres://unit.invalid/db', { max: 1 });
+  return { transaction: client.transaction, end: client.end, writesAfterLoss: () => writesAfterLoss, lose: (err: Error) => close(err), texts };
 }
 
 const events = defineOutboxEvents(TEST_EVENTS);
@@ -127,7 +141,7 @@ function command(): TransactionCommand {
   return prepared.command;
 }
 
-test('construction refuses a malformed client or mutator table, and accepts the pool as the driver shapes it — a function', () => {
+test('construction refuses a malformed client, a raw driver pool or a malformed mutator table, and accepts the kernel', () => {
   const client = untouched().client;
   for (const options of [null, {}, { client: null, mutators: [] }, { client: {}, mutators: [] }, { client, mutators: null }]) {
     assert.throws(() => createPostgresTransactionalStore(options as never), TypeError);
@@ -140,8 +154,9 @@ test('construction refuses a malformed client or mutator table, and accepts the 
     [{ ...CREATE_MUTATOR, table: 'item' }],
     [CREATE_MUTATOR, { ...CREATE_MUTATOR }],
   ]) assert.throws(() => createPostgresTransactionalStore({ client, mutators } as never), TypeError, 'a mutator table in contract only, one per kind');
-  const pool = Object.assign(() => undefined, { begin: client.begin });
-  const store = createPostgresTransactionalStore({ client: pool as unknown as PgClient, mutators: [CREATE_MUTATOR] });
+  assert.throws(() => createPostgresTransactionalStore({ client: Object.assign(() => undefined, { begin: async () => undefined }), mutators: [] } as never), TypeError,
+    'a driver pool is refused: only the transaction kernel');
+  const store = createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR] });
   assert.deepEqual(Object.keys(store).sort(), ['delivery', 'idempotency', 'transactions'], 'three separate ports, no fourth surface');
   assert.deepEqual([Object.keys(store.idempotency).sort(), Object.keys(store.transactions).sort(), Object.keys(store.delivery).sort()], [
     ['acquire', 'complete', 'probe'], ['commit', 'probe'], ['acknowledge', 'claim', 'deadLetter', 'probe', 'retry'],
@@ -196,7 +211,7 @@ test('a malformed request, an unserved kind, a pre-M5 scope or an aborted signal
 
 test('a failure before COMMIT is unavailable; after COMMIT is sent, only a server ERROR is — anything else rejects with one fixed message', async () => {
   const good = command();
-  const commitOn = (client: PgClient): Promise<unknown> =>
+  const commitOn = (client: SupervisedPgClient): Promise<unknown> =>
     Promise.resolve(createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR] }).transactions.commit(good, live()));
   assert.deepEqual(await commitOn(scripted(good.lease)), COMMITTED, 'the scripted store commits a well-formed command');
   for (const [label, options] of [
@@ -261,37 +276,23 @@ test('the adapter reads no host clock, environment or console, binds no driver, 
     assert.equal([...code.matchAll(new RegExp(`(^|[^.\\w])${routine}\\b`, 'g'))].length, 0, `every call of ${routine} is qualified tmpos_internal.${routine}`);
   }
   assert.doesNotMatch(code, /\bpublic\./, 'no relation of the store is named in public');
-  assert.match(code, /set_config\('search_path', 'pg_catalog, pg_temp', true\)/, 'every transaction pins pg_catalog, pg_temp: no writable schema on its path');
+  for (const driverOnly of [/\.begin\s*\(/, /savepoint/i, /\.reserve\s*\(/, /\.release\s*\(/, /\bprepare\s+transaction\b/i]) {
+    assert.doesNotMatch(code, driverOnly, `the adapter reaches the driver only through the kernel: no ${driverOnly}`);
+  }
   const audits = [...code.matchAll(/\bwriteAuditEvent\(([^)]*)\)/g)];
   assert.deepEqual(audits.map((m) => /\{\s*executor\s*\}/.test(m[1])), [true], 'the one audit write runs on the transaction, never the runtime pool');
 });
 
 test('an idle claim rolls back, so it is never indeterminate; one that dead-lettered a spent claim commits', async () => {
-  const settled: string[] = [];
   let spentNow = 0;
-  const client: PgClient = {
-    async begin(fn) {
-      const tx = ((strings: TemplateStringsArray) => {
-        const rows = strings.join('$').includes('m6_outbox_claim') ? [{ spent: spentNow, event_id: null }] : [];
-        return Object.assign(Promise.resolve(Object.assign(rows, { count: 0 })), { cancel: () => undefined });
-      }) as unknown as PgTransaction;
-      Object.assign(tx, { json: (value: unknown) => value });
-      try {
-        const result = await fn(tx);
-        settled.push('COMMIT');
-        return result;
-      } catch (err) {
-        settled.push('ROLLBACK');
-        throw err;
-      }
-    },
-  };
+  const client = scripted(digest(), { spent: () => spentNow });
   const store = createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR] });
   const request = { claim: digest(), limit: 32, claimMs: 30_000 };
   assert.deepEqual(await store.delivery.claim(request, live()), { outcome: 'claimed', events: [] });
   spentNow = 1;
   assert.deepEqual(await store.delivery.claim(request, live()), { outcome: 'claimed', events: [] });
-  assert.deepEqual(settled, ['ROLLBACK', 'COMMIT'], 'the same empty answer; only the claim that dead-lettered something commits');
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback', 'commit'],
+    'the same empty answer; only the claim that dead-lettered something commits');
 });
 
 test('a connection lost while the mutator waits between statements is handed nothing more — no statement, ROLLBACK or COMMIT — and the call is unavailable', async () => {

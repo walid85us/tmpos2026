@@ -54,7 +54,7 @@ import {
   COMMAND_AUDIT_EVALUATED_BY,
   createPostgresTransactionalStore,
 } from '../../server/persistence/postgresTransactionalStore.ts';
-import { RETIRED_POOL_GRACE_S } from '../../server/persistence/supervisedPgClient.ts';
+import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { TEST_IDEMPOTENCY_KEY, assertIdempotencyStoreContract } from '../../server/runtime/idempotencyStore.testkit.ts';
 import {
   TEST_CREATE,
@@ -230,13 +230,13 @@ const relay = startRelay();
 await relay.listening;
 
 /**
- * A store client: the runtime principal's own options, through a relay (the shared one unless named), as the
- * non-owner probe, each close the driver finishes counted on that relay. Six connections, not the runtime's ten:
- * the local disposable cluster allows twenty in all, and two instances plus the owner's connections must fit — so
- * concurrent callers also queue in the client, as they would in production.
+ * A store client: the transaction kernel over the runtime principal's own options, through a relay (the shared one unless
+ * named), as the non-owner probe, each close the driver finishes counted on that relay. Six one-connection pools, not the
+ * runtime's ten: the local disposable cluster allows twenty connections in all, and two instances plus the owner's
+ * connections must fit — so concurrent callers also queue in the kernel, as they would in production.
  */
 function storeClient(max = 6, via = relay) {
-  return postgres(driverDsn(TARGET_DSN, STORE_PROBE), {
+  return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, STORE_PROBE), {
     ...runtimeClientOptions(TARGET_DSN),
     // EXPLICIT TLS opt-out at the call site: the disposable target is a task-owned socket or loopback.
     ssl: false,
@@ -559,7 +559,7 @@ async function sleepingStoreSession() {
 
 test.after(async () => {
   await relay.close().catch(() => {});
-  for (const c of [clientA, clientB, ...extraClients]) await c.end({ timeout: 0 }).catch(() => {});
+  for (const c of [clientA, clientB, ...extraClients]) await c.end({ timeout: 0 }).catch(() => {}); // a kernel's end takes no argument
   if (productionClock !== null) await observer.unsafe(productionClock).catch(() => {});
   await observer.unsafe('drop schema if exists m6_proof cascade').catch(() => {});
   await observer.unsafe(`drop role if exists ${STORE_PROBE}`).catch(() => {});
@@ -980,9 +980,11 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
 
 test('M6-PG-03: the unchanged idempotency conformance suite passes over two independent instances on separate connections', async () => {
   await ready();
-  const [[a], [b]] = await Promise.all([clientA`select pg_catalog.pg_backend_pid() as pid`, clientB`select pg_catalog.pg_backend_pid() as pid`]);
-  assert.notEqual(a.pid, b.pid, 'two pools, two backends');
+  assert.notEqual(clientA, clientB, 'two kernels');
   assert.notEqual(A.idempotency, B.idempotency);
+  assert.deepEqual([await A.idempotency.probe(live()), await B.idempotency.probe(live())], [true, true]);
+  const [{ backends }] = await observer`select count(*)::int as backends from pg_catalog.pg_stat_activity where usename = ${STORE_PROBE}`;
+  assert.ok(backends >= 2, 'two pools, two backends');
   await assertIdempotencyStoreContract({
     store: A.idempotency, peer: B.idempotency, advance, breakStore: storeDown, restoreStore: () => relay.restore(),
   });
@@ -1889,13 +1891,13 @@ const DEFECT_TARGETS = JSON.stringify({
 const WRITE_AFTER_CLOSE = "Cannot read properties of null (reading 'write')";
 
 /** One scenario of the defect child: its exit code, its RESULT, and everything it printed. */
-function inChild(scenario) {
+function inChild(scenario, variant) {
   return new Promise((done, fail) => {
-    const child = spawn(TSX, [DEFECT_CHILD, scenario], { env: { ...process.env, M6_DEFECT_TARGETS: DEFECT_TARGETS }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(TSX, [DEFECT_CHILD, scenario, ...(variant === undefined ? [] : [variant])], { env: { ...process.env, M6_DEFECT_TARGETS: DEFECT_TARGETS }, stdio: ['ignore', 'pipe', 'pipe'] });
     let printed = '';
     child.stdout.on('data', (chunk) => { printed += chunk; });
     child.stderr.on('data', (chunk) => { printed += chunk; });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
     child.on('error', fail);
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -1918,23 +1920,32 @@ test('M6-PG-24: the pinned driver still has both connection-loss defects — a w
   assert.ok(poisoned.result.endMs < 3_000, 'ending that pool is still bounded');
 });
 
-test('M6-PG-25: a connection lost under a command — mid-statement, or while its mutator waits, then runs a statement, refuses or completes — answers unavailable, writes nothing more, and the process lives', async () => {
-  for (const kind of ['mid-statement', 'gap-statement', 'gap-refusal', 'gap-completion']) {
-    const run = await inChild(kind);
-    assert.equal(run.code, 0, `${kind}: the process survived`);
-    assert.deepEqual(run.result, { kind, acquired: 'acquired', answer: 'unavailable', sleepReturned: false },
-      `${kind}: failed closed, before COMMIT — and mid-statement, the statement itself was cut`);
-    assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE), `${kind}: nothing was written to the closed socket`);
+test('M6-PG-25: the close window — a connection lost after a statement returned, by FIN, reset, server termination, a close processed in the mutator\'s own call or between a statement\'s build and hand-off — lets no statement, COMMIT or ROLLBACK reach the driver; the call is unavailable, the process lives, and the next call opens a fresh pool', async () => {
+  for (const loss of ['fin', 'reset', 'terminate', 'sync', 'handoff']) {
+    const run = await inChild('gap', loss);
+    assert.equal(run.code, 0, `${loss}: the process lived and exited normally`);
+    assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE), `${loss}: nothing was written to a dropped socket`);
+    assert.equal(run.result.loss, loss);
+    assert.deepEqual(run.result.steps.map((s) => s.step), loss === 'handoff' ? ['statement'] : ['statement', 'commit', 'rollback']);
+    for (const step of run.result.steps) {
+      const label = `${loss}, then the mutator's ${step.step}`;
+      assert.deepEqual([step.acquired, step.answer, step.next, step.nextWithinDeadline], ['acquired', 'unavailable', 'acquired', true],
+        `${label}: nothing committed, and the next call was served within its deadline`);
+      assert.deepEqual([step.afterClose, step.orphanEnds, step.commits], [0, 0, 2],
+        `${label}: no statement built for a closed connection, no COMMIT or ROLLBACK without its own BEGIN, and COMMIT only for the two acquisitions`);
+      assert.ok(step.connections >= 2 && step.closes >= 1, `${label}: the next call ran on a fresh connection`);
+    }
   }
 });
 
-test('M6-PG-26: the supervised client discards a poisoned pool — the call that met it fails once, unretried; the next opens a fresh pool within its deadline; end is bounded', async () => {
-  const run = await inChild('supervised');
+test('M6-PG-26: a write queued when its connection closes, and the slot that close would poison, are never used again; the next call opens a fresh pool within its deadline; end is bounded', async () => {
+  const run = await inChild('queued-write');
   assert.equal(run.code, 0);
+  assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE));
   const r = run.result;
-  assert.deepEqual([r.first, r.lost, r.next, r.pools], ['acquired', 'unavailable', 'acquired', 2], 'the poisoned pool failed one call and was replaced');
-  assert.ok(r.nextMs < r.deadlineMs, 'the next call answered within its deadline');
-  assert.ok(r.endMs < (RETIRED_POOL_GRACE_S + 2) * 1_000, 'end waited for the retired pool, within its bound');
+  assert.deepEqual([r.acquired, r.answer, r.next, r.nextWithinDeadline, r.afterClose, r.orphanEnds], ['acquired', 'unavailable', 'acquired', true, 0, 0]);
+  assert.ok(r.connections >= 2, 'the next call opened a fresh connection instead of the poisoned one');
+  assert.ok(r.endMs < 2_000, 'ending the client is bounded');
 });
 
 test('M6-PG-27: a server NOTICE through the runtime\'s own client options reaches no output; the driver\'s default would print it', async () => {
@@ -1944,4 +1955,33 @@ test('M6-PG-27: a server NOTICE through the runtime\'s own client options reache
   for (const canary of ['M6-NOTICE-CANARY-RUNTIME', 'M6-NOTICE-CANARY-DETAIL']) {
     assert.ok(!run.printed.includes(canary), `the runtime's handler prints nothing of it: ${canary}`);
   }
+});
+
+test('M6-PG-30: COMMIT handed to the driver and its answer lost rejects as indeterminate — it landed exactly once, replays, and is never repeated', async () => {
+  const run = await inChild('commit-lost');
+  assert.equal(run.code, 0);
+  assert.deepEqual([run.result.answer, run.result.completed, run.result.replay, run.result.again], ['outcome_unknown', 1, 'replay', 'lease_lost']);
+  assert.deepEqual([run.result.afterClose, run.result.orphanEnds, run.result.commits], [0, 0, 2], 'COMMIT built for the acquisition and the command once — never again after the loss');
+});
+
+test('M6-PG-31: under pool-queue pressure, the server ending one transaction\'s connection fails that call alone; the waiting calls commit, and no late COMMIT or ROLLBACK reaches any connection', async () => {
+  const run = await inChild('pressure');
+  assert.equal(run.code, 0);
+  assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE));
+  assert.deepEqual([run.result.victim, run.result.others], ['unavailable', Array(5).fill('committed')]);
+  assert.deepEqual([run.result.afterClose, run.result.orphanEnds, run.result.commits], [0, 0, 11],
+    'nothing built for a closed connection, every COMMIT or ROLLBACK after a BEGIN on its own connection: six acquisitions and five commands committed');
+});
+
+test('M6-PG-32: after a loss, end() closes a transaction stuck in a long statement within its grace, and the process lives', async () => {
+  const run = await inChild('shutdown');
+  assert.equal(run.code, 0);
+  assert.deepEqual([run.result.lostAnswer, run.result.stuck, run.result.endWithinBound, run.result.afterClose], ['unavailable', 'unavailable', true, 0]);
+});
+
+test('M6-PG-33: a pool ended after its connection attempt was refused still opens a session nobody owns once the server is back; the kernel, meeting the same outage, leaves none', async () => {
+  const run = await inChild('orphan');
+  assert.equal(run.code, 0);
+  assert.deepEqual(run.result, { refused: true, answers: ['unavailable', 'unavailable', 'unavailable'], driverSessions: 1, kernelSessions: 0 },
+    'the pinned driver still reconnects an ended pool (DA-15 (3) — re-read on any driver change); the kernel never reserves a connection that has not opened');
 });
