@@ -65,8 +65,22 @@ if (typeof ambient === 'string' && ambient.trim() !== '') {
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
+/**
+ * `host`/`user` travel in client options for a socket-form target, never in the URL — every client
+ * strips them — so the query is dropped here and the options carry them. With a hostname the URL is
+ * what was validated, and a named role REPLACES its userinfo.
+ */
+function driverDsn(raw, user) {
+  const url = new URL(raw);
+  url.search = '';
+  if (user !== undefined) { url.username = user; url.password = ''; }
+  return url.toString();
+}
+const connect = (user, max) =>
+  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+
 /** The owner: applies the migrations and writes the fixtures. RLS does not restrict it. */
-const owner = postgres({ ...CLIENT_OPTS, database: DATABASE, max: 2, onnotice: () => {} });
+const owner = connect(undefined, 2);
 /** The runtime principal: a LOGIN role holding tmpos_app and nothing else. */
 let runtime = null;
 
@@ -110,7 +124,7 @@ let applyReport;
 await owner.unsafe(`drop role if exists ${RUNTIME_LOGIN}`);
 await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
 await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
-runtime = postgres({ ...CLIENT_OPTS, database: DATABASE, user: RUNTIME_LOGIN, max: 2, onnotice: () => {} });
+runtime = connect(RUNTIME_LOGIN, 2);
 
 const [{ internal_user_id: ACTOR }] = await owner`
   insert into platform_identity (auth_provider, auth_provider_uid) values ('firebase', ${UID})
@@ -348,8 +362,8 @@ test('M5-10: a revocation racing a command waits for it — the documented isola
   // Here the command holds its lock first, so the revoking transaction blocks until the command ends;
   // it therefore cannot slip in between the check and the COMMIT.
   const version = (await resolve('firebase', UID)).security_version;
-  const held = postgres({ ...CLIENT_OPTS, database: DATABASE, user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
-  const revoker = postgres({ ...CLIENT_OPTS, database: DATABASE, max: 1, onnotice: () => {} });
+  const held = connect(RUNTIME_LOGIN, 1);
+  const revoker = connect(undefined, 1);
   let settled = false;
   let revocation = null;
   try {
