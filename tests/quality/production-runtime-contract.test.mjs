@@ -343,7 +343,9 @@ test('the transactional outbox has no bound production adapter and no worker, it
   // The two contracts import node built-ins and the runtime only — no database, network or provider client — and hold no SQL.
   const imports = (name) => importSpecifiers(readFileSync(join(RUNTIME_DIR, name), 'utf8')).sort();
   assert.deepEqual(imports('outbox.ts'), ['./deadline.js', './routes.js', 'node:crypto']);
-  assert.deepEqual(imports('commandTransaction.ts'), ['./deadline.js', './idempotency.js', './idempotency.js', './outbox.js', './outbox.js', './routes.js', './routes.js', 'node:crypto', 'node:util']);
+  // M5-ID-P1: the command contract now carries a trusted scope, so it imports the principals module —
+  // types plus the one guard that refuses a scope server-derived selection could not have produced.
+  assert.deepEqual(imports('commandTransaction.ts'), ['./deadline.js', './idempotency.js', './idempotency.js', './outbox.js', './outbox.js', './principals.js', './principals.js', './routes.js', './routes.js', 'node:crypto', 'node:util']);
   for (const name of ['outbox.ts', 'commandTransaction.ts']) assert.doesNotMatch(codeOf(join(RUNTIME_DIR, name)), SQL, `${name}: SQL text in a provider-independent contract`);
   // The sessions root's approved-adapter table stays closed: no idempotency, transaction or outbox slot, and nothing bound.
   const root = readFileSync(join(REPO, 'server', 'composition', 'productionSessions.ts'), 'utf8');
@@ -471,7 +473,7 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     'server/platform-identity/db.ts': ['CONTEXT_SETTINGS', 'DB_SESSION_BOUNDS', 'DRIVER_TLS_ENV_VAR', 'DatabaseTlsRefusal', 'assertTenantContext', 'closeDb', 'closeRuntimeDb',
       'createRuntimeStoreClient', 'discardNotice', 'getDb', 'getRuntimeDb', 'readTenantContext', 'resolveDatabaseTls', 'runtimeClientOptions', 'withTenantContext'],
     'server/platform-identity/databaseEndpoint.ts': ['ENDPOINT_GRAMMAR', 'classifyRuntimeDatabaseUrl', 'sealedRuntimeTarget'],
-    'server/composition/productionTransactions.ts': ['PRODUCTION_INVENTORY', 'TransactionCompositionError', 'assembleTransactions', 'composeProductionTransactions'],
+    'server/composition/productionTransactions.ts': ['PRODUCTION_INVENTORY', 'TransactionCompositionError', 'assembleTransactions', 'composeProductionTransactions', 'uncataloguedRoutePermissions'],
   };
   for (const [file, expected] of Object.entries(surfaces)) {
     assert.deepEqual(surfaceOf(trees.get(join(REPO, file))), [...expected].sort(), `${file}: exact value export surface`);

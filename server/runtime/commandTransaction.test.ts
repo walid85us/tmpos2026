@@ -46,6 +46,7 @@ const op = keyring.operationOf(randomUUID(), { authProvider: 'synthetic', authPr
 });
 const binding = (newAggregateId = randomUUID()) => ({
   scope: op.scope, lease: 'l'.repeat(43), newAggregateId, authorization: Object.freeze({ scope: 'platform' as const, permission: 'items.write' }),
+  context: null,
   seal: (e: Parameters<typeof keyring.seal>[0]) => keyring.seal(e, op),
 });
 const createPlan = (id: string) => ({
@@ -62,7 +63,7 @@ test('a plan becomes one command: runtime-generated identities, null scope and a
   const prepared = prepareCommand(create, events, createPlan(b.newAggregateId), b);
   assert.ok(prepared);
   const { command } = prepared;
-  assert.deepEqual(Object.keys(command).sort(), ['audit', 'events', 'lease', 'mutation', 'response', 'scope'], 'values only: no SQL, relation or raw request');
+  assert.deepEqual(Object.keys(command).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope'], 'values only: no SQL, relation or raw request');
   assert.deepEqual(command.mutation, { kind: 'conformance.item.create', aggregateType: 'item', aggregateId: b.newAggregateId, expectedVersion: null, changes: { name: 'n', quantity: 1 } });
   assert.match(command.audit.correlationId, UUID_V4);
   assert.deepEqual(command.audit, { action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null, correlationId: command.audit.correlationId });
@@ -353,7 +354,7 @@ test('a command commits every part together, answers only once committed, and ev
     });
     assert.ok(UUID_V4.test(audit.correlationId) && audit.correlationId !== 'client-chosen-request-id', 'the correlation ID is the server’s, never the client’s request ID');
     assert.deepEqual(committed.events.map((e) => [e.envelope.aggregateId, e.envelope.correlationId, e.envelope.occurredAt]), [[id, audit.correlationId, audit.at]]);
-    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'events', 'lease', 'mutation', 'response', 'scope']);
+    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope']);
     assert.deepEqual(Object.keys(plans[0]).sort(), ['audience', 'body', 'newAggregateId'], 'the planner sees its context and nothing else');
     assert.equal(plans[0].newAggregateId, id, 'a create names the runtime’s aggregate ID');
     for (const retry of [await post(port, { key }), await post(port, { key: key.toUpperCase() })]) {

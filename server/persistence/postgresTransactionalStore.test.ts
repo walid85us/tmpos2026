@@ -15,6 +15,7 @@ import { createSupervisedPgClient } from './supervisedPgClient.js';
 import type { DriverPool, SupervisedPgClient } from './supervisedPgClient.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import type { TransactionCommand } from '../runtime/commandTransaction.js';
+import type { TrustedScope } from '../runtime/principals.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
 import { TEST_IDEMPOTENCY_KEY } from '../runtime/idempotencyStore.testkit.js';
 import { defineOutboxEvents } from '../runtime/outbox.js';
@@ -122,8 +123,14 @@ const events = defineOutboxEvents(TEST_EVENTS);
 const commands = defineCommands([TEST_CREATE], events);
 const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 
+/** A trusted context as scope selection produces one: a platform actor with a security version. */
+const TRUSTED: TrustedScope = Object.freeze({
+  actor: '11111111-1111-4111-8111-111111111111', securityVersion: 'a'.repeat(64),
+  scope: 'platform', tenant: null, store: null, roleId: 'system_owner', limitation: 'none',
+});
+
 /** A command exactly as the runtime prepares one. */
-function command(): TransactionCommand {
+function command(context: TrustedScope | null = null): TransactionCommand {
   const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
     method: 'POST', path: '/v1/unit', audience: null, tenant: null, store: null, body: Buffer.from('{}'),
   });
@@ -135,6 +142,7 @@ function command(): TransactionCommand {
     events: [{ type: 'conformance.item.created', payload: { name: 'n', quantity: 1 } }], response: { status: 201, body: { id } },
   }, {
     scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+    context,
     seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null);
@@ -317,5 +325,129 @@ test('a connection lost while the mutator waits between statements is handed not
     resume();
     for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(client.writesAfterLoss(), 0, `${after}: nothing reaches the lost connection`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M5-ID-P1 — transaction-local revalidation
+// ---------------------------------------------------------------------------
+
+test('a trusted context is re-read after the fence and before any business state', async () => {
+  // The order is the whole point: a stale lease must still answer 'lease_lost' and learn nothing about
+  // the identity, and a revoked actor must never reach a mutator.
+  const order: string[] = [];
+  const c = command(TRUSTED);
+  const client = scripted(c.lease);
+  const mutator: AggregateMutator = Object.freeze({
+    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item',
+    apply: async () => { order.push('mutator'); return 'applied'; },
+  });
+  const store = createPostgresTransactionalStore({
+    client, mutators: [mutator],
+    revalidate: async (_sql, scope) => { order.push('revalidate'); assert.deepEqual(scope, TRUSTED); return 'system_owner'; },
+  });
+
+  assert.deepEqual(await store.transactions.commit(c, live()), COMMITTED);
+  assert.deepEqual(order, ['revalidate', 'mutator'], 'the context is re-read before the mutation');
+  const fenceAt = client.texts.findIndex((t) => t.includes('m6_command_fence'));
+  assert.ok(fenceAt >= 0 && fenceAt < client.texts.findIndex((t) => t.includes('m6_command_enqueue')), 'the fence still runs first');
+});
+
+test('a lost lease refuses before the context is read at all', async () => {
+  let asked = false;
+  const c = command(TRUSTED);
+  const store = createPostgresTransactionalStore({
+    client: scripted('a'.repeat(43)), mutators: [CREATE_MUTATOR],
+    revalidate: async () => { asked = true; return 'system_owner'; },
+  });
+  assert.deepEqual(await store.transactions.commit(c, live()), LEASE_LOST);
+  assert.equal(asked, false, 'a stale attempt learns nothing about the actor');
+});
+
+test('a context that no longer holds commits nothing — no mutation, completion, audit or event', async () => {
+  for (const [label, answer] of [['revoked', null], ['a different role', 'support_admin']] as const) {
+    let applied = 0;
+    const c = command(TRUSTED);
+    const client = scripted(c.lease);
+    const store = createPostgresTransactionalStore({
+      client,
+      mutators: [Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply: async () => { applied++; return 'applied'; } })],
+      revalidate: async () => answer,
+    });
+    assert.deepEqual(await store.transactions.commit(c, live()), UNAVAILABLE, label);
+    assert.equal(applied, 0, `${label}: no mutator runs`);
+    for (const forbidden of ['m6_command_enqueue', 'm6_idempotency_complete', 'insert into']) {
+      assert.ok(!client.texts.some((t) => t.toLowerCase().includes(forbidden)), `${label}: no ${forbidden}`);
+    }
+    assert.ok(client.texts.includes('rollback'), `${label}: the transaction rolled back`);
+  }
+});
+
+test('a context the store cannot revalidate is never committed', async () => {
+  // No revalidator composed: a contextless command still commits, and a command carrying a context
+  // does not — the store never commits an unrevalidated actor because its dependency is missing.
+  const contextless = command();
+  const withContext = command(TRUSTED);
+  assert.deepEqual(await createPostgresTransactionalStore({ client: scripted(contextless.lease), mutators: [CREATE_MUTATOR] })
+    .transactions.commit(contextless, live()), COMMITTED);
+  const client = scripted(withContext.lease);
+  assert.deepEqual(await createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR] })
+    .transactions.commit(withContext, live()), UNAVAILABLE);
+  assert.ok(!client.texts.some((t) => t.includes('m6_command_enqueue')));
+});
+
+test('a context whose scope this transaction cannot prove is refused before any statement', async () => {
+  // Tenant and store scopes wait on GAP-11 and on the audit writer carrying the tenant RLS context;
+  // until then the store refuses rather than auditing at a scope it cannot prove.
+  const tenant = '22222222-2222-4222-8222-222222222222';
+  for (const scope of [
+    { ...TRUSTED, scope: 'tenant' as const, tenant, roleId: 'manager' },
+    { ...TRUSTED, scope: 'store' as const, tenant, store: '44444444-4444-4444-8444-444444444444', roleId: 'technician' },
+  ]) {
+    const c = command(scope);
+    const store = untouched();
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'manager' })
+      .transactions.commit(c, live()), UNAVAILABLE, scope.scope);
+    assert.equal(store.begins(), 0, 'no transaction opens');
+  }
+});
+
+test('a read-only context may not commit a command at all', async () => {
+  // A command is a write. The resolver marks the context read-only when the account, the tenant or the
+  // store is read_only or overdue; the store refuses it rather than leaving the limiting to a caller.
+  for (const limitation of ['read_only'] as const) {
+    const c = command({ ...TRUSTED, limitation });
+    const store = untouched();
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+      .transactions.commit(c, live()), UNAVAILABLE, limitation);
+    assert.equal(store.begins(), 0, 'no transaction opens');
+  }
+});
+
+test('an outbox event names no actor, tenant or store even under a trusted context', async () => {
+  // Migration 006 types those columns as keyed digests, not identifiers; naming one would abort the
+  // whole transaction at the constraint. The actor is attributed on the audit record instead.
+  const c = command(TRUSTED);
+  assert.deepEqual(c.events.map((e) => [e.tenant, e.store, e.actor]), c.events.map(() => [null, null, null]));
+  assert.equal(c.audit.actor, TRUSTED.actor, 'the audit record does name it');
+  const client = scripted(c.lease);
+  assert.deepEqual(await createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+    .transactions.commit(c, live()), COMMITTED);
+});
+
+test('a command may not name an actor, tenant or store its context did not give it', async () => {
+  const c = command(TRUSTED);
+  const forged: unknown[] = [
+    { ...c, context: null }, //                                       an audit actor with no context
+    { ...c, audit: { ...c.audit, actor: 'someone-else' } }, //          an actor of the caller's choosing
+    { ...c, audit: { ...c.audit, tenant: '22222222-2222-4222-8222-222222222222' } },
+    { ...c, context: { ...TRUSTED, actor: 'root' } }, //                a context selection could not produce
+    { ...c, events: c.events.map((e) => ({ ...e, actor: 'someone-else' })) },
+  ];
+  for (const raw of forged) {
+    const store = untouched();
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+      .transactions.commit(raw as TransactionCommand, live()), UNAVAILABLE, JSON.stringify(raw).slice(0, 60));
+    assert.equal(store.begins(), 0);
   }
 });

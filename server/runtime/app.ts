@@ -838,6 +838,9 @@ export function createApp(deps: AppDeps): Express {
           const requirement = 'authorization' in policy ? policy.authorization : null;
           const prepared = prepareCommand(contract, outboxEvents, plan, {
             scope: operation.scope, lease, newAggregateId, authorization: requirement as AuthorizationRequirement,
+            // No route resolves a principal yet (M5-ID-P1 delivers the boundary, not a business route),
+            // so every command still commits without a trusted context — and the store audits it as such.
+            context: null,
             seal: (envelope) => store.keyring.seal(envelope, operation),
           });
           if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');

@@ -29,6 +29,8 @@ import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
+import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
+import { createPostgresPrincipalResolver, revalidateTrustedScope } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
@@ -37,6 +39,7 @@ import type { IdempotencyDeps } from '../runtime/idempotency.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { defineRoutes } from '../runtime/routes.js';
 import type { RouteDefinition } from '../runtime/routes.js';
+import type { PrincipalResolutionPort } from '../runtime/principals.js';
 
 export type TransactionCompositionBlocker =
   | RuntimeDatabaseRefusal
@@ -44,7 +47,11 @@ export type TransactionCompositionBlocker =
   | 'idempotency_key_missing'
   | 'idempotency_key_invalid'
   | 'idempotency_key_shared'
-  | 'command_mutator_unavailable';
+  | 'command_mutator_unavailable'
+  /** A route requires a permission no canonical catalog entry defines, at its declared scope. */
+  | 'route_permission_uncatalogued'
+  /** A route requires a tenant- or store-scope permission, which GAP-11 leaves undecidable. */
+  | 'route_permission_undecidable';
 
 /** Composition refusal: every blocker, as bounded codes only. */
 export class TransactionCompositionError extends Error {
@@ -67,6 +74,8 @@ export interface TransactionInventory {
 export interface ProductionTransactions {
   readonly idempotency: IdempotencyDeps;
   readonly transactions: CommandTransactionDeps;
+  /** The trusted principal resolver over the same kernel (M5-ID-P1), for the chain that resolves an actor. */
+  readonly principals: PrincipalResolutionPort;
   /** Ends the store's kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
 }
@@ -75,6 +84,7 @@ export interface ProductionTransactions {
 export interface TransactionFactories {
   readonly client: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
+  readonly principals: (client: SupervisedPgClient) => PrincipalResolutionPort;
 }
 
 // The production route inventory. No business route is roadmapped into it yet, so no route requires idempotency and nothing
@@ -82,7 +92,11 @@ export interface TransactionFactories {
 export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({ routes: Object.freeze([]), mutators: Object.freeze([]) });
 
 // The approved production factories: the runtime principal's kernel over the classified endpoint, and the M6 PostgreSQL store.
-const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({ client: createRuntimeStoreClient, store: createPostgresTransactionalStore });
+const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
+  client: createRuntimeStoreClient,
+  store: createPostgresTransactionalStore,
+  principals: (client: SupervisedPgClient) => createPostgresPrincipalResolver({ client }),
+});
 
 /**
  * Compose the transaction boundary `inventory` needs from `env` through `factories`: null when no route requires idempotency
@@ -126,7 +140,9 @@ export function assembleTransactions(
   }
   let store: TransactionalStore;
   try {
-    store = factories.store({ client, mutators: inventory.mutators });
+    // The revalidator the store runs inside each command transaction, over the same client and the
+    // same governed endpoint: one credential, one boundary, no second connection.
+    store = factories.store({ client, mutators: inventory.mutators, revalidate: revalidateTrustedScope });
   } catch (err) {
     void client.end(); // nothing opened yet: the kernel connects only when a transaction runs
     throw err;
@@ -134,6 +150,10 @@ export function assembleTransactions(
   return Object.freeze({
     idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
     transactions: Object.freeze({ port: store.transactions }),
+    // The trusted principal resolver over the SAME kernel. It is built here, with the store, so a
+    // deployment can never hold one without the other, and never resolves an identity through a client
+    // this composition did not classify.
+    principals: factories.principals(client),
     close: () => client.end(),
   });
 }
@@ -143,5 +163,31 @@ export function assembleTransactions(
  * naming every missing or refused part. Configuration is the only input; no store, client or factory can be handed to it.
  */
 export function composeProductionTransactions(env: Readonly<Record<string, string | undefined>>): ProductionTransactions | null {
+  const uncatalogued = uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes);
+  if (uncatalogued.length > 0) throw new TransactionCompositionError(uncatalogued);
   return assembleTransactions(PRODUCTION_INVENTORY, env, PRODUCTION_FACTORIES);
+}
+
+/**
+ * The blockers a route inventory earns for the permissions it declares (M5-ID-P1; docs/phase-4/04
+ * §2-§3, 03 §6). Every permission a DEPLOYED route requires must be one canonical catalog entry,
+ * matched exactly and case-sensitively: a key the catalog does not define is a typo or an invented
+ * permission, and a tenant- or store-scope key is undecidable until GAP-11's ordering unification and
+ * its six safeguards land. Either way the deployment refuses to start rather than denying at run time
+ * — or, worse, allowing on a comparison whose meaning has not been settled.
+ *
+ * It is exported, and applied to the PRODUCTION inventory rather than inside assembleTransactions, so
+ * a conformance harness may still drive the boundary with a synthetic route while every route that
+ * could actually be served is checked. Empty means every declared permission is canonical.
+ */
+export function uncataloguedRoutePermissions(routes: readonly RouteDefinition[]): TransactionCompositionBlocker[] {
+  const blockers: TransactionCompositionBlocker[] = [];
+  for (const route of defineRoutes(routes).list()) {
+    const requirement = route.policy.access === 'authenticated' || route.policy.access === 'session'
+      ? route.policy.authorization : null;
+    if (requirement === null) continue;
+    if (canonicalPermission(requirement.scope, requirement.permission) === null) blockers.push('route_permission_uncatalogued');
+    else if (requirement.scope !== 'platform') blockers.push('route_permission_undecidable');
+  }
+  return blockers;
 }

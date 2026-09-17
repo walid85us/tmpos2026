@@ -20,10 +20,11 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import {
-  PRODUCTION_INVENTORY, TransactionCompositionError, assembleTransactions, composeProductionTransactions,
+  PRODUCTION_INVENTORY, TransactionCompositionError, assembleTransactions, composeProductionTransactions, uncataloguedRoutePermissions,
 } from './productionTransactions.js';
 import type { ProductionTransactions, TransactionFactories, TransactionInventory } from './productionTransactions.js';
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
+import { createPostgresPrincipalResolver } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator, TransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { RETIRED_POOL_GRACE_S, createSupervisedPgClient } from '../persistence/supervisedPgClient.js';
@@ -105,6 +106,7 @@ function counted(fake = fakeDriver()) {
       built.client = createSupervisedPgClient(fake.driver, '', { max: 2 });
       return built.client;
     },
+    principals: (client) => createPostgresPrincipalResolver({ client }),
     store: (options) => {
       calls.store++;
       built.store = createPostgresTransactionalStore(options);
@@ -117,6 +119,7 @@ function counted(fake = fakeDriver()) {
 const NEVER: TransactionFactories = Object.freeze({
   client: () => assert.fail('no client may be built'),
   store: () => assert.fail('no store may be built'),
+  principals: () => assert.fail('no resolver may be built'),
 });
 
 function blockersOf(inventory: TransactionInventory, env: Record<string, string | undefined>, factories: TransactionFactories = NEVER): readonly string[] {
@@ -303,7 +306,7 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.ok(boundary !== null);
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
-    assert.deepEqual(Object.keys(boundary).sort(), ['close', 'idempotency', 'transactions']);
+    assert.deepEqual(Object.keys(boundary).sort(), ['close', 'idempotency', 'principals', 'transactions']);
     assert.deepEqual(Object.keys(boundary.idempotency).sort(), ['keySecret', 'store']);
     assert.deepEqual(Object.keys(boundary.transactions), ['port']);
     assert.ok(Object.isFrozen(boundary) && Object.isFrozen(boundary.idempotency) && Object.isFrozen(boundary.transactions));
@@ -339,14 +342,15 @@ test('a command route needs its mutator, a partial construction composes nothing
   const failing: TransactionFactories = {
     client: () => { const client = createSupervisedPgClient(fake.driver, '', { max: 1 }); return { transaction: client.transaction, end: () => { ended++; return client.end(); } }; },
     store: () => { throw new TypeError('transactional store mutator invalid'); },
+    principals: NEVER.principals,
   };
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, failing), /transactional store mutator invalid/);
   assert.equal(ended, 1);
   // The transport policy refuses: a bounded blocker, and no store is built.
-  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store }),
+  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals }),
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
-  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store }), RangeError);
+  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
   assert.equal(composeProductionTransactions({ ...CONFIGURED, idempotencyStore: 'memory', store: 'memory' }), null, 'extra configuration composes nothing');
@@ -358,6 +362,7 @@ test('a refused configuration makes no contact, and the real client dials only t
     const factories: TransactionFactories = {
       client: (endpoint) => { calls.client++; return createRuntimeStoreClient(endpoint); },
       store: (options) => { calls.store++; return createPostgresTransactionalStore(options); },
+      principals: (client) => createPostgresPrincipalResolver({ client }),
     };
     return { calls, factories };
   };
@@ -452,6 +457,7 @@ test('readiness is 503 when a composed port\'s probe throws, rejects, answers a 
   for (const [label, probe] of cases) {
     const factories: TransactionFactories = {
       client: () => ({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined }),
+      principals: (client) => createPostgresPrincipalResolver({ client }),
       store: () => ({ ...store, idempotency: { ...store.idempotency, probe }, transactions: { ...store.transactions, probe } }),
     };
     const boundary = assembleTransactions(REQUIRED, CONFIGURED, factories) as ProductionTransactions;
@@ -503,4 +509,51 @@ test('without a composed store readiness probes nothing, and shutdown with one i
     assert.deepEqual(exits, [0], 'the hook finished before the forced deadline');
     assert.equal((await get('/readiness')).status, 503, 'after shutdown the instance is not ready');
   });
+});
+
+// ---------------------------------------------------------------------------
+// M5-ID-P1 — the canonical permission gate and the resolver's composition
+// ---------------------------------------------------------------------------
+
+test('a deployed route may require only a canonical platform permission, and startup says so', () => {
+  const route = (permission: string, scope: 'platform' | 'tenant' | 'store') => Object.freeze({
+    method: 'POST' as const, path: '/v1/unit',
+    policy: Object.freeze({ access: 'authenticated' as const, authorization: Object.freeze({ scope, permission }) }),
+    body: Object.freeze({ kind: 'json' as const, maxBytes: 1024, required: true }),
+    idempotency: 'none' as const,
+    handler: () => undefined,
+  });
+  // A real catalog key at platform scope is the only thing that passes.
+  assert.deepEqual(uncataloguedRoutePermissions([route('view_command_center', 'platform')]), []);
+  // A key the catalog does not define is a typo or an invented permission.
+  for (const key of ['conformance.write', 'command_center', 'made_up', 'view_command_centre']) {
+    assert.deepEqual(uncataloguedRoutePermissions([route(key, 'platform')]), ['route_permission_uncatalogued'], key);
+  }
+  // A key that is not even a permission SHAPE never reaches the catalog: the route table refuses it
+  // first, so case is rejected twice over.
+  assert.throws(() => uncataloguedRoutePermissions([route('View_Command_Center', 'platform')]), /route_policy_invalid/);
+  // A real tenant key is undecidable until GAP-11's ordering unification and its six safeguards land.
+  assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'tenant')]), ['route_permission_undecidable']);
+  assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'store')]), ['route_permission_undecidable']);
+  // A public route declares no permission and needs none.
+  assert.deepEqual(uncataloguedRoutePermissions([Object.freeze({
+    method: 'GET' as const, path: '/v1/open', policy: Object.freeze({ access: 'public' as const }),
+    body: Object.freeze({ kind: 'none' as const }), idempotency: 'none' as const, handler: () => undefined,
+  })]), []);
+  // Today's production inventory declares no route at all, so it clears the gate.
+  assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
+});
+
+test('the resolver is composed with the store, over the same client, and never alone', () => {
+  const built: string[] = [];
+  let sharedClient: unknown = null;
+  const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
+    client: (endpoint) => { const c = createRuntimeStoreClient(endpoint); sharedClient = c; built.push('client'); return c; },
+    store: (options) => { built.push('store'); assert.equal(options.client, sharedClient, 'the store takes the shared client'); assert.equal(typeof options.revalidate, 'function', 'and a revalidator'); return createPostgresTransactionalStore(options); },
+    principals: (client) => { built.push('principals'); assert.equal(client, sharedClient, 'the resolver takes the SAME client'); return createPostgresPrincipalResolver({ client }); },
+  });
+  assert.ok(boundary !== null);
+  assert.deepEqual(built, ['client', 'store', 'principals'], 'one client, then both consumers of it');
+  assert.equal(typeof boundary!.principals.resolve, 'function');
+  assert.equal(typeof boundary!.principals.probe, 'function');
 });

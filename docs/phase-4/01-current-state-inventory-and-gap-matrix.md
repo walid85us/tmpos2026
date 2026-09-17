@@ -23,7 +23,7 @@
 | **Platform permissions** | `platformPermissionsConfig.ts` is "single source of truth" but self-describes *"does NOT introduce server-side RBAC… all gating is UI-enforced"*; overrides persist to `sessionStorage('platform_permissions_v1')`. |
 | **Business persistence** | `src/context/StoreLocalState.tsx` = `useState` seeded from `SEED_*`. **Every business write is lost on reload.** No DB/API/localStorage write-back for domain data. |
 | **Audit (business + platform)** | "Audit" = human-readable notes appended into the same in-memory/`sessionStorage` record arrays. Not append-only, not server-side. The owner "Audit & Security" log is user-writable `sessionStorage` — **zero integrity**. |
-| **Durable backend** | Postgres schema (`server/platform-identity/migrations/001–004`) is **identity/authz/audit only** — 8 tables, no business tables. Reachable only via the DEV-only `:5002` sidecar. See [05](./05-canonical-data-ownership-and-api-db-contracts.md). |
+| **Durable backend** | Postgres schema (`server/platform-identity/migrations/001–007`) is **identity/authz/audit/store only** — 10 tables (8 in `public` from 001–004, plus the two `tmpos_internal` store tables from 006), no business tables. 005 adds the runtime roles and RLS, 007 adds three identity-resolution routines and no table. Reachable only via the DEV-only `:5002` sidecar. See [05](./05-canonical-data-ownership-and-api-db-contracts.md). |
 | **Test coverage** | `src/components/**` and `src/owner/**`: **0** tests. `src/backend-control-plane/**`: 8 client-classifier tests. `server/bcp-pilot/**` + `server/platform-identity/**`: substantial (the BCP corpus + platform-identity suites). Business/UI: unverified. |
 
 ---
@@ -129,13 +129,19 @@ anywhere**, state in an in-memory `Map`:
 - `POST /api/shipping/webhook/:providerId` + `/replay-event` ingested/replayed **unauthenticated, no provider-signature verify** (all three `SHIPPING_WEBHOOK_SECRET_*` were unset, so verification was skipped entirely), and persisted attacker-supplied payloads to `data/webhook-audit-log.json`.
 - Provider adapters egressed to **hardcoded** carrier hosts (not the SSRF surface); deleted with the sidecar because it was their only caller.
 
-**Remaining unauthenticated exposure is the Identity API only** — see the next section. Do not read
+~~**Remaining unauthenticated exposure is the Identity API only** — see the next section. Do not read
 "Shipping sidecar removed" as "G-UNAUTH closed": `POST /identity/resolve` is still unauthenticated
-and is now tracked by `TMPOS-UNAUTH-IDENTITY-RESOLVE`.
+and is now tracked by `TMPOS-UNAUTH-IDENTITY-RESOLVE`.~~
+**CORRECTED (M3; recorded here M5-ID-P1).** Both unauthenticated identity routes were **deleted** in
+M3 — `POST /identity/resolve` and `GET /identity/by-uid` each answer a bounded JSON 404
+(`server/platform-identity/identityUnauthenticatedSurfaceElimination.test.ts`), as
+[08](./08-production-gate-and-risk-register.md) G-UNAUTH and `m2-security-gate-manifest.json` already
+record. `TMPOS-UNAUTH-IDENTITY-RESOLVE` remains only as the forward obligation that every endpoint be
+authenticated AND authorized (M5/M8), not as a live unauthenticated write.
 
 ### Identity API — `server/platform-identity/server.ts` (:5002, `npm run identity:api` only) — DEV-only, master-gated
 Master flag `ENABLE_SUPABASE_PLATFORM_IDENTITY` (default OFF ⇒ only `/health`+`/readiness`).
-- `POST /identity/resolve` — **NONE (caller auth deferred)** — **upserts `platform_identity`** with caller-supplied, unverified `authProviderUid` ⇒ **unauthenticated DB write / identity spoof**, gated only by a flag.
+- ~~`POST /identity/resolve` — **NONE (caller auth deferred)** — **upserts `platform_identity`** with caller-supplied, unverified `authProviderUid` ⇒ **unauthenticated DB write / identity spoof**, gated only by a flag.~~ **DELETED in M3** (bounded JSON 404). Since M5-ID-P1 the only way to turn a provider reference into an app-owned actor is migration 007's `tmpos_internal.m5_resolve_principal`, which takes a reference the authentication boundary has ALREADY verified, writes nothing, and hands the runtime role no privilege on `platform_identity`.
 - `POST /auth/session/resolve` — verifies Bearer Supabase token, returns a JSON DTO — **issues NO cookie**; `RUNTIME_SESSION_RESOLVE_AUTHORIZATION = null` (server-derived authorization deferred).
 - Diagnostics endpoints (`echo-decision` dev-asserted actor; `supabase-whoami` verified) — dev-only.
 - `db.ts` connects as the **DB-owner role → bypasses RLS** (`platform_identity` RLS-enabled, zero policies).
@@ -164,7 +170,7 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 | GAP-02 | C | No server-issued admin session / no separate Backend CP login boundary; no cookie, no CSRF, no MFA. | M4 | G-CPLOGIN |
 | GAP-03 | C | ~~Open SSRF — `GET /api/shipping/label-proxy?url=` fetches arbitrary URLs unauthenticated.~~ **CLOSED (M3)** — route and sidecar deleted; no replacement request-controlled fetch exists anywhere in `server/`. Residual G-SSRF work is the M7e/M8 provider egress boundary, not this route. | M3 (done) → M7e/M8 egress | G-SSRF |
 | GAP-04 | C | ~~Entire Shipping API unauthenticated (22 routes), incl. live-label purchase, pickups, webhook ingest/replay.~~ **CLOSED (M3)** — all 22 routes eliminated with the sidecar. (Count corrected 23→22; verified by enumeration.) | M3 (done) | G-UNAUTH |
-| GAP-05 | C | Unauthenticated Postgres write — `/identity/resolve` upserts identity with unverified caller UID. | M3/M5 | G-UNAUTH |
+| ~~GAP-05~~ | C | ~~Unauthenticated Postgres write — `/identity/resolve` upserts identity with unverified caller UID.~~ **CLOSED AT SOURCE in M3** (route deleted); M5-ID-P1 replaces the read half with migration 007's verified-reference resolver. | M3/M5 | G-UNAUTH |
 | GAP-06 | C | ~~Unauthenticated in-memory secret store — `POST /credentials` holds live carrier keys in RAM.~~ **CLOSED (M3)** — `credential-store.ts` deleted; no in-memory credential store remains. Encrypted durable secrets + rotation remain M6/M8. | M3 (done) → M6/M8 encryption | G-SECRETS |
 | GAP-07 | C | No durable audit — `auditEventWriter` built but unwired; zero compliance trail; owner "audit log" is forgeable `sessionStorage`. | M6 | G-AUDIT |
 | GAP-08 | C | No durable business persistence — all POS/inventory/invoice/repair/customer/etc. writes lost on reload. | M7a–e | G-PERSIST |
@@ -187,6 +193,6 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 | GAP-24 | M | Historical (pre-M0-fix) Firestore exploitation cannot be disproven with available evidence (historical evidence limitation, not an active vuln). | M8→M9 | G-HIST |
 | GAP-25 | M | Two independent Express apps, zero shared middleware — protection re-implemented/omitted per route. | M3 | G-UNAUTH (shared middleware) |
 
-**Inventory totals:** 23 tenant surfaces · 18 owner surfaces (incl. 2 unrouted) · 1 DEV BCP shell + 1 pilot · **1 Express app** (Identity ~8 endpoints + C01–C07 lenses; the Shipping sidecar's 22 routes were eliminated in Phase 4.0 M3) · 8 durable tables (identity/authz/audit only) · **26 gaps (11 Critical, 9 High, 6 Medium)** — GAP-03/04/06 are now closed at source; the gap COUNT is left unchanged so the historical matrix stays comparable.
+**Inventory totals:** 23 tenant surfaces · 18 owner surfaces (incl. 2 unrouted) · 1 DEV BCP shell + 1 pilot · **1 Express app** (Identity ~8 endpoints + C01–C07 lenses; the Shipping sidecar's 22 routes were eliminated in Phase 4.0 M3) · 10 durable tables across 001–007 (8 identity/authz/audit in `public`, 2 store tables in `tmpos_internal`) · **26 gaps (11 Critical, 9 High, 6 Medium)** — GAP-03/04/05/06 are now closed at source; the gap COUNT is left unchanged so the historical matrix stays comparable.
 
 > **Note on severity semantics:** a gap's defect severity here may differ from its go-live *gate* severity in [08](./08-production-gate-and-risk-register.md) — a gate can be more blocking than its source defect (e.g. GAP-18 defect *High* → gate G-EMU *BLOCKER*; GAP-24 defect *Medium* → gate G-HIST *HIGH*). This is intentional.

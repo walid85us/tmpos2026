@@ -306,3 +306,50 @@ test('S4.1a-C10: no production source re-enables the driver TLS env fallback or 
     .filter((f) => new RegExp(`\\b${envVar}\\b`).test(stripComments(read(f))));
   assert.deepEqual(offenders, [], `only ${POLICY_MODULE} may name the driver's TLS environment fallback`);
 });
+
+// ---------------------------------------------------------------------------
+// M5-ID-P1 — the trusted identity boundary cannot be walked around
+// ---------------------------------------------------------------------------
+
+test('M5-ID-P1-C13: the runtime, persistence and composition layers reach identity only through the resolver', () => {
+  // Migration 005 grants the runtime role nothing on these relations, so a direct read there would
+  // fail at run time anyway — but it would fail as an outage, long after review. This fails at review.
+  // The DEV control plane (server/platform-identity/authorizationRepository.ts) still reads them
+  // through the OWNER connection and is deliberately out of this scan: it is not reachable from a
+  // deployable entry, and replacing it is the rest of M5, not this stage.
+  const PROTECTED = ['platform_identity', 'app_user', 'identity_link'];
+  const LAYERS = ['server/runtime', 'server/persistence', 'server/composition'];
+  const offenders = [];
+  for (const file of localSources(...LAYERS)) {
+    if (/\.test\.(ts|tsx|mjs)$/.test(file)) continue; // a test may name a relation to prove it is unreadable
+    const src = stripComments(read(file));
+    for (const relation of PROTECTED) {
+      if (new RegExp(`(from|join|into|update)\\s+(public\\.)?${relation}\\b`, 'i').test(src)) {
+        offenders.push(`${file}: ${relation}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], "these layers name migration 007's two routines, never an identity table");
+});
+
+test('M5-ID-P1-C14: the unclassified runtime client has exactly the known DEV-only callers', () => {
+  // getRuntimeDb() builds a client from APP_DATABASE_URL WITHOUT the endpoint classification every
+  // other runtime path goes through (databaseEndpoint.ts). Each caller is therefore a deliberate,
+  // reviewable entry — and the audit writer, which used to fall back to it when a caller forgot an
+  // executor, is no longer one of them.
+  const CALLERS = [
+    'server/platform-identity/db.ts', //                            defines it
+    'server/platform-identity/authorizationRepository.ts', //        DEV control plane; no deployable entry reaches it
+    'server/platform-identity/server.ts', //                         DEV sidecar readiness; listens only under npm run identity:api
+  ];
+  const found = localSources('server', 'scripts', 'src')
+    .filter((f) => !/\.test\.(ts|tsx|mjs)$/.test(f))
+    .filter((f) => /\bgetRuntimeDb\s*\(/.test(stripComments(read(f))));
+  assert.deepEqual(found.sort(), [...CALLERS].sort(),
+    'a new caller of the unclassified client is a deliberate decision, made here');
+
+  const writer = 'server/platform-identity/auditEventWriter.ts';
+  const src = stripComments(read(writer));
+  assert.ok(!/getRuntimeDb/.test(src), 'the audit writer builds no client of its own');
+  assert.match(src, /audit executor missing/, "it refuses instead: an audit record rides its write's own executor");
+});

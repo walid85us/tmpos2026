@@ -4,7 +4,10 @@
 
 ## 1. Existing durable schema (the canonical seed)
 
-8 tables (`server/platform-identity/migrations/001–004`), **identity/authz/audit only**:
+10 tables (`server/platform-identity/migrations/001–007`), **identity/authz/audit/store only** — the 8
+below in `public` (001–004), plus `tmpos_internal.idempotency_record` and `tmpos_internal.outbox_event`
+(006, the transactional store). 005 creates no table (runtime roles, grants and RLS), and 007 creates
+no table either (three identity-resolution routines in 006's schema):
 
 | Table | Role | Key constraints |
 |---|---|---|
@@ -18,7 +21,7 @@
 | `identity_link` | Firebase↔Supabase link | composite FKs; partial UNIQUE WHERE active; **unwired** |
 
 - **`audit_event` is append-only**: `reject_audit_event_mutation()` + `trg_audit_event_reject_mutation` (BEFORE UPDATE OR DELETE) raise `restrict_violation` for **all roles including the table owner**. Metadata is guarded (`audit_metadata_is_flat`, forbidden-key list: access/refresh tokens, raw JWT/JWKS, service-role key, DB URL, connection string, password, PAN, card number, provider secret). **Forward-hardening (M6/M7b):** when payments land, extend this guard + log/error redaction to **CVV/CVC, track1/2, and PIN block** so the enforced key-list matches the documented no-CHD boundary (§5), and make the [07](./07-quality-and-test-strategy.md) "no PAN/CVV/track/PIN" assertion check that guard. `evidence_level` ∈ `dev_sidecar_log_advisory | durable_compliance_event`.
-- **RLS enabled on all 8 tables, zero policies**; 7/8 `REVOKE ALL … FROM public/anon/authenticated`. Effect: PostgREST/anon/authenticated get deny-all; the owner-role connection bypasses RLS and is the only path (GAP-17: an app role that does not bypass RLS is an M3 target).
+- **RLS enabled on all 10 tables.** At 001–004 there were zero policies and 7/8 `REVOKE ALL … FROM public/anon/authenticated` (001's was added by 005). Migration 005 then adds the runtime roles and **five** tenant/store-scoped policies (`tenant`, `store`, `user_membership`, `tenant_feature_entitlement` for `tmpos_app`; an append-only one for `tmpos_audit_writer`), and 006's two `tmpos_internal` tables are RLS-enabled with no policy — defence in depth, since the runtime role holds no privilege on them at all. Effect: PostgREST/anon/authenticated get deny-all; the owner-role connection still bypasses RLS, and GAP-17 (an app role that does not bypass RLS) stays open until a runtime LOGIN role exists (G-DBROLE).
 
 ## 2. Canonical data ownership per business domain (introduced in M7)
 

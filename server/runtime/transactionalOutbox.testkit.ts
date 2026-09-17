@@ -312,6 +312,7 @@ function conformanceKit(h: TransactionalOutboxHarness) {
   const prepared = (contract: CommandContract, attempt: Attempt, held: string, newAggregateId: string, plan: unknown): TransactionCommand => {
     const result = prepareCommand(contract, events, plan, {
       scope: attempt.operation.scope, lease: held, newAggregateId, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+      context: null,
       seal: (envelope) => keyring.seal(envelope, attempt.operation),
     });
     assert.ok(result !== null, 'the conformance plans are in contract');

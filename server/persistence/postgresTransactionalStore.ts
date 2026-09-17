@@ -53,6 +53,17 @@
 // may have committed or not, and the call rejects with one fixed message, which the runtime treats as indeterminate. No
 // driver message, statement, parameter, identifier or stack is kept, logged or returned.
 import { writeAuditEvent } from '../platform-identity/auditEventWriter';
+import { isTrustedScope } from '../runtime/principals.js';
+// A frozen copy of a trusted scope's seven scalar fields, or undefined when the value is not one.
+// Every field is read exactly once, so the context validated is the context committed under, and a
+// hostile getter cannot answer differently to the audit record and to the revalidation's parameters.
+const trustedScopeOf = (raw: unknown): TrustedScope | undefined => {
+  if (!isTrustedScope(raw)) return undefined;
+  const { actor, securityVersion, scope, tenant, store, roleId, limitation } = raw;
+  const copy = Object.freeze({ actor, securityVersion, scope, tenant, store, roleId, limitation });
+  return isTrustedScope(copy) ? copy : undefined;
+};
+import type { TrustedScope } from '../runtime/principals.js';
 import { TransactionFailure } from './supervisedPgClient.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter';
@@ -84,9 +95,22 @@ export interface AggregateMutator {
   readonly apply: (sql: PgStatement, mutation: TransactionMutation) => Promise<unknown>;
 }
 
+/**
+ * Re-reads a command's trusted context on the committing transaction's own handle, answering the role
+ * still granted at that exact scope or null for every failure (M5-ID-P1). The store is handed it
+ * rather than owning it, so no authorization policy lives in persistence and a command can be proven
+ * against a synthetic revalidator with no database at all.
+ */
+export type ContextRevalidator = (sql: PgTransactionScope, scope: TrustedScope) => Promise<string | null>;
+
 export interface TransactionalStoreOptions {
   readonly client: SupervisedPgClient;
   readonly mutators: readonly AggregateMutator[];
+  /**
+   * Required once a command may carry a trusted context. Absent, the store commits only contextless
+   * commands and refuses every command that carries one — it never commits one unrevalidated.
+   */
+  readonly revalidate?: ContextRevalidator;
 }
 
 /** The three ports over one database: separate objects, each only its own interface. */
@@ -123,7 +147,7 @@ const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
-const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'mutation', 'audit', 'events'];
+const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'mutation', 'audit', 'events', 'context'];
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
 const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId'];
 const EVENT_FIELDS: readonly string[] = [
@@ -293,19 +317,22 @@ interface EventDraft {
 interface Command {
   readonly scope: string; readonly lease: string; readonly response: string; readonly mutator: AggregateMutator;
   readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput; readonly events: readonly EventDraft[];
+  readonly context: TrustedScope | null;
 }
 
 
 /**
  * A command in contract, re-checked at the store's boundary: LEASE_LOST when its fence can never match a
- * granted lease; UNAVAILABLE when anything else is malformed or no mutator serves its kind. Tenant and store
- * scopes wait on M5, which supplies their identities: until then only a platform-scope command is audited, and its
- * events name no tenant, store or actor.
+ * granted lease; UNAVAILABLE when anything else is malformed or no mutator serves its kind. Only a
+ * PLATFORM-scope command commits: a tenant- or store-scoped context waits on GAP-11's permission ordering
+ * and on the audit writer carrying the tenant RLS context. An event names no tenant, store or actor in any
+ * case — those columns are keyed digests in migration 006, and this stage keys none. Since M5-ID-P1 the
+ * AUDIT record names the app-owned actor whenever a trusted context is carried.
  */
 function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
-    const { scope, lease, response, mutation, audit, events } = raw;
+    const { scope, lease, response, mutation, audit, events, context: rawContext } = raw;
     if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST;
     if (!isSealed(response) || response.length === 0 || !isRecord(mutation) || !hasExactKeys(mutation, MUTATION_FIELDS)) return UNAVAILABLE;
     const { kind, aggregateType, aggregateId, expectedVersion, changes: rawChanges } = mutation;
@@ -314,8 +341,27 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     if (mutator.mode === 'create' ? expectedVersion !== null : !isInteger(expectedVersion, 1, Number.MAX_SAFE_INTEGER - 1)) return UNAVAILABLE;
     const changes = scalarRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
+    // The trusted context, read once. A command carries one or it does not; anything that is not a
+    // trusted scope is not a context, and a context this store cannot revalidate is never committed.
+    // Read once and COPIED, like every other value at this boundary: a getter that answered one way
+    // here and another way when the revalidation binds its parameters would otherwise let a command
+    // be proved against one actor and audited as another.
+    const context = rawContext === null ? null : trustedScopeOf(rawContext);
+    if (context === undefined) return UNAVAILABLE;
+    // A command is a write. A context the resolver marked read-only — because the account, the tenant
+    // or the store is `read_only` or `overdue` — may not perform one, and that limiting is applied
+    // here rather than left to a caller who might forget it.
+    if (context !== null && context.limitation !== 'none') return UNAVAILABLE;
+    // Until GAP-11's ordering unification lands, and until the audit writer carries the tenant RLS
+    // context, only a PLATFORM-scope context commits here; a tenant- or store-scoped one is refused
+    // rather than audited at a scope this transaction cannot prove.
+    if (context !== null && context.scope !== 'platform') return UNAVAILABLE;
     const { action, permission, scope: auditScope, tenant, store, actor, correlationId } = audit;
-    if (action !== kind || auditScope !== 'platform' || tenant !== null || store !== null || actor !== null) return UNAVAILABLE;
+    if (action !== kind || auditScope !== 'platform') return UNAVAILABLE;
+    // With no context the audit names no tenant, store or actor, exactly as before. With one, it names
+    // that context's own values and nothing else — never a value the caller chose independently.
+    if (tenant !== (context === null ? null : context.tenant) || store !== (context === null ? null : context.store)
+      || actor !== (context === null ? null : context.actor)) return UNAVAILABLE;
     if (typeof permission !== 'string' || permission.length === 0 || permission.length > MAX_PERMISSION_LENGTH || CONTROL_RE.test(permission)) return UNAVAILABLE;
     if (typeof correlationId !== 'string' || !UUID_V4_RE.test(correlationId)) return UNAVAILABLE;
     // The array and its length, each read once: a proxied length cannot pass the bound and then drive the loop past it.
@@ -331,7 +377,12 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
         tenant: eventTenant, store: eventStore, actor: eventActor, correlationId: eventCorrelationId, payload: rawPayload } = e;
       if (typeof eventId !== 'string' || !UUID_V4_RE.test(eventId) || drafts.some((d) => d.eventId === eventId)) return UNAVAILABLE;
       if (!isContractName(type) || !isInteger(eventVersion, 1, MAX_EVENT_VERSION) || eventAggregateType !== mutator.aggregateType || eventAggregateId !== aggregateId) return UNAVAILABLE;
-      if (aggregateVersion !== version || eventCorrelationId !== correlationId || eventTenant !== null || eventStore !== null || eventActor !== null) return UNAVAILABLE;
+      if (aggregateVersion !== version || eventCorrelationId !== correlationId) return UNAVAILABLE;
+      // An event's tenant, store and actor are KEYED DIGESTS in migration 006, not identifiers
+      // (outbox_event_digest_chk), and this stage defines no keying for them. They therefore stay
+      // null even under a trusted context — the actor is attributed on the audit record, whose
+      // column is the app-owned uuid itself. Naming one here would abort the whole transaction.
+      if (eventTenant !== null || eventStore !== null || eventActor !== null) return UNAVAILABLE;
       const payload = scalarRecordOf(rawPayload);
       if (payload === null) return UNAVAILABLE;
       drafts.push(Object.freeze({
@@ -340,7 +391,8 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       }));
     }
     const auditEvent: AuditEventWriteInput = {
-      requestId: correlationId, traceId: null, actorInternalUserId: null, actorAuthProvider: null, onBehalfOfInternalUserId: null,
+      requestId: correlationId, traceId: null, actorInternalUserId: context === null ? null : context.actor,
+      actorAuthProvider: null, onBehalfOfInternalUserId: null,
       scopeType: 'platform', tenantId: null, storeId: null, actionId: kind as string, requiredPermission: permission, decision: 'allow',
       reasonCode: 'command_committed', humanReadableReason: 'An authorized command committed atomically with its idempotency completion and outbox events.',
       resultStatus: 'succeeded', sourceOfTruth: 'command_transaction', evaluatedBy: COMMAND_AUDIT_EVALUATED_BY, evidenceLevel: 'durable_compliance_event', metadata: {},
@@ -349,17 +401,29 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     const checked: TransactionMutation = Object.freeze({
       kind: mutator.kind, aggregateType: mutator.aggregateType, aggregateId, expectedVersion: expectedVersion as number | null, changes,
     });
-    return Object.freeze({ scope, lease, response, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts) });
+    return Object.freeze({ scope, lease, response, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
   }
 }
 
 /** The command in the order the contract fixes: fence, mutation, audit, events, completion — then COMMIT. */
-async function commit(sql: PgTransactionScope, c: Command): Promise<Answer> {
+async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRevalidator | null): Promise<Answer> {
   // 1. The fence, before any business state: the routine locks the record for the rest of the transaction, then reads
   //    the clock — held iff within retention, in progress and under exactly this lease.
   if (single(await sql`select tmpos_internal.m6_command_fence(${c.scope}::text, ${c.lease}::text) as held`).held !== true) return refuse(LEASE_LOST);
+  // 1b. The trusted context, re-read on THIS transaction before any business state is touched
+  //     (M5-ID-P1; docs/phase-4/08 G-CPLOGIN). The lease is judged first and learns nothing about the
+  //     actor, so a stale attempt still answers 'lease_lost' and no more. A context that no longer
+  //     holds — a suspended account, a moved security version, a withdrawn membership, a suspended
+  //     tenant or store — rolls the whole transaction back: no mutation, no completion, no audit
+  //     record, no event. The refusal is 'unavailable', the same answer an outage gives, so nothing
+  //     distinguishes a revoked actor from a database that could not answer.
+  if (c.context !== null) {
+    if (revalidate === null) return refuse(UNAVAILABLE);
+    const role = await revalidate(sql, c.context);
+    if (role === null || role !== c.context.roleId) return refuse(UNAVAILABLE);
+  }
   // 2. The business mutation, by the kind's own mutator.
   const applied = await c.mutator.apply(sql, c.mutation);
   if (applied === 'conflict') return refuse(CONFLICT);
@@ -381,12 +445,12 @@ async function commit(sql: PgTransactionScope, c: Command): Promise<Answer> {
   return (await completed(sql, c.scope, c.lease, c.response)) ? COMMITTED : refuse(UNAVAILABLE);
 }
 
-function transactionPort(client: SupervisedPgClient, mutators: ReadonlyMap<string, AggregateMutator>): CommandTransactionPort {
+function transactionPort(client: SupervisedPgClient, mutators: ReadonlyMap<string, AggregateMutator>, revalidate: ContextRevalidator | null): CommandTransactionPort {
   return Object.freeze({
     async commit(raw: unknown, signal: AbortSignal): Promise<Answer> {
       const command = commandOf(raw, mutators);
       if (!('mutator' in command)) return command;
-      return transact(client, signal, TRANSACTION_BOUNDS, (sql) => commit(sql, command as Command));
+      return transact(client, signal, TRANSACTION_BOUNDS, (sql) => commit(sql, command as Command, revalidate));
     },
     probe: (signal: AbortSignal): Promise<boolean> => probe(client, signal),
   });
@@ -497,15 +561,20 @@ function mutatorOf(raw: unknown): AggregateMutator {
 
 /** The three ports over `client`. Validates the mutator table; opens nothing until a port is called. */
 export function createPostgresTransactionalStore(options: TransactionalStoreOptions): TransactionalStore {
-  const { client, mutators } = isRecord(options) ? options : ({} as Partial<TransactionalStoreOptions>);
+  const { client, mutators, revalidate } = isRecord(options) ? options : ({} as Partial<TransactionalStoreOptions>);
   if (typeof client !== 'object' || client === null || typeof client.transaction !== 'function' || !Array.isArray(mutators)) {
     throw new TypeError('transactional store options invalid');
   }
+  if (revalidate !== undefined && typeof revalidate !== 'function') throw new TypeError('transactional store options invalid');
   const table = new Map<string, AggregateMutator>();
   for (const raw of mutators) {
     const mutator = mutatorOf(raw);
     if (table.has(mutator.kind)) throw new TypeError('transactional store mutator invalid');
     table.set(mutator.kind, mutator);
   }
-  return Object.freeze({ idempotency: idempotencyPort(client), transactions: transactionPort(client, table), delivery: deliveryPort(client) });
+  return Object.freeze({
+    idempotency: idempotencyPort(client),
+    transactions: transactionPort(client, table, revalidate ?? null),
+    delivery: deliveryPort(client),
+  });
 }

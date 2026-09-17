@@ -339,12 +339,16 @@ test('C1R-I: an absent runtime DSN fails closed — it never substitutes the adm
 
 // --- J. AUDIT ----------------------------------------------------------------
 
-test('C1R-J: audit append defaults to the runtime principal, and injection still wins', async () => {
-  // The executor is chosen BEFORE the event is validated, so an intentionally invalid event is a
-  // clean probe of WHICH executor the writer reached for — no valid-event fixture required.
+test('C1R-J: audit append has no default executor at all, and injection still wins', async () => {
+  // M5-ID-P1: the writer used to fall back to getRuntimeDb(), a client built from APP_DATABASE_URL
+  // WITHOUT the endpoint classification every other runtime path goes through. There is no fallback
+  // now: a caller with no executor gets a refusal, and no client is constructed. The executor is
+  // chosen BEFORE the event is validated, so an intentionally invalid event is a clean probe of which
+  // executor the writer reached for — no valid-event fixture required.
   const defaulted = await writeAuditEvent({} as never).then(() => null, (e: unknown) => e as Error);
   assert.ok(defaulted instanceof Error);
-  assert.match(defaulted!.message, /APP_DATABASE_URL/, 'the default append path is the runtime client');
+  assert.match(defaulted!.message, /audit executor missing/, 'no executor, no audit record');
+  assert.ok(!/APP_DATABASE_URL/.test(defaulted!.message), 'and no unclassified client is reached for');
 
   let used = false;
   const injected = (() => { used = true; return Promise.resolve([]); }) as never;

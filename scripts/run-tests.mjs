@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 112;
+export const MIN_SUITES = 115;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -55,6 +55,9 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/outbox.test.ts',                             // M6 transactional outbox: closed contracts, bounded envelope, delivery conformance, one bounded pass
   'server/persistence/postgresTransactionalStore.test.ts',     // M6 PostgreSQL store: refusals before the database, COMMIT-phase outcomes, source containment
   'server/persistence/supervisedPgClient.test.ts',             // M6 transaction kernel: one guarded dispatcher, a close gate shut synchronously, no savepoint, no retry, reset before reuse, bounded end
+  'server/persistence/postgresPrincipalResolver.test.ts',      // M5 principal resolver: bounded outcomes, no fallback, nothing trusted the routine did not say
+  'server/runtime/principals.test.ts',                         // M5 server-derived scope: a selector narrows and never grants, no default invented
+  'server/platform-identity/m5CanonicalPermissions.test.ts',   // M5 canonical route permissions: exact keys, fail-closed unknowns, tenant plane undecidable until GAP-11
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context

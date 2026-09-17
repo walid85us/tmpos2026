@@ -67,8 +67,9 @@
 // kind (the action) and authorization requirement, and the command's server-generated correlation ID —
 // never the planner's output. A PostgreSQL adapter writes it through that writer on the same transaction
 // handle (an append-only INSERT; a failed write aborts the commit) — never after the commit. It records
-// committed mutations only. The actor is null, like tenant and store, until M5 supplies the app-owned
-// identity: no provider-derived pseudonym is written into a permanent record (G-AUDIT).
+// committed mutations only. Since M5-ID-P1 the actor is the app-owned internal_user_id, taken from the
+// command's trusted context and from nowhere else; it stays null for a command prepared without one.
+// No provider-derived pseudonym is ever written into a permanent record (G-AUDIT).
 import { randomUUID } from 'node:crypto';
 import { types } from 'node:util';
 import { outage, withDeadline } from './deadline.js';
@@ -78,6 +79,8 @@ import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, isContractName, par
 import type { EventContract, OutboxEventDraft, OutboxEventRegistry, RecordSchema, RecordValue } from './outbox.js';
 import { EnforcementSetupError } from './routes.js';
 import type { AuthorizationRequirement, AuthorizationScope } from './routes.js';
+import { isTrustedScope } from './principals.js';
+import type { TrustedScope } from './principals.js';
 
 /** The bound on one commit, below the port deadline: a durable transaction of a few statements. */
 export const COMMAND_TRANSACTION_DEADLINE_MS = 2_000;
@@ -121,10 +124,14 @@ export interface TransactionAudit {
   /** The route's authorization requirement. */
   readonly permission: string;
   readonly scope: AuthorizationScope;
-  /** Null until M5 supplies server-derived tenant, store and actor identities. */
-  readonly tenant: null;
-  readonly store: null;
-  readonly actor: null;
+  /**
+   * The server-derived scope tuple and the app-owned actor, taken from the command's trusted context
+   * (M5-ID-P1). All three stay null for a command prepared without one, which is every command until
+   * a route supplies a resolved principal — so nothing here is ever caller-supplied.
+   */
+  readonly tenant: string | null;
+  readonly store: string | null;
+  readonly actor: string | null;
   /** The command's server-generated correlation ID (a UUID version 4), shared by its events. */
   readonly correlationId: string;
 }
@@ -140,6 +147,14 @@ export interface TransactionCommand {
   readonly mutation: TransactionMutation;
   readonly audit: TransactionAudit;
   readonly events: readonly OutboxEventDraft[];
+  /**
+   * The trusted context this command was planned under, re-read inside the committing transaction
+   * before any business state (M5-ID-P1; docs/phase-4/08 G-CPLOGIN). It carries the app-owned actor,
+   * the security version to compare, the selected scope and the role granted there — never a provider
+   * UID, a token, a cookie or a request, and never the permission itself, which is the ROUTE's
+   * declared requirement and travels on the audit record. null while no route resolves a principal.
+   */
+  readonly context: TrustedScope | null;
 }
 
 /** The port. Each call is handed its deadline's AbortSignal and may return a Promise. */
@@ -165,6 +180,8 @@ export interface CommandBinding {
   /** The UUID the runtime generated for this attempt: the only aggregate a create may name. */
   readonly newAggregateId: string;
   readonly authorization: AuthorizationRequirement;
+  /** The trusted context the chain derived for this attempt, or null while no route resolves one. */
+  readonly context: TrustedScope | null;
   readonly seal: (envelope: ReplayEnvelope) => string;
 }
 
@@ -266,8 +283,8 @@ function refuseThenable(value: unknown): boolean {
  * lowercase UUID at a version;
  * changes and event payloads in their schemas; events only of the types the contract allows, each at
  * most once (one logical event per operation); and a success response a replay can carry. The runtime
- * supplies everything else: event IDs, the version produced, the correlation ID, the null scope and actor
- * slots and the audit record.
+ * supplies everything else: event IDs, the version produced, the correlation ID, the trusted context's
+ * scope and actor (null without one) and the audit record.
  */
 export function prepareCommand(contract: CommandContract, events: OutboxEventRegistry, raw: unknown, binding: CommandBinding): PreparedCommand | null {
   if (refuseThenable(raw)) return null;
@@ -285,6 +302,10 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     const id = aggregateId as string;
     const version = expectedVersion === null ? 1 : (expectedVersion as number) + 1;
     const correlationId = randomUUID();
+    // Read once: the context validated is the context committed under, and a hostile getter that
+    // changed it between the audit and the revalidation would not be handing back the same object.
+    const ctx = binding.context === null ? null : (isTrustedScope(binding.context) ? binding.context : undefined);
+    if (ctx === undefined) return null; // a context that is not a trusted scope is not a context
     const drafts: OutboxEventDraft[] = [];
     // inv: drafts holds a valid draft for each item below i, their types distinct and allowed by the contract; term: i rises to count.
     for (let i = 0; i < count; i++) {
@@ -311,10 +332,12 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
         kind: contract.kind, aggregateType: contract.aggregateType, aggregateId: id, expectedVersion: expectedVersion as number | null, changes: mutationChanges,
       }),
       audit: Object.freeze({
-        action: contract.kind, permission: binding.authorization.permission, scope: binding.authorization.scope, tenant: null, store: null, actor: null,
+        action: contract.kind, permission: binding.authorization.permission, scope: binding.authorization.scope,
+        tenant: ctx === null ? null : ctx.tenant, store: ctx === null ? null : ctx.store, actor: ctx === null ? null : ctx.actor,
         correlationId,
       }),
       events: Object.freeze(drafts),
+      context: ctx,
     });
     return Object.freeze({ command, response: envelope });
   } catch {
