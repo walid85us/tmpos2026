@@ -547,8 +547,12 @@ test('a deployed route may require only a canonical platform permission, and sta
 test('the resolver is composed with the store, over the same client, and never alone', () => {
   const built: string[] = [];
   let sharedClient: unknown = null;
+  // A stub client, not the real one: this proves WHO is handed the client, not how it is built (the
+  // transport policy is proved above, and resolving it here would need a trust anchor this test has
+  // no business installing).
+  const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
   const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
-    client: (endpoint) => { const c = createRuntimeStoreClient(endpoint); sharedClient = c; built.push('client'); return c; },
+    client: () => { sharedClient = stub; built.push('client'); return stub as never; },
     store: (options) => { built.push('store'); assert.equal(options.client, sharedClient, 'the store takes the shared client'); assert.equal(typeof options.revalidate, 'function', 'and a revalidator'); return createPostgresTransactionalStore(options); },
     principals: (client) => { built.push('principals'); assert.equal(client, sharedClient, 'the resolver takes the SAME client'); return createPostgresPrincipalResolver({ client }); },
   });
