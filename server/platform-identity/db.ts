@@ -15,12 +15,17 @@
 //     A missing APP_DATABASE_URL must NEVER quietly resolve to the owner URL — that would run
 //     the tenant request path with RLS bypassed, which is the exact failure S2 exists to make
 //     impossible.
+//   - The M6 store's client (createRuntimeStoreClient, M6-PG-P7-R1) is the transaction kernel over
+//     the same runtime principal, built only by the production transaction composition for an
+//     APP_DATABASE_URL classified as a direct or session-pooler endpoint (databaseEndpoint.ts).
 //
 // Both clients are created lazily (on first use), so importing this module — or running the
 // isolated API with the feature flag OFF — opens no connection and requires no secret.
 
 import { X509Certificate } from 'node:crypto';
 import postgres from 'postgres';
+import { createSupervisedPgClient } from '../persistence/supervisedPgClient.js';
+import type { PgDriver, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import {
   getRequiredServerConfig,
   getRuntimePrincipalConfig,
@@ -29,6 +34,8 @@ import {
   APP_DATABASE_URL_VAR,
   DATABASE_CA_CERT_VAR,
 } from './config';
+import { sealedRuntimeTarget } from './databaseEndpoint';
+import type { RuntimeDatabaseEndpoint } from './databaseEndpoint';
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -191,12 +198,15 @@ function assertCaCertificates(ca: string): void {
   }
 }
 
+/** The transport policy refused the configuration: no client was built. */
+export class DatabaseTlsRefusal extends Error {}
+
 /**
  * A bounded refusal. It names the configuration CATEGORY at fault and never its value — no DSN,
  * no password, no certificate body — because these messages reach logs and operator terminals.
  */
-function tlsRefusal(reason: string): Error {
-  return new Error(`refusing to open a database connection: ${reason}`);
+function tlsRefusal(reason: string): DatabaseTlsRefusal {
+  return new DatabaseTlsRefusal(`refusing to open a database connection: ${reason}`);
 }
 
 /**
@@ -263,7 +273,9 @@ export function resolveDatabaseTls(rawUrl: string): DatabaseTlsOptions {
  * actually dials localhost over TCP, and a pooler sidecar on 127.0.0.1 still carries credentials
  * over a socket someone else can bind.
  *
- * `prepare: false` is required by a transaction-mode pooler.
+ * `prepare: false`: the M6 store's kernel forces it anyway, since its per-connection reset (DISCARD ALL) removes prepared
+ * statements. It does NOT make a transaction-mode pooler acceptable for that store, which is bound only over a direct or
+ * session-mode endpoint (createRuntimeStoreClient below; databaseEndpoint.ts).
  */
 function clientOptions(max: number) {
   return {
@@ -336,6 +348,26 @@ export function getRuntimeDb(): Sql {
   const ssl = resolveDatabaseTls(cfg.databaseUrl);
   runtimeSql = postgres(cfg.databaseUrl, { ...runtimeClientOptions(cfg.databaseUrl), ssl });
   return runtimeSql;
+}
+
+/**
+ * The M6 transactional store's client: the transaction kernel (server/persistence/supervisedPgClient.ts) over the runtime
+ * principal, for an APP_DATABASE_URL already classified as a direct or session-pooler endpoint (databaseEndpoint.ts). A
+ * transaction-mode pooler never reaches here: the kernel's reset before reuse needs one connection to stay one session.
+ *
+ * Nothing connects here — the kernel opens a pool only when a transaction runs. The transport policy is resolved first, so an
+ * unverifiable configuration builds no client (DatabaseTlsRefusal). Every routing value and the credential reach the driver as
+ * explicit options, taken once from the classification, and the driver is handed no connection string: its own reading of one
+ * (comma multihost, percent-decoding, query parameters) has nothing to act on, and no ambient PGHOST, PGPORT, PGDATABASE, PGUSER
+ * or PGPASSWORD can stand in for a value, since each is non-empty. The kernel never leaves the composition that asked for it.
+ */
+export function createRuntimeStoreClient(endpoint: RuntimeDatabaseEndpoint): SupervisedPgClient {
+  const target = sealedRuntimeTarget(endpoint);
+  const ssl = resolveDatabaseTls(target.tlsPolicySource);
+  // The driver's typed overloads do not unify with the kernel's one call shape, (url, options); the call itself is that shape.
+  return createSupervisedPgClient(postgres as unknown as PgDriver, '', {
+    ...runtimeClientOptions(''), host: target.host, port: target.port, database: target.database, user: target.user, pass: target.password, ssl,
+  });
 }
 
 /** Closes the shared admin client (used by scripts and graceful shutdown). */

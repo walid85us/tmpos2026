@@ -5,7 +5,8 @@
 // composition refuses, naming every missing dependency, while any production adapter is absent;
 // that the origin topology is exact, https and host-distinct per boundary; that the root takes
 // configuration only, so no test double can be handed to it; and that, with every adapter
-// present, assembly is all or nothing and yields boundaries the runtime serves end to end.
+// present, assembly is all or nothing and yields boundaries the runtime serves end to end. Durable
+// idempotency is the transaction root's (productionTransactions.test.ts), never this one's.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -17,7 +18,6 @@ import { createApp, createBoundedServer, createReadinessState } from '../runtime
 import type { BearerTokenView } from '../runtime/access.js';
 import { createMemorySessionStore } from '../runtime/memorySessionStore.testkit.js';
 import { createMemoryRateLimiter, testRequestLimits } from '../runtime/rateLimiter.testkit.js';
-import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyStore } from '../runtime/idempotencyStore.testkit.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../runtime/requestSecurity.js';
 import { sessionPaths } from '../runtime/routes.js';
 import type { SessionAudience } from '../runtime/routes.js';
@@ -150,46 +150,22 @@ function parts(): SessionParts {
     admission: { tenant: { admit: () => admitted }, admin: { admit: () => admitted } },
     authorizer: { tenant: { authorize: () => true }, admin: { authorize: () => true } },
     ...testRequestLimits(),
-    idempotencyKey: null,
-    idempotencyStore: null,
   };
 }
 
-// A synthetic idempotency key (32 bytes of 0x09): never a deployment's, and never the limiter key above.
-const IDEM_KEY = Buffer.alloc(32, 9).toString('base64url');
-
-test('idempotency is composed only when IDEMPOTENCY_KEY is configured, and then needs a valid, separate key and an approved store', () => {
-  const blockers = (over: Record<string, string | undefined>): readonly string[] => blockersOf({ ...CONFIGURED, ...over });
-  for (const unset of [undefined, '']) {
-    assert.deepEqual(blockers({ IDEMPOTENCY_KEY: unset }), [LIMITER, ...ADAPTER_BLOCKERS], 'not configured: nothing about idempotency blocks');
-  }
-  assert.deepEqual(blockers({ IDEMPOTENCY_KEY: IDEM_KEY }), [LIMITER, 'idempotency_store_unavailable', ...ADAPTER_BLOCKERS],
-    'configured: no durable store is approved, and nothing stands in for one');
-  for (const bad of ['short', IDEM_KEY.slice(0, 42), `${IDEM_KEY}=`, Buffer.alloc(31, 9).toString('base64url'), Buffer.alloc(32, 9).toString('base64')]) {
-    assert.deepEqual(blockers({ IDEMPOTENCY_KEY: bad }), [LIMITER, 'idempotency_key_invalid', 'idempotency_store_unavailable', ...ADAPTER_BLOCKERS], bad);
-  }
-  assert.deepEqual(blockers({ IDEMPOTENCY_KEY: KEY }), [LIMITER, 'idempotency_key_shared', 'idempotency_store_unavailable', ...ADAPTER_BLOCKERS],
-    'the limiter key is never the idempotency key');
-  // HMAC zero-pads a short key, so the limiter key followed by zero bytes is the same key.
-  const padded = Buffer.concat([Buffer.alloc(32, 7), Buffer.alloc(32, 0)]).toString('base64url');
-  assert.deepEqual(blockers({ IDEMPOTENCY_KEY: padded }), [LIMITER, 'idempotency_key_shared', 'idempotency_store_unavailable', ...ADAPTER_BLOCKERS],
-    'nor the limiter key padded with zero bytes');
-  const smuggled = { ...CONFIGURED, IDEMPOTENCY_KEY: IDEM_KEY, idempotencyStore: createMemoryIdempotencyStore() } as unknown as Record<string, string>;
-  assert.deepEqual(blockersOf(smuggled), [LIMITER, 'idempotency_store_unavailable', ...ADAPTER_BLOCKERS], 'no store can be handed to the root');
-  const full = parts();
-  const refused = (p: SessionParts): readonly string[] => {
-    try {
-      assembleSessions(p);
-    } catch (err) {
-      if (err instanceof ProductionCompositionError) return err.blockers;
-      throw err;
-    }
-    return assert.fail('assembly must refuse');
-  };
-  assert.deepEqual(refused({ ...full, idempotencyKey: TEST_IDEMPOTENCY_KEY }), ['idempotency_store_unavailable'], 'no per-process store stands in');
-  const assembled = assembleSessions({ ...full, idempotencyKey: TEST_IDEMPOTENCY_KEY, idempotencyStore: createMemoryIdempotencyStore() });
-  assert.ok(assembled.idempotency !== null && Object.isFrozen(assembled.idempotency));
-  assert.equal(assembleSessions(full).idempotency, null, 'not configured: not composed');
+test('durable idempotency is not this root\'s: it reads no IDEMPOTENCY_KEY or APP_DATABASE_URL and composes no idempotency or transaction port', () => {
+  // The transaction root (productionTransactions.ts) owns both, for a route that requires them.
+  const read = new Set<string>();
+  const env = new Proxy({ ...CONFIGURED, IDEMPOTENCY_KEY: 'short', APP_DATABASE_URL: 'postgres://unit.invalid:6543/db' } as Record<string, string | undefined>, {
+    get: (target, key) => {
+      if (typeof key === 'string') read.add(key);
+      return Reflect.get(target, key);
+    },
+  });
+  assert.deepEqual(blockersOf(env), [LIMITER, ...ADAPTER_BLOCKERS], 'a malformed key or an unsupported endpoint is nothing to this root');
+  assert.ok(!read.has('IDEMPOTENCY_KEY') && !read.has('APP_DATABASE_URL'), 'neither is read');
+  assert.ok(read.has('RATE_LIMIT_KEY'), 'the scan observes reads (positive control)');
+  assert.deepEqual(Object.keys(assembleSessions(parts())).sort(), ['limits', 'sessions']);
 });
 
 test('assembly is all or nothing: a missing part names its dependency and composes no boundary', () => {

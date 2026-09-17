@@ -1,5 +1,5 @@
-// Phase 4.0 M4/M6 — the provider-aware production composition root: the two session boundaries,
-// the request limits they are served with, and — when configured — durable idempotency.
+// Phase 4.0 M4/M6 — the provider-aware production composition root: the two session boundaries
+// and the request limits they are served with.
 //
 // The runtime (server/runtime) is provider-independent: it defines the ports and may import no
 // identity provider, database or other adapter (tests/quality/production-runtime-contract). This
@@ -27,14 +27,10 @@
 //   - RATE_LIMIT_KEY: the keyed-hash secret that turns client addresses and account digests into
 //     pseudonymous limiter keys — unpadded base64url of 32–64 random bytes from the secrets store,
 //     the same on every instance. Absent or malformed refuses;
-//   - the distributed limiter: the approved shared-store adapter below;
-// and, only when IDEMPOTENCY_KEY is configured, durable idempotency (server/runtime/idempotency.ts):
-//   - IDEMPOTENCY_KEY: the dedicated keyed-hash secret for idempotency records — unpadded
-//     base64url of 32–64 random bytes from the secrets store, the same on every instance and
-//     unchanged for one retention period around any change, and never RATE_LIMIT_KEY (an equal
-//     key refuses, however padded). Absent, idempotency is not composed and the runtime refuses any
-//     route that requires it (`idempotency_required`); present, it must be valid and the approved
-//     durable store below must exist.
+//   - the distributed limiter: the approved shared-store adapter below.
+// Durable idempotency and the command-transaction port — IDEMPOTENCY_KEY, APP_DATABASE_URL and the
+// M6 PostgreSQL store — are not this root's: the transaction root (productionTransactions.ts) is
+// their one production authority, and composes them only for a route that requires them.
 // Composition is all or nothing: a refusal names every blocker (bounded codes, never
 // configuration content), and nothing is composed while any blocker remains. The deployable
 // runtime entry (server/runtime/server.ts) serves the operational routes only; making this root
@@ -42,8 +38,6 @@
 import { IdentityCompositionError, createRuntimeIdentityVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
 import type { RequestAuthenticator, RouteAuthorizer } from '../runtime/access.js';
 import { parseTrustedProxies } from '../runtime/clientAddress.js';
-import type { DurableIdempotencyStore, IdempotencyDeps } from '../runtime/idempotency.js';
-import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { parseRateLimitKey } from '../runtime/rateLimit.js';
 import type { DistributedRateLimiter, RequestLimitDeps } from '../runtime/rateLimit.js';
 import { normalizeOrigin } from '../runtime/requestSecurity.js';
@@ -62,9 +56,6 @@ export type CompositionBlocker =
   | 'rate_limit_key_missing'
   | 'rate_limit_key_invalid'
   | 'rate_limit_store_unavailable'
-  | 'idempotency_key_invalid'
-  | 'idempotency_key_shared'
-  | 'idempotency_store_unavailable'
   | `${SessionAudience}_session_store_unavailable`
   | `${SessionAudience}_admission_unavailable`
   | `${SessionAudience}_authorizer_unavailable`;
@@ -94,17 +85,12 @@ export interface SessionParts {
   readonly keySecret: Uint8Array | CompositionBlocker;
   /** The approved distributed limiter; null is a blocker, never a fallback. */
   readonly limiter: DistributedRateLimiter | null;
-  /** The idempotency secret, or why it is refused; null when IDEMPOTENCY_KEY is not configured. */
-  readonly idempotencyKey: Uint8Array | CompositionBlocker | null;
-  /** The approved durable idempotency store; null is a blocker once the key is configured, never a fallback. */
-  readonly idempotencyStore: DurableIdempotencyStore | null;
 }
 
-/** One composition: createApp's `sessions`, `limits` and — when configured, else null — `idempotency`. */
+/** One composition: createApp's `sessions` and `limits`. */
 export interface ProductionSessions {
   readonly sessions: SessionDeps;
   readonly limits: RequestLimitDeps;
-  readonly idempotency: IdempotencyDeps | null;
 }
 
 const AUDIENCES: readonly SessionAudience[] = ['tenant', 'admin'];
@@ -122,19 +108,15 @@ const AUDIENCES: readonly SessionAudience[] = ['tenant', 'admin'];
 //   - the distributed rate limiter (G-IDEMPOT, M6): no repository decision approves a shared
 //     backing store (docs/phase-4/02 §8 names one only as an example; every ADR is proposed), so
 //     none is bound and there is no per-process limiter to fall back to. An adapter must pass the
-//     port's conformance suite (assertRateLimiterContract) before it is approved here;
-//   - the durable idempotency store, the command-transaction port and the outbox delivery store
-//     (G-IDEMPOT, M6; docs/phase-4/10 ADR-17): one PostgreSQL adapter must serve all three over one
-//     database — the lease a commit checks is the idempotency record's — and first pass
-//     assertIdempotencyStoreContract, assertCommandTransactionContract and assertOutboxDeliveryContract
-//     there, with fault injection. None exists, so the table binds none of them, and this root composes
-//     no transaction port, outbox or worker. There is no per-process store to fall back to.
-const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter' | 'idempotencyStore'> = Object.freeze({
+//     port's conformance suite (assertRateLimiterContract) before it is approved here.
+// The durable idempotency store and the command-transaction port are not in this table: the
+// transaction root (productionTransactions.ts) composes both from the M6 PostgreSQL store, together,
+// for a route that requires them. No root composes the outbox delivery store or a worker (M8).
+const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> = Object.freeze({
   store: Object.freeze({ tenant: null, admin: null }),
   admission: Object.freeze({ tenant: null, admin: null }),
   authorizer: Object.freeze({ tenant: null, admin: null }),
   limiter: null,
-  idempotencyStore: null,
 });
 
 /** Each boundary's exact https origins, or why the configuration is refused. */
@@ -173,31 +155,18 @@ function rateLimitKey(env: Readonly<Record<string, string | undefined>>): Sessio
   return parseRateLimitKey(raw) ?? 'rate_limit_key_invalid';
 }
 
-/** The idempotency secret, null when not configured, or why the configuration is refused. */
-function idempotencyKey(env: Readonly<Record<string, string | undefined>>): SessionParts['idempotencyKey'] {
-  const raw = env.IDEMPOTENCY_KEY;
-  if (raw === undefined || raw === '') return null;
-  return parseKeyMaterial(raw) ?? 'idempotency_key_invalid';
-}
-
 /**
- * Bind `parts` to both boundaries and their limits — and to durable idempotency when its key is
- * configured — all or nothing: every missing or refused part is named, and nothing is composed
- * while any remains.
+ * Bind `parts` to both boundaries and their limits, all or nothing: every missing or refused part
+ * is named, and nothing is composed while any remains.
  */
 export function assembleSessions(parts: SessionParts): ProductionSessions {
-  const { origins, verifier, store, admission, authorizer, trustedProxies: proxies, keySecret, limiter, idempotencyKey: idemKey, idempotencyStore } = parts;
+  const { origins, verifier, store, admission, authorizer, trustedProxies: proxies, keySecret, limiter } = parts;
   const blockers: CompositionBlocker[] = [];
   if (typeof origins === 'string') blockers.push(origins);
   if (verifier === null) blockers.push('identity_verifier_unconfigured');
   if (typeof proxies === 'string') blockers.push(proxies);
   if (typeof keySecret === 'string') blockers.push(keySecret);
   if (limiter === null) blockers.push('rate_limit_store_unavailable');
-  if (idemKey !== null) {
-    if (typeof idemKey === 'string') blockers.push(idemKey);
-    else if (typeof keySecret !== 'string' && sameKeyMaterial(idemKey, keySecret)) blockers.push('idempotency_key_shared');
-    if (idempotencyStore === null) blockers.push('idempotency_store_unavailable');
-  }
   const boundaries: { [A in SessionAudience]?: SessionBoundaryDeps } = {};
   for (const audience of AUDIENCES) {
     const sessions = store[audience];
@@ -218,14 +187,13 @@ export function assembleSessions(parts: SessionParts): ProductionSessions {
       keySecret: keySecret as Uint8Array,
       trustedProxies: proxies as readonly string[],
     }),
-    idempotency: idemKey === null ? null : Object.freeze({ store: idempotencyStore as DurableIdempotencyStore, keySecret: idemKey as Uint8Array }),
   });
 }
 
 /**
- * The production composition: configuration in, both boundaries, their limits and any configured
- * idempotency out — or a refusal naming every missing dependency. Configuration is the only input;
- * nothing else can be injected.
+ * The production composition: configuration in, both boundaries and their limits out — or a
+ * refusal naming every missing dependency. Configuration is the only input; nothing else can be
+ * injected.
  */
 export function composeProductionSessions(env: Readonly<Record<string, string | undefined>>): ProductionSessions {
   let verifier: RequestAuthenticator | null = null;
@@ -235,7 +203,6 @@ export function composeProductionSessions(env: Readonly<Record<string, string | 
     if (!(err instanceof IdentityCompositionError)) throw err;
   }
   return assembleSessions({
-    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env),
-    idempotencyKey: idempotencyKey(env), ...PRODUCTION_ADAPTERS,
+    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env), ...PRODUCTION_ADAPTERS,
   });
 }

@@ -468,6 +468,11 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // asserted above — that the production graph reaches no driver and no executor — is unchanged.
     'scripts/managed-default-acl-preflight.ts',
     'tests/quality/managed-default-acl-preflight.test.mjs',
+    // M6-PG-P7-R1: the parity proof for the runtime endpoint classifier (databaseEndpoint.ts). The runtime may not import
+    // the executor, so it restates the managed validator's endpoint grammar; this suite binds the two by calling the
+    // executor's exported, pure assertManagedDevDsn over one corpus — it opens no connection and uses no apply, ledger or
+    // catalog surface. A test file, never part of the runtime import graph, so the decisive property above is unchanged.
+    'server/platform-identity/databaseEndpoint.test.ts',
   ]);
   const unexpected = importers.filter((f) => !allowed.has(f));
   assert.deepEqual(unexpected, [], `unexpected importer(s) of the executor: ${unexpected.join(', ')}`);

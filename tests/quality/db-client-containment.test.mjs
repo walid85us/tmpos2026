@@ -13,7 +13,8 @@
 //   * no approved site uses a string TLS policy, disables certificate verification, or replaces
 //     hostname verification;
 //   * the validator does not restate a private copy of the policy;
-//   * the client bundle root never reaches the driver at all.
+//   * the client bundle root never reaches the driver at all;
+//   * the M6 store's transaction kernel is built over the driver only in the policy module, under the same policy.
 //
 // SCOPE. Only `server/`, `scripts/` and `src/` are inventoried — the roots that can ship or run
 // against a real endpoint. `tests/db/` is deliberately NOT inventoried: those suites are the
@@ -136,7 +137,9 @@ function usesComputedSpecifier(source) {
  */
 function constructionOffsets(source) {
   const code = stripComments(source);
-  const re = /\bpostgres\s*\(/g;
+  // A client is the driver called directly, or the M6 store's transaction kernel built over it (createRuntimeStoreClient):
+  // each needs its own preceding policy resolution and a bound `ssl`.
+  const re = /\bpostgres\s*\(|(?<!function\s)\bcreateSupervisedPgClient\s*\(/g;
   const out = [];
   let m;
   while ((m = re.exec(code)) !== null) out.push(m.index);
@@ -278,6 +281,20 @@ test('S4.1a-C9: hostname verification is never replaced under the production roo
   const bypass = new RegExp(['check', 'ServerIdentity'].join(''));
   const offenders = ALL_SOURCES.filter((f) => bypass.test(stripComments(read(f))));
   assert.deepEqual(offenders, [], "Node's default hostname verification must stay in force");
+});
+
+test('M6-PG-P7-R1-C12: the M6 store\'s kernel is built over the driver in the policy module alone', () => {
+  // The kernel takes the driver as an argument, so a module that never imports the driver could still hand it one it got
+  // elsewhere — or build the kernel over a different transport. Only the policy module may call it outside its own module.
+  const CALL = /(?<!function\s)\bcreateSupervisedPgClient\s*\(/;
+  assert.match('createSupervisedPgClient(postgres as unknown as PgDriver, \'\', options)', CALL, 'the scan must catch a call');
+  assert.doesNotMatch('export function createSupervisedPgClient(driver, url, options) {', CALL, 'a definition is not a call');
+  const callers = ALL_SOURCES
+    .filter((f) => !/\.test\.[cm]?[jt]s$/.test(f) && f !== 'server/persistence/supervisedPgClient.ts')
+    .filter((f) => CALL.test(stripComments(read(f))));
+  assert.deepEqual(callers, [POLICY_MODULE], 'a new kernel construction must go through the shared transport policy');
+  const kernelSite = constructionOffsets(read(POLICY_MODULE)).filter((offset) => stripComments(read(POLICY_MODULE)).startsWith('createSupervisedPgClient', offset));
+  assert.equal(kernelSite.length, 1, 'the policy module builds the kernel exactly once, counted by C4 and C5 above');
 });
 
 test('S4.1a-C10: no production source re-enables the driver TLS env fallback or a DSN downgrade', () => {

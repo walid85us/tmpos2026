@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 110;
+export const MIN_SUITES = 112;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -47,6 +47,7 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/enforcement.test.ts',                        // shared enforced runtime chain: authn/authz/CSRF/rate-limit/security headers
   'server/runtime/sessions.test.ts',                           // M4 session boundaries: login/current/logout, cookies, session CSRF, login limits, revalidation, MFA, deadlines
   'server/composition/productionSessions.test.ts',             // production session composition refuses until every production adapter exists
+  'server/composition/productionTransactions.test.ts',         // M6 transaction boundary: composed only for a required route, endpoint refused before contact, both ports together, readiness, bounded shutdown
   'server/runtime/clientAddress.test.ts',                      // M6 trusted-proxy client address: right-to-left walk, spoof resistance, /64 grouping
   'server/runtime/rateLimit.test.ts',                          // M6 distributed limiter port: keyed pseudonyms, strict outcomes, adapter conformance
   'server/runtime/idempotency.test.ts',                        // M6 durable idempotency: key grammar, sealed replay, strict outcomes, store conformance, chain order
@@ -57,6 +58,7 @@ export const REQUIRED_SENTINELS = [
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context
+  'server/platform-identity/databaseEndpoint.test.ts',         // runtime endpoint classifier: direct/session pooler on 5432 only, bounded refusals, zero contact, parity with the frozen executor
   'server/platform-identity/auditEventWriter.test.ts',         // INSERT-only audit writer (no RETURNING) + scope truth table
   'server/platform-identity/auditTransaction.test.ts',         // mutation + required audit in ONE transaction, fail-closed
   'tests/quality/migration-executor-containment.test.mjs',     // executor unreachable from the production import graph
