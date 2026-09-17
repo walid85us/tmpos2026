@@ -1,4 +1,4 @@
-// Phase 4.0 M6-PG-P6 — the transactional store's transaction kernel (docs/phase-4/08 DA-15, DA-19, DA-20).
+// Phase 4.0 M6-PG-P6/P7 — the transactional store's transaction kernel (docs/phase-4/08 DA-15, DA-19, DA-20, DA-21).
 //
 // The only way the store reaches PostgreSQL. It owns every transaction from BEGIN to COMMIT or ROLLBACK on one reserved
 // connection, and hands the driver each statement — BEGIN, the transaction-local settings, every statement of the body,
@@ -38,6 +38,19 @@
 //     once, never released, never given to another transaction. The next transaction opens a fresh pool.
 //   * ROLLBACK only on a connection still demonstrably usable — the gate open, nothing in flight. Otherwise the pool is
 //     retired, and the server rolls the transaction back when its session ends.
+//   * Reset before reuse. A transaction ends, but its session does not: a setting or role the body changed for the session,
+//     a session advisory lock, LISTEN, a held cursor, a temporary object, sequence state would all reach the next
+//     transaction on that connection. So a connection goes back to its pool only when the transaction's outcome is known —
+//     COMMIT or ROLLBACK acknowledged — nothing is in flight, the gate is open, its caller has not aborted, and DISCARD ALL,
+//     sent by the kernel through the same gate, has been acknowledged; only then can the next transaction, or a caller
+//     waiting, have the pool. Anything else retires it. DISCARD ALL also removes prepared statements, so every pool is
+//     built with the driver's `prepare` forced off: the driver then names no statement, has none to lose, and never sends
+//     one again by itself (with it on, a statement the reset removed is re-sent by the driver, outside this gate). The body's
+//     statement function stops working once the body settles, so one kept past it cannot reach the connection after its
+//     reset, or another transaction's. DISCARD ALL leaves random()'s seed, and the name — not the value — of a custom
+//     setting once defined, which reads '' after. A pool of one is one server session only over a direct or session-mode
+//     connection: behind a transaction-mode pooler the reset could reach a different backend, so the store is never bound
+//     through one.
 //   * A body statement runs one at a time: frozen template text — which the driver reads again when it executes the
 //     statement, so it must not be able to change in between — beginning with SELECT, INSERT, UPDATE, DELETE, WITH or
 //     VALUES, and plain values only. Anything else — transaction control, SAVEPOINT, COPY, SET, DO, CALL, LOCK — is
@@ -48,9 +61,13 @@
 // Answers. The body's value once COMMIT is acknowledged; the body's own failure once ROLLBACK is acknowledged, so the
 // caller can read it. Otherwise one of two fixed failures that carry nothing of the driver: outcomeUnknown once COMMIT
 // was handed to the driver and never acknowledged — it may have committed; unavailable for everything else — nothing
-// committed. An abort before COMMIT is handed over answers unavailable at once; the kernel then rolls back if nothing is in
-// flight, or cancels the statement in flight and retires the pool — a cancel is addressed to the session, not to the
-// statement, so one arriving late could interrupt the next transaction on that connection. Nothing is retried or replayed.
+// committed — including a COMMIT the server answers ROLLBACK, as it does for a block an earlier error aborted. An abort before
+// COMMIT is handed over answers unavailable at once and retires the pool then, cancelling any body statement in flight first,
+// so a body or a statement that never finishes holds no pool; the server rolls the transaction back as the session ends. (A
+// cancel is addressed to the session, not to the statement, so a pool that saw one is never reused.) An abort while ROLLBACK
+// is on its way retires the pool too, and answers once ROLLBACK does. The answer is fixed once COMMIT or
+// ROLLBACK is acknowledged, before the reset: a reset that fails, or a close or abort while it runs, retires the pool and
+// changes nothing about the answer, which an abort or a close then gives at once. Nothing is retried or replayed.
 import type { PgRows } from './postgresTransactionalStore.js';
 
 /** A statement the driver has built: a promise of its rows that runs when first awaited, handed to its connection by `handler`. */
@@ -98,7 +115,8 @@ export class TransactionFailure {
 export interface SupervisedPgClient {
   /**
    * `work` in one transaction on one reserved connection under `bounds`: its value once committed; its own failure once
-   * rolled back; otherwise TransactionFailure.unavailable, or TransactionFailure.outcomeUnknown.
+   * rolled back; otherwise TransactionFailure.unavailable, or TransactionFailure.outcomeUnknown. The connection is reset
+   * before it serves another transaction, or its pool retired; neither changes the answer.
    */
   transaction<T>(signal: AbortSignal, bounds: TransactionBounds, work: (sql: PgTransactionScope) => Promise<T>): Promise<T>;
   /** Refuses every later transaction, lets those in flight finish for up to RETIRED_POOL_GRACE_S, then ends every pool. */
@@ -144,6 +162,8 @@ const OPEN = tagged('select 1');
 const BEGIN = tagged('begin');
 const COMMIT = tagged('commit');
 const ROLLBACK = tagged('rollback');
+/** The whole session back to how it opened: CLOSE ALL, SET SESSION AUTHORIZATION DEFAULT, RESET ALL, DEALLOCATE ALL, UNLISTEN *, pg_advisory_unlock_all(), DISCARD PLANS, TEMP and SEQUENCES. Refused inside a transaction block. */
+const RESET = tagged('discard all');
 // The transaction's bounds, and its search path: pg_catalog, then pg_temp — no schema a less privileged role could write to,
 // so an operator or function placed there is never a candidate beside pg_catalog's own.
 const SETTINGS = tagged("select pg_catalog.set_config('lock_timeout', ", ", true), pg_catalog.set_config('statement_timeout', ",
@@ -168,11 +188,19 @@ interface Waiter {
   readonly resolve: (pool: Pool) => void;
   readonly reject: () => void;
 }
+/** A transaction's answer: the body's value, or the failure it ends with. */
+type Outcome = { readonly value: unknown } | { readonly failure: unknown };
 interface Flight {
+  /** COMMIT is on its way: only its own outcome answers, not an abort nor a close. */
   committing: boolean;
+  /** ROLLBACK is on its way: a close answers with its outcome, a few microtasks on, not before it. */
+  rollingBack: boolean;
+  /** The answer, once COMMIT or ROLLBACK has settled it: nothing after — the reset, a close, an abort — changes it. */
+  outcome: Outcome | null;
   inFlight: DriverQuery | null;
+  /** Answers at once: the known outcome, or unavailable while none is known. */
   abandon: () => void;
-  /** Stops trusting the connection: nothing more is sent on it, and its pool is retired. */
+  /** Stops trusting the connection: nothing more is sent on it, and its pool is retired — at once, if the answer is known. */
   distrust: () => void;
 }
 
@@ -253,7 +281,8 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
         }
       }
     };
-    pool.driver = driver(url, { ...options, max: 1, onclose });
+    // `prepare` off: DISCARD ALL removes prepared statements, and a driver that kept one would send it again by itself.
+    pool.driver = driver(url, { ...options, max: 1, prepare: false, onclose });
     pools.add(pool);
     return pool;
   }
@@ -299,7 +328,7 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
     waiters.push(waiter);
   });
 
-  /** The pool back once a transaction is done with it: idle again only when nothing leaves the connection in doubt. */
+  /** The pool back once a transaction is done with it: idle again only when nothing leaves the connection in doubt — and, once anything was sent on it, only after its reset. */
   function giveBack(pool: Pool, reserved: DriverReserved | null, usable: boolean): void {
     const gate = pool.gate;
     pool.gate = null;
@@ -321,9 +350,14 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
 
   async function run<T>(signal: AbortSignal, bounds: TransactionBounds, work: (sql: PgTransactionScope) => Promise<T>, flight: Flight): Promise<T> {
     const pool = await acquire(signal);
-    const gate: Gate = { closed: pool.closed, lost: () => { if (!flight.committing) flight.abandon(); } };
+    const gate: Gate = { closed: pool.closed, lost: () => { if (flight.outcome !== null || !(flight.committing || flight.rollingBack)) flight.abandon(); } };
     pool.gate = gate;
-    flight.distrust = () => { gate.closed = true; };
+    flight.distrust = () => {
+      gate.closed = true;
+      // Nothing on this connection is waited out — a body, a statement or a reset that never finishes: the pool is retired
+      // now and a waiting caller served — while it is still this transaction's, never once it is idle again or another's.
+      if (pool.gate === gate) retire(pool);
+    };
     if (gate.closed || signal.aborted) {
       giveBack(pool, null, true);
       throw TransactionFailure.unavailable;
@@ -331,7 +365,7 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
     let commitHandedOver = false;
 
     /** THE dispatcher: every statement of this transaction, the kernel's own included — on the pool only to open it. */
-    const dispatch = (sql: DriverStatement, strings: TemplateStringsArray, values: readonly unknown[], commit = false): Promise<PgRows> => {
+    const dispatch = (sql: DriverStatement, strings: TemplateStringsArray, values: readonly unknown[], ending: 'commit' | 'rollback' | null = null): Promise<PgRows> => {
       if (gate.closed) return Promise.reject(CLOSED);
       if (flight.inFlight !== null) return Promise.reject(REFUSED);
       const query = sql(strings, ...values);
@@ -347,10 +381,14 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
           q.reject(CLOSED);
           return undefined;
         }
-        if (commit) {
+        if (ending === 'commit') {
           // From here COMMIT is on its way: neither an abort nor a close answers before its own outcome does.
           commitHandedOver = true;
           flight.committing = true;
+        } else if (ending === 'rollback') {
+          // ROLLBACK too, for a close — which the driver reports only after rejecting it, so its outcome follows at once. An
+          // acknowledgement the close lands behind still settles the answer: the body's own failure.
+          flight.rollingBack = true;
         }
         return (handOver as (q: DriverQuery) => unknown)(q);
       };
@@ -403,12 +441,14 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
       throw TransactionFailure.unavailable;
     }
     const params = new WeakSet<object>();
+    /** The body has settled: its statement function — kept past it, or called from a timer — reaches nothing any more. */
+    let bodyDone = false;
 
     const statement = (strings: TemplateStringsArray, ...values: unknown[]): Promise<PgRows> => {
       const leading = isFixedText(strings) ? LEADING_WORD_RE.exec(strings[0]) : null;
       if (leading === null || !BODY_WORDS.has(leading[1].toLowerCase())) return Promise.reject(REFUSED);
       if (!values.every((v) => isPlainValue(v) || (typeof v === 'object' && v !== null && params.has(v)))) return Promise.reject(REFUSED);
-      if (signal.aborted) return Promise.reject(REFUSED);
+      if (bodyDone || signal.aborted) return Promise.reject(REFUSED);
       return dispatch(reserved, strings, values);
     };
     const json = (value: unknown): unknown => {
@@ -427,45 +467,70 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
       }
       if (gate.closed) return false;
       try {
-        await dispatch(reserved, ROLLBACK, []);
+        await dispatch(reserved, ROLLBACK, [], 'rollback');
+        return true; // a close after the acknowledgement leaves the transaction rolled back; the reset then refuses the connection
+      } catch {
+        return false;
+      }
+    };
+
+    /**
+     * DISCARD ALL iff the connection may serve another transaction: nothing in flight, the gate open, the caller still
+     * waiting (its signal is what bounds the reset), the client not ending. True once acknowledged with the gate still open.
+     */
+    const reset = async (): Promise<boolean> => {
+      if (gate.closed || flight.inFlight !== null || signal.aborted || ended) return false;
+      try {
+        await dispatch(reserved, RESET, []);
         return !gate.closed;
       } catch {
         return false;
       }
+    };
+    /**
+     * The transaction's answer is `outcome`, fixed before anything more is sent. A connection whose transaction definitely
+     * ended — COMMIT or ROLLBACK acknowledged — is reset, and only a reset connection is released; otherwise, or when the
+     * reset fails, the pool is retired. Only then is the pool free for a waiter — and only then does the answer return.
+     */
+    const settle = async (outcome: Outcome, definitelyEnded: boolean): Promise<T> => {
+      flight.outcome = outcome;
+      giveBack(pool, reserved, definitelyEnded && await reset());
+      if ('value' in outcome) return outcome.value as T;
+      throw outcome.failure;
     };
 
     try {
       await dispatch(reserved, BEGIN, []);
       await dispatch(reserved, SETTINGS, [bounds.lock, bounds.statement, bounds.idle]);
     } catch {
-      giveBack(pool, reserved, await rollback());
-      throw TransactionFailure.unavailable;
+      return settle({ failure: TransactionFailure.unavailable }, await rollback());
     }
     let value: T;
     try {
       value = await work(scope);
     } catch (bodyFailure) {
+      bodyDone = true;
       const rolledBack = await rollback();
-      giveBack(pool, reserved, rolledBack);
-      if (rolledBack && !signal.aborted) throw bodyFailure;
-      throw TransactionFailure.unavailable;
+      return settle({ failure: rolledBack && !signal.aborted ? bodyFailure : TransactionFailure.unavailable }, rolledBack);
     }
+    bodyDone = true;
     if (gate.closed || signal.aborted || flight.inFlight !== null) {
       // The connection is in doubt, the deadline passed during the body, or the body left a statement running: never commit.
-      giveBack(pool, reserved, await rollback());
-      throw TransactionFailure.unavailable;
+      return settle({ failure: TransactionFailure.unavailable }, await rollback());
     }
+    let committed: PgRows;
     try {
-      await dispatch(reserved, COMMIT, [], true);
+      committed = await dispatch(reserved, COMMIT, [], 'commit');
     } catch (err) {
       // Refused before the driver took it: nothing was sent. A server ERROR at COMMIT rolled the transaction back on a
       // connection still open. Anything else, once COMMIT was handed over, may have committed.
       const rolledBack = !commitHandedOver || (isStatementError(err) && !gate.closed);
-      giveBack(pool, reserved, commitHandedOver && rolledBack);
-      throw rolledBack ? TransactionFailure.unavailable : TransactionFailure.outcomeUnknown;
+      return settle({ failure: rolledBack ? TransactionFailure.unavailable : TransactionFailure.outcomeUnknown }, commitHandedOver && rolledBack);
     }
-    giveBack(pool, reserved, true);
-    return value;
+    // A block that an error the body caught left aborted ends at COMMIT with the answer ROLLBACK, and no error: nothing
+    // committed, and the transaction did end.
+    if (Reflect.get(committed, 'command') !== 'COMMIT') return settle({ failure: TransactionFailure.unavailable }, true);
+    return settle({ value }, true);
   }
 
   return Object.freeze({
@@ -474,20 +539,26 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
         || ![bounds.lock, bounds.statement, bounds.idle].every((b) => typeof b === 'string' && BOUND_RE.test(b))) {
         throw TransactionFailure.unavailable;
       }
-      const flight: Flight = { committing: false, inFlight: null, abandon: noop, distrust: noop };
-      const abandoned = new Promise<never>((_, reject) => { flight.abandon = () => reject(TransactionFailure.unavailable); });
+      const flight: Flight = { committing: false, rollingBack: false, outcome: null, inFlight: null, abandon: noop, distrust: noop };
+      const abandoned = new Promise<T>((resolve, reject) => {
+        flight.abandon = () => {
+          const known = flight.outcome;
+          if (known === null) reject(TransactionFailure.unavailable);
+          else if ('value' in known) resolve(known.value as T);
+          else reject(known.failure);
+        };
+      });
       abandoned.catch(noop);
-      // An abort before COMMIT is on its way answers at once, and so does the connection's close. A statement in flight is
-      // cancelled and its connection no longer trusted, so its pool is retired; with none, the transaction rolls back. Once
-      // COMMIT is on its way, only its own outcome answers.
+      // Once COMMIT is on its way, only its own outcome answers. Otherwise an abort stops trusting the connection and retires
+      // its pool at once — after cancelling a body statement in flight, so the server stops it — and answers: unavailable
+      // before any outcome is known, the known outcome once it is (the reset running), and ROLLBACK's own outcome, which the
+      // retirement brings at once, while ROLLBACK is on its way.
       const onAbort = (): void => {
-        if (flight.committing) return;
+        if (flight.committing && flight.outcome === null) return;
         const query = flight.inFlight;
-        if (query !== null) {
-          flight.distrust();
-          void Promise.resolve().then(() => query.cancel()).catch(noop);
-        }
-        flight.abandon();
+        if (query !== null && flight.outcome === null && !flight.rollingBack) void Promise.resolve().then(() => query.cancel()).catch(noop);
+        flight.distrust();
+        if (flight.outcome !== null || !flight.rollingBack) flight.abandon();
       };
       signal.addEventListener('abort', onAbort, { once: true });
       const transaction = run(signal, bounds, work, flight);

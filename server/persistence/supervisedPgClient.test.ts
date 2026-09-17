@@ -1,4 +1,4 @@
-// Phase 4.0 M6-PG-P6 — the transaction kernel's own rules, without a database (docs/phase-4/08 DA-15, DA-19, DA-20).
+// Phase 4.0 M6-PG-P6/P7 — the transaction kernel's own rules, without a database (docs/phase-4/08 DA-15, DA-19, DA-20, DA-21).
 //
 // The fake driver below keeps the pinned driver's orderings that matter, and nothing else: a statement runs when first
 // awaited and is handed to its connection by its `handler` one microtask later; a close rejects the statement in flight,
@@ -17,8 +17,15 @@ const live = (): AbortSignal => new AbortController().signal;
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const serverError = (code: string): Error => Object.assign(new Error(`M6-UNIT-CANARY ${code}`), { code, severity: 'ERROR' });
 const lost = (): Error => Object.assign(new Error('M6-UNIT-CANARY CONNECTION_CLOSED'), { code: 'CONNECTION_CLOSED' });
+/** A shared order for the fake's events: which came first, a statement's cancel or its connection's end. */
+let clock = 0;
 
-type Reply = { rows?: Record<string, unknown>[]; answer?: unknown; error?: Error; hold?: Promise<void> };
+/**
+ * `after` runs as soon as the statement is answered, before anything awaiting that answer — where a close lands behind it.
+ * `stall`: never answered, and a cancel changes nothing — a network that has gone quiet; only closing the connection ends it.
+ * `command`: the tag the answer carries, as the driver reports it (by default the statement's first word).
+ */
+type Reply = { rows?: Record<string, unknown>[]; command?: string; answer?: unknown; error?: Error; hold?: Promise<void>; after?: () => void; stall?: boolean };
 /** The fake's answer to a statement: its text, and whether it was built on the pool rather than a reserved connection. */
 type Replier = (text: string, onPool: boolean) => Reply;
 interface FakeConnection {
@@ -28,12 +35,19 @@ interface FakeConnection {
   released: number;
   reserves: number;
   ended: boolean;
+  /** When end() was called (the shared clock), 0 if never. */
+  endedAt: number;
+  /** Every statement handed to this connection. */
+  readonly queries: FakeQuery[];
   inFlight: FakeQuery | null;
   close(error?: Error): void;
 }
 class FakeQuery {
   handler: (q: FakeQuery) => void;
   settled = false;
+  cancellable = true;
+  /** When cancel() was called (the shared clock), 0 if never — whether or not it could still reach the statement. */
+  cancelledAt = 0;
   private started = false;
   private readonly promise: Promise<unknown>;
   private resolveFn: (v: unknown) => void = () => undefined;
@@ -51,7 +65,7 @@ class FakeQuery {
   }
   resolve(v: unknown): void { if (!this.settled) { this.settled = true; this.resolveFn(v); } }
   reject(e: unknown): void { if (!this.settled) { this.settled = true; this.rejectFn(e); } }
-  cancel(): void { this.reject(Object.assign(new Error('canceling statement'), { code: '57014', severity: 'ERROR' })); }
+  cancel(): void { this.cancelledAt = ++clock; if (this.cancellable) this.reject(Object.assign(new Error('canceling statement'), { code: '57014', severity: 'ERROR' })); }
 }
 
 /** A fake driver: every pool it builds, what each connection was handed, and the writes a real driver would make after a close. */
@@ -62,7 +76,7 @@ function fakeDriver(reply: Replier = () => ({}), onBuild: (text: string) => void
   const driver = (_url: string, options: Record<string, unknown>): DriverPool => {
     built.push(options);
     const conn: FakeConnection = {
-      id: connections.length + 1, texts: [], closed: false, released: 0, reserves: 0, ended: false, inFlight: null,
+      id: connections.length + 1, texts: [], closed: false, released: 0, reserves: 0, ended: false, endedAt: 0, queries: [], inFlight: null,
       close(error = lost()) {
         if (conn.closed) return;
         conn.closed = true;
@@ -74,13 +88,19 @@ function fakeDriver(reply: Replier = () => ({}), onBuild: (text: string) => void
     const execute = (onPool: boolean) => (q: FakeQuery): void => {
       if (conn.closed || conn.ended) { writesAfterClose++; return; }
       conn.texts.push(`${onPool ? 'pool:' : ''}${q.text}`);
+      conn.queries.push(q);
       conn.inFlight = q;
       const r = reply(q.text, onPool);
+      if (r.stall === true) {
+        q.cancellable = false;
+        return;
+      }
       void Promise.resolve(r.hold).then(() => {
         if (conn.inFlight === q) conn.inFlight = null;
         if (r.error !== undefined) q.reject(r.error);
         else if (r.answer !== undefined) q.resolve(r.answer);
-        else q.resolve(Object.assign(r.rows ?? [{}], { count: (r.rows ?? [{}]).length, state: { pid: 1, secret: 2 } }));
+        else q.resolve(Object.assign(r.rows ?? [{}], { count: (r.rows ?? [{}]).length, command: r.command ?? q.text.split(/\s/)[0].toUpperCase(), state: { pid: 1, secret: 2 } }));
+        r.after?.();
       });
     };
     const reserved = Object.assign((strings: TemplateStringsArray) => {
@@ -91,7 +111,7 @@ function fakeDriver(reply: Replier = () => ({}), onBuild: (text: string) => void
       json: (value: unknown) => ({ jsonParameter: value }),
       release: () => { if (conn.closed) writesAfterClose++; conn.released++; },
     });
-    const end = async (): Promise<void> => { conn.ended = true; conn.inFlight?.reject(lost()); };
+    const end = async (): Promise<void> => { conn.ended = true; conn.endedAt = ++clock; conn.inFlight?.reject(lost()); };
     const reserve = async (): Promise<typeof reserved> => { conn.reserves++; return reserved; };
     return Object.assign((strings: TemplateStringsArray) => new FakeQuery(strings.join('$'), execute(true)), { reserve, end }) as unknown as DriverPool;
   };
@@ -100,8 +120,8 @@ function fakeDriver(reply: Replier = () => ({}), onBuild: (text: string) => void
 
 const clientOver = (fake: ReturnType<typeof fakeDriver>, max = 2, extra: Record<string, unknown> = {}) =>
   createSupervisedPgClient(fake.driver, 'postgres://unit.invalid/db', { max, prepare: false, ...extra });
-const kinds = (texts: readonly string[]): string[] =>
-  texts.map((t) => (t.startsWith('pool:') ? `open ${t.slice(5)}` : /^(begin|commit|rollback)$/.test(t) ? t : /set_config/.test(t) ? 'settings' : 'body'));
+const kinds = (texts: readonly string[]): string[] => texts.map((t) =>
+  (t.startsWith('pool:') ? `open ${t.slice(5)}` : /^(begin|commit|rollback)$/.test(t) ? t : t === 'discard all' ? 'reset' : /set_config/.test(t) ? 'settings' : 'body'));
 const isUnavailable = (err: unknown): boolean => err === TransactionFailure.unavailable;
 
 test('options are checked, and nothing is opened before a transaction needs it', () => {
@@ -113,18 +133,19 @@ test('options are checked, and nothing is opened before a transaction needs it',
   assert.equal(fake.built.length, 0);
 });
 
-test('a transaction runs BEGIN, its settings, the body and COMMIT on one reserved connection of a one-connection pool, then releases it', async () => {
+test('a transaction runs BEGIN, its settings, the body and COMMIT on one reserved connection of a one-connection pool, resets it, then releases it', async () => {
   const fake = fakeDriver((text) => ({ rows: /select 7/.test(text) ? [{ n: 7 }] : [{}] }));
   const observed: unknown[] = [];
-  const client = clientOver(fake, 2, { onclose: (id: unknown) => observed.push(id) });
+  const client = clientOver(fake, 2, { onclose: (id: unknown) => observed.push(id), prepare: true });
   assert.equal(await client.transaction(live(), BOUNDS, async (sql) => (await sql`select 7 as n`)[0].n), 7);
-  assert.deepEqual([fake.built.length, fake.built[0].max, typeof fake.built[0].onclose], [1, 1, 'function'], 'max forced to 1, onclose the kernel\'s own');
+  assert.deepEqual([fake.built.length, fake.built[0].max, fake.built[0].prepare, typeof fake.built[0].onclose], [1, 1, false, 'function'],
+    'max forced to 1, prepare forced off (DISCARD ALL removes prepared statements), onclose the kernel\'s own');
   const [conn] = fake.connections;
-  assert.deepEqual(kinds(conn.texts), ['open select 1', 'begin', 'settings', 'body', 'commit']);
+  assert.deepEqual(kinds(conn.texts), ['open select 1', 'begin', 'settings', 'body', 'commit', 'reset']);
   assert.equal(conn.released, 1);
   await client.transaction(live(), BOUNDS, async (sql) => sql`select 1`);
   assert.equal(fake.built.length, 1, 'the idle pool is reused');
-  assert.deepEqual(kinds(conn.texts).slice(5), ['begin', 'settings', 'body', 'commit'], 'and its open connection is not opened again');
+  assert.deepEqual(kinds(conn.texts).slice(6), ['begin', 'settings', 'body', 'commit', 'reset'], 'and its open connection is not opened again');
   conn.close();
   assert.deepEqual(observed, [1], 'the caller\'s own onclose is still told');
   await client.end();
@@ -218,12 +239,14 @@ test('COMMIT: a server ERROR is unavailable on a reusable connection; a loss onc
   const errorAtCommit = fakeDriver((text) => (text === 'commit' ? { error: serverError('23505') } : {}));
   const c1 = clientOver(errorAtCommit);
   await assert.rejects(c1.transaction(live(), BOUNDS, async (sql) => sql`select 1`), isUnavailable);
-  assert.equal(errorAtCommit.connections[0].released, 1);
+  assert.deepEqual([kinds(errorAtCommit.connections[0].texts).slice(-2), errorAtCommit.connections[0].released], [['commit', 'reset'], 1],
+    'rolled back by the server: reset, then released');
 
   const lostAtCommit = fakeDriver((text) => (text === 'commit' ? { error: lost() } : {}));
   const c2 = clientOver(lostAtCommit);
   await assert.rejects(c2.transaction(live(), BOUNDS, async (sql) => sql`select 1`), (err: unknown) => err === TransactionFailure.outcomeUnknown);
-  assert.deepEqual([lostAtCommit.connections[0].released, lostAtCommit.connections[0].ended], [0, true]);
+  assert.deepEqual([lostAtCommit.connections[0].released, lostAtCommit.connections[0].ended, lostAtCommit.connections[0].texts.includes('discard all')], [0, true, false],
+    'an indeterminate COMMIT is never reset: the pool is retired');
 
   const closedBeforeCommit = fakeDriver();
   const c3 = clientOver(closedBeforeCommit);
@@ -242,7 +265,187 @@ test('a body that fails on a usable connection is rolled back and its own failur
   const refusal = new Error('M6-UNIT-CANARY a refusal');
   let runs = 0;
   await assert.rejects(client.transaction(live(), BOUNDS, async (sql) => { runs++; await sql`select 1`; throw refusal; }), (err: unknown) => err === refusal);
-  assert.deepEqual([kinds(fake.connections[0].texts), fake.connections[0].released, runs], [['open select 1', 'begin', 'settings', 'body', 'rollback'], 1, 1]);
+  assert.deepEqual([kinds(fake.connections[0].texts), fake.connections[0].released, runs], [['open select 1', 'begin', 'settings', 'body', 'rollback', 'reset'], 1, 1]);
+  await client.end();
+});
+
+test('the reset is sent only once COMMIT or ROLLBACK is acknowledged, and the connection is released only once the reset is: a caller waiting for the pool starts after it', async () => {
+  let letReset: () => void = () => undefined;
+  const resetHeld = new Promise<void>((resolve) => { letReset = resolve; });
+  const releasedAtReset: number[] = [];
+  const fake = fakeDriver((text) => {
+    if (text !== 'discard all') return {};
+    releasedAtReset.push(fake.connections[0].released);
+    return releasedAtReset.length === 1 ? { hold: resetHeld } : {};
+  });
+  const client = clientOver(fake, 1);
+  const order: string[] = [];
+  const first = client.transaction(live(), BOUNDS, async (sql) => { await sql`select 1`; order.push('first'); return 'first'; });
+  const second = client.transaction(live(), BOUNDS, async (sql) => { order.push('second'); await sql`select 2`; throw new Error('M6-UNIT-CANARY second refused'); });
+  for (let i = 0; i < 10; i++) await tick();
+  const [conn] = fake.connections;
+  assert.deepEqual([kinds(conn.texts), order, conn.released], [['open select 1', 'begin', 'settings', 'body', 'commit', 'reset'], ['first'], 0],
+    'COMMIT acknowledged and its reset still running: the connection is not released, and the waiting caller has not started');
+  letReset();
+  assert.equal(await first, 'first');
+  await assert.rejects(second, /second refused/);
+  assert.deepEqual([kinds(conn.texts).slice(6), releasedAtReset, conn.released, fake.built.length], [['begin', 'settings', 'body', 'rollback', 'reset'], [0, 1], 2, 1],
+    'the waiting caller ran on the same connection once it was reset, and its ROLLBACK was reset before release too');
+  await client.end();
+});
+
+test('a close before the reset, while it runs, or between its build and its hand-off keeps the known answer, writes nothing after the close, and retires the pool', async () => {
+  const refusal = new Error('M6-UNIT-CANARY refused by the body');
+  for (const ending of ['commit', 'rollback'] as const) {
+    for (const when of ['before', 'during', 'hand-off'] as const) {
+      let armed = true; // the first transaction's connection only; the next transaction's runs untouched
+      const close = (): void => { armed = false; fake.connections[0].close(); };
+      const fake = fakeDriver(
+        (text) => (!armed ? {} : when === 'before' && text === ending ? { after: close } // answered, and closed before anything sees the answer
+          : when === 'during' && text === 'discard all' ? { hold: new Promise<void>(() => { setImmediate(close); }) } : {}),
+        (text) => { if (armed && when === 'hand-off' && text === 'discard all') close(); },
+      );
+      const client = clientOver(fake);
+      const answer = client.transaction(live(), BOUNDS, async (sql) => {
+        await sql`select 1`;
+        if (ending === 'rollback') throw refusal;
+        return 'applied';
+      });
+      if (ending === 'commit') assert.equal(await answer, 'applied', `${ending}/${when}: the committed answer stands`);
+      else await assert.rejects(answer, (err: unknown) => err === refusal, `${ending}/${when}: the body's own failure stands`);
+      for (let i = 0; i < 3; i++) await tick();
+      const [conn] = fake.connections;
+      const handed = ['open select 1', 'begin', 'settings', 'body', ending, ...(when === 'during' ? ['reset'] : [])];
+      assert.deepEqual([kinds(conn.texts), fake.writesAfterClose(), conn.released, conn.ended], [handed, 0, 0, true],
+        `${ending}/${when}: no reset handed over after the close, nothing written to it, never released, the pool retired`);
+      assert.equal(await client.transaction(live(), BOUNDS, async () => 'next'), 'next');
+      assert.equal(fake.connections.length, 2, `${ending}/${when}: the next transaction opens a fresh pool`);
+      await client.end();
+    }
+  }
+});
+
+test('an abort while the reset stalls answers the committed outcome at once and retires the pool then: the waiting caller is served by a fresh pool, never that connection', async () => {
+  let resets = 0;
+  const fake = fakeDriver((text) => (text === 'discard all' && ++resets === 1 ? { stall: true } : {}));
+  const client = clientOver(fake, 1);
+  const ctl = new AbortController();
+  const answer = client.transaction(ctl.signal, BOUNDS, async (sql) => { await sql`select 1`; return 'applied'; });
+  const waiting = client.transaction(live(), BOUNDS, async (sql) => (await sql`select 2`).length);
+  for (let i = 0; i < 10; i++) await tick();
+  const [conn] = fake.connections;
+  assert.deepEqual(kinds(conn.texts).slice(-2), ['commit', 'reset'], 'COMMIT acknowledged, the reset in flight');
+  ctl.abort();
+  assert.equal(await answer, 'applied', 'the abort answers what committed, never unavailable');
+  assert.equal(await waiting, 1);
+  assert.deepEqual([conn.released, conn.ended, fake.connections.length, kinds(fake.connections[1].texts)[0], fake.writesAfterClose()], [0, true, 2, 'open select 1', 0],
+    'a reset no cancel reaches does not hold the pool: it is retired unreleased at the abort, and the waiting caller served by a fresh pool');
+  await client.end();
+});
+
+test('a reset that fails is never retried and nothing is replayed: the committed answer stands, the body ran once, and the pool is retired', async () => {
+  for (const failure of [serverError('25001'), lost()]) {
+    let runs = 0;
+    const fake = fakeDriver((text) => (text === 'discard all' ? { error: failure } : {}));
+    const client = clientOver(fake);
+    assert.equal(await client.transaction(live(), BOUNDS, async (sql) => { runs++; await sql`insert into t values (1)`; return 'applied'; }), 'applied');
+    const [conn] = fake.connections;
+    assert.deepEqual([kinds(conn.texts), runs, conn.released, conn.ended], [['open select 1', 'begin', 'settings', 'body', 'commit', 'reset'], 1, 0, true], String(failure.message));
+    await client.end();
+  }
+});
+
+test('an abort retires the pool at once: a body that never finishes, a statement no cancel reaches, or a ROLLBACK that never answers holds no pool, and the caller waiting for it is served by a fresh one', async () => {
+  for (const stuck of ['body', 'statement', 'rollback'] as const) {
+    const fake = fakeDriver((text) => ((stuck === 'statement' && /pg_sleep/.test(text)) || (stuck === 'rollback' && text === 'rollback') ? { stall: true } : {}));
+    const client = clientOver(fake, 1);
+    const ctl = new AbortController();
+    const answer = client.transaction(ctl.signal, BOUNDS, async (sql) => {
+      await sql`select 1`;
+      if (stuck === 'body') await new Promise<void>(() => undefined);
+      if (stuck === 'statement') await sql`select pg_sleep(1000)`;
+      throw new Error('M6-UNIT-CANARY refused');
+    });
+    const waiting = client.transaction(live(), BOUNDS, async () => 'served');
+    for (let i = 0; i < 10; i++) await tick();
+    ctl.abort();
+    await assert.rejects(answer, isUnavailable, `${stuck}: nothing committed`);
+    assert.equal(await waiting, 'served', `${stuck}: the waiting caller is served`);
+    const [conn] = fake.connections;
+    const handed = ['open select 1', 'begin', 'settings', 'body', ...(stuck === 'statement' ? ['body'] : stuck === 'rollback' ? ['rollback'] : [])];
+    assert.deepEqual([kinds(conn.texts), conn.released, conn.ended, fake.connections.length, fake.writesAfterClose()], [handed, 0, true, 2, 0],
+      `${stuck}: nothing more sent on the aborted connection — no ROLLBACK, no reset — never released, retired, and a fresh pool served the next caller`);
+    const cancelled = conn.queries.filter((q) => q.cancelledAt > 0);
+    assert.deepEqual([cancelled.map((q) => q.text), cancelled.every((q) => q.cancelledAt < conn.endedAt)], [stuck === 'statement' ? ['select pg_sleep(1000)'] : [], true],
+      `${stuck}: only a body statement in flight is cancelled — once, and before the connection is ended; never ROLLBACK`);
+    await client.end();
+  }
+});
+
+test('once end() has begun, a transaction still finishing — its body or its reset — answers, and its connection is retired rather than reset or reused, within the grace', async () => {
+  for (const at of ['body', 'reset'] as const) {
+    let finish: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    const fake = fakeDriver((text) => (at === 'reset' && text === 'discard all' ? { hold: held } : {}));
+    const client = clientOver(fake);
+    const answer = client.transaction(live(), BOUNDS, async (sql) => { await sql`select 1`; if (at === 'body') await held; return 'applied'; });
+    for (let i = 0; i < 10; i++) await tick();
+    const t = Date.now();
+    const ended = client.end();
+    finish();
+    assert.equal(await answer, 'applied', `${at}: the committed answer`);
+    await ended;
+    const [conn] = fake.connections;
+    assert.deepEqual([kinds(conn.texts).slice(-1), conn.released, conn.ended, Date.now() - t < RETIRED_POOL_GRACE_S * 1_000],
+      [[at === 'body' ? 'commit' : 'reset'], 0, true, true], `${at}: no reset sent once end() began, never released, retired, end() within its grace`);
+  }
+});
+
+test('the body\'s statement function stops at the end of its body: kept and called later — while the reset runs, once the pool is idle, or during the next transaction — it is refused and reaches no connection', async () => {
+  for (const when of ['reset', 'idle', 'next'] as const) {
+    let letReset: () => void = () => undefined;
+    const resetHeld = new Promise<void>((resolve) => { letReset = resolve; });
+    let letNext: () => void = () => undefined;
+    const nextHeld = new Promise<void>((resolve) => { letNext = resolve; });
+    let resets = 0;
+    const fake = fakeDriver((text) => (text === 'discard all' && ++resets === 1 && when === 'reset' ? { hold: resetHeld } : /'next'/.test(text) ? { hold: nextHeld } : {}));
+    const client = clientOver(fake, 1);
+    let kept: PgTransactionScope | null = null;
+    const first = client.transaction(live(), BOUNDS, async (sql) => { kept = sql; await sql`select 1`; return 'applied'; });
+    for (let i = 0; i < 10; i++) await tick();
+    const late = (): Promise<string> => (kept as unknown as PgTransactionScope)`select pg_catalog.set_config('app.tenant_id', 'x', false)`.then(() => 'ran', () => 'refused');
+    let next: Promise<unknown> | null = null;
+    let seen: string;
+    if (when === 'reset') {
+      seen = await late();
+      letReset();
+      await first;
+    } else {
+      await first;
+      if (when === 'next') {
+        next = client.transaction(live(), BOUNDS, async (sql) => sql`select 'next'`);
+        for (let i = 0; i < 10; i++) await tick();
+      }
+      seen = await late();
+      letNext();
+      await next;
+    }
+    const texts = kinds(fake.connections[0].texts);
+    assert.equal(seen, 'refused', `${when}: refused`);
+    assert.equal(fake.connections[0].texts.some((t) => t.includes('app.tenant_id')), false, `${when}: nothing of it reached the connection`);
+    assert.deepEqual(texts.slice(0, 6), ['open select 1', 'begin', 'settings', 'body', 'commit', 'reset'], `${when}: the transaction itself ran as ever`);
+    await client.end();
+  }
+});
+
+test('a COMMIT the server answers ROLLBACK — a block an error the body caught left aborted — is unavailable, never the body\'s value; the transaction did end, so the connection is reset and reused', async () => {
+  let commits = 0;
+  const fake = fakeDriver((text) => (text === 'commit' && ++commits === 1 ? { command: 'ROLLBACK' } : /1\/0/.test(text) ? { error: serverError('22012') } : {}));
+  const client = clientOver(fake);
+  await assert.rejects(client.transaction(live(), BOUNDS, async (sql) => { await sql`select 1/0`.catch(() => undefined); return 'applied'; }), isUnavailable);
+  const [conn] = fake.connections;
+  assert.deepEqual([kinds(conn.texts).slice(-2), conn.released], [['commit', 'reset'], 1]);
+  assert.equal(await client.transaction(live(), BOUNDS, async () => 'next'), 'next', 'and a COMMIT answered COMMIT is the body\'s value');
   await client.end();
 });
 
@@ -280,7 +483,7 @@ test('only fixed text beginning with SELECT, INSERT, UPDATE, DELETE, WITH or VAL
     return 'ok';
   });
   assert.deepEqual(seen, Array(28).fill('refused'));
-  assert.deepEqual(kinds(fake.connections[0].texts), ['open select 1', 'begin', 'settings', 'body', 'body', 'body', 'body', 'commit'], 'none of them reached the connection');
+  assert.deepEqual(kinds(fake.connections[0].texts), ['open select 1', 'begin', 'settings', 'body', 'body', 'body', 'body', 'commit', 'reset'], 'none of them reached the connection');
   await client.end();
 });
 

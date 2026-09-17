@@ -1985,3 +1985,182 @@ test('M6-PG-33: a pool ended after its connection attempt was refused still open
   assert.deepEqual(run.result, { refused: true, answers: ['unavailable', 'unavailable', 'unavailable'], driverSessions: 1, kernelSessions: 0 },
     'the pinned driver still reconnects an ended pool (DA-15 (3) — re-read on any driver change); the kernel never reserves a connection that has not opened');
 });
+
+test('M6-PG-36: a connection lost around its reset — closed right behind the COMMIT or ROLLBACK answer, with DISCARD ALL unanswered, or between the reset\'s build and hand-off — or a caller aborting while the reset stalls: the answer stands, the effects exist once and replay, nothing reaches the closed connection, nothing is retried, and the caller queued behind it is served on a fresh connection', async () => {
+  // The last two statements the driver took on the lost connection: S a body statement, C COMMIT, R ROLLBACK, D the reset.
+  const tails = { before: { commit: 'SC', rollback: 'SR' }, during: { commit: 'CD', rollback: 'RD' }, handoff: { commit: 'SC', rollback: 'SR' }, abort: { commit: 'CD', rollback: 'RD' } };
+  for (const variant of ['before', 'during', 'handoff', 'abort']) {
+    const run = await inChild('reset', variant);
+    assert.equal(run.code, 0, `${variant}: the process lived and exited normally`);
+    assert.ok(!run.printed.includes(WRITE_AFTER_CLOSE), `${variant}: nothing was written to a dropped socket`);
+    assert.equal(run.result.variant, variant);
+    assert.deepEqual(run.result.steps.map((s) => s.ending), ['commit', 'rollback']);
+    for (const s of run.result.steps) {
+      const label = `${variant}, a command that ends in ${s.ending}`;
+      assert.deepEqual([s.answer, s.answeredWithinBound, s.next, s.nextWithinDeadline], [s.ending === 'commit' ? 'committed' : 'lease_lost', true, 'acquired', true],
+        `${label}: the known answer stands (an abort gives it at once), and the queued caller is served within its deadline`);
+      assert.deepEqual([s.completed, s.events, s.replay], [1, 1, 'replay'], `${label}: the command's effects exist exactly once, and replay`);
+      assert.deepEqual([s.afterClose, s.orphanEnds, s.closes, s.tails], [0, 0, 1, [tails[variant][s.ending]]],
+        `${label}: one connection lost, nothing taken on it after its close — no reset after it, and none retried — and every COMMIT or ROLLBACK after its own BEGIN`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// session hygiene: nothing a transaction leaves in its session reaches the next one on that connection (doc 08, DA-21)
+// ---------------------------------------------------------------------------
+
+/** Session state a body can leave through functions a SELECT calls, and a way to read a sequence's session value. */
+const HYGIENE_SQL = `
+create sequence if not exists m6_proof.hygiene_seq;
+create or replace function m6_proof.hygiene_leave() returns void language plpgsql security definer set search_path = pg_catalog, pg_temp as $$
+begin
+  listen m6_hygiene_channel;
+  create temp table m6_hygiene_temp (x integer) on commit preserve rows;
+  execute 'declare m6_hygiene_cursor cursor with hold for select 1';
+  execute 'prepare m6_hygiene_prepared as select 1';
+end
+$$;
+create or replace function m6_proof.hygiene_currval() returns text language plpgsql set search_path = pg_catalog, pg_temp as $$
+begin
+  return pg_catalog.currval('m6_proof.hygiene_seq')::text;
+exception when object_not_in_prerequisite_state then
+  return null;
+end
+$$;
+revoke all on function m6_proof.hygiene_leave(), m6_proof.hygiene_currval() from public;
+grant execute on function m6_proof.hygiene_leave(), m6_proof.hygiene_currval() to ${STORE_PROBE};
+grant usage on sequence m6_proof.hygiene_seq to ${STORE_PROBE};
+`;
+const HYGIENE_BOUNDS = Object.freeze({ lock: '2000ms', statement: '5000ms', idle: '10000ms' });
+
+test('M6-PG-34: nothing a transaction leaves in its session reaches the next one on the same connection — a setting, read-only mode, an advisory lock, LISTEN, a temporary table, a held cursor, a prepared statement, sequence state, a role; the same session without the reset keeps every one', async () => {
+  await ready();
+  await observer.unsafe(HYGIENE_SQL).simple();
+  const tenant = randomUUID();
+  const lockKey = 720_340;
+  const leave = (sql) => sql`select pg_catalog.pg_backend_pid() as pid, pg_catalog.set_config('app.tenant_id', ${tenant}, false) as tenant,
+    pg_catalog.set_config('default_transaction_read_only', 'on', false) as read_only, pg_catalog.pg_advisory_lock(${lockKey}) as locked,
+    m6_proof.hygiene_leave() as left_behind, pg_catalog.nextval('m6_proof.hygiene_seq') as sequence`;
+  const look = (sql) => sql`select pg_catalog.pg_backend_pid() as pid,
+    pg_catalog.current_setting('app.tenant_id', true) as tenant,
+    pg_catalog.current_setting('transaction_read_only') as read_only,
+    pg_catalog.array_to_string(array(select pg_catalog.pg_listening_channels()), ',') as channels,
+    (select count(*)::int from pg_catalog.pg_class where relnamespace = pg_catalog.pg_my_temp_schema() and relname = 'm6_hygiene_temp') as temps,
+    (select count(*)::int from pg_catalog.pg_cursors where name = 'm6_hygiene_cursor') as cursors,
+    (select count(*)::int from pg_catalog.pg_prepared_statements where name = 'm6_hygiene_prepared') as prepared,
+    (select count(*)::int from pg_catalog.pg_locks where locktype = 'advisory' and pid = pg_catalog.pg_backend_pid()) as advisory,
+    m6_proof.hygiene_currval() as sequence`;
+  const becomeApp = (sql) => sql`select pg_catalog.set_config('role', 'tmpos_app', false) as role`;
+  const whoAmI = (sql) => sql`select pg_catalog.pg_backend_pid() as pid, current_user::text as role`;
+  const lockFree = async () => {
+    const [{ got }] = await observer`select pg_catalog.pg_try_advisory_lock(${lockKey}) as got`;
+    if (got) await observer`select pg_catalog.pg_advisory_unlock(${lockKey})`;
+    return got;
+  };
+  /** Leave everything, read it back in the next transaction, then take a role and read that back too. */
+  const trace = async (inTransaction) => {
+    const [left] = await inTransaction(leave);
+    const lockFreeAfter = await lockFree();
+    const [seen] = await inTransaction(look);
+    await inTransaction(becomeApp);
+    const [who] = await inTransaction(whoAmI);
+    return {
+      oneSession: seen.pid === left.pid && who.pid === left.pid, lockFreeAfter,
+      tenant: seen.tenant, readOnly: seen.read_only, channels: seen.channels, temps: seen.temps, cursors: seen.cursors,
+      prepared: seen.prepared, advisory: seen.advisory, sequence: seen.sequence !== null, role: who.role,
+    };
+  };
+
+  const kernel = storeClient(1);
+  extraClients.push(kernel);
+  const viaKernel = await trace((statement) => kernel.transaction(live(), HYGIENE_BOUNDS, async (sql) => statement(sql)));
+  assert.deepEqual(viaKernel, {
+    oneSession: true, lockFreeAfter: true, tenant: '', readOnly: 'off', channels: '', temps: 0, cursors: 0, prepared: 0, advisory: 0, sequence: false, role: STORE_PROBE,
+  }, 'every transaction ran on the one session, and found none of it: the advisory lock was free the moment the call answered, and the setting is back to empty — a custom setting keeps its name after a reset, reading \'\' rather than unset, which migration 005\'s policies read as unset (nullif)');
+
+  // The positive control: the same principal, statements and session, through the driver alone — no reset between transactions.
+  const raw = postgres(driverDsn(TARGET_DSN, STORE_PROBE), { ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, ...CLIENT_OPTS, user: STORE_PROBE });
+  try {
+    const reserved = await raw.reserve();
+    const viaDriver = await trace(async (statement) => {
+      await reserved`begin`;
+      const rows = await statement(reserved);
+      await reserved`commit`;
+      return rows;
+    });
+    reserved.release();
+    assert.deepEqual(viaDriver, {
+      oneSession: true, lockFreeAfter: false, tenant, readOnly: 'on', channels: 'm6_hygiene_channel', temps: 1, cursors: 1, prepared: 1, advisory: 1, sequence: true, role: 'tmpos_app',
+    }, 'without the reset, the next transaction on that session finds every one of them');
+  } finally {
+    await raw.end({ timeout: 1 });
+  }
+  assert.equal(await lockFree(), true, 'the control session\'s lock ended with it');
+});
+
+test('M6-PG-35: one pool is reset and reused two hundred times, the driver keeping and re-sending no statement — prepare forced off even when asked for — and a caller queued for it runs only after its reset', async () => {
+  await ready();
+  const built = [];
+  const client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, STORE_PROBE), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, ...CLIENT_OPTS, user: STORE_PROBE,
+    prepare: true, debug: (_id, text) => built.push(text.trim()),
+  });
+  extraClients.push(client);
+  const CYCLES = 200;
+  const pids = new Set();
+  let unclean = 0;
+  for (let i = 0; i < CYCLES; i++) {
+    await client.transaction(live(), HYGIENE_BOUNDS, async (sql) => {
+      const [row] = await sql`select nullif(pg_catalog.current_setting('app.m6_cycle', true), '') as prior, pg_catalog.pg_backend_pid() as pid,
+        ${i}::int + ${1}::int as next, (select count(*)::int from pg_catalog.pg_prepared_statements) as prepared`;
+      await sql`select pg_catalog.set_config('app.m6_cycle', ${String(i)}, false) as cycle`;
+      pids.add(row.pid);
+      if (row.prior !== null || row.next !== i + 1 || row.prepared !== 0) unclean++;
+    });
+  }
+  const count = (match) => built.filter(match).length;
+  assert.deepEqual([pids.size, unclean], [1, 0], 'one session served every cycle; each began with the last one\'s setting gone, a right answer, and no prepared statement on the session');
+  assert.deepEqual([count((t) => t === 'discard all'), count((t) => t === 'commit'), count((t) => t.includes('app.m6_cycle'))], [CYCLES, CYCLES, 2 * CYCLES],
+    'one reset per COMMIT, and each statement taken by the driver exactly once: nothing was prepared, so nothing was re-sent');
+
+  const lockKey = 720_350;
+  const from = built.length;
+  let reached = () => undefined;
+  const holding = new Promise((resolve) => { reached = resolve; });
+  const first = client.transaction(live(), HYGIENE_BOUNDS, async (sql) => {
+    const [{ pid }] = await sql`select pg_catalog.pg_backend_pid() as pid, pg_catalog.pg_advisory_lock(${lockKey}) as locked`;
+    reached();
+    await sleep(200);
+    return pid;
+  });
+  await holding;
+  const second = client.transaction(live(), HYGIENE_BOUNDS, async (sql) => (await sql`select pg_catalog.pg_backend_pid() as pid,
+    (select count(*)::int from pg_catalog.pg_locks where locktype = 'advisory' and pid = pg_catalog.pg_backend_pid()) as advisory`)[0]);
+  const [firstPid, seen] = await Promise.all([first, second]);
+  const kinds = built.slice(from).map((t) => (t === 'begin' ? 'B' : t === 'commit' ? 'C' : t === 'discard all' ? 'D' : t.includes('lock_timeout') ? 'T' : 'S'));
+  assert.deepEqual(kinds, ['B', 'T', 'S', 'C', 'D', 'B', 'T', 'S', 'C', 'D'], 'the queued caller\'s BEGIN was taken only after the first transaction\'s reset');
+  assert.deepEqual([seen.pid, seen.advisory], [firstPid, 0], 'on the same session, with the first transaction\'s session lock already gone');
+});
+
+test('M6-PG-37: a body that catches its own statement error cannot commit — the server answers COMMIT with ROLLBACK and the call is unavailable, never the body\'s value — and a body\'s statement function kept past its transaction reaches nothing', async () => {
+  await ready();
+  const kernel = storeClient(1);
+  extraClients.push(kernel);
+  const caught = await kernel.transaction(live(), HYGIENE_BOUNDS, async (sql) => {
+    await sql`select 1 / 0 as never`.catch(() => undefined); // 22012: the block is now aborted, and the body swallows it
+    return 'applied';
+  }).then((v) => v, (e) => (e instanceof Error ? e.message : 'unavailable'));
+  assert.equal(caught, 'unavailable', 'nothing committed, and the caller is not told otherwise');
+
+  let kept = null;
+  const [{ pid }] = await kernel.transaction(live(), HYGIENE_BOUNDS, async (sql) => {
+    kept = sql;
+    return sql`select pg_catalog.pg_backend_pid() as pid`;
+  });
+  const late = await kept`select pg_catalog.set_config('app.tenant_id', ${randomUUID()}, false) as tenant`.then(() => 'ran', () => 'refused');
+  const [seen] = await kernel.transaction(live(), HYGIENE_BOUNDS, async (sql) => sql`select pg_catalog.pg_backend_pid() as pid,
+    nullif(pg_catalog.current_setting('app.tenant_id', true), '') as tenant`);
+  assert.deepEqual([late, seen.pid, seen.tenant], ['refused', pid, null], 'the kept function is refused, and the next transaction on that session finds no tenant');
+});
+

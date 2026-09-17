@@ -1,4 +1,5 @@
-// Phase 4.0 M6-PG-P5/P6 — one scenario per process, for M6-PG-24..27 and M6-PG-30..33 (docs/phase-4/08 DA-15, DA-17, DA-19, DA-20).
+// Phase 4.0 M6-PG-P5/P6/P7 — one scenario per process, for M6-PG-24..27, M6-PG-30..33 and M6-PG-36 (docs/phase-4/08 DA-15, DA-17, DA-19,
+// DA-20, DA-21).
 //
 // The pinned driver's first defect ends the process that meets it, so each scenario runs here, in a child of the PostgreSQL
 // suite, which reads its exit status, its one RESULT line and everything it printed. No scenario installs an
@@ -29,11 +30,24 @@ const settled = (p) => p.then(() => 'ok', codeOf);
 const live = () => new AbortController().signal;
 const outcomeOf = (p) => p.then((a) => a.outcome, (e) => (e instanceof Error && e.message === 'transactional_store_outcome_unknown' ? 'outcome_unknown' : 'rejected'));
 
+/** A chunk from the server that ends with ReadyForQuery: the point at which the driver settles the statement it answers. */
+const endsReady = (chunk) => chunk.length >= 6 && chunk[chunk.length - 6] === 0x5a && chunk.readUInt32BE(chunk.length - 5) === 5;
+
 /** The sockets the driver opens through this hook, so the last one can be cut, or closed at an exact point. */
 function sockets() {
   const opened = [];
+  let behind = null;
+  const closeNow = (s) => { s.destroy(); s.emit('close', false); };
   const hook = (o) => new Promise((resolve, reject) => {
     const s = o.path ? net.createConnection(o.path) : net.createConnection({ host: o.host[0], port: o.port[0] });
+    s.on('data', (chunk) => {
+      if (behind === null) return;
+      if (chunk.includes(behind.tag)) behind.seen = true;
+      if (!behind.seen || !endsReady(chunk)) return;
+      behind = null;
+      // The driver settles the statement in this same 'data' call; a tick runs before anything awaiting it can.
+      process.nextTick(() => closeNow(s));
+    });
     s.once('connect', () => { opened.push(s); resolve(s); });
     s.once('error', reject);
   });
@@ -41,31 +55,34 @@ function sockets() {
     hook,
     cut: () => opened[opened.length - 1].destroy(),
     /** Destroyed, and its close delivered to the driver now, within this very call. */
-    closeNow: () => { const s = opened[opened.length - 1]; s.destroy(); s.emit('close', false); },
+    closeNow: () => closeNow(opened[opened.length - 1]),
+    /** Closed right behind the server's next answer tagged `tag` (COMMIT, ROLLBACK): settled by the driver, unseen by its caller. */
+    closeBehindAnswer: (tag) => { behind = { tag: Buffer.from(`${tag}\0`), seen: false }; },
   };
 }
 
 /**
- * A TCP relay to the target: toward the driver, the last connection's FIN or reset, the server's answer to COMMIT swallowed, or
- * every new connection refused until restored.
+ * A TCP relay to the target: toward the driver, the last connection's FIN or reset, the server's answer to COMMIT or to the
+ * reset swallowed with the connection cut, the answer to the reset withheld on a connection left open, or every new connection
+ * refused until restored.
  */
 async function relay(who) {
   const t = targets[who];
   const u = new URL(t.dsn);
   const upstream = t.options.host ? { path: join(t.options.host, `.s.PGSQL.${u.port || 5432}`) } : { host: u.hostname, port: Number(u.port || 5432) };
   const pairs = [];
-  let dropCommit = false;
+  let drop = null; // the next statement whose answer is swallowed: its Parse text, and 'cut' or 'hold'
   const server = net.createServer((client) => {
     client.on('error', () => {});
     const db = net.connect(upstream);
     db.on('error', () => {});
-    const pair = { client, db, swallow: false };
+    const pair = { client, db, swallow: null };
     pairs.push(pair);
     client.on('data', (chunk) => {
-      if (dropCommit && chunk.includes(Buffer.from('\0commit\0'))) { dropCommit = false; pair.swallow = true; }
+      if (drop !== null && chunk.includes(drop.parse)) { pair.swallow = drop.mode; drop = null; }
       db.write(chunk);
     });
-    db.on('data', (chunk) => (pair.swallow ? (client.destroy(), db.destroy()) : client.write(chunk)));
+    db.on('data', (chunk) => (pair.swallow === 'cut' ? (client.destroy(), db.destroy()) : pair.swallow === null ? client.write(chunk) : undefined));
     client.on('close', () => db.destroy());
     db.on('close', () => client.destroy());
   });
@@ -78,7 +95,9 @@ async function relay(who) {
     restore: () => new Promise((resolve) => server.listen(port, '127.0.0.1', resolve)),
     fin: () => { last().client.end(); last().db.end(); },
     reset: () => { last().db.destroy(); last().client.resetAndDestroy(); },
-    dropNextCommitAnswer: () => { dropCommit = true; },
+    dropNextCommitAnswer: () => { drop = { parse: Buffer.from('\0commit\0'), mode: 'cut' }; },
+    dropNextResetAnswer: () => { drop = { parse: Buffer.from('\0discard all\0'), mode: 'cut' }; },
+    holdNextResetAnswer: () => { drop = { parse: Buffer.from('\0discard all\0'), mode: 'hold' }; },
     close: () => new Promise((resolve) => { for (const p of pairs) { p.client.destroy(); p.db.destroy(); } server.close(resolve); }),
   };
 }
@@ -88,12 +107,17 @@ function witness() {
   const closed = new Set();
   const built = new Map();
   let waiters = [];
-  const kind = (text) => (/^\s*begin\s*$/i.test(text) ? 'B' : /^\s*commit\s*$/i.test(text) ? 'C' : /^\s*rollback\s*$/i.test(text) ? 'R' : 'S');
+  let onReset = null;
+  const kind = (text) => (/^\s*begin\s*$/i.test(text) ? 'B' : /^\s*commit\s*$/i.test(text) ? 'C' : /^\s*rollback\s*$/i.test(text) ? 'R'
+    : /^\s*discard all\s*$/i.test(text) ? 'D' : 'S');
   return {
     debug: (id, text) => {
       if (!built.has(id)) built.set(id, []);
       built.get(id).push(`${kind(text)}${closed.has(id) ? '!' : ''}`);
+      if (kind(text) === 'D' && onReset !== null) { const told = onReset; onReset = null; told(); }
     },
+    /** Resolves when the driver next takes a reset. */
+    nextReset: () => new Promise((resolve) => { onReset = resolve; }),
     onclose: (id) => {
       closed.add(id);
       const ready = waiters;
@@ -118,15 +142,17 @@ function witness() {
           }
         }
       }
-      return { afterClose, orphanEnds, commits, connections: built.size, closes: closed.size };
+      // The last two statements the driver took on each connection that closed, in order of the close.
+      const tails = [...closed].map((id) => (built.get(id) ?? []).slice(-2).join(''));
+      return { afterClose, orphanEnds, commits, connections: built.size, closes: closed.size, tails };
     },
   };
 }
 
 /** The transaction kernel for `who`, as the runtime would compose one, over `transport` (a relay port or the socket hook). */
-function kernel(who, w, transport, max = 1) {
+function kernel(who, w, transport, max = 1, driver = postgres) {
   const t = targets[who];
-  return createSupervisedPgClient(postgres, t.dsn, {
+  return createSupervisedPgClient(driver, t.dsn, {
     ...runtimeClientOptions(t.dsn), ssl: false, max, idle_timeout: 0, connect_timeout: 2, ...t.options,
     ...(transport.port !== undefined ? { host: '127.0.0.1', port: transport.port } : { socket: transport.hook }),
     debug: w.debug, onclose: w.onclose,
@@ -363,6 +389,68 @@ async function orphan() {
   await r.close();
 }
 
+/**
+ * The reset (DA-21), for one way of losing it: 'before' — the close lands right behind the COMMIT or ROLLBACK answer, settled by
+ * the driver but unseen by the kernel; 'during' — DISCARD ALL reached the server and its answer is lost with the connection;
+ * 'handoff' — the close lands between the reset's build and the driver taking it (a pass-through proxy on the driver's reserved
+ * connection closes the socket as the kernel builds it); 'abort' — the reset's answer never comes, and the caller aborts while
+ * it waits. Each for a command that commits and for a fenced one the store rolls back (lease_lost), with another caller queued
+ * behind it for the only pool. The answer stands; the command's effects exist exactly once and replay; nothing is taken after
+ * the close; nothing is retried; the queued caller is served on a fresh connection.
+ */
+async function reset(variant) {
+  const steps = [];
+  for (const ending of ['commit', 'rollback']) {
+    const w = witness();
+    const transport = ['during', 'abort'].includes(variant) ? await relay('store') : sockets();
+    let closeAtBuild = false;
+    const proxied = (url, options) => {
+      const pool = postgres(url, options);
+      const watch = (reserved) => new Proxy(reserved, {
+        apply: (target, self, args) => {
+          const query = Reflect.apply(target, self, args);
+          if (closeAtBuild && Array.isArray(args[0]) && args[0][0] === 'discard all') { closeAtBuild = false; transport.closeNow(); }
+          return query;
+        },
+      });
+      return new Proxy(pool, { get: (target, key) => (key === 'reserve' ? async () => watch(await target.reserve()) : Reflect.get(target, key)) });
+    };
+    const client = kernel('store', w, transport, 1, variant === 'handoff' ? proxied : postgres);
+    const store = createPostgresTransactionalStore({ client, mutators: [mutatorOf(async () => 'applied')] });
+    const first = await held(store);
+    if (ending === 'rollback') await store.transactions.commit(first.command, live()); // committed: the same command again is fenced
+    const ctl = new AbortController();
+    let abortedAt = 0;
+    if (variant === 'before') transport.closeBehindAnswer(ending === 'commit' ? 'COMMIT' : 'ROLLBACK');
+    else if (variant === 'during') transport.dropNextResetAnswer();
+    else if (variant === 'handoff') closeAtBuild = true;
+    else {
+      transport.holdNextResetAnswer();
+      void w.nextReset().then(() => sleep(150)).then(() => { abortedAt = Date.now(); ctl.abort(); });
+    }
+    const started = Date.now();
+    const answer = outcomeOf(store.transactions.commit(first.command, variant === 'abort' ? ctl.signal : live()));
+    const queued = held(createPostgresTransactionalStore({ client, mutators: [mutatorOf(async () => 'applied')] }));
+    const settledAnswer = await answer;
+    const answeredMs = Date.now() - (abortedAt === 0 ? started : abortedAt); // the whole call, or from the abort
+    const t = Date.now();
+    const next = await queued;
+    const nextWithinDeadline = Date.now() - t < IDEMPOTENCY_DEADLINE_MS;
+    await sleep(300); // a write scheduled on a dropped socket would have ended this process by now
+    const owner = ownerSql();
+    const [effects] = await owner`select
+      (select count(*)::int from tmpos_internal.idempotency_record where scope = ${first.op.scope} and response is not null) as completed,
+      (select count(*)::int from tmpos_internal.outbox_event where correlation_id = ${first.command.audit.correlationId}) as events`;
+    const replay = await store.idempotency.acquire({ scope: first.op.scope, fingerprint: first.op.fingerprint, lease: randomBytes(32).toString('base64url'), leaseMs: 60_000, retentionMs: 600_000 }, live());
+    steps.push({ ending, answer: settledAnswer, answeredWithinBound: answeredMs < 2_000, next: next.acquired, nextWithinDeadline,
+      completed: effects.completed, events: effects.events, replay: replay.outcome, ...w.tally() });
+    await client.end();
+    await owner.end({ timeout: 1 });
+    if (transport.close !== undefined) await transport.close();
+  }
+  report({ variant, steps });
+}
+
 /** A NOTICE through the runtime's options, and one through the driver's default handler as the control. */
 async function notices() {
   const s = sockets();
@@ -388,8 +476,10 @@ const run = {
   shutdown,
   orphan,
   notices,
+  reset: () => reset(variant),
 }[scenario];
-if (targets === null || run === undefined || (scenario === 'gap' && !['fin', 'reset', 'terminate', 'sync', 'handoff'].includes(variant))) {
+if (targets === null || run === undefined || (scenario === 'gap' && !['fin', 'reset', 'terminate', 'sync', 'handoff'].includes(variant))
+  || (scenario === 'reset' && !['before', 'during', 'handoff', 'abort'].includes(variant))) {
   console.error('usage: M6_DEFECT_TARGETS=<json> pgDriverDefects.child.mjs <scenario> [variant]');
   process.exit(2);
 }

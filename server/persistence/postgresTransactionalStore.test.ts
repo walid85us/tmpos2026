@@ -99,7 +99,7 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
             if (failed && options.lost === true) { rejectFn(options.error); close(options.error as Error); } // the statement first, then the close
             else if (failed) rejectFn(options.error);
             else if (commitFails) rejectFn(options.commit);
-            else { const rows = rowsFor(text, values); resolveFn(Object.assign(rows, { count: rows.length })); }
+            else { const rows = rowsFor(text, values); resolveFn(Object.assign(rows, { count: rows.length, command: text.split(/\s/)[0].toUpperCase() })); }
           });
         },
         then: (a?: (v: unknown) => unknown, b?: (e: unknown) => unknown) => {
