@@ -178,6 +178,9 @@ async function held(store) {
     events: [{ type: 'conformance.item.created', payload: { name: 'defect', quantity: 1 } }], response: { status: 201, body: { id } },
   }, {
     scope: op.scope, lease, newAggregateId: id, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+    // These proofs are about the driver's close window, not about identity: no route resolves a
+    // principal yet, so the command commits without a trusted context, as the runtime does.
+    context: null,
     seal: (envelope) => KEYRING.seal(envelope, op),
   });
   return { op, acquired: acquired.outcome, command: prepared.command };

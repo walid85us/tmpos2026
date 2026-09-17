@@ -76,19 +76,26 @@ const PINNED = {
   // managed apply of 005 refuses at its exact-[005] plan gate (tests/quality/managed-m005-launcher.test.mjs).
   '006_m6_transactional_store.up.sql': '091933e19559d1d109580dd86cd381ada12398fbe1a93b011ac97e15c23dc68c',
   '006_m6_transactional_store.down.sql': '767afd8a194b5bfe4b8541af25342f12346d219b8bc046d588ddb18cf3d44ecc',
+  // Phase 4.0 M5-ID-P1 — the trusted principal-resolution and transaction-revalidation boundary: three
+  // routines in 006's schema, no table, no column, no role. Proved by
+  // tests/db/principalResolution.integration.test.mjs against disposable PostgreSQL only; applied to no
+  // managed, persistent or application database. It changes no exact-[005] gate: the derived managed
+  // plan simply lengthens, and that gate refuses any plan that is not exactly [005].
+  '007_m5_trusted_principal_resolution.up.sql': 'a3a9aa98b299cd343e35df6b9048ea1468f5b11668e7ea6996045cb514f7bcbe',
+  '007_m5_trusted_principal_resolution.down.sql': '1f3a130489d2c19a9cba27ece60d2937fa92956bf7b1d5e13cfa63602b697984',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twelve expected files', () => {
+test('the migrations directory holds exactly the fourteen expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

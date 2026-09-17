@@ -493,6 +493,9 @@ function prepared(kind, attempt, plan, newAggregateId) {
   const result = prepareCommand(COMMANDS.contract(kind), EVENTS, plan, {
     scope: attempt.op.scope, lease: attempt.lease, newAggregateId,
     authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+    // These proofs are about the store's own transaction, not about identity: no route resolves a
+    // principal yet, so every command here commits without a trusted context, as the runtime does.
+    context: null,
     seal: (envelope) => KEYRING.seal(envelope, attempt.op),
   });
   assert.ok(result !== null, 'the proof plans are in contract');
@@ -695,7 +698,7 @@ const insertRecord = (r) => observer`insert into tmpos_internal.idempotency_reco
 test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback, reverses cleanly and re-applies', async () => {
   assert.equal(applyReport.outcome, 'complete', `the trusted apply failed: ${applyReport.code}`);
   const ledger = await observer`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006'].map((v) => [v, false]),
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007'].map((v) => [v, false]),
     '001-006 are recorded clean in the ledger of the disposable database');
   await assertStorePosture('after the trusted apply');
   const [{ roles }] = await observer`select count(*)::int as roles from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')`;
