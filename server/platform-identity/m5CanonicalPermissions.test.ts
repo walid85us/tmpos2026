@@ -88,7 +88,8 @@ test('an unknown key or an unknown role grants nothing', () => {
 
 test('a tenant or store permission is undecidable, never allowed, until GAP-11 is settled', () => {
   // docs/phase-4/04 section 3 makes the ordering unification an M5 phase (i) migration with six
-  // mandatory safeguards, two of which are the owner's to make. Answering here would either keep the
+  // mandatory safeguards, one of which (#3, approval of the grant diff) is explicitly the owner's and
+  // one (#1, the per-action re-pin) is still an open policy choice. Answering here would either keep the
   // old tenant ordering (contradicting the canonical decision) or adopt the new one and silently
   // widen every manage-holder's grants. So it answers neither, and composition refuses such a route.
   const key = TENANT_SUB_PERMISSIONS[0].id;

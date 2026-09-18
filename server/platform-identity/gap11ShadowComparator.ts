@@ -1,0 +1,221 @@
+// Phase 4.0 M5 — GAP-11 safeguard #5: dual-read shadow evaluation (docs/phase-4/04 §3).
+//
+// 04 §3 requires the old-order and new-order comparators to run in parallel and their divergences to
+// be recorded BEFORE authority is switched to the new order. This is that shadow read, and nothing
+// more: it observes, it never decides.
+//
+// THE AUTHORITATIVE ANSWER IS AN INPUT, NOT SOMETHING THIS MODULE COMPUTES. The caller has already
+// made its decision when it calls `compare`; it passes that decision in and gets it back. That shape
+// is deliberate and does three things at once:
+//   * it makes fail-open structurally impossible — there is no code path on which a candidate result
+//     becomes the returned value, because the candidate is never assigned to it;
+//   * it satisfies 04 §3's "run both in parallel" honestly — one policy is evaluated by the caller,
+//     the other here, on the same input;
+//   * it avoids the duplicate evaluation the brief forbids. Re-deriving the authoritative answer to
+//     "check" it would evaluate the same policy twice and invite the two copies to disagree.
+//
+// WHAT A MISMATCH MAY CONTAIN. Canonical vocabulary and outcome codes only: plane, stratum, role id,
+// domain/feature id, action id, level token, the two outcomes. No user id, no email, no token, no
+// cookie, no session, no tenant or store record, no request, no header, no IP, no timestamp, no free
+// text. A divergence record is a statement about the CATALOG, not about a person — the catalog is
+// the same for everyone holding the role, so nothing identifying is needed to act on it.
+//
+// WHERE MISMATCHES GO. To an injected observer, or to the comparator's own bounded buffer. There is
+// no approved telemetry sink, so this module adds none, and it does not log: a console write is an
+// unbounded, unredacted sink wearing a different hat. No network, no database, no file, no env var,
+// no process global.
+//
+// NOT A CUTOVER. Enabling this changes no decision anywhere. The candidate stays observational until
+// safeguards #1 and #3 land — the per-action re-pin (owner decision D2) and the owner's explicit
+// approval of the grant diff (D3).
+import {
+  canonicalTupleFor,
+  evaluateAfterCandidate,
+  snapshotContext,
+  type CanonicalGrantTuple,
+  type GrantEvaluationContext,
+  type GrantOutcome,
+  type GrantPlane,
+  type GrantStratum,
+} from './gap11GrantDiff';
+import type { PermissionLevelValue } from './authorizationConstants';
+
+type Level = PermissionLevelValue;
+
+/** Why a record exists. `divergence` is the one 04 §3 asks for; the others are failures to observe. */
+export type ShadowMismatchKind =
+  /** Both policies answered; they disagreed. */
+  | 'divergence'
+  /**
+   * The candidate evaluator threw. Recorded, never allowed to affect the returned decision. No input
+   * reaches this today — the candidate only ever sees a canonical tuple and a frozen context copy — so
+   * it is defence in depth: a future candidate defect is recorded rather than silently lost.
+   */
+  | 'candidate_error'
+  /**
+   * The evaluation context is not one: it throws while being read, or a field is missing, of the
+   * wrong shape, or unknown. No candidate is attempted.
+   */
+  | 'malformed_context'
+  /** The caller supplied something that is not a decision. Returned as a denial, fail closed. */
+  | 'malformed_authoritative'
+  /**
+   * The tuple is not one of the universe's canonical tuples — malformed, unknown, or a mismatched
+   * combination of known parts. No candidate is attempted and no caller field is recorded.
+   */
+  | 'malformed_tuple';
+
+/** A bounded divergence record. Vocabulary and outcome codes only — see the header. */
+export interface ShadowMismatch {
+  readonly kind: ShadowMismatchKind;
+  readonly plane: GrantPlane | 'unknown';
+  readonly stratum: GrantStratum | 'unknown';
+  readonly role: string;
+  readonly scope: string;
+  readonly action: string;
+  readonly requiredLevel: Level | null;
+  /** The decision the caller made and the comparator returned. */
+  readonly authoritative: GrantOutcome;
+  /** What the unified ordering would have said. `null` when it could not be obtained. */
+  readonly candidate: GrantOutcome | null;
+}
+
+export type ShadowObserver = (mismatch: ShadowMismatch) => void;
+
+export interface ShadowComparatorOptions {
+  /**
+   * Where divergences go. Optional: with no observer they land in the comparator's own bounded
+   * buffer, readable through `records()`. An observer that throws is contained — a broken sink must
+   * not be able to influence an authorization outcome.
+   */
+  readonly observer?: ShadowObserver;
+  /** Hard cap on retained records. Beyond it, records are dropped and counted, never accumulated. */
+  readonly maxRecords?: number;
+}
+
+export interface ShadowComparator {
+  /**
+   * Record whether the unified ordering would have answered differently, and return the caller's own
+   * decision, unchanged. THE RETURN VALUE IS ALWAYS THE `authoritative` ARGUMENT — except when that
+   * argument is not a decision at all, in which case the answer is `denied`.
+   */
+  compare(
+    tuple: CanonicalGrantTuple,
+    ctx: GrantEvaluationContext,
+    authoritative: GrantOutcome,
+  ): GrantOutcome;
+  /** The retained records, oldest first. */
+  records(): readonly ShadowMismatch[];
+  /** How many records were dropped after `maxRecords` was reached. */
+  dropped(): number;
+}
+
+const DEFAULT_MAX_RECORDS = 256;
+
+function isOutcome(v: unknown): v is GrantOutcome {
+  return v === 'granted' || v === 'denied';
+}
+
+/**
+ * A record built only from the universe's own frozen tuple, or from fixed placeholders when there is
+ * none. No caller-supplied string is ever copied into a record, so every record is catalog vocabulary
+ * and its size is bounded by the catalog, whatever the caller passed.
+ */
+function record(
+  kind: ShadowMismatchKind,
+  t: CanonicalGrantTuple | null,
+  authoritative: GrantOutcome,
+  candidate: GrantOutcome | null,
+): ShadowMismatch {
+  return Object.freeze({
+    kind,
+    plane: t === null ? ('unknown' as const) : t.plane,
+    stratum: t === null ? ('unknown' as const) : t.stratum,
+    role: t === null ? '' : t.role,
+    scope: t === null ? '' : t.scope,
+    action: t === null ? '' : t.action,
+    requiredLevel: t === null ? null : t.requiredLevel,
+    authoritative,
+    candidate,
+  });
+}
+
+export function createShadowComparator(options: ShadowComparatorOptions = {}): ShadowComparator {
+  // Options are read once, here, and defensively: a getter that throws, or a value of the wrong type,
+  // leaves the defaults in place rather than reaching compare().
+  let observer: ShadowObserver | undefined;
+  let max = DEFAULT_MAX_RECORDS;
+  try {
+    const o = options.observer;
+    if (typeof o === 'function') observer = o;
+    const m = options.maxRecords;
+    if (typeof m === 'number' && Number.isInteger(m) && m >= 0) max = m;
+  } catch {
+    // unreadable options ⇒ defaults
+  }
+  const buffer: ShadowMismatch[] = [];
+  let droppedCount = 0;
+
+  function emit(m: ShadowMismatch): void {
+    if (buffer.length < max) buffer.push(m); else droppedCount += 1;
+    if (observer === undefined) return;
+    try {
+      // An async sink's rejection is settled here too: an unhandled rejection would end the process.
+      void Promise.resolve(observer(m)).catch(() => {});
+    } catch {
+      // A sink that throws is a broken sink, not an authorization event.
+    }
+  }
+
+  return {
+    compare(tuple, ctx, authoritative) {
+      // The answer is fixed before anything is observed. Coercing a non-decision to `denied` can
+      // never turn a denial into an allowance, which is the one direction that matters.
+      const decision: GrantOutcome = isOutcome(authoritative) ? authoritative : 'denied';
+
+      // Everything below is observation, and all of it is inside one catch-all: a hostile tuple,
+      // context or observer can cost a record, never the decision.
+      try {
+        const canonical = canonicalTupleFor(tuple);
+        if (!isOutcome(authoritative)) {
+          emit(record('malformed_authoritative', canonical, 'denied', null));
+        } else if (canonical === null) {
+          // Not one of the universe's tuples — malformed, unknown, or a mismatched combination of
+          // known parts. Observed with placeholders, never guessed at.
+          emit(record('malformed_tuple', null, decision, null));
+        } else {
+          // The context is read once, here; the candidate sees only the frozen copy. One it cannot
+          // read is a failure to observe, not a policy divergence.
+          const context = snapshotContext(ctx, canonical.plane);
+          if (context === null) {
+            emit(record('malformed_context', canonical, decision, null));
+          } else {
+            // The shadow read: one candidate evaluation, on the universe's own tuple.
+            let candidate: GrantOutcome | null = null;
+            try {
+              candidate = evaluateAfterCandidate(canonical, context);
+            } catch {
+              candidate = null;
+            }
+            if (candidate === null) emit(record('candidate_error', canonical, decision, null));
+            else if (candidate !== decision) emit(record('divergence', canonical, decision, candidate));
+            // Exact agreement produces no record at all — 04 §3 asks for divergences, not a trace.
+          }
+        }
+      } catch {
+        // Observation failed; the decision stands.
+      }
+
+      // The single return. It is the caller's own decision; the candidate is never returned.
+      return decision;
+    },
+
+    records() {
+      return Object.freeze(buffer.slice());
+    },
+
+    dropped() {
+      return droppedCount;
+    },
+  };
+}
