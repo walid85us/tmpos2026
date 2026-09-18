@@ -27,12 +27,16 @@
 // unbounded, unredacted sink wearing a different hat. No network, no database, no file, no env var,
 // no process global.
 //
-// NOT A CUTOVER. Enabling this changes no decision anywhere. The candidate stays observational until
-// safeguards #1 and #3 land — the per-action re-pin (owner decision D2) and the owner's explicit
-// approval of the grant diff (D3).
+// WHICH CANDIDATE. The post-D2 one (evaluateAfterRepinCandidate): the unified ordering with owner
+// decision D2's explicit money-action grants — the evaluator a cutover would install, so the
+// divergences recorded are the ones a cutover would make.
+//
+// NOT A CUTOVER. Enabling this changes no decision anywhere. The candidate stays observational: the
+// re-pin exists in the candidate only, the owner's approval of the grant diff (D3) is still open, and
+// no cutover is decided.
 import {
   canonicalTupleFor,
-  evaluateAfterCandidate,
+  evaluateAfterRepinCandidate,
   snapshotContext,
   type CanonicalGrantTuple,
   type D2Classification,
@@ -86,7 +90,7 @@ export interface ShadowMismatch {
   readonly moneyAction: string | null;
   /** The decision the comparator returned: the caller's, or `denied` when that was not admissible. */
   readonly authoritative: GrantOutcome;
-  /** What the unified ordering would have said. `null` when it could not be obtained. */
+  /** What the post-D2 candidate would have said. `null` when it could not be obtained. */
   readonly candidate: GrantOutcome | null;
 }
 
@@ -216,7 +220,7 @@ export function createShadowComparator(options: ShadowComparatorOptions = {}): S
             // The shadow read: one candidate evaluation, on the universe's own tuple.
             let candidate: GrantOutcome | null = null;
             try {
-              candidate = evaluateAfterCandidate(canonical, context);
+              candidate = evaluateAfterRepinCandidate(canonical, context);
             } catch {
               candidate = null;
             }

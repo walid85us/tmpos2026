@@ -22,6 +22,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import { AccessProvider, useAccess, isKnownNavigationFeature } from './AccessContext';
+import { D2_EXPLICIT_MONEY_ACTION_GRANTS } from '../../server/platform-identity/gap11GrantDiff';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -285,6 +286,33 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
     expect(ctx!.canAccess('ledger')).toBe(true); // control: a navigation-only placeholder
     expect(ctx!.canAccess('')).toBe(false);
     expect(ctx!.canAccess('not_a_feature')).toBe(false);
+  });
+
+  it('23. M5-GAP11-P2 server/client agreement: every tenant role\'s refund and return approval equals its D2 explicit grant', async () => {
+    // The client engine decides these today through levels and its own role tables; D2's candidate
+    // decides them through explicit per-role grants. The two must give the same answer, role by role.
+    const grant = (l: string): boolean => {
+      const g = D2_EXPLICIT_MONEY_ACTION_GRANTS.find((x) => `${x.plane}/${x.stratum}/${x.role}/${x.scope}/${x.action}` === l);
+      if (g === undefined) throw new Error(`no D2 grant ${l}`);
+      return g.granted;
+    };
+    let granted = 0;
+    for (const role of ['store_owner', 'manager', 'sales_staff', 'technician']) {
+      getDoc.mockResolvedValue(existing(role));
+      const { unmount } = render(<AccessProvider><CaptureCtx /></AccessProvider>);
+      await fireAuth({ uid: `u-d2-${role}`, email: `d2-${role}@synthetic.test` });
+      const cases: readonly [boolean, string][] = [
+        [ctx!.checkPermission('refunds', 'approve'), `tenant/domain_threshold/${role}/refunds/require:approve`],
+        [ctx!.checkSubPermission('approve_refunds'), `tenant/sub_permission/${role}/refunds/approve_refunds`],
+        [ctx!.checkSubPermission('approve_return'), `tenant/sub_permission/${role}/returns/approve_return`],
+      ];
+      for (const [client, l] of cases) {
+        expect({ l, client }).toEqual({ l, client: grant(l) });
+        if (client) granted += 1;
+      }
+      unmount();
+    }
+    expect(granted).toBe(6); // control: store_owner and manager on all three, nobody else
   });
 });
 

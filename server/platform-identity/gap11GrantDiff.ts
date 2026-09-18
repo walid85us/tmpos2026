@@ -7,10 +7,16 @@
 // and evaluates it twice, under the ordering that ships today and under the unified candidate, so the
 // owner can see every changed grant before deciding anything.
 //
-// WHAT THIS IS NOT. It re-pins nothing (safeguard #1, blocked on owner decision D2), approves nothing
-// (safeguard #3, blocked on D3), and cuts nothing over. THE CANDIDATE EVALUATOR IS OBSERVATIONAL. It
-// is never consulted for a real authorization decision: `materializeTenant*` / `materializePlatform*`
-// in permissionCatalog.ts remain the sole authority, and nothing here is imported by a request path.
+// THE D2 RE-PIN (M5-GAP11-P2). The owner decided D2: an approval-gated money action requires an
+// explicit per-role grant, and no level — `approve`, `manage`, `full` — grants one by itself. The
+// candidate carries that re-pin as a closed table of literal per-role booleans
+// (D2_EXPLICIT_MONEY_ACTION_GRANTS), each equal to today's authoritative answer, and a second candidate
+// view (evaluateAfterRepinCandidate) that consults it. That is safeguard #1 in the CANDIDATE only.
+//
+// WHAT THIS IS NOT. It re-pins nothing in production, approves nothing (safeguard #3, owner decision
+// D3), and cuts nothing over. THE CANDIDATE EVALUATORS ARE OBSERVATIONAL. They are never consulted
+// for a real authorization decision: `materializeTenant*` / `materializePlatform*` in
+// permissionCatalog.ts remain the sole authority, and nothing here is imported by a request path.
 //
 // WHY THE TWO EVALUATORS ARE BUILT DIFFERENTLY, ON PURPOSE. A single `evaluate(ordering)` parameterised
 // twice would be worthless evidence: one defect in it makes every comparison agree, and "no grants
@@ -246,6 +252,50 @@ export const D2_UNMAPPED_PAYMENT_OPERATIONS: readonly string[] = Object.freeze([
   'void_payment',
 ]);
 
+/** One explicit per-role grant for one canonical money-action tuple (owner decision D2). */
+export interface D2ExplicitMoneyGrant {
+  readonly plane: GrantPlane;
+  readonly stratum: GrantStratum;
+  readonly role: TenantRoleId | PlatformRoleId;
+  readonly scope: string;
+  readonly action: string;
+  readonly granted: boolean;
+}
+
+const moneyGrant = (
+  plane: GrantPlane, stratum: GrantStratum, role: TenantRoleId | PlatformRoleId, scope: string, action: string,
+  granted: boolean,
+): D2ExplicitMoneyGrant => Object.freeze({ plane, stratum, role, scope, action, granted });
+
+/**
+ * Owner decision D2, in the candidate: every tuple classified `money_action` carries one explicit
+ * per-role grant, and only `granted: true` can allow it. Each value is LITERAL — written out, never
+ * derived — and equals the authoritative answer the tuple has today (the D2 suite checks every one
+ * against the shipped evaluators), so the re-pin changes how a money action is decided, not whether.
+ * Changing any value is a new owner policy decision, not an edit. The table is closed: exactly one
+ * entry per money-action tuple, in universe order, and a table that does not audit clean honors no
+ * grant at all.
+ */
+export const D2_EXPLICIT_MONEY_ACTION_GRANTS: readonly D2ExplicitMoneyGrant[] = Object.freeze([
+  moneyGrant('platform', 'sub_permission', 'billing_admin', 'billing_subscriptions', 'approve_billing_actions', true),
+  moneyGrant('platform', 'sub_permission', 'operations_admin', 'billing_subscriptions', 'approve_billing_actions', false),
+  moneyGrant('platform', 'sub_permission', 'security_admin', 'billing_subscriptions', 'approve_billing_actions', false),
+  moneyGrant('platform', 'sub_permission', 'support_admin', 'billing_subscriptions', 'approve_billing_actions', false),
+  moneyGrant('platform', 'sub_permission', 'system_owner', 'billing_subscriptions', 'approve_billing_actions', true),
+  moneyGrant('tenant', 'domain_threshold', 'manager', 'refunds', 'require:approve', true),
+  moneyGrant('tenant', 'domain_threshold', 'sales_staff', 'refunds', 'require:approve', false),
+  moneyGrant('tenant', 'domain_threshold', 'store_owner', 'refunds', 'require:approve', true),
+  moneyGrant('tenant', 'domain_threshold', 'technician', 'refunds', 'require:approve', false),
+  moneyGrant('tenant', 'sub_permission', 'manager', 'refunds', 'approve_refunds', true),
+  moneyGrant('tenant', 'sub_permission', 'manager', 'returns', 'approve_return', true),
+  moneyGrant('tenant', 'sub_permission', 'sales_staff', 'refunds', 'approve_refunds', false),
+  moneyGrant('tenant', 'sub_permission', 'sales_staff', 'returns', 'approve_return', false),
+  moneyGrant('tenant', 'sub_permission', 'store_owner', 'refunds', 'approve_refunds', true),
+  moneyGrant('tenant', 'sub_permission', 'store_owner', 'returns', 'approve_return', true),
+  moneyGrant('tenant', 'sub_permission', 'technician', 'refunds', 'approve_refunds', false),
+  moneyGrant('tenant', 'sub_permission', 'technician', 'returns', 'approve_return', false),
+]);
+
 export interface CanonicalGrantTuple {
   readonly plane: GrantPlane;
   readonly stratum: GrantStratum;
@@ -382,9 +432,17 @@ export const UNIVERSE_SHAPE = Object.freeze({
     PLATFORM_ROLE_IDS.length * PLATFORM_FEATURE_KEYS.length * PERMISSION_LEVEL_VALUES.length,
 });
 
-const CANONICAL_BY_KEY: ReadonlyMap<string, CanonicalGrantTuple> = new Map(
-  CANONICAL_GRANT_UNIVERSE.map((t) => [grantTupleKey(t), t] as const),
-);
+/**
+ * Every canonical tuple by grantTupleKey, in a null-prototype record built at module load. Looked up
+ * with an index, never through Map.prototype.get: a caller's getter runs before the lookup, and a
+ * lookup that dispatched through a built-in the getter had rewritten could hand back a tuple of its
+ * choosing — a money action classified as something else, say.
+ */
+const CANONICAL_INDEX: Readonly<Record<string, CanonicalGrantTuple>> = (() => {
+  const index = { __proto__: null } as unknown as Record<string, CanonicalGrantTuple>;
+  for (const t of CANONICAL_GRANT_UNIVERSE) index[grantTupleKey(t)] = t;
+  return Object.freeze(index);
+})();
 
 /**
  * The canonical tuple a value names, or null. Shared by both evaluators and the shadow comparator as
@@ -415,7 +473,7 @@ export function canonicalTupleFor(value: unknown): CanonicalGrantTuple | null {
   } = fields;
   if (typeof plane !== 'string' || typeof stratum !== 'string' || typeof role !== 'string'
     || typeof scope !== 'string' || typeof action !== 'string') return null;
-  const t = CANONICAL_BY_KEY.get(`${plane}\u0000${stratum}\u0000${role}\u0000${scope}\u0000${action}`);
+  const t = CANONICAL_INDEX[`${plane}\u0000${stratum}\u0000${role}\u0000${scope}\u0000${action}`];
   if (t === undefined) return null;
   // Every field, the classifications included: an unknown required level, or a tuple claiming another
   // classification than the universe gives it, is not canonical — it is never read as a `none` gate.
@@ -424,6 +482,128 @@ export function canonicalTupleFor(value: unknown): CanonicalGrantTuple | null {
     || t.sensitive !== sensitive || t.requiresApproveLevel !== requiresApproveLevel
     || t.d2Classification !== d2Classification || t.moneyAction !== moneyAction) return null;
   return t;
+}
+
+// =============================================================================
+// The D2 explicit money-action grants — parsed once, audited whole
+// =============================================================================
+
+/** Every money-action tuple of the universe, in universe order. */
+const MONEY_ACTION_TUPLES: readonly CanonicalGrantTuple[] = Object.freeze(
+  CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification === 'money_action'),
+);
+
+interface ParsedMoneyGrants {
+  readonly ok: boolean;
+  readonly problems: readonly string[];
+  /** Keyed by grantTupleKey; a null-prototype record. Only consulted when `ok`. */
+  readonly grants: Readonly<Record<string, boolean>>;
+}
+
+/**
+ * Read a grant table once, whatever it is. Each entry's fields are read exactly once, and an entry
+ * counts only if it names a canonical money-action tuple field for field (so a separator smuggled
+ * into one field cannot land on another tuple's key) and carries a boolean. Anything else is a
+ * problem, and one problem anywhere makes the whole table unsound.
+ *
+ * WHAT THIS CAN AND CANNOT DEFEND. A getter or proxy trap in the table runs caller code while the
+ * table is read. Reading once stops it answering twice; it cannot stop it rewriting JavaScript's
+ * own built-ins — code that can do that already runs inside the process, and reaches the shipped
+ * evaluator the same way (a plan gate checked with Array.prototype.every, say). So this function
+ * guarantees something narrower that holds even then: it reads the table with operators and index
+ * access, never a built-in method, counts problems in a primitive, and records grants in a
+ * null-prototype record, and builds its messages from template literals — so a grant it reports
+ * `true` is a boolean `true` the table itself carried for that tuple, a problem once counted keeps
+ * the table unsound, and a rewritten built-in cannot make it throw. (Array.isArray is still called:
+ * there is no built-in-free array test, so a rewritten one can admit an array-like table — whose
+ * grants are still only the booleans it carries.)
+ */
+function parseExplicitMoneyGrants(table: unknown): ParsedMoneyGrants {
+  const grants = { __proto__: null } as unknown as Record<string, boolean>;
+  const problems: string[] = [];
+  let count = 0;
+  const problem = (why: string): void => {
+    count += 1;
+    try { problems.push(why); } catch { /* the message is for people; the count decides */ }
+  };
+  const done = (): ParsedMoneyGrants => ({ ok: count === 0, problems, grants });
+
+  let length: unknown;
+  try {
+    if (!Array.isArray(table)) { problem('the grant table is not an array'); return done(); }
+    length = (table as { length: unknown }).length;
+  } catch {
+    problem('the grant table cannot be read');
+    return done();
+  }
+  if (typeof length !== 'number' || !(length >= 0 && length <= 1024) || length % 1 !== 0) {
+    problem('the grant table has no usable length');
+    return done();
+  }
+  for (let i = 0; i < length; i += 1) {
+    let plane: unknown; let stratum: unknown; let role: unknown; let scope: unknown; let action: unknown;
+    let granted: unknown;
+    try {
+      const entry: unknown = (table as Record<number, unknown>)[i];
+      if (typeof entry !== 'object' || entry === null) { problem(`entry ${i} is not an object`); continue; }
+      ({ plane, stratum, role, scope, action, granted } = entry as Record<string, unknown>);
+    } catch {
+      problem(`entry ${i} cannot be read`);
+      continue;
+    }
+    if (typeof plane !== 'string' || typeof stratum !== 'string' || typeof role !== 'string'
+      || typeof scope !== 'string' || typeof action !== 'string') {
+      problem(`entry ${i} does not name a tuple`);
+      continue;
+    }
+    const key = `${plane}\u0000${stratum}\u0000${role}\u0000${scope}\u0000${action}`;
+    const t = CANONICAL_INDEX[key];
+    if (t === undefined || t.plane !== plane || t.stratum !== stratum || t.role !== role
+      || t.scope !== scope || t.action !== action) {
+      problem(`entry ${i} names no canonical tuple`);
+      continue;
+    }
+    if (t.d2Classification !== 'money_action') {
+      problem(`entry ${i} names a tuple that is not a money action: ${plane}/${stratum}/${role}/${scope}/${action}`);
+      continue;
+    }
+    if (typeof granted !== 'boolean') {
+      problem(`entry ${i} grant is not a boolean: ${plane}/${stratum}/${role}/${scope}/${action}`);
+      continue;
+    }
+    if (key in grants) {
+      problem(`duplicate grant: ${plane}/${stratum}/${role}/${scope}/${action}`);
+      continue;
+    }
+    grants[key] = granted;
+  }
+  for (let i = 0; i < MONEY_ACTION_TUPLES.length; i += 1) {
+    const m = MONEY_ACTION_TUPLES[i];
+    if (!(grantTupleKey(m) in grants)) problem(`missing grant: ${m.plane}/${m.stratum}/${m.role}/${m.scope}/${m.action}`);
+  }
+  return done();
+}
+
+/**
+ * Fail-closed integrity check over a grant table. Reports, never throws. Sound means: an array, one
+ * well-formed entry per money-action tuple, no entry for anything else, and every value a boolean.
+ */
+export function auditExplicitMoneyGrants(table: unknown): { readonly ok: boolean; readonly problems: readonly string[] } {
+  const { ok, problems } = parseExplicitMoneyGrants(table);
+  return { ok, problems };
+}
+
+/**
+ * The explicit grant `table` gives a money-action tuple: `true` or `false` from a sound table, `null`
+ * when the tuple is not a money action or the table is unsound. Only `true` can allow.
+ */
+export function explicitMoneyGrantFor(table: unknown, tuple: unknown): boolean | null {
+  const t = canonicalTupleFor(tuple);
+  if (t === null || t.d2Classification !== 'money_action') return null;
+  const parsed = parseExplicitMoneyGrants(table);
+  if (!parsed.ok) return null;
+  const v = parsed.grants[grantTupleKey(t)];
+  return typeof v === 'boolean' ? v : null;
 }
 
 // =============================================================================
@@ -603,6 +783,11 @@ function candidatePlatformSub(role: string, subId: string, visiting: ReadonlySet
     : (((PLATFORM_ROLE_FEATURE_DEFAULTS as unknown as Record<string, Record<string, Level>>)[role]?.[def.feature]
         ?? 'none') as Level);
   if (!candidateMeetsLevel(level, def.threshold)) return false;
+  return candidatePlatformDependenciesMet(role, subId, visiting);
+}
+
+/** Every prerequisite of a platform sub-permission holds, each by its own rules. */
+function candidatePlatformDependenciesMet(role: string, subId: string, visiting: ReadonlySet<string>): boolean {
   const deps = (PLATFORM_PERMISSION_DEPENDENCIES as Record<string, readonly string[]>)[subId] ?? [];
   for (const dep of deps) {
     if (visiting.has(dep)) continue; // cycle guard
@@ -614,49 +799,101 @@ function candidatePlatformSub(role: string, subId: string, visiting: ReadonlySet
 }
 
 /**
- * The grant the unified ordering WOULD produce, before any owner-approved re-pin. Observational.
- * Anything that is not exactly a canonical tuple — an unknown role, scope, action or level, or a
- * mismatched combination of known ones — is denied (04 §3 #4).
+ * The candidate's decision on a canonical tuple and a context copy.
+ *
+ * `explicit` is `null` for the unified-ordering rules alone. Under the D2 re-pin it is the tuple's
+ * explicit money-action grant, and it replaces EXACTLY the step that confers the grant — a threshold
+ * tuple's level comparison; for a tenant sub-permission the owner short-circuit, the per-role explicit
+ * map and the default-by-level path; for a platform sub-permission its threshold. Every other step
+ * keeps its place and can only deny: the plan gates, a non-owner's parent-module minimum, platform
+ * dependencies, and the read-only limitation. So no level grants a money action by itself, and the
+ * explicit grant is necessary but never sufficient.
+ */
+function candidateDecision(t: CanonicalGrantTuple, ctx: GrantEvaluationContext, explicit: boolean | null): boolean {
+  const limited = ctx.limitation === 'read_only';
+  if (t.plane === 'tenant') {
+    if (t.stratum === 'sub_permission') {
+      const sub = TENANT_SUB_PERMISSIONS.find((s) => s.id === t.action);
+      if (sub === undefined) return false;
+      let granted: boolean;
+      const gates = candidateGatesFor(sub.id, sub.parentDomain);
+      if (!gates.every((g) => candidateEntitled(ctx.entitlements, g))) granted = false;
+      else if (t.role === 'store_owner') granted = explicit ?? true;
+      else {
+        const parent = candidateTenantDomainLevel(t.role, sub.parentDomain, ctx, false);
+        if (!candidateMeetsLevel(parent, sub.minModuleLevel)) granted = false;
+        else if (explicit !== null) granted = explicit;
+        else {
+          const explicitMap =
+            (TENANT_ROLE_SUBPERMISSION_DEFAULTS as unknown as Record<string, Record<string, boolean>>)[t.role];
+          const mapped = explicitMap ? explicitMap[sub.id] : undefined;
+          granted = mapped !== undefined ? mapped : candidateMeetsLevel(parent, sub.defaultLevel);
+        }
+      }
+      if (limited && sub.mutating) granted = false;
+      return granted;
+    }
+    if (explicit === null) {
+      return candidateMeetsLevel(candidateTenantDomainLevel(t.role, t.scope, ctx, true), t.requiredLevel);
+    }
+    // Re-pinned threshold: the plan gate still zeroes the domain, and the read-only cap still leaves
+    // at most `view`, so it still refuses any gate `view` does not clear. Only the comparison goes.
+    const gate = (TENANT_DOMAIN_ENTITLEMENT as Record<string, string | null>)[t.scope];
+    if (gate && !candidateEntitled(ctx.entitlements, gate)) return false;
+    if (limited && !candidateMeetsLevel('view', t.requiredLevel)) return false;
+    return explicit;
+  }
+
+  if (t.stratum === 'sub_permission') {
+    const def = PLATFORM_SUB_PERMISSIONS.find((s) => s.id === t.action);
+    if (def === undefined) return false;
+    let granted = explicit === null
+      ? candidatePlatformSub(t.role, t.action, new Set<string>())
+      : explicit && candidatePlatformDependenciesMet(t.role, t.action, new Set<string>());
+    if (limited && granted && (def.threshold !== 'view' || def.sensitive)) granted = false;
+    return granted;
+  }
+  if (explicit === null) {
+    return candidateMeetsLevel(candidatePlatformFeatureLevel(t.role, t.scope, ctx, true), t.requiredLevel);
+  }
+  // No platform threshold is a documented money action (the D2 suite asserts it). Should one ever be
+  // registered, it is denied until its own re-pin is written and tested — never decided by a guess.
+  return false;
+}
+
+/**
+ * The grant the unified ordering WOULD produce, before the D2 re-pin. Observational. Anything that is
+ * not exactly a canonical tuple — an unknown role, scope, action or level, or a mismatched combination
+ * of known ones — is denied (04 §3 #4).
  */
 export function evaluateAfterCandidate(tuple: unknown, context: GrantEvaluationContext): GrantOutcome {
   const t = canonicalTupleFor(tuple);
   const ctx = t === null ? null : snapshotContext(context, t.plane);
   if (t === null || ctx === null) return 'denied';
-  const limited = ctx.limitation === 'read_only';
-  if (t.plane === 'tenant') {
-    if (t.stratum === 'sub_permission') {
-      const sub = TENANT_SUB_PERMISSIONS.find((s) => s.id === t.action);
-      if (sub === undefined) return 'denied';
-      let granted: boolean;
-      const gates = candidateGatesFor(sub.id, sub.parentDomain);
-      if (!gates.every((g) => candidateEntitled(ctx.entitlements, g))) granted = false;
-      else if (t.role === 'store_owner') granted = true;
-      else {
-        const parent = candidateTenantDomainLevel(t.role, sub.parentDomain, ctx, false);
-        if (!candidateMeetsLevel(parent, sub.minModuleLevel)) granted = false;
-        else {
-          const explicitMap =
-            (TENANT_ROLE_SUBPERMISSION_DEFAULTS as unknown as Record<string, Record<string, boolean>>)[t.role];
-          const explicit = explicitMap ? explicitMap[sub.id] : undefined;
-          granted = explicit !== undefined ? explicit : candidateMeetsLevel(parent, sub.defaultLevel);
-        }
-      }
-      if (limited && sub.mutating) granted = false;
-      return granted ? 'granted' : 'denied';
-    }
-    const level = candidateTenantDomainLevel(t.role, t.scope, ctx, true);
-    return candidateMeetsLevel(level, t.requiredLevel) ? 'granted' : 'denied';
-  }
+  return candidateDecision(t, ctx, null) ? 'granted' : 'denied';
+}
 
-  if (t.stratum === 'sub_permission') {
-    const def = PLATFORM_SUB_PERMISSIONS.find((s) => s.id === t.action);
-    if (def === undefined) return 'denied';
-    let granted = candidatePlatformSub(t.role, t.action, new Set<string>());
-    if (limited && granted && (def.threshold !== 'view' || def.sensitive)) granted = false;
-    return granted ? 'granted' : 'denied';
-  }
-  const level = candidatePlatformFeatureLevel(t.role, t.scope, ctx, true);
-  return candidateMeetsLevel(level, t.requiredLevel) ? 'granted' : 'denied';
+/**
+ * The grant the unified ordering WOULD produce AFTER the D2 re-pin — the candidate a cutover would
+ * install. Observational. A tuple that is not a money action goes through exactly the rules of
+ * evaluateAfterCandidate and never reads the grant table. A money action is allowed only by an
+ * explicit `true` in a table that audits clean; a missing, `false`, malformed or unknown grant, or an
+ * unsound table, denies — and a `true` still has to clear every other constraint (candidateDecision).
+ * `grants` is a parameter so the suite can prove a corrupted table fails closed; nothing but that
+ * suite passes anything but the default.
+ */
+export function evaluateAfterRepinCandidate(
+  tuple: unknown,
+  context: GrantEvaluationContext,
+  grants: unknown = D2_EXPLICIT_MONEY_ACTION_GRANTS,
+): GrantOutcome {
+  const t = canonicalTupleFor(tuple);
+  const ctx = t === null ? null : snapshotContext(context, t.plane);
+  if (t === null || ctx === null) return 'denied';
+  if (t.d2Classification !== 'money_action') return candidateDecision(t, ctx, null) ? 'granted' : 'denied';
+  const parsed = parseExplicitMoneyGrants(grants);
+  const explicit = parsed.ok && parsed.grants[grantTupleKey(t)] === true;
+  return candidateDecision(t, ctx, explicit) ? 'granted' : 'denied';
 }
 
 // =============================================================================
@@ -677,10 +914,22 @@ export interface GrantDiffRow {
    */
   readonly heldLevel: Level | null;
   readonly before: GrantOutcome;
+  /** The candidate view this diff compares against — pre- or post-re-pin (GrantDiff.view). */
   readonly after: GrantOutcome;
   readonly change: ChangeClass;
-  /** Which of the two flipping comparisons produced this row. */
-  readonly flipPair: FlipPair;
+  /**
+   * What decided the candidate's answer: the unified ordering, or — for a money action in the
+   * post-re-pin view — its D2 explicit grant.
+   */
+  readonly decidedBy: 'level_ordering' | 'explicit_grant';
+  /** Which of the two flipping comparisons produced this row; null when an explicit grant decided it. */
+  readonly flipPair: FlipPair | null;
+  /**
+   * The D2 explicit grant the post-re-pin view read: a boolean only on a row `decidedBy` an explicit
+   * grant whose table audits clean. Null in the pre-re-pin view, off money actions, and on a money
+   * action decided against an unsound table (which honors no grant, so the row is a denial).
+   */
+  readonly explicitGrant: boolean | null;
   readonly sensitive: boolean;
   /** Structural: the row's decisive required level is `approve`. Not a money classification. */
   readonly requiresApproveLevel: boolean;
@@ -703,7 +952,14 @@ export interface GrantDiffSummary {
   readonly byAction: Readonly<Record<string, number>>;
 }
 
+/**
+ * `pre_repin` — authority against the unified ordering alone (evaluateAfterCandidate).
+ * `post_repin` — authority against the unified ordering with the D2 re-pin (evaluateAfterRepinCandidate).
+ */
+export type CandidateView = 'pre_repin' | 'post_repin';
+
 export interface GrantDiff {
+  readonly view: CandidateView;
   /** The context the diff was computed in, or `null` when the one given was malformed (then no row exists). */
   readonly context: GrantEvaluationContext | null;
   readonly shape: typeof UNIVERSE_SHAPE;
@@ -711,10 +967,29 @@ export interface GrantDiff {
   readonly summary: GrantDiffSummary;
 }
 
-/** Compute the full diff. Deterministic: same inputs, same rows, same order, every time. */
+/**
+ * The full diff against the unified ordering BEFORE the D2 re-pin — the structural ordering diff.
+ * Deterministic: same inputs, same rows, same order, every time.
+ */
 export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIFF_CONTEXT): GrantDiff {
+  return diffAgainst('pre_repin', context, D2_EXPLICIT_MONEY_ACTION_GRANTS);
+}
+
+/**
+ * The full diff against the candidate AFTER the D2 re-pin — the net effective change a cutover would
+ * make, and the diff D3 approves. `grants` defaults to the committed table; the suite passes a
+ * corrupted one to prove a changed value surfaces here as a row decided by an explicit grant.
+ */
+export function computeRepinnedGrantDiff(
+  context: GrantEvaluationContext = CANONICAL_DIFF_CONTEXT,
+  grants: unknown = D2_EXPLICIT_MONEY_ACTION_GRANTS,
+): GrantDiff {
+  return diffAgainst('post_repin', context, grants);
+}
+
+function diffAgainst(view: CandidateView, context: GrantEvaluationContext, grants: unknown): GrantDiff {
   // One copy for every read below. A malformed context is never read again: an empty stand-in is one
-  // both evaluators deny, so no row is produced.
+  // every evaluator denies, so no row is produced.
   const snapshot = snapshotContext(context);
   const ctx = snapshot ?? (Object.freeze({}) as GrantEvaluationContext);
   const rows: GrantDiffRow[] = [];
@@ -728,10 +1003,11 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
 
   for (const t of CANONICAL_GRANT_UNIVERSE) {
     const before = evaluateBefore(t, ctx);
-    const after = evaluateAfterCandidate(t, ctx);
+    const after = view === 'pre_repin' ? evaluateAfterCandidate(t, ctx) : evaluateAfterRepinCandidate(t, ctx, grants);
     if (before === after) continue;
     const change: ChangeClass = before === 'denied' ? 'widened' : 'narrowed';
-    const flipPair: FlipPair = change === 'widened'
+    const byGrant = view === 'post_repin' && t.d2Classification === 'money_action';
+    const flipPair: FlipPair | null = byGrant ? null : change === 'widened'
       ? 'manage_satisfies_approve'
       : 'approve_no_longer_satisfies_manage';
     if (change === 'widened') widened += 1; else narrowed += 1;
@@ -743,7 +1019,10 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
     rows.push(Object.freeze({
       plane: t.plane, stratum: t.stratum, role: t.role, scope: t.scope, action: t.action,
       requiredLevel: t.requiredLevel, heldLevel: heldLevelFor(t, ctx),
-      before, after, change, flipPair,
+      before, after, change,
+      decidedBy: byGrant ? 'explicit_grant' as const : 'level_ordering' as const,
+      flipPair,
+      explicitGrant: byGrant ? explicitMoneyGrantFor(grants, t) : null,
       sensitive: t.sensitive, requiresApproveLevel: t.requiresApproveLevel,
       d2Classification: t.d2Classification, moneyAction: t.moneyAction,
     }));
@@ -753,6 +1032,7 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
     Object.freeze(Object.fromEntries(Object.keys(r).sort().map((k) => [k, r[k]])));
 
   return Object.freeze({
+    view,
     context: snapshot,
     shape: UNIVERSE_SHAPE,
     rows: Object.freeze(rows),
@@ -864,10 +1144,12 @@ export function normalizedAuthorizationInputs(): string {
     },
     // The D2 classification's own inputs: which operations are identified money actions, where the
     // documents say so, and the named-grant-only list — so a changed classification is a stale artifact.
+    // And D2's explicit per-role grants, so a changed grant value is a stale artifact too.
     d2: {
       moneyActions: D2_MONEY_ACTIONS,
       namedGrantOnly: [...D2_NAMED_GRANT_ONLY_ACTIONS],
       unmappedPaymentOperations: [...D2_UNMAPPED_PAYMENT_OPERATIONS],
+      explicitGrants: D2_EXPLICIT_MONEY_ACTION_GRANTS,
     },
   }));
 }

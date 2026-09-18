@@ -15,7 +15,9 @@ import {
   CANONICAL_GRANT_UNIVERSE,
   CANONICAL_DIFF_CONTEXT,
   computeGrantDiff,
+  computeRepinnedGrantDiff,
   evaluateAfterCandidate,
+  evaluateAfterRepinCandidate,
   evaluateBefore,
   type CanonicalGrantTuple,
   type GrantEvaluationContext,
@@ -240,8 +242,36 @@ test('an unknown required level is denied before comparison and is never read as
       // Both evaluators agree it is no tuple: neither reads it as a `none` gate, which every level clears.
       assert.equal(evaluateBefore(bad as never, CTX), 'denied');
       assert.equal(evaluateAfterCandidate(bad as never, CTX), 'denied');
+      assert.equal(evaluateAfterRepinCandidate(bad as never, CTX), 'denied');
     }
   }
+});
+
+test('the shadow reads the post-D2 candidate on money actions, and still returns only the caller decision', () => {
+  // M5-GAP11-P2: the candidate a cutover would install carries D2's explicit money-action grants. A
+  // caller whose decision disagrees with an explicit grant is recorded, never overruled. Written by
+  // hand from the D2 table: sales_staff holds `approve_refunds` false, store_owner the refunds
+  // approval threshold true.
+  const salesRefund = tupleFor((t) => t.plane === 'tenant' && t.stratum === 'sub_permission'
+    && t.role === 'sales_staff' && t.action === 'approve_refunds');
+  const ownerRefund = tupleFor((t) => t.plane === 'tenant' && t.stratum === 'domain_threshold'
+    && t.role === 'store_owner' && t.scope === 'refunds' && t.action === 'require:approve');
+  const cases = [[salesRefund, 'granted', 'denied'], [ownerRefund, 'denied', 'granted']] as const;
+  for (const [t, callerSays, grantSays] of cases) {
+    const c = createShadowComparator();
+    assert.equal(c.compare(t, CTX, callerSays), callerSays, 'the caller decision is what comes back');
+    assert.equal(c.records().length, 1);
+    const [m] = c.records();
+    assert.deepEqual({ kind: m.kind, d2: m.d2Classification, authoritative: m.authoritative, candidate: m.candidate },
+      { kind: 'divergence', d2: 'money_action', authoritative: callerSays, candidate: grantSays });
+  }
+  // With the shipped authority as the caller, no money action diverges: the explicit grants preserve it.
+  const quiet = createShadowComparator({ maxRecords: 4096 });
+  for (const t of CANONICAL_GRANT_UNIVERSE) quiet.compare(t, CTX, evaluateBefore(t, CTX));
+  assert.equal(quiet.records().filter((m) => m.d2Classification === 'money_action').length, 0);
+  // And what it does record is exactly the post-re-pin diff, row for row.
+  const expected = computeRepinnedGrantDiff(CTX).rows.map((r) => `${r.plane}/${r.stratum}/${r.role}/${r.scope}/${r.action}`);
+  assert.deepEqual(quiet.records().map((m) => `${m.plane}/${m.stratum}/${m.role}/${m.scope}/${m.action}`), expected);
 });
 
 test('a context that cannot be read is contained and recorded as malformed, not as a divergence', () => {
@@ -341,7 +371,8 @@ test('hostile options cannot break construction or compare', () => {
 
 test('the candidate is evaluated at one call site, directly in compare(), outside any loop — and compare never re-enters', () => {
   // A structural claim, checked on the syntax tree rather than by counting text: exactly one call to
-  // evaluateAfterCandidate; its nearest enclosing function is the `compare` method itself (not a
+  // evaluateAfterRepinCandidate (the post-D2 candidate — and none to the pre-re-pin one); its nearest
+  // enclosing function is the `compare` method itself (not a
   // callback that could run many times); no loop sits between them; nothing in the module calls
   // compare. Together those bound it to at most one candidate evaluation per compare() call. (The
   // runtime count is not observed directly — the call is a static ESM binding — so the test claims
@@ -349,12 +380,14 @@ test('the candidate is evaluated at one call site, directly in compare(), outsid
   // for this module lives in tests/quality/gap11-grant-diff-artifact.test.mjs.
   const sf = ts.createSourceFile('gap11ShadowComparator.ts', SOURCE, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const candidateCalls: ts.CallExpression[] = [];
+  const preRepinCalls: ts.CallExpression[] = [];
   const compareCalls: ts.CallExpression[] = [];
   let namesBefore = false;
   const visit = (n: ts.Node): void => {
     if (ts.isIdentifier(n) && n.text === 'evaluateBefore') namesBefore = true;
     if (ts.isCallExpression(n)) {
-      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluateAfterCandidate') candidateCalls.push(n);
+      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluateAfterRepinCandidate') candidateCalls.push(n);
+      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluateAfterCandidate') preRepinCalls.push(n);
       const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text
         : ts.isIdentifier(n.expression) ? n.expression.text : '';
       if (callee === 'compare') compareCalls.push(n);
@@ -364,6 +397,7 @@ test('the candidate is evaluated at one call site, directly in compare(), outsid
   visit(sf);
 
   assert.equal(candidateCalls.length, 1, 'exactly one call site');
+  assert.equal(preRepinCalls.length, 0, 'the shadow never reads the pre-re-pin candidate');
   assert.equal(compareCalls.length, 0, 'compare never calls itself');
   assert.equal(namesBefore, false, 'the comparator never evaluates the authoritative policy — that would be the duplicate evaluation');
 

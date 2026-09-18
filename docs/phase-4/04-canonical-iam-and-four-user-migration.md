@@ -77,7 +77,7 @@ The platform module explicitly says *"Do not unify them"* and ships its own `pla
 
 **This migration is NOT risk-free — it changes effective grants by construction.** Under the old tenant order `manage < approve`, a `manage`-holder did **not** satisfy an `approve` threshold; under the unified order `approve < manage`, **every `manage`-holder now satisfies every `approve`-gated action** — including money-sensitive ones (`refunds: approve` / `approve_refunds`, `returns: approve_return`). So the tenant `manager` role, which holds `refunds: approve` and `returns` at `manage`, would silently gain approval capability it did not have. Required safeguards (all in M5 phase (i), none optional):
 
-1. **Re-pin, don't infer:** for each affected `approve`-gated sub-permission, set the explicit required level (re-pin `approve`-gated money actions to require `≥ manage` **or** an explicit per-role grant) so the ordering flip does not auto-expand it.
+1. **Re-pin, don't infer:** for each affected `approve`-gated sub-permission, set the explicit required level (re-pin `approve`-gated money actions to require `≥ manage` **or** an explicit per-role grant) so the ordering flip does not auto-expand it. *(Owner decision D2: the explicit per-role grant — carried in the candidate only, not cut over; [09](./09-roadmap-m0-m9.md), M5-GAP11-P2.)*
 2. **Grant-diff report:** produce a before/after effective-grant diff for every (role × domain × action); no silent change ships.
 3. **Owner approval:** the diff is reviewed and explicitly owner-approved before cutover.
 4. **Deny-by-default on unknowns:** any level/action not in the unified catalog denies.

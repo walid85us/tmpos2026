@@ -16,6 +16,11 @@
 // action. Section C lists the approve-level rows no document ties to one. A level is never evidence of
 // money, so no count in A is presented as a count of D2 rows.
 //
+// THREE VIEWS (M5-GAP11-P2). The owner decided D2 — an explicit per-role grant for every approval-gated
+// money action — and the candidate carries it. Every tuple is therefore shown three ways: the shipped
+// authority, the unified ordering before the re-pin, and the unified ordering after it. Section D is
+// the re-pin itself; section E is the final diff D3 approves, with each kind of change kept apart.
+//
 // Usage:
 //   tsx scripts/generate-gap11-grant-diff.ts            write the artifact
 //   tsx scripts/generate-gap11-grant-diff.ts --check    exit 1 if the committed artifact is stale
@@ -27,14 +32,19 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  auditExplicitMoneyGrants,
   computeGrantDiff,
+  computeRepinnedGrantDiff,
   evaluateAfterCandidate,
+  evaluateAfterRepinCandidate,
   evaluateBefore,
+  explicitMoneyGrantFor,
   heldLevelFor,
   normalizedAuthorizationInputs,
   CANONICAL_DIFF_CONTEXT,
   CANONICAL_GRANT_UNIVERSE,
   UNIFIED_CANDIDATE_ORDERING,
+  D2_EXPLICIT_MONEY_ACTION_GRANTS,
   D2_MONEY_ACTIONS,
   D2_NAMED_GRANT_ONLY_ACTIONS,
   D2_UNMAPPED_PAYMENT_OPERATIONS,
@@ -43,11 +53,14 @@ import {
   type D2MoneyAction,
   type GrantDiff,
   type GrantDiffRow,
+  type GrantEvaluationContext,
+  type GrantOutcome,
 } from '../server/platform-identity/gap11GrantDiff';
 import {
   TENANT_ORDERING,
   PLATFORM_ORDERING,
   TENANT_SUB_PERMISSIONS,
+  PLATFORM_SUB_PERMISSIONS,
   TENANT_ROLE_SUBPERMISSION_DEFAULTS,
   TENANT_ROLE_PERMISSION_DEFAULTS,
 } from '../server/platform-identity/permissionCatalog';
@@ -75,6 +88,8 @@ export const ARTIFACT_RELATIVE_PATH = 'docs/phase-4/evidence/gap11-ordering-flip
 
 const sha256 = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 const code = (s: string): string => `\`${s}\``;
+const labelOf = (t: { plane: string; stratum: string; role: string; scope: string; action: string }): string =>
+  `${t.plane}/${t.stratum}/${t.role}/${t.scope}/${t.action}`;
 
 function table(header: readonly string[], rows: readonly (readonly string[])[]): string {
   const head = `| ${header.join(' | ')} |`;
@@ -107,54 +122,105 @@ function rowLine(r: GrantDiffRow): readonly string[] {
   ];
 }
 
+/** The three answers for one tuple: the shipped authority, and the candidate before and after the re-pin. */
+interface ThreeViews {
+  readonly t: CanonicalGrantTuple;
+  readonly authoritative: GrantOutcome;
+  readonly preRepin: GrantOutcome;
+  readonly postRepin: GrantOutcome;
+  readonly explicit: boolean | null;
+}
+
+function threeViews(t: CanonicalGrantTuple, ctx: GrantEvaluationContext): ThreeViews {
+  return {
+    t,
+    authoritative: evaluateBefore(t, ctx),
+    preRepin: evaluateAfterCandidate(t, ctx),
+    postRepin: evaluateAfterRepinCandidate(t, ctx),
+    explicit: explicitMoneyGrantFor(D2_EXPLICIT_MONEY_ACTION_GRANTS, t),
+  };
+}
+
 /** The universe's tuples for one representation — one per role on its plane, in universe order. */
 function tuplesFor(rep: D2MoneyAction['representations'][number]): readonly CanonicalGrantTuple[] {
   return CANONICAL_GRANT_UNIVERSE.filter((t) =>
     t.plane === rep.plane && t.stratum === rep.stratum && t.scope === rep.scope && t.action === rep.action);
 }
 
+/** The level a tuple's classification rests on: a threshold's gate, a tenant sub's default, a platform sub's threshold. */
+function decisiveLevel(t: CanonicalGrantTuple): string {
+  if (t.requiredLevel !== null) return t.requiredLevel;
+  if (t.plane === 'tenant') return TENANT_SUB_PERMISSIONS.find((s) => s.id === t.action)?.defaultLevel ?? '—';
+  return PLATFORM_SUB_PERMISSIONS.find((s) => s.id === t.action)?.threshold ?? '—';
+}
+
+/** Where a tuple's D2 classification comes from: a quoted document for a money action, the catalog otherwise. */
+function classificationSource(t: CanonicalGrantTuple): string {
+  if (t.d2Classification === 'money_action') {
+    const m = D2_MONEY_ACTIONS.find((x) => x.operation === t.moneyAction);
+    return m === undefined ? '—' : m.sources.map((s) => code(s.path)).join(', ');
+  }
+  const level = code(decisiveLevel(t));
+  return t.d2Classification === 'unresolved'
+    ? `catalog: decisive level ${level}; no document names it a money action`
+    : `catalog: decisive level ${level}, not \`approve\`; no document names it`;
+}
+
+/** Why a changed tuple's answers differ, in one line. */
+function reasonFor(v: ThreeViews, held: string | null): string {
+  if (v.t.d2Classification === 'money_action' && v.postRepin !== v.authoritative) {
+    return `the D2 explicit grant is ${v.explicit === null ? 'missing or unsound' : code(String(v.explicit))}, `
+      + `the authority says ${v.authoritative}`;
+  }
+  const holds = held === null ? 'no level' : code(held);
+  if (v.authoritative === 'denied' && v.preRepin === 'granted') {
+    return `holds ${holds}; the unified ordering ranks \`manage\` above \`approve\`, so it now clears the ${code(v.t.requiredLevel ?? '')} gate; not a money action, so the re-pin leaves it`;
+  }
+  if (v.authoritative === 'granted' && v.preRepin === 'denied') {
+    return `holds ${holds}; the unified ordering ranks \`approve\` below \`manage\`, so it no longer clears the ${code(v.t.requiredLevel ?? '')} gate; not a money action, so the re-pin leaves it`;
+  }
+  return 'the candidate views disagree with each other';
+}
+
 /**
- * What the catalog cannot yet express about each identified operation. Prose, keyed by the registry's
- * operation id; the suite requires one entry per registered operation, so a new money action cannot be
- * rendered without saying what its representation leaves open.
+ * What the catalog cannot yet express about each identified operation, and how the D2 re-pin meets it.
+ * Prose, keyed by the registry's operation id; the suite requires one entry per registered operation,
+ * so a new money action cannot be rendered without saying what its representation leaves open.
  */
 export const DATA_MODEL_NOTES: Readonly<Record<string, string>> = Object.freeze({
   refund_approval:
     'The catalog represents refund approval twice, and links the two only through `approve_refunds`\' '
-    + 'default-by-level path (`refunds` at `approve`), which every canonical role\'s explicit grant '
-    + 'overrides — so for those roles they are separate decisions that can disagree. The client\'s '
-    + 'supervisor refund authorization requires both: the `refunds` level at `approve` and an '
-    + '`approve_refunds` entry that is absent or true. There is no single canonical refund-approval action, '
-    + 'so "re-pin refund approval" names more than one change. D2 has to say which representation it '
-    + 're-pins — the refunds narrowing below is where the difference shows.',
+    + 'default-by-level path (`refunds` at `approve`), which every canonical role\'s explicit catalog grant '
+    + 'overrides. The client\'s supervisor refund authorization requires both: the `refunds` level at '
+    + '`approve` and an `approve_refunds` entry that is absent or true. D2\'s explicit per-role grant is '
+    + 'applied to BOTH representations, and today each role carries the same value on both, so in the '
+    + 'candidate neither is decided by a level any more. The two still differ in one step the re-pin '
+    + 'keeps: the threshold\'s comparison IS its grant step, so the explicit grant replaces it outright, '
+    + 'while `approve_refunds` keeps its `refunds` minimum (`view`), read before the grant. With today\'s '
+    + 'values both agree for every role in every context (the D2 suite checks it); a later value change '
+    + 'should set both together, or a role holding `refunds` at `none` could pass the threshold while the '
+    + 'sub-permission still refuses it. The refunds narrowing below is a third comparison on the same '
+    + 'domain; it is not a documented money action and is not re-pinned.',
   return_approval:
-    'One representation: the `approve_return` sub-permission. Two of its comparisons are on the level '
-    + 'the flip moves. Its minimum module level is `manage`, checked BEFORE any explicit grant: a role '
-    + 'holding `returns` at `approve` clears it today and would not under the unified ordering — no '
-    + 'canonical role holds that level, which is why no row changes. Its default-by-level path compares '
-    + '`returns` against `approve` — the same comparison as the widened `manager` / `returns` row in '
-    + 'section C — but every canonical tenant role carries an explicit `approve_return` grant, read after '
-    + 'the minimum and before the default, so the path is not reached for them. The server catalog has only its four '
-    + 'fixed tenant roles and cannot represent a role without an explicit grant. The client can: a '
-    + 'custom role created in the Employees screen stores only the sub-permissions an owner toggled, so '
-    + 'for such a role the client\'s default path, and with it the unified ordering, would decide.',
+    'One representation: the `approve_return` sub-permission. Its minimum module level `manage` is a '
+    + 'prerequisite, read BEFORE the grant step, and the re-pin keeps it there: it can still deny, never '
+    + 'grant. A role holding `returns` at `approve` clears it today and would not under the unified '
+    + 'ordering — no canonical role holds that level, which is why no row changes. The explicit grant '
+    + 'replaces the per-role catalog grant and the default-by-level path together. The server catalog has '
+    + 'only its four fixed tenant roles; a custom role created in the client\'s Employees screen stores '
+    + 'only the sub-permissions an owner toggled, and has no D2 grant — under the re-pin it would be '
+    + 'denied, where today the client\'s default path would decide.',
   platform_billing_approval:
     'Platform plane. That plane already ranks `approve` below `manage`, so the unified ordering cannot '
-    + 'move it (0 platform rows change). Nothing needs re-pinning to prevent a silent change.',
+    + 'move it (0 platform rows change). Under the re-pin its threshold is replaced by the explicit grant; '
+    + 'it has no platform prerequisite, and the read-only limitation still refuses it.',
 });
 
-function moneyActionSection(m: D2MoneyAction, context: GrantDiff['context']): string {
-  const ctx = context!;
+function moneyActionSection(m: D2MoneyAction, ctx: GrantEvaluationContext): string {
   const lines: string[] = [];
   const reps = m.representations.map((rep) => {
-    const tuples = tuplesFor(rep);
-    const rows = tuples.map((t) => {
-      const before = evaluateBefore(t, ctx);
-      const after = evaluateAfterCandidate(t, ctx);
-      const held = heldLevelFor(t, ctx);
-      return { t, before, after, held, changes: before !== after };
-    });
-    return { rep, rows, moves: rows.some((r) => r.changes) };
+    const rows = tuplesFor(rep).map((t) => ({ v: threeViews(t, ctx), held: heldLevelFor(t, ctx) }));
+    return { rep, rows, moves: rows.some((r) => r.v.preRepin !== r.v.authoritative) };
   });
 
   lines.push(`#### ${code(m.operation)}`);
@@ -164,30 +230,32 @@ function moneyActionSection(m: D2MoneyAction, context: GrantDiff['context']): st
   for (const s of m.sources) lines.push(`- ${code(s.path)} — "${s.quote}"`);
   lines.push('');
   lines.push(table(
-    ['representation', 'kind', 'changes under the flip', 're-pin needed to stop a silent change'],
+    ['representation', 'kind', 'changes under the flip', 'decided after the re-pin by'],
     reps.map(({ rep, moves }) => [
       code(`${rep.plane}/${rep.scope}/${rep.action}`),
       STRATUM_LABEL[rep.stratum],
       moves ? '**yes**' : 'no',
-      moves ? '**yes** — the flip moves it' : 'no — the flip does not move it (D2 may still re-pin it as policy)',
+      'its D2 explicit per-role grant',
     ]),
   ));
   lines.push('');
   lines.push(table(
-    ['representation', 'role', 'holds', 'BEFORE', 'AFTER-CANDIDATE', 'changes'],
-    reps.flatMap(({ rep, rows }) => rows.map((r) => [
+    ['representation', 'role', 'holds', 'authoritative', 'pre-re-pin', 'explicit grant', 'post-re-pin', 'preserved'],
+    reps.flatMap(({ rep, rows }) => rows.map(({ v, held }) => [
       code(`${rep.scope}/${rep.action}`),
-      code(r.t.role),
-      r.held === null ? '—' : code(r.held),
-      r.before,
-      r.after,
-      r.changes ? '**yes**' : 'no',
+      code(v.t.role),
+      held === null ? '—' : code(held),
+      v.authoritative,
+      v.preRepin,
+      v.explicit === null ? '—' : code(String(v.explicit)),
+      v.postRepin,
+      v.postRepin === v.authoritative ? 'yes' : '**NO**',
     ])),
   ));
   lines.push('');
   const note = Object.prototype.hasOwnProperty.call(DATA_MODEL_NOTES, m.operation) ? DATA_MODEL_NOTES[m.operation] : undefined;
   if (note === undefined) throw new Error(`no data-model note for money action ${m.operation}`);
-  lines.push(`What the current data model cannot yet express: ${note}`);
+  lines.push(`What the data model leaves open, and how the re-pin meets it: ${note}`);
   return lines.join('\n');
 }
 
@@ -226,23 +294,63 @@ function unresolvedSubPermissions(plane: 'tenant' | 'platform'): string {
 }
 
 /** For a tenant threshold row: the catalog sub-permissions whose default-by-level path IS this comparison. */
-function defaultPathOf(r: GrantDiffRow): string {
+function defaultPathOf(r: { plane: string; stratum: string; scope: string; requiredLevel: string | null }): string {
   if (r.plane !== 'tenant' || r.stratum !== 'domain_threshold') return '—';
   const subs = TENANT_SUB_PERMISSIONS.filter((s) => s.parentDomain === r.scope && s.defaultLevel === r.requiredLevel);
   return subs.length === 0 ? '—' : subs.map((s) => code(s.id)).join(', ');
 }
 
-export function renderArtifact(diff: GrantDiff, inputsFingerprint: string): string {
-  const context = diff.context;
-  if (context === null) throw new Error('refusing to render a diff computed in a malformed context');
-  const s = diff.summary;
-  const widened = diff.rows.filter((r) => r.change === 'widened');
-  const narrowed = diff.rows.filter((r) => r.change === 'narrowed');
-  const unresolvedRows = diff.rows.filter((r) => r.d2Classification === 'unresolved');
-  const subPlane = diff.rows.filter((r) => r.stratum === 'sub_permission');
-  const platformPlane = diff.rows.filter((r) => r.plane === 'platform');
+/**
+ * Every unresolved tuple, grouped by what it gates (plane, stratum, scope, action) with the roles each
+ * view grants — so all of them are pinned in the artifact, not only the ones that change.
+ */
+function unresolvedMappingRows(views: readonly ThreeViews[]): readonly (readonly string[])[] {
+  const groups = new Map<string, ThreeViews[]>();
+  for (const v of views) {
+    const k = `${v.t.plane}/${v.t.stratum}/${v.t.scope}/${v.t.action}`;
+    const g = groups.get(k);
+    if (g === undefined) groups.set(k, [v]); else g.push(v);
+  }
+  const granted = (g: readonly ThreeViews[], pick: (v: ThreeViews) => GrantOutcome): string => {
+    const roles = g.filter((v) => pick(v) === 'granted').map((v) => code(v.t.role));
+    return roles.length === 0 ? 'none' : roles.join(', ');
+  };
+  return [...groups.keys()].sort().map((k) => {
+    const g = groups.get(k)!;
+    const changes = g.filter((v) => v.postRepin !== v.authoritative).length;
+    return [
+      code(`${g[0].t.plane}/${g[0].t.stratum}`), code(g[0].t.scope), code(g[0].t.action), String(g.length),
+      granted(g, (v) => v.authoritative), granted(g, (v) => v.preRepin), granted(g, (v) => v.postRepin),
+      changes === 0 ? '0' : `**${changes}**`,
+    ];
+  });
+}
+
+export function renderArtifact(pre: GrantDiff, post: GrantDiff, inputsFingerprint: string): string {
+  const context = pre.context;
+  if (context === null || post.context === null) throw new Error('refusing to render a diff computed in a malformed context');
+  if (pre.view !== 'pre_repin' || post.view !== 'post_repin') throw new Error('refusing to render diffs of the wrong views');
+  const audit = auditExplicitMoneyGrants(D2_EXPLICIT_MONEY_ACTION_GRANTS);
+  if (!audit.ok) throw new Error(`refusing to render with an unsound D2 grant table: ${audit.problems.join('; ')}`);
+  const s = pre.summary;
+  const p = post.summary;
+  const widened = pre.rows.filter((r) => r.change === 'widened');
+  const narrowed = pre.rows.filter((r) => r.change === 'narrowed');
+  const unresolvedRows = pre.rows.filter((r) => r.d2Classification === 'unresolved');
+  const subPlane = pre.rows.filter((r) => r.stratum === 'sub_permission');
+  const platformPlane = pre.rows.filter((r) => r.plane === 'platform');
   const coverage = explicitGrantCoverage();
   const moneyTuples = CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification === 'money_action');
+  const moneyViews = moneyTuples.map((t) => threeViews(t, context));
+  const unresolvedViews = CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification === 'unresolved').map((t) => threeViews(t, context));
+  const preserved = moneyViews.filter((v) => v.postRepin === v.authoritative).length;
+  const repinMoves = CANONICAL_GRANT_UNIVERSE.filter((t) =>
+    evaluateAfterCandidate(t, context) !== evaluateAfterRepinCandidate(t, context)).length;
+  const byGrant = post.rows.filter((r) => r.decidedBy === 'explicit_grant');
+
+  // Every tuple either candidate view moves, in universe order, with all three answers.
+  const changedKeys = new Set([...pre.rows, ...post.rows].map(labelOf));
+  const changed = CANONICAL_GRANT_UNIVERSE.filter((t) => changedKeys.has(labelOf(t))).map((t) => threeViews(t, context));
 
   // The refunds narrowing, read from the catalog rather than restated.
   const managerRefunds = (TENANT_ROLE_PERMISSION_DEFAULTS as Record<string, Record<string, string>>).manager.refunds;
@@ -252,6 +360,18 @@ export function renderArtifact(diff: GrantDiff, inputsFingerprint: string): stri
   if (refundNarrowing === undefined || narrowed.length !== 1) {
     throw new Error('the refunds narrowing this artifact explains is not the diff\'s only narrowing');
   }
+  const narrowingAfterRepin = post.rows.find((r) => labelOf(r) === labelOf(refundNarrowing));
+  // The D3 section describes the net change in words; refuse to render words the rows do not support.
+  const netWidened = post.rows.filter((r) => r.change === 'widened');
+  const netNarrowed = post.rows.filter((r) => r.change === 'narrowed');
+  if (!netWidened.every((r) => r.d2Classification === 'unresolved')
+    || !netNarrowed.every((r) => r.d2Classification === 'not_money_action')
+    || netNarrowed.length !== 1 || labelOf(netNarrowed[0]) !== labelOf(refundNarrowing)) {
+    throw new Error('the D3 section\'s description no longer matches the post-re-pin rows');
+  }
+  const managerWidened = netWidened.filter((r) => r.role === 'manager').length;
+  const otherWidened = netWidened.filter((r) => r.role !== 'manager')
+    .map((r) => `the ${r.role} on ${code(r.scope)}`).join(', ');
 
   const rowsTable = (rs: readonly GrantDiffRow[]): string =>
     rs.length === 0
@@ -260,6 +380,13 @@ export function renderArtifact(diff: GrantDiff, inputsFingerprint: string): stri
           ['role', 'scope', 'action', 'holds', 'gate', 'before', 'after', 'change', 'approve level', 'D2 classification', 'plane/stratum'],
           rs.map(rowLine),
         )}\n`;
+
+  const moneyOutcomes = moneyViews.map((v) => ({
+    tuple: labelOf(v.t), explicit: v.explicit, authoritative: v.authoritative, preRepin: v.preRepin, postRepin: v.postRepin,
+  }));
+  const unresolvedOutcomes = unresolvedViews.map((v) => ({
+    tuple: labelOf(v.t), authoritative: v.authoritative, preRepin: v.preRepin, postRepin: v.postRepin,
+  }));
 
   return `# GAP-11 — ordering-flip effective-grant diff
 
@@ -271,12 +398,26 @@ This is **safeguard #2** of the six that [docs/phase-4/04 §3](../04-canonical-i
 binds to the GAP-11 ordering unification: a before/after effective-grant diff for every canonical
 \`(role, scope, action)\` tuple, so that no silent change ships.
 
-It decides nothing. Safeguard **#1** (the per-action re-pin of \`approve\`-gated money actions) is an
-open policy choice, tracked as decision **D2** — 04 §3 names two ways to satisfy it and assigns the
-choice to no one. Safeguard **#3** (explicit approval of this diff) is the owner's, tracked as decision
-**D3**. Both remain open; GAP-11 is **not** closed.
+It decides nothing. Safeguard **#1** (the per-action re-pin of \`approve\`-gated money actions) is
+owner decision **D2**, now made: an approval-gated money action requires an explicit per-role grant.
+The candidate carries that re-pin (section D) — in the candidate only: production is not re-pinned and
+nothing is cut over. Safeguard **#3** (explicit approval of this diff) is owner decision **D3**, still
+open; section E is the diff it approves. GAP-11 is **not** closed.
 
-## How to read this diff: two classifications, kept apart
+## How to read this diff
+
+### Three views of every tuple
+
+${table(
+  ['view', 'what it is'],
+  [
+    ['**authoritative** (BEFORE)', 'What ships today: the production materializers in `server/platform-identity/permissionCatalog.ts`, called directly.'],
+    ['**pre-re-pin** (AFTER-CANDIDATE)', 'The unified ordering alone — an independent implementation with its own rank table. Section A is the diff against it: the structural ordering changes.'],
+    ['**post-re-pin** (AFTER-REPIN)', 'The unified ordering with D2\'s explicit money-action grants — the evaluator a cutover would install. Section E is the diff against it: the net effective change D3 approves.'],
+  ],
+)}
+
+### Two classifications, kept apart
 
 Every tuple carries two separate classifications, and no count below mixes them:
 
@@ -284,8 +425,8 @@ ${table(
   ['classification', 'values', 'what it means'],
   [
     ['**approve level** (structural)', 'yes / no', 'The tuple\'s decisive required level is `approve`: a threshold tuple\'s level, a platform sub-permission\'s threshold, or a tenant sub-permission\'s default level. It is the level the flip moves. It says nothing about money.'],
-    ['**D2 classification**', '`money_action`', 'The tuple represents an operation an authoritative document identifies as an approve-gated money action (section B, with the source quoted). Only these are D2 rows.'],
-    ['', '`unresolved`', 'The tuple requires the `approve` level, but no authoritative document ties it to a money action (section C). Whether D2 covers it is part of D2\'s open scope, not a finding. It is not counted as a D2 row.'],
+    ['**D2 classification**', '`money_action`', 'The tuple represents an operation an authoritative document identifies as an approve-gated money action (section B, with the source quoted). Only these are D2 rows, and only these carry an explicit grant (section D).'],
+    ['', '`unresolved`', 'The tuple requires the `approve` level, but no authoritative document ties it to a money action (section C). It keeps the unified ordering\'s rules; it is not re-pinned and not counted as a D2 row.'],
     ['', '`not_money_action`', 'Neither: the decisive level is not `approve`, so the tuple cannot be an approve-gated action, and no document names it as one.'],
   ],
 )}
@@ -343,18 +484,18 @@ This is the **maximal-grant** context, chosen deliberately: plan gating can only
 straddles the \`manage\`/\`approve\` boundary. No other context can therefore produce a change this
 one does not contain. The authorization-matrix suite checks that argument rather than trusting it,
 across the full, empty, every-one-off and every-one-on entitlement sets, each with and without the
-read-only cap.
+read-only cap, for both candidate views.
 
 ### Universe
 
 ${table(
   ['stratum', 'tuples'],
   [
-    ['tenant sub-permissions (roles × actions)', `${diff.shape.tenantRoles} × ${diff.shape.tenantSubPermissions} = ${diff.shape.tenantSubTuples}`],
-    ['tenant domain thresholds (roles × domains × levels)', `${diff.shape.tenantRoles} × ${diff.shape.tenantDomains} × ${diff.shape.levels} = ${diff.shape.tenantThresholdTuples}`],
-    ['platform sub-permissions (roles × actions)', `${diff.shape.platformRoles} × ${diff.shape.platformSubPermissions} = ${diff.shape.platformSubTuples}`],
-    ['platform feature thresholds (roles × features × levels)', `${diff.shape.platformRoles} × ${diff.shape.platformFeatures} × ${diff.shape.levels} = ${diff.shape.platformThresholdTuples}`],
-    ['**total**', `**${diff.shape.total}**`],
+    ['tenant sub-permissions (roles × actions)', `${pre.shape.tenantRoles} × ${pre.shape.tenantSubPermissions} = ${pre.shape.tenantSubTuples}`],
+    ['tenant domain thresholds (roles × domains × levels)', `${pre.shape.tenantRoles} × ${pre.shape.tenantDomains} × ${pre.shape.levels} = ${pre.shape.tenantThresholdTuples}`],
+    ['platform sub-permissions (roles × actions)', `${pre.shape.platformRoles} × ${pre.shape.platformSubPermissions} = ${pre.shape.platformSubTuples}`],
+    ['platform feature thresholds (roles × features × levels)', `${pre.shape.platformRoles} × ${pre.shape.platformFeatures} × ${pre.shape.levels} = ${pre.shape.platformThresholdTuples}`],
+    ['**total**', `**${pre.shape.total}**`],
   ],
 )}
 
@@ -427,26 +568,26 @@ ${coverage.roles.map((r) => `   - ${code(r.role)}: ${r.defaulted.length === 0 ? 
 These are the only tuples D2 governs. Each operation below is identified as an approve-gated money
 action by the quoted source, and listed with every canonical representation the catalog gives it.
 ${moneyTuples.length} of the universe's ${CANONICAL_GRANT_UNIVERSE.length} tuples are such
-representations, and **${s.byD2Classification.money_action} of them change** under the unified ordering.
+representations. **${s.byD2Classification.money_action} of them change** under the unified ordering
+alone, and **${p.byD2Classification.money_action} change** after the D2 re-pin: all
+${moneyTuples.length} keep their authoritative answer (${preserved} of ${moneyTuples.length} preserved).
 
 ${D2_MONEY_ACTIONS.map((m) => moneyActionSection(m, context)).join('\n\n')}
 
-**What this means for D2.** On every documented money action, for every canonical role, the unified
-ordering changes nothing: the manager already holds \`refunds\` at \`approve\`, every non-owner tenant
-role holds explicit \`approve_refunds\` and \`approve_return\` grants that are read before the
-default-by-level path, and no canonical role holds the \`approve\` level that \`approve_return\`'s \`manage\`
-minimum would stop admitting.
-04 §3's warning that the manager "would silently gain approval capability it did not have" does not
-materialize on these operations for the catalog's roles; the structural widening sits on the
-\`unresolved\` rows of section C. What D2 still has to settle is where a re-pin lands — which
-representation of refund approval is the canonical one, and whether roles without explicit grants are
-in scope — not a change the flip forces on the documented actions.
+**What this means.** On every documented money action, for every canonical role, neither candidate
+view changes the answer: the manager already holds \`refunds\` at \`approve\`, every non-owner tenant
+role holds explicit catalog grants for \`approve_refunds\` and \`approve_return\` that are read before the
+default-by-level path, no canonical role holds the \`approve\` level that \`approve_return\`'s \`manage\`
+minimum would stop admitting, and D2's explicit grants carry exactly today's answers. 04 §3's warning
+that the manager "would silently gain approval capability it did not have" does not materialize on
+these operations for the catalog's roles; the structural widening sits on the \`unresolved\` rows of
+section C, which D2 does not re-pin.
 
 ## C. Unresolved mapping
 
 These rows require the \`approve\` level but **no authoritative document ties them to a money
-action**. They are structural facts, not D2 rows, and D2 is not asked to decide from them. Whether
-D2's re-pin should also cover them is part of D2's open scope; nothing here answers it.
+action**. They are structural facts, not D2 rows: D2's explicit grants do not apply to them, and they
+keep the unified ordering's rules in the post-re-pin view. No document is taken to classify them here.
 
 ### Changed rows (${unresolvedRows.length})
 
@@ -486,6 +627,99 @@ them money actions. 04 §2.1 also names payment-operation permissions — ${D2_U
 without a level and without calling them approve-gated. None of either list is in the catalog; should
 one be added, its tuples classify \`unresolved\`.
 
+### All ${unresolvedViews.length} unresolved mappings
+
+Every unresolved tuple, grouped by what it gates. Each "granted" column lists the roles that view
+allows; every other role of the plane is denied. "changes" counts the roles whose post-re-pin answer
+differs from the authoritative one.
+
+${table(
+  ['plane/stratum', 'scope', 'action', 'roles', 'granted — authoritative', 'granted — pre-re-pin', 'granted — post-re-pin', 'changes'],
+  unresolvedMappingRows(unresolvedViews),
+)}
+
+## D. The D2 re-pin — explicit money-action grants (candidate only)
+
+Owner decision D2, as the candidate implements it:
+
+1. Every \`money_action\` tuple requires an explicit per-role grant, and only \`true\` can allow it.
+2. \`false\`, a missing entry, a malformed value or an unknown entry denies. The table is closed — one
+   entry per money-action tuple, nothing else — and a table that does not audit clean honors no grant.
+3. No level (\`approve\`, \`manage\`, \`full\`) and no ordering comparison grants a money action by
+   itself: the explicit grant replaces exactly the step that confers the grant — a threshold tuple's
+   level comparison; for a tenant sub-permission the owner short-circuit, the per-role catalog grant and
+   the default-by-level path; for a platform sub-permission its threshold.
+4. The grant is necessary, never sufficient. Every other step keeps its place and can only deny: the
+   plan gates, a non-owner's parent-module minimum, platform prerequisites, and the read-only
+   limitation. Identity, scope, session and route constraints are enforced outside this model and are
+   unchanged.
+5. Each value below equals the tuple's authoritative answer today. No new business entitlement is
+   created, and changing a value is a new owner policy decision.
+
+The grants live in \`D2_EXPLICIT_MONEY_ACTION_GRANTS\` (\`server/platform-identity/gap11GrantDiff.ts\`),
+which no production module imports; the post-re-pin view reads them, the authority never does.
+
+${table(
+  ['plane/stratum', 'role', 'scope', 'action', 'explicit grant', 'authoritative', 'pre-re-pin', 'post-re-pin', 'preserved'],
+  moneyViews.map((v) => [
+    code(`${v.t.plane}/${v.t.stratum}`), code(v.t.role), code(v.t.scope), code(v.t.action),
+    v.explicit === null ? '—' : code(String(v.explicit)),
+    v.authoritative, v.preRepin, v.postRepin,
+    v.postRepin === v.authoritative ? 'yes' : '**NO**',
+  ]),
+)}
+
+**Preserved: ${preserved} of ${moneyTuples.length}** in this context. The D2 suite checks the same in every
+entitlement and limitation context the matrix sweeps, and proves the controls: a missing, \`false\`,
+malformed, duplicated or unknown grant denies; an \`approve\`, \`manage\` or \`full\` holder is denied
+without its grant; and a grant still cannot pass a disabled plan gate, the read-only limitation, the
+\`manage\` minimum of \`approve_return\`, or another tuple's scope.
+
+## E. The final diff for D3
+
+### Counts in each view
+
+${table(
+  ['compared against the authority', 'evaluated', 'unchanged', 'widened', 'narrowed'],
+  [
+    ['pre-re-pin candidate (the ordering flip alone)', String(s.evaluated), String(s.unchanged), String(s.widened), String(s.narrowed)],
+    ['post-re-pin candidate (the flip with D2\'s grants)', String(p.evaluated), String(p.unchanged), String(p.widened), String(p.narrowed)],
+  ],
+)}
+
+### Four kinds of change, kept apart
+
+${table(
+  ['kind', 'tuples', 'what it is'],
+  [
+    ['**structural ordering changes** — authority vs pre-re-pin', `${pre.rows.length} (${s.widened} widened, ${s.narrowed} narrowed)`, 'the comparisons the unified ordering moves (section A); none is a money action'],
+    ['**explicit-grant representation changes** — how a tuple is decided', `${moneyTuples.length}`, `the money-action tuples now decided by a D2 explicit grant instead of a level; ${p.byD2Classification.money_action} of them change their answer`],
+    ['**re-pin effect** — pre-re-pin vs post-re-pin', String(repinMoves), 'tuples whose answer the re-pin itself moves'],
+    ['**net effective authorization changes** — authority vs post-re-pin', `${post.rows.length} (${p.widened} widened, ${p.narrowed} narrowed; ${byGrant.length} decided by an explicit grant)`, 'what a cutover would change, and what D3 approves'],
+  ],
+)}
+
+${table(
+  ['intended or still unapproved', 'tuples', 'status'],
+  [
+    ['intended — decided by the owner', String(moneyTuples.length), 'the money-action answers, preserved by D2\'s explicit grants'],
+    ['**still unapproved**', String(post.rows.length), '**the net effective changes below — awaiting D3**'],
+  ],
+)}
+
+### Every changed tuple
+
+${changed.length === 0 ? '_No rows._' : table(
+  ['scope', 'role', 'domain', 'action', 'D2 classification', 'authoritative', 'pre-re-pin', 'post-re-pin', 'explicit grant', 'classification source', 'reason'],
+  changed.map((v) => [
+    code(v.t.plane), code(v.t.role), code(v.t.scope), code(v.t.action), code(v.t.d2Classification),
+    v.authoritative, v.preRepin, v.postRepin,
+    v.explicit === null ? '—' : code(String(v.explicit)),
+    classificationSource(v.t),
+    reasonFor(v, heldLevelFor(v.t, context)),
+  ]),
+)}
+
 ## The \`manager\` / \`refunds\` narrowing
 
 ${table(
@@ -495,19 +729,30 @@ ${table(
     ['level required', `${code(refundNarrowing.requiredLevel ?? '')} — the tuple ${code(`refunds/${refundNarrowing.action}`)}`],
     ['BEFORE', `**${refundNarrowing.before}** — the tenant ordering ranks \`approve\` (5) above \`manage\` (4), so an \`approve\` holder clears a \`manage\` gate`],
     ['AFTER-CANDIDATE', `**${refundNarrowing.after}** — the unified ordering ranks \`approve\` (4) below \`manage\` (5), so it no longer does`],
+    ['AFTER-REPIN', `**${narrowingAfterRepin === undefined ? refundNarrowing.before : narrowingAfterRepin.after}** — the re-pin does not touch it: the tuple is not a money action, so it keeps the unified ordering's rule`],
     ['a real refund money action?', `**No — a domain-threshold decision only** (D2 classification ${code(refundNarrowing.d2Classification)}). Refund approval is documented as \`refunds: approve\` / \`approve_refunds\` (section B); nothing documents \`refunds\` at \`manage\`. No catalog sub-permission uses that comparison — ${refundSubs} — and the client offers no \`manage\` level on \`refunds\` at all.`],
-    ['can D2 affect it?', '**D2 does not decide it, but D2 can make it a live check.** If D2 re-pins refund approval to "`≥ manage`" as a *domain-level* gate — the shape of the `refunds: approve` representation and of the client\'s supervisor refund authorization — this comparison becomes the manager\'s refund-approval check, and under the unified ordering the manager would lose refund approval unless the role\'s `refunds` level is raised in the same change. If D2 re-pins through an explicit per-role grant or on `approve_refunds`, this comparison is not consulted: the manager\'s explicit grant is read first.'],
-    ['what remains for D3', 'Approval of this row, as of every changed row: accepting that under the unified ordering an `approve` holder no longer clears a `manage` gate on `refunds`. Whatever D2 decides, the row is D3\'s to approve; if D2 makes it a live check, D3\'s approval of it should be read together with that choice.'],
+    ['does D2 affect it?', '**No.** D2 was decided as an explicit per-role grant, applied to both refund-approval representations (`refunds/require:approve` and `approve_refunds`), not as a "`≥ manage`" domain-level gate. So this comparison is not the manager\'s refund-approval check: the manager\'s refund approval is decided by its explicit grants, which are `true` and preserved.'],
+    ['what remains for D3', 'Approval of this row, as of every changed row: accepting that under the unified ordering an `approve` holder no longer clears a `manage` gate on `refunds`.'],
   ],
 )}
 
-## What remains to be decided (D2, D3)
+## The D3 decision
 
-- **D3** — approval of all ${diff.rows.length} changed rows: ${s.widened} widened, ${s.narrowed} narrowed.
-- **D2** — the re-pin of the approve-gated money actions in section B. None of their representations
-  changes under the flip, so D2 is not forced by this diff; it still has to choose where a re-pin lands
-  (see the refund-approval data-model note and the narrowing above) and, separately, whether its scope
-  extends to the ${unresolvedRows.length} \`unresolved\` rows of section C. Neither choice is made here.
+D2 is decided and is not asked again. What is open is **D3**: the owner's explicit approval of the net
+effective change in section E — ${post.rows.length} rows, identified exactly by the post-re-pin row
+fingerprint below. The owner can:
+
+- **Approve** the diff as listed. That accepts, for a future cutover: the manager newly clearing an
+  \`approve\` gate on ${managerWidened} domains${otherWidened === '' ? '' : ` and ${otherWidened}`} (the ${p.widened} widened
+  rows, all \`unresolved\`); the manager no longer clearing the \`manage\` gate on \`refunds\` (the
+  ${p.narrowed} narrowed row, \`not_money_action\`); and the ${moneyTuples.length} money actions decided by the explicit grants in section D,
+  each with today's answer. Approval does not cut anything over: the cutover stays a separate step.
+- **Reject** some or all rows. Each rejected row then needs its own re-pin — an explicit per-role
+  value or a changed role level — before any cutover, and each such re-pin is a new decision.
+- **Revise** and approve again. Changing an explicit grant value, re-pinning an \`unresolved\` row,
+  or changing a role's level regenerates this artifact with a new fingerprint; D3 then approves that
+  fingerprint instead. An \`unresolved\` row becomes a money action only if an authoritative document
+  says so.
 
 ## Fingerprints
 
@@ -515,22 +760,27 @@ ${table(
   ['input', 'sha256'],
   [
     ['normalized authorization inputs', code(inputsFingerprint)],
-    ['diff rows (canonical serialization)', code(sha256(JSON.stringify(diff.rows)))],
-    ['summary (canonical serialization)', code(sha256(JSON.stringify(diff.summary)))],
+    ['diff rows (canonical serialization)', code(sha256(JSON.stringify(pre.rows)))],
+    ['summary (canonical serialization)', code(sha256(JSON.stringify(pre.summary)))],
+    ['post-re-pin diff rows — the diff D3 approves', code(sha256(JSON.stringify(post.rows)))],
+    ['post-re-pin summary', code(sha256(JSON.stringify(post.summary)))],
+    ['money-action outcomes, all three views', code(sha256(JSON.stringify(moneyOutcomes)))],
+    ['unresolved mappings, all three views', code(sha256(JSON.stringify(unresolvedOutcomes)))],
   ],
 )}
 
 The first fingerprint covers every catalog input this diff reads — orderings, roles, domains,
 features, actions, thresholds, role defaults, explicit grants, entitlement gates and dependencies —
-and the D2 classification's own inputs (the money-action registry with its quoted sources, and the
-named-grant-only list), serialized with sorted keys at every level. If it changes, this artifact is
-stale and the repository test fails.
+and the D2 inputs (the money-action registry with its quoted sources, the named-grant-only list, and
+the explicit money-action grants), serialized with sorted keys at every level. If it changes, this
+artifact is stale and the repository test fails.
 `;
 }
 
 export function buildArtifact(): string {
-  const diff = computeGrantDiff(CANONICAL_DIFF_CONTEXT);
-  return renderArtifact(diff, sha256(normalizedAuthorizationInputs()));
+  const pre = computeGrantDiff(CANONICAL_DIFF_CONTEXT);
+  const post = computeRepinnedGrantDiff(CANONICAL_DIFF_CONTEXT);
+  return renderArtifact(pre, post, sha256(normalizedAuthorizationInputs()));
 }
 
 function main(argv: readonly string[]): number {

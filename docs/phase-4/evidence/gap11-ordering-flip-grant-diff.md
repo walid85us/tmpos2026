@@ -8,20 +8,31 @@ This is **safeguard #2** of the six that [docs/phase-4/04 §3](../04-canonical-i
 binds to the GAP-11 ordering unification: a before/after effective-grant diff for every canonical
 `(role, scope, action)` tuple, so that no silent change ships.
 
-It decides nothing. Safeguard **#1** (the per-action re-pin of `approve`-gated money actions) is an
-open policy choice, tracked as decision **D2** — 04 §3 names two ways to satisfy it and assigns the
-choice to no one. Safeguard **#3** (explicit approval of this diff) is the owner's, tracked as decision
-**D3**. Both remain open; GAP-11 is **not** closed.
+It decides nothing. Safeguard **#1** (the per-action re-pin of `approve`-gated money actions) is
+owner decision **D2**, now made: an approval-gated money action requires an explicit per-role grant.
+The candidate carries that re-pin (section D) — in the candidate only: production is not re-pinned and
+nothing is cut over. Safeguard **#3** (explicit approval of this diff) is owner decision **D3**, still
+open; section E is the diff it approves. GAP-11 is **not** closed.
 
-## How to read this diff: two classifications, kept apart
+## How to read this diff
+
+### Three views of every tuple
+
+| view | what it is |
+| --- | --- |
+| **authoritative** (BEFORE) | What ships today: the production materializers in `server/platform-identity/permissionCatalog.ts`, called directly. |
+| **pre-re-pin** (AFTER-CANDIDATE) | The unified ordering alone — an independent implementation with its own rank table. Section A is the diff against it: the structural ordering changes. |
+| **post-re-pin** (AFTER-REPIN) | The unified ordering with D2's explicit money-action grants — the evaluator a cutover would install. Section E is the diff against it: the net effective change D3 approves. |
+
+### Two classifications, kept apart
 
 Every tuple carries two separate classifications, and no count below mixes them:
 
 | classification | values | what it means |
 | --- | --- | --- |
 | **approve level** (structural) | yes / no | The tuple's decisive required level is `approve`: a threshold tuple's level, a platform sub-permission's threshold, or a tenant sub-permission's default level. It is the level the flip moves. It says nothing about money. |
-| **D2 classification** | `money_action` | The tuple represents an operation an authoritative document identifies as an approve-gated money action (section B, with the source quoted). Only these are D2 rows. |
-|  | `unresolved` | The tuple requires the `approve` level, but no authoritative document ties it to a money action (section C). Whether D2 covers it is part of D2's open scope, not a finding. It is not counted as a D2 row. |
+| **D2 classification** | `money_action` | The tuple represents an operation an authoritative document identifies as an approve-gated money action (section B, with the source quoted). Only these are D2 rows, and only these carry an explicit grant (section D). |
+|  | `unresolved` | The tuple requires the `approve` level, but no authoritative document ties it to a money action (section C). It keeps the unified ordering's rules; it is not re-pinned and not counted as a D2 row. |
 |  | `not_money_action` | Neither: the decisive level is not `approve`, so the tuple cannot be an approve-gated action, and no document names it as one. |
 
 A level, a domain name, a widening, or the role that holds it is never taken as evidence of money.
@@ -68,7 +79,7 @@ This is the **maximal-grant** context, chosen deliberately: plan gating can only
 straddles the `manage`/`approve` boundary. No other context can therefore produce a change this
 one does not contain. The authorization-matrix suite checks that argument rather than trusting it,
 across the full, empty, every-one-off and every-one-on entitlement sets, each with and without the
-read-only cap.
+read-only cap, for both candidate views.
 
 ### Universe
 
@@ -195,7 +206,9 @@ grants changed" while the real exposure sat untouched beside it — which is exa
 These are the only tuples D2 governs. Each operation below is identified as an approve-gated money
 action by the quoted source, and listed with every canonical representation the catalog gives it.
 17 of the universe's 1659 tuples are such
-representations, and **0 of them change** under the unified ordering.
+representations. **0 of them change** under the unified ordering
+alone, and **0 change** after the D2 re-pin: all
+17 keep their authoritative answer (17 of 17 preserved).
 
 #### `refund_approval`
 
@@ -203,23 +216,23 @@ Authoritative source:
 
 - `docs/phase-4/04-canonical-iam-and-four-user-migration.md` — "including money-sensitive ones (`refunds: approve` / `approve_refunds`, `returns: approve_return`)"
 
-| representation | kind | changes under the flip | re-pin needed to stop a silent change |
+| representation | kind | changes under the flip | decided after the re-pin by |
 | --- | --- | --- | --- |
-| `tenant/refunds/require:approve` | domain-threshold decision | no | no — the flip does not move it (D2 may still re-pin it as policy) |
-| `tenant/refunds/approve_refunds` | named sub-permission | no | no — the flip does not move it (D2 may still re-pin it as policy) |
+| `tenant/refunds/require:approve` | domain-threshold decision | no | its D2 explicit per-role grant |
+| `tenant/refunds/approve_refunds` | named sub-permission | no | its D2 explicit per-role grant |
 
-| representation | role | holds | BEFORE | AFTER-CANDIDATE | changes |
-| --- | --- | --- | --- | --- | --- |
-| `refunds/require:approve` | `manager` | `approve` | granted | granted | no |
-| `refunds/require:approve` | `sales_staff` | `none` | denied | denied | no |
-| `refunds/require:approve` | `store_owner` | `full` | granted | granted | no |
-| `refunds/require:approve` | `technician` | `none` | denied | denied | no |
-| `refunds/approve_refunds` | `manager` | `approve` | granted | granted | no |
-| `refunds/approve_refunds` | `sales_staff` | `none` | denied | denied | no |
-| `refunds/approve_refunds` | `store_owner` | `full` | granted | granted | no |
-| `refunds/approve_refunds` | `technician` | `none` | denied | denied | no |
+| representation | role | holds | authoritative | pre-re-pin | explicit grant | post-re-pin | preserved |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `refunds/require:approve` | `manager` | `approve` | granted | granted | `true` | granted | yes |
+| `refunds/require:approve` | `sales_staff` | `none` | denied | denied | `false` | denied | yes |
+| `refunds/require:approve` | `store_owner` | `full` | granted | granted | `true` | granted | yes |
+| `refunds/require:approve` | `technician` | `none` | denied | denied | `false` | denied | yes |
+| `refunds/approve_refunds` | `manager` | `approve` | granted | granted | `true` | granted | yes |
+| `refunds/approve_refunds` | `sales_staff` | `none` | denied | denied | `false` | denied | yes |
+| `refunds/approve_refunds` | `store_owner` | `full` | granted | granted | `true` | granted | yes |
+| `refunds/approve_refunds` | `technician` | `none` | denied | denied | `false` | denied | yes |
 
-What the current data model cannot yet express: The catalog represents refund approval twice, and links the two only through `approve_refunds`' default-by-level path (`refunds` at `approve`), which every canonical role's explicit grant overrides — so for those roles they are separate decisions that can disagree. The client's supervisor refund authorization requires both: the `refunds` level at `approve` and an `approve_refunds` entry that is absent or true. There is no single canonical refund-approval action, so "re-pin refund approval" names more than one change. D2 has to say which representation it re-pins — the refunds narrowing below is where the difference shows.
+What the data model leaves open, and how the re-pin meets it: The catalog represents refund approval twice, and links the two only through `approve_refunds`' default-by-level path (`refunds` at `approve`), which every canonical role's explicit catalog grant overrides. The client's supervisor refund authorization requires both: the `refunds` level at `approve` and an `approve_refunds` entry that is absent or true. D2's explicit per-role grant is applied to BOTH representations, and today each role carries the same value on both, so in the candidate neither is decided by a level any more. The two still differ in one step the re-pin keeps: the threshold's comparison IS its grant step, so the explicit grant replaces it outright, while `approve_refunds` keeps its `refunds` minimum (`view`), read before the grant. With today's values both agree for every role in every context (the D2 suite checks it); a later value change should set both together, or a role holding `refunds` at `none` could pass the threshold while the sub-permission still refuses it. The refunds narrowing below is a third comparison on the same domain; it is not a documented money action and is not re-pinned.
 
 #### `return_approval`
 
@@ -227,18 +240,18 @@ Authoritative source:
 
 - `docs/phase-4/04-canonical-iam-and-four-user-migration.md` — "including money-sensitive ones (`refunds: approve` / `approve_refunds`, `returns: approve_return`)"
 
-| representation | kind | changes under the flip | re-pin needed to stop a silent change |
+| representation | kind | changes under the flip | decided after the re-pin by |
 | --- | --- | --- | --- |
-| `tenant/returns/approve_return` | named sub-permission | no | no — the flip does not move it (D2 may still re-pin it as policy) |
+| `tenant/returns/approve_return` | named sub-permission | no | its D2 explicit per-role grant |
 
-| representation | role | holds | BEFORE | AFTER-CANDIDATE | changes |
-| --- | --- | --- | --- | --- | --- |
-| `returns/approve_return` | `manager` | `manage` | granted | granted | no |
-| `returns/approve_return` | `sales_staff` | `view` | denied | denied | no |
-| `returns/approve_return` | `store_owner` | `full` | granted | granted | no |
-| `returns/approve_return` | `technician` | `view` | denied | denied | no |
+| representation | role | holds | authoritative | pre-re-pin | explicit grant | post-re-pin | preserved |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `returns/approve_return` | `manager` | `manage` | granted | granted | `true` | granted | yes |
+| `returns/approve_return` | `sales_staff` | `view` | denied | denied | `false` | denied | yes |
+| `returns/approve_return` | `store_owner` | `full` | granted | granted | `true` | granted | yes |
+| `returns/approve_return` | `technician` | `view` | denied | denied | `false` | denied | yes |
 
-What the current data model cannot yet express: One representation: the `approve_return` sub-permission. Two of its comparisons are on the level the flip moves. Its minimum module level is `manage`, checked BEFORE any explicit grant: a role holding `returns` at `approve` clears it today and would not under the unified ordering — no canonical role holds that level, which is why no row changes. Its default-by-level path compares `returns` against `approve` — the same comparison as the widened `manager` / `returns` row in section C — but every canonical tenant role carries an explicit `approve_return` grant, read after the minimum and before the default, so the path is not reached for them. The server catalog has only its four fixed tenant roles and cannot represent a role without an explicit grant. The client can: a custom role created in the Employees screen stores only the sub-permissions an owner toggled, so for such a role the client's default path, and with it the unified ordering, would decide.
+What the data model leaves open, and how the re-pin meets it: One representation: the `approve_return` sub-permission. Its minimum module level `manage` is a prerequisite, read BEFORE the grant step, and the re-pin keeps it there: it can still deny, never grant. A role holding `returns` at `approve` clears it today and would not under the unified ordering — no canonical role holds that level, which is why no row changes. The explicit grant replaces the per-role catalog grant and the default-by-level path together. The server catalog has only its four fixed tenant roles; a custom role created in the client's Employees screen stores only the sub-permissions an owner toggled, and has no D2 grant — under the re-pin it would be denied, where today the client's default path would decide.
 
 #### `platform_billing_approval`
 
@@ -247,36 +260,34 @@ Authoritative sources:
 - `src/owner/platformPermissionsConfig.ts` — "id: 'approve_billing_actions', label: 'Approve Billing Actions', description: 'Approve refunds, credits, or write-offs.', threshold: 'approve'"
 - `docs/phase-1.3-platform-access-inventory.md` — "financial approval (refund/credit/write-off)"
 
-| representation | kind | changes under the flip | re-pin needed to stop a silent change |
+| representation | kind | changes under the flip | decided after the re-pin by |
 | --- | --- | --- | --- |
-| `platform/billing_subscriptions/approve_billing_actions` | named sub-permission | no | no — the flip does not move it (D2 may still re-pin it as policy) |
+| `platform/billing_subscriptions/approve_billing_actions` | named sub-permission | no | its D2 explicit per-role grant |
 
-| representation | role | holds | BEFORE | AFTER-CANDIDATE | changes |
-| --- | --- | --- | --- | --- | --- |
-| `billing_subscriptions/approve_billing_actions` | `billing_admin` | `full` | granted | granted | no |
-| `billing_subscriptions/approve_billing_actions` | `operations_admin` | `view` | denied | denied | no |
-| `billing_subscriptions/approve_billing_actions` | `security_admin` | `view` | denied | denied | no |
-| `billing_subscriptions/approve_billing_actions` | `support_admin` | `view` | denied | denied | no |
-| `billing_subscriptions/approve_billing_actions` | `system_owner` | `full` | granted | granted | no |
+| representation | role | holds | authoritative | pre-re-pin | explicit grant | post-re-pin | preserved |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `billing_subscriptions/approve_billing_actions` | `billing_admin` | `full` | granted | granted | `true` | granted | yes |
+| `billing_subscriptions/approve_billing_actions` | `operations_admin` | `view` | denied | denied | `false` | denied | yes |
+| `billing_subscriptions/approve_billing_actions` | `security_admin` | `view` | denied | denied | `false` | denied | yes |
+| `billing_subscriptions/approve_billing_actions` | `support_admin` | `view` | denied | denied | `false` | denied | yes |
+| `billing_subscriptions/approve_billing_actions` | `system_owner` | `full` | granted | granted | `true` | granted | yes |
 
-What the current data model cannot yet express: Platform plane. That plane already ranks `approve` below `manage`, so the unified ordering cannot move it (0 platform rows change). Nothing needs re-pinning to prevent a silent change.
+What the data model leaves open, and how the re-pin meets it: Platform plane. That plane already ranks `approve` below `manage`, so the unified ordering cannot move it (0 platform rows change). Under the re-pin its threshold is replaced by the explicit grant; it has no platform prerequisite, and the read-only limitation still refuses it.
 
-**What this means for D2.** On every documented money action, for every canonical role, the unified
-ordering changes nothing: the manager already holds `refunds` at `approve`, every non-owner tenant
-role holds explicit `approve_refunds` and `approve_return` grants that are read before the
-default-by-level path, and no canonical role holds the `approve` level that `approve_return`'s `manage`
-minimum would stop admitting.
-04 §3's warning that the manager "would silently gain approval capability it did not have" does not
-materialize on these operations for the catalog's roles; the structural widening sits on the
-`unresolved` rows of section C. What D2 still has to settle is where a re-pin lands — which
-representation of refund approval is the canonical one, and whether roles without explicit grants are
-in scope — not a change the flip forces on the documented actions.
+**What this means.** On every documented money action, for every canonical role, neither candidate
+view changes the answer: the manager already holds `refunds` at `approve`, every non-owner tenant
+role holds explicit catalog grants for `approve_refunds` and `approve_return` that are read before the
+default-by-level path, no canonical role holds the `approve` level that `approve_return`'s `manage`
+minimum would stop admitting, and D2's explicit grants carry exactly today's answers. 04 §3's warning
+that the manager "would silently gain approval capability it did not have" does not materialize on
+these operations for the catalog's roles; the structural widening sits on the `unresolved` rows of
+section C, which D2 does not re-pin.
 
 ## C. Unresolved mapping
 
 These rows require the `approve` level but **no authoritative document ties them to a money
-action**. They are structural facts, not D2 rows, and D2 is not asked to decide from them. Whether
-D2's re-pin should also cover them is part of D2's open scope; nothing here answers it.
+action**. They are structural facts, not D2 rows: D2's explicit grants do not apply to them, and they
+keep the unified ordering's rules in the post-re-pin view. No document is taken to classify them here.
 
 ### Changed rows (12)
 
@@ -320,6 +331,145 @@ them money actions. 04 §2.1 also names payment-operation permissions — `accep
 without a level and without calling them approve-gated. None of either list is in the catalog; should
 one be added, its tuples classify `unresolved`.
 
+### All 188 unresolved mappings
+
+Every unresolved tuple, grouped by what it gates. Each "granted" column lists the roles that view
+allows; every other role of the plane is denied. "changes" counts the roles whose post-re-pin answer
+differs from the authoritative one.
+
+| plane/stratum | scope | action | roles | granted — authoritative | granted — pre-re-pin | granted — post-re-pin | changes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `platform/domain_threshold` | `addon_governance` | `require:approve` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `audit_security` | `require:approve` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `billing_subscriptions` | `require:approve` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `command_center` | `require:approve` | 5 | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `domains` | `require:approve` | 5 | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `feature_matrix` | `require:approve` | 5 | `billing_admin`, `operations_admin`, `system_owner` | `billing_admin`, `operations_admin`, `system_owner` | `billing_admin`, `operations_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `platform_settings` | `require:approve` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `provisioning` | `require:approve` | 5 | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `support_tools` | `require:approve` | 5 | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `team_management` | `require:approve` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/domain_threshold` | `tenant_management` | `require:approve` | 5 | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | `operations_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `addon_governance` | `edit_addon_overrides` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `addon_governance` | `grant_paid_override` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `addon_governance` | `grant_trial` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `addon_governance` | `revoke_addon_override` | 5 | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | `billing_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `audit_security` | `delete_security_note` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `audit_security` | `export_audit_csv` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `audit_security` | `view_restricted_audit_details` | 5 | `security_admin`, `system_owner` | `security_admin`, `system_owner` | `security_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `support_tools` | `change_escalation_level` | 5 | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | 0 |
+| `platform/sub_permission` | `support_tools` | `resolve_escalation` | 5 | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | `operations_admin`, `security_admin`, `support_admin`, `system_owner` | 0 |
+| `tenant/domain_threshold` | `customers` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `dashboard` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `employees` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `integrations` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `inventory` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `invoices` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `marketing` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `prospects` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `repairs` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner`, `technician` | `manager`, `store_owner`, `technician` | **1** |
+| `tenant/domain_threshold` | `reports` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `returns` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `sales` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `services` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `settings` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `shipping` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `suggestive_sales` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `supply_chain` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `support` | `require:approve` | 4 | `manager`, `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | 0 |
+| `tenant/domain_threshold` | `warranties` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/domain_threshold` | `widgets` | `require:approve` | 4 | `store_owner` | `manager`, `store_owner` | `manager`, `store_owner` | **1** |
+| `tenant/sub_permission` | `employees` | `approve_requests` | 4 | `store_owner` | `store_owner` | `store_owner` | 0 |
+| `tenant/sub_permission` | `inventory` | `approve_inventory` | 4 | `store_owner` | `store_owner` | `store_owner` | 0 |
+
+## D. The D2 re-pin — explicit money-action grants (candidate only)
+
+Owner decision D2, as the candidate implements it:
+
+1. Every `money_action` tuple requires an explicit per-role grant, and only `true` can allow it.
+2. `false`, a missing entry, a malformed value or an unknown entry denies. The table is closed — one
+   entry per money-action tuple, nothing else — and a table that does not audit clean honors no grant.
+3. No level (`approve`, `manage`, `full`) and no ordering comparison grants a money action by
+   itself: the explicit grant replaces exactly the step that confers the grant — a threshold tuple's
+   level comparison; for a tenant sub-permission the owner short-circuit, the per-role catalog grant and
+   the default-by-level path; for a platform sub-permission its threshold.
+4. The grant is necessary, never sufficient. Every other step keeps its place and can only deny: the
+   plan gates, a non-owner's parent-module minimum, platform prerequisites, and the read-only
+   limitation. Identity, scope, session and route constraints are enforced outside this model and are
+   unchanged.
+5. Each value below equals the tuple's authoritative answer today. No new business entitlement is
+   created, and changing a value is a new owner policy decision.
+
+The grants live in `D2_EXPLICIT_MONEY_ACTION_GRANTS` (`server/platform-identity/gap11GrantDiff.ts`),
+which no production module imports; the post-re-pin view reads them, the authority never does.
+
+| plane/stratum | role | scope | action | explicit grant | authoritative | pre-re-pin | post-re-pin | preserved |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `platform/sub_permission` | `billing_admin` | `billing_subscriptions` | `approve_billing_actions` | `true` | granted | granted | granted | yes |
+| `platform/sub_permission` | `operations_admin` | `billing_subscriptions` | `approve_billing_actions` | `false` | denied | denied | denied | yes |
+| `platform/sub_permission` | `security_admin` | `billing_subscriptions` | `approve_billing_actions` | `false` | denied | denied | denied | yes |
+| `platform/sub_permission` | `support_admin` | `billing_subscriptions` | `approve_billing_actions` | `false` | denied | denied | denied | yes |
+| `platform/sub_permission` | `system_owner` | `billing_subscriptions` | `approve_billing_actions` | `true` | granted | granted | granted | yes |
+| `tenant/domain_threshold` | `manager` | `refunds` | `require:approve` | `true` | granted | granted | granted | yes |
+| `tenant/domain_threshold` | `sales_staff` | `refunds` | `require:approve` | `false` | denied | denied | denied | yes |
+| `tenant/domain_threshold` | `store_owner` | `refunds` | `require:approve` | `true` | granted | granted | granted | yes |
+| `tenant/domain_threshold` | `technician` | `refunds` | `require:approve` | `false` | denied | denied | denied | yes |
+| `tenant/sub_permission` | `manager` | `refunds` | `approve_refunds` | `true` | granted | granted | granted | yes |
+| `tenant/sub_permission` | `manager` | `returns` | `approve_return` | `true` | granted | granted | granted | yes |
+| `tenant/sub_permission` | `sales_staff` | `refunds` | `approve_refunds` | `false` | denied | denied | denied | yes |
+| `tenant/sub_permission` | `sales_staff` | `returns` | `approve_return` | `false` | denied | denied | denied | yes |
+| `tenant/sub_permission` | `store_owner` | `refunds` | `approve_refunds` | `true` | granted | granted | granted | yes |
+| `tenant/sub_permission` | `store_owner` | `returns` | `approve_return` | `true` | granted | granted | granted | yes |
+| `tenant/sub_permission` | `technician` | `refunds` | `approve_refunds` | `false` | denied | denied | denied | yes |
+| `tenant/sub_permission` | `technician` | `returns` | `approve_return` | `false` | denied | denied | denied | yes |
+
+**Preserved: 17 of 17** in this context. The D2 suite checks the same in every
+entitlement and limitation context the matrix sweeps, and proves the controls: a missing, `false`,
+malformed, duplicated or unknown grant denies; an `approve`, `manage` or `full` holder is denied
+without its grant; and a grant still cannot pass a disabled plan gate, the read-only limitation, the
+`manage` minimum of `approve_return`, or another tuple's scope.
+
+## E. The final diff for D3
+
+### Counts in each view
+
+| compared against the authority | evaluated | unchanged | widened | narrowed |
+| --- | --- | --- | --- | --- |
+| pre-re-pin candidate (the ordering flip alone) | 1659 | 1646 | 12 | 1 |
+| post-re-pin candidate (the flip with D2's grants) | 1659 | 1646 | 12 | 1 |
+
+### Four kinds of change, kept apart
+
+| kind | tuples | what it is |
+| --- | --- | --- |
+| **structural ordering changes** — authority vs pre-re-pin | 13 (12 widened, 1 narrowed) | the comparisons the unified ordering moves (section A); none is a money action |
+| **explicit-grant representation changes** — how a tuple is decided | 17 | the money-action tuples now decided by a D2 explicit grant instead of a level; 0 of them change their answer |
+| **re-pin effect** — pre-re-pin vs post-re-pin | 0 | tuples whose answer the re-pin itself moves |
+| **net effective authorization changes** — authority vs post-re-pin | 13 (12 widened, 1 narrowed; 0 decided by an explicit grant) | what a cutover would change, and what D3 approves |
+
+| intended or still unapproved | tuples | status |
+| --- | --- | --- |
+| intended — decided by the owner | 17 | the money-action answers, preserved by D2's explicit grants |
+| **still unapproved** | 13 | **the net effective changes below — awaiting D3** |
+
+### Every changed tuple
+
+| scope | role | domain | action | D2 classification | authoritative | pre-re-pin | post-re-pin | explicit grant | classification source | reason |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tenant` | `manager` | `employees` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `integrations` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `inventory` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `marketing` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `refunds` | `require:manage` | `not_money_action` | granted | denied | denied | — | catalog: decisive level `manage`, not `approve`; no document names it | holds `approve`; the unified ordering ranks `approve` below `manage`, so it no longer clears the `manage` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `returns` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `settings` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `shipping` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `suggestive_sales` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `supply_chain` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `warranties` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `manager` | `widgets` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+| `tenant` | `technician` | `repairs` | `require:approve` | `unresolved` | denied | granted | granted | — | catalog: decisive level `approve`; no document names it a money action | holds `manage`; the unified ordering ranks `manage` above `approve`, so it now clears the `approve` gate; not a money action, so the re-pin leaves it |
+
 ## The `manager` / `refunds` narrowing
 
 | question | answer |
@@ -328,28 +478,43 @@ one be added, its tuples classify `unresolved`.
 | level required | `manage` — the tuple `refunds/require:manage` |
 | BEFORE | **granted** — the tenant ordering ranks `approve` (5) above `manage` (4), so an `approve` holder clears a `manage` gate |
 | AFTER-CANDIDATE | **denied** — the unified ordering ranks `approve` (4) below `manage` (5), so it no longer does |
+| AFTER-REPIN | **denied** — the re-pin does not touch it: the tuple is not a money action, so it keeps the unified ordering's rule |
 | a real refund money action? | **No — a domain-threshold decision only** (D2 classification `not_money_action`). Refund approval is documented as `refunds: approve` / `approve_refunds` (section B); nothing documents `refunds` at `manage`. No catalog sub-permission uses that comparison — `process_refunds` (minimum `view`, default `create`), `approve_refunds` (minimum `view`, default `approve`) — and the client offers no `manage` level on `refunds` at all. |
-| can D2 affect it? | **D2 does not decide it, but D2 can make it a live check.** If D2 re-pins refund approval to "`≥ manage`" as a *domain-level* gate — the shape of the `refunds: approve` representation and of the client's supervisor refund authorization — this comparison becomes the manager's refund-approval check, and under the unified ordering the manager would lose refund approval unless the role's `refunds` level is raised in the same change. If D2 re-pins through an explicit per-role grant or on `approve_refunds`, this comparison is not consulted: the manager's explicit grant is read first. |
-| what remains for D3 | Approval of this row, as of every changed row: accepting that under the unified ordering an `approve` holder no longer clears a `manage` gate on `refunds`. Whatever D2 decides, the row is D3's to approve; if D2 makes it a live check, D3's approval of it should be read together with that choice. |
+| does D2 affect it? | **No.** D2 was decided as an explicit per-role grant, applied to both refund-approval representations (`refunds/require:approve` and `approve_refunds`), not as a "`≥ manage`" domain-level gate. So this comparison is not the manager's refund-approval check: the manager's refund approval is decided by its explicit grants, which are `true` and preserved. |
+| what remains for D3 | Approval of this row, as of every changed row: accepting that under the unified ordering an `approve` holder no longer clears a `manage` gate on `refunds`. |
 
-## What remains to be decided (D2, D3)
+## The D3 decision
 
-- **D3** — approval of all 13 changed rows: 12 widened, 1 narrowed.
-- **D2** — the re-pin of the approve-gated money actions in section B. None of their representations
-  changes under the flip, so D2 is not forced by this diff; it still has to choose where a re-pin lands
-  (see the refund-approval data-model note and the narrowing above) and, separately, whether its scope
-  extends to the 12 `unresolved` rows of section C. Neither choice is made here.
+D2 is decided and is not asked again. What is open is **D3**: the owner's explicit approval of the net
+effective change in section E — 13 rows, identified exactly by the post-re-pin row
+fingerprint below. The owner can:
+
+- **Approve** the diff as listed. That accepts, for a future cutover: the manager newly clearing an
+  `approve` gate on 11 domains and the technician on `repairs` (the 12 widened
+  rows, all `unresolved`); the manager no longer clearing the `manage` gate on `refunds` (the
+  1 narrowed row, `not_money_action`); and the 17 money actions decided by the explicit grants in section D,
+  each with today's answer. Approval does not cut anything over: the cutover stays a separate step.
+- **Reject** some or all rows. Each rejected row then needs its own re-pin — an explicit per-role
+  value or a changed role level — before any cutover, and each such re-pin is a new decision.
+- **Revise** and approve again. Changing an explicit grant value, re-pinning an `unresolved` row,
+  or changing a role's level regenerates this artifact with a new fingerprint; D3 then approves that
+  fingerprint instead. An `unresolved` row becomes a money action only if an authoritative document
+  says so.
 
 ## Fingerprints
 
 | input | sha256 |
 | --- | --- |
-| normalized authorization inputs | `5789c18f7eb6b784761a0d815f85e70774f98c360025c38ffc35dd680d3806ac` |
-| diff rows (canonical serialization) | `c13c2c134c24c6c07351d7d8ab927359c8270ff10476b2ad5f6df01a5bb43071` |
+| normalized authorization inputs | `3e496550eb71b1fb9a916c82568e0685a2467798e288dcafa575e3645480af08` |
+| diff rows (canonical serialization) | `e7bee0bdcfc19dc9ab6acc4edd57df8d5fab3a1c1dfb19c8a0233ad5faacf186` |
 | summary (canonical serialization) | `0861bb6fee9af28aecdbd0131b153a14deebd5e85940041159a8668f2f7688ee` |
+| post-re-pin diff rows — the diff D3 approves | `e7bee0bdcfc19dc9ab6acc4edd57df8d5fab3a1c1dfb19c8a0233ad5faacf186` |
+| post-re-pin summary | `0861bb6fee9af28aecdbd0131b153a14deebd5e85940041159a8668f2f7688ee` |
+| money-action outcomes, all three views | `8f637dbfae84d8fbdef9381972e0a3276801ac6f83e6ed66f1c961a85e7c9ff1` |
+| unresolved mappings, all three views | `0383e6911362bbccd93aed5a279860ead33920522d0a06a1ae4eb3bd7da1efd7` |
 
 The first fingerprint covers every catalog input this diff reads — orderings, roles, domains,
 features, actions, thresholds, role defaults, explicit grants, entitlement gates and dependencies —
-and the D2 classification's own inputs (the money-action registry with its quoted sources, and the
-named-grant-only list), serialized with sorted keys at every level. If it changes, this artifact is
-stale and the repository test fails.
+and the D2 inputs (the money-action registry with its quoted sources, the named-grant-only list, and
+the explicit money-action grants), serialized with sorted keys at every level. If it changes, this
+artifact is stale and the repository test fails.

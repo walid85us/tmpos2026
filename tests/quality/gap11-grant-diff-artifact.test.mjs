@@ -26,13 +26,20 @@ const OBSERVATIONAL_MODULES = [
   'server/platform-identity/gap11ShadowComparator.ts',
 ];
 
-/** The only files permitted to name them, until safeguards #1 and #3 land and a cutover is decided. */
+/**
+ * The only files permitted to name them, until D3 approves the diff and a cutover is decided. Every
+ * entry but the modules themselves and the generator is a test suite (M5-GAP11-P2 adds the D2 suite
+ * and the two client suites that check server/client agreement).
+ */
 const PERMITTED_NAMERS = [
   'scripts/generate-gap11-grant-diff.ts',
   'server/platform-identity/gap11GrantDiff.test.ts',
   'server/platform-identity/gap11GrantDiff.ts',
+  'server/platform-identity/gap11MoneyActionGrants.test.ts',
   'server/platform-identity/gap11ShadowComparator.test.ts',
   'server/platform-identity/gap11ShadowComparator.ts',
+  'src/context/AccessContext.test.tsx',
+  'src/context/authorizationVocabulary.test.ts',
   'tests/quality/gap11-grant-diff-artifact.test.mjs',
   // The test ratchet names the new SUITES in its sentinel list, which is required of it. The test
   // below proves it names only `*.test.*` paths, so it cannot become a route to the modules.
@@ -162,15 +169,23 @@ test('the generator writes exactly one file, under the governed evidence directo
 // Containment — the observational modules stay out of every decision path
 // =============================================================================
 
+/** The observational modules, and the candidate-only D2 table and evaluator they export (M5-GAP11-P2). */
+const OBSERVATIONAL_NAMES = /gap11GrantDiff|gap11ShadowComparator|D2_EXPLICIT_MONEY_ACTION_GRANTS|evaluateAfterRepinCandidate|computeRepinnedGrantDiff/;
+
 test('nothing outside the permitted set names the observational modules', () => {
   const offenders = [];
   for (const file of localSources('server', 'src', 'scripts', 'tests')) {
     if (PERMITTED_NAMERS.includes(file)) continue;
     const text = readFileSync(join(REPO, file), 'utf8');
-    if (/gap11GrantDiff|gap11ShadowComparator/.test(text)) offenders.push(file);
+    if (OBSERVATIONAL_NAMES.test(text)) offenders.push(file);
   }
   assert.deepEqual(offenders, [],
-    'the candidate evaluator and shadow comparator must remain unreachable from any decision path');
+    'the candidate evaluators, the D2 grant table and the shadow comparator must remain unreachable from any decision path');
+  // Every permitted namer outside the modules and the generator is a test suite or the test ratchet.
+  for (const f of PERMITTED_NAMERS) {
+    if (OBSERVATIONAL_MODULES.includes(f) || f === GENERATOR || f === 'scripts/run-tests.mjs') continue;
+    assert.match(f, /\.test\.(ts|tsx|mjs)$/, `${f} may name the modules only as a test`);
+  }
 });
 
 test('the test ratchet names only the new SUITES, never the modules themselves', () => {
@@ -199,9 +214,15 @@ test('no production authorization module imports the observational modules', () 
   for (const f of AUTHORITY) {
     assert.ok(existsSync(join(REPO, f)), `${f} exists`);
     const text = readFileSync(join(REPO, f), 'utf8');
-    assert.ok(!/gap11GrantDiff|gap11ShadowComparator/.test(text),
-      `${f} must not reach the observational modules`);
+    assert.ok(!OBSERVATIONAL_NAMES.test(text),
+      `${f} must not reach the observational modules or the candidate-only D2 table`);
   }
+  // And no production module anywhere — every non-test source under server/ and src/ — does either.
+  const production = localSources('server', 'src').filter((f) => !/\.test\.(m|c)?[jt]sx?$/.test(f)
+    && !OBSERVATIONAL_MODULES.includes(f));
+  assert.ok(production.length > 100, 'the scan covers the real tree');
+  const importers = production.filter((f) => OBSERVATIONAL_NAMES.test(readFileSync(join(REPO, f), 'utf8')));
+  assert.deepEqual(importers, [], 'no production module names a candidate-only module, table or evaluator');
 });
 
 test('the observational modules never import a production decision entry point', () => {
@@ -261,6 +282,21 @@ const ALLOWED_SPECIFIERS = {
   'server/platform-identity/gap11ShadowComparator.ts': ['./authorizationConstants', './gap11GrantDiff'],
 };
 
+test('the GAP-11 sources carry no raw control bytes — a NUL separator is written as an escape', () => {
+  // A literal NUL makes `file`, grep and ripgrep treat a source as binary and skip it, so a scanner or
+  // a reviewer can silently miss the module (it happened twice: P1 and P2 each wrote one by accident).
+  const isControl = (b) => b < 0x09 || b === 0x0b || b === 0x0c || (b > 0x0d && b < 0x20);
+  const files = [...OBSERVATIONAL_MODULES, GENERATOR, 'server/platform-identity/gap11GrantDiff.test.ts',
+    'server/platform-identity/gap11MoneyActionGrants.test.ts', 'server/platform-identity/gap11ShadowComparator.test.ts',
+    'tests/quality/gap11-grant-diff-artifact.test.mjs', ARTIFACT];
+  for (const f of files) {
+    const at = readFileSync(join(REPO, f)).findIndex(isControl);
+    assert.equal(at, -1, `${f} has a raw control byte at offset ${at}`);
+  }
+  // Control: the check does see one.
+  assert.notEqual(Buffer.from(`a${String.fromCharCode(0)}b`).findIndex(isControl), -1);
+});
+
 test('the observational modules name no ambient capability and import only their inert inputs', () => {
   for (const f of OBSERVATIONAL_MODULES) {
     const c = census(readFileSync(join(REPO, f), 'utf8'), f);
@@ -314,7 +350,7 @@ test('no migration is changed, and no role default or explicit grant is re-pinne
   };
   const fingerprint = createHash('sha256').update(JSON.stringify(stable(grants))).digest('hex');
   assert.equal(fingerprint, '4c08356343ec6ef98acc2f76b09b0f68683a3f1b7a72752f2071d74cd01f4eed',
-    'the role defaults and explicit grants must not change: a re-pin is decision D2, not this stage');
+    'the production role defaults and explicit grants must not change: D2\'s re-pin lives in the candidate only');
 });
 
 test('the artifact keeps the structural diff and the D2 money actions apart, in three sections', () => {
@@ -332,11 +368,67 @@ test('the artifact keeps the structural diff and the D2 money actions apart, in 
   // The structural count and the D2 count are separate numbers, and they reconcile with the rows.
   assert.match(text, /changed rows whose decisive level is `approve` \(structural\) \| 12 \|/);
   assert.match(text, /\| `money_action` \| 0 \|\n\| `unresolved` \| 12 \|\n\| `not_money_action` \| 1 \|/);
-  // The narrowing is explained in full.
+  // The narrowing is explained in full — including after the re-pin D2 chose (M5-GAP11-P2).
   const narrowing = text.slice(at('## The `manager` / `refunds` narrowing'));
-  for (const q of ['level held', 'level required', 'BEFORE', 'AFTER-CANDIDATE', 'a real refund money action?', 'can D2 affect it?', 'what remains for D3']) {
+  for (const q of ['level held', 'level required', 'BEFORE', 'AFTER-CANDIDATE', 'AFTER-REPIN', 'a real refund money action?', 'does D2 affect it?', 'what remains for D3']) {
     assert.ok(narrowing.includes(`| ${q} |`), `the narrowing answers: ${q}`);
   }
+});
+
+/**
+ * The artifact the owner is asked to approve as D3, pinned byte for byte. Regenerating it with any
+ * change — a catalog edit, a D2 grant value, a wording change in the generator — moves this hash, and
+ * a moved hash is a new D3 question, not a refresh.
+ */
+const D3_ARTIFACT_SHA256 = 'f49ca74baf0d46a628bdcc066b95aade8f0f4ff92ef8eef20c5c8e7e394bd7c0';
+
+test('the artifact carries the three views, the D2 grants, every unresolved mapping and the D3 decision — pinned', () => {
+  const text = readFileSync(join(REPO, ARTIFACT), 'utf8');
+  assert.equal(createHash('sha256').update(text, 'utf8').digest('hex'), D3_ARTIFACT_SHA256,
+    'the D3 artifact changed: review the new diff, then pin its hash deliberately');
+  const at = (heading) => text.indexOf(heading);
+  const c = at('## C. Unresolved mapping');
+  const d = at('## D. The D2 re-pin — explicit money-action grants (candidate only)');
+  const e = at('## E. The final diff for D3');
+  const decision = at('## The D3 decision');
+  assert.ok(c > 0 && d > c && e > d && decision > e, 'sections C, D, E and the D3 decision, in that order');
+
+  // D2 is recorded as made, in the candidate only; D3 is open; nothing asks for D2 again.
+  assert.match(text, /owner decision \*\*D2\*\*, now made/);
+  assert.match(text, /in the candidate only: production is not re-pinned and\s+nothing is cut over/);
+  for (const stale of [/can D2 affect it\?/, /D2 has to say which representation/, /D2 is not forced by this diff/, /Both remain open/]) {
+    assert.ok(!stale.test(text), `stale pre-D2 wording ${stale}`);
+  }
+
+  // Both views' counts, and the four kinds of change kept apart.
+  assert.match(text, /\| pre-re-pin candidate \(the ordering flip alone\) \| 1659 \| 1646 \| 12 \| 1 \|/);
+  assert.match(text, /\| post-re-pin candidate \(the flip with D2's grants\) \| 1659 \| 1646 \| 12 \| 1 \|/);
+  assert.match(text, /\*\*explicit-grant representation changes\*\* — how a tuple is decided \| 17 \|/);
+  assert.match(text, /\*\*re-pin effect\*\* — pre-re-pin vs post-re-pin \| 0 \|/);
+  assert.match(text, /\| \*\*still unapproved\*\* \| 13 \|/);
+
+  // Section D: seventeen explicit grants, every one preserved.
+  const dRows = text.slice(d, e).split('\n').filter((l) => /^\| `(tenant|platform)\/(sub_permission|domain_threshold)` \|/.test(l));
+  assert.equal(dRows.length, 17);
+  assert.ok(dRows.every((l) => l.endsWith('| yes |')), 'every money action preserved');
+  assert.equal(dRows.filter((l) => l.includes('| `true` |')).length, 8);
+  assert.match(text, /\*\*Preserved: 17 of 17\*\*/);
+
+  // Section C: every one of the 188 unresolved tuples, grouped; only the twelve widened ones change.
+  const allUnresolved = text.slice(at('### All 188 unresolved mappings'), d);
+  const groups = allUnresolved.split('\n').filter((l) => /^\| `(tenant|platform)\//.test(l));
+  assert.equal(groups.reduce((n, l) => n + Number(l.split(' | ')[3]), 0), 188);
+  assert.equal(groups.filter((l) => l.endsWith('| **1** |')).length, 12);
+
+  // Section E: every changed tuple once, with every column the D3 decision needs.
+  const changed = text.slice(at('### Every changed tuple'), at('## The `manager` / `refunds` narrowing'));
+  assert.match(changed, /\| scope \| role \| domain \| action \| D2 classification \| authoritative \| pre-re-pin \| post-re-pin \| explicit grant \| classification source \| reason \|/);
+  assert.equal(changed.split('\n').filter((l) => l.startsWith('| `tenant` |') || l.startsWith('| `platform` |')).length, 13);
+
+  // The D3 decision offers approve, reject and revise, and approval is not a cutover.
+  const d3 = text.slice(decision);
+  for (const option of ['**Approve**', '**Reject**', '**Revise**']) assert.ok(d3.includes(option), option);
+  assert.match(d3, /Approval does not cut anything over/);
 });
 
 test('the run-tests ratchet lists the new suites as sentinels', async () => {
@@ -345,6 +437,8 @@ test('the run-tests ratchet lists the new suites as sentinels', async () => {
     'server/platform-identity/gap11GrantDiff.test.ts',
     'server/platform-identity/gap11ShadowComparator.test.ts',
     'tests/quality/gap11-grant-diff-artifact.test.mjs',
+    // M5-GAP11-P2: the D2 explicit money-action grant suite.
+    'server/platform-identity/gap11MoneyActionGrants.test.ts',
     // M5-GAP11-P1-R1: the direct deny-by-default suites.
     'server/platform-identity/permissionDecision.test.ts',
     'server/platform-identity/protectedAction.test.ts',

@@ -20,7 +20,15 @@ import {
   PLATFORM_FEATURE_GROUPS,
 } from '../owner/platformPermissionsConfig';
 import type { PlatformFeatureKey, PlatformPermissionsOverrides } from '../owner/platformPermissionsConfig';
-import { materializePlatformSubPermissions } from '../../server/platform-identity/permissionCatalog';
+import { materializePlatformSubPermissions, meetsTenantPermissionLevel } from '../../server/platform-identity/permissionCatalog';
+import {
+  CANONICAL_DIFF_CONTEXT,
+  CANONICAL_GRANT_UNIVERSE,
+  D2_EXPLICIT_MONEY_ACTION_GRANTS,
+  candidateMeetsLevel,
+  evaluateAfterRepinCandidate,
+  evaluateBefore,
+} from '../../server/platform-identity/gap11GrantDiff';
 import { readFileSync } from 'node:fs';
 
 // The written orderings (spec text, pinned as literal expectations — not
@@ -431,4 +439,43 @@ test('TeamManagementPage gates: a corrupt store denies the governance gates inst
   const gates = [...page.matchAll(/\b(?:hasPlatformPermission|canPlatform|hasEffectiveFeatureAccess|getEffectiveFeatureAccess|hasSectionAccess|hasActionAccess)\(([^)]*)\)/g)].map((m) => m[1]);
   assert.ok(gates.length >= 5, `control: the five governance gates are found (found ${gates.length})`);
   for (const args of gates) assert.equal(args.split(',').length, 2, args);
+});
+
+// =============================================================================
+// M5-GAP11-P2 — server/client agreement for the GAP-11 candidate and D2's money actions
+// =============================================================================
+
+test('server/client agreement: the client comparators equal the server authority (tenant) and the server candidate (unified), on every probe', () => {
+  // The candidate adopts the unified ordering, which is the one the client's platform comparator already
+  // uses; the tenant side stays the authority on both. Canonical levels and every unknown class alike.
+  const probes: unknown[] = [...PLATFORM_ORDER, ...UNKNOWN_VALUES];
+  let pairs = 0;
+  let flips = 0;
+  for (const a of probes) {
+    for (const r of probes) {
+      const unified = platformPermissionMeets(a as PermissionLevel, r as PermissionLevel);
+      const tenant = meetsPermissionLevel(a as PermissionLevel, r as PermissionLevel);
+      assert.equal(unified, candidateMeetsLevel(a, r), `unified: ${String(a)} vs ${String(r)}`);
+      assert.equal(tenant, meetsTenantPermissionLevel(a as never, r as never), `tenant: ${String(a)} vs ${String(r)}`);
+      if (unified !== tenant) flips += 1;
+      pairs += 1;
+    }
+  }
+  assert.equal(pairs, probes.length * probes.length);
+  assert.equal(flips, 2, 'control: the two orderings still differ on exactly the manage/approve pair');
+});
+
+test('server/client agreement: the client\'s platform billing approval equals the D2 explicit grant and the post-re-pin candidate, per role', () => {
+  const platform = D2_EXPLICIT_MONEY_ACTION_GRANTS.filter((g) => g.plane === 'platform');
+  assert.equal(platform.length, 5);
+  assert.equal(platform.filter((g) => g.granted).length, 2, 'control: the check is not a constant');
+  for (const g of platform) {
+    const client = explainAccessDecision(g.role as Role, g.action, {}).allowed;
+    assert.equal(client, g.granted, `client vs D2 grant: ${g.role}`);
+    const t = CANONICAL_GRANT_UNIVERSE.find((x) => x.plane === g.plane && x.stratum === g.stratum
+      && x.role === g.role && x.scope === g.scope && x.action === g.action);
+    assert.ok(t !== undefined, g.role);
+    assert.equal(evaluateAfterRepinCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `candidate vs client: ${g.role}`);
+    assert.equal(evaluateBefore(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `authority vs client: ${g.role}`);
+  }
 });
