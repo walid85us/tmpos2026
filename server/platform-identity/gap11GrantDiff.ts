@@ -13,8 +13,15 @@
 // (D2_EXPLICIT_MONEY_ACTION_GRANTS), each equal to today's authoritative answer, and a second candidate
 // view (evaluateAfterRepinCandidate) that consults it. That is safeguard #1 in the CANDIDATE only.
 //
-// WHAT THIS IS NOT. It re-pins nothing in production, approves nothing (safeguard #3, owner decision
-// D3), and cuts nothing over. THE CANDIDATE EVALUATORS ARE OBSERVATIONAL. They are never consulted
+// THE D3 PINS (M5-GAP11-P3). The owner decided D3: every one of the thirteen changes the ordering
+// makes is rejected, and each of those tuples keeps today's answer. The candidate carries that as a
+// closed table of thirteen literal ordering-compatibility pins (D3_COMPATIBILITY_PINS) and a third
+// candidate view (evaluatePinnedCandidate) — the one a cutover would install — which answers exactly
+// as the shipped authority on every tuple. A pin table that is not exactly the committed one makes
+// that view invalid; it never falls back to the unified ordering's answer.
+//
+// WHAT THIS IS NOT. It re-pins nothing in production and cuts nothing over. D3 approves an artifact,
+// not a cutover. THE CANDIDATE EVALUATORS ARE OBSERVATIONAL. They are never consulted
 // for a real authorization decision: `materializeTenant*` / `materializePlatform*` in
 // permissionCatalog.ts remain the sole authority, and nothing here is imported by a request path.
 //
@@ -294,6 +301,46 @@ export const D2_EXPLICIT_MONEY_ACTION_GRANTS: readonly D2ExplicitMoneyGrant[] = 
   moneyGrant('tenant', 'sub_permission', 'store_owner', 'returns', 'approve_return', true),
   moneyGrant('tenant', 'sub_permission', 'technician', 'refunds', 'approve_refunds', false),
   moneyGrant('tenant', 'sub_permission', 'technician', 'returns', 'approve_return', false),
+]);
+
+/** One ordering-compatibility pin (owner decision D3): the authoritative answer a tuple keeps. */
+export interface D3CompatibilityPin {
+  readonly plane: GrantPlane;
+  readonly stratum: GrantStratum;
+  readonly role: TenantRoleId | PlatformRoleId;
+  readonly scope: string;
+  readonly action: string;
+  readonly granted: boolean;
+}
+
+const compatibilityPin = (
+  plane: GrantPlane, stratum: GrantStratum, role: TenantRoleId | PlatformRoleId, scope: string, action: string,
+  granted: boolean,
+): D3CompatibilityPin => Object.freeze({ plane, stratum, role, scope, action, granted });
+
+/**
+ * Owner decision D3, in the candidate: every one of the thirteen changes the P2 artifact listed is
+ * rejected, and each tuple keeps the answer it has today — the twelve widened rows stay denied, the
+ * manager's `refunds` `manage` gate stays allowed. Each value is LITERAL and equals the authoritative
+ * answer. These are ORDERING-COMPATIBILITY pins, not money-action classifications and not a rule: they
+ * say nothing about any other tuple, and no role level, ordering or D2 grant changes. The table is
+ * closed — it must match, entry for entry, the rows the unified ordering changes that D2 does not
+ * decide, each with its authoritative value — and a table that does not makes the candidate invalid.
+ */
+export const D3_COMPATIBILITY_PINS: readonly D3CompatibilityPin[] = Object.freeze([
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'employees', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'integrations', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'inventory', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'marketing', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'refunds', 'require:manage', true),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'returns', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'settings', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'shipping', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'suggestive_sales', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'supply_chain', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'warranties', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'manager', 'widgets', 'require:approve', false),
+  compatibilityPin('tenant', 'domain_threshold', 'technician', 'repairs', 'require:approve', false),
 ]);
 
 export interface CanonicalGrantTuple {
@@ -874,8 +921,8 @@ export function evaluateAfterCandidate(tuple: unknown, context: GrantEvaluationC
 }
 
 /**
- * The grant the unified ordering WOULD produce AFTER the D2 re-pin — the candidate a cutover would
- * install. Observational. A tuple that is not a money action goes through exactly the rules of
+ * The grant the unified ordering WOULD produce AFTER the D2 re-pin, before D3's compatibility pins.
+ * Observational. A tuple that is not a money action goes through exactly the rules of
  * evaluateAfterCandidate and never reads the grant table. A money action is allowed only by an
  * explicit `true` in a table that audits clean; a missing, `false`, malformed or unknown grant, or an
  * unsound table, denies — and a `true` still has to clear every other constraint (candidateDecision).
@@ -897,6 +944,202 @@ export function evaluateAfterRepinCandidate(
 }
 
 // =============================================================================
+// The D3 compatibility pins — a closed catalogue, fixed at module load
+// =============================================================================
+
+/**
+ * The only tuples a pin may name: every tuple the post-D2 candidate answers differently from the
+ * authority in the canonical context that D2 does not decide (a money action is D2's, never a pin's),
+ * in universe order. Computed once, here, at module load — before any caller code can run — so no
+ * table, tuple or context a caller hands over later can move it. It is behaviour, not a name rule: a
+ * role, domain or level is never read to decide what may be pinned.
+ */
+const COMPATIBILITY_PIN_TUPLES: readonly CanonicalGrantTuple[] = Object.freeze(
+  CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification !== 'money_action'
+    && evaluateAfterRepinCandidate(t, CANONICAL_DIFF_CONTEXT) !== evaluateBefore(t, CANONICAL_DIFF_CONTEXT)),
+);
+
+/** The authoritative answer each catalogue tuple must keep, by grantTupleKey; a null-prototype record. */
+const COMPATIBILITY_PIN_AUTHORITY: Readonly<Record<string, boolean>> = (() => {
+  const index = { __proto__: null } as unknown as Record<string, boolean>;
+  for (const t of COMPATIBILITY_PIN_TUPLES) index[grantTupleKey(t)] = evaluateBefore(t, CANONICAL_DIFF_CONTEXT) === 'granted';
+  return Object.freeze(index);
+})();
+
+interface ParsedCompatibilityPins {
+  readonly ok: boolean;
+  readonly problems: readonly string[];
+  /** Keyed by grantTupleKey; a null-prototype record. Only consulted when `ok`. */
+  readonly pins: Readonly<Record<string, boolean>>;
+}
+
+/**
+ * Read a pin table once, whatever it is, with the discipline of parseExplicitMoneyGrants (and the
+ * same stated boundary): operators and index access only, problems counted in a primitive, pins
+ * recorded in a null-prototype record, messages built from template literals. An entry counts only if
+ * it is exactly the six pin fields as its own keys, names a canonical tuple field for field, that tuple is not a
+ * money action, it is in the catalogue, and it carries exactly the catalogue's authoritative boolean;
+ * every catalogue tuple must have one.
+ * Anything else — missing, duplicate, malformed, unexpected, or a changed value — is a problem, and one
+ * problem makes the whole table invalid. So the only table that parses clean is the committed one's
+ * content: no caller-supplied table can add, remove or rewrite a pin, only make the candidate invalid.
+ */
+function parseCompatibilityPins(table: unknown): ParsedCompatibilityPins {
+  const pins = { __proto__: null } as unknown as Record<string, boolean>;
+  const problems: string[] = [];
+  let count = 0;
+  const problem = (why: string): void => {
+    count += 1;
+    try { problems.push(why); } catch { /* the message is for people; the count decides */ }
+  };
+  const done = (): ParsedCompatibilityPins => ({ ok: count === 0, problems, pins });
+
+  let length: unknown;
+  try {
+    if (!Array.isArray(table)) { problem('the pin table is not an array'); return done(); }
+    length = (table as { length: unknown }).length;
+  } catch {
+    problem('the pin table cannot be read');
+    return done();
+  }
+  if (typeof length !== 'number' || !(length >= 0 && length <= 1024) || length % 1 !== 0) {
+    problem('the pin table has no usable length');
+    return done();
+  }
+  // inv: `pins` holds exactly the entries of table[0..i) that passed every check, each with its
+  // catalogue value, and `count` is the number of problems found so far. term: i rises to length ≤ 1024.
+  for (let i = 0; i < length; i += 1) {
+    let plane: unknown; let stratum: unknown; let role: unknown; let scope: unknown; let action: unknown;
+    let granted: unknown;
+    let exact = false;
+    try {
+      const entry: unknown = (table as Record<number, unknown>)[i];
+      if (typeof entry !== 'object' || entry === null) { problem(`entry ${i} is not an object`); continue; }
+      ({ plane, stratum, role, scope, action, granted } = entry as Record<string, unknown>);
+      // A pin is exactly these six own fields. Anything else — a classification, a level, a rule, a
+      // non-enumerable or symbol-keyed extra, or a field it lacks and would inherit — is unexpected pin
+      // data, not a harmless extra: it invalidates the table rather than being ignored.
+      const keys = Reflect.ownKeys(entry);
+      exact = keys.length === 6;
+      // inv: every key in keys[0..k) is one of the six. term: k rises to keys.length.
+      for (let k = 0; exact && k < keys.length; k += 1) {
+        const key = keys[k];
+        exact = key === 'plane' || key === 'stratum' || key === 'role' || key === 'scope' || key === 'action'
+          || key === 'granted';
+      }
+    } catch {
+      problem(`entry ${i} cannot be read`);
+      continue;
+    }
+    if (!exact) {
+      problem(`entry ${i} does not carry exactly the six pin fields`);
+      continue;
+    }
+    if (typeof plane !== 'string' || typeof stratum !== 'string' || typeof role !== 'string'
+      || typeof scope !== 'string' || typeof action !== 'string') {
+      problem(`entry ${i} does not name a tuple`);
+      continue;
+    }
+    const key = `${plane}\u0000${stratum}\u0000${role}\u0000${scope}\u0000${action}`;
+    const t = CANONICAL_INDEX[key];
+    if (t === undefined || t.plane !== plane || t.stratum !== stratum || t.role !== role
+      || t.scope !== scope || t.action !== action) {
+      problem(`entry ${i} names no canonical tuple`);
+      continue;
+    }
+    const where = `${plane}/${stratum}/${role}/${scope}/${action}`;
+    if (t.d2Classification === 'money_action') {
+      problem(`entry ${i} pins a money action, which only its D2 grant decides: ${where}`);
+      continue;
+    }
+    const authoritative = COMPATIBILITY_PIN_AUTHORITY[key];
+    if (authoritative === undefined) {
+      problem(`entry ${i} pins a tuple the unified ordering does not change: ${where}`);
+      continue;
+    }
+    if (typeof granted !== 'boolean') {
+      problem(`entry ${i} value is not a boolean: ${where}`);
+      continue;
+    }
+    if (granted !== authoritative) {
+      problem(`entry ${i} does not keep the authoritative answer: ${where}`);
+      continue;
+    }
+    if (key in pins) {
+      problem(`duplicate pin: ${where}`);
+      continue;
+    }
+    pins[key] = granted;
+  }
+  // inv: a problem is counted for every catalogue tuple before j that has no pin. term: j rises to the
+  // catalogue's length.
+  for (let j = 0; j < COMPATIBILITY_PIN_TUPLES.length; j += 1) {
+    const m = COMPATIBILITY_PIN_TUPLES[j];
+    if (!(grantTupleKey(m) in pins)) problem(`missing pin: ${m.plane}/${m.stratum}/${m.role}/${m.scope}/${m.action}`);
+  }
+  return done();
+}
+
+/** The committed table, parsed once. It is frozen, entries included, so this parse is its parse for good. */
+const COMMITTED_PINS: ParsedCompatibilityPins = parseCompatibilityPins(D3_COMPATIBILITY_PINS);
+
+const pinsFor = (pins: unknown): ParsedCompatibilityPins =>
+  pins === D3_COMPATIBILITY_PINS ? COMMITTED_PINS : parseCompatibilityPins(pins);
+
+/**
+ * Fail-closed integrity check over a pin table. Reports, never throws. Valid means: exactly one
+ * entry per catalogue tuple, each carrying that tuple's authoritative boolean, and nothing else.
+ */
+export function auditCompatibilityPins(table: unknown): { readonly ok: boolean; readonly problems: readonly string[] } {
+  const { ok, problems } = parseCompatibilityPins(table);
+  return { ok, problems };
+}
+
+/**
+ * What the pinned candidate answers: a grant outcome, or `invalid` — for EVERY input — when the pin
+ * table is not valid. An invalid candidate has no answers; it never falls back to the unified
+ * ordering's widened or narrowed one.
+ */
+export type PinnedCandidateOutcome = GrantOutcome | 'invalid';
+
+/**
+ * A valid pin table's decision: a pin replaces only the pinned tuple's grant step; the rest is post-D2.
+ * An invalid table has no answers, so reaching here with one is a defect in the caller, and it throws
+ * rather than apply whatever entries happened to parse.
+ */
+function pinnedDecision(t: CanonicalGrantTuple, ctx: GrantEvaluationContext, parsed: ParsedCompatibilityPins): boolean {
+  if (!parsed.ok) throw new Error('an invalid pin table has no answers');
+  const pin = parsed.pins[grantTupleKey(t)];
+  if (pin === true || pin === false) return candidateDecision(t, ctx, pin);
+  return evaluateAfterRepinCandidate(t, ctx) === 'granted';
+}
+
+/**
+ * The grant the unified ordering WOULD produce with D2's explicit money-action grants AND D3's
+ * compatibility pins — the candidate a cutover would install. Observational.
+ *
+ * A pinned tuple (every one a tenant domain threshold) is decided by candidateDecision with its pin as
+ * the grant step: the pin replaces only the level comparison, so the plan gate still zeroes the domain
+ * and the read-only cap still refuses any gate `view` does not clear — which is what makes the one
+ * allowing pin agree with the authority in every context, not only the canonical one. Every other tuple
+ * answers exactly as evaluateAfterRepinCandidate. Anything that is not a canonical tuple is denied.
+ * `pins` is a parameter so the suite can prove an invalid table is surfaced; since only the committed
+ * table's content parses clean, no argument can do more than make the candidate invalid.
+ */
+export function evaluatePinnedCandidate(
+  tuple: unknown,
+  context: GrantEvaluationContext,
+  pins: unknown = D3_COMPATIBILITY_PINS,
+): PinnedCandidateOutcome {
+  const parsed = pinsFor(pins);
+  if (!parsed.ok) return 'invalid';
+  const t = canonicalTupleFor(tuple);
+  const ctx = t === null ? null : snapshotContext(context, t.plane);
+  if (t === null || ctx === null) return 'denied';
+  return pinnedDecision(t, ctx, parsed) ? 'granted' : 'denied';
+}
+
+// =============================================================================
 // The diff
 // =============================================================================
 
@@ -914,15 +1157,15 @@ export interface GrantDiffRow {
    */
   readonly heldLevel: Level | null;
   readonly before: GrantOutcome;
-  /** The candidate view this diff compares against — pre- or post-re-pin (GrantDiff.view). */
+  /** The candidate view this diff compares against — pre-re-pin, post-re-pin or post-pins (GrantDiff.view). */
   readonly after: GrantOutcome;
   readonly change: ChangeClass;
   /**
-   * What decided the candidate's answer: the unified ordering, or — for a money action in the
-   * post-re-pin view — its D2 explicit grant.
+   * What decided the candidate's answer: the unified ordering; for a money action in the post-re-pin
+   * or post-pins view, its D2 explicit grant; for a pinned tuple in the post-pins view, its D3 pin.
    */
-  readonly decidedBy: 'level_ordering' | 'explicit_grant';
-  /** Which of the two flipping comparisons produced this row; null when an explicit grant decided it. */
+  readonly decidedBy: 'level_ordering' | 'explicit_grant' | 'compatibility_pin';
+  /** Which of the two flipping comparisons produced this row; null when a grant or a pin decided it. */
   readonly flipPair: FlipPair | null;
   /**
    * The D2 explicit grant the post-re-pin view read: a boolean only on a row `decidedBy` an explicit
@@ -955,8 +1198,9 @@ export interface GrantDiffSummary {
 /**
  * `pre_repin` — authority against the unified ordering alone (evaluateAfterCandidate).
  * `post_repin` — authority against the unified ordering with the D2 re-pin (evaluateAfterRepinCandidate).
+ * `post_pins` — authority against the candidate with D2's grants and D3's pins (evaluatePinnedCandidate).
  */
-export type CandidateView = 'pre_repin' | 'post_repin';
+export type CandidateView = 'pre_repin' | 'post_repin' | 'post_pins';
 
 export interface GrantDiff {
   readonly view: CandidateView;
@@ -972,22 +1216,48 @@ export interface GrantDiff {
  * Deterministic: same inputs, same rows, same order, every time.
  */
 export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIFF_CONTEXT): GrantDiff {
-  return diffAgainst('pre_repin', context, D2_EXPLICIT_MONEY_ACTION_GRANTS);
+  return diffAgainst('pre_repin', context, D2_EXPLICIT_MONEY_ACTION_GRANTS, null);
 }
 
 /**
- * The full diff against the candidate AFTER the D2 re-pin — the net effective change a cutover would
- * make, and the diff D3 approves. `grants` defaults to the committed table; the suite passes a
+ * The full diff against the candidate AFTER the D2 re-pin, before D3's pins — the thirteen net changes
+ * the P2 artifact listed and D3 rejected. `grants` defaults to the committed table; the suite passes a
  * corrupted one to prove a changed value surfaces here as a row decided by an explicit grant.
  */
 export function computeRepinnedGrantDiff(
   context: GrantEvaluationContext = CANONICAL_DIFF_CONTEXT,
   grants: unknown = D2_EXPLICIT_MONEY_ACTION_GRANTS,
 ): GrantDiff {
-  return diffAgainst('post_repin', context, grants);
+  return diffAgainst('post_repin', context, grants, null);
 }
 
-function diffAgainst(view: CandidateView, context: GrantEvaluationContext, grants: unknown): GrantDiff {
+/**
+ * The full diff against the candidate with D2's grants AND D3's pins — the net effective change a
+ * cutover would make, which D3's approval requires to be empty. So an empty result must mean "every
+ * tuple compared, none differs", and nothing else: this THROWS rather than return any diff when the
+ * pin table is invalid (a zero read off an invalid candidate would be a silent fallback, and so would a
+ * diff that quietly used the unified ordering on the pinned rows) or when the context is malformed
+ * (both sides would deny every tuple, and the empty diff would compare nothing).
+ */
+export function computePinnedGrantDiff(
+  context: GrantEvaluationContext = CANONICAL_DIFF_CONTEXT,
+  pins: unknown = D3_COMPATIBILITY_PINS,
+): GrantDiff {
+  const parsed = pinsFor(pins);
+  if (!parsed.ok) {
+    throw new Error(`the D3 compatibility pins are invalid, so the pinned candidate has no answers: ${parsed.problems.join('; ')}`);
+  }
+  // Read once: the diff below reads only this frozen copy, so a getter cannot pass here and fail there.
+  const snapshot = snapshotContext(context);
+  if (snapshot === null) {
+    throw new Error('the context is malformed, so the pinned diff would compare nothing');
+  }
+  return diffAgainst('post_pins', snapshot, D2_EXPLICIT_MONEY_ACTION_GRANTS, parsed);
+}
+
+function diffAgainst(
+  view: CandidateView, context: GrantEvaluationContext, grants: unknown, pins: ParsedCompatibilityPins | null,
+): GrantDiff {
   // One copy for every read below. A malformed context is never read again: an empty stand-in is one
   // every evaluator denies, so no row is produced.
   const snapshot = snapshotContext(context);
@@ -1003,11 +1273,19 @@ function diffAgainst(view: CandidateView, context: GrantEvaluationContext, grant
 
   for (const t of CANONICAL_GRANT_UNIVERSE) {
     const before = evaluateBefore(t, ctx);
-    const after = view === 'pre_repin' ? evaluateAfterCandidate(t, ctx) : evaluateAfterRepinCandidate(t, ctx, grants);
+    let after: GrantOutcome;
+    if (view === 'pre_repin') after = evaluateAfterCandidate(t, ctx);
+    else if (pins === null) after = evaluateAfterRepinCandidate(t, ctx, grants);
+    else {
+      const s = snapshotContext(ctx, t.plane);
+      after = s !== null && pinnedDecision(t, s, pins) ? 'granted' : 'denied';
+    }
     if (before === after) continue;
     const change: ChangeClass = before === 'denied' ? 'widened' : 'narrowed';
-    const byGrant = view === 'post_repin' && t.d2Classification === 'money_action';
-    const flipPair: FlipPair | null = byGrant ? null : change === 'widened'
+    // At most one of the two decided the row; a pin, where there is one, takes precedence everywhere.
+    const byPin = pins !== null && grantTupleKey(t) in pins.pins;
+    const byGrant = !byPin && view !== 'pre_repin' && t.d2Classification === 'money_action';
+    const flipPair: FlipPair | null = byGrant || byPin ? null : change === 'widened'
       ? 'manage_satisfies_approve'
       : 'approve_no_longer_satisfies_manage';
     if (change === 'widened') widened += 1; else narrowed += 1;
@@ -1020,7 +1298,7 @@ function diffAgainst(view: CandidateView, context: GrantEvaluationContext, grant
       plane: t.plane, stratum: t.stratum, role: t.role, scope: t.scope, action: t.action,
       requiredLevel: t.requiredLevel, heldLevel: heldLevelFor(t, ctx),
       before, after, change,
-      decidedBy: byGrant ? 'explicit_grant' as const : 'level_ordering' as const,
+      decidedBy: byPin ? 'compatibility_pin' as const : byGrant ? 'explicit_grant' as const : 'level_ordering' as const,
       flipPair,
       explicitGrant: byGrant ? explicitMoneyGrantFor(grants, t) : null,
       sensitive: t.sensitive, requiresApproveLevel: t.requiresApproveLevel,
@@ -1150,6 +1428,10 @@ export function normalizedAuthorizationInputs(): string {
       namedGrantOnly: [...D2_NAMED_GRANT_ONLY_ACTIONS],
       unmappedPaymentOperations: [...D2_UNMAPPED_PAYMENT_OPERATIONS],
       explicitGrants: D2_EXPLICIT_MONEY_ACTION_GRANTS,
+    },
+    // D3's compatibility pins, so a changed, added or removed pin is a stale artifact.
+    d3: {
+      compatibilityPins: D3_COMPATIBILITY_PINS,
     },
   }));
 }

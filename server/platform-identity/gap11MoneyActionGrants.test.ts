@@ -470,7 +470,7 @@ test('unknown roles, levels, domains and actions fail closed on the post-re-pin 
 });
 
 // =============================================================================
-// The three views and the D3 diff
+// The three views and the post-D2 diff (the thirteen changes D3 rejected; the D3 suite pins them)
 // =============================================================================
 
 /** The thirteen rows the ordering flip changes — pinned by hand in the matrix suite, repeated here. */
@@ -532,7 +532,7 @@ test('the production evaluator is unchanged over the canonical decision space �
   assert.equal(vector(evaluateAfterCandidate), 'b853f82a3bb950a6669c042d9047a9ab88d6b16838ba066830a9abe36fbc5289');
 });
 
-test('control: a removed or corrupted explicit grant surfaces in the D3 diff and breaks preservation', () => {
+test('control: a removed or corrupted explicit grant surfaces in the post-D2 diff and breaks preservation', () => {
   // Break the table on purpose and require the machinery to notice — a preservation test that could
   // not fail would prove nothing.
   const l = 'tenant/sub_permission/manager/refunds/approve_refunds';
@@ -556,7 +556,7 @@ test('control: a removed or corrupted explicit grant surfaces in the D3 diff and
   assert.equal(rows.filter((r) => r.decidedBy === 'explicit_grant').length, 1, 'control: only the changed grant moves');
 });
 
-test('the table and the D3 diff are deterministic, frozen, and fingerprinted into the artifact inputs', () => {
+test('the table and the post-D2 diff are deterministic, frozen, and fingerprinted into the artifact inputs', () => {
   assert.equal(JSON.stringify(computeRepinnedGrantDiff(CTX)), JSON.stringify(computeRepinnedGrantDiff(CTX)));
   const d = computeRepinnedGrantDiff(CTX);
   assert.equal(Object.isFrozen(d), true);

@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 123; // M5-GAP11-P2: +1, the D2 explicit money-action grant suite (sentinel below)
+export const MIN_SUITES = 124; // M5-GAP11-P3: +1, the D3 compatibility-pin suite (sentinel below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -61,6 +61,7 @@ export const REQUIRED_SENTINELS = [
   'server/platform-identity/gap11GrantDiff.test.ts',           // GAP-11 authorization matrix: every canonical tuple once, pinned changed rows, deny-by-default unknowns, defect controls
   'server/platform-identity/gap11ShadowComparator.test.ts',    // GAP-11 dual-read shadow: the authoritative answer returned unchanged, bounded records, never fails open
   'server/platform-identity/gap11MoneyActionGrants.test.ts',   // GAP-11 D2 in the candidate: explicit per-role money-action grants, fail-closed table, preservation, no level grants alone
+  'server/platform-identity/gap11CompatibilityPins.test.ts',   // GAP-11 D3 in the candidate: thirteen closed compatibility pins, pinned candidate equals the authority, invalid never falls back
   'tests/quality/gap11-grant-diff-artifact.test.mjs',          // GAP-11 grant-diff artifact: not stale, deterministic, and the candidate evaluator stays out of every decision path
   'server/platform-identity/permissionDecision.test.ts',       // safeguard #4: the DEV decision spine denies unknown vocabulary; every canonical decision unchanged
   'server/platform-identity/protectedAction.test.ts',          // safeguard #4: a malformed route requirement is a 403, read once, never a crash

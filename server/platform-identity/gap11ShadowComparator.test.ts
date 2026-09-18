@@ -1,4 +1,6 @@
-// Phase 4.0 M5-GAP11-P1 — the dual-read shadow comparator (04 §3 safeguard #5).
+// Phase 4.0 M5-GAP11-P1 — the dual-read shadow comparator (04 §3 safeguard #5). Since M5-GAP11-P3 it
+// reads the pinned candidate (D2's grants and D3's compatibility pins), which equals the shipped
+// authority, so every divergence below is driven by a caller decision that disagrees with it.
 //
 // The whole value of a shadow read is that it cannot affect the decision it shadows. So most of this
 // suite is adversarial: throw from the candidate, throw from the observer, hand it garbage, hand it a
@@ -19,7 +21,10 @@ import {
   evaluateAfterCandidate,
   evaluateAfterRepinCandidate,
   evaluateBefore,
+  evaluatePinnedCandidate,
+  D3_COMPATIBILITY_PINS,
   type CanonicalGrantTuple,
+  type D3CompatibilityPin,
   type GrantEvaluationContext,
 } from './gap11GrantDiff';
 
@@ -29,7 +34,11 @@ const SOURCE = readFileSync(fileURLToPath(new URL('./gap11ShadowComparator.ts', 
 const tupleFor = (pred: (t: CanonicalGrantTuple) => boolean): CanonicalGrantTuple =>
   CANONICAL_GRANT_UNIVERSE.find(pred)!;
 
-/** A tuple the two policies genuinely disagree about — `manager` holds `manage` on `returns`. */
+/**
+ * A tuple the unified ordering alone disagrees about — `manager` holds `manage` on `returns` — and D3
+ * pins to its authoritative `denied`. Against the pinned candidate only a caller that says `granted`
+ * diverges on it.
+ */
 const DIVERGING = tupleFor((t) =>
   t.plane === 'tenant' && t.stratum === 'domain_threshold'
   && t.role === 'manager' && t.scope === 'returns' && t.action === 'require:approve');
@@ -90,7 +99,7 @@ test('exact agreement produces no record at all', () => {
 test('disagreement produces exactly one bounded record naming only canonical vocabulary', () => {
   const seen: ShadowMismatch[] = [];
   const c = createShadowComparator({ observer: (m) => { seen.push(m); } });
-  c.compare(DIVERGING, CTX, 'denied');
+  c.compare(DIVERGING, CTX, 'granted');
 
   assert.equal(seen.length, 1, 'one record per compare, not two');
   assert.deepEqual(c.records(), seen);
@@ -108,15 +117,19 @@ test('disagreement produces exactly one bounded record naming only canonical voc
     requiresApproveLevel: true,
     d2Classification: 'unresolved',
     moneyAction: null,
-    authoritative: 'denied',
-    candidate: 'granted',
+    authoritative: 'granted',
+    candidate: 'denied',
   });
   assert.equal(Object.isFrozen(m), true);
 });
 
+/** The opposite of the shipped answer: a caller that disagrees with the pinned candidate on every tuple. */
+const opposite = (t: CanonicalGrantTuple): 'granted' | 'denied' => (evaluateBefore(t, CTX) === 'granted' ? 'denied' : 'granted');
+
 test('a record carries no identity, credential, request or free text — asserted over the whole universe', () => {
   const c = createShadowComparator({ maxRecords: 4096 });
-  for (const t of CANONICAL_GRANT_UNIVERSE) c.compare(t, CTX, evaluateBefore(t, CTX));
+  for (const t of CANONICAL_GRANT_UNIVERSE) c.compare(t, CTX, opposite(t));
+  assert.equal(c.records().length, CANONICAL_GRANT_UNIVERSE.length, 'one record for every tuple');
 
   const ALLOWED_KEYS = ['kind', 'plane', 'stratum', 'role', 'scope', 'action', 'requiredLevel',
     'requiresApproveLevel', 'd2Classification', 'moneyAction', 'authoritative', 'candidate'];
@@ -145,14 +158,14 @@ test('the record buffer is bounded and drops are counted, never accumulated', ()
   const diverging = computeGrantDiff(CTX).rows.map((r) =>
     tupleFor((x) => x.role === r.role && x.scope === r.scope && x.action === r.action));
   assert.ok(diverging.length > 3, 'more divergences than the cap');
-  for (const t of diverging) c.compare(t, CTX, evaluateBefore(t, CTX));
+  for (const t of diverging) c.compare(t, CTX, opposite(t));
   assert.equal(c.records().length, 3);
   assert.equal(c.dropped(), diverging.length - 3);
 });
 
 test('records() hands back a frozen copy that cannot be used to mutate the buffer', () => {
   const c = createShadowComparator();
-  c.compare(DIVERGING, CTX, 'denied');
+  c.compare(DIVERGING, CTX, 'granted');
   const first = c.records();
   assert.equal(Object.isFrozen(first), true);
   assert.notEqual(first, c.records(), 'a fresh copy each call');
@@ -165,7 +178,7 @@ test('records() hands back a frozen copy that cannot be used to mutate the buffe
 
 test('an async observer that rejects is settled, never left as an unhandled rejection', async () => {
   const c = createShadowComparator({ observer: async () => { throw new Error('sink down'); } });
-  assert.equal(c.compare(DIVERGING, CTX, 'denied'), 'denied');
+  assert.equal(c.compare(DIVERGING, CTX, 'granted'), 'granted');
   assert.equal(c.records().length, 1);
   // Let the rejection surface: were it unhandled, the test runner would fail this test here.
   await new Promise((resolve) => setImmediate(resolve));
@@ -174,7 +187,7 @@ test('an async observer that rejects is settled, never left as an unhandled reje
 test('an observer that throws cannot influence the decision or lose the record', () => {
   let calls = 0;
   const c = createShadowComparator({ observer() { calls += 1; throw new Error('boom'); } });
-  assert.equal(c.compare(DIVERGING, CTX, 'denied'), 'denied');
+  assert.equal(c.compare(DIVERGING, CTX, 'granted'), 'granted');
   assert.equal(calls, 1);
   assert.equal(c.records().length, 1, 'the buffered copy survives a broken sink');
 });
@@ -243,11 +256,12 @@ test('an unknown required level is denied before comparison and is never read as
       assert.equal(evaluateBefore(bad as never, CTX), 'denied');
       assert.equal(evaluateAfterCandidate(bad as never, CTX), 'denied');
       assert.equal(evaluateAfterRepinCandidate(bad as never, CTX), 'denied');
+      assert.equal(evaluatePinnedCandidate(bad as never, CTX), 'denied');
     }
   }
 });
 
-test('the shadow reads the post-D2 candidate on money actions, and still returns only the caller decision', () => {
+test('the shadow reads the pinned candidate on money actions, and still returns only the caller decision', () => {
   // M5-GAP11-P2: the candidate a cutover would install carries D2's explicit money-action grants. A
   // caller whose decision disagrees with an explicit grant is recorded, never overruled. Written by
   // hand from the D2 table: sales_staff holds `approve_refunds` false, store_owner the refunds
@@ -265,13 +279,77 @@ test('the shadow reads the post-D2 candidate on money actions, and still returns
     assert.deepEqual({ kind: m.kind, d2: m.d2Classification, authoritative: m.authoritative, candidate: m.candidate },
       { kind: 'divergence', d2: 'money_action', authoritative: callerSays, candidate: grantSays });
   }
-  // With the shipped authority as the caller, no money action diverges: the explicit grants preserve it.
+  // With the shipped authority as the caller, nothing diverges at all: the pinned candidate is the authority.
   const quiet = createShadowComparator({ maxRecords: 4096 });
-  for (const t of CANONICAL_GRANT_UNIVERSE) quiet.compare(t, CTX, evaluateBefore(t, CTX));
-  assert.equal(quiet.records().filter((m) => m.d2Classification === 'money_action').length, 0);
-  // And what it does record is exactly the post-re-pin diff, row for row.
-  const expected = computeRepinnedGrantDiff(CTX).rows.map((r) => `${r.plane}/${r.stratum}/${r.role}/${r.scope}/${r.action}`);
-  assert.deepEqual(quiet.records().map((m) => `${m.plane}/${m.stratum}/${m.role}/${m.scope}/${m.action}`), expected);
+  for (const t of CANONICAL_GRANT_UNIVERSE) assert.equal(quiet.compare(t, CTX, evaluateBefore(t, CTX)), evaluateBefore(t, CTX));
+  assert.deepEqual(quiet.records(), []);
+});
+
+test('the shadow reads D3\'s pins: a caller giving the unified ordering\'s answer on a pinned row diverges from it', () => {
+  // M5-GAP11-P3: the thirteen rows the post-D2 candidate changed are pinned to the authority. A caller
+  // that answered as the unified ordering would is recorded against the pin — and still gets its own
+  // answer back.
+  const rows = computeRepinnedGrantDiff(CTX).rows;
+  assert.equal(rows.length, 13, 'control: the thirteen rejected changes');
+  const c = createShadowComparator();
+  for (const r of rows) {
+    const t = tupleFor((x) => x.plane === r.plane && x.stratum === r.stratum && x.role === r.role
+      && x.scope === r.scope && x.action === r.action);
+    assert.equal(c.compare(t, CTX, r.after), r.after, 'the caller decision is what comes back');
+  }
+  assert.deepEqual(c.records().map((m) => ({ kind: m.kind, authoritative: m.authoritative, candidate: m.candidate })),
+    rows.map((r) => ({ kind: 'divergence', authoritative: r.after, candidate: r.before })));
+});
+
+test('an invalid pin table is surfaced as candidate_invalid on every compare that reaches the candidate, deterministically, and never decides', () => {
+  // Removing one pin makes the candidate invalid. Every compare of a canonical tuple, in a readable
+  // context, with a real decision records exactly one candidate_invalid record — never a divergence,
+  // never an answer — and returns the caller decision unchanged.
+  const invalid = D3_COMPATIBILITY_PINS.slice(1);
+  const runs = [0, 1].map(() => {
+    const c = createShadowComparator({ compatibilityPins: invalid, maxRecords: 4096 });
+    for (const t of CANONICAL_GRANT_UNIVERSE) {
+      for (const authoritative of ['granted', 'denied'] as const) assert.equal(c.compare(t, CTX, authoritative), authoritative);
+    }
+    return c.records();
+  });
+  assert.equal(runs[0].length, CANONICAL_GRANT_UNIVERSE.length * 2, 'one record per compare');
+  assert.ok(runs[0].every((m) => m.kind === 'candidate_invalid' && m.candidate === null));
+  assert.deepEqual(runs[0], runs[1], 'deterministic');
+  assert.equal(evaluatePinnedCandidate(DIVERGING, CTX, invalid), 'invalid', 'control: the candidate itself is invalid');
+  // A copy with the committed content is valid: the option can invalidate, never rewrite.
+  const copy = createShadowComparator({ compatibilityPins: JSON.parse(JSON.stringify(D3_COMPATIBILITY_PINS)) });
+  copy.compare(DIVERGING, CTX, 'denied');
+  assert.deepEqual(copy.records(), []);
+  // Malformed input is recorded as what it is, ahead of the candidate: that ordering is fixed too.
+  const c = createShadowComparator({ compatibilityPins: invalid });
+  assert.equal(c.compare({ junk: true } as unknown as CanonicalGrantTuple, CTX, 'granted'), 'denied');
+  assert.equal(c.compare(DIVERGING, null as never, 'granted'), 'granted');
+  assert.equal(c.compare(DIVERGING, CTX, 'allow' as never), 'denied');
+  assert.deepEqual(c.records().map((m) => m.kind), ['malformed_tuple', 'malformed_context', 'malformed_authoritative']);
+});
+
+test('the pin option is decided once, at creation: changing the table afterwards changes nothing', () => {
+  // A valid copy stays valid after it is emptied; an invalid table stays invalid after it is repaired;
+  // and a getter-backed table is read at creation only, never inside compare().
+  const valid = JSON.parse(JSON.stringify(D3_COMPATIBILITY_PINS)) as D3CompatibilityPin[];
+  const a = createShadowComparator({ compatibilityPins: valid });
+  valid.length = 0;
+  a.compare(DIVERGING, CTX, 'denied');
+  assert.deepEqual(a.records(), [], 'still the committed pins');
+  const broken = D3_COMPATIBILITY_PINS.slice(1);
+  const b = createShadowComparator({ compatibilityPins: broken });
+  broken.unshift(D3_COMPATIBILITY_PINS[0]);
+  b.compare(DIVERGING, CTX, 'denied');
+  assert.deepEqual(b.records().map((m) => m.kind), ['candidate_invalid'], 'still invalid');
+  let reads = 0;
+  const watched = new Proxy([...D3_COMPATIBILITY_PINS], { get(t, k, r) { reads += 1; return Reflect.get(t, k, r); } });
+  const w = createShadowComparator({ compatibilityPins: watched });
+  const atCreation = reads;
+  assert.ok(atCreation > 0, 'control: the table is read at creation');
+  for (let i = 0; i < 5; i += 1) w.compare(DIVERGING, CTX, 'denied');
+  assert.equal(reads, atCreation, 'compare() never reads the caller\'s table');
+  assert.deepEqual(w.records(), []);
 });
 
 test('a context that cannot be read is contained and recorded as malformed, not as a divergence', () => {
@@ -358,10 +436,20 @@ test('hostile getters on the tuple cannot throw out of compare or smuggle unvali
 test('hostile options cannot break construction or compare', () => {
   const throwingObserver = Object.defineProperty({}, 'observer', { get() { throw new Error('boom'); } });
   const throwingMax = Object.defineProperty({}, 'maxRecords', { get() { throw new Error('boom'); } });
-  for (const options of [throwingObserver, throwingMax, { observer: 'not a function' }, { maxRecords: -1 }, { maxRecords: 1.5 }]) {
+  for (const options of [throwingObserver, throwingMax, { observer: 'not a function' }, { maxRecords: -1 }, { maxRecords: 1.5 }, null, 42]) {
     const c = createShadowComparator(options as never);
-    assert.equal(c.compare(DIVERGING, CTX, 'denied'), 'denied');
+    assert.equal(c.compare(DIVERGING, CTX, 'granted'), 'granted');
     assert.equal(c.records().length, 1, 'defaults applied: the divergence is buffered');
+    assert.equal(c.records()[0].kind, 'divergence', 'and the committed pins are read');
+  }
+  // Pin data that cannot be read is invalid pin data — never replaced by the committed pins — and one
+  // unreadable option cannot cost another its value.
+  const throwingPins = Object.defineProperty({}, 'compatibilityPins', { get() { throw new Error('boom'); } });
+  const emptyPinsThrowingObserver = Object.defineProperty({ compatibilityPins: [] }, 'observer', { get() { throw new Error('boom'); } });
+  for (const options of [throwingPins, emptyPinsThrowingObserver]) {
+    const c = createShadowComparator(options as never);
+    assert.equal(c.compare(DIVERGING, CTX, 'granted'), 'granted');
+    assert.deepEqual(c.records().map((m) => m.kind), ['candidate_invalid']);
   }
 });
 
@@ -371,7 +459,7 @@ test('hostile options cannot break construction or compare', () => {
 
 test('the candidate is evaluated at one call site, directly in compare(), outside any loop — and compare never re-enters', () => {
   // A structural claim, checked on the syntax tree rather than by counting text: exactly one call to
-  // evaluateAfterRepinCandidate (the post-D2 candidate — and none to the pre-re-pin one); its nearest
+  // evaluatePinnedCandidate (the pinned candidate — and none to the pre-D2 or post-D2 one); its nearest
   // enclosing function is the `compare` method itself (not a
   // callback that could run many times); no loop sits between them; nothing in the module calls
   // compare. Together those bound it to at most one candidate evaluation per compare() call. (The
@@ -386,8 +474,9 @@ test('the candidate is evaluated at one call site, directly in compare(), outsid
   const visit = (n: ts.Node): void => {
     if (ts.isIdentifier(n) && n.text === 'evaluateBefore') namesBefore = true;
     if (ts.isCallExpression(n)) {
-      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluateAfterRepinCandidate') candidateCalls.push(n);
-      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluateAfterCandidate') preRepinCalls.push(n);
+      if (ts.isIdentifier(n.expression) && n.expression.text === 'evaluatePinnedCandidate') candidateCalls.push(n);
+      if (ts.isIdentifier(n.expression) && (n.expression.text === 'evaluateAfterCandidate'
+        || n.expression.text === 'evaluateAfterRepinCandidate')) preRepinCalls.push(n);
       const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text
         : ts.isIdentifier(n.expression) ? n.expression.text : '';
       if (callee === 'compare') compareCalls.push(n);
@@ -397,7 +486,7 @@ test('the candidate is evaluated at one call site, directly in compare(), outsid
   visit(sf);
 
   assert.equal(candidateCalls.length, 1, 'exactly one call site');
-  assert.equal(preRepinCalls.length, 0, 'the shadow never reads the pre-re-pin candidate');
+  assert.equal(preRepinCalls.length, 0, 'the shadow never reads the pre-D2 or post-D2 candidate');
   assert.equal(compareCalls.length, 0, 'compare never calls itself');
   assert.equal(namesBefore, false, 'the comparator never evaluates the authoritative policy — that would be the duplicate evaluation');
 

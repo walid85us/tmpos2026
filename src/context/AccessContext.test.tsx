@@ -22,7 +22,13 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import { AccessProvider, useAccess, isKnownNavigationFeature } from './AccessContext';
-import { D2_EXPLICIT_MONEY_ACTION_GRANTS } from '../../server/platform-identity/gap11GrantDiff';
+import {
+  CANONICAL_DIFF_CONTEXT,
+  CANONICAL_GRANT_UNIVERSE,
+  D2_EXPLICIT_MONEY_ACTION_GRANTS,
+  D3_COMPATIBILITY_PINS,
+  evaluatePinnedCandidate,
+} from '../../server/platform-identity/gap11GrantDiff';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -313,6 +319,33 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
       unmount();
     }
     expect(granted).toBe(6); // control: store_owner and manager on all three, nobody else
+  });
+
+  it('24. M5-GAP11-P3 server/client agreement: every D3-pinned threshold answers in the client as its pin and as the pinned candidate', async () => {
+    // The thirteen rows D3 pinned are domain-threshold decisions the client engine makes itself, through
+    // checkPermission(domain, level). Each must answer as its pin — today's answer — and as the server's
+    // pinned candidate.
+    let allowed = 0;
+    let checked = 0;
+    for (const role of ['manager', 'technician']) {
+      getDoc.mockResolvedValue(existing(role));
+      const { unmount } = render(<AccessProvider><CaptureCtx /></AccessProvider>);
+      await fireAuth({ uid: `u-d3-${role}`, email: `d3-${role}@synthetic.test` });
+      for (const pin of D3_COMPATIBILITY_PINS.filter((p) => p.role === role)) {
+        const level = pin.action.replace(/^require:/, '') as PermissionLevel;
+        const client = ctx!.checkPermission(pin.scope, level);
+        const t = CANONICAL_GRANT_UNIVERSE.find((x) => x.plane === pin.plane && x.stratum === pin.stratum
+          && x.role === pin.role && x.scope === pin.scope && x.action === pin.action);
+        const l = `${pin.role}/${pin.scope}/${pin.action}`;
+        expect({ l, client }).toEqual({ l, client: pin.granted });
+        expect({ l, client }).toEqual({ l, client: evaluatePinnedCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted' });
+        if (client) allowed += 1;
+        checked += 1;
+      }
+      unmount();
+    }
+    expect(checked).toBe(13);
+    expect(allowed).toBe(1); // control: only the manager's refunds `manage` gate is allowed
   });
 });
 
