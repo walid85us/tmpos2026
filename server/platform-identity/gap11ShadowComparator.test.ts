@@ -15,6 +15,7 @@ import {
   CANONICAL_GRANT_UNIVERSE,
   CANONICAL_DIFF_CONTEXT,
   computeGrantDiff,
+  evaluateAfterCandidate,
   evaluateBefore,
   type CanonicalGrantTuple,
   type GrantEvaluationContext,
@@ -100,6 +101,11 @@ test('disagreement produces exactly one bounded record naming only canonical voc
     scope: 'returns',
     action: 'require:approve',
     requiredLevel: 'approve',
+    // The corrected taxonomy travels with the record: structurally approve-level, and NOT a D2 row —
+    // no document ties the returns domain at approve to a money action.
+    requiresApproveLevel: true,
+    d2Classification: 'unresolved',
+    moneyAction: null,
     authoritative: 'denied',
     candidate: 'granted',
   });
@@ -110,7 +116,8 @@ test('a record carries no identity, credential, request or free text — asserte
   const c = createShadowComparator({ maxRecords: 4096 });
   for (const t of CANONICAL_GRANT_UNIVERSE) c.compare(t, CTX, evaluateBefore(t, CTX));
 
-  const ALLOWED_KEYS = ['kind', 'plane', 'stratum', 'role', 'scope', 'action', 'requiredLevel', 'authoritative', 'candidate'];
+  const ALLOWED_KEYS = ['kind', 'plane', 'stratum', 'role', 'scope', 'action', 'requiredLevel',
+    'requiresApproveLevel', 'd2Classification', 'moneyAction', 'authoritative', 'candidate'];
   const vocabulary = new Set<string>([
     ...CANONICAL_GRANT_UNIVERSE.map((t) => t.role),
     ...CANONICAL_GRANT_UNIVERSE.map((t) => t.scope),
@@ -180,7 +187,7 @@ test('a malformed authoritative value fails closed to denied and is recorded as 
   }
 });
 
-test('a malformed tuple is recorded without a candidate, and the caller decision still stands', () => {
+test('a malformed tuple is recorded without a candidate, and is denied whatever the caller said', () => {
   const malformed: readonly unknown[] = [
     null, undefined, 42, 'tuple', [], {}, { plane: 'tenant' },
     { plane: 'nope', stratum: 'sub_permission', role: 'r', scope: 's', action: 'a', requiredLevel: null },
@@ -193,10 +200,46 @@ test('a malformed tuple is recorded without a candidate, and the caller decision
   for (const bad of malformed) {
     for (const authoritative of ['granted', 'denied'] as const) {
       const c = createShadowComparator();
-      assert.equal(c.compare(bad as never, CTX, authoritative), authoritative);
+      // M5-GAP11-P1-R1: a tuple that is not canonical is denied before any comparison — the caller's
+      // `granted` for it is not admissible. The comparator can only ever tighten, never loosen.
+      assert.equal(c.compare(bad as never, CTX, authoritative), 'denied');
       assert.equal(c.records()[0].kind, 'malformed_tuple');
+      assert.equal(c.records()[0].authoritative, 'denied');
       assert.equal(c.records()[0].candidate, null);
       assert.equal(c.records()[0].role, '');
+    }
+  }
+});
+
+test('an unknown required level is denied before comparison and is never read as a `none` requirement', () => {
+  // A canonical threshold tuple the caller grants, then the same tuple with its required level
+  // replaced by something outside the catalog. The control proves the comparator does return a
+  // caller's `granted` for a canonical tuple, so the denials below are the rule, not a constant.
+  const threshold = tupleFor((t) => t.plane === 'tenant' && t.stratum === 'domain_threshold'
+    && t.role === 'manager' && t.scope === 'sales' && t.action === 'require:none');
+  const control = createShadowComparator();
+  assert.equal(control.compare(threshold, CTX, 'granted'), 'granted', 'control: a canonical tuple keeps the caller decision');
+
+  const nul = String.fromCharCode(0);
+  const unknownLevels: readonly unknown[] = [
+    'bogus', 'FULL', 'None', ' none', 'none ', '', `none${nul}`, `none${String.fromCharCode(1)}`,
+    undefined, 0, false, {}, [], ['none'], 'constructor', '__proto__', 'toString',
+  ];
+  for (const requiredLevel of unknownLevels) {
+    // The same substitution also on a tuple whose action names the level, so neither field is trusted.
+    for (const bad of [{ ...threshold, requiredLevel }, { ...threshold, requiredLevel, action: `require:${String(requiredLevel)}` }]) {
+      const c = createShadowComparator();
+      assert.equal(c.compare(bad as never, CTX, 'granted'), 'denied', `denied: ${JSON.stringify(requiredLevel)}`);
+      assert.equal(c.records().length, 1, 'observed once');
+      const [m] = c.records();
+      assert.equal(m.kind, 'malformed_tuple', 'refused as a tuple, not compared');
+      assert.equal(m.candidate, null, 'no candidate was evaluated');
+      assert.equal(m.requiredLevel, null, 'recorded as no level at all — never as `none`');
+      assert.equal(m.action, '', 'and never as `require:none`');
+      assert.equal(m.d2Classification, null);
+      // Both evaluators agree it is no tuple: neither reads it as a `none` gate, which every level clears.
+      assert.equal(evaluateBefore(bad as never, CTX), 'denied');
+      assert.equal(evaluateAfterCandidate(bad as never, CTX), 'denied');
     }
   }
 });
@@ -268,8 +311,9 @@ test('hostile getters on the tuple cannot throw out of compare or smuggle unvali
   revoked.revoke();
   for (const authoritative of ['granted', 'denied'] as const) {
     const c = createShadowComparator();
-    assert.equal(c.compare(throwing as CanonicalGrantTuple, CTX, authoritative), authoritative);
-    assert.equal(c.compare(revoked.proxy as CanonicalGrantTuple, CTX, authoritative), authoritative);
+    // An unreadable tuple is not canonical, so it is denied whatever the caller said (R1).
+    assert.equal(c.compare(throwing as CanonicalGrantTuple, CTX, authoritative), 'denied');
+    assert.equal(c.compare(revoked.proxy as CanonicalGrantTuple, CTX, authoritative), 'denied');
     assert.deepEqual(c.records().map((m) => m.kind), ['malformed_tuple', 'malformed_tuple'],
       'an unreadable tuple is observed, not silently lost');
     reads = 0;

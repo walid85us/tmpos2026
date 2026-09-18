@@ -649,15 +649,17 @@ export default function TeamManagementPage() {
 
   // Phase 1.3 — Milestone 5 correction: the M3/M4 governance tabs + actions are
   // now controlled by the Platform Global Permissions Matrix (not hardcoded
-  // System-Owner gating). Gates resolve through the unchanged resolver with the
-  // page's live `overrides`, so matrix edits take effect immediately. System
-  // Owner resolves to `full` for every key, so it stays fully allowed.
+  // System-Owner gating). Gates read the stored overrides through the resolver's
+  // own deny-by-default reader, never the editor's `overrides` state (which
+  // sanitizes a corrupt store to `{}`, i.e. to the role defaults); each matrix
+  // edit writes the store and updates that state, so the gates re-read the
+  // edit on the next render. System Owner resolves to `full` for every key.
   const sessionRole = (session?.role as Role | undefined) ?? null;
-  const canViewTempAccess = hasPlatformPermission(sessionRole, 'view_temporary_access', overrides).allowed;
-  const canManageTempAccess = hasPlatformPermission(sessionRole, 'manage_temporary_access', overrides).allowed;
-  const canViewAccessReviews = hasPlatformPermission(sessionRole, 'view_access_reviews', overrides).allowed;
-  const canManageAccessReviews = hasPlatformPermission(sessionRole, 'manage_access_reviews', overrides).allowed;
-  const canCaptureSensitiveReasons = hasPlatformPermission(sessionRole, 'capture_sensitive_action_reasons', overrides).allowed;
+  const canViewTempAccess = hasPlatformPermission(sessionRole, 'view_temporary_access').allowed;
+  const canManageTempAccess = hasPlatformPermission(sessionRole, 'manage_temporary_access').allowed;
+  const canViewAccessReviews = hasPlatformPermission(sessionRole, 'view_access_reviews').allowed;
+  const canManageAccessReviews = hasPlatformPermission(sessionRole, 'manage_access_reviews').allowed;
+  const canCaptureSensitiveReasons = hasPlatformPermission(sessionRole, 'capture_sensitive_action_reasons').allowed;
 
   // Truthful no-access panel for a governance tab the current role cannot view
   // (consistent with the rest of the page; the tab itself is also hidden, so

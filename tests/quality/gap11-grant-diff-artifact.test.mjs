@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import ts from 'typescript';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -69,6 +70,11 @@ test('the committed grant-diff artifact exists and is not stale', () => {
 });
 
 test('regenerating on unchanged inputs produces a byte-identical file and no working-tree diff', () => {
+  const gitView = () => [
+    execFileSync('git', ['status', '--porcelain', '--', ARTIFACT], { cwd: REPO, encoding: 'utf8' }),
+    execFileSync('git', ['diff', '--', ARTIFACT], { cwd: REPO, encoding: 'utf8' }),
+  ];
+  const gitBefore = gitView();
   const before = readFileSync(join(REPO, ARTIFACT), 'utf8');
   const first = runGenerator();
   assert.equal(first.status, 0, first.stderr);
@@ -80,10 +86,10 @@ test('regenerating on unchanged inputs produces a byte-identical file and no wor
   assert.equal(afterOne, before, 'regeneration did not change the committed bytes');
   assert.equal(afterTwo, afterOne, 'two runs agree byte for byte');
 
-  // And git agrees the file is untouched — the strongest form of "leaves no diff".
-  const status = execFileSync('git', ['status', '--porcelain', '--', ARTIFACT], { cwd: REPO, encoding: 'utf8' });
-  assert.ok(status.trim() === '' || status.trim().startsWith('??'),
-    `regeneration left a modification in the working tree: ${status}`);
+  // And git agrees regeneration touched nothing — the strongest form of "leaves no diff". Compared
+  // before and after rather than against a clean status, so it holds on a committed tree (both empty)
+  // and on a candidate whose artifact is not yet committed (both the same pending change).
+  assert.deepEqual(gitView(), gitBefore, 'regeneration changed git\'s view of the artifact');
 });
 
 test('the artifact carries no timestamp, host, absolute path or other run-varying value', () => {
@@ -282,17 +288,55 @@ test('control: the census catches the evasions a text regex misses', () => {
   assert.deepEqual(census("export * from 'pg';").specifiers, ['pg'], 're-export specifier is seen');
 });
 
-test('the stage changed no migration and re-pinned no role default', () => {
-  // A grant-diff stage that quietly edited the catalog it measures would be measuring itself.
-  // Tracked changes AND untracked files: a new, not-yet-staged migration must fail this too.
+test('no migration is changed, and no role default or explicit grant is re-pinned', async () => {
+  // A grant-diff stage that quietly edited the grants it measures would be measuring itself.
+  // Migrations: file level — tracked changes AND untracked files, so a new, not-yet-staged migration
+  // fails this too.
   const changed = [...gitPaths(['diff', '--name-only', 'HEAD', '--']), ...gitPaths(['ls-files', '--others', '--exclude-standard'])];
-  const forbidden = changed.filter((f) =>
-    f.startsWith('server/platform-identity/migrations/')
-    || f === 'server/platform-identity/permissionCatalog.ts'
-    || f === 'src/context/accessConfig.ts'
-    || f === 'src/owner/platformPermissionsConfig.ts');
-  assert.deepEqual(forbidden, [],
-    'this stage must not modify a migration, the permission catalog, or either client permission config');
+  assert.deepEqual(changed.filter((f) => f.startsWith('server/platform-identity/migrations/')), [],
+    'no migration may be modified or added');
+  // Grants: DATA level. M5-GAP11-P1-R1 had to change the catalog's and the client's COMPARISON code
+  // (deny-by-default on unknown vocabulary), so a file-level ban on those files would forbid the very
+  // correction; what must never move is the grant data they hold. Every role default, every explicit
+  // sub-permission grant, and the client's own role tables are fingerprinted with sorted keys and
+  // pinned — the value is unchanged from b61612d9, before R1.
+  const cat = await import('../../server/platform-identity/permissionCatalog.ts');
+  const acc = await import('../../src/context/accessConfig.ts');
+  const plat = await import('../../src/owner/platformPermissionsConfig.ts');
+  const stable = (v) => Array.isArray(v) ? v.map(stable)
+    : v !== null && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
+  const grants = {
+    server: { tenant: cat.TENANT_ROLE_PERMISSION_DEFAULTS, tenantSubs: cat.TENANT_ROLE_SUBPERMISSION_DEFAULTS, platform: cat.PLATFORM_ROLE_FEATURE_DEFAULTS },
+    client: {
+      tenantRoles: acc.tenantRoles.map((r) => ({ id: r.id, permissions: r.permissions, subPermissions: r.subPermissions ?? null })),
+      platformDefaults: plat.DEFAULT_PLATFORM_FEATURE_LEVELS,
+    },
+  };
+  const fingerprint = createHash('sha256').update(JSON.stringify(stable(grants))).digest('hex');
+  assert.equal(fingerprint, '4c08356343ec6ef98acc2f76b09b0f68683a3f1b7a72752f2071d74cd01f4eed',
+    'the role defaults and explicit grants must not change: a re-pin is decision D2, not this stage');
+});
+
+test('the artifact keeps the structural diff and the D2 money actions apart, in three sections', () => {
+  const text = readFileSync(join(REPO, ARTIFACT), 'utf8');
+  const at = (heading) => text.indexOf(heading);
+  const a = at('## A. Structural ordering diff');
+  const b = at('## B. Authoritatively identified money actions (D2)');
+  const c = at('## C. Unresolved mapping');
+  assert.ok(a > 0 && b > a && c > b, 'sections A, B and C, in that order');
+  // The P1 wording that read a structural count as a count of D2 rows is gone, and so is the
+  // ambiguous "D3 only" framing of the refunds narrowing.
+  for (const stale of [/waiting on D2 \(approve-gated/i, /approve-gated \| D2 \|/i, /D3 only/i, /D3's approval of the diff only/i]) {
+    assert.ok(!stale.test(text), `stale wording ${stale}`);
+  }
+  // The structural count and the D2 count are separate numbers, and they reconcile with the rows.
+  assert.match(text, /changed rows whose decisive level is `approve` \(structural\) \| 12 \|/);
+  assert.match(text, /\| `money_action` \| 0 \|\n\| `unresolved` \| 12 \|\n\| `not_money_action` \| 1 \|/);
+  // The narrowing is explained in full.
+  const narrowing = text.slice(at('## The `manager` / `refunds` narrowing'));
+  for (const q of ['level held', 'level required', 'BEFORE', 'AFTER-CANDIDATE', 'a real refund money action?', 'can D2 affect it?', 'what remains for D3']) {
+    assert.ok(narrowing.includes(`| ${q} |`), `the narrowing answers: ${q}`);
+  }
 });
 
 test('the run-tests ratchet lists the new suites as sentinels', async () => {
@@ -301,6 +345,11 @@ test('the run-tests ratchet lists the new suites as sentinels', async () => {
     'server/platform-identity/gap11GrantDiff.test.ts',
     'server/platform-identity/gap11ShadowComparator.test.ts',
     'tests/quality/gap11-grant-diff-artifact.test.mjs',
+    // M5-GAP11-P1-R1: the direct deny-by-default suites.
+    'server/platform-identity/permissionDecision.test.ts',
+    'server/platform-identity/protectedAction.test.ts',
+    'server/platform-identity/authorizationFailClosed.test.ts',
+    'src/context/authorizationVocabulary.test.ts',
   ]) {
     assert.ok(REQUIRED_SENTINELS.includes(s), `${s} is a named sentinel`);
   }

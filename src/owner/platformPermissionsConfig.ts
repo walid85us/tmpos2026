@@ -61,6 +61,15 @@ const LEVEL_RANK: Record<PermissionLevel, number> = {
   full: 6,
 };
 
+// Own-property rank lookup: -1 for anything that is not EXACTLY one of the 7
+// canonical level strings (wrong case, whitespace, non-strings, arrays, and
+// prototype names like 'constructor' all resolve -1, never an inherited rank).
+function platformLevelRank(level: unknown): number {
+  return typeof level === 'string' && Object.prototype.hasOwnProperty.call(LEVEL_RANK, level)
+    ? LEVEL_RANK[level as PermissionLevel]
+    : -1;
+}
+
 /**
  * Spec-aligned threshold check for platform permissions.
  * Approve / Manage / Full Access all satisfy an Approve threshold.
@@ -70,13 +79,18 @@ const LEVEL_RANK: Record<PermissionLevel, number> = {
  * Note: this is intentionally separate from `meetsPermissionLevel()` in
  * accessConfig.ts (which uses a different array ordering and is consumed
  * by the tenant / store side of the app). Do not unify them.
+ *
+ * Deny-by-default on unknowns: both sides must be exactly a canonical level.
+ * A canonical `actual` still clears a `none` threshold (every rank >= 0), but
+ * a non-canonical `actual`/`threshold` no longer passes.
  */
 export function platformPermissionMeets(
   actual: PermissionLevel,
   threshold: PermissionLevel
 ): boolean {
-  if (threshold === 'none') return true;
-  return LEVEL_RANK[actual] >= LEVEL_RANK[threshold];
+  const a = platformLevelRank(actual);
+  const t = platformLevelRank(threshold);
+  return a >= 0 && t >= 0 && a >= t;
 }
 
 // ---------------------------------------------------------------------------
@@ -792,20 +806,154 @@ export function writePlatformPermissionsOverrides(next: PlatformPermissionsOverr
 // Reader helpers.
 // ---------------------------------------------------------------------------
 
+// Only these 5 ids resolve platform levels. Tenant-side role ids and anything
+// unknown (wrong case, empty string, arrays, prototype names, ...) must
+// resolve 'none' and must never consult overrides — deny-by-default on
+// unknowns (docs/phase-4/04 §3 safeguard #4).
+const PLATFORM_ROLE_IDS: ReadonlySet<string> = new Set([
+  'system_owner', 'support_admin', 'billing_admin', 'operations_admin', 'security_admin',
+]);
+
+function isPlatformRoleId(role: unknown): role is Role {
+  return typeof role === 'string' && PLATFORM_ROLE_IDS.has(role);
+}
+
+// A real plain object literal or JSON.parse result — NOT an array, NOT null,
+// and NOT a Date/Map/class instance/other exotic object (those have a
+// prototype other than Object.prototype, so bracket-reading them as a
+// role/kind/key container would be meaningless and must deny, not default).
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Overrides source for the decision readers below (deny-by-default). Distinct
+ * from the exported `readPlatformPermissionsOverrides()`, which the matrix
+ * EDITOR uses to seed editable UI state and therefore still sanitizes
+ * malformed data back to `{}` — that sanitizing is exactly what must NOT
+ * happen for an authorization decision:
+ *   - no window/sessionStorage, or no stored item -> {} (absent; spec
+ *     defaults apply exactly as today)
+ *   - storage access or `getItem` throws, or the stored item fails JSON.parse -> `null` (a
+ *     non-plain marker so every reader below denies instead of silently
+ *     defaulting)
+ *   - otherwise -> the parsed value AS-IS, unsanitized (a malformed shape —
+ *     array, primitive, Date, ...) then denies via `readPlatformOverrideLevel`)
+ */
+function readOverridesForDecision(): PlatformPermissionsOverrides | null {
+  if (typeof window === 'undefined') return {};
+  let raw: string | null;
+  try {
+    // Reading `window.sessionStorage` itself throws where the browser blocks storage.
+    if (!window.sessionStorage) return {};
+    raw = window.sessionStorage.getItem(PLATFORM_PERMISSIONS_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as PlatformPermissionsOverrides;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Single reader used by every override lookup below (getPlatformFeatureLevel,
+ * getPlatformSubPermissionLevel, explainAccessDecision). Own-property reads
+ * ONLY at every level, so a wrong-shape overrides blob or an own `__proto__`/
+ * `constructor` entry can never be normalized into a level:
+ *   - overrides is `undefined`                     -> undefined (genuinely no
+ *                                                      overrides source at all;
+ *                                                      caller falls back to
+ *                                                      the spec default)
+ *   - overrides is anything else that isn't a plain
+ *     object (array, `null`, primitive, Date, ...)  -> 'none' (explicit deny —
+ *                                                      a malformed ROOT must
+ *                                                      not silently default)
+ *   - no own entry for role / kind / key            -> undefined (caller falls
+ *                                                      back to the spec default)
+ *   - present but malformed at any level             -> 'none' (explicit deny)
+ * 'none' is safe as the malformed sentinel only because no catalog platform
+ * threshold is 'none' (asserted in authorizationVocabulary.test.ts).
+ */
+function readPlatformOverrideLevel(
+  overrides: PlatformPermissionsOverrides | null | undefined,
+  role: Role,
+  kind: 'features' | 'subs',
+  key: string
+): PermissionLevel | undefined {
+  if (overrides === undefined) return undefined;
+  if (!isPlainObject(overrides)) return 'none';
+  if (!Object.prototype.hasOwnProperty.call(overrides, role)) return undefined;
+  const roleEntry = (overrides as Record<string, unknown>)[role];
+  if (!isPlainObject(roleEntry)) return 'none';
+  if (!Object.prototype.hasOwnProperty.call(roleEntry, kind)) return undefined;
+  const kindContainer = roleEntry[kind];
+  if (!isPlainObject(kindContainer)) return 'none';
+  if (!Object.prototype.hasOwnProperty.call(kindContainer, key)) return undefined;
+  const leaf = kindContainer[key];
+  return typeof leaf === 'string' && PLATFORM_PERMISSION_LEVELS.includes(leaf as PermissionLevel)
+    ? (leaf as PermissionLevel)
+    : 'none';
+}
+
+/**
+ * Resolve the explicit SUB-permission override for `subKey`, canonicalizing
+ * legacy aliases (e.g. `view_nba_recommendations` -> `view_next_best_actions`,
+ * see PLATFORM_SUB_PERMISSION_ALIASES) so one permission has exactly one
+ * configured answer, never two. If `subKey` names an alias AND its own slot
+ * AND the canonical slot are both explicitly set but DISAGREE, that is
+ * ambiguous configured authority and denies ('none') rather than picking one
+ * arbitrarily.
+ */
+function readExplicitSubOverride(
+  ov: PlatformPermissionsOverrides | null | undefined,
+  role: Role,
+  subKey: string,
+  canonicalId: string
+): PermissionLevel | undefined {
+  // Ambiguity is a property of the STORED configuration, not of which name
+  // the caller queried by — so this checks the canonical slot AND every
+  // known alias slot for this canonical id, regardless of which one `subKey`
+  // is, and denies if any two configured slots disagree.
+  const aliasKeys = new Set<string>();
+  if (subKey !== canonicalId) aliasKeys.add(subKey);
+  for (const [alias, target] of Object.entries(PLATFORM_SUB_PERMISSION_ALIASES)) {
+    if (target === canonicalId) aliasKeys.add(alias);
+  }
+  let result = readPlatformOverrideLevel(ov, role, 'subs', canonicalId);
+  for (const aliasKey of aliasKeys) {
+    const aliasExplicit = readPlatformOverrideLevel(ov, role, 'subs', aliasKey);
+    if (aliasExplicit === undefined) continue;
+    if (result === undefined) { result = aliasExplicit; continue; }
+    if (aliasExplicit !== result) return 'none';
+  }
+  return result;
+}
+
 /**
  * Returns the effective feature-level for a role. System Owner is locked to
- * `full`; tenant-side roles always return `none`. Otherwise: the override
- * value (if present) wins, else the spec default.
+ * `full`; tenant-side and unknown roles always return `none`. Otherwise: the
+ * override value (if present and well-formed) wins, else the spec default.
+ * An unrecognized `featureKey` (not in the catalog) also returns `none` —
+ * previously a name like `constructor` resolved to an inherited Object
+ * property instead of denying.
  */
 export function getPlatformFeatureLevel(
   role: Role | undefined | null,
   featureKey: PlatformFeatureKey,
-  overrides?: PlatformPermissionsOverrides
+  overrides?: PlatformPermissionsOverrides | null
 ): PermissionLevel {
-  if (!role) return 'none';
+  if (!isPlatformRoleId(role)) return 'none';
+  // Key validity is checked BEFORE the System Owner shortcut: an unknown or
+  // inherited featureKey must deny even for the owner, not resolve 'full'.
+  if (!FEATURE_BY_KEY.has(featureKey)) return 'none';
   if (role === 'system_owner') return 'full';
-  const ov = (overrides ?? readPlatformPermissionsOverrides())[role]?.features?.[featureKey];
-  if (ov) return ov;
+  const ov = readPlatformOverrideLevel(overrides ?? readOverridesForDecision(), role, 'features', featureKey);
+  if (ov !== undefined) return ov;
   return DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[featureKey] ?? 'none';
 }
 
@@ -823,15 +971,17 @@ export function getPlatformFeatureLevel(
 export function getPlatformSubPermissionLevel(
   role: Role | undefined | null,
   subKey: string,
-  overrides?: PlatformPermissionsOverrides
+  overrides?: PlatformPermissionsOverrides | null
 ): PermissionLevel {
-  if (!role) return 'none';
-  if (role === 'system_owner') return 'full';
+  if (!isPlatformRoleId(role)) return 'none';
+  // Key validity is checked BEFORE the System Owner shortcut: an unknown
+  // subKey must deny even for the owner, not resolve 'full'.
   const sub = SUB_LOOKUP.get(subKey);
   if (!sub) return 'none';
-  const ov = overrides ?? readPlatformPermissionsOverrides();
-  const explicit = ov[role]?.subs?.[subKey];
-  if (explicit) return explicit;
+  if (role === 'system_owner') return 'full';
+  const ov = overrides ?? readOverridesForDecision();
+  const explicit = readExplicitSubOverride(ov, role, subKey, sub.def.id);
+  if (explicit !== undefined) return explicit;
   return getPlatformFeatureLevel(role, sub.feature, ov);
 }
 
@@ -900,12 +1050,15 @@ export function canPlatform(
 export function hasEffectiveFeatureAccess(
   role: Role | undefined | null,
   featureKey: PlatformFeatureKey,
-  overrides?: PlatformPermissionsOverrides
+  overrides?: PlatformPermissionsOverrides | null
 ): boolean {
+  // Key validity is checked BEFORE the System Owner shortcut: an unknown or
+  // inherited featureKey must deny even for the owner, not resolve true.
+  if (!FEATURE_BY_KEY.has(featureKey)) return false;
   if (!role) return false;
   if (role === 'system_owner') return true;
 
-  const ov = overrides ?? readPlatformPermissionsOverrides();
+  const ov = overrides ?? readOverridesForDecision();
 
   const parentLevel = getPlatformFeatureLevel(role, featureKey, ov);
   if (parentLevel !== 'none') return true;
@@ -1013,11 +1166,14 @@ export interface AccessDecision {
 export function getEffectiveFeatureAccess(
   role: Role | undefined | null,
   featureKey: PlatformFeatureKey,
-  overrides?: PlatformPermissionsOverrides
+  overrides?: PlatformPermissionsOverrides | null
 ): PermissionLevel {
+  // Key validity is checked BEFORE the System Owner shortcut: an unknown or
+  // inherited featureKey must deny even for the owner, not resolve 'full'.
+  if (!FEATURE_BY_KEY.has(featureKey)) return 'none';
   if (!role) return 'none';
   if (role === 'system_owner') return 'full';
-  const ov = overrides ?? readPlatformPermissionsOverrides();
+  const ov = overrides ?? readOverridesForDecision();
   let highest = getPlatformFeatureLevel(role, featureKey, ov);
   if (highest === 'full') return highest;
   const group = FEATURE_BY_KEY.get(featureKey);
@@ -1067,7 +1223,7 @@ export function hasActionAccess(
 export function explainAccessDecision(
   role: Role | undefined | null,
   subKey: string,
-  overrides?: PlatformPermissionsOverrides,
+  overrides?: PlatformPermissionsOverrides | null,
   _depPath?: Set<string>
 ): AccessDecision {
   const sub = SUB_LOOKUP.get(subKey);
@@ -1099,23 +1255,32 @@ export function explainAccessDecision(
       threshold,
     };
   }
-  const ov = overrides ?? readPlatformPermissionsOverrides();
-  // Detect explicit child vs default child.
-  const explicitChild = ov[role]?.subs?.[subKey];
-  const explicitParent = ov[role]?.features?.[sub.feature];
+  const ov = overrides ?? readOverridesForDecision();
   let source: AccessDecisionSource;
   let effectiveLevel: PermissionLevel;
-  if (explicitChild !== undefined) {
-    effectiveLevel = explicitChild;
-    source = explicitChild === 'none' ? 'denied_explicit_child' : 'explicit_child';
-  } else if (explicitParent !== undefined) {
-    effectiveLevel = explicitParent;
-    source = 'explicit_parent';
+  if (!isPlatformRoleId(role)) {
+    // Tenant-side or unrecognized role: no platform access, overrides ignored.
+    effectiveLevel = 'none';
+    source = 'denied_no_access';
   } else {
-    // No explicit override — fall back to the spec default for the parent
-    // feature (sub-permissions inherit their parent's role default).
-    effectiveLevel = (DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[sub.feature]) || 'none';
-    source = 'default_parent';
+    // Detect explicit child vs default child — own-property reads only (via
+    // the canonical sub id, so a legacy alias never has its own separate
+    // configured answer), so a present-but-malformed override denies instead
+    // of falling through.
+    const explicitChild = readExplicitSubOverride(ov, role, subKey, sub.def.id);
+    const explicitParent = readPlatformOverrideLevel(ov, role, 'features', sub.feature);
+    if (explicitChild !== undefined) {
+      effectiveLevel = explicitChild;
+      source = explicitChild === 'none' ? 'denied_explicit_child' : 'explicit_child';
+    } else if (explicitParent !== undefined) {
+      effectiveLevel = explicitParent;
+      source = 'explicit_parent';
+    } else {
+      // No explicit override — fall back to the spec default for the parent
+      // feature (sub-permissions inherit their parent's role default).
+      effectiveLevel = (DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[sub.feature]) || 'none';
+      source = 'default_parent';
+    }
   }
   let allowed = platformPermissionMeets(effectiveLevel, threshold);
   if (!allowed && source !== 'denied_explicit_child') {

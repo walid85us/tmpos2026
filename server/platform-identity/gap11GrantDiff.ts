@@ -80,12 +80,10 @@ const UNIFIED_RANK: ReadonlyMap<string, number> = Object.freeze(
  * The candidate comparator — safeguard #4 applied to both sides, never a thrown error.
  *
  * An unknown level on EITHER side denies outright — even against a `none` requirement, which only a
- * recognised level clears. That is deliberately stricter than the shipped comparators: `rankIn` in
- * permissionCatalog.ts (and its mirror in permissionDecision.ts) maps an unknown level to rank 0, so a
- * requirement nobody can name is satisfied by everyone — including a `none` holder. No catalog-defined
- * level is unknown today, so no effective grant depends on the difference and the diff is unaffected;
- * but "any level not in the unified catalog denies" (04 §3 #4) is the rule the unified evaluator has
- * to meet, so this one meets it.
+ * recognised level clears ("any level not in the unified catalog denies", 04 §3 #4). Since
+ * M5-GAP11-P1-R1 the shipped comparators in permissionCatalog.ts apply the same rule (before it they
+ * ranked an unknown level as `none`), so on vocabulary the two evaluators agree and only the ordering
+ * separates them. The rank table stays this module's own, so the candidate shares no decision path.
  */
 export function candidateMeetsLevel(actual: unknown, required: unknown): boolean {
   if (typeof actual !== 'string' || typeof required !== 'string') return false;
@@ -95,9 +93,12 @@ export function candidateMeetsLevel(actual: unknown, required: unknown): boolean
   return a >= r;
 }
 
-/** The candidate's own read-only cap: anything above `view` collapses to `view`. */
+/**
+ * The candidate's own read-only cap: anything above `view` collapses to `view`. An unrecognised level
+ * is returned unchanged, never mistaken for `none`, so candidateMeetsLevel denies it.
+ */
 function candidateCapForReadOnly(level: Level): Level {
-  return (UNIFIED_RANK.get(level) ?? 0) > (UNIFIED_RANK.get('view') ?? 1) ? 'view' : level;
+  return (UNIFIED_RANK.get(level) ?? -1) > (UNIFIED_RANK.get('view') ?? 1) ? 'view' : level;
 }
 
 // =============================================================================
@@ -126,6 +127,125 @@ export type ChangeClass = 'widened' | 'narrowed';
  */
 export type FlipPair = 'manage_satisfies_approve' | 'approve_no_longer_satisfies_manage';
 
+/**
+ * Whether decision D2 governs a tuple — a CLOSED classification, kept apart from the structural one.
+ * D2 is safeguard #1 of 04 §3: the per-action re-pin of `approve`-gated MONEY actions. A tuple's
+ * required level says nothing about money, so level alone never makes a tuple D2's (M5-GAP11-P1-R1:
+ * P1's `approveGated` flag, read as "a D2 row", overstated exactly that).
+ *   - `money_action`     — the tuple is a canonical representation of an operation an authoritative
+ *                          document identifies as an approve-gated money action (D2_MONEY_ACTIONS,
+ *                          each with its source).
+ *   - `unresolved`       — the tuple's decisive level is `approve`, but no authoritative document ties
+ *                          it to a money action. Whether D2 covers it is part of D2's open scope, not
+ *                          a finding, and it is not counted as a D2 row.
+ *   - `not_money_action` — neither: its decisive level is not `approve`, so it cannot be an
+ *                          approve-gated action, and no document names it as one.
+ */
+export type D2Classification = 'money_action' | 'not_money_action' | 'unresolved';
+
+/** Where an authoritative document says so, quoted exactly — the suite checks each quote is there. */
+export interface D2Source {
+  readonly path: string;
+  readonly quote: string;
+}
+
+/** One canonical way the catalog represents an operation: a named sub-permission or a domain threshold. */
+export interface D2Representation {
+  readonly plane: GrantPlane;
+  readonly stratum: GrantStratum;
+  readonly scope: string;
+  readonly action: string;
+}
+
+export interface D2MoneyAction {
+  readonly operation: string;
+  readonly sources: readonly D2Source[];
+  readonly representations: readonly D2Representation[];
+}
+
+/**
+ * Every operation an authoritative document identifies as an approve-gated money action, with every
+ * canonical representation the catalog gives it. Nothing here is inferred from a level, a domain name,
+ * a widening, or a role: 04 §3 names refund approval (`refunds: approve` / `approve_refunds`) and return
+ * approval (`returns: approve_return`) — the domain:level form for refunds, the sub-permission for
+ * returns — and the platform catalog defines `approve_billing_actions` as approving refunds, credits
+ * and write-offs, which the Phase 1.3 platform access inventory classifies as a financial approval.
+ * 04 §3's list says "including", so it is not exhaustive. 04 §2.1 names further payment-operation
+ * permissions (D2_UNMAPPED_PAYMENT_OPERATIONS) without calling them approve-gated, and none is in the
+ * catalog; should one be added it classifies `unresolved` until a document settles it.
+ */
+export const D2_MONEY_ACTIONS: readonly D2MoneyAction[] = Object.freeze([
+  Object.freeze({
+    operation: 'refund_approval',
+    sources: Object.freeze([
+      Object.freeze({
+        path: 'docs/phase-4/04-canonical-iam-and-four-user-migration.md',
+        quote: 'including money-sensitive ones (`refunds: approve` / `approve_refunds`, `returns: approve_return`)',
+      }),
+    ]),
+    representations: Object.freeze([
+      Object.freeze({ plane: 'tenant' as const, stratum: 'domain_threshold' as const, scope: 'refunds', action: 'require:approve' }),
+      Object.freeze({ plane: 'tenant' as const, stratum: 'sub_permission' as const, scope: 'refunds', action: 'approve_refunds' }),
+    ]),
+  }),
+  Object.freeze({
+    operation: 'return_approval',
+    sources: Object.freeze([
+      Object.freeze({
+        path: 'docs/phase-4/04-canonical-iam-and-four-user-migration.md',
+        quote: 'including money-sensitive ones (`refunds: approve` / `approve_refunds`, `returns: approve_return`)',
+      }),
+    ]),
+    representations: Object.freeze([
+      Object.freeze({ plane: 'tenant' as const, stratum: 'sub_permission' as const, scope: 'returns', action: 'approve_return' }),
+    ]),
+  }),
+  Object.freeze({
+    operation: 'platform_billing_approval',
+    sources: Object.freeze([
+      Object.freeze({
+        path: 'src/owner/platformPermissionsConfig.ts',
+        quote: "id: 'approve_billing_actions', label: 'Approve Billing Actions', description: 'Approve refunds, credits, or write-offs.', threshold: 'approve'",
+      }),
+      Object.freeze({
+        path: 'docs/phase-1.3-platform-access-inventory.md',
+        quote: 'financial approval (refund/credit/write-off)',
+      }),
+    ]),
+    representations: Object.freeze([
+      Object.freeze({ plane: 'platform' as const, stratum: 'sub_permission' as const, scope: 'billing_subscriptions', action: 'approve_billing_actions' }),
+    ]),
+  }),
+]);
+
+/**
+ * Capabilities docs/phase-4/04 §2 declares satisfiable ONLY by their specific named grant, so that a
+ * broad `manage`/`full` level can never confer them, and folds by name into the §3 re-pin + grant-diff
+ * safeguard. 04 §2.1 classes them as provider CONFIGURATION, separate from payment operations, and no
+ * document calls them money actions. None is in the shipped catalog; should one be added, its tuples
+ * classify `unresolved` — part of D2's open scope — rather than passing as `not_money_action` unnoticed.
+ */
+export const D2_NAMED_GRANT_ONLY_ACTIONS: readonly string[] = Object.freeze([
+  'activate_payment_gateway',
+  'disconnect_payment_gateway',
+  'manage_payment_gateway_connections',
+  'manage_payment_terminals',
+]);
+
+/**
+ * Payment-operation permissions 04 §2.1 names to separate operation from configuration, with no level
+ * and no statement that they are approve-gated. None is in the catalog. Should one be added, its tuples
+ * classify `unresolved` — an open question for D2's scope — never silently `not_money_action`.
+ */
+export const D2_UNMAPPED_PAYMENT_OPERATIONS: readonly string[] = Object.freeze([
+  'accept_payment',
+  'approve_high_value_refund',
+  'process_payment',
+  'refund_payment',
+  'view_reconciliation',
+  'void_payment',
+]);
+
 export interface CanonicalGrantTuple {
   readonly plane: GrantPlane;
   readonly stratum: GrantStratum;
@@ -144,8 +264,16 @@ export interface CanonicalGrantTuple {
    * are not the same kind of fact and the artifact does not present them as one.
    */
   readonly sensitive: boolean;
-  /** True when the tuple's decisive required level is `approve` — the level the flip moves. */
-  readonly approveGated: boolean;
+  /**
+   * STRUCTURAL: the tuple's decisive required level is `approve` — the threshold of a threshold tuple,
+   * a platform sub-permission's threshold, or a tenant sub-permission's default level. It is the level
+   * the flip moves, and nothing more: it is not a statement that the tuple is a money action.
+   */
+  readonly requiresApproveLevel: boolean;
+  /** Whether decision D2 governs the tuple — see D2Classification. Never derived from the level alone. */
+  readonly d2Classification: D2Classification;
+  /** The operation a `money_action` tuple represents (D2_MONEY_ACTIONS); null otherwise. */
+  readonly moneyAction: string | null;
 }
 
 /** Stable, documented ordering: plane, stratum, role, scope, action — all lexical, no locale. */
@@ -160,6 +288,38 @@ function compareTuples(a: CanonicalGrantTuple, b: CanonicalGrantTuple): number {
 }
 
 /**
+ * The D2 classification of one tuple. A money action only by an explicit D2_MONEY_ACTIONS entry; a
+ * named-grant-only capability 04 §2 folds into the re-pin safeguard is `unresolved` should the catalog
+ * ever carry one (04 §2.1 calls them provider configuration, not money); otherwise the structural
+ * level decides only between `unresolved` and `not_money_action`.
+ */
+export function classifyForD2(
+  plane: GrantPlane, stratum: GrantStratum, scope: string, action: string, requiresApproveLevel: boolean,
+): { d2Classification: D2Classification; moneyAction: string | null } {
+  for (const m of D2_MONEY_ACTIONS) {
+    for (const r of m.representations) {
+      if (r.plane === plane && r.stratum === stratum && r.scope === scope && r.action === action) {
+        return { d2Classification: 'money_action', moneyAction: m.operation };
+      }
+    }
+  }
+  if (requiresApproveLevel || D2_NAMED_GRANT_ONLY_ACTIONS.includes(action) || D2_UNMAPPED_PAYMENT_OPERATIONS.includes(action)) {
+    return { d2Classification: 'unresolved', moneyAction: null };
+  }
+  return { d2Classification: 'not_money_action', moneyAction: null };
+}
+
+function tuple(
+  plane: GrantPlane, stratum: GrantStratum, role: string, scope: string, action: string,
+  requiredLevel: Level | null, sensitive: boolean, requiresApproveLevel: boolean,
+): CanonicalGrantTuple {
+  return Object.freeze({
+    plane, stratum, role, scope, action, requiredLevel, sensitive, requiresApproveLevel,
+    ...classifyForD2(plane, stratum, scope, action, requiresApproveLevel),
+  });
+}
+
+/**
  * Every canonical tuple, exactly once, in stable order. Built by enumerating the catalog — never by
  * re-listing a vocabulary here, so an action added or removed there is added or removed from the
  * universe with it, and the asserted counts below fail rather than drift.
@@ -169,38 +329,26 @@ export const CANONICAL_GRANT_UNIVERSE: readonly CanonicalGrantTuple[] = (() => {
 
   for (const role of TENANT_ROLE_IDS) {
     for (const sub of TENANT_SUB_PERMISSIONS) {
-      out.push(Object.freeze({
-        plane: 'tenant' as const, stratum: 'sub_permission' as const, role: role as string,
-        scope: sub.parentDomain, action: sub.id, requiredLevel: null,
-        sensitive: sub.mutating, approveGated: sub.defaultLevel === 'approve',
-      }));
+      out.push(tuple('tenant', 'sub_permission', role, sub.parentDomain, sub.id, null,
+        sub.mutating, sub.defaultLevel === 'approve'));
     }
     for (const domain of TENANT_PERMISSION_DOMAINS) {
       for (const required of PERMISSION_LEVEL_VALUES) {
-        out.push(Object.freeze({
-          plane: 'tenant' as const, stratum: 'domain_threshold' as const, role: role as string,
-          scope: domain, action: `require:${required}`, requiredLevel: required,
-          sensitive: required !== 'none' && required !== 'view', approveGated: required === 'approve',
-        }));
+        out.push(tuple('tenant', 'domain_threshold', role, domain, `require:${required}`, required,
+          required !== 'none' && required !== 'view', required === 'approve'));
       }
     }
   }
 
   for (const role of PLATFORM_ROLE_IDS) {
     for (const sub of PLATFORM_SUB_PERMISSIONS) {
-      out.push(Object.freeze({
-        plane: 'platform' as const, stratum: 'sub_permission' as const, role: role as string,
-        scope: sub.feature, action: sub.id, requiredLevel: null,
-        sensitive: sub.sensitive, approveGated: sub.threshold === 'approve',
-      }));
+      out.push(tuple('platform', 'sub_permission', role, sub.feature, sub.id, null,
+        sub.sensitive, sub.threshold === 'approve'));
     }
     for (const feature of PLATFORM_FEATURE_KEYS) {
       for (const required of PERMISSION_LEVEL_VALUES) {
-        out.push(Object.freeze({
-          plane: 'platform' as const, stratum: 'domain_threshold' as const, role: role as string,
-          scope: feature, action: `require:${required}`, requiredLevel: required,
-          sensitive: required !== 'none' && required !== 'view', approveGated: required === 'approve',
-        }));
+        out.push(tuple('platform', 'domain_threshold', role, feature, `require:${required}`, required,
+          required !== 'none' && required !== 'view', required === 'approve'));
       }
     }
   }
@@ -250,20 +398,31 @@ export function canonicalTupleFor(value: unknown): CanonicalGrantTuple | null {
   if (typeof value !== 'object' || value === null) return null;
   let fields: Record<string, unknown>;
   try {
-    const { plane, stratum, role, scope, action, requiredLevel, sensitive, approveGated } =
-      value as Record<string, unknown>;
-    fields = { plane, stratum, role, scope, action, requiredLevel, sensitive, approveGated };
+    const {
+      plane, stratum, role, scope, action, requiredLevel, sensitive, requiresApproveLevel, d2Classification,
+      moneyAction,
+    } = value as Record<string, unknown>;
+    fields = {
+      plane, stratum, role, scope, action, requiredLevel, sensitive, requiresApproveLevel, d2Classification,
+      moneyAction,
+    };
   } catch {
     return null; // a tuple that throws while being read (a trap, a revoked proxy) is malformed
   }
-  const { plane, stratum, role, scope, action, requiredLevel, sensitive, approveGated } = fields;
+  const {
+    plane, stratum, role, scope, action, requiredLevel, sensitive, requiresApproveLevel, d2Classification,
+    moneyAction,
+  } = fields;
   if (typeof plane !== 'string' || typeof stratum !== 'string' || typeof role !== 'string'
     || typeof scope !== 'string' || typeof action !== 'string') return null;
   const t = CANONICAL_BY_KEY.get(`${plane}\u0000${stratum}\u0000${role}\u0000${scope}\u0000${action}`);
   if (t === undefined) return null;
+  // Every field, the classifications included: an unknown required level, or a tuple claiming another
+  // classification than the universe gives it, is not canonical — it is never read as a `none` gate.
   if (t.plane !== plane || t.stratum !== stratum || t.role !== role || t.scope !== scope
     || t.action !== action || t.requiredLevel !== requiredLevel
-    || t.sensitive !== sensitive || t.approveGated !== approveGated) return null;
+    || t.sensitive !== sensitive || t.requiresApproveLevel !== requiresApproveLevel
+    || t.d2Classification !== d2Classification || t.moneyAction !== moneyAction) return null;
   return t;
 }
 
@@ -523,9 +682,11 @@ export interface GrantDiffRow {
   /** Which of the two flipping comparisons produced this row. */
   readonly flipPair: FlipPair;
   readonly sensitive: boolean;
-  readonly approveGated: boolean;
-  /** True when the row waits on decision D2, the open re-pin policy choice (04 §3 safeguard #1). */
-  readonly blockedOnD2: boolean;
+  /** Structural: the row's decisive required level is `approve`. Not a money classification. */
+  readonly requiresApproveLevel: boolean;
+  /** Whether D2 governs the row — the tuple's own classification, carried unchanged. */
+  readonly d2Classification: D2Classification;
+  readonly moneyAction: string | null;
 }
 
 export interface GrantDiffSummary {
@@ -533,7 +694,10 @@ export interface GrantDiffSummary {
   readonly unchanged: number;
   readonly widened: number;
   readonly narrowed: number;
-  readonly blockedOnD2: number;
+  /** Changed rows whose decisive required level is `approve` — a STRUCTURAL count. */
+  readonly requiresApproveLevel: number;
+  /** Changed rows by D2 classification — every class present, zero included. Kept apart from the above. */
+  readonly byD2Classification: Readonly<Record<D2Classification, number>>;
   readonly byRole: Readonly<Record<string, number>>;
   readonly byScope: Readonly<Record<string, number>>;
   readonly byAction: Readonly<Record<string, number>>;
@@ -545,34 +709,6 @@ export interface GrantDiff {
   readonly shape: typeof UNIVERSE_SHAPE;
   readonly rows: readonly GrantDiffRow[];
   readonly summary: GrantDiffSummary;
-}
-
-/**
- * Capabilities docs/phase-4/04 §2 declares satisfiable ONLY by their specific named grant, so that a
- * broad `manage`/`full` level can never confer them. 04 §2 folds them into the §3 re-pin + grant-diff
- * safeguard by name, so a changed row touching one is an owner decision even when the ordering did
- * not move it. None is present in the shipped catalog today; the list is carried so that adding one
- * lands it in the D2 bucket instead of passing unnoticed.
- */
-export const D2_NAMED_GRANT_ONLY_ACTIONS: readonly string[] = Object.freeze([
-  'activate_payment_gateway',
-  'disconnect_payment_gateway',
-  'manage_payment_gateway_connections',
-  'manage_payment_terminals',
-]);
-
-/**
- * Whether a CHANGED row waits on decision D2 — the open policy choice 04 §3 safeguard #1 leaves
- * unmade: how an `approve`-gated action is re-pinned (`≥ manage`, or an explicit per-role grant).
- *
- * That choice governs rows whose gate IS `approve`, plus the capabilities 04 §2 folds into the same
- * safeguard by name. A changed row gated at `manage` — the one narrowing, an `approve`-holder that
- * stops clearing a `manage` gate — is not a re-pin question: it is part of the diff safeguard #3
- * requires the owner to approve (D3), and D2's choice can make it matter more or less, but D2 does
- * not settle it. Every changed row waits on D3; only these wait on D2 as well.
- */
-function isBlockedOnD2(t: CanonicalGrantTuple): boolean {
-  return t.approveGated || D2_NAMED_GRANT_ONLY_ACTIONS.includes(t.action);
 }
 
 /** Compute the full diff. Deterministic: same inputs, same rows, same order, every time. */
@@ -587,7 +723,8 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
   const byAction: Record<string, number> = {};
   let widened = 0;
   let narrowed = 0;
-  let blocked = 0;
+  let approveLevel = 0;
+  const byD2: Record<D2Classification, number> = { money_action: 0, not_money_action: 0, unresolved: 0 };
 
   for (const t of CANONICAL_GRANT_UNIVERSE) {
     const before = evaluateBefore(t, ctx);
@@ -598,8 +735,8 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
       ? 'manage_satisfies_approve'
       : 'approve_no_longer_satisfies_manage';
     if (change === 'widened') widened += 1; else narrowed += 1;
-    const blockedOnD2 = isBlockedOnD2(t);
-    if (blockedOnD2) blocked += 1;
+    if (t.requiresApproveLevel) approveLevel += 1;
+    byD2[t.d2Classification] += 1;
     byRole[t.role] = (byRole[t.role] ?? 0) + 1;
     byScope[t.scope] = (byScope[t.scope] ?? 0) + 1;
     byAction[t.action] = (byAction[t.action] ?? 0) + 1;
@@ -607,7 +744,8 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
       plane: t.plane, stratum: t.stratum, role: t.role, scope: t.scope, action: t.action,
       requiredLevel: t.requiredLevel, heldLevel: heldLevelFor(t, ctx),
       before, after, change, flipPair,
-      sensitive: t.sensitive, approveGated: t.approveGated, blockedOnD2,
+      sensitive: t.sensitive, requiresApproveLevel: t.requiresApproveLevel,
+      d2Classification: t.d2Classification, moneyAction: t.moneyAction,
     }));
   }
 
@@ -623,7 +761,8 @@ export function computeGrantDiff(context: GrantEvaluationContext = CANONICAL_DIF
       unchanged: CANONICAL_GRANT_UNIVERSE.length - rows.length,
       widened,
       narrowed,
-      blockedOnD2: blocked,
+      requiresApproveLevel: approveLevel,
+      byD2Classification: Object.freeze(byD2),
       byRole: sortRecord(byRole),
       byScope: sortRecord(byScope),
       byAction: sortRecord(byAction),
@@ -722,6 +861,13 @@ export function normalizedAuthorizationInputs(): string {
       })),
       roleFeatureDefaults: PLATFORM_ROLE_FEATURE_DEFAULTS,
       dependencies: PLATFORM_PERMISSION_DEPENDENCIES,
+    },
+    // The D2 classification's own inputs: which operations are identified money actions, where the
+    // documents say so, and the named-grant-only list — so a changed classification is a stale artifact.
+    d2: {
+      moneyActions: D2_MONEY_ACTIONS,
+      namedGrantOnly: [...D2_NAMED_GRANT_ONLY_ACTIONS],
+      unmappedPaymentOperations: [...D2_UNMAPPED_PAYMENT_OPERATIONS],
     },
   }));
 }

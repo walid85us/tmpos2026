@@ -12,6 +12,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   CANONICAL_GRANT_UNIVERSE,
@@ -19,10 +22,13 @@ import {
   CANONICAL_DIFF_CONTEXT,
   FULLY_ENTITLED,
   UNIFIED_CANDIDATE_ORDERING,
+  D2_MONEY_ACTIONS,
   D2_NAMED_GRANT_ONLY_ACTIONS,
+  D2_UNMAPPED_PAYMENT_OPERATIONS,
   auditUniverse,
   canonicalTupleFor,
   candidateMeetsLevel,
+  classifyForD2,
   computeGrantDiff,
   evaluateAfterCandidate,
   evaluateBefore,
@@ -216,14 +222,17 @@ test('the changed set is exactly the pinned thirteen rows', () => {
   assert.deepEqual(actual, PINNED_CHANGED_ROWS);
 
   // Every changed row is a threshold row on the tenant plane — the finding the artifact reports. The
-  // twelve widened rows are gated at `approve` and wait on D2; the narrowing is gated at `manage`, is
-  // not a re-pin question, and waits on D3's approval of the diff only.
+  // twelve widened rows are STRUCTURALLY approve-level; none of them is an identified money action, so
+  // all twelve are `unresolved`, not D2 rows. The narrowing is gated at `manage`: `not_money_action`.
   for (const r of diff.rows) {
     assert.equal(r.plane, 'tenant');
     assert.equal(r.stratum, 'domain_threshold');
-    assert.equal(r.blockedOnD2, r.change === 'widened', `${r.role}/${r.scope}: D2 iff approve-gated`);
+    assert.equal(r.requiresApproveLevel, r.change === 'widened', `${r.role}/${r.scope}: approve level iff widened`);
+    assert.equal(r.d2Classification, r.change === 'widened' ? 'unresolved' : 'not_money_action', `${r.role}/${r.scope}`);
+    assert.equal(r.moneyAction, null, `${r.role}/${r.scope}: no changed row represents a money action`);
   }
-  assert.equal(diff.summary.blockedOnD2, 12);
+  assert.equal(diff.summary.requiresApproveLevel, 12);
+  assert.deepEqual({ ...diff.summary.byD2Classification }, { money_action: 0, not_money_action: 1, unresolved: 12 });
 
   // The per-key tallies the artifact prints, pinned rather than recomputed from the rows.
   assert.deepEqual({ ...diff.summary.byRole }, { manager: 12, technician: 1 });
@@ -331,8 +340,11 @@ test('unknown role, scope, action and malformed values all deny, on both evaluat
     ['sub-permission carrying a required level', { ...base, requiredLevel: 'view' }],
     ['sub-permission carrying an unknown level', { ...base, requiredLevel: 'not_a_level' }],
     ['inverted sensitivity', { ...base, sensitive: !base.sensitive }],
-    ['a string where a boolean belongs', { ...base, approveGated: String(base.approveGated) }],
-    ['missing classification', (({ sensitive: _s, approveGated: _a, ...rest }) => rest)(base)],
+    ['a string where a boolean belongs', { ...base, requiresApproveLevel: String(base.requiresApproveLevel) }],
+    ['missing classification', (({ sensitive: _s, requiresApproveLevel: _a, ...rest }) => rest)(base)],
+    ['a claimed D2 classification the universe does not give', { ...base, d2Classification: 'money_action', moneyAction: 'refund_approval' }],
+    ['an unknown D2 classification', { ...base, d2Classification: 'maybe' }],
+    ['a missing D2 classification', (({ d2Classification: _d, ...rest }) => rest)(base)],
     ['a key that splices fields across the separator', { ...base, role: `${base.role}\u0000${base.scope}`, scope: base.action }],
     ['a threshold on an inherited property name', { ...threshold, scope: 'constructor' }],
     ['a tuple that throws while being read', Object.defineProperty({ ...base }, 'role', { get(): never { throw new Error('trap'); } })],
@@ -550,10 +562,10 @@ test('the candidate denies an unknown level on either side — held or required'
   }
 });
 
-test('no catalog-defined level is unknown — so the stricter rule moves no grant', () => {
-  // The candidate is stricter than the shipped comparators on an unknown level (they rank it `none`).
-  // That difference is only harmless while no real requirement or held default is unknown; assert
-  // that premise instead of assuming it.
+test('no catalog-defined level is unknown — so deny-by-default moves no canonical grant', () => {
+  // Both evaluators deny an unknown level (the shipped comparators since M5-GAP11-P1-R1; before it
+  // they ranked one as `none`). That changes no canonical grant only while no real requirement or held
+  // default is unknown; assert that premise instead of assuming it.
   const known = new Set<string>(PERMISSION_LEVEL_VALUES);
   const levels = [
     ...TENANT_SUB_PERMISSIONS.flatMap((s) => [s.minModuleLevel, s.defaultLevel]),
@@ -577,6 +589,174 @@ test('sensitive actions keep the classification the shipped catalog gives them',
       assert.equal(t.sensitive, sub.sensitive, t.action);
     }
   }
+});
+
+// =============================================================================
+// The taxonomy — a structural classification and a D2 classification, kept apart (M5-GAP11-P1-R1)
+// =============================================================================
+
+/** Written from the catalog by hand: the sub-permissions whose decisive level is `approve`. */
+const PINNED_APPROVE_LEVEL_SUBS = {
+  tenant: ['approve_inventory', 'approve_refunds', 'approve_requests', 'approve_return'],
+  platform: [
+    'approve_billing_actions', 'change_escalation_level', 'delete_security_note', 'edit_addon_overrides',
+    'export_audit_csv', 'grant_paid_override', 'grant_trial', 'resolve_escalation', 'revoke_addon_override',
+    'view_restricted_audit_details',
+  ],
+} as const;
+
+/**
+ * Written from docs/phase-4/04 §3 and the platform catalog by hand: every tuple that represents an
+ * identified approve-gated money action. Nothing here comes from a level.
+ */
+const PINNED_MONEY_ACTION_TUPLES: readonly string[] = [
+  ...['manager', 'sales_staff', 'store_owner', 'technician'].flatMap((role) => [
+    `tenant/domain_threshold/${role}/refunds/require:approve=refund_approval`,
+    `tenant/sub_permission/${role}/refunds/approve_refunds=refund_approval`,
+    `tenant/sub_permission/${role}/returns/approve_return=return_approval`,
+  ]),
+  ...['billing_admin', 'operations_admin', 'security_admin', 'support_admin', 'system_owner'].map((role) =>
+    `platform/sub_permission/${role}/billing_subscriptions/approve_billing_actions=platform_billing_approval`),
+].sort();
+
+const tupleLabel = (t: CanonicalGrantTuple): string => `${t.plane}/${t.stratum}/${t.role}/${t.scope}/${t.action}`;
+
+test('the structural classification is exactly the decisive level, stratum by stratum', () => {
+  for (const t of CANONICAL_GRANT_UNIVERSE) {
+    let expected: boolean;
+    if (t.stratum === 'domain_threshold') expected = t.requiredLevel === 'approve';
+    else if (t.plane === 'tenant') expected = TENANT_SUB_PERMISSIONS.find((s) => s.id === t.action)!.defaultLevel === 'approve';
+    else expected = PLATFORM_SUB_PERMISSIONS.find((s) => s.id === t.action)!.threshold === 'approve';
+    assert.equal(t.requiresApproveLevel, expected, tupleLabel(t));
+  }
+  const subs = (plane: string): string[] => [...new Set(CANONICAL_GRANT_UNIVERSE
+    .filter((t) => t.plane === plane && t.stratum === 'sub_permission' && t.requiresApproveLevel).map((t) => t.action))].sort();
+  assert.deepEqual(subs('tenant'), [...PINNED_APPROVE_LEVEL_SUBS.tenant]);
+  assert.deepEqual(subs('platform'), [...PINNED_APPROVE_LEVEL_SUBS.platform]);
+  // 4 roles × 21 domains + 5 × 11 features at `approve`, plus 4 × 4 tenant and 5 × 10 platform subs.
+  assert.equal(CANONICAL_GRANT_UNIVERSE.filter((t) => t.requiresApproveLevel).length, 84 + 55 + 16 + 50);
+});
+
+test('the D2 money actions are exactly the documented representations — never inferred from a level', () => {
+  const money = CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification === 'money_action')
+    .map((t) => `${tupleLabel(t)}=${t.moneyAction}`).sort();
+  assert.deepEqual(money, PINNED_MONEY_ACTION_TUPLES);
+
+  for (const t of CANONICAL_GRANT_UNIVERSE) {
+    if (t.d2Classification === 'money_action') {
+      assert.equal(t.requiresApproveLevel, true, `a money action is approve-level: ${tupleLabel(t)}`);
+      assert.notEqual(t.moneyAction, null);
+    } else {
+      assert.equal(t.moneyAction, null, tupleLabel(t));
+      // Everything approve-level that is not documented is unresolved; everything else is not D2's.
+      assert.equal(t.d2Classification, t.requiresApproveLevel ? 'unresolved' : 'not_money_action', tupleLabel(t));
+    }
+  }
+  const count = (c: string): number => CANONICAL_GRANT_UNIVERSE.filter((t) => t.d2Classification === c).length;
+  assert.deepEqual({ money: count('money_action'), unresolved: count('unresolved'), not: count('not_money_action') },
+    { money: 17, unresolved: 205 - 17, not: 1659 - 205 });
+
+  // Level alone never makes a money action: approve-level tuples a document does not name stay unresolved.
+  const at = (plane: string, stratum: string, role: string, scope: string, action: string): CanonicalGrantTuple =>
+    CANONICAL_GRANT_UNIVERSE.find((t) => t.plane === plane && t.stratum === stratum && t.role === role
+      && t.scope === scope && t.action === action)!;
+  assert.equal(at('tenant', 'sub_permission', 'manager', 'inventory', 'approve_inventory').d2Classification, 'unresolved');
+  assert.equal(at('tenant', 'sub_permission', 'manager', 'employees', 'approve_requests').d2Classification, 'unresolved');
+  assert.equal(at('tenant', 'domain_threshold', 'manager', 'returns', 'require:approve').d2Classification, 'unresolved',
+    'return approval is documented as approve_return, not as the returns domain at approve');
+  assert.equal(at('platform', 'sub_permission', 'support_admin', 'addon_governance', 'grant_paid_override').d2Classification, 'unresolved');
+  assert.equal(at('tenant', 'domain_threshold', 'manager', 'refunds', 'require:manage').d2Classification, 'not_money_action');
+  assert.equal(at('tenant', 'sub_permission', 'manager', 'refunds', 'process_refunds').d2Classification, 'not_money_action',
+    'process_refunds moves money but is not approve-gated, so D2 does not govern it');
+});
+
+test('every money-action source is quoted exactly from the document it names', () => {
+  const repo = fileURLToPath(new URL('../../', import.meta.url));
+  assert.deepEqual(D2_MONEY_ACTIONS.map((m) => m.operation), ['refund_approval', 'return_approval', 'platform_billing_approval']);
+  for (const m of D2_MONEY_ACTIONS) {
+    assert.ok(m.sources.length > 0, `${m.operation} has a source`);
+    assert.ok(m.representations.length > 0, `${m.operation} has a representation`);
+    for (const s of m.sources) {
+      assert.ok(readFileSync(join(repo, s.path), 'utf8').includes(s.quote), `${m.operation}: "${s.quote}" is in ${s.path}`);
+    }
+    for (const r of m.representations) {
+      const roles = r.plane === 'tenant' ? TENANT_ROLE_IDS : PLATFORM_ROLE_IDS;
+      for (const role of roles) {
+        assert.ok(CANONICAL_GRANT_UNIVERSE.some((t) => t.plane === r.plane && t.stratum === r.stratum
+          && t.role === role && t.scope === r.scope && t.action === r.action), `${m.operation}: ${role}/${r.scope}/${r.action} exists`);
+      }
+    }
+  }
+});
+
+test('no documented money action changes under the unified ordering — pinned per role', () => {
+  // Written by hand: the manager already holds refunds at approve; every non-owner tenant role holds an
+  // explicit approve_refunds / approve_return grant (true for the manager only); store_owner is full;
+  // on the platform only system_owner and billing_admin (billing_subscriptions full) clear approve.
+  const GRANTED = new Set(['manager', 'store_owner', 'system_owner', 'billing_admin']);
+  let checked = 0;
+  for (const t of CANONICAL_GRANT_UNIVERSE) {
+    if (t.d2Classification !== 'money_action') continue;
+    const expected = GRANTED.has(t.role) ? 'granted' : 'denied';
+    assert.equal(evaluateBefore(t, CTX), expected, `BEFORE ${tupleLabel(t)}`);
+    assert.equal(evaluateAfterCandidate(t, CTX), expected, `AFTER ${tupleLabel(t)}`);
+    checked += 1;
+  }
+  assert.equal(checked, 17);
+});
+
+test('a named-grant-only capability would classify unresolved, never slip through as not_money_action', () => {
+  for (const action of [...D2_NAMED_GRANT_ONLY_ACTIONS, ...D2_UNMAPPED_PAYMENT_OPERATIONS]) {
+    assert.equal(CANONICAL_GRANT_UNIVERSE.some((t) => t.action === action), false, `${action} is not in the catalog yet`);
+    for (const approve of [false, true]) {
+      assert.deepEqual(classifyForD2('tenant', 'sub_permission', 'payments', action, approve),
+        { d2Classification: 'unresolved', moneyAction: null }, action);
+    }
+  }
+  assert.deepEqual(classifyForD2('tenant', 'sub_permission', 'refunds', 'approve_refunds', true),
+    { d2Classification: 'money_action', moneyAction: 'refund_approval' });
+  assert.deepEqual(classifyForD2('tenant', 'domain_threshold', 'widgets', 'require:approve', true),
+    { d2Classification: 'unresolved', moneyAction: null });
+  assert.deepEqual(classifyForD2('tenant', 'domain_threshold', 'widgets', 'require:manage', false),
+    { d2Classification: 'not_money_action', moneyAction: null });
+  // A representation matches on every field: the same action on another plane or scope is not it.
+  assert.deepEqual(classifyForD2('platform', 'sub_permission', 'refunds', 'approve_refunds', true),
+    { d2Classification: 'unresolved', moneyAction: null });
+});
+
+test('the manager/refunds narrowing is pinned: an approve holder, a manage gate, a threshold only', () => {
+  const row = computeGrantDiff(CTX).rows.find((r) => r.change === 'narrowed')!;
+  assert.deepEqual(
+    { role: row.role, scope: row.scope, action: row.action, held: row.heldLevel, gate: row.requiredLevel,
+      before: row.before, after: row.after, flip: row.flipPair, d2: row.d2Classification, money: row.moneyAction },
+    { role: 'manager', scope: 'refunds', action: 'require:manage', held: 'approve', gate: 'manage',
+      before: 'granted', after: 'denied', flip: 'approve_no_longer_satisfies_manage', d2: 'not_money_action', money: null });
+  // Why BEFORE and AFTER differ: approve ranks above manage today, below it under the unified ordering.
+  assert.equal(meetsTenantPermissionLevel('approve', 'manage'), true);
+  assert.equal(candidateMeetsLevel('approve', 'manage'), false);
+  // Why it is a threshold only: no refunds sub-permission compares against manage, and the documented
+  // refund-approval representation (refunds at approve) does not move for the manager.
+  for (const s of TENANT_SUB_PERMISSIONS.filter((x) => x.parentDomain === 'refunds')) {
+    assert.notEqual(s.minModuleLevel, 'manage', s.id);
+    assert.notEqual(s.defaultLevel, 'manage', s.id);
+  }
+  const approveGate = CANONICAL_GRANT_UNIVERSE.find((t) => t.plane === 'tenant' && t.stratum === 'domain_threshold'
+    && t.role === 'manager' && t.scope === 'refunds' && t.action === 'require:approve')!;
+  assert.equal(approveGate.d2Classification, 'money_action');
+  assert.equal(evaluateBefore(approveGate, CTX), 'granted');
+  assert.equal(evaluateAfterCandidate(approveGate, CTX), 'granted');
+});
+
+test('control: a level-only D2 classification — P1\'s reading of approve-gated as "a D2 row" — is detected', () => {
+  // Classifying every approve-level tuple as a money action is exactly the overstatement R1 corrects.
+  // The pinned set must reject it, or the taxonomy tests above would not be testing anything.
+  const levelOnly = CANONICAL_GRANT_UNIVERSE.filter((t) => t.requiresApproveLevel).map(tupleLabel).sort();
+  const pinned = PINNED_MONEY_ACTION_TUPLES.map((s) => s.split('=')[0]).sort();
+  assert.notDeepEqual(levelOnly, pinned);
+  assert.equal(levelOnly.length - pinned.length, 188, 'a level-only reading would claim 188 extra D2 tuples');
+  const diff = computeGrantDiff(CTX);
+  assert.equal(diff.rows.filter((r) => r.requiresApproveLevel).length, 12, 'twelve structural approve-level rows…');
+  assert.equal(diff.rows.filter((r) => r.d2Classification === 'money_action').length, 0, '…and zero money-action rows');
 });
 
 // =============================================================================

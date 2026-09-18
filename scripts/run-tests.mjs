@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 118;
+export const MIN_SUITES = 122;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -61,6 +61,10 @@ export const REQUIRED_SENTINELS = [
   'server/platform-identity/gap11GrantDiff.test.ts',           // GAP-11 authorization matrix: every canonical tuple once, pinned changed rows, deny-by-default unknowns, defect controls
   'server/platform-identity/gap11ShadowComparator.test.ts',    // GAP-11 dual-read shadow: the authoritative answer returned unchanged, bounded records, never fails open
   'tests/quality/gap11-grant-diff-artifact.test.mjs',          // GAP-11 grant-diff artifact: not stale, deterministic, and the candidate evaluator stays out of every decision path
+  'server/platform-identity/permissionDecision.test.ts',       // safeguard #4: the DEV decision spine denies unknown vocabulary; every canonical decision unchanged
+  'server/platform-identity/protectedAction.test.ts',          // safeguard #4: a malformed route requirement is a 403, read once, never a crash
+  'server/platform-identity/authorizationFailClosed.test.ts',  // safeguard #4: catalog comparators and materializers, resolver roles and statuses, BCP guard
+  'src/context/authorizationVocabulary.test.ts',               // safeguard #4: the client comparators and platform override readers deny unknown vocabulary
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context

@@ -10,13 +10,18 @@ import {
   type CanonicalAuthzView,
 } from './bcpActionLivePrincipalResolver';
 import { authorizeBcpAction } from './bcpActionAuthorizationGuard';
+import { PLATFORM_FEATURE_KEYS } from '../platform-identity/permissionCatalog';
+
+/** A complete canonical platform map: every catalog feature at `level`, the first one at `floor` if given. */
+const MAP = (level: string, floor?: string): Record<string, string> =>
+  Object.fromEntries(PLATFORM_FEATURE_KEYS.map((k, i) => [k, i === 0 && floor !== undefined ? floor : level]));
 
 const cases: { name: string; fn: () => Promise<void> | void }[] = [];
 const test = (n: string, fn: () => Promise<void> | void) => cases.push({ name: n, fn });
 
 const view = (o: Partial<CanonicalAuthzView> = {}): CanonicalAuthzView => ({
   decision: 'allow', reasonCode: 'resolved', limitation: 'none',
-  platformRoleId: 'system_owner', permissions: { admin: 'full', ops: 'full' },
+  platformRoleId: 'system_owner', permissions: MAP('full'),
   statusValues: ['active', 'active', 'active'], scopeType: 'platform', ...o,
 });
 
@@ -59,11 +64,11 @@ test('null role → visibility none → guard DENY', () => {
 
 // ---------- permission derived from CANONICAL map, never role name ----------
 test('system_owner but canonical map floor=manage → level manage → ALLOW (manage meets manage)', () => {
-  const t = translateToBcpActionPrincipal('iu', view({ permissions: { a: 'full', b: 'manage' } }));
+  const t = translateToBcpActionPrincipal('iu', view({ permissions: MAP('full', 'manage') }));
   assert.equal(t.platformPermissionLevel, 'manage'); assert.equal(decide(t), 'allow');
 });
 test('system_owner but canonical map floor=view → level view → DENY (not role-name inferred)', () => {
-  const t = translateToBcpActionPrincipal('iu', view({ permissions: { a: 'full', b: 'view' } }));
+  const t = translateToBcpActionPrincipal('iu', view({ permissions: MAP('full', 'view') }));
   assert.equal(t.platformPermissionLevel, 'view'); assert.equal(decide(t), 'deny');
 });
 test('empty canonical permissions → level none → DENY', () => {

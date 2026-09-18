@@ -7,7 +7,11 @@ export type AccountStatus = 'active' | 'trialing' | 'overdue' | 'suspended' | 'r
 export const PERMISSION_HIERARCHY: PermissionLevel[] = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
 
 export function meetsPermissionLevel(actual: PermissionLevel, required: PermissionLevel): boolean {
-  return PERMISSION_HIERARCHY.indexOf(actual) >= PERMISSION_HIERARCHY.indexOf(required);
+  // Deny-by-default on unknowns: an unranked (non-canonical) level ranks -1 on
+  // both sides, so it can never satisfy or be satisfied by anything.
+  const a = PERMISSION_HIERARCHY.indexOf(actual);
+  const r = PERMISSION_HIERARCHY.indexOf(required);
+  return a >= 0 && r >= 0 && a >= r;
 }
 
 export const PERMISSION_DOMAINS = [

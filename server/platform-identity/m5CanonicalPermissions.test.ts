@@ -101,3 +101,49 @@ test('a tenant or store permission is undecidable, never allowed, until GAP-11 i
     assert.equal(evaluateCanonicalPermission({ scope, roleId: 'manager', permission: 'no_such_permission', limitation: 'none' }), 'denied');
   }
 });
+
+// M5-GAP11-P1-R1 — deny-by-default on the two inputs that were still coerced: the scope and the limitation.
+
+test('an unknown scope names no plane: nothing is found in it, and nothing is evaluated', () => {
+  const tenantKey = TENANT_SUB_PERMISSIONS[0].id;
+  // Control: the same keys are found in their real planes.
+  assert.notEqual(canonicalPermission('tenant', tenantKey), null);
+  assert.notEqual(canonicalPermission('platform', 'view_command_center'), null);
+  for (const scope of ['bogus', 'Platform', 'TENANT', ' store', '', 'none', 'constructor', undefined, null, 1]) {
+    // Until R1 any scope that was not 'platform' read the TENANT plane, as if it were a tenant scope.
+    assert.equal(canonicalPermission(scope as never, tenantKey), null, `scope ${String(scope)}`);
+    assert.equal(canonicalPermission(scope as never, 'view_command_center'), null, `scope ${String(scope)}`);
+    assert.equal(evaluateCanonicalPermission({ scope: scope as never, roleId: 'manager', permission: tenantKey, limitation: 'none' }),
+      'denied', `denied, not undecidable: scope ${String(scope)}`);
+  }
+});
+
+test('an unrecognised limitation is not "no limitation": it denies, even for the owner', () => {
+  const sensitive = PLATFORM_SUB_PERMISSIONS.find((s) => s.sensitive)!;
+  // Control: the owner holds the sensitive grant when the limitation is exactly 'none'.
+  assert.equal(evaluateCanonicalPermission({ scope: 'platform', roleId: 'system_owner', permission: sensitive.id, limitation: 'none' }), 'granted');
+  for (const limitation of ['READ_ONLY', 'readonly', 'read-only', 'None', ' none', '', undefined, null, true, false, 0, 1, {}]) {
+    for (const permission of [sensitive.id, 'view_command_center']) {
+      assert.equal(evaluateCanonicalPermission({ scope: 'platform', roleId: 'system_owner', permission, limitation: limitation as never }),
+        'denied', `${permission} under ${JSON.stringify(limitation)}`);
+    }
+  }
+  // Nor for a tenant key: a malformed request is a denial, not an 'undecidable' that invites a retry.
+  assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId: 'manager', permission: TENANT_SUB_PERMISSIONS[0].id, limitation: 'READ_ONLY' as never }),
+    'denied');
+});
+
+test('every input field is read exactly once — a getter cannot answer the check and the use differently', () => {
+  const reads: Record<string, number> = {};
+  let limitationReads = 0;
+  const input = new Proxy({ scope: 'platform', roleId: 'system_owner', permission: 'export_audit_csv' } as Record<string, unknown>, {
+    get(t, k, r) {
+      reads[String(k)] = (reads[String(k)] ?? 0) + 1;
+      if (k === 'limitation') { limitationReads += 1; return limitationReads === 1 ? 'read_only' : 'none'; }
+      return Reflect.get(t, k, r);
+    },
+  });
+  // Read once as 'read_only', the sensitive export is denied; a second read would have said 'none'.
+  assert.equal(evaluateCanonicalPermission(input as never), 'denied');
+  assert.deepEqual(reads, { scope: 1, roleId: 1, permission: 1, limitation: 1 });
+});

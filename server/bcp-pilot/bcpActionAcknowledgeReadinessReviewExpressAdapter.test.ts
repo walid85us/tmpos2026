@@ -11,6 +11,7 @@ import {
 } from './bcpActionAcknowledgeReadinessReviewExpressAdapter';
 import { createRecordingActionAuditSink, type BcpActionAuditSink } from './bcpActionAuditSink';
 import type { CanonicalAuthzView } from './bcpActionLivePrincipalResolver';
+import { PLATFORM_FEATURE_KEYS } from '../platform-identity/permissionCatalog';
 import { BcpActionIdempotencyStore } from './bcpActionIdempotencyStore';
 import { BcpActionRateLimiter } from './bcpActionRateLimiter';
 import fs from 'node:fs';
@@ -44,7 +45,7 @@ function counting<T extends (...a: any[]) => any>(fn: T) {
 }
 const view = (o: Partial<CanonicalAuthzView> = {}): CanonicalAuthzView => ({
   decision: 'allow', reasonCode: 'resolved', limitation: 'none', platformRoleId: 'system_owner',
-  permissions: { admin: 'full' }, statusValues: ['active'], scopeType: 'platform', ...o,
+  permissions: Object.fromEntries(PLATFORM_FEATURE_KEYS.map((k) => [k, 'full'])), statusValues: ['active'], scopeType: 'platform', ...o,
 });
 const verifyOk = async () => ({ ok: true, firebaseUid: 'fb_test' });
 const verifyFail = (code: string) => async () => ({ ok: false, code });

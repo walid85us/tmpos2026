@@ -35,7 +35,15 @@ export type ActionGuardReasonCode =
   | 'no_internal_user_id'
   | 'parity_unresolved'
   | 'insufficient_visibility'
-  | 'insufficient_permission';
+  | 'insufficient_permission'
+  | 'scope_mismatch'
+  | 'unknown_action';
+
+/**
+ * Every controlled action the guard can authorize. An action key outside this list is no action and is
+ * refused (docs/phase-4/04 §3 safeguard #4). The owning modules' constants are asserted against it.
+ */
+export const BCP_CONTROLLED_ACTION_KEYS: readonly string[] = Object.freeze(['bcp.action.acknowledge_readiness_review']);
 
 export interface ActionGuardResult {
   decision: ActionGuardDecision;
@@ -69,12 +77,32 @@ const blocked = (reasonCode: ActionGuardReasonCode): ActionGuardResult => ({ dec
  * ONLY from `principal` + the server-resolved permission level; `hints` are never consulted. Never throws.
  */
 export function authorizeBcpAction(req: ActionGuardRequest): ActionGuardResult {
+  // Every request field is read ONCE, here, so a getter cannot answer a check and its use differently;
+  // a request that throws while being read is refused. Every boolean gate is `=== true`: a truthy
+  // non-boolean ('false', 1) is not a yes.
+  let fields: Pick<ActionGuardRequest, 'actionKey' | 'isDevEnvironment' | 'featureEnabled' | 'principal'
+    | 'platformPermissionLevel' | 'planReadOnly' | 'planOverdue' | 'hints'>;
+  try {
+    const { actionKey, isDevEnvironment, featureEnabled, principal, platformPermissionLevel, planReadOnly, planOverdue, hints } = req;
+    fields = { actionKey, isDevEnvironment, featureEnabled, principal, platformPermissionLevel, planReadOnly, planOverdue, hints };
+  } catch {
+    return deny('no_server_principal');
+  }
   // 0. Production is never permitted (defense-in-depth even if the handler already gated).
-  if (!req.isDevEnvironment) return deny('production_forbidden');
+  if (fields.isDevEnvironment !== true) return deny('production_forbidden');
 
   // 1. Default-off feature flag.
-  if (!req.featureEnabled) return deny('feature_disabled');
+  if (fields.featureEnabled !== true) return deny('feature_disabled');
 
+  // 1a. Only a declared controlled action can be authorized: an unknown action key is no action.
+  if (typeof fields.actionKey !== 'string' || !BCP_CONTROLLED_ACTION_KEYS.includes(fields.actionKey)) {
+    return deny('unknown_action');
+  }
+
+  return authorizeReadFields(fields);
+}
+
+function authorizeReadFields(req: Pick<ActionGuardRequest, 'principal' | 'platformPermissionLevel' | 'planReadOnly' | 'planOverdue' | 'hints'>): ActionGuardResult {
   // 2. A server-derived principal is mandatory; untrusted hints are never promoted to authority.
   if (!req.principal) {
     const hadUntrustedAttempt =
@@ -88,23 +116,38 @@ export function authorizeBcpAction(req: ActionGuardRequest): ActionGuardResult {
     return deny(hadUntrustedAttempt ? 'untrusted_authority_only' : 'no_server_principal');
   }
 
+  // The principal's fields, read once.
+  let p: Pick<SyntheticServerPrincipal, 'source' | 'verified' | 'internalUserId' | 'parityState' | 'scopeType' | 'visibilityClass'>;
+  try {
+    const { source, verified, internalUserId, parityState, scopeType, visibilityClass } = req.principal;
+    p = { source, verified, internalUserId, parityState, scopeType, visibilityClass };
+  } catch {
+    return deny('no_server_principal');
+  }
   // 3. Only the server-derived source is authority.
-  if (req.principal.source !== 'server_derived') return deny('no_server_principal');
+  if (p.source !== 'server_derived') return deny('no_server_principal');
   // 4. Must be a cryptographically verified principal.
-  if (!req.principal.verified) return deny('unverified_principal');
+  if (p.verified !== true) return deny('unverified_principal');
   // 5. Must carry a durable app-owned anchor.
-  if (!req.principal.internalUserId) return deny('no_internal_user_id');
+  if (!p.internalUserId) return deny('no_internal_user_id');
   // 6. Parity must be proven ready.
-  if (req.principal.parityState !== 'ready') return blocked('parity_unresolved');
+  if (p.parityState !== 'ready') return blocked('parity_unresolved');
+  // 6a. A controlled action is a PLATFORM action: a principal resolved at any other plane — tenant,
+  //     store, none, or an unrecognised one — is refused before its visibility or level is consulted.
+  if (p.scopeType !== 'platform') return deny('scope_mismatch');
 
   // 7. Visibility floor: system_owner (the strongest class). Exact equality — an unknown/inherited class value
   //    will not equal 'system_owner', so this fails closed for anything weaker or malformed.
-  if (req.principal.visibilityClass !== BCP_ACTION_VISIBILITY_FLOOR) return deny('insufficient_visibility');
+  if (p.visibilityClass !== BCP_ACTION_VISIBILITY_FLOOR) return deny('insufficient_visibility');
 
-  // 8. Permission floor: platform `manage`, with read-only/overdue cap. A missing level fails closed.
-  if (req.platformPermissionLevel == null) return deny('insufficient_permission');
-  let level: PermissionLevelValue = req.platformPermissionLevel;
-  if (req.planReadOnly || req.planOverdue) level = capPlatformLevelForReadOnly(level);
+  // 8. Permission floor: platform `manage`, with read-only/overdue cap. A missing level fails closed. Each plan
+  //    flag lifts the cap only when it is exactly `false` or absent: a malformed flag (0, 'false') restricts.
+  const held = req.platformPermissionLevel;
+  if (held == null) return deny('insufficient_permission');
+  const unrestricted = (flag: unknown): boolean => flag === false || flag === undefined;
+  const level: PermissionLevelValue = unrestricted(req.planReadOnly) && unrestricted(req.planOverdue)
+    ? held
+    : capPlatformLevelForReadOnly(held);
   if (!meetsPlatformPermissionLevel(level, BCP_ACTION_PERMISSION_FLOOR)) return deny('insufficient_permission');
 
   return { decision: 'allow', reasonCode: 'allow' };

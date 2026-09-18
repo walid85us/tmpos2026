@@ -5,8 +5,9 @@
 // more: it observes, it never decides.
 //
 // THE AUTHORITATIVE ANSWER IS AN INPUT, NOT SOMETHING THIS MODULE COMPUTES. The caller has already
-// made its decision when it calls `compare`; it passes that decision in and gets it back. That shape
-// is deliberate and does three things at once:
+// made its decision when it calls `compare`; it passes that decision in and gets it back — or a
+// denial, when the decision or the tuple it concerns is not admissible (never the reverse). That
+// shape is deliberate and does three things at once:
 //   * it makes fail-open structurally impossible — there is no code path on which a candidate result
 //     becomes the returned value, because the candidate is never assigned to it;
 //   * it satisfies 04 §3's "run both in parallel" honestly — one policy is evaluated by the caller,
@@ -15,7 +16,8 @@
 //     "check" it would evaluate the same policy twice and invite the two copies to disagree.
 //
 // WHAT A MISMATCH MAY CONTAIN. Canonical vocabulary and outcome codes only: plane, stratum, role id,
-// domain/feature id, action id, level token, the two outcomes. No user id, no email, no token, no
+// domain/feature id, action id, level token, the tuple's own structural and D2 classifications, the
+// two outcomes. No user id, no email, no token, no
 // cookie, no session, no tenant or store record, no request, no header, no IP, no timestamp, no free
 // text. A divergence record is a statement about the CATALOG, not about a person — the catalog is
 // the same for everyone holding the role, so nothing identifying is needed to act on it.
@@ -33,6 +35,7 @@ import {
   evaluateAfterCandidate,
   snapshotContext,
   type CanonicalGrantTuple,
+  type D2Classification,
   type GrantEvaluationContext,
   type GrantOutcome,
   type GrantPlane,
@@ -60,8 +63,10 @@ export type ShadowMismatchKind =
   /** The caller supplied something that is not a decision. Returned as a denial, fail closed. */
   | 'malformed_authoritative'
   /**
-   * The tuple is not one of the universe's canonical tuples — malformed, unknown, or a mismatched
-   * combination of known parts. No candidate is attempted and no caller field is recorded.
+   * The tuple is not one of the universe's canonical tuples — malformed, unknown (an unknown required
+   * level included), or a mismatched combination of known parts. It is DENIED before any comparison:
+   * no candidate is attempted, no caller field is recorded, and nothing about it is read as a `none`
+   * requirement (the record's level is null, never `none`).
    */
   | 'malformed_tuple';
 
@@ -74,7 +79,12 @@ export interface ShadowMismatch {
   readonly scope: string;
   readonly action: string;
   readonly requiredLevel: Level | null;
-  /** The decision the caller made and the comparator returned. */
+  /** Structural: the tuple's decisive level is `approve`. False when there is no canonical tuple. */
+  readonly requiresApproveLevel: boolean;
+  /** Whether D2 governs the tuple; null when there is no canonical tuple to classify. */
+  readonly d2Classification: D2Classification | null;
+  readonly moneyAction: string | null;
+  /** The decision the comparator returned: the caller's, or `denied` when that was not admissible. */
   readonly authoritative: GrantOutcome;
   /** What the unified ordering would have said. `null` when it could not be obtained. */
   readonly candidate: GrantOutcome | null;
@@ -97,7 +107,8 @@ export interface ShadowComparator {
   /**
    * Record whether the unified ordering would have answered differently, and return the caller's own
    * decision, unchanged. THE RETURN VALUE IS ALWAYS THE `authoritative` ARGUMENT — except when that
-   * argument is not a decision at all, in which case the answer is `denied`.
+   * argument is not a decision at all, or the tuple is not one of the universe's canonical tuples, in
+   * which case the answer is `denied`. Both exceptions only ever deny; neither consults the candidate.
    */
   compare(
     tuple: CanonicalGrantTuple,
@@ -135,6 +146,9 @@ function record(
     scope: t === null ? '' : t.scope,
     action: t === null ? '' : t.action,
     requiredLevel: t === null ? null : t.requiredLevel,
+    requiresApproveLevel: t === null ? false : t.requiresApproveLevel,
+    d2Classification: t === null ? null : t.d2Classification,
+    moneyAction: t === null ? null : t.moneyAction,
     authoritative,
     candidate,
   });
@@ -169,14 +183,23 @@ export function createShadowComparator(options: ShadowComparatorOptions = {}): S
 
   return {
     compare(tuple, ctx, authoritative) {
-      // The answer is fixed before anything is observed. Coercing a non-decision to `denied` can
-      // never turn a denial into an allowance, which is the one direction that matters.
-      const decision: GrantOutcome = isOutcome(authoritative) ? authoritative : 'denied';
+      // The tuple is parsed first, once: vocabulary, never a grant. canonicalTupleFor reads each field
+      // once and returns null rather than throwing; the catch is belt and braces.
+      let canonical: CanonicalGrantTuple | null;
+      try {
+        canonical = canonicalTupleFor(tuple);
+      } catch {
+        canonical = null;
+      }
+      // The answer is fixed before anything is observed. A non-decision, or a tuple that is not one of
+      // the universe's own — an unknown required level included — is `denied` before any comparison:
+      // it is never compared, and never read as an ordinary `none` requirement. Coercing to `denied`
+      // can never turn a denial into an allowance, which is the one direction that matters.
+      const decision: GrantOutcome = isOutcome(authoritative) && canonical !== null ? authoritative : 'denied';
 
       // Everything below is observation, and all of it is inside one catch-all: a hostile tuple,
       // context or observer can cost a record, never the decision.
       try {
-        const canonical = canonicalTupleFor(tuple);
         if (!isOutcome(authoritative)) {
           emit(record('malformed_authoritative', canonical, 'denied', null));
         } else if (canonical === null) {

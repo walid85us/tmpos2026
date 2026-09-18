@@ -14,8 +14,10 @@
 //     the M9 contract (erased at compile time).
 //   - It does NOT import any frontend file (src/**). It MIRRORS the frozen client
 //     engines by read-only parity (see PARITY SOURCES) — it never imports them.
-//   - Imported at runtime ONLY by authorizationResolver.ts. Never by the client
-//     bundle, the M7 route, the M8 pilot, the M11.4 service, or the M11.5 route.
+//   - Imported at runtime by authorizationResolver.ts, and (M5-GAP11-P1-R1) by
+//     permissionDecision.ts, whose level comparisons now delegate here so one
+//     deny-by-default rule serves both. Never by the client bundle, the M7 route,
+//     the M8 pilot, the M11.4 service, or the M11.5 route.
 //
 // SERVER-AUTHORITATIVE (binding): operates ONLY on a server-resolved role id +
 // the server-resolved, enabled-only entitlement map + a server-resolved
@@ -83,27 +85,49 @@ export const TENANT_ORDERING: readonly Level[] = TENANT_PERMISSION_ORDERING;
 /** Platform ordering: none < view < create < edit < approve < manage < full. */
 export const PLATFORM_ORDERING: readonly Level[] = PLATFORM_PERMISSION_ORDERING;
 
-function rankIn(order: readonly Level[], level: Level | null | undefined): number {
-  const idx = order.indexOf((level ?? 'none') as Level);
-  return idx < 0 ? 0 : idx; // unknown level ⇒ treated as 'none' (fail closed)
+/**
+ * True only for one of the seven canonical tokens, exactly: no trimming, no case folding, no
+ * coercion. docs/phase-4/04 §3 safeguard #4 — a level outside the catalog is not a weaker level, it
+ * is no level at all.
+ */
+export function isPermissionLevel(value: unknown): value is Level {
+  return typeof value === 'string' && (PERMISSION_TOKENS as readonly string[]).includes(value);
 }
 
-/** Mirrors accessConfig.meetsPermissionLevel — uses the TENANT ordering. */
+/** The level's rank, or -1 for anything that is not exactly a canonical token (null, undefined included). */
+function rankIn(order: readonly Level[], level: unknown): number {
+  return isPermissionLevel(level) ? order.indexOf(level) : -1;
+}
+
+/**
+ * Mirrors accessConfig.meetsPermissionLevel — uses the TENANT ordering. DENY-BY-DEFAULT: a held or
+ * required level that is not canonical clears nothing. (Until M5-GAP11-P1-R1 an unknown level ranked
+ * as `none`, so a requirement nobody could name was satisfied by every holder.)
+ */
 export function meetsTenantPermissionLevel(actual: Level, required: Level): boolean {
-  return rankIn(TENANT_ORDERING, actual) >= rankIn(TENANT_ORDERING, required);
+  const a = rankIn(TENANT_ORDERING, actual);
+  const r = rankIn(TENANT_ORDERING, required);
+  return a >= 0 && r >= 0 && a >= r;
 }
 
-/** Mirrors platformPermissionsConfig.platformPermissionMeets — PLATFORM ordering. */
+/**
+ * Mirrors platformPermissionsConfig.platformPermissionMeets — PLATFORM ordering, same deny-by-default
+ * rule. A canonical holder still clears a `none` threshold, because every canonical rank is >= 0.
+ */
 export function meetsPlatformPermissionLevel(actual: Level, threshold: Level): boolean {
-  if (threshold === 'none') return true;
-  return rankIn(PLATFORM_ORDERING, actual) >= rankIn(PLATFORM_ORDERING, threshold);
+  const a = rankIn(PLATFORM_ORDERING, actual);
+  const t = rankIn(PLATFORM_ORDERING, threshold);
+  return a >= 0 && t >= 0 && a >= t;
 }
 
 // =============================================================================
 // Status / read-only capping helpers
 // =============================================================================
 
-/** Cap any write level down to `view` (read_only / overdue). none/view unchanged. */
+/**
+ * Cap any write level down to `view` (read_only / overdue). none/view unchanged. A non-canonical level
+ * is returned unchanged — never turned into `none` or `view` — so the comparison it reaches denies it.
+ */
 export function capTenantLevelForReadOnly(level: Level): Level {
   return rankIn(TENANT_ORDERING, level) > rankIn(TENANT_ORDERING, 'view') ? 'view' : level;
 }
@@ -415,7 +439,8 @@ export const FEATURE_KEY_ALIASES: Readonly<Record<string, string>> = {
  * known gate, so it can never enable a capability.
  */
 export function normalizeFeatureKey(key: string): string {
-  return FEATURE_KEY_ALIASES[key] ?? key;
+  // Own entries only: an inherited name ('constructor', 'toString') is not a declared alias.
+  return Object.prototype.hasOwnProperty.call(FEATURE_KEY_ALIASES, key) ? FEATURE_KEY_ALIASES[key] : key;
 }
 
 /**
@@ -788,10 +813,14 @@ const PLATFORM_ROLE_IDS_SET: ReadonlySet<string> = new Set<string>(Object.keys(P
 // Pure materializers
 // =============================================================================
 
+/** A role default's own entry, or `none` when the role map has none. Never an inherited property. */
+function ownDefaultLevel(map: Readonly<Record<string, Level>> | undefined, key: string): Level {
+  return map !== undefined && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : 'none';
+}
+
 function tenantBaseDomainLevel(role: TenantRoleId, domain: string): Level {
   if (role === 'store_owner') return 'full'; // _grant: 'full' owner short-circuit
-  const map = (TENANT_ROLE_PERMISSION_DEFAULTS as Record<string, Record<string, Level>>)[role];
-  return (map?.[domain] ?? 'none') as Level;
+  return ownDefaultLevel((TENANT_ROLE_PERMISSION_DEFAULTS as Record<string, Record<string, Level>>)[role], domain);
 }
 
 /** Role base level capped by entitlement gate only (NOT status). */
@@ -816,6 +845,7 @@ export function materializeTenantPermissions(
   limited: boolean,
 ): EffectivePermissions {
   if (!TENANT_ROLE_IDS_SET.has(role)) return {}; // fail closed on unknown role
+  if (typeof limited !== 'boolean') return {}; // an unreadable limitation is not "unlimited"
   const r = role as TenantRoleId;
   const ent = normalizeEntitlements(entitlements);
   const out: EffectivePermissions = {};
@@ -843,6 +873,7 @@ export function materializeTenantSubPermissions(
   limited: boolean,
 ): EffectiveSubPermissions {
   if (!TENANT_ROLE_IDS_SET.has(role)) return {}; // fail closed on unknown role
+  if (typeof limited !== 'boolean') return {}; // an unreadable limitation is not "unlimited"
   const r = role as TenantRoleId;
   const ent = normalizeEntitlements(entitlements);
   const explicitMap = (TENANT_ROLE_SUBPERMISSION_DEFAULTS as Record<string, Record<string, boolean>>)[r];
@@ -877,8 +908,7 @@ export function materializeTenantSubPermissions(
 
 function platformFeatureLevel(role: PlatformRoleId, feature: string): Level {
   if (role === 'system_owner') return 'full';
-  const map = (PLATFORM_ROLE_FEATURE_DEFAULTS as Record<string, Record<string, Level>>)[role];
-  return (map?.[feature] ?? 'none') as Level;
+  return ownDefaultLevel((PLATFORM_ROLE_FEATURE_DEFAULTS as Record<string, Record<string, Level>>)[role], feature);
 }
 
 /**
@@ -891,6 +921,7 @@ export function materializePlatformPermissions(
   limited: boolean,
 ): EffectivePermissions {
   if (!PLATFORM_ROLE_IDS_SET.has(role)) return {}; // fail closed on unmapped role
+  if (typeof limited !== 'boolean') return {}; // an unreadable limitation is not "unlimited"
   const r = role as PlatformRoleId;
   const out: EffectivePermissions = {};
   for (const feature of PLATFORM_FEATURE_KEYS) {
@@ -934,6 +965,7 @@ export function materializePlatformSubPermissions(
   limited: boolean,
 ): EffectiveSubPermissions {
   if (!PLATFORM_ROLE_IDS_SET.has(role)) return {}; // fail closed on unmapped role
+  if (typeof limited !== 'boolean') return {}; // an unreadable limitation is not "unlimited"
   const r = role as PlatformRoleId;
   const out: EffectiveSubPermissions = {};
   for (const sub of PLATFORM_SUB_PERMISSIONS) {
@@ -962,12 +994,14 @@ export interface MaterializeCapabilitiesInput {
 /**
  * Single entry point the resolver's allow() choke-point calls. Selects the
  * platform or tenant materializers by which role id is resolved. Returns empty
- * maps (fail closed) only when NEITHER role resolved — every genuine allow
- * carries a populated, non-empty map (empty is never "full").
+ * maps (fail closed) when NEITHER role resolved, and when BOTH did — two role
+ * ids for one decision is ambiguous authority, not a choice this function makes.
+ * Every genuine allow carries a populated, non-empty map (empty is never "full").
  */
 export function materializeCapabilities(
   input: MaterializeCapabilitiesInput,
 ): { permissions: EffectivePermissions; subPermissions: EffectiveSubPermissions } {
+  if (input.platformRoleId && input.tenantRoleId) return { permissions: {}, subPermissions: {} };
   if (input.platformRoleId) {
     return {
       permissions: materializePlatformPermissions(input.platformRoleId, input.limited),

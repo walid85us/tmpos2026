@@ -21,6 +21,7 @@ import {
   type AuthAdapter,
 } from './authAdapter';
 import {
+  invalidRequirement,
   requirePlatformPermission,
   requireTenantPermission,
   requireSubPermission,
@@ -54,7 +55,53 @@ export type SafeResult = Record<string, unknown>;
 
 export type ProtectedHandler = (ctx: RequestContext) => Promise<SafeResult> | SafeResult;
 
-function requiredToString(required: RequiredPermission): string {
+/**
+ * The route's declared requirement, read ONCE when the route is defined: a frozen copy whose fields
+ * have the declared types, or null. It decides nothing about vocabulary — the permission decision
+ * checks every name and level against the catalog — but it is what turns a malformed declaration (an
+ * unknown kind, a missing or non-string field, a getter that throws) into a denial on every request,
+ * rather than a crash, a coercion, or a second read that answers differently.
+ */
+function readRequirement(required: unknown): RequiredPermission | null {
+  try {
+    if (typeof required !== 'object' || required === null || Array.isArray(required)) return null;
+    const r = required as Record<string, unknown>;
+    const kind = r.kind;
+    if (kind === 'platform') {
+      const { featureKey, threshold } = r;
+      if (typeof featureKey !== 'string' || typeof threshold !== 'string') return null;
+      return Object.freeze({ kind, featureKey, threshold: threshold as PermissionLevel });
+    }
+    if (kind === 'tenant') {
+      const { domain, level } = r;
+      if (typeof domain !== 'string' || typeof level !== 'string') return null;
+      return Object.freeze({ kind, domain, level: level as PermissionLevel });
+    }
+    if (kind === 'sub') {
+      const { subPermissionId, subDef } = r;
+      if (typeof subPermissionId !== 'string' || typeof subDef !== 'object' || subDef === null || Array.isArray(subDef)) return null;
+      const { parentDomain, minModuleLevel, defaultLevel, planAvailable } = subDef as Record<string, unknown>;
+      if (typeof parentDomain !== 'string' || typeof minModuleLevel !== 'string'
+        || typeof defaultLevel !== 'string' || typeof planAvailable !== 'boolean') return null;
+      return Object.freeze({
+        kind,
+        subPermissionId,
+        subDef: Object.freeze({
+          parentDomain,
+          minModuleLevel: minModuleLevel as PermissionLevel,
+          defaultLevel: defaultLevel as PermissionLevel,
+          planAvailable,
+        }),
+      });
+    }
+    return null; // an unknown kind names no plane
+  } catch {
+    return null;
+  }
+}
+
+function requiredToString(required: RequiredPermission | null): string {
+  if (required === null) return 'invalid_requirement';
   switch (required.kind) {
     case 'platform': return `${required.featureKey}:${required.threshold}`;
     case 'tenant': return `${required.domain}:${required.level}`;
@@ -62,11 +109,24 @@ function requiredToString(required: RequiredPermission): string {
   }
 }
 
-function evaluate(ctx: RequestContext, required: RequiredPermission): DecisionResult {
-  switch (required.kind) {
-    case 'platform': return requirePlatformPermission(ctx, required.featureKey, required.threshold);
-    case 'tenant': return requireTenantPermission(ctx, required.domain, required.level);
-    case 'sub': return requireSubPermission(ctx, required.subPermissionId, required.subDef);
+const EVALUATION_FAILED: DecisionResult = Object.freeze({
+  decision: 'deny',
+  reasonCode: 'denied_evaluation_failed',
+  humanReadableReason: 'The permission decision could not be evaluated.',
+});
+
+/** Never throws and never allows by default: a malformed requirement or context is a denial. */
+function evaluate(ctx: RequestContext, required: RequiredPermission | null): DecisionResult {
+  if (required === null) return invalidRequirement();
+  try {
+    switch (required.kind) {
+      case 'platform': return requirePlatformPermission(ctx, required.featureKey, required.threshold);
+      case 'tenant': return requireTenantPermission(ctx, required.domain, required.level);
+      case 'sub': return requireSubPermission(ctx, required.subPermissionId, required.subDef);
+      default: return invalidRequirement();
+    }
+  } catch {
+    return EVALUATION_FAILED;
   }
 }
 
@@ -84,6 +144,8 @@ export function withProtectedAction(
   required: RequiredPermission,
   handler: ProtectedHandler,
 ) {
+  const requirement = readRequirement(required);
+  const requiredPermission = requiredToString(requirement);
   return async (req: Request, res: Response): Promise<void> => {
     // --- Gate 1: feature flag (default OFF) ---
     if (!isPlatformIdentityEnabled()) {
@@ -97,7 +159,6 @@ export function withProtectedAction(
     }
 
     const requestId = randomUUID();
-    const requiredPermission = requiredToString(required);
 
     // --- Select the auth adapter. Dev assertion by default; the stub Firebase
     //     verifier can be selected (dev) to demonstrate the not-implemented seam. ---
@@ -132,7 +193,7 @@ export function withProtectedAction(
     }
 
     // --- Permission decision ---
-    const result = evaluate(ctx, required);
+    const result = evaluate(ctx, requirement);
 
     // --- Emit advisory audit envelope (every decision path: allow AND deny) ---
     emitAuditEnvelope(buildAuditEnvelope({

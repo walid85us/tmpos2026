@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createBcpActionEligibilityHandler, BCP_ELIGIBILITY_ROUTE_PATH } from './bcpActionEligibilityExpressAdapter';
 import { BcpActionRateLimiter } from './bcpActionRateLimiter';
 import type { CanonicalAuthzView } from './bcpActionLivePrincipalResolver';
+import { PLATFORM_FEATURE_KEYS } from '../platform-identity/permissionCatalog';
 
 const cases: { name: string; fn: () => void | Promise<void> }[] = [];
 const test = (n: string, fn: () => void | Promise<void>) => cases.push({ name: n, fn });
@@ -15,7 +16,7 @@ const test = (n: string, fn: () => void | Promise<void>) => cases.push({ name: n
 const TRUSTED = () => ({ ok: true, origin: 'https://t.example' } as const);
 const view = (o: Partial<CanonicalAuthzView> = {}): CanonicalAuthzView => ({
   decision: 'allow', reasonCode: 'resolved', limitation: 'none', platformRoleId: 'system_owner',
-  permissions: { f: 'full' }, statusValues: [], scopeType: 'platform', ...o,
+  permissions: Object.fromEntries(PLATFORM_FEATURE_KEYS.map((k) => [k, 'full'])), statusValues: ['active'], scopeType: 'platform', ...o,
 });
 const okVerify = async () => ({ ok: true, firebaseUid: 'uid-1' } as any);
 const okLookup = async () => ({ ok: true, internalUserId: 'iu-1' } as any);
@@ -143,7 +144,7 @@ test('eligible canonical principal → 200 eligible:true', async () => {
   assert.equal(res.statusCode, 200); assert.deepEqual(res.body, { eligible: true, status: 'eligible' });
 });
 test('permission insufficient → 200 eligible:false', async () => {
-  const res = await run(baseDeps({ resolveCanonicalAuthz: async () => view({ permissions: { f: 'view' } }) }));
+  const res = await run(baseDeps({ resolveCanonicalAuthz: async () => view({ permissions: Object.fromEntries(PLATFORM_FEATURE_KEYS.map((k) => [k, 'view'])) }) }));
   assert.deepEqual(res.body, { eligible: false, status: 'not_authorized' });
 });
 test('visibility insufficient (non system_owner) → 200 eligible:false', async () => {

@@ -90,12 +90,15 @@ export const GAP_11_TENANT_ORDERING_UNRESOLVED =
 /**
  * The canonical permission for (scope, key), or null. Exact and case-sensitive: no trimming, no
  * lowercasing, no alias, no prefix match. A platform scope reads the platform plane; tenant and store
- * scopes read the tenant plane, which is the same plane for both (a store role is a tenant role).
+ * scopes read the tenant plane, which is the same plane for both (a store role is a tenant role). Any
+ * other scope names no plane, so nothing is found in it (M5-GAP11-P1-R1: it used to read the tenant
+ * plane, as if an unknown scope were a tenant one).
  */
 export function canonicalPermission(scope: CanonicalPermissionScope, key: unknown): CanonicalPermission | null {
   if (typeof key !== 'string' || key.length === 0) return null;
-  const table = scope === 'platform' ? CANONICAL_PLATFORM_PERMISSIONS : CANONICAL_TENANT_PERMISSIONS;
-  return table.get(key) ?? null;
+  if (scope === 'platform') return CANONICAL_PLATFORM_PERMISSIONS.get(key) ?? null;
+  if (scope === 'tenant' || scope === 'store') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? null;
+  return null;
 }
 
 /**
@@ -103,8 +106,9 @@ export function canonicalPermission(scope: CanonicalPermissionScope, key: unknow
  *
  * 'granted' / 'denied' are decisions. 'undecidable' is NOT a denial a caller may cache or report as
  * one: it means this stage cannot answer, and the only correct response is to refuse the route at
- * startup rather than serve it. Every unknown — an unknown key, an unknown role, a role that does not
- * belong to the scope's plane — is 'denied', fail-closed.
+ * startup rather than serve it. Every unknown — an unknown key, scope or role, a role that does not
+ * belong to the scope's plane, a limitation that is neither 'none' nor 'read_only' — is 'denied',
+ * fail-closed. An unrecognised limitation is not "no limitation". Each input field is read once.
  *
  * The platform evaluation is the existing one, unchanged: materializePlatformSubPermissions applies
  * the role's default feature levels, the sub's threshold on the platform ordering, its prerequisites,
@@ -117,10 +121,12 @@ export function evaluateCanonicalPermission(input: {
   readonly permission: string;
   readonly limitation: 'none' | 'read_only';
 }): 'granted' | 'denied' | 'undecidable' {
-  const entry = canonicalPermission(input.scope, input.permission);
+  const { scope, roleId, permission, limitation } = input;
+  const entry = canonicalPermission(scope, permission);
   if (entry === null) return 'denied';
-  if (input.scope !== 'platform') return 'undecidable';
-  if (!(PLATFORM_ROLE_IDS as readonly string[]).includes(input.roleId)) return 'denied';
-  const granted = materializePlatformSubPermissions(input.roleId, input.limitation === 'read_only');
+  if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
+  if (scope !== 'platform') return 'undecidable';
+  if (!(PLATFORM_ROLE_IDS as readonly string[]).includes(roleId)) return 'denied';
+  const granted = materializePlatformSubPermissions(roleId, limitation === 'read_only');
   return granted[entry.key] === true ? 'granted' : 'denied';
 }

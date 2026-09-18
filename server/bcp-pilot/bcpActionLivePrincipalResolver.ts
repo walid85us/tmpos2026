@@ -11,7 +11,8 @@
 import type { SyntheticServerPrincipal, BcpVisibilityClass } from './bcpAuthorizationGuard';
 import type { ScopeType } from '../platform-identity/requestContext';
 import type { PermissionLevelValue } from '../platform-identity/authorizationConstants';
-import { PLATFORM_ORDERING } from '../platform-identity/permissionCatalog';
+import { ACCOUNT_STATUS_VALUES, PLATFORM_ROLE_IDS, STATUS_DENY_BEFORE_ROLE } from '../platform-identity/authorizationConstants';
+import { PLATFORM_FEATURE_KEYS, PLATFORM_ORDERING } from '../platform-identity/permissionCatalog';
 import type { FirebaseVerifyResult } from '../platform-identity/firebaseAdminAuthAdapter';
 import type { ProviderSubjectLookupResult } from '../platform-identity/identityRepository';
 
@@ -23,7 +24,7 @@ export interface CanonicalAuthzView {
   platformRoleId: string | null;
   /** Canonical per-feature effective platform permissions (Record<featureKey, PermissionLevelValue>). */
   permissions: Record<string, string>;
-  /** [userStatus, tenantStatus, storeStatus] with nulls dropped (used ONLY for the overdue cap signal). */
+  /** [userStatus, tenantStatus, storeStatus] with nulls dropped (the parity check and the overdue cap signal). */
   statusValues: string[];
   scopeType: string;
 }
@@ -46,17 +47,31 @@ const UNRESOLVED_REASONS = new Set([
   'denied_no_app_user', 'denied_no_membership', 'denied_membership_not_active',
   'denied_unresolvable_role', 'denied_scope_context_invalid',
   'denied_tenant_missing', 'denied_store_missing', 'denied_store_tenant_mismatch',
+  'denied_ambiguous_membership',
 ]);
 
-/** ONLY canonical `system_owner` maps to the strongest class; every other/unknown/missing role is insufficient. */
+/**
+ * ONLY canonical `system_owner` maps to the strongest class; the other canonical platform roles map to
+ * `overview_viewer`; an unknown or missing role is `none` — never a class it was not given.
+ */
 function deriveVisibility(platformRoleId: string | null): BcpVisibilityClass {
   if (platformRoleId === 'system_owner') return 'system_owner';
-  return platformRoleId ? 'overview_viewer' : 'none';
+  return typeof platformRoleId === 'string' && (PLATFORM_ROLE_IDS as readonly string[]).includes(platformRoleId)
+    ? 'overview_viewer'
+    : 'none';
 }
 
-/** Derived from canonical decision/reasonCode — never manufactured. Allow ⇒ ready; else unresolved/blocked. */
-function deriveParity(decision: string, reasonCode: string): 'ready' | 'unresolved' | 'blocked' {
-  if (decision === 'allow') return 'ready';
+/** Derived from canonical decision/reasonCode/statuses — never manufactured. Resolved allow ⇒ ready; else unresolved/blocked. */
+function deriveParity(decision: string, reasonCode: string, statusValues: unknown): 'ready' | 'unresolved' | 'blocked' {
+  // Ready only for an allow the resolver actually emits, over statuses it actually knows: an allow with
+  // another reason code, with no status at all (every allow carries the user's), or with a status outside
+  // the vocabulary or one that denies before any role, is not an established authorization.
+  if (decision === 'allow') {
+    const statusesKnown = Array.isArray(statusValues) && statusValues.length > 0 && statusValues.every((s) =>
+      typeof s === 'string' && (ACCOUNT_STATUS_VALUES as readonly string[]).includes(s)
+      && !(STATUS_DENY_BEFORE_ROLE as readonly string[]).includes(s));
+    return (reasonCode === 'resolved' || reasonCode === 'resolved_read_only') && statusesKnown ? 'ready' : 'blocked';
+  }
   if (UNRESOLVED_REASONS.has(reasonCode)) return 'unresolved';
   return 'blocked';
 }
@@ -67,8 +82,13 @@ function deriveParity(decision: string, reasonCode: string): 'ready' | 'unresolv
  * A genuine system_owner yields 'full' on every feature, so its floor is 'full'.
  */
 function derivePlatformLevel(permissions: Record<string, string>): PermissionLevelValue | null {
-  const values = Object.values(permissions ?? {});
-  if (values.length === 0) return null;
+  // A map, or nothing: an array (whose values Object.values would read the same way) is not a map. And the
+  // canonical map is COMPLETE — exactly the catalog's platform features — so a partial map, or one keyed by
+  // anything else, is not a floor over the catalog and derives nothing.
+  if (typeof permissions !== 'object' || permissions === null || Array.isArray(permissions)) return null;
+  const keys = Object.keys(permissions);
+  if (keys.length !== PLATFORM_FEATURE_KEYS.length || !PLATFORM_FEATURE_KEYS.every((k) => keys.includes(k))) return null;
+  const values = Object.values(permissions);
   let minRank = Number.POSITIVE_INFINITY;
   let minLevel: PermissionLevelValue | null = null;
   for (const v of values) {
@@ -88,13 +108,14 @@ export function translateToBcpActionPrincipal(internalUserId: string, authz: Can
     authProvider: 'firebase',
     verified: true,
     scopeType,
-    parityState: deriveParity(authz.decision, authz.reasonCode),
+    parityState: deriveParity(authz.decision, authz.reasonCode, authz.statusValues),
     visibilityClass: deriveVisibility(authz.platformRoleId),
   };
   return {
     principal,
     platformPermissionLevel: derivePlatformLevel(authz.permissions),
-    planReadOnly: authz.limitation === 'read_only',
+    // Only an exact 'none' is unlimited: an unrecognised limitation caps, it does not lift the cap.
+    planReadOnly: authz.limitation !== 'none',
     planOverdue: Array.isArray(authz.statusValues) && authz.statusValues.includes('overdue'),
   };
 }

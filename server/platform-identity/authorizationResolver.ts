@@ -43,6 +43,7 @@
 // a role it cannot honestly reconcile.
 
 import {
+  ACCOUNT_STATUS_VALUES,
   AUTHORIZATION_CONTRACT_VERSION,
   AUTHORIZATION_EVALUATED_BY,
   STATUS_DENY_BEFORE_ROLE,
@@ -164,6 +165,10 @@ export const AUTHORIZATION_RESOLVER_REASON_CODES = {
   DENIED_NO_MEMBERSHIP: 'denied_no_membership',
   DENIED_MEMBERSHIP_NOT_ACTIVE: 'denied_membership_not_active',
   DENIED_UNRESOLVABLE_ROLE: 'denied_unresolvable_role',
+  /** M5-GAP11-P1-R1: an account status outside the contract vocabulary is not "active". */
+  DENIED_ACCOUNT_STATUS_UNRECOGNIZED: 'denied_account_status_unrecognized',
+  /** M5-GAP11-P1-R1: two active memberships at one scope are two answers; neither is chosen. */
+  DENIED_AMBIGUOUS_MEMBERSHIP: 'denied_ambiguous_membership',
 } as const;
 
 export type AuthorizationResolverReasonCode =
@@ -204,19 +209,41 @@ export const PLATFORM_ROLE_COMPAT_MAP: Readonly<Record<string, PlatformRoleId>> 
 const R = AUTHORIZATION_RESOLVER_REASON_CODES;
 
 function resolvePlatformRoleId(rawRoleId: string): PlatformRoleId | null {
+  if (typeof rawRoleId !== 'string') return null;
   if ((PLATFORM_ROLE_IDS as readonly string[]).includes(rawRoleId)) return rawRoleId as PlatformRoleId;
-  return PLATFORM_ROLE_COMPAT_MAP[rawRoleId] ?? null;
+  // Own entries only: an inherited name ('constructor', '__proto__') is not a legacy role id.
+  return Object.prototype.hasOwnProperty.call(PLATFORM_ROLE_COMPAT_MAP, rawRoleId)
+    ? PLATFORM_ROLE_COMPAT_MAP[rawRoleId]
+    : null;
 }
 
 function resolveTenantRoleId(rawRoleId: string): TenantRoleId | null {
-  return (TENANT_ROLE_IDS as readonly string[]).includes(rawRoleId) ? (rawRoleId as TenantRoleId) : null;
+  return typeof rawRoleId === 'string' && (TENANT_ROLE_IDS as readonly string[]).includes(rawRoleId)
+    ? (rawRoleId as TenantRoleId)
+    : null;
 }
 
-/** 'deny' (suspended/pending_activation), 'read_only' (read_only/overdue), or 'normal'. */
-function statusDisposition(status: AccountStatusValue): 'deny' | 'read_only' | 'normal' {
+/**
+ * 'deny' (suspended/pending_activation), 'read_only' (read_only/overdue), 'normal' (active/trialing),
+ * or 'unrecognized' — any value outside the contract vocabulary, which every caller denies. It is not
+ * silently 'normal': a status nobody can name grants nothing.
+ */
+function statusDisposition(status: AccountStatusValue): 'deny' | 'read_only' | 'normal' | 'unrecognized' {
+  if (typeof status !== 'string' || !(ACCOUNT_STATUS_VALUES as readonly string[]).includes(status)) return 'unrecognized';
   if ((STATUS_DENY_BEFORE_ROLE as readonly AccountStatusValue[]).includes(status)) return 'deny';
   if (status === 'read_only' || status === 'overdue') return 'read_only';
   return 'normal';
+}
+
+/**
+ * The one active membership among `ms`, or why there is not exactly one. The durable uniqueness
+ * constraint includes `role_id`, so two active rows at one scope carry two different roles — ambiguous
+ * authority this resolver does not choose between.
+ */
+function soleActive(ms: readonly MembershipSnapshot[]): MembershipSnapshot | 'none' | 'ambiguous' {
+  const active = ms.filter((m) => m.status === 'active');
+  if (active.length === 0) return 'none';
+  return active.length === 1 ? active[0] : 'ambiguous';
 }
 
 function deny(reasonCode: AuthorizationResolverReasonCode, humanReadableReason: string): AuthorizationResolverResult {
@@ -292,27 +319,35 @@ function entitlementsForTenant(rows: EntitlementSnapshot[], tenantId: string): F
 export function resolveAuthorization(input: AuthorizationResolverInput): AuthorizationResolverResult {
   const { identity, appUser, requestedContext } = input;
 
-  // 0) app_user must exist and belong to the verified identity (fail closed).
-  if (!appUser || appUser.internal_user_id !== identity.internalUserId) {
+  // 0) app_user must exist and belong to the verified identity (fail closed). A missing id on both
+  //    sides is not a match: `undefined === undefined` is no identity.
+  // Every field below is read ONCE into a local, so a value cannot pass a check and then differ in use.
+  const actorId = identity.internalUserId;
+  if (!appUser || typeof actorId !== 'string' || actorId === '' || appUser.internal_user_id !== actorId) {
     return deny(R.DENIED_NO_APP_USER, 'No durable app_user for the verified identity.');
   }
 
   // 1) Account-status precedence — BEFORE any role grant.
-  const userDisp = statusDisposition(appUser.status);
+  const userStatus = appUser.status;
+  const userDisp = statusDisposition(userStatus);
+  if (userDisp === 'unrecognized') {
+    return deny(R.DENIED_ACCOUNT_STATUS_UNRECOGNIZED, 'Account status is not in the contract vocabulary.');
+  }
   if (userDisp === 'deny') {
-    if (appUser.status === 'suspended') return deny(R.DENIED_ACCOUNT_SUSPENDED, 'Account is suspended.');
+    if (userStatus === 'suspended') return deny(R.DENIED_ACCOUNT_SUSPENDED, 'Account is suspended.');
     return deny(R.DENIED_ACCOUNT_PENDING_ACTIVATION, 'Account is pending activation.');
   }
 
   // Defensive: only ever consider memberships belonging to this identity.
-  const ownMemberships = input.memberships.filter((m) => m.internal_user_id === identity.internalUserId);
+  const ownMemberships = input.memberships.filter((m) => m.internal_user_id === actorId);
   let userLimited = userDisp === 'read_only';
 
   // 2) Scope-specific resolution.
   if (requestedContext.scopeType === 'platform') {
     const platformMs = ownMemberships.filter((m) => m.scope_type === 'platform');
-    const active = platformMs.find((m) => m.status === 'active');
-    if (!active) {
+    const active = soleActive(platformMs);
+    if (active === 'ambiguous') return deny(R.DENIED_AMBIGUOUS_MEMBERSHIP, 'More than one active platform membership.');
+    if (active === 'none') {
       return platformMs.length
         ? deny(R.DENIED_MEMBERSHIP_NOT_ACTIVE, 'Platform membership is not active.')
         : deny(R.DENIED_NO_MEMBERSHIP, 'No platform membership.');
@@ -324,7 +359,7 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     return allow({
       userType: 'platform', scopeType: 'platform', tenantId: null, storeId: null,
       platformRoleId, tenantRoleId: null,
-      userStatus: appUser.status, tenantStatus: null, storeStatus: null,
+      userStatus, tenantStatus: null, storeStatus: null,
       entitlements: {}, limited: userLimited,
     });
   }
@@ -336,12 +371,16 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     if (!tenant || tenant.tenant_id !== tenantId) {
       return deny(R.DENIED_TENANT_MISSING, 'Tenant row is missing or does not match the requested tenant.');
     }
-    const tenantDisp = statusDisposition(tenant.status);
-    if (tenantDisp === 'deny') return deny(R.DENIED_TENANT_STATUS, 'Tenant is suspended or not yet active.');
+    const tenantStatus = tenant.status;
+    const tenantDisp = statusDisposition(tenantStatus);
+    if (tenantDisp === 'deny' || tenantDisp === 'unrecognized') {
+      return deny(R.DENIED_TENANT_STATUS, 'Tenant is suspended, not yet active, or in an unrecognized status.');
+    }
 
     const tenantMs = ownMemberships.filter((m) => m.scope_type === 'tenant' && m.tenant_id === tenantId);
-    const active = tenantMs.find((m) => m.status === 'active');
-    if (!active) {
+    const active = soleActive(tenantMs);
+    if (active === 'ambiguous') return deny(R.DENIED_AMBIGUOUS_MEMBERSHIP, 'More than one active tenant membership.');
+    if (active === 'none') {
       return tenantMs.length
         ? deny(R.DENIED_MEMBERSHIP_NOT_ACTIVE, 'Tenant membership is not active.')
         : deny(R.DENIED_NO_MEMBERSHIP, 'No active tenant membership.');
@@ -352,7 +391,7 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     return allow({
       userType: 'tenant', scopeType: 'tenant', tenantId, storeId: null,
       platformRoleId: null, tenantRoleId,
-      userStatus: appUser.status, tenantStatus: tenant.status, storeStatus: null,
+      userStatus, tenantStatus, storeStatus: null,
       entitlements: entitlementsForTenant(input.entitlements, tenantId),
       limited: userLimited || tenantDisp === 'read_only',
     });
@@ -366,8 +405,11 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     if (!tenant || tenant.tenant_id !== tenantId) {
       return deny(R.DENIED_TENANT_MISSING, 'Tenant row is missing or does not match the requested tenant.');
     }
-    const tenantDisp = statusDisposition(tenant.status);
-    if (tenantDisp === 'deny') return deny(R.DENIED_TENANT_STATUS, 'Tenant is suspended or not yet active.');
+    const tenantStatus = tenant.status;
+    const tenantDisp = statusDisposition(tenantStatus);
+    if (tenantDisp === 'deny' || tenantDisp === 'unrecognized') {
+      return deny(R.DENIED_TENANT_STATUS, 'Tenant is suspended, not yet active, or in an unrecognized status.');
+    }
     const store = input.store;
     if (!store || store.store_id !== storeId) {
       return deny(R.DENIED_STORE_MISSING, 'Store row is missing or does not match the requested store.');
@@ -375,14 +417,18 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     if (store.tenant_id !== tenantId) {
       return deny(R.DENIED_STORE_TENANT_MISMATCH, 'Store does not belong to the requested tenant.');
     }
-    const storeDisp = statusDisposition(store.status);
-    if (storeDisp === 'deny') return deny(R.DENIED_STORE_STATUS, 'Store is suspended or not yet active.');
+    const storeStatus = store.status;
+    const storeDisp = statusDisposition(storeStatus);
+    if (storeDisp === 'deny' || storeDisp === 'unrecognized') {
+      return deny(R.DENIED_STORE_STATUS, 'Store is suspended, not yet active, or in an unrecognized status.');
+    }
 
     const storeMs = ownMemberships.filter(
       (m) => m.scope_type === 'store' && m.tenant_id === tenantId && m.store_id === storeId,
     );
-    const active = storeMs.find((m) => m.status === 'active');
-    if (!active) {
+    const active = soleActive(storeMs);
+    if (active === 'ambiguous') return deny(R.DENIED_AMBIGUOUS_MEMBERSHIP, 'More than one active store membership.');
+    if (active === 'none') {
       return storeMs.length
         ? deny(R.DENIED_MEMBERSHIP_NOT_ACTIVE, 'Store membership is not active.')
         : deny(R.DENIED_NO_MEMBERSHIP, 'No active store membership.');
@@ -393,7 +439,7 @@ export function resolveAuthorization(input: AuthorizationResolverInput): Authori
     return allow({
       userType: 'tenant', scopeType: 'store', tenantId, storeId,
       platformRoleId: null, tenantRoleId,
-      userStatus: appUser.status, tenantStatus: tenant.status, storeStatus: store.status,
+      userStatus, tenantStatus, storeStatus,
       entitlements: entitlementsForTenant(input.entitlements, tenantId),
       limited: userLimited || tenantDisp === 'read_only' || storeDisp === 'read_only',
     });

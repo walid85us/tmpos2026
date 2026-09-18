@@ -77,6 +77,23 @@ describe('AccessGuard', () => {
     expect(screen.getByText('LANDING')).toBeInTheDocument();
   });
 
+  it('redirects when feature is an explicit empty string (control: an accessible non-empty feature still renders)', () => {
+    const canAccess = (f: string) => f !== '';
+    useAccess.mockReturnValue(asAccess({ ...base, session: { userType: 'tenant', role: 'owner' }, canAccess }));
+    renderGuard({ feature: 'inventory' });
+    expect(screen.getByText('PROTECTED')).toBeInTheDocument(); // control: non-empty feature still gated normally
+
+    useAccess.mockReturnValue(asAccess({ ...base, session: { userType: 'tenant', role: 'owner' }, canAccess }));
+    renderGuard({ feature: '' });
+    expect(screen.getByText('LANDING')).toBeInTheDocument();
+  });
+
+  it('redirects a system_owner session too when feature is an explicit empty string (canAccess is the sole source of truth)', () => {
+    useAccess.mockReturnValue(asAccess({ ...base, session: { userType: 'platform', role: 'system_owner' }, canAccess: (f: string) => f !== '' }));
+    renderGuard({ feature: '' });
+    expect(screen.getByText('LANDING')).toBeInTheDocument();
+  });
+
   it('does not log session identifiers (uid/role) on redirect', () => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
     useAccess.mockReturnValue(asAccess({ ...base, session: { userType: 'platform', role: 'secret-role-xyz', uid: 'uid-abc-123' } }));

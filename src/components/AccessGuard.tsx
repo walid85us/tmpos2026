@@ -43,7 +43,7 @@ const AccessGuard: React.FC<AccessGuardProps> = ({ children, allowedUserTypes, r
     return <Navigate to={target} replace />;
   }
 
-  if (session && feature && !canAccess(feature)) {
+  if (session && feature !== undefined && !canAccess(feature)) {
     const target = resolveLandingRoute(session);
     console.log('[AccessGuard] Feature not accessible:', feature, '— redirecting to', target);
     return <Navigate to={target} replace />;

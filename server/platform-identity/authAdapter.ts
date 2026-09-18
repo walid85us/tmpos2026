@@ -59,28 +59,35 @@ function parseScope(raw: unknown): RequestScope {
   };
 }
 
+/**
+ * A snapshot map carried through AS ASSERTED (M5-GAP11-P1-R1): absent is an empty map; a plain record is
+ * copied entry for entry, malformed values included; anything else is passed on unchanged. Cleaning it up
+ * here — dropping a non-boolean grant, a non-string level — would hand the decision a tidier snapshot than
+ * the one asserted: a revoke written as 'false' would arrive as "no entry" and fall through to a default.
+ * The decision (permissionDecision.ts) is where a malformed map or value is refused.
+ */
+function assertedMap(v: unknown): unknown {
+  if (v === undefined || v === null) return {};
+  if (typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype) {
+    return Object.fromEntries(Object.entries(v as Record<string, unknown>));
+  }
+  return v;
+}
+
+/** A role slot AS ASSERTED: absent or null is no role; anything else reaches the decision untrimmed. */
+function assertedRole(v: unknown): unknown {
+  return v === undefined || v === null ? null : v;
+}
+
 function parseSnapshot(raw: unknown): PermissionSnapshot | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
-
-  const permissions: Record<string, string> = {};
-  if (r.permissions && typeof r.permissions === 'object') {
-    for (const [k, v] of Object.entries(r.permissions as Record<string, unknown>)) {
-      if (typeof v === 'string') permissions[k] = v;
-    }
-  }
-  const subPermissions: Record<string, boolean> = {};
-  if (r.subPermissions && typeof r.subPermissions === 'object') {
-    for (const [k, v] of Object.entries(r.subPermissions as Record<string, unknown>)) {
-      if (typeof v === 'boolean') subPermissions[k] = v;
-    }
-  }
   return {
     source: 'dev_asserted_snapshot',
-    platformRoleId: asString(r.platformRoleId),
-    tenantRoleId: asString(r.tenantRoleId),
-    permissions,
-    subPermissions,
+    platformRoleId: assertedRole(r.platformRoleId) as string | null,
+    tenantRoleId: assertedRole(r.tenantRoleId) as string | null,
+    permissions: assertedMap(r.permissions) as Record<string, string>,
+    subPermissions: assertedMap(r.subPermissions) as Record<string, boolean>,
   };
 }
 

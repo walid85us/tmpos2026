@@ -55,6 +55,30 @@ interface Tenant {
 
 export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support'];
 
+// Routes App.tsx gates (Coming Soon placeholders) that belong to no permission or plan catalog.
+export const NAVIGATION_ONLY_FEATURES = ['app-store', 'ledger', 'mail-in'];
+
+// The full vocabulary of feature strings canAccess() may legitimately be
+// asked about: every platform nav key, every tenant plan feature, every
+// admin action id, every onboarding-allowed module, every store permission
+// domain, the supply-chain/supply_chain alias pair, and the navigation-only
+// placeholders above. Bounds the System Owner's blanket access so an
+// unknown or empty feature string denies instead of silently passing.
+const KNOWN_NAVIGATION_FEATURES: ReadonlySet<string> = new Set<string>([
+  ...Object.keys(NAV_FEATURE_TO_PLATFORM_KEY),
+  ...Object.keys(NAV_FEATURE_SECONDARY_KEYS),
+  ...Object.values(planFeatures).flat(),
+  ...adminPermissions,
+  ...ONBOARDING_ALLOWED_MODULES,
+  ...PERMISSION_DOMAINS.map(d => d.id),
+  'supply-chain', 'supply_chain',
+  ...NAVIGATION_ONLY_FEATURES,
+]);
+
+export function isKnownNavigationFeature(feature: string): boolean {
+  return KNOWN_NAVIGATION_FEATURES.has(feature);
+}
+
 interface AccessContextType {
   session: Session | null;
   tenant: Tenant | null;
@@ -103,8 +127,12 @@ function resolvePermissionLevel(roleConfig: EmployeeRole, domain: string): Permi
     if (perms.includes(`${domain}_read`)) return 'view';
     return 'none';
   }
-  if ((perms as Record<string, PermissionLevel>)['_grant'] === 'full') return 'full';
-  return (perms as Record<string, PermissionLevel>)[domain] || 'none';
+  const record = perms as Record<string, PermissionLevel>;
+  // Own-property reads: absent -> 'none'; present -> returned as stored (a
+  // malformed value like '', null, 0 is no longer coerced to 'none' by `||`
+  // — meetsPermissionLevel denies anything non-canonical on its own).
+  if (Object.prototype.hasOwnProperty.call(record, '_grant') && record['_grant'] === 'full') return 'full';
+  return Object.prototype.hasOwnProperty.call(record, domain) ? record[domain] : 'none';
 }
 
 export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -238,6 +266,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
   const getPermissionLevel = useCallback((domain: string): PermissionLevel => {
     if (!session) return 'none';
+    // Deny-by-default: an unknown domain denies even for the owner shortcut.
+    if (!PERMISSION_DOMAINS.some(d => d.id === domain)) return 'none';
     if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return 'full';
 
     const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
@@ -246,6 +276,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   }, [session, effectiveRole, tenantRolesState]);
 
   const checkPermission = useCallback((domain: string, requiredLevel: PermissionLevel): boolean => {
+    // Deny-by-default: an unknown domain denies even for store_owner/system_owner,
+    // whose getPermissionLevel returns 'full' for any string.
+    if (!PERMISSION_DOMAINS.some(d => d.id === domain)) return false;
     const actual = getPermissionLevel(domain);
     return meetsPermissionLevel(actual, requiredLevel);
   }, [getPermissionLevel]);
@@ -278,8 +311,11 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
     if (!roleConfig) return false;
 
-    if (roleConfig.subPermissions && actionId in roleConfig.subPermissions) {
-      return roleConfig.subPermissions[actionId];
+    // Own-property read, and the stored value must be exactly `true` — a
+    // present non-boolean (e.g. the string 'false', 1, null) denies rather
+    // than falling through to the default-by-level path below.
+    if (roleConfig.subPermissions && Object.prototype.hasOwnProperty.call(roleConfig.subPermissions, actionId)) {
+      return roleConfig.subPermissions[actionId] === true;
     }
 
     return meetsPermissionLevel(parentLevel, actionDef.defaultLevel);
@@ -296,7 +332,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const canAccess = (feature: string) => {
     if (!session) return false;
 
-    if (session.role === 'system_owner') return true;
+    // Owner keeps every KNOWN feature; an unknown or empty one is refused
+    // rather than silently passing through a blanket "role is owner" check.
+    if (session.role === 'system_owner') return isKnownNavigationFeature(feature);
 
     if (session.userType === 'platform') {
       const platformKey = NAV_FEATURE_TO_PLATFORM_KEY[feature];
@@ -314,7 +352,11 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       if (!roleConfig) return false;
       const hasPermission = Array.isArray(roleConfig.permissions)
         ? roleConfig.permissions.includes(feature) || roleConfig.permissions.includes(`${feature}_read`) || roleConfig.permissions.includes('all')
-        : roleConfig.permissions[feature] && roleConfig.permissions[feature] !== 'none' || roleConfig.permissions['all'] === 'full';
+        // Own-property reads: the stored value must be exactly a canonical
+        // level other than 'none' (a truthy-but-malformed value no longer
+        // grants access).
+        : (Object.prototype.hasOwnProperty.call(roleConfig.permissions, feature) && PERMISSION_HIERARCHY.includes(roleConfig.permissions[feature]) && roleConfig.permissions[feature] !== 'none')
+          || (Object.prototype.hasOwnProperty.call(roleConfig.permissions, 'all') && roleConfig.permissions['all'] === 'full');
       return hasPermission;
     }
 
@@ -383,6 +425,10 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
       if (effectiveRole === 'store_owner') return true;
 
+      // An unknown tenant role (not present in tenantRolesState) must not
+      // reach the default-allow-if-not-a-permission-domain branch below.
+      if (!tenantRolesState.some(r => r.id === effectiveRole)) return false;
+
       const isPermissionDomain = PERMISSION_DOMAINS.some(d => d.id === normalizedFeature);
       if (!isPermissionDomain) return true;
 
@@ -426,7 +472,13 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     if (!supervisorRole) return false;
     const refundLevel = resolvePermissionLevel(supervisorRole, 'refunds');
     if (!meetsPermissionLevel(refundLevel, 'approve')) return false;
-    if (supervisorRole.subPermissions && supervisorRole.subPermissions['approve_refunds'] === false) return false;
+    // Explicit approve_refunds entry must be absent or exactly true; present
+    // and anything else (false, 'false', null, 1, ...) denies.
+    if (
+      supervisorRole.subPermissions &&
+      Object.prototype.hasOwnProperty.call(supervisorRole.subPermissions, 'approve_refunds') &&
+      supervisorRole.subPermissions['approve_refunds'] !== true
+    ) return false;
     const names: Record<string, string> = { store_owner: 'Store Owner', manager: 'Manager' };
     setSupervisorRefundAuth({ active: true, supervisorName: names[supervisorId] || supervisorRole.name });
     return true;

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import { platformRoles } from './accessConfig';
+import type { PermissionLevel } from '../types';
 
 // Mock the Firebase boundary only — no real Firebase contact. onAuthStateChanged
 // captures the provider's callback so tests can drive auth transitions; getDoc is
@@ -20,7 +21,10 @@ vi.mock('firebase/firestore', () => ({
   getDoc: (...a: unknown[]) => getDoc(...a),
 }));
 
-import { AccessProvider, useAccess } from './AccessContext';
+import { AccessProvider, useAccess, isKnownNavigationFeature } from './AccessContext';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 const PLATFORM_ROLE = platformRoles[0].id;
 const TENANT_ROLE = '__definitely_not_a_platform_role__';
@@ -41,6 +45,15 @@ function Probe() {
 
 const existing = (role: string) => ({ exists: () => true, data: () => ({ role, name: 'Synthetic' }) });
 const missing = () => ({ exists: () => false, data: () => ({}) });
+
+// Captures the live context value so tests can call its functions directly
+// (checkPermission/checkSubPermission/canAccess/requestSupervisorRefundAuth
+// are not otherwise reachable from plain DOM assertions).
+let ctx: ReturnType<typeof useAccess> | null = null;
+function CaptureCtx() {
+  ctx = useAccess();
+  return null;
+}
 
 async function fireAuth(user: unknown) {
   await act(async () => {
@@ -173,5 +186,116 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
     render(<AccessProvider><Probe /></AccessProvider>);
     await fireAuth(null);
     expect(screen.getByTestId('api')).toHaveTextContent('API_OK');
+  });
+
+  it('14. checkPermission denies an unknown domain for store_owner (control: a real domain still checked)', async () => {
+    getDoc.mockResolvedValue(existing('store_owner'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-so', email: 'so@synthetic.test' });
+    expect(ctx!.checkPermission('sales', 'view')).toBe(true); // control: real domain, store_owner is full
+    expect(ctx!.checkPermission('not_a_real_domain', 'view')).toBe(false);
+  });
+
+  it('15. checkPermission denies an unknown domain for manager (control: a real domain still checked)', async () => {
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr', email: 'mgr@synthetic.test' });
+    expect(ctx!.checkPermission('sales', 'view')).toBe(true); // control
+    expect(ctx!.checkPermission('not_a_real_domain', 'view')).toBe(false);
+  });
+
+  it('16. checkPermission denies an unknown/garbage required level (control: a real level still checked)', async () => {
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr2', email: 'mgr2@synthetic.test' });
+    expect(ctx!.checkPermission('sales', 'view')).toBe(true); // control
+    expect(ctx!.checkPermission('sales', 'GARBAGE_LEVEL' as unknown as PermissionLevel)).toBe(false);
+  });
+
+  it('17. checkSubPermission denies a stored explicit non-boolean value (control: stored true/false booleans still behave)', async () => {
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr3', email: 'mgr3@synthetic.test' });
+    expect(ctx!.checkSubPermission('process_refunds')).toBe(true); // control: stored true
+
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'process_refunds', false); });
+    expect(ctx!.checkSubPermission('process_refunds')).toBe(false); // control: stored false
+
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'process_refunds', 'not-a-boolean' as unknown as boolean); });
+    expect(ctx!.checkSubPermission('process_refunds')).toBe(false); // denial: present non-boolean
+  });
+
+  it('18. canAccess resolves normally for a known tenant role (control)', async () => {
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr4', email: 'mgr4@synthetic.test' });
+    expect(ctx!.canAccess('sales')).toBe(true);
+  });
+
+  it('19. canAccess denies an unknown tenant role for a non-domain feature the unknown-role branch actually governs (control: a real tenant role still resolves that same feature)', async () => {
+    // 'manage_employees' is an adminPermissions id, not a PERMISSION_DOMAINS
+    // id, so it reaches the `!isPermissionDomain -> allow` branch this line
+    // guards — unlike a domain id such as 'sales', which is already denied
+    // for an unknown role by a different, pre-existing path (getPermissionLevel's
+    // own `!roleConfig -> 'none'`), making that probe vacuous.
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr5', email: 'mgr5@synthetic.test' });
+    expect(ctx!.canAccess('manage_employees')).toBe(true); // control: a real tenant role
+
+    getDoc.mockResolvedValue(existing('__definitely_not_a_tenant_role__'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-unknown', email: 'unknown@synthetic.test' });
+    expect(ctx!.canAccess('manage_employees')).toBe(false);
+  });
+
+  it('20. resolvePermissionLevel (via getPermissionLevel/checkPermission) denies a present-but-falsy malformed stored value even against a "none" requirement (control: an absent domain key still resolves "none" and clears "none")', async () => {
+    getDoc.mockResolvedValue(existing('manager'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-mgr6', email: 'mgr6@synthetic.test' });
+
+    // control: 'employees' is absent from a permissions Record missing that key entirely.
+    act(() => { ctx!.updateTenantRole('manager', { dashboard: 'full' } as unknown as Record<string, PermissionLevel>); });
+    expect(ctx!.getPermissionLevel('employees')).toBe('none');
+    expect(ctx!.checkPermission('employees', 'none')).toBe(true); // absent legitimately clears 'none'
+
+    for (const malformed of ['', null, 0]) {
+      act(() => { ctx!.updateTenantRole('manager', { refunds: malformed } as unknown as Record<string, PermissionLevel>); });
+      expect(ctx!.getPermissionLevel('refunds')).toBe(malformed as unknown as PermissionLevel);
+      expect(ctx!.checkPermission('refunds', 'none')).toBe(false); // present-but-malformed no longer satisfies 'none'
+    }
+  });
+
+  it('21. requestSupervisorRefundAuth denies a malformed explicit approve_refunds entry (control: absent and exactly-true both still authorize)', () => {
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(true); // control: subPermissions absent entirely
+    act(() => { ctx!.clearSupervisorRefundAuth(); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(true); // control: present and exactly true
+    act(() => { ctx!.clearSupervisorRefundAuth(); });
+
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', 'not-a-boolean' as unknown as boolean); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // denial: present, not exactly true
+  });
+
+  it('22. canAccess: System Owner denies an unknown/empty feature (F5) (controls: a real platform nav feature and a navigation-only placeholder both true)', async () => {
+    getDoc.mockResolvedValue(existing(platformRoles[0].id));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-owner2', email: 'owner2@synthetic.test' });
+    expect(ctx!.canAccess('tenants')).toBe(true); // control: a real platform nav feature
+    expect(ctx!.canAccess('ledger')).toBe(true); // control: a navigation-only placeholder
+    expect(ctx!.canAccess('')).toBe(false);
+    expect(ctx!.canAccess('not_a_feature')).toBe(false);
+  });
+});
+
+describe('isKnownNavigationFeature — static AccessGuard vocabulary guard', () => {
+  it('every literal feature="..." on <AccessGuard> in App.tsx is a known navigation feature, so a new route cannot silently lock the owner out', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const appTsxPath = resolve(here, '../App.tsx');
+    const source = readFileSync(appTsxPath, 'utf8');
+    const literals = [...source.matchAll(/<AccessGuard\b[^>]*\bfeature="([^"]*)"/g)].map(m => m[1]);
+    expect(literals.length).toBeGreaterThanOrEqual(30); // non-vacuous extraction
+    const unknown = literals.filter(f => !isKnownNavigationFeature(f));
+    expect(unknown).toEqual([]);
   });
 });
