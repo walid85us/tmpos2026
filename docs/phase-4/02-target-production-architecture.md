@@ -77,7 +77,7 @@ Key boundaries:
 |---|---|---|
 | Authentication | Firebase ID token verified at server login exchange | client-asserted identity |
 | Identity / membership / role | Postgres `platform_identity` / `app_user` / `user_membership` | Firestore `users/{uid}.role` as an authorization input |
-| Permission level | Server canonical authorization service (unified catalog, [04](./04-canonical-iam-and-four-user-migration.md)) | client `sessionStorage('platform_permissions_v1')` |
+| Permission level | Server canonical authorization service (family-aware permission contract, [04](./04-canonical-iam-and-four-user-migration.md)) | client `sessionStorage('platform_permissions_v1')` |
 | Plan / feature entitlement | Postgres `tenant_feature_entitlement` (server-materialized) | client `sessionStorage('features_data')` / `tenant_overrides_data` |
 | Account status | Postgres `app_user.status` / membership status | hardcoded `status:'active'` |
 | Tenant / store scope | Server-derived from membership | client-supplied `tenantId`/`storeId` (context only) |

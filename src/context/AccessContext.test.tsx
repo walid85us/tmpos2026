@@ -22,13 +22,8 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import { AccessProvider, useAccess, isKnownNavigationFeature } from './AccessContext';
-import {
-  CANONICAL_DIFF_CONTEXT,
-  CANONICAL_GRANT_UNIVERSE,
-  D2_EXPLICIT_MONEY_ACTION_GRANTS,
-  D3_COMPATIBILITY_PINS,
-  evaluatePinnedCandidate,
-} from '../../server/platform-identity/gap11GrantDiff';
+import { CANONICAL_DIFF_CONTEXT, computeRepinnedGrantDiff } from '../../server/platform-identity/gap11GrantDiff';
+import { BUILT_IN_MONEY_GRANT_DEFAULTS } from '../authorization/moneyCapabilities';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -273,15 +268,29 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
     }
   });
 
-  it('21. requestSupervisorRefundAuth denies a malformed explicit approve_refunds entry (control: absent and exactly-true both still authorize)', () => {
+  it('21. requestSupervisorRefundAuth is the one refund-approval capability: explicit grant exactly true, a session, the plan (M5-GAP11-P5)', async () => {
     render(<AccessProvider><CaptureCtx /></AccessProvider>);
-    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(true); // control: subPermissions absent entirely
+    // No session: the converged capability denies (checkSubPermission always required one).
+    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(false);
+    getDoc.mockResolvedValue(existing('sales_staff'));
+    await fireAuth({ uid: 'u-sup', email: 'sup@synthetic.test' });
+    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(true); // control: store_owner's explicit default grant
     act(() => { ctx!.clearSupervisorRefundAuth(); });
     expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(true); // control: present and exactly true
     act(() => { ctx!.clearSupervisorRefundAuth(); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '0000')).toBe(false); // the PIN still gates first
 
     act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', 'not-a-boolean' as unknown as boolean); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // denial: present, not exactly true
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // malformed: denied
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', false); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // owner revoke is honoured
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', true); });
+    // Refunds lowered to Create, grant kept: the capability's gate is the catalog minimum (Refunds View),
+    // so both refund-approval forms answer the same — the supervisor check and checkSubPermission.
+    act(() => { ctx!.updateTenantRole('manager', { refunds: 'create' } as Record<string, PermissionLevel>); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(true);
+    act(() => { ctx!.updateTenantRole('manager', { refunds: 'none' } as Record<string, PermissionLevel>); });
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // parent-module minimum still denies
   });
 
   it('22. canAccess: System Owner denies an unknown/empty feature (F5) (controls: a real platform nav feature and a navigation-only placeholder both true)', async () => {
@@ -294,51 +303,41 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
     expect(ctx!.canAccess('not_a_feature')).toBe(false);
   });
 
-  it('23. M5-GAP11-P2 server/client agreement: every tenant role\'s refund and return approval equals its D2 explicit grant', async () => {
-    // The client engine decides these today through levels and its own role tables; D2's candidate
-    // decides them through explicit per-role grants. The two must give the same answer, role by role.
-    const grant = (l: string): boolean => {
-      const g = D2_EXPLICIT_MONEY_ACTION_GRANTS.find((x) => `${x.plane}/${x.stratum}/${x.role}/${x.scope}/${x.action}` === l);
-      if (g === undefined) throw new Error(`no D2 grant ${l}`);
-      return g.granted;
-    };
+  it('23. M5-GAP11-P5: every built-in store role\'s refund and return approval equals its built-in default grant; the retired level form is refused', async () => {
     let granted = 0;
     for (const role of ['store_owner', 'manager', 'sales_staff', 'technician']) {
       getDoc.mockResolvedValue(existing(role));
       const { unmount } = render(<AccessProvider><CaptureCtx /></AccessProvider>);
-      await fireAuth({ uid: `u-d2-${role}`, email: `d2-${role}@synthetic.test` });
-      const cases: readonly [boolean, string][] = [
-        [ctx!.checkPermission('refunds', 'approve'), `tenant/domain_threshold/${role}/refunds/require:approve`],
-        [ctx!.checkSubPermission('approve_refunds'), `tenant/sub_permission/${role}/refunds/approve_refunds`],
-        [ctx!.checkSubPermission('approve_return'), `tenant/sub_permission/${role}/returns/approve_return`],
-      ];
-      for (const [client, l] of cases) {
-        expect({ l, client }).toEqual({ l, client: grant(l) });
-        if (client) granted += 1;
-      }
+      await fireAuth({ uid: `u-money-${role}`, email: `money-${role}@synthetic.test` });
+      const defaults = BUILT_IN_MONEY_GRANT_DEFAULTS[role];
+      expect({ role, client: ctx!.checkSubPermission('approve_refunds') }).toEqual({ role, client: defaults.approve_refunds === true });
+      expect({ role, client: ctx!.checkSubPermission('approve_return') }).toEqual({ role, client: defaults.approve_return === true });
+      // Refunds at Approve is the retired level form of refund approval: refused, owners included.
+      expect({ role, client: ctx!.checkPermission('refunds', 'approve') }).toEqual({ role, client: false });
+      if (ctx!.checkSubPermission('approve_refunds')) granted += 1;
+      if (ctx!.checkSubPermission('approve_return')) granted += 1;
       unmount();
     }
-    expect(granted).toBe(6); // control: store_owner and manager on all three, nobody else
+    expect(granted).toBe(4); // control: store_owner and manager on both capabilities, nobody else
   });
 
-  it('24. M5-GAP11-P3 server/client agreement: every D3-pinned threshold answers in the client as its pin and as the pinned candidate', async () => {
-    // The thirteen rows D3 pinned are domain-threshold decisions the client engine makes itself, through
-    // checkPermission(domain, level). Each must answer as its pin — today's answer — and as the server's
-    // pinned candidate.
+  it('24. M5-GAP11-P5: the store family keeps every answer the rejected global ordering would have changed', async () => {
+    // The superseded P2/P3 candidate (one global ordering + D2) changes 13 domain thresholds against the
+    // authority. The client decides them in the tenant/store family, so each keeps the authority's answer.
+    const rows = computeRepinnedGrantDiff(CANONICAL_DIFF_CONTEXT).rows
+      .filter((r) => r.plane === 'tenant' && r.stratum === 'domain_threshold');
     let allowed = 0;
     let checked = 0;
     for (const role of ['manager', 'technician']) {
       getDoc.mockResolvedValue(existing(role));
       const { unmount } = render(<AccessProvider><CaptureCtx /></AccessProvider>);
-      await fireAuth({ uid: `u-d3-${role}`, email: `d3-${role}@synthetic.test` });
-      for (const pin of D3_COMPATIBILITY_PINS.filter((p) => p.role === role)) {
-        const level = pin.action.replace(/^require:/, '') as PermissionLevel;
-        const client = ctx!.checkPermission(pin.scope, level);
-        const t = CANONICAL_GRANT_UNIVERSE.find((x) => x.plane === pin.plane && x.stratum === pin.stratum
-          && x.role === pin.role && x.scope === pin.scope && x.action === pin.action);
-        const l = `${pin.role}/${pin.scope}/${pin.action}`;
-        expect({ l, client }).toEqual({ l, client: pin.granted });
-        expect({ l, client }).toEqual({ l, client: evaluatePinnedCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted' });
+      await fireAuth({ uid: `u-fam-${role}`, email: `fam-${role}@synthetic.test` });
+      for (const r of rows.filter((x) => x.role === role)) {
+        const level = r.action.replace(/^require:/, '') as PermissionLevel;
+        const client = ctx!.checkPermission(r.scope, level);
+        const l = `${r.role}/${r.scope}/${r.action}`;
+        expect({ l, client }).toEqual({ l, client: r.before === 'granted' });
+        expect({ l, differsFromRejectedCandidate: client !== (r.after === 'granted') }).toEqual({ l, differsFromRejectedCandidate: true });
         if (client) allowed += 1;
         checked += 1;
       }
@@ -346,6 +345,49 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
     }
     expect(checked).toBe(13);
     expect(allowed).toBe(1); // control: only the manager's refunds `manage` gate is allowed
+  });
+});
+
+describe('AccessProvider — POS operator switch onto edited and custom roles (M5-GAP11-P5)', () => {
+  it('25. the operator\'s runtime role decides: store-family levels for non-money checks, explicit grants for money', async () => {
+    getDoc.mockResolvedValue(existing('store_owner'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-pos', email: 'pos@synthetic.test' });
+    // Edited built-in role: Inventory set to Approve, Returns set to Approve (the P4 witnesses).
+    act(() => { ctx!.updateTenantRole('technician', { inventory: 'approve', returns: 'approve' } as Record<string, PermissionLevel>); });
+    act(() => { ctx!.setPosOperatorRole('technician'); });
+    expect(ctx!.effectiveRole).toBe('technician');
+    expect(ctx!.checkPermission('inventory', 'manage')).toBe(true); // store family: Approve satisfies Manage
+    expect(ctx!.checkSubPermission('complete_return_disposition')).toBe(false); // explicit false kept from the shipped role
+    expect(ctx!.checkSubPermission('approve_return')).toBe(false); // default grant: denied
+    act(() => { ctx!.updateTenantRoleSubPermission('technician', 'approve_return', true); });
+    expect(ctx!.checkSubPermission('approve_return')).toBe(true); // owner grant honoured
+    act(() => { ctx!.updateTenantRole('manager', { returns: 'approve' } as Record<string, PermissionLevel>); });
+    act(() => { ctx!.setPosOperatorRole('manager'); });
+    expect(ctx!.checkSubPermission('approve_return')).toBe(true);
+    expect(ctx!.checkSubPermission('complete_return_disposition')).toBe(true);
+    // Custom role: a high level never grants a money capability; Manage does not satisfy Approve.
+    act(() => { ctx!.addTenantRole({ id: 'custom_counter', name: 'Counter', permissions: { returns: 'full', refunds: 'full', inventory: 'manage' }, subPermissions: {} }); });
+    act(() => { ctx!.setPosOperatorRole('custom_counter'); });
+    expect(ctx!.checkSubPermission('approve_return')).toBe(false);
+    expect(ctx!.checkSubPermission('approve_refunds')).toBe(false);
+    expect(ctx!.checkPermission('inventory', 'approve')).toBe(false);
+    expect(ctx!.checkPermission('inventory', 'manage')).toBe(true);
+    act(() => { ctx!.updateTenantRoleSubPermission('custom_counter', 'approve_return', true); });
+    expect(ctx!.checkSubPermission('approve_return')).toBe(true);
+    expect(ctx!.requestSupervisorRefundAuth('custom_counter', '1234')).toBe(false); // no refund grant
+    // A custom role named like a built-in or platform role gets its own id: it never shares or shadows
+    // that role's levels and money grants.
+    act(() => { ctx!.addTenantRole({ id: 'manager', name: 'Manager', permissions: { refunds: 'full' }, subPermissions: {} }); });
+    act(() => { ctx!.addTenantRole({ id: 'system_owner', name: 'System Owner', permissions: { refunds: 'full' }, subPermissions: {} }); });
+    const ids = ctx!.tenantRolesState.map((r) => r.id);
+    expect(ids.filter((id) => id === 'manager')).toHaveLength(1);
+    expect(ids).toEqual(expect.arrayContaining(['manager_2', 'system_owner_2']));
+    expect(ids).not.toContain('system_owner');
+    act(() => { ctx!.updateTenantRoleSubPermission('manager_2', 'approve_refunds', false); });
+    expect(ctx!.tenantRolesState.find((r) => r.id === 'manager')!.subPermissions!.approve_refunds).toBe(true); // the built-in manager keeps its grant
+    expect(ctx!.tenantRolesState.find((r) => r.id === 'manager_2')!.subPermissions!.approve_refunds).toBe(false);
+    expect(ctx!.requestSupervisorRefundAuth('system_owner', '1234')).toBe(false); // still no store role with that id
   });
 });
 

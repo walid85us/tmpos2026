@@ -11,14 +11,30 @@ import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
-const GENERATOR = 'scripts/generate-gap11-grant-diff.ts';
 const ARTIFACT = 'docs/phase-4/evidence/gap11-ordering-flip-grant-diff.md';
+
+/**
+ * M5-GAP11-P5: the generator (scripts/generate-gap11-grant-diff.ts) is DELETED — it cannot compile
+ * without the retired D3 pin machinery. The artifact is now FROZEN HISTORY: its bytes are pinned to
+ * the commit that produced them and never regenerated. Reproducing it, if ever needed, is
+ * `git show 84fa74e9b5c8031cc1346f7eed31fcf2182e330d:docs/phase-4/evidence/gap11-ordering-flip-grant-diff.md`.
+ */
+const D3_ARTIFACT_COMMIT = '84fa74e9b5c8031cc1346f7eed31fcf2182e330d';
+const D3_ARTIFACT_SHA256 = '6d8ed14e6429eb5f6c044eb26b84e1c25c9250dae99aa0e7a151dc748be68e98';
+/** The P2 artifact whose thirteen net changes the owner rejected as D3 — a historical reference. */
+const D3_REJECTED_ARTIFACT_COMMIT = '543cef3f5689d882e4b90d83b9830bd889ed1fac';
+const D3_REJECTED_ARTIFACT_SHA256 = 'f49ca74baf0d46a628bdcc066b95aade8f0f4ff92ef8eef20c5c8e7e394bd7c0';
+
+/** The artifact's bytes at `commit`, as a Buffer. Throws (never skips) when the commit is missing. */
+function artifactAt(commit) {
+  return execFileSync('git', ['show', `${commit}:${ARTIFACT}`], { cwd: REPO, maxBuffer: 1024 * 1024 * 16 });
+}
 
 /** The modules this stage adds. They are observational and must remain unreachable from a decision. */
 const OBSERVATIONAL_MODULES = [
@@ -28,17 +44,18 @@ const OBSERVATIONAL_MODULES = [
 
 /**
  * The only files permitted to name them, until a cutover is decided. Every entry but the modules
- * themselves and the generator is a test suite (M5-GAP11-P2 adds the D2 suite and the two client suites
- * that check server/client agreement; M5-GAP11-P3 adds the D3 compatibility-pin suite).
+ * themselves is a test suite (M5-GAP11-P2 adds the D2 suite and the two client suites that check
+ * server/client agreement; M5-GAP11-P3/P5 the compatibility-pins-turned-convergence suite). The
+ * generator is gone (M5-GAP11-P5): the artifact is frozen history, never regenerated.
  */
 const PERMITTED_NAMERS = [
-  'scripts/generate-gap11-grant-diff.ts',
   'server/platform-identity/gap11CompatibilityPins.test.ts',
   'server/platform-identity/gap11GrantDiff.test.ts',
   'server/platform-identity/gap11GrantDiff.ts',
   'server/platform-identity/gap11MoneyActionGrants.test.ts',
   'server/platform-identity/gap11ShadowComparator.test.ts',
   'server/platform-identity/gap11ShadowComparator.ts',
+  'src/authorization/authorizationContainment.test.ts',
   'src/context/AccessContext.test.tsx',
   'src/context/authorizationVocabulary.test.ts',
   'tests/quality/gap11-grant-diff-artifact.test.mjs',
@@ -46,10 +63,6 @@ const PERMITTED_NAMERS = [
   // below proves it names only `*.test.*` paths, so it cannot become a route to the modules.
   'scripts/run-tests.mjs',
 ];
-
-const runGenerator = (...args) => spawnSync('npx', ['tsx', GENERATOR, ...args], {
-  cwd: REPO, encoding: 'utf8', timeout: 180_000,
-});
 
 /** Git paths, NUL-separated and unquoted, so no legal filename is dropped or mangled. */
 const gitPaths = ([command, ...rest], cwd = REPO) =>
@@ -70,34 +83,23 @@ function localSources(...roots) {
 // The artifact
 // =============================================================================
 
-test('the committed grant-diff artifact exists and is not stale', () => {
+test('the committed grant-diff artifact exists and is frozen history: its bytes equal the 84fa74e9 blob', () => {
   assert.ok(existsSync(join(REPO, ARTIFACT)), `${ARTIFACT} must be committed`);
-  const r = runGenerator('--check');
-  assert.equal(r.status, 0,
-    `the committed artifact does not match the catalog — regenerate with \`npx tsx ${GENERATOR}\`.\n${r.stdout ?? ''}${r.stderr ?? ''}`);
+  const working = readFileSync(join(REPO, ARTIFACT));
+  assert.equal(createHash('sha256').update(working).digest('hex'), D3_ARTIFACT_SHA256,
+    'the working-tree artifact must hash to the frozen D3 artifact hash');
+  // A missing commit is a FAILURE of this test, never a skip: execFileSync throws when the commit or
+  // the path at it does not exist, and that throw is not caught here.
+  const committed = artifactAt(D3_ARTIFACT_COMMIT);
+  assert.ok(Buffer.compare(working, committed) === 0,
+    `the working-tree artifact must equal the ${D3_ARTIFACT_COMMIT} blob byte for byte`);
+  assert.equal(createHash('sha256').update(committed).digest('hex'), D3_ARTIFACT_SHA256);
 });
 
-test('regenerating on unchanged inputs produces a byte-identical file and no working-tree diff', () => {
-  const gitView = () => [
-    execFileSync('git', ['status', '--porcelain', '--', ARTIFACT], { cwd: REPO, encoding: 'utf8' }),
-    execFileSync('git', ['diff', '--', ARTIFACT], { cwd: REPO, encoding: 'utf8' }),
-  ];
-  const gitBefore = gitView();
-  const before = readFileSync(join(REPO, ARTIFACT), 'utf8');
-  const first = runGenerator();
-  assert.equal(first.status, 0, first.stderr);
-  const afterOne = readFileSync(join(REPO, ARTIFACT), 'utf8');
-  const second = runGenerator();
-  assert.equal(second.status, 0, second.stderr);
-  const afterTwo = readFileSync(join(REPO, ARTIFACT), 'utf8');
-
-  assert.equal(afterOne, before, 'regeneration did not change the committed bytes');
-  assert.equal(afterTwo, afterOne, 'two runs agree byte for byte');
-
-  // And git agrees regeneration touched nothing — the strongest form of "leaves no diff". Compared
-  // before and after rather than against a clean status, so it holds on a committed tree (both empty)
-  // and on a candidate whose artifact is not yet committed (both the same pending change).
-  assert.deepEqual(gitView(), gitBefore, 'regeneration changed git\'s view of the artifact');
+test('the P2 artifact (the candidate D3 rejected) is frozen at its own commit, a distinct historical reference', () => {
+  const p2 = artifactAt(D3_REJECTED_ARTIFACT_COMMIT);
+  assert.equal(createHash('sha256').update(p2).digest('hex'), D3_REJECTED_ARTIFACT_SHA256);
+  assert.notEqual(D3_REJECTED_ARTIFACT_SHA256, D3_ARTIFACT_SHA256, 'the P2 and D3 artifacts differ');
 });
 
 test('the artifact carries no timestamp, host, absolute path or other run-varying value', () => {
@@ -156,25 +158,18 @@ test('the path inventory keeps filenames git would quote or a trim would change'
   }
 });
 
-test('the generator writes exactly one file, under the governed evidence directory', () => {
-  const src = readFileSync(join(REPO, GENERATOR), 'utf8');
-  const writes = src.match(/writeFileSync\s*\(/g) ?? [];
-  assert.equal(writes.length, 1, 'one write call');
-  assert.match(src, /ARTIFACT_RELATIVE_PATH = 'docs\/phase-4\/evidence\//);
-  for (const re of [/\bfetch\s*\(/, /from\s+['"](?:postgres|pg)['"]/, /process\s*\.\s*env\b/, /execSync|spawnSync|execFileSync/]) {
-    assert.ok(!re.test(src), `the generator must not use ${re}`);
-  }
-});
-
 // =============================================================================
 // Containment — the observational modules stay out of every decision path
 // =============================================================================
 
 /**
  * The observational modules, and the candidate-only tables and evaluators they export: D2's grants
- * (M5-GAP11-P2) and D3's compatibility pins (M5-GAP11-P3).
+ * (M5-GAP11-P2/P5). The retired names (D2_EXPLICIT_MONEY_ACTION_GRANTS, D3_COMPATIBILITY_PINS,
+ * evaluatePinnedCandidate, computePinnedGrantDiff, auditCompatibilityPins) stay in the regex as a
+ * tripwire: gap11GrantDiff.test.ts confirms they are no longer exported, so their presence in ANY
+ * source text (outside a historical comment) would mean something reintroduced them.
  */
-const OBSERVATIONAL_NAMES = /gap11GrantDiff|gap11ShadowComparator|D2_EXPLICIT_MONEY_ACTION_GRANTS|evaluateAfterRepinCandidate|computeRepinnedGrantDiff|D3_COMPATIBILITY_PINS|evaluatePinnedCandidate|computePinnedGrantDiff|auditCompatibilityPins/;
+const OBSERVATIONAL_NAMES = /gap11GrantDiff|gap11ShadowComparator|D2_DEFAULT_MONEY_ACTION_GRANTS|D2_EXPLICIT_MONEY_ACTION_GRANTS|evaluateAfterRepinCandidate|computeRepinnedGrantDiff|D3_COMPATIBILITY_PINS|evaluatePinnedCandidate|computePinnedGrantDiff|auditCompatibilityPins/;
 
 test('nothing outside the permitted set names the observational modules', () => {
   const offenders = [];
@@ -185,9 +180,9 @@ test('nothing outside the permitted set names the observational modules', () => 
   }
   assert.deepEqual(offenders, [],
     'the candidate evaluators, the D2 grant table, the D3 pins and the shadow comparator must remain unreachable from any decision path');
-  // Every permitted namer outside the modules and the generator is a test suite or the test ratchet.
+  // Every permitted namer outside the modules is a test suite or the test ratchet.
   for (const f of PERMITTED_NAMERS) {
-    if (OBSERVATIONAL_MODULES.includes(f) || f === GENERATOR || f === 'scripts/run-tests.mjs') continue;
+    if (OBSERVATIONAL_MODULES.includes(f) || f === 'scripts/run-tests.mjs') continue;
     assert.match(f, /\.test\.(ts|tsx|mjs)$/, `${f} may name the modules only as a test`);
   }
 });
@@ -290,7 +285,7 @@ test('the GAP-11 sources carry no raw control bytes — a NUL separator is writt
   // A literal NUL makes `file`, grep and ripgrep treat a source as binary and skip it, so a scanner or
   // a reviewer can silently miss the module (it happened twice: P1 and P2 each wrote one by accident).
   const isControl = (b) => b < 0x09 || b === 0x0b || b === 0x0c || (b > 0x0d && b < 0x20);
-  const files = [...OBSERVATIONAL_MODULES, GENERATOR, 'server/platform-identity/gap11GrantDiff.test.ts',
+  const files = [...OBSERVATIONAL_MODULES, 'server/platform-identity/gap11GrantDiff.test.ts',
     'server/platform-identity/gap11MoneyActionGrants.test.ts', 'server/platform-identity/gap11CompatibilityPins.test.ts',
     'server/platform-identity/gap11ShadowComparator.test.ts',
     'tests/quality/gap11-grant-diff-artifact.test.mjs', ARTIFACT];
@@ -338,9 +333,16 @@ test('no migration is changed, and no role default or explicit grant is re-pinne
     'no migration may be modified or added');
   // Grants: DATA level. M5-GAP11-P1-R1 had to change the catalog's and the client's COMPARISON code
   // (deny-by-default on unknown vocabulary), so a file-level ban on those files would forbid the very
-  // correction; what must never move is the grant data they hold. Every role default, every explicit
-  // sub-permission grant, and the client's own role tables are fingerprinted with sorted keys and
-  // pinned — the value is unchanged from b61612d9, before R1.
+  // correction; what must never move without an owner decision is the grant data they hold. Every role
+  // default, every explicit sub-permission grant, and the client's own role tables are fingerprinted
+  // with sorted keys and pinned.
+  //
+  // M5-GAP11-P5 legitimately moves this fingerprint from 4c08356343ec6ef98acc2f76b09b0f68683a3f1b7a72752f2071d74cd01f4eed
+  // (its value since b61612d9, before R1): store_owner now carries explicit money-capability defaults
+  // in src/context/accessConfig.ts tenantRoles (subPermissions {approve_refunds:true, approve_return:true}),
+  // and the server's TENANT_ROLE_SUBPERMISSION_DEFAULTS money entries now spread from builtInMoneyGrants
+  // (src/authorization/moneyCapabilities.ts) instead of being listed inline. This is the one and only
+  // authorized reason for this value to change; it must not change again without a fresh owner decision.
   const cat = await import('../../server/platform-identity/permissionCatalog.ts');
   const acc = await import('../../src/context/accessConfig.ts');
   const plat = await import('../../src/owner/platformPermissionsConfig.ts');
@@ -354,8 +356,9 @@ test('no migration is changed, and no role default or explicit grant is re-pinne
     },
   };
   const fingerprint = createHash('sha256').update(JSON.stringify(stable(grants))).digest('hex');
-  assert.equal(fingerprint, '4c08356343ec6ef98acc2f76b09b0f68683a3f1b7a72752f2071d74cd01f4eed',
-    'the production role defaults and explicit grants must not change: D2\'s re-pin and D3\'s pins live in the candidate only');
+  assert.equal(fingerprint, '50df5ec752f6c9d384a1164782c7b21be1ce4fb552e5e592d64e69ef1f1da402',
+    'the fingerprint changed in M5-GAP11-P5 because store_owner now carries explicit money-capability '
+    + 'defaults; it must not change again without an owner decision');
 });
 
 test('the artifact keeps the four views and the final diff apart, in five sections', () => {
@@ -385,13 +388,6 @@ test('the artifact keeps the four views and the final diff apart, in five sectio
     assert.ok(narrowing.includes(`| ${q} |`), `the narrowing answers: ${q}`);
   }
 });
-
-/**
- * The artifact the owner approved as D3 — conditionally, on zero behavioural difference — pinned byte
- * for byte. Regenerating it with any change — a catalog edit, a D2 grant, a D3 pin, a wording change in
- * the generator — moves this hash, and a moved hash is a new question for the owner, not a refresh.
- */
-const D3_ARTIFACT_SHA256 = '6d8ed14e6429eb5f6c044eb26b84e1c25c9250dae99aa0e7a151dc748be68e98';
 
 test('the artifact carries the four views, the 17 grants, the 13 pins, every unresolved mapping and the zero final diff — pinned', () => {
   const text = readFileSync(join(REPO, ARTIFACT), 'utf8');
@@ -451,21 +447,6 @@ test('the artifact carries the four views, the 17 grants, the 13 pins, every unr
   assert.match(d3, /Approval is not a cutover/);
   assert.match(d3, /GAP-11 stays open/);
   assert.match(text, /\| D3 compatibility pins and their outcomes, all four views \| `[0-9a-f]{64}` \|/);
-});
-
-test('the generator refuses a non-empty final diff and diffs of the wrong views', async () => {
-  // The artifact records D3's approval, which holds only while the final diff is empty — so the refusal
-  // is proven directly, with a leaked row, not only by the committed inputs happening to be clean.
-  const g = await import('../../scripts/generate-gap11-grant-diff.ts');
-  const d = await import('../../server/platform-identity/gap11GrantDiff.ts');
-  const pre = d.computeGrantDiff();
-  const post = d.computeRepinnedGrantDiff();
-  const pinned = d.computePinnedGrantDiff();
-  assert.doesNotThrow(() => g.renderArtifact(pre, post, pinned, 'inputs'), 'control: the real diffs render');
-  const leaked = { ...pinned, rows: [post.rows[0]], summary: { ...pinned.summary, unchanged: pinned.summary.unchanged - 1, widened: 1 } };
-  assert.throws(() => g.renderArtifact(pre, post, leaked, 'inputs'), /final diff is not empty/);
-  assert.throws(() => g.renderArtifact(pre, post, post, 'inputs'), /wrong views/);
-  assert.throws(() => g.renderArtifact(pre, pinned, pinned, 'inputs'), /wrong views/);
 });
 
 test('the run-tests ratchet lists the new suites as sentinels', async () => {

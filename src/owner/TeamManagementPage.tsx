@@ -86,10 +86,12 @@ import {
   platformPermissionMeets,
   getPlatformFeatureLevel,
   getPlatformSubPermissionLevel,
+  getPlatformMoneyGrant,
   hasPlatformPermission,
   type PlatformFeatureKey,
   type PlatformPermissionsOverrides,
 } from './platformPermissionsConfig';
+import { isPlatformMoneyCapability, type PlatformMoneyCapability } from '../authorization/moneyCapabilities';
 
 // Phase 1.1.3A correction — the Global Permissions Matrix is governed by the
 // 5 hardcoded platform roles. Custom roles created via "Create Role" still
@@ -754,6 +756,33 @@ export default function TeamManagementPage() {
     }
   };
 
+  // A money capability (approve_billing_actions) is an explicit, editable boolean grant — never a
+  // level (M5-GAP11-P5). It is edited in its own matrix row and stored under `grants`.
+  const setMoneyGrant = (role: Role, featureKey: PlatformFeatureKey, capability: PlatformMoneyCapability, granted: boolean) => {
+    if (!isOwner || role === 'system_owner') return;
+    const was = getPlatformMoneyGrant(role, capability, overrides);
+    if (was === granted) return;
+    const next: PlatformPermissionsOverrides = { ...overrides };
+    const roleEntry = { ...(next[role] || {}) };
+    roleEntry.grants = { ...(roleEntry.grants || {}), [capability]: granted };
+    next[role] = roleEntry;
+    setOverrides(next);
+    writePlatformPermissionsOverrides(next);
+    const group = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey);
+    const subDef = group?.subPermissions.find(s => s.id === capability);
+    const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
+    logActivity('Updated Sub-Permission', `${granted ? 'Granted' : 'Revoked'} ${subDef?.label || capability} for ${roleLabel}`);
+    pushPlatformAudit({
+      actor: session?.user?.name || 'System Owner',
+      action: 'platform_sub_permission_changed',
+      target: `${roleLabel} · ${group?.label || featureKey} · ${subDef?.label || capability}`,
+      category: 'team',
+      oldValue: was ? 'granted' : 'denied',
+      newValue: granted ? 'granted' : 'denied',
+      severity: 'warning',
+    });
+  };
+
   // Emit one `platform_permission_dependency_reconciled` audit row per
   // auto-adjustment. Deduplicates by subKey so a transitive chain that
   // somehow re-visits the same node never doubles up.
@@ -788,6 +817,11 @@ export default function TeamManagementPage() {
     if (!group) return { enabled: 0, total: 0 };
     let enabled = 0;
     for (const sp of group.subPermissions) {
+      if (isPlatformMoneyCapability(sp.id)) {
+        // A money capability counts as enabled only when it is actually granted.
+        if (explainAccessDecision(role, sp.id, overrides).allowed) enabled++;
+        continue;
+      }
       const lvl = getPlatformSubPermissionLevel(role, sp.id, overrides);
       if (platformPermissionMeets(lvl, sp.threshold)) enabled++;
     }
@@ -1166,7 +1200,11 @@ export default function TeamManagementPage() {
                         </p>
                         <p className="text-[10px] font-medium text-slate-500 mt-0.5">
                           {sp.description}
-                          <span className="text-slate-400"> · Requires {PLATFORM_PERMISSION_LEVEL_LABEL[sp.threshold]} or higher.</span>
+                          {isPlatformMoneyCapability(sp.id) ? (
+                            <span className="text-slate-400"> · Money approval: explicit grant only (never implied by a level) · also requires View Only or higher on {group.label}.</span>
+                          ) : (
+                            <span className="text-slate-400"> · Requires {PLATFORM_PERMISSION_LEVEL_LABEL[sp.threshold]} or higher.</span>
+                          )}
                         </p>
                       </td>
                       {MATRIX_ROLES.map(role => {
@@ -1180,9 +1218,24 @@ export default function TeamManagementPage() {
                         const dec = explainAccessDecision(role, sp.id, overrides);
                         const meets = dec.allowed;
                         const blockedByPrereq = !meets && dec.source === 'denied_prerequisite';
+                        const moneyCapability = isPlatformMoneyCapability(sp.id) ? sp.id : null;
+                        const granted = moneyCapability !== null && getPlatformMoneyGrant(role, moneyCapability, overrides);
                         return (
                           <td key={role} className="px-3 py-3 text-center">
-                            {renderLevelSelect(
+                            {moneyCapability !== null ? (
+                              <button
+                                type="button"
+                                data-testid={`matrix-grant-${sp.id}-${role}`}
+                                disabled={lockedRow}
+                                aria-pressed={granted}
+                                onClick={() => setMoneyGrant(role, group.key, moneyCapability, !granted)}
+                                className={`text-[11px] font-bold rounded-lg px-2 py-1 border disabled:opacity-50 disabled:cursor-not-allowed ${
+                                  granted ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-500 border-red-200'
+                                }`}
+                              >
+                                {granted ? 'Granted' : 'Denied'}
+                              </button>
+                            ) : renderLevelSelect(
                               displayLvl,
                               (next) => setSubLevel(role, group.key, sp.id, next),
                               lockedRow,

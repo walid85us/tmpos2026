@@ -165,6 +165,33 @@ function legacySub(c: RequestContext, id: string, sub: SubPermissionContext) {
   return legacyMeets(parentLevel, sub.defaultLevel) ? d('allow', 'allowed_default') : d('deny', 'denied_default');
 }
 
+// M5-GAP11-P5 — the owner decisions layered on the legacy oracle, and nothing else:
+//   * Refunds at Approve (the retired level form of refund approval) is refused;
+//   * a money capability (approve_refunds, approve_return) needs a store role, the parent minimum
+//     and an explicit grant exactly `true` — no owner short-circuit, no default-by-level.
+// Every other decision must equal the legacy oracle exactly; the tests below also assert that every
+// decision that differs from it is one of these two cases.
+const MONEY_SUBS: ReadonlySet<string> = new Set(['approve_refunds', 'approve_return']);
+function p5Tenant(c: RequestContext, domain: string, level: PermissionLevel) {
+  if (!legacyAuthenticated(c)) return d('deny', 'denied_unauthenticated');
+  if (c.scope.scopeType !== 'tenant' && c.scope.scopeType !== 'store') return d('deny', 'denied_scope_mismatch');
+  if (!c.scope.tenantId) return d('deny', 'denied_missing_tenant');
+  if (domain === 'refunds' && level === 'approve') return d('deny', 'denied_money_level_form');
+  return legacyTenant(c, domain, level);
+}
+function p5Sub(c: RequestContext, id: string, sub: SubPermissionContext) {
+  if (!MONEY_SUBS.has(id)) return legacySub(c, id, sub);
+  if (!legacyAuthenticated(c)) return d('deny', 'denied_unauthenticated');
+  if (c.scope.scopeType !== 'tenant' && c.scope.scopeType !== 'store') return d('deny', 'denied_scope_mismatch');
+  if (!c.scope.tenantId) return d('deny', 'denied_missing_tenant');
+  const snap = c.permissionSnapshot!;
+  if (!sub.planAvailable) return d('deny', 'denied_plan_locked');
+  if (snap.tenantRoleId === null) return d('deny', 'denied_no_store_role');
+  if (!legacyMeets(snap.permissions[sub.parentDomain] ?? 'none', sub.minModuleLevel)) return d('deny', 'denied_parent_level');
+  if (!Object.prototype.hasOwnProperty.call(snap.subPermissions, id)) return d('deny', 'denied_missing_grant');
+  return snap.subPermissions[id] === true ? d('allow', 'allowed_explicit_grant') : d('deny', 'denied_explicit_revoke');
+}
+
 const pick = (r: DecisionResult) => ({ decision: r.decision, reasonCode: r.reasonCode });
 
 // =============================================================================
@@ -349,8 +376,9 @@ const FULL_TENANT_ENTITLEMENTS: Record<string, boolean> = Object.fromEntries([
   'service_points', 'carrier_analytics', 'carrier_scorecards', 'shipping_sla_optimization',
 ].map((k) => [k, true]));
 
-test('tenant: every canonical decision is unchanged from before R1', () => {
+test('tenant: every canonical decision is unchanged from before R1, except the retired money level form (P5)', () => {
   let n = 0;
+  let changed = 0;
   for (const role of TENANT_ROLE_IDS) {
     const maps: Record<string, string>[] = [
       materializeTenantPermissions(role, FULL_TENANT_ENTITLEMENTS, false), materializeTenantPermissions(role, {}, true), {},
@@ -361,8 +389,12 @@ test('tenant: every canonical decision is unchanged from before R1', () => {
         const c = ctx(scope, { tenantRoleId: role, permissions });
         for (const domain of TENANT_PERMISSION_DOMAINS) {
           for (const level of PERMISSION_LEVEL_VALUES) {
-            assert.deepEqual(pick(requireTenantPermission(c, domain, level)), legacyTenant(c, domain, level),
-              `${scope} ${role} ${domain}:${level}`);
+            const got = pick(requireTenantPermission(c, domain, level));
+            assert.deepEqual(got, p5Tenant(c, domain, level), `${scope} ${role} ${domain}:${level}`);
+            if (JSON.stringify(got) !== JSON.stringify(legacyTenant(c, domain, level))) {
+              changed += 1;
+              assert.ok(domain === 'refunds' && level === 'approve', `only the retired level form may differ: ${domain}:${level}`);
+            }
             n += 1;
           }
         }
@@ -370,6 +402,8 @@ test('tenant: every canonical decision is unchanged from before R1', () => {
     }
   }
   assert.equal(n, 4 * (3 + 21 * 7) * 2 * 21 * 7);
+  // Every refunds:approve decision in the space: 4 roles x 150 maps x 2 scopes — all refused now.
+  assert.equal(changed, 4 * (3 + 21 * 7) * 2, 'the P5 change is exactly the refunds:approve requirement, every time');
 });
 
 test('tenant: unknown domains, levels and roles deny — the store owner included', () => {
@@ -410,7 +444,7 @@ test('tenant: the gap R1 closes — an unknown level was an allowance for a hold
 // requireSubPermission
 // =============================================================================
 
-test('sub-permission: every canonical decision is unchanged from before R1', () => {
+test('sub-permission: every canonical decision is unchanged from before R1, except the money capabilities (P5)', () => {
   const actors: { platformRoleId: string | null; tenantRoleId: string | null }[] = [
     ...TENANT_ROLE_IDS.map((r) => ({ platformRoleId: null, tenantRoleId: r as string })),
     { platformRoleId: 'system_owner', tenantRoleId: null },
@@ -428,7 +462,11 @@ test('sub-permission: every canonical decision is unchanged from before R1', () 
           for (const planAvailable of [true, false]) {
             const c = ctx('store', { ...actor, permissions, subPermissions });
             const def = subDefOf(sub.id, planAvailable);
-            assert.deepEqual(pick(requireSubPermission(c, sub.id, def)), legacySub(c, sub.id, def), `${JSON.stringify(actor)} ${sub.id}`);
+            const got = pick(requireSubPermission(c, sub.id, def));
+            assert.deepEqual(got, p5Sub(c, sub.id, def), `${JSON.stringify(actor)} ${sub.id}`);
+            if (JSON.stringify(got) !== JSON.stringify(legacySub(c, sub.id, def))) {
+              assert.ok(MONEY_SUBS.has(sub.id), `only a money capability may differ from the legacy oracle: ${sub.id}`);
+            }
             n += 1;
           }
         }
@@ -439,13 +477,14 @@ test('sub-permission: every canonical decision is unchanged from before R1', () 
 });
 
 test('sub-permission: an unknown id, or a definition that disagrees with the catalog, is refused', () => {
+  // process_refunds: a non-money sub-permission, so the owner short-circuit is the control.
   const owner = ctx('tenant', { tenantRoleId: 'store_owner' });
-  assert.equal(requireSubPermission(owner, 'approve_refunds', subDefOf('approve_refunds')).decision, 'allow', 'control');
+  assert.equal(requireSubPermission(owner, 'process_refunds', subDefOf('process_refunds')).decision, 'allow', 'control');
   for (const [why, id] of MALFORMED_NAMES) {
-    assert.equal(requireSubPermission(owner, id as string, subDefOf('approve_refunds')).reasonCode, 'denied_invalid_requirement', `id ${why}`);
+    assert.equal(requireSubPermission(owner, id as string, subDefOf('process_refunds')).reasonCode, 'denied_invalid_requirement', `id ${why}`);
   }
   // Two sources of configured authority that disagree are ambiguous, and ambiguity denies.
-  const def = subDefOf('approve_refunds');
+  const def = subDefOf('process_refunds');
   const variants: readonly (readonly [string, unknown])[] = [
     ['another parent domain', { ...def, parentDomain: 'sales' }],
     ['a lower minimum level', { ...def, minModuleLevel: 'none' }],
@@ -460,7 +499,7 @@ test('sub-permission: an unknown id, or a definition that disagrees with the cat
     ['an array', []],
   ];
   for (const [why, bad] of variants) {
-    assert.equal(requireSubPermission(owner, 'approve_refunds', bad as SubPermissionContext).reasonCode, 'denied_invalid_requirement', why);
+    assert.equal(requireSubPermission(owner, 'process_refunds', bad as SubPermissionContext).reasonCode, 'denied_invalid_requirement', why);
   }
 });
 
@@ -470,7 +509,11 @@ test('sub-permission: an explicit grant must be a boolean — anything else is m
       'approve_refunds', subDefOf('approve_refunds'));
   assert.equal(at({ approve_refunds: true }).reasonCode, 'allowed_explicit_grant', 'control');
   assert.equal(at({ approve_refunds: false }).reasonCode, 'denied_explicit_revoke', 'control');
-  assert.equal(at({}).reasonCode, 'allowed_default', 'control: no entry falls through to the default');
+  // P5: a money capability has no default — no entry is no grant, even at Refunds Approve.
+  assert.deepEqual(pick(at({})), { decision: 'deny', reasonCode: 'denied_missing_grant' }, 'no entry is no money grant');
+  // A non-money sub-permission still falls through to its default at the parent level.
+  assert.equal(requireSubPermission(ctx('tenant', { tenantRoleId: 'manager', permissions: { refunds: 'approve' }, subPermissions: {} }),
+    'process_refunds', subDefOf('process_refunds')).reasonCode, 'allowed_default', 'control: non-money default still applies');
   for (const bad of ['true', 'false', 1, 0, null, undefined, {}, [], 'yes']) {
     assert.deepEqual(pick(at({ approve_refunds: bad })), { decision: 'deny', reasonCode: 'denied_malformed_snapshot' }, JSON.stringify(bad));
   }
@@ -481,8 +524,11 @@ test('sub-permission: an explicit grant must be a boolean — anything else is m
 
 test('sub-permission: roles — a tenant role or the System Owner; nothing else, nothing unknown', () => {
   const def = subDefOf('approve_refunds');
-  assert.equal(requireSubPermission(ctx('store', { platformRoleId: 'system_owner' }), 'approve_refunds', def).reasonCode, 'allowed_owner',
-    'the System Owner keeps its tenant short-circuit, as the frontend grants it');
+  assert.equal(requireSubPermission(ctx('store', { platformRoleId: 'system_owner' }), 'process_refunds', subDefOf('process_refunds')).reasonCode,
+    'allowed_owner', 'the System Owner keeps its tenant short-circuit for a non-money sub-permission, as the frontend grants it');
+  // P5 (owner decision): the System Owner has no store role, so it holds no store money capability.
+  assert.deepEqual(pick(requireSubPermission(ctx('store', { platformRoleId: 'system_owner', permissions: { refunds: 'full' }, subPermissions: { approve_refunds: true } }), 'approve_refunds', def)),
+    { decision: 'deny', reasonCode: 'denied_no_store_role' }, 'the System Owner is denied a store money capability');
   assert.equal(requireSubPermission(ctx('store', { platformRoleId: 'support_admin', permissions: { refunds: 'full' } }), 'approve_refunds', def)
     .reasonCode, 'denied_unknown_role', 'a platform role other than the owner holds no tenant capability');
   for (const [why, role] of MALFORMED_NAMES) {
@@ -509,7 +555,7 @@ test('the inputs the decision reads are read once — a getter cannot answer the
 
 test('two roles for one decision are ambiguous, and a snapshot map must be a plain record', () => {
   const c = (snap: Record<string, unknown>) => ctx('store', snap as never);
-  assert.equal(requireSubPermission(c({ platformRoleId: 'system_owner' }), 'approve_refunds', subDefOf('approve_refunds')).decision, 'allow', 'control');
+  assert.equal(requireSubPermission(c({ platformRoleId: 'system_owner' }), 'process_refunds', subDefOf('process_refunds')).decision, 'allow', 'control');
   const both = requireSubPermission(c({ platformRoleId: 'system_owner', tenantRoleId: 'sales_staff', subPermissions: { approve_refunds: false } }),
     'approve_refunds', subDefOf('approve_refunds'));
   assert.deepEqual(pick(both), { decision: 'deny', reasonCode: 'denied_ambiguous_role' }, 'the owner slot cannot override the tenant slot');

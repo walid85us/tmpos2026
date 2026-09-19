@@ -24,11 +24,10 @@ import { materializePlatformSubPermissions, meetsTenantPermissionLevel } from '.
 import {
   CANONICAL_DIFF_CONTEXT,
   CANONICAL_GRANT_UNIVERSE,
-  D2_EXPLICIT_MONEY_ACTION_GRANTS,
+  D2_DEFAULT_MONEY_ACTION_GRANTS,
   candidateMeetsLevel,
   evaluateAfterRepinCandidate,
   evaluateBefore,
-  evaluatePinnedCandidate,
   heldLevelFor,
 } from '../../server/platform-identity/gap11GrantDiff';
 import { readFileSync } from 'node:fs';
@@ -467,8 +466,8 @@ test('server/client agreement: the client comparators equal the server authority
   assert.equal(flips, 2, 'control: the two orderings still differ on exactly the manage/approve pair');
 });
 
-test('server/client agreement: the client\'s platform billing approval equals the D2 explicit grant and the post-re-pin candidate, per role', () => {
-  const platform = D2_EXPLICIT_MONEY_ACTION_GRANTS.filter((g) => g.plane === 'platform');
+test('server/client agreement: the client\'s platform billing approval equals the (historical) D2 default grant and the post-re-pin candidate, per role', () => {
+  const platform = D2_DEFAULT_MONEY_ACTION_GRANTS.filter((g) => g.plane === 'platform');
   assert.equal(platform.length, 5);
   assert.equal(platform.filter((g) => g.granted).length, 2, 'control: the check is not a constant');
   for (const g of platform) {
@@ -478,28 +477,29 @@ test('server/client agreement: the client\'s platform billing approval equals th
       && x.role === g.role && x.scope === g.scope && x.action === g.action);
     assert.ok(t !== undefined, g.role);
     assert.equal(evaluateAfterRepinCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `candidate vs client: ${g.role}`);
-    assert.equal(evaluatePinnedCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `pinned candidate vs client: ${g.role}`);
     assert.equal(evaluateBefore(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `authority vs client: ${g.role}`);
   }
 });
 
 // =============================================================================
-// M5-GAP11-P3 — server/client agreement for the D3-pinned candidate
+// M5-GAP11-P5 — the global-ordering candidate is retired; the client agrees with the AUTHORITY on
+// every tenant domain threshold, and the (rejected, historical) post-D2 candidate still differs on 13.
 // =============================================================================
 
-test('server/client agreement: on every tenant domain threshold the client\'s comparator equals the pinned candidate (control: 13 differ from the post-D2 one)', () => {
-  // The client engine decides a domain threshold by comparing the held level with the tenant ordering.
-  // With D3's pins the server candidate a cutover would install answers the same on every one of them;
-  // before the pins, it differed on exactly the thirteen D3 rejected.
+test('server/client agreement: on every tenant domain threshold the client\'s comparator equals the authority (control: 13 differ from the rejected post-D2 candidate)', () => {
+  // The client engine decides a domain threshold by comparing the held level with the tenant ordering —
+  // the same family-aware comparison the server authority uses, so they agree on every threshold. The
+  // (rejected, historical) post-D2 candidate — the unified global ordering M5-GAP11-P5 superseded —
+  // still differs on exactly the thirteen historical rows D3 rejected.
   const thresholds = CANONICAL_GRANT_UNIVERSE.filter((t) => t.plane === 'tenant' && t.stratum === 'domain_threshold');
   assert.equal(thresholds.length, 588);
-  let beforePins = 0;
+  let differsFromCandidate = 0;
   for (const t of thresholds) {
     const held = heldLevelFor(t, CANONICAL_DIFF_CONTEXT);
     const client = meetsPermissionLevel(held as PermissionLevel, t.requiredLevel as PermissionLevel);
     const where = `${t.role}/${t.scope}/${t.action}`;
-    assert.equal(evaluatePinnedCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `pinned candidate vs client: ${where}`);
-    if ((evaluateAfterRepinCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted') !== client) beforePins += 1;
+    assert.equal(evaluateBefore(t, CANONICAL_DIFF_CONTEXT) === 'granted', client, `authority vs client: ${where}`);
+    if ((evaluateAfterRepinCandidate(t, CANONICAL_DIFF_CONTEXT) === 'granted') !== client) differsFromCandidate += 1;
   }
-  assert.equal(beforePins, 13, 'control: the post-D2 candidate still disagrees with the client on the thirteen');
+  assert.equal(differsFromCandidate, 13, 'control: the rejected post-D2 candidate still disagrees with the client on the thirteen');
 });

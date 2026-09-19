@@ -1,8 +1,14 @@
-// Phase 4.0 M5 — GAP-11 safeguard #5: dual-read shadow evaluation (docs/phase-4/04 §3).
+// Phase 4.0 M5-GAP11-P1 — dual-read shadow comparator, kept as a DIAGNOSTIC-ONLY historical artifact.
 //
-// 04 §3 requires the old-order and new-order comparators to run in parallel and their divergences to
-// be recorded BEFORE authority is switched to the new order. This is that shadow read, and nothing
-// more: it observes, it never decides.
+// SUPERSEDED. This comparator shadow-read the pinned candidate (the unified global ordering with D2's
+// default grants and D3's now-retired compatibility pins) — the evaluator a cutover to a single global
+// ordering would have installed. M5-GAP11-P5 rejected that cutover in favour of family-specific
+// orderings (src/authorization/permissionFamilies.ts), so there is no longer a pinned candidate to
+// shadow: `evaluatePinnedCandidate` and the D3 pins it depended on are retired. This module now shadows
+// the pre-pin post-D2 candidate (`evaluateAfterRepinCandidate`) purely as a diagnostic historical
+// comparator — it is wired into no request path, decides nothing, and its divergences are simply the
+// (already known, already rejected) differences between today's family-aware authority and the
+// abandoned global-ordering proposal.
 //
 // THE AUTHORITATIVE ANSWER IS AN INPUT, NOT SOMETHING THIS MODULE COMPUTES. The caller has already
 // made its decision when it calls `compare`; it passes that decision in and gets it back — or a
@@ -10,10 +16,10 @@
 // shape is deliberate and does three things at once:
 //   * it makes fail-open structurally impossible — there is no code path on which a candidate result
 //     becomes the returned value, because the candidate is never assigned to it;
-//   * it satisfies 04 §3's "run both in parallel" honestly — one policy is evaluated by the caller,
-//     the other here, on the same input;
-//   * it avoids the duplicate evaluation the brief forbids. Re-deriving the authoritative answer to
-//     "check" it would evaluate the same policy twice and invite the two copies to disagree.
+//   * it satisfies the original "run both in parallel" shadow-read shape honestly — one policy is
+//     evaluated by the caller, the other here, on the same input;
+//   * it avoids a duplicate evaluation of the authoritative policy, which would evaluate it twice and
+//     invite the two copies to disagree.
 //
 // WHAT A MISMATCH MAY CONTAIN. Canonical vocabulary and outcome codes only: plane, stratum, role id,
 // domain/feature id, action id, level token, the tuple's own structural and D2 classifications, the
@@ -27,26 +33,18 @@
 // unbounded, unredacted sink wearing a different hat. No network, no database, no file, no env var,
 // no process global.
 //
-// WHICH CANDIDATE. The pinned one (evaluatePinnedCandidate): the unified ordering with owner decision
-// D2's explicit money-action grants and owner decision D3's compatibility pins — the evaluator a
-// cutover would install, so the divergences recorded are the ones a cutover would make. Against the
-// shipped authority there are none: the pinned candidate answers exactly as it does. When the pin
-// table is invalid the candidate has no answer: that is decided once, when the comparator is created,
-// and recorded as `candidate_invalid` on every compare that reaches the candidate (a canonical tuple,
-// a readable context and a real decision; the others are recorded as the malformed input they are)
-// — deterministically, never as a divergence and never as a fallback answer.
+// WHICH CANDIDATE. The post-D2 candidate (evaluateAfterRepinCandidate): the (rejected) unified ordering
+// with owner decision D2's default money-action grants — never the D3-pinned view, which is retired.
+// Every divergence recorded here is therefore a KNOWN, HISTORICAL difference from the abandoned
+// global-ordering proposal, not a live risk.
 //
-// NOT A CUTOVER. Enabling this changes no decision anywhere. The candidate stays observational: the
-// re-pin and the pins exist in the candidate only, D3 approves an artifact rather than a cutover, and
-// no cutover is decided.
+// NOT A CUTOVER, AND NEVER WAS. Enabling this changes no decision anywhere. The candidate stays
+// observational and diagnostic-only.
 import {
-  auditCompatibilityPins,
   canonicalTupleFor,
-  evaluatePinnedCandidate,
+  evaluateAfterRepinCandidate,
   snapshotContext,
-  D3_COMPATIBILITY_PINS,
   type CanonicalGrantTuple,
-  type D3CompatibilityPin,
   type D2Classification,
   type GrantEvaluationContext,
   type GrantOutcome,
@@ -57,7 +55,7 @@ import type { PermissionLevelValue } from './authorizationConstants';
 
 type Level = PermissionLevelValue;
 
-/** Why a record exists. `divergence` is the one 04 §3 asks for; the others are failures to observe. */
+/** Why a record exists. `divergence` is the diagnostic one; the others are failures to observe. */
 export type ShadowMismatchKind =
   /** Both policies answered; they disagreed. */
   | 'divergence'
@@ -67,12 +65,6 @@ export type ShadowMismatchKind =
    * it is defence in depth: a future candidate defect is recorded rather than silently lost.
    */
   | 'candidate_error'
-  /**
-   * The candidate is invalid — its compatibility-pin table is not exactly the committed one — so it
-   * has no answer to compare. Decided once, when the comparator is created, and recorded on every
-   * compare that reaches the candidate; the caller's decision is returned as always.
-   */
-  | 'candidate_invalid'
   /**
    * The evaluation context is not one: it throws while being read, or a field is missing, of the
    * wrong shape, or unknown. No candidate is attempted.
@@ -104,7 +96,7 @@ export interface ShadowMismatch {
   readonly moneyAction: string | null;
   /** The decision the comparator returned: the caller's, or `denied` when that was not admissible. */
   readonly authoritative: GrantOutcome;
-  /** What the pinned candidate would have said. `null` when it could not be obtained or is invalid. */
+  /** What the post-D2 candidate would have said. `null` when it could not be obtained. */
   readonly candidate: GrantOutcome | null;
 }
 
@@ -119,22 +111,15 @@ export interface ShadowComparatorOptions {
   readonly observer?: ShadowObserver;
   /** Hard cap on retained records. Beyond it, records are dropped and counted, never accumulated. */
   readonly maxRecords?: number;
-  /**
-   * The compatibility-pin table the candidate reads. For the suite only: it proves an invalid candidate
-   * is surfaced. It is audited once, at creation. Only the committed table's content audits clean, so
-   * this can make the candidate invalid and nothing else — it cannot add, remove or rewrite a pin, it is
-   * never read again after creation, and it never reaches the decision. A pin option that cannot be read
-   * is invalid pin data, never replaced by the committed pins.
-   */
-  readonly compatibilityPins?: readonly D3CompatibilityPin[];
 }
 
 export interface ShadowComparator {
   /**
-   * Record whether the unified ordering would have answered differently, and return the caller's own
-   * decision, unchanged. THE RETURN VALUE IS ALWAYS THE `authoritative` ARGUMENT — except when that
-   * argument is not a decision at all, or the tuple is not one of the universe's canonical tuples, in
-   * which case the answer is `denied`. Both exceptions only ever deny; neither consults the candidate.
+   * Record whether the (retired) candidate ordering would have answered differently, and return the
+   * caller's own decision, unchanged. THE RETURN VALUE IS ALWAYS THE `authoritative` ARGUMENT — except
+   * when that argument is not a decision at all, or the tuple is not one of the universe's canonical
+   * tuples, in which case the answer is `denied`. Both exceptions only ever deny; neither consults the
+   * candidate.
    */
   compare(
     tuple: CanonicalGrantTuple,
@@ -148,9 +133,6 @@ export interface ShadowComparator {
 }
 
 const DEFAULT_MAX_RECORDS = 256;
-
-/** Never a pin table: the candidate reading it is invalid. Stands in for pin data that failed its audit. */
-const INVALID_PIN_TABLE = null;
 
 function isOutcome(v: unknown): v is GrantOutcome {
   return v === 'granted' || v === 'denied';
@@ -185,15 +167,9 @@ function record(
 
 export function createShadowComparator(options: ShadowComparatorOptions = {}): ShadowComparator {
   // Options are read once, here, each in its own guard, so one unreadable option cannot cost another
-  // its value. An observer or cap that throws, or has the wrong type, leaves its default in place. The
-  // pin table is decided here too, once, so compare() never runs a caller's getter and the candidate's
-  // validity cannot change over the comparator's life: absent means the committed table; a table that
-  // audits clean has, by construction, exactly the committed content, so the committed table is used;
-  // anything else — a pin option that cannot even be read included — is invalid pin data, never
-  // silently replaced by the committed pins.
+  // its value. An observer or cap that throws, or has the wrong type, leaves its default in place.
   let observer: ShadowObserver | undefined;
   let max = DEFAULT_MAX_RECORDS;
-  let pins: unknown = D3_COMPATIBILITY_PINS;
   const given: ShadowComparatorOptions = typeof options === 'object' && options !== null ? options : {};
   try {
     const o = given.observer;
@@ -206,12 +182,6 @@ export function createShadowComparator(options: ShadowComparatorOptions = {}): S
     if (typeof m === 'number' && Number.isInteger(m) && m >= 0) max = m;
   } catch {
     // unreadable ⇒ the default cap
-  }
-  try {
-    const p = given.compatibilityPins;
-    if (p !== undefined) pins = auditCompatibilityPins(p).ok ? D3_COMPATIBILITY_PINS : INVALID_PIN_TABLE;
-  } catch {
-    pins = INVALID_PIN_TABLE; // unreadable pin data is invalid pin data
   }
   const buffer: ShadowMismatch[] = [];
   let droppedCount = 0;
@@ -260,16 +230,15 @@ export function createShadowComparator(options: ShadowComparatorOptions = {}): S
             emit(record('malformed_context', canonical, decision, null));
           } else {
             // The shadow read: one candidate evaluation, on the universe's own tuple.
-            let candidate: GrantOutcome | 'invalid' | null = null;
+            let candidate: GrantOutcome | null = null;
             try {
-              candidate = evaluatePinnedCandidate(canonical, context, pins);
+              candidate = evaluateAfterRepinCandidate(canonical, context);
             } catch {
               candidate = null;
             }
             if (candidate === null) emit(record('candidate_error', canonical, decision, null));
-            else if (candidate === 'invalid') emit(record('candidate_invalid', canonical, decision, null));
             else if (candidate !== decision) emit(record('divergence', canonical, decision, candidate));
-            // Exact agreement produces no record at all — 04 §3 asks for divergences, not a trace.
+            // Exact agreement produces no record at all.
           }
         }
       } catch {

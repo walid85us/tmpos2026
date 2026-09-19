@@ -5,11 +5,11 @@
 // platform staff") permissions. It is intentionally additive on top of the
 // existing access model in `src/context/accessConfig.ts`:
 //
-//   - It reuses the same `PermissionLevel` 7-level hierarchy
-//     (none / view / create / edit / approve / manage / full).
-//   - It does NOT replace the existing `PERMISSION_HIERARCHY` ordering;
-//     `meetsPermissionLevel(actual, required)` still works for the rest of
-//     the app exactly as before.
+//   - It reuses the same 7-level vocabulary and compares it in the PLATFORM
+//     family (none / view / create / edit / approve / manage / full) of the
+//     canonical contract, src/authorization/permissionFamilies.ts
+//     (M5-GAP11-P5). It holds no rank table of its own.
+//   - The store side keeps the tenant/store family; the two are never mixed.
 //   - It does NOT replace or alter the Store Permissions Matrix or the
 //     tenant-side `SUB_PERMISSIONS` catalog (those govern store employees).
 //   - It does NOT introduce server-side RBAC or PIM/PAM. All gating here is
@@ -30,16 +30,25 @@
 //
 // Override storage: per-role overrides written by the Global Permissions
 // Matrix UI live in `sessionStorage.platform_permissions_v1` as
-// `{ [roleId]: { features: {[featureKey]: PermissionLevel}, subs: {[subKey]: PermissionLevel} } }`.
+// `{ [roleId]: { features: {[featureKey]: PermissionLevel}, subs: {[subKey]: PermissionLevel},
+//   grants: {[moneyCapability]: boolean} } }`. `grants` carries the explicit, editable money-action
+// capability (approve_billing_actions, M5-GAP11-P5): a level never grants it.
 // System Owner is locked at Full Access and cannot be overridden.
 // =============================================================================
 
 import type { PermissionLevel } from '../types';
 import type { Role } from '../context/accessConfig';
+import { PLATFORM_ORDERING, meetsFamilyLevel, permissionLevelRank } from '../authorization/permissionFamilies';
+import {
+  PLATFORM_MONEY_PARENT_MINIMUM,
+  builtInMoneyGrants,
+  hasExplicitMoneyGrant,
+  isPlatformMoneyCapability,
+  type PlatformMoneyCapability,
+} from '../authorization/moneyCapabilities';
 
-export const PLATFORM_PERMISSION_LEVELS: PermissionLevel[] = [
-  'none', 'view', 'create', 'edit', 'approve', 'manage', 'full',
-];
+/** The platform family ordering, in display order for the matrix level selects. */
+export const PLATFORM_PERMISSION_LEVELS: readonly PermissionLevel[] = PLATFORM_ORDERING;
 
 export const PLATFORM_PERMISSION_LEVEL_LABEL: Record<PermissionLevel, string> = {
   none: 'None',
@@ -51,34 +60,18 @@ export const PLATFORM_PERMISSION_LEVEL_LABEL: Record<PermissionLevel, string> = 
   full: 'Full Access',
 };
 
-const LEVEL_RANK: Record<PermissionLevel, number> = {
-  none: 0,
-  view: 1,
-  create: 2,
-  edit: 3,
-  approve: 4,
-  manage: 5,
-  full: 6,
-};
-
-// Own-property rank lookup: -1 for anything that is not EXACTLY one of the 7
-// canonical level strings (wrong case, whitespace, non-strings, arrays, and
-// prototype names like 'constructor' all resolve -1, never an inherited rank).
-function platformLevelRank(level: unknown): number {
-  return typeof level === 'string' && Object.prototype.hasOwnProperty.call(LEVEL_RANK, level)
-    ? LEVEL_RANK[level as PermissionLevel]
-    : -1;
-}
+/** Rank in the platform family; -1 for anything that is not exactly a canonical level. */
+const platformRank = (level: unknown): number => permissionLevelRank('platform', level);
 
 /**
- * Spec-aligned threshold check for platform permissions.
+ * Spec-aligned threshold check for platform permissions — the platform-family comparison
+ * (meetsFamilyLevel('platform', …)) under its existing public name.
  * Approve / Manage / Full Access all satisfy an Approve threshold.
  * Manage / Full Access satisfy a Manage threshold.
  * Full Access satisfies all thresholds.
  *
- * Note: this is intentionally separate from `meetsPermissionLevel()` in
- * accessConfig.ts (which uses a different array ordering and is consumed
- * by the tenant / store side of the app). Do not unify them.
+ * The store side compares in the tenant/store family instead; the two families are deliberately
+ * different and never mixed (M5-GAP11-P5).
  *
  * Deny-by-default on unknowns: both sides must be exactly a canonical level.
  * A canonical `actual` still clears a `none` threshold (every rank >= 0), but
@@ -88,9 +81,7 @@ export function platformPermissionMeets(
   actual: PermissionLevel,
   threshold: PermissionLevel
 ): boolean {
-  const a = platformLevelRank(actual);
-  const t = platformLevelRank(threshold);
-  return a >= 0 && t >= 0 && a >= t;
+  return meetsFamilyLevel('platform', actual, threshold);
 }
 
 // ---------------------------------------------------------------------------
@@ -514,14 +505,14 @@ export function reconcileSubPermissionChange(
   overridesBefore: PlatformPermissionsOverrides
 ): ReconciliationResult {
   if (role === 'system_owner') return { next: overrides, adjustments: [] };
-  if (LEVEL_RANK[nextLevel] === LEVEL_RANK[prevLevel]) {
+  if (platformRank(nextLevel) === platformRank(prevLevel)) {
     return { next: overrides, adjustments: [] };
   }
   const working = cloneOverrides(overrides);
   const adjustments: PermissionAdjustment[] = [];
 
-  const raised = LEVEL_RANK[nextLevel] > LEVEL_RANK[prevLevel];
-  const lowered = LEVEL_RANK[nextLevel] < LEVEL_RANK[prevLevel];
+  const raised = platformRank(nextLevel) > platformRank(prevLevel);
+  const lowered = platformRank(nextLevel) < platformRank(prevLevel);
 
   if (raised) {
     // Walk this sub's prerequisites transitively; raise any currently-denied
@@ -544,7 +535,7 @@ export function reconcileSubPermissionChange(
           // where a prereq is itself denied because of yet another missing
           // prereq — in that case raising its sibling prereq fixes things
           // and we must not overwrite the unrelated sub.
-          if (LEVEL_RANK[target] <= LEVEL_RANK[currentStored]) {
+          if (platformRank(target) <= platformRank(currentStored)) {
             raiseChain(dk);
             continue;
           }
@@ -619,7 +610,7 @@ export function reconcileFeatureLevelChange(
   overridesBefore: PlatformPermissionsOverrides
 ): ReconciliationResult {
   if (role === 'system_owner') return { next: overrides, adjustments: [] };
-  if (LEVEL_RANK[nextLevel] >= LEVEL_RANK[prevLevel]) {
+  if (platformRank(nextLevel) >= platformRank(prevLevel)) {
     return { next: overrides, adjustments: [] };
   }
   const working = cloneOverrides(overrides);
@@ -778,6 +769,8 @@ export const PLATFORM_PERMISSIONS_STORAGE_KEY = 'platform_permissions_v1';
 export interface PlatformRoleOverrides {
   features?: Partial<Record<PlatformFeatureKey, PermissionLevel>>;
   subs?: Record<string, PermissionLevel>;
+  /** Explicit money-action grants: `true` grants, `false` revokes, absent keeps the built-in default. */
+  grants?: Partial<Record<PlatformMoneyCapability, boolean>>;
 }
 
 export type PlatformPermissionsOverrides = Partial<Record<Role, PlatformRoleOverrides>>;
@@ -932,6 +925,59 @@ function readExplicitSubOverride(
     if (aliasExplicit !== result) return 'none';
   }
   return result;
+}
+
+/**
+ * The stored explicit money grant for (role, capability), read with the same own-property, deny-by-
+ * default discipline as readPlatformOverrideLevel:
+ *   - overrides `undefined`, or no own entry for role / `grants` / capability -> undefined (the
+ *     role's built-in default applies)
+ *   - a malformed root, role entry, `grants` container, or a leaf that is not exactly a boolean
+ *     -> false (an explicit denial — a corrupt grant never falls back to the default)
+ *   - no explicit grant, but a level the pre-P5 matrix stored for the capability under `subs`: a
+ *     level never grants, yet one below the old Approve threshold (or malformed) was an owner
+ *     revocation and stays one -> false; at or above it -> undefined (the default applies)
+ */
+function readPlatformMoneyGrantOverride(
+  overrides: PlatformPermissionsOverrides | null | undefined,
+  role: Role,
+  capability: PlatformMoneyCapability
+): boolean | undefined {
+  if (overrides === undefined) return undefined;
+  if (!isPlainObject(overrides)) return false;
+  if (!Object.prototype.hasOwnProperty.call(overrides, role)) return undefined;
+  const roleEntry = (overrides as Record<string, unknown>)[role];
+  if (!isPlainObject(roleEntry)) return false;
+  if (Object.prototype.hasOwnProperty.call(roleEntry, 'grants')) {
+    const grants = roleEntry.grants;
+    if (!isPlainObject(grants)) return false;
+    if (Object.prototype.hasOwnProperty.call(grants, capability)) return grants[capability] === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(roleEntry, 'subs')) {
+    const subs = roleEntry.subs;
+    if (!isPlainObject(subs)) return false;
+    if (Object.prototype.hasOwnProperty.call(subs, capability) && !meetsFamilyLevel('platform', subs[capability], 'approve')) return false;
+  }
+  return undefined;
+}
+
+/**
+ * The effective explicit grant a platform role holds for a platform money capability: the stored
+ * owner edit when present, otherwise the role's built-in default (billing_admin and system_owner
+ * true, the other platform roles false). System Owner is locked and ignores overrides. Tenant-side
+ * and unknown roles hold none. This is the grant only — explainAccessDecision adds the other gates.
+ */
+export function getPlatformMoneyGrant(
+  role: Role | undefined | null,
+  capability: PlatformMoneyCapability,
+  overrides?: PlatformPermissionsOverrides | null
+): boolean {
+  if (!isPlatformRoleId(role) || !isPlatformMoneyCapability(capability)) return false;
+  if (role !== 'system_owner') {
+    const stored = readPlatformMoneyGrantOverride(overrides ?? readOverridesForDecision(), role, capability);
+    if (stored !== undefined) return stored;
+  }
+  return hasExplicitMoneyGrant(builtInMoneyGrants(role), capability);
 }
 
 /**
@@ -1144,7 +1190,11 @@ export type AccessDecisionSource =
   | 'default_parent'
   | 'denied_explicit_child'
   | 'denied_no_access'
-  | 'denied_prerequisite';
+  | 'denied_prerequisite'
+  // Money capabilities (M5-GAP11-P5): decided by the explicit grant, never by a level.
+  | 'explicit_grant'
+  | 'default_grant'
+  | 'denied_no_grant';
 // Note: `default_child` is intentionally absent — sub-permissions inherit
 // from the parent feature default (no per-child default level is stored on
 // the def), so `default_parent` is the correct source label whenever the
@@ -1180,7 +1230,7 @@ export function getEffectiveFeatureAccess(
   if (!group) return highest;
   for (const sp of group.subPermissions) {
     const sl = getPlatformSubPermissionLevel(role, sp.id, ov);
-    if (LEVEL_RANK[sl] > LEVEL_RANK[highest]) {
+    if (platformRank(sl) > platformRank(highest)) {
       highest = sl;
     }
   }
@@ -1236,7 +1286,10 @@ export function explainAccessDecision(
       threshold: 'view',
     };
   }
-  const threshold = sub.def.threshold;
+  const moneyCapability = isPlatformMoneyCapability(sub.def.id) ? sub.def.id : null;
+  // A money capability's only level gate is the parent-module minimum; its catalog threshold is not
+  // consulted, because no level grants it (M5-GAP11-P5).
+  const threshold = moneyCapability !== null ? PLATFORM_MONEY_PARENT_MINIMUM : sub.def.threshold;
   if (!role) {
     return {
       allowed: false,
@@ -1246,7 +1299,7 @@ export function explainAccessDecision(
       threshold,
     };
   }
-  if (role === 'system_owner') {
+  if (role === 'system_owner' && moneyCapability === null) {
     return {
       allowed: true,
       effectiveLevel: 'full',
@@ -1258,7 +1311,38 @@ export function explainAccessDecision(
   const ov = overrides ?? readOverridesForDecision();
   let source: AccessDecisionSource;
   let effectiveLevel: PermissionLevel;
-  if (!isPlatformRoleId(role)) {
+  let allowed = false;
+  if (moneyCapability !== null) {
+    // Money capability: a platform role, the parent feature at View or above (a denying gate only),
+    // then the explicit grant — the owner's stored edit, else the role's built-in default. System
+    // Owner is locked to its default grant.
+    if (!isPlatformRoleId(role)) {
+      return { allowed: false, effectiveLevel: 'none', source: 'denied_no_access', reason: `${sub.def.label} needs a platform role.`, threshold };
+    }
+    effectiveLevel = getPlatformFeatureLevel(role, sub.feature, ov);
+    if (!meetsFamilyLevel('platform', effectiveLevel, PLATFORM_MONEY_PARENT_MINIMUM)) {
+      const featureLabel = FEATURE_BY_KEY.get(sub.feature)?.label ?? sub.feature;
+      return {
+        allowed: false,
+        effectiveLevel,
+        source: 'denied_no_access',
+        reason: `${sub.def.label} requires ${PLATFORM_PERMISSION_LEVEL_LABEL[PLATFORM_MONEY_PARENT_MINIMUM]} or higher on ${featureLabel}; current level is ${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel] ?? 'unrecognised'}.`,
+        threshold,
+      };
+    }
+    const stored = role === 'system_owner' ? undefined : readPlatformMoneyGrantOverride(ov, role, moneyCapability);
+    allowed = stored !== undefined ? stored : hasExplicitMoneyGrant(builtInMoneyGrants(role), moneyCapability);
+    if (!allowed) {
+      return {
+        allowed: false,
+        effectiveLevel,
+        source: 'denied_no_grant',
+        reason: `${sub.def.label} is not explicitly granted to this role (${stored !== undefined ? 'owner edit' : 'built-in default'}). A permission level never grants it.`,
+        threshold,
+      };
+    }
+    source = role === 'system_owner' ? 'system_owner' : stored !== undefined ? 'explicit_grant' : 'default_grant';
+  } else if (!isPlatformRoleId(role)) {
     // Tenant-side or unrecognized role: no platform access, overrides ignored.
     effectiveLevel = 'none';
     source = 'denied_no_access';
@@ -1282,9 +1366,11 @@ export function explainAccessDecision(
       source = 'default_parent';
     }
   }
-  let allowed = platformPermissionMeets(effectiveLevel, threshold);
-  if (!allowed && source !== 'denied_explicit_child') {
-    if (effectiveLevel === 'none') source = 'denied_no_access';
+  if (moneyCapability === null) {
+    allowed = platformPermissionMeets(effectiveLevel, threshold);
+    if (!allowed && source !== 'denied_explicit_child') {
+      if (effectiveLevel === 'none') source = 'denied_no_access';
+    }
   }
 
   // Dependency / prerequisite reconciliation. If this permission depends on
@@ -1322,7 +1408,9 @@ export function explainAccessDecision(
     effectiveLevel,
     source,
     reason: allowed
-      ? `${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel]} (${source.replace(/_/g, ' ')})`
+      ? moneyCapability !== null
+        ? `${sub.def.label} explicitly granted (${source.replace(/_/g, ' ')}).`
+        : `${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel]} (${source.replace(/_/g, ' ')})`
       : `${PLATFORM_PERMISSION_LEVEL_LABEL[threshold]} or higher required for ${sub.def.label}; current level is ${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel]} (${source.replace(/_/g, ' ')}).`,
     threshold,
   };

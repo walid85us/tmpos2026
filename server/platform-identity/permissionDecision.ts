@@ -7,10 +7,13 @@
 //   - platform threshold semantics                    → src/owner/platformPermissionsConfig.ts
 //   - sub-permission precedence                       → src/context/AccessContext.tsx (checkSubPermission)
 //
-// ONE COMPARISON RULE (M5-GAP11-P1-R1). The two level orderings are no longer
-// duplicated here: both comparisons delegate to the server permission catalog
-// (permissionCatalog.ts), which holds the orderings and the deny-by-default rule
-// of docs/phase-4/04 §3 safeguard #4. Every vocabulary item a check names — the
+// ONE COMPARISON RULE (M5-GAP11-P1-R1, P5). The two level orderings are not
+// duplicated here: every comparison names its family and delegates to the one
+// canonical family contract (src/authorization/permissionFamilies.ts), which holds
+// both orderings and the deny-by-default rule of docs/phase-4/04 §3 safeguard #4.
+// Money capabilities (approve_refunds, approve_return) are decided by the explicit
+// grant only, and Refunds at Approve — their retired level form — is refused.
+// This path stays DEV-only and unrouted for tenant/sub kinds. Every vocabulary item a check names — the
 // feature, domain or sub-permission, the level, the role — must be exactly one the
 // catalog declares; anything else is a denial, never a weaker requirement.
 //
@@ -24,19 +27,19 @@ import {
   TENANT_PERMISSION_DOMAINS,
   TENANT_SUB_PERMISSIONS,
   isPermissionLevel,
-  meetsPlatformPermissionLevel,
-  meetsTenantPermissionLevel,
 } from './permissionCatalog';
 import { PLATFORM_ROLE_IDS, TENANT_ROLE_IDS } from './authorizationConstants';
+import { meetsFamilyLevel } from '../../src/authorization/permissionFamilies';
+import { isRetiredMoneyLevelForm, isTenantMoneyCapability } from '../../src/authorization/moneyCapabilities';
 
-/** Mirrors accessConfig.meetsPermissionLevel (tenant ordering). Non-canonical on either side ⇒ false. */
+/** The TENANT/STORE family comparison (same as accessConfig.meetsPermissionLevel). Non-canonical ⇒ false. */
 export function meetsPermissionLevel(actual: string, required: PermissionLevel): boolean {
-  return meetsTenantPermissionLevel(actual as PermissionLevel, required);
+  return meetsFamilyLevel('tenant_store', actual, required);
 }
 
-/** Mirrors platformPermissionsConfig.platformPermissionMeets (platform ordering). Non-canonical ⇒ false. */
+/** The PLATFORM family comparison (same as platformPermissionMeets). Non-canonical ⇒ false. */
 export function platformPermissionMeets(actual: string, threshold: PermissionLevel): boolean {
-  return meetsPlatformPermissionLevel(actual as PermissionLevel, threshold);
+  return meetsFamilyLevel('platform', actual, threshold);
 }
 
 export type DecisionOutcome = 'allow' | 'deny' | 'deferred' | 'not_applicable';
@@ -197,6 +200,11 @@ export function requireTenantPermission(
   if (typeof domain !== 'string' || !TENANT_PERMISSION_DOMAINS.includes(domain) || !isPermissionLevel(level)) {
     return invalidRequirement();
   }
+  // M5-GAP11-P5: Refunds at Approve is the retired level form of refund approval. It is refused — for
+  // every role, owners included — because refund approval is the approve_refunds capability.
+  if (isRetiredMoneyLevelForm(domain, level)) {
+    return deny('denied_money_level_form', 'Refund approval is an explicit capability, not a permission level.');
+  }
   const snap = readSnapshot(ctx);
   if (isDecision(snap)) return snap;
   if (snap.tenantRoleId === null) return unknownRole(); // a tenant action needs a tenant role
@@ -227,6 +235,8 @@ function canonicalSubDefinition(subPermissionId: unknown, subDef: unknown): SubP
 /**
  * Sub-permission check. Mirrors AccessContext.checkSubPermission precedence:
  *   1. plan availability (deny if plan-locked) — runs BEFORE the owner short-circuit
+ *   1a. a money capability (M5-GAP11-P5) then needs a store role, the parent minimum and an explicit
+ *       grant that is exactly `true` — no owner short-circuit, no default fallback
  *   2. system_owner / store_owner short-circuit
  *   3. parent-domain minimum module level
  *   4. explicit per-role sub-permission grant — exactly `true` allows, exactly `false` revokes, and
@@ -258,6 +268,23 @@ export function requireSubPermission(
   // 1. Plan availability runs BEFORE the owner short-circuit (mirrors the frontend).
   if (!def.planAvailable) {
     return deny('denied_plan_locked', 'Capability is not available on the current plan.');
+  }
+  // Money capability (M5-GAP11-P5): a store role holding the explicit grant, nothing else. No owner
+  // short-circuit (the platform System Owner has no store role), no default-by-level fallback.
+  if (isTenantMoneyCapability(subPermissionId)) {
+    if (snap.tenantRoleId === null) {
+      return deny('denied_no_store_role', 'A money capability needs a store role holding the explicit grant.');
+    }
+    if (!meetsPermissionLevel(heldLevel(snap.permissions, def.parentDomain), def.minModuleLevel)) {
+      return deny('denied_parent_level', 'Actor lacks the required module level.');
+    }
+    if (!hasOwn(snap.subPermissions, subPermissionId)) {
+      return deny('denied_missing_grant', 'Money capability is not explicitly granted.');
+    }
+    const grant = ownEntry(snap.subPermissions, subPermissionId);
+    if (grant === true) return allow('allowed_explicit_grant', 'Money capability explicitly granted.');
+    if (grant === false) return deny('denied_explicit_revoke', 'Money capability explicitly revoked.');
+    return malformedSnapshot();
   }
   // 2. Owner short-circuit.
   if (snap.platformRoleId === 'system_owner' || snap.tenantRoleId === 'store_owner') {

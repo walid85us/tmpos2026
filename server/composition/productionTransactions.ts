@@ -172,8 +172,8 @@ export function composeProductionTransactions(env: Readonly<Record<string, strin
  * The blockers a route inventory earns for the permissions it declares (M5-ID-P1; docs/phase-4/04
  * §2-§3, 03 §6). Every permission a DEPLOYED route requires must be one canonical catalog entry,
  * matched exactly and case-sensitively: a key the catalog does not define is a typo or an invented
- * permission, and a tenant- or store-scope key is undecidable until GAP-11's ordering unification and
- * its six safeguards land. Either way the deployment refuses to start rather than denying at run time
+ * permission, and a tenant- or store-scope key is undecidable until owner decision D1 defines a specific
+ * route and its authoritative product rules (M5-GAP11-P5). Either way the deployment refuses to start rather than denying at run time
  * — or, worse, allowing on a comparison whose meaning has not been settled.
  *
  * It is exported, and applied to the PRODUCTION inventory rather than inside assembleTransactions, so

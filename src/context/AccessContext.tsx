@@ -1,8 +1,16 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo, ReactNode } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS, isSubPermissionPlanAvailable } from './accessConfig';
+import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_DOMAINS } from './accessConfig';
+import { isPermissionLevel, meetsFamilyLevel } from '../authorization/permissionFamilies';
+import {
+  decideSupervisorRefundApproval,
+  decideTenantPermission,
+  decideTenantSubPermission,
+  tenantPermissionLevel,
+  type TenantDecisionInput,
+} from './tenantAccessDecisions';
 import { EmployeeRole, PermissionLevel } from '../types';
 import { NAV_FEATURE_TO_PLATFORM_KEY, NAV_FEATURE_SECONDARY_KEYS, hasEffectiveFeatureAccess } from '../owner/platformPermissionsConfig';
 // Phase 1.6 M8 — TYPE-ONLY import (erased at runtime; pulls NO module into the bundle).
@@ -118,22 +126,6 @@ interface AccessContextType {
 }
 
 const AccessContext = createContext<AccessContextType | undefined>(undefined);
-
-function resolvePermissionLevel(roleConfig: EmployeeRole, domain: string): PermissionLevel {
-  const perms = roleConfig.permissions;
-  if (Array.isArray(perms)) {
-    if (perms.includes('all')) return 'full';
-    if (perms.includes(domain)) return 'full';
-    if (perms.includes(`${domain}_read`)) return 'view';
-    return 'none';
-  }
-  const record = perms as Record<string, PermissionLevel>;
-  // Own-property reads: absent -> 'none'; present -> returned as stored (a
-  // malformed value like '', null, 0 is no longer coerced to 'none' by `||`
-  // — meetsPermissionLevel denies anything non-canonical on its own).
-  if (Object.prototype.hasOwnProperty.call(record, '_grant') && record['_grant'] === 'full') return 'full';
-  return Object.prototype.hasOwnProperty.call(record, domain) ? record[domain] : 'none';
-}
 
 export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [realSession, setRealSession] = useState<Session | null>(null);
@@ -264,62 +256,31 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     return stage === 'active' && (tenant.status === 'active' || tenant.status === 'trialing' || tenant.status === 'overdue');
   };
 
-  const getPermissionLevel = useCallback((domain: string): PermissionLevel => {
-    if (!session) return 'none';
-    // Deny-by-default: an unknown domain denies even for the owner shortcut.
-    if (!PERMISSION_DOMAINS.some(d => d.id === domain)) return 'none';
-    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return 'full';
+  // Every store-plane decision is a pure function of this runtime data (tenantAccessDecisions.ts):
+  // the session, the effective role, the runtime roles (built-in, owner-edited and custom alike) and
+  // the tenant's plan. Plan availability runs before every shortcut, owners included; money
+  // capabilities are decided by their explicit grant only (M5-GAP11-P5).
+  const decisionInput = useMemo<TenantDecisionInput>(() => ({
+    hasSession: session !== null,
+    effectiveRole,
+    roles: tenantRolesState,
+    tenant: tenant ? { id: tenant.id, plan: tenant.plan } : null,
+  }), [session, effectiveRole, tenantRolesState, tenant]);
 
-    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
-    if (!roleConfig) return 'none';
-    return resolvePermissionLevel(roleConfig, domain);
-  }, [session, effectiveRole, tenantRolesState]);
+  const getPermissionLevel = useCallback(
+    (domain: string): PermissionLevel => tenantPermissionLevel(decisionInput, domain),
+    [decisionInput],
+  );
 
-  const checkPermission = useCallback((domain: string, requiredLevel: PermissionLevel): boolean => {
-    // Deny-by-default: an unknown domain denies even for store_owner/system_owner,
-    // whose getPermissionLevel returns 'full' for any string.
-    if (!PERMISSION_DOMAINS.some(d => d.id === domain)) return false;
-    const actual = getPermissionLevel(domain);
-    return meetsPermissionLevel(actual, requiredLevel);
-  }, [getPermissionLevel]);
+  const checkPermission = useCallback(
+    (domain: string, requiredLevel: PermissionLevel): boolean => decideTenantPermission(decisionInput, domain, requiredLevel),
+    [decisionInput],
+  );
 
-  const checkSubPermission = useCallback((actionId: string): boolean => {
-    if (!session) return false;
-
-    const actionDef = SUB_PERMISSIONS.find(sp => sp.id === actionId);
-    if (!actionDef) return false;
-
-    // PHASE 2 PLAN-TO-PERMISSION PROPAGATION (general rule):
-    // The plan-availability check runs BEFORE every other shortcut — including
-    // the system_owner / store_owner blanket allow — so a plan-disabled
-    // capability cannot be exercised by ANY role, even Store Owner. Plan
-    // decides whether the feature exists; role decides who can use it within
-    // an enabled feature; role can never resurrect a plan-disabled feature.
-    // System Owner (platform role) is also subject to this for tenant-scoped
-    // sub-permissions because they operate within the tenant's plan envelope.
-    // Tenant id is passed so sub-permissions linked to commercially overridden
-    // features (active trials / paid overrides whose linked add-on is active
-    // in the catalog) become assignable in the matrix; disabled or archived
-    // catalog rows revoke them automatically.
-    if (tenant && !isSubPermissionPlanAvailable(actionDef, tenant.plan, tenant.id)) return false;
-
-    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
-
-    const parentLevel = getPermissionLevel(actionDef.parentDomain);
-    if (!meetsPermissionLevel(parentLevel, actionDef.minModuleLevel)) return false;
-
-    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
-    if (!roleConfig) return false;
-
-    // Own-property read, and the stored value must be exactly `true` — a
-    // present non-boolean (e.g. the string 'false', 1, null) denies rather
-    // than falling through to the default-by-level path below.
-    if (roleConfig.subPermissions && Object.prototype.hasOwnProperty.call(roleConfig.subPermissions, actionId)) {
-      return roleConfig.subPermissions[actionId] === true;
-    }
-
-    return meetsPermissionLevel(parentLevel, actionDef.defaultLevel);
-  }, [session, effectiveRole, tenantRolesState, tenant, getPermissionLevel]);
+  const checkSubPermission = useCallback(
+    (actionId: string): boolean => decideTenantSubPermission(decisionInput, actionId),
+    [decisionInput],
+  );
 
   const updateTenantRoleSubPermission = (roleId: string, actionId: string, granted: boolean) => {
     setTenantRolesState(prev => prev.map(r => {
@@ -355,7 +316,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         // Own-property reads: the stored value must be exactly a canonical
         // level other than 'none' (a truthy-but-malformed value no longer
         // grants access).
-        : (Object.prototype.hasOwnProperty.call(roleConfig.permissions, feature) && PERMISSION_HIERARCHY.includes(roleConfig.permissions[feature]) && roleConfig.permissions[feature] !== 'none')
+        : (Object.prototype.hasOwnProperty.call(roleConfig.permissions, feature) && isPermissionLevel(roleConfig.permissions[feature]) && roleConfig.permissions[feature] !== 'none')
           || (Object.prototype.hasOwnProperty.call(roleConfig.permissions, 'all') && roleConfig.permissions['all'] === 'full');
       return hasPermission;
     }
@@ -433,7 +394,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       if (!isPermissionDomain) return true;
 
       const level = getPermissionLevel(normalizedFeature);
-      return meetsPermissionLevel(level, 'view');
+      return meetsFamilyLevel('tenant_store', level, 'view');
     }
 
     return false;
@@ -451,7 +412,13 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const getAvailableRoles = () => ({ platform: platformRolesState, tenant: tenantRolesState });
 
   const addPlatformRole = (role: EmployeeRole) => {
-    setPlatformRolesState(prev => [...prev, role]);
+    setPlatformRolesState(prev => {
+      // Same rule as addTenantRole: never an id a platform or store role already uses.
+      const taken = new Set([...prev, ...tenantRolesState].map(r => r.id));
+      let id = role.id;
+      for (let n = 2; taken.has(id); n++) id = `${role.id}_${n}`;
+      return [...prev, { ...role, id }];
+    });
   };
 
   const updatePlatformRole = (roleId: string, permissions: Record<string, PermissionLevel> | string[]) => {
@@ -459,7 +426,14 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   };
 
   const addTenantRole = (role: EmployeeRole) => {
-    setTenantRolesState(prev => [...prev, role]);
+    setTenantRolesState(prev => {
+      // Roles are looked up by id everywhere, so a new role never takes an id a store or platform role
+      // already uses: a duplicate would share or shadow that role's levels and money grants.
+      const taken = new Set([...prev, ...platformRolesState].map(r => r.id));
+      let id = role.id;
+      for (let n = 2; taken.has(id); n++) id = `${role.id}_${n}`;
+      return [...prev, { ...role, id }];
+    });
   };
 
   const updateTenantRole = (roleId: string, permissions: Record<string, PermissionLevel> | string[]) => {
@@ -470,15 +444,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     if (pin !== '1234') return false;
     const supervisorRole = tenantRolesState.find(r => r.id === supervisorId);
     if (!supervisorRole) return false;
-    const refundLevel = resolvePermissionLevel(supervisorRole, 'refunds');
-    if (!meetsPermissionLevel(refundLevel, 'approve')) return false;
-    // Explicit approve_refunds entry must be absent or exactly true; present
-    // and anything else (false, 'false', null, 1, ...) denies.
-    if (
-      supervisorRole.subPermissions &&
-      Object.prototype.hasOwnProperty.call(supervisorRole.subPermissions, 'approve_refunds') &&
-      supervisorRole.subPermissions['approve_refunds'] !== true
-    ) return false;
+    // The same refund-approval capability checkSubPermission('approve_refunds') decides: plan, the
+    // Refunds parent-module minimum, and the explicit grant (exactly true). No level grants it.
+    if (!decideSupervisorRefundApproval(decisionInput, supervisorId)) return false;
     const names: Record<string, string> = { store_owner: 'Store Owner', manager: 'Manager' };
     setSupervisorRefundAuth({ active: true, supervisorName: names[supervisorId] || supervisorRole.name });
     return true;

@@ -14,6 +14,12 @@
 // bare FEATURE or DOMAIN key ('command_center', 'sales') is deliberately NOT a route permission: it
 // names a level, and a level without a threshold is not a decidable requirement.
 //
+// M5-GAP11-P5 UPDATE. The one-global-ordering plan described below was superseded: tenant/store and
+// platform permissions keep family-specific orderings (src/authorization/permissionFamilies.ts) and
+// money actions are explicit editable grants. The tenant/store refusal STAYS: a store-scope route is
+// undecidable here until owner decision D1 names a specific route and its authoritative product rules
+// — the catalogue is not broadened merely to close GAP-11. The history of the refusal follows.
+//
 // GAP-11 — WHY TENANT AND STORE SCOPES ARE UNDECIDABLE HERE. docs/phase-4/04 §3 records two
 // conflicting level orderings: the tenant engine ranks `manage < approve`, the platform engine ranks
 // `approve < manage`, and the canonical decision is to adopt ONE ordering — the platform one. That
@@ -85,7 +91,7 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
 
 /** The one message a refusal to evaluate the tenant plane carries, so every caller says the same thing. */
 export const GAP_11_TENANT_ORDERING_UNRESOLVED =
-  'tenant and store permissions are undecidable until the GAP-11 ordering unification and its six safeguards land (docs/phase-4/04 section 3)';
+  'tenant and store permissions are undecidable until owner decision D1 defines a specific route and its authoritative product rules (docs/phase-4/04 section 3, M5-GAP11-P5)';
 
 /**
  * The canonical permission for (scope, key), or null. Exact and case-sensitive: no trimming, no

@@ -53,7 +53,7 @@ const dupes = (arr: string[]): string[] => {
 
 // Extract a `[ ... ]` token list following a named const in a source string.
 function extractArray(src: string, constName: string): string[] {
-  const re = new RegExp(`${constName}[^=]*=\\s*\\[([^\\]]*)\\]`);
+  const re = new RegExp(`${constName}[^=]*=\\s*(?:Object\\.freeze\\()?\\[([^\\]]*)\\]`);
   const m = re.exec(src);
   if (!m) return [];
   return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
@@ -81,12 +81,15 @@ check('2a tenant ordering exact (manage < approve)', JSON.stringify([...TENANT_O
 check('2b platform ordering exact (approve < manage)', JSON.stringify([...PLATFORM_ORDERING]) === JSON.stringify(platformExpected), PLATFORM_ORDERING.join('<'));
 check('2c 7-token vocabulary present', PERMISSION_TOKENS.length === 7 && new Set(PERMISSION_TOKENS).size === 7, PERMISSION_TOKENS.join(','));
 
+// M5-GAP11-P5: both orderings live in ONE family contract that the frontend and the catalog both import,
+// so parity is read from that module (the frontend's PERMISSION_HIERARCHY / PLATFORM_PERMISSION_LEVELS
+// are now the same arrays, re-exported).
 const accessConfigSrc = read('src/context/accessConfig.ts');
-const platformConfigSrc = read('src/owner/platformPermissionsConfig.ts');
-const feHierarchy = extractArray(accessConfigSrc, 'PERMISSION_HIERARCHY');
-const feePlatform = extractArray(platformConfigSrc, 'PLATFORM_PERMISSION_LEVELS');
-check('3a tenant ordering matches frontend PERMISSION_HIERARCHY (parity)', JSON.stringify(feHierarchy) === JSON.stringify([...TENANT_ORDERING]), feHierarchy.join('<') || 'not found');
-check('3b platform ordering matches frontend PLATFORM_PERMISSION_LEVELS (parity)', JSON.stringify(feePlatform) === JSON.stringify([...PLATFORM_ORDERING]), feePlatform.join('<') || 'not found');
+const familiesSrc = read('src/authorization/permissionFamilies.ts');
+const feHierarchy = extractArray(familiesSrc, 'TENANT_STORE_ORDERING');
+const feePlatform = extractArray(familiesSrc, 'PLATFORM_ORDERING');
+check('3a tenant ordering matches the family contract TENANT_STORE_ORDERING (parity)', JSON.stringify(feHierarchy) === JSON.stringify([...TENANT_ORDERING]), feHierarchy.join('<') || 'not found');
+check('3b platform ordering matches the family contract PLATFORM_ORDERING (parity)', JSON.stringify(feePlatform) === JSON.stringify([...PLATFORM_ORDERING]), feePlatform.join('<') || 'not found');
 
 // manage/approve must NOT be collapsed: orderings disagree on their relative order.
 const tManageIdx = TENANT_ORDERING.indexOf('manage');
@@ -214,9 +217,12 @@ check('9b materialized output carries no secret-like field', leakedInOut.length 
 // Inertness: catalog imports only inert modules (no DB/env/network/frontend).
 // Imports are real statements (never inside comments), so read from raw source.
 const catImports = [...catalogSrc.matchAll(/^import[\s\S]*?from '([^']+)'/gm)].map((m) => m[1]);
-const allowedCatImports = new Set(['./authorizationConstants', './authorizationContract']);
+// M5-GAP11-P5: plus the two PURE authorization contracts under src/authorization (no runtime imports).
+const allowedCatImports = new Set(['./authorizationConstants', './authorizationContract',
+  '../../src/authorization/permissionFamilies', '../../src/authorization/moneyCapabilities']);
 check('9c catalog imports only inert modules', catImports.length > 0 && catImports.every((i) => allowedCatImports.has(i)), `imports=[${catImports.join(', ')}]`);
-check('9d catalog imports no frontend (src/)', !/from '[^']*\/src\//.test(codeOnly) && !/from 'src\//.test(codeOnly), 'no src import');
+check('9d catalog imports no frontend (src/) beyond the pure authorization contracts',
+  [...codeOnly.matchAll(/from '([^']*\/src\/[^']*)'/g)].every((m) => m[1].startsWith('../../src/authorization/')), 'only src/authorization');
 check('9e catalog performs no I/O', !/getDb|from 'postgres'|postgres\(|from 'express'|fetch\(|createClient|firebase|supabase|https?:\/\/|require\(/i.test(codeOnly), 'no io');
 
 // =============================================================================

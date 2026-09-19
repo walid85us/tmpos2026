@@ -16,17 +16,15 @@
 //     vocabulary as a documented mirror so the server contract does not import the
 //     client bundle. See DRIFT RISK below.
 //
-// SECURITY (binding): imports NOTHING. Reads NO env. No DB/Supabase/Firebase/
-// Express. References NO service-role key, DB URL, JWT secret, raw token, JWKS,
-// or connection string. Server-side only; never imported by the client bundle at
-// runtime.
+// SECURITY (binding): its ONLY import is the pure permission-family contract
+// (src/authorization/permissionFamilies.ts — no runtime imports of its own). Reads
+// NO env. No DB/Supabase/Firebase/Express. References NO service-role key, DB URL,
+// JWT secret, raw token, JWKS, or connection string. Server-side only; never
+// imported by the client bundle at runtime.
 //
-// ⚠ DRIFT RISK (documented, NOT resolved here): the level orderings and role ids
-// below intentionally mirror the client engine. They are ALSO mirrored in
-// server/platform-identity/permissionDecision.ts (which carries the same warning).
-// A FUTURE milestone should unify all three into ONE shared catalog imported by
-// BOTH src/ and server/. M9 only DECLARES that target (see
-// SHARED_PERMISSION_CATALOG_TARGET) — it does not build it.
+// DRIFT (M5-GAP11-P5): the two level orderings are no longer mirrored — they are
+// re-exported from the one family contract both src/ and server/ import. The role
+// ids below still mirror the client engine (documented, not resolved here).
 
 // =============================================================================
 // Contract versions + evaluator labels
@@ -124,27 +122,16 @@ export const PERMISSION_LEVEL_VALUES = [
 ] as const;
 export type PermissionLevelValue = (typeof PERMISSION_LEVEL_VALUES)[number];
 
-/** MIRRORS src/context/accessConfig.ts PERMISSION_HIERARCHY (note: manage < approve). */
-export const TENANT_PERMISSION_ORDERING: readonly PermissionLevelValue[] = [
-  'none',
-  'view',
-  'create',
-  'edit',
-  'manage',
-  'approve',
-  'full',
-] as const;
-
-/** MIRRORS src/owner/platformPermissionsConfig.ts PLATFORM_PERMISSION_LEVELS (note: approve < manage). */
-export const PLATFORM_PERMISSION_ORDERING: readonly PermissionLevelValue[] = [
-  'none',
-  'view',
-  'create',
-  'edit',
-  'approve',
-  'manage',
-  'full',
-] as const;
+/**
+ * The two family orderings (M5-GAP11-P5) are no longer mirrored here: they are re-exported from the
+ * ONE canonical family contract, src/authorization/permissionFamilies.ts — a pure module (no runtime
+ * imports, no DOM, no env) that the client and this server tree both use, so no second rank table
+ * exists to drift. Tenant/store: manage < approve. Platform: approve < manage.
+ */
+export {
+  TENANT_STORE_ORDERING as TENANT_PERMISSION_ORDERING,
+  PLATFORM_ORDERING as PLATFORM_PERMISSION_ORDERING,
+} from '../../src/authorization/permissionFamilies';
 
 // =============================================================================
 // Role ids (mirror; duplicated, NOT imported from the client engine)

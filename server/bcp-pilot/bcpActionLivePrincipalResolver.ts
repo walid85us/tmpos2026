@@ -12,7 +12,7 @@ import type { SyntheticServerPrincipal, BcpVisibilityClass } from './bcpAuthoriz
 import type { ScopeType } from '../platform-identity/requestContext';
 import type { PermissionLevelValue } from '../platform-identity/authorizationConstants';
 import { ACCOUNT_STATUS_VALUES, PLATFORM_ROLE_IDS, STATUS_DENY_BEFORE_ROLE } from '../platform-identity/authorizationConstants';
-import { PLATFORM_FEATURE_KEYS, PLATFORM_ORDERING } from '../platform-identity/permissionCatalog';
+import { PLATFORM_FEATURE_KEYS, permissionLevelRank } from '../platform-identity/permissionCatalog';
 import type { FirebaseVerifyResult } from '../platform-identity/firebaseAdminAuthAdapter';
 import type { ProviderSubjectLookupResult } from '../platform-identity/identityRepository';
 
@@ -92,7 +92,7 @@ function derivePlatformLevel(permissions: Record<string, string>): PermissionLev
   let minRank = Number.POSITIVE_INFINITY;
   let minLevel: PermissionLevelValue | null = null;
   for (const v of values) {
-    const rank = PLATFORM_ORDERING.indexOf(v as PermissionLevelValue);
+    const rank = permissionLevelRank('platform', v); // platform family (M5-GAP11-P5)
     if (rank < 0) return null; // unrecognized level ⇒ fail closed
     if (rank < minRank) { minRank = rank; minLevel = v as PermissionLevelValue; }
   }

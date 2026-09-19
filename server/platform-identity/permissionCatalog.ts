@@ -9,11 +9,12 @@
 //
 // PURE / INERT (binding):
 //   - No DB, no env, no network, no Express, no Supabase, no Firebase, no audit,
-//     no side effects, no process.env, no I/O. It imports ONLY the inert M9
-//     constants (one runtime import for the two orderings) and `import type` from
-//     the M9 contract (erased at compile time).
-//   - It does NOT import any frontend file (src/**). It MIRRORS the frozen client
-//     engines by read-only parity (see PARITY SOURCES) — it never imports them.
+//     no side effects, no process.env, no I/O. Its runtime imports are the two
+//     PURE authorization contracts under src/authorization (permission families,
+//     money capabilities — no imports of their own, no DOM) and `import type` from
+//     the M9 constants/contract (erased at compile time).
+//   - It imports no other frontend file (src/**). It MIRRORS the client engines'
+//     catalog data by read-only parity (see PARITY SOURCES) — it never imports them.
 //   - Imported at runtime by authorizationResolver.ts, and (M5-GAP11-P1-R1) by
 //     permissionDecision.ts, whose level comparisons now delegate here so one
 //     deny-by-default rule serves both. Never by the client bundle, the M7 route,
@@ -46,11 +47,28 @@
 // ⚠ TWO ORDERINGS ARE INTENTIONAL (binding): tenant/store ordering keeps
 // `manage < approve`; platform ordering keeps `approve < manage`. They are NOT
 // unified. Collapsing them is a correctness bug.
+//
+// M5-GAP11-P5 — FAMILY CONTRACT + MONEY CAPABILITIES. Every level comparison here
+// delegates to the canonical family contract (src/authorization/permissionFamilies.ts)
+// with its family named; this module holds no rank table. The money capabilities
+// (approve_refunds, approve_return, approve_billing_actions) are decided by their
+// explicit grant (src/authorization/moneyCapabilities.ts): no owner short-circuit and
+// no default-by-level for them. Those two pure modules (no runtime imports, no DOM,
+// no env) are the only src/ files this module imports.
 
 import {
-  TENANT_PERMISSION_ORDERING,
-  PLATFORM_PERMISSION_ORDERING,
-} from './authorizationConstants';
+  TENANT_STORE_ORDERING,
+  PLATFORM_ORDERING as PLATFORM_FAMILY_ORDERING,
+  meetsFamilyLevel,
+  permissionLevelRank,
+} from '../../src/authorization/permissionFamilies';
+import {
+  PLATFORM_MONEY_PARENT_MINIMUM,
+  builtInMoneyGrants,
+  hasExplicitMoneyGrant,
+  isPlatformMoneyCapability,
+  isTenantMoneyCapability,
+} from '../../src/authorization/moneyCapabilities';
 import type {
   PermissionLevelValue,
   PlatformRoleId,
@@ -79,11 +97,14 @@ export const PERMISSION_TOKENS: readonly Level[] = [
   'full',
 ] as const;
 
-/** Tenant/store ordering: none < view < create < edit < manage < approve < full. */
-export const TENANT_ORDERING: readonly Level[] = TENANT_PERMISSION_ORDERING;
+/** Tenant/store ordering: none < view < create < edit < manage < approve < full (the family contract's). */
+export const TENANT_ORDERING: readonly Level[] = TENANT_STORE_ORDERING;
 
-/** Platform ordering: none < view < create < edit < approve < manage < full. */
-export const PLATFORM_ORDERING: readonly Level[] = PLATFORM_PERMISSION_ORDERING;
+/** Platform ordering: none < view < create < edit < approve < manage < full (the family contract's). */
+export const PLATFORM_ORDERING: readonly Level[] = PLATFORM_FAMILY_ORDERING;
+
+/** Rank of a level within a family, -1 when not canonical — the family contract's, re-exported. */
+export { permissionLevelRank };
 
 /**
  * True only for one of the seven canonical tokens, exactly: no trimming, no case folding, no
@@ -94,30 +115,22 @@ export function isPermissionLevel(value: unknown): value is Level {
   return typeof value === 'string' && (PERMISSION_TOKENS as readonly string[]).includes(value);
 }
 
-/** The level's rank, or -1 for anything that is not exactly a canonical token (null, undefined included). */
-function rankIn(order: readonly Level[], level: unknown): number {
-  return isPermissionLevel(level) ? order.indexOf(level) : -1;
-}
-
 /**
- * Mirrors accessConfig.meetsPermissionLevel — uses the TENANT ordering. DENY-BY-DEFAULT: a held or
- * required level that is not canonical clears nothing. (Until M5-GAP11-P1-R1 an unknown level ranked
- * as `none`, so a requirement nobody could name was satisfied by every holder.)
+ * The TENANT/STORE family comparison — meetsFamilyLevel('tenant_store', …), the same one the client's
+ * meetsPermissionLevel uses. DENY-BY-DEFAULT: a held or required level that is not canonical clears
+ * nothing. (Until M5-GAP11-P1-R1 an unknown level ranked as `none`, so a requirement nobody could name
+ * was satisfied by every holder.)
  */
 export function meetsTenantPermissionLevel(actual: Level, required: Level): boolean {
-  const a = rankIn(TENANT_ORDERING, actual);
-  const r = rankIn(TENANT_ORDERING, required);
-  return a >= 0 && r >= 0 && a >= r;
+  return meetsFamilyLevel('tenant_store', actual, required);
 }
 
 /**
- * Mirrors platformPermissionsConfig.platformPermissionMeets — PLATFORM ordering, same deny-by-default
- * rule. A canonical holder still clears a `none` threshold, because every canonical rank is >= 0.
+ * The PLATFORM family comparison — meetsFamilyLevel('platform', …), the same one the client's
+ * platformPermissionMeets uses. A canonical holder still clears a `none` threshold.
  */
 export function meetsPlatformPermissionLevel(actual: Level, threshold: Level): boolean {
-  const a = rankIn(PLATFORM_ORDERING, actual);
-  const t = rankIn(PLATFORM_ORDERING, threshold);
-  return a >= 0 && t >= 0 && a >= t;
+  return meetsFamilyLevel('platform', actual, threshold);
 }
 
 // =============================================================================
@@ -129,12 +142,12 @@ export function meetsPlatformPermissionLevel(actual: Level, threshold: Level): b
  * is returned unchanged — never turned into `none` or `view` — so the comparison it reaches denies it.
  */
 export function capTenantLevelForReadOnly(level: Level): Level {
-  return rankIn(TENANT_ORDERING, level) > rankIn(TENANT_ORDERING, 'view') ? 'view' : level;
+  return permissionLevelRank('tenant_store', level) > permissionLevelRank('tenant_store', 'view') ? 'view' : level;
 }
 
-/** Platform-ordering variant of the read-only level cap. */
+/** Platform-family variant of the read-only level cap. */
 export function capPlatformLevelForReadOnly(level: Level): Level {
-  return rankIn(PLATFORM_ORDERING, level) > rankIn(PLATFORM_ORDERING, 'view') ? 'view' : level;
+  return permissionLevelRank('platform', level) > permissionLevelRank('platform', 'view') ? 'view' : level;
 }
 
 // =============================================================================
@@ -496,16 +509,20 @@ export const TENANT_ROLE_PERMISSION_DEFAULTS: Readonly<
 };
 
 // Explicit per-role sub-permission grants (mirror tenantRoles[].subPermissions).
-// store_owner is intentionally absent (owner short-circuit). manager/technician/
-// sales_staff carry an explicit boolean for every tenant sub.
+// store_owner is intentionally absent (owner short-circuit for non-money subs; its
+// money grants come from the built-in defaults like every role's). manager/technician/
+// sales_staff carry an explicit boolean for every tenant sub — the money ones spread
+// from the one defaults table (src/authorization/moneyCapabilities.ts).
 export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
   Record<Exclude<TenantRoleId, 'store_owner'>, Readonly<Record<string, boolean>>>
 > = {
   manager: {
+    // Money capabilities: the built-in default grants (src/authorization/moneyCapabilities.ts).
+    ...builtInMoneyGrants('manager'),
     manage_employees: true, manage_attendance: true, create_roles: true, edit_roles: true,
     manage_role_permissions: true, assign_roles: true, assign_manager_role: false,
     approve_requests: false, manage_compensation: true, approve_inventory: false,
-    manage_warranty_claims: true, process_refunds: true, approve_refunds: true,
+    manage_warranty_claims: true, process_refunds: true,
     process_expired_warranty: true, loyalty_customer_edit: true, loyalty_settings_manage: true,
     reopen_invoice: true, assign_technician: true, adjust_stock: true, create_inventory_items: true,
     manage_transfers: true, manage_purchase_orders: true, manage_trade_ins: true,
@@ -517,7 +534,7 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
     configure_shipping_provider: true, manage_carrier_locator_settings: true,
     validate_shipping_address: true, fetch_shipping_rates: true, purchase_shipping_label: true,
     print_shipping_label: true, sync_shipping_tracking: true, create_return: true,
-    approve_return: true, receive_return: true, inspect_return: true,
+    receive_return: true, inspect_return: true,
     complete_return_disposition: true, cancel_return: true, create_return_shipment: true,
     manage_shipping_automation_rules: true, view_shipping_automation_results: true,
     view_shipping_automation_outcomes: true, resolve_shipping_automation_reviews: true,
@@ -531,10 +548,12 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
     // not explicitly listed on the manager role default → default-by-level applies.
   },
   technician: {
+    // Money capabilities: the built-in default grants (src/authorization/moneyCapabilities.ts).
+    ...builtInMoneyGrants('technician'),
     manage_employees: false, manage_attendance: false, create_roles: false, edit_roles: false,
     manage_role_permissions: false, assign_roles: false, assign_manager_role: false,
     approve_requests: false, manage_compensation: false, approve_inventory: false,
-    manage_warranty_claims: false, process_refunds: false, approve_refunds: false,
+    manage_warranty_claims: false, process_refunds: false,
     process_expired_warranty: false, loyalty_customer_edit: false, loyalty_settings_manage: false,
     reopen_invoice: false, assign_technician: false, adjust_stock: true, create_inventory_items: true,
     manage_transfers: false, manage_purchase_orders: false, manage_trade_ins: false,
@@ -546,7 +565,7 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
     configure_shipping_provider: false, manage_carrier_locator_settings: false,
     validate_shipping_address: false, fetch_shipping_rates: false, purchase_shipping_label: false,
     print_shipping_label: false, sync_shipping_tracking: false, create_return: false,
-    approve_return: false, receive_return: false, inspect_return: false,
+    receive_return: false, inspect_return: false,
     complete_return_disposition: false, cancel_return: false, create_return_shipment: false,
     manage_shipping_automation_rules: false, view_shipping_automation_results: false,
     view_shipping_automation_outcomes: false, resolve_shipping_automation_reviews: false,
@@ -558,10 +577,12 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
     resolve_shipping_sla_exceptions: false, edit_shipping_sla_delay_reasons: false,
   },
   sales_staff: {
+    // Money capabilities: the built-in default grants (src/authorization/moneyCapabilities.ts).
+    ...builtInMoneyGrants('sales_staff'),
     manage_employees: false, manage_attendance: false, create_roles: false, edit_roles: false,
     manage_role_permissions: false, assign_roles: false, assign_manager_role: false,
     approve_requests: false, manage_compensation: false, approve_inventory: false,
-    manage_warranty_claims: false, process_refunds: false, approve_refunds: false,
+    manage_warranty_claims: false, process_refunds: false,
     process_expired_warranty: false, loyalty_customer_edit: false, loyalty_settings_manage: false,
     reopen_invoice: false, assign_technician: false, adjust_stock: false, create_inventory_items: false,
     manage_transfers: false, manage_purchase_orders: false, manage_trade_ins: false,
@@ -573,7 +594,7 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
     configure_shipping_provider: false, manage_carrier_locator_settings: false,
     validate_shipping_address: false, fetch_shipping_rates: false, purchase_shipping_label: false,
     print_shipping_label: false, sync_shipping_tracking: false, create_return: false,
-    approve_return: false, receive_return: false, inspect_return: false,
+    receive_return: false, inspect_return: false,
     complete_return_disposition: false, cancel_return: false, create_return_shipment: false,
     manage_shipping_automation_rules: false, view_shipping_automation_results: false,
     view_shipping_automation_outcomes: false, resolve_shipping_automation_reviews: false,
@@ -885,6 +906,13 @@ export function materializeTenantSubPermissions(
     const required = requiredEntitlementsForTenantSub(sub);
     if (!required.every((k) => ent[k] === true)) {
       granted = false;
+    } else if (isTenantMoneyCapability(sub.id)) {
+      // Money capability (M5-GAP11-P5): no owner short-circuit and no default-by-level. The parent
+      // minimum still denies; then only the role's explicit grant (its built-in default here — the
+      // server has no owner edits) can allow. store_owner holds `true` by default like any grant.
+      const parent = tenantEntitledDomainLevel(r, sub.parentDomain, ent);
+      granted = meetsTenantPermissionLevel(parent, sub.minModuleLevel)
+        && hasExplicitMoneyGrant(builtInMoneyGrants(r), sub.id);
     } else if (r === 'store_owner') {
       // 2) Owner short-circuit, AFTER plan gating.
       granted = true;
@@ -943,7 +971,14 @@ function platformSubAllowedByDefaults(
   const def = PLATFORM_SUB_BY_ID.get(subId);
   if (!def) return false; // unknown sub → fail closed
   const level = role === 'system_owner' ? 'full' : platformFeatureLevel(role, def.feature);
-  if (!meetsPlatformPermissionLevel(level, def.threshold)) return false;
+  if (isPlatformMoneyCapability(subId)) {
+    // Money capability (M5-GAP11-P5): the parent feature at View or above is a denying gate only;
+    // the threshold is not consulted, and only the role's explicit grant (its built-in default) allows.
+    if (!meetsPlatformPermissionLevel(level, PLATFORM_MONEY_PARENT_MINIMUM)) return false;
+    if (!hasExplicitMoneyGrant(builtInMoneyGrants(role), subId)) return false;
+  } else if (!meetsPlatformPermissionLevel(level, def.threshold)) {
+    return false;
+  }
   const deps = PLATFORM_PERMISSION_DEPENDENCIES[subId] ?? [];
   for (const dep of deps) {
     if (visiting.has(dep)) continue; // cycle guard

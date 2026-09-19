@@ -1,17 +1,22 @@
 import { EmployeeRole, PermissionLevel } from '../types';
+import { TENANT_STORE_ORDERING, meetsFamilyLevel } from '../authorization/permissionFamilies';
+import { builtInMoneyGrants } from '../authorization/moneyCapabilities';
 
 export type Role = 'system_owner' | 'support_admin' | 'billing_admin' | 'operations_admin' | 'security_admin' | 'store_owner' | 'manager' | 'technician' | 'sales_staff';
 export type Plan = 'starter' | 'growth' | 'advanced';
 export type AccountStatus = 'active' | 'trialing' | 'overdue' | 'suspended' | 'read_only' | 'pending_activation';
 
-export const PERMISSION_HIERARCHY: PermissionLevel[] = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+/** The tenant/store family ordering (src/authorization/permissionFamilies.ts) — the store editors' level order. */
+export const PERMISSION_HIERARCHY: readonly PermissionLevel[] = TENANT_STORE_ORDERING;
 
+/**
+ * The tenant/store-family comparison, kept under its existing public name for the deployed store
+ * callers. It is exactly meetsFamilyLevel('tenant_store', …): `approve` satisfies `manage`, `manage`
+ * does not satisfy `approve`, and a non-canonical level on either side denies. Platform permissions
+ * never use it — they compare in the platform family.
+ */
 export function meetsPermissionLevel(actual: PermissionLevel, required: PermissionLevel): boolean {
-  // Deny-by-default on unknowns: an unranked (non-canonical) level ranks -1 on
-  // both sides, so it can never satisfy or be satisfied by anything.
-  const a = PERMISSION_HIERARCHY.indexOf(actual);
-  const r = PERMISSION_HIERARCHY.indexOf(required);
-  return a >= 0 && r >= 0 && a >= r;
+  return meetsFamilyLevel('tenant_store', actual, required);
 }
 
 export const PERMISSION_DOMAINS = [
@@ -419,6 +424,8 @@ export const tenantRoles: EmployeeRole[] = [
   {
     id: 'store_owner', name: 'Store Owner',
     permissions: { _grant: 'full' } as Record<string, PermissionLevel>,
+    // Money capabilities are explicit grants even for the owner (built-in defaults, M5-GAP11-P5).
+    subPermissions: { ...builtInMoneyGrants('store_owner') },
     description: 'Full system access'
   },
   {
@@ -447,6 +454,8 @@ export const tenantRoles: EmployeeRole[] = [
       returns: 'manage',
     } as Record<string, PermissionLevel>,
     subPermissions: {
+      // Money capabilities: built-in default grants (explicit, editable), never implied by a level.
+      ...builtInMoneyGrants('manager'),
       manage_employees: true,
       manage_attendance: true,
       create_roles: true,
@@ -459,7 +468,6 @@ export const tenantRoles: EmployeeRole[] = [
       approve_inventory: false,
       manage_warranty_claims: true,
       process_refunds: true,
-      approve_refunds: true,
       process_expired_warranty: true,
       loyalty_customer_edit: true,
       loyalty_settings_manage: true,
@@ -493,7 +501,6 @@ export const tenantRoles: EmployeeRole[] = [
       print_shipping_label: true,
       sync_shipping_tracking: true,
       create_return: true,
-      approve_return: true,
       receive_return: true,
       inspect_return: true,
       complete_return_disposition: true,
@@ -547,6 +554,8 @@ export const tenantRoles: EmployeeRole[] = [
       returns: 'view',
     } as Record<string, PermissionLevel>,
     subPermissions: {
+      // Money capabilities: built-in default grants (explicit, editable), never implied by a level.
+      ...builtInMoneyGrants('technician'),
       manage_employees: false,
       manage_attendance: false,
       create_roles: false,
@@ -559,7 +568,6 @@ export const tenantRoles: EmployeeRole[] = [
       approve_inventory: false,
       manage_warranty_claims: false,
       process_refunds: false,
-      approve_refunds: false,
       process_expired_warranty: false,
       loyalty_customer_edit: false,
       loyalty_settings_manage: false,
@@ -593,7 +601,6 @@ export const tenantRoles: EmployeeRole[] = [
       print_shipping_label: false,
       sync_shipping_tracking: false,
       create_return: false,
-      approve_return: false,
       receive_return: false,
       inspect_return: false,
       complete_return_disposition: false,
@@ -647,6 +654,8 @@ export const tenantRoles: EmployeeRole[] = [
       returns: 'view',
     } as Record<string, PermissionLevel>,
     subPermissions: {
+      // Money capabilities: built-in default grants (explicit, editable), never implied by a level.
+      ...builtInMoneyGrants('sales_staff'),
       manage_employees: false,
       manage_attendance: false,
       create_roles: false,
@@ -659,7 +668,6 @@ export const tenantRoles: EmployeeRole[] = [
       approve_inventory: false,
       manage_warranty_claims: false,
       process_refunds: false,
-      approve_refunds: false,
       process_expired_warranty: false,
       loyalty_customer_edit: false,
       loyalty_settings_manage: false,
@@ -693,7 +701,6 @@ export const tenantRoles: EmployeeRole[] = [
       print_shipping_label: false,
       sync_shipping_tracking: false,
       create_return: false,
-      approve_return: false,
       receive_return: false,
       inspect_return: false,
       complete_return_disposition: false,

@@ -532,7 +532,7 @@ test('a deployed route may require only a canonical platform permission, and sta
   // A key that is not even a permission SHAPE never reaches the catalog: the route table refuses it
   // first, so case is rejected twice over.
   assert.throws(() => uncataloguedRoutePermissions([route('View_Command_Center', 'platform')]), /route_policy_invalid/);
-  // A real tenant key is undecidable until GAP-11's ordering unification and its six safeguards land.
+  // A real tenant key is undecidable until owner decision D1 defines a specific route (M5-GAP11-P5).
   assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'tenant')]), ['route_permission_undecidable']);
   assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'store')]), ['route_permission_undecidable']);
   // A public route declares no permission and needs none.

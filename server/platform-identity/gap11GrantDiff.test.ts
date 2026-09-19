@@ -1,4 +1,7 @@
-// Phase 4.0 M5-GAP11-P1 — the authorization matrix (04 §3 safeguards #2, #4 and #6).
+// Phase 4.0 M5-GAP11-P1 — the authorization matrix, now a HISTORICAL record of the (rejected)
+// global-ordering candidate (04 §3 safeguards #2, #4 and #6). M5-GAP11-P5 superseded the global-ordering
+// cutover this matrix evaluated with family-specific orderings (src/authorization/permissionFamilies.ts);
+// the candidate evaluators here stay observational and decide nothing live.
 //
 // HOW THIS SUITE AVOIDS CERTIFYING ITSELF. The diff reports that only 13 of 1659 tuples change, and
 // most of those 1659 come out identical under both evaluators. A suite that obtained its expected

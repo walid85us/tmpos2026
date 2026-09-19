@@ -352,7 +352,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // or the store is `read_only` or `overdue` — may not perform one, and that limiting is applied
     // here rather than left to a caller who might forget it.
     if (context !== null && context.limitation !== 'none') return UNAVAILABLE;
-    // Until GAP-11's ordering unification lands, and until the audit writer carries the tenant RLS
+    // Until owner decision D1 defines a tenant/store route (M5-GAP11-P5), and until the audit writer carries the tenant RLS
     // context, only a PLATFORM-scope context commits here; a tenant- or store-scoped one is refused
     // rather than audited at a scope this transaction cannot prove.
     if (context !== null && context.scope !== 'platform') return UNAVAILABLE;

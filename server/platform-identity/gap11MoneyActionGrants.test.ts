@@ -1,10 +1,13 @@
-// Phase 4.0 M5-GAP11-P2 — owner decision D2 in the candidate: explicit per-role money-action grants.
+// Phase 4.0 M5-GAP11-P2/P5 — owner decision D2, historical record of the (rejected) candidate re-pin,
+// now reclassified as the record of the BUILT-IN DEFAULT money-action grants.
 //
 // D2: an approval-gated money action requires an explicit per-role grant. An explicit `true` is
 // required; `false`, missing, malformed or unknown denies; no level — `approve`, `manage`, `full` —
 // and no ordering comparison grants one by itself; the grant is necessary but never sufficient; and
-// the initial values preserve today's authoritative answer. This suite proves each of those against
-// the candidate (evaluateAfterRepinCandidate), which stays observational.
+// the initial values preserve the authoritative answer at the time. This suite proves each of those
+// against the (rejected, historical) candidate (evaluateAfterRepinCandidate), which stays observational
+// and decides nothing live — live money-approval defaults are src/authorization/moneyCapabilities.ts
+// BUILT_IN_MONEY_GRANT_DEFAULTS, and runtime authority is each role's own runtime configuration.
 //
 // As in the matrix suite, the expectations are PINNED AS LITERAL DATA — the seventeen tuples and their
 // values are written out by hand — so a defect that moved the table and the evaluator together could
@@ -17,7 +20,7 @@ import {
   CANONICAL_GRANT_UNIVERSE,
   CANONICAL_DIFF_CONTEXT,
   FULLY_ENTITLED,
-  D2_EXPLICIT_MONEY_ACTION_GRANTS,
+  D2_DEFAULT_MONEY_ACTION_GRANTS,
   D2_MONEY_ACTIONS,
   auditExplicitMoneyGrants,
   candidateMeetsLevel,
@@ -30,7 +33,7 @@ import {
   heldLevelFor,
   normalizedAuthorizationInputs,
   type CanonicalGrantTuple,
-  type D2ExplicitMoneyGrant,
+  type D2DefaultMoneyGrant,
   type GrantEvaluationContext,
 } from './gap11GrantDiff';
 import {
@@ -77,8 +80,8 @@ const tupleAt = (l: string): CanonicalGrantTuple => {
   return t;
 };
 
-const entryAt = (l: string): D2ExplicitMoneyGrant => {
-  const g = D2_EXPLICIT_MONEY_ACTION_GRANTS.find((x) => label(x) === l);
+const entryAt = (l: string): D2DefaultMoneyGrant => {
+  const g = D2_DEFAULT_MONEY_ACTION_GRANTS.find((x) => label(x) === l);
   assert.ok(g !== undefined, `no grant ${l}`);
   return g;
 };
@@ -86,7 +89,7 @@ const entryAt = (l: string): D2ExplicitMoneyGrant => {
 /** The committed table with one entry replaced (or removed, when `replacement` is undefined). */
 const withEntry = (l: string, replacement?: unknown): unknown[] => {
   const out: unknown[] = [];
-  for (const g of D2_EXPLICIT_MONEY_ACTION_GRANTS) {
+  for (const g of D2_DEFAULT_MONEY_ACTION_GRANTS) {
     if (label(g) !== l) out.push(g);
     else if (replacement !== undefined) out.push(replacement);
   }
@@ -125,12 +128,12 @@ test('the money-action catalogue is exactly the seventeen documented tuples, and
   assert.deepEqual({ refund: byOp('refund_approval'), ret: byOp('return_approval'), billing: byOp('platform_billing_approval') },
     { refund: 8, ret: 4, billing: 5 });
 
-  assert.deepEqual(Object.fromEntries(D2_EXPLICIT_MONEY_ACTION_GRANTS.map((g) => [label(g), g.granted])), PINNED_EXPLICIT);
-  assert.deepEqual(auditExplicitMoneyGrants(D2_EXPLICIT_MONEY_ACTION_GRANTS), { ok: true, problems: [] });
+  assert.deepEqual(Object.fromEntries(D2_DEFAULT_MONEY_ACTION_GRANTS.map((g) => [label(g), g.granted])), PINNED_EXPLICIT);
+  assert.deepEqual(auditExplicitMoneyGrants(D2_DEFAULT_MONEY_ACTION_GRANTS), { ok: true, problems: [] });
   // One entry per tuple, in universe order, frozen at every level, every value a real boolean.
-  assert.deepEqual(D2_EXPLICIT_MONEY_ACTION_GRANTS.map(label), MONEY.map(label));
-  assert.equal(Object.isFrozen(D2_EXPLICIT_MONEY_ACTION_GRANTS), true);
-  for (const g of D2_EXPLICIT_MONEY_ACTION_GRANTS) {
+  assert.deepEqual(D2_DEFAULT_MONEY_ACTION_GRANTS.map(label), MONEY.map(label));
+  assert.equal(Object.isFrozen(D2_DEFAULT_MONEY_ACTION_GRANTS), true);
+  for (const g of D2_DEFAULT_MONEY_ACTION_GRANTS) {
     assert.equal(Object.isFrozen(g), true);
     assert.equal(typeof g.granted, 'boolean');
   }
@@ -140,7 +143,7 @@ test('each explicit value equals the shipped authority, and the catalog\'s own p
   for (const t of MONEY) {
     const pinned = PINNED_EXPLICIT[label(t)];
     assert.equal(evaluateBefore(t, CTX), pinned ? 'granted' : 'denied', `authority: ${label(t)}`);
-    assert.equal(explicitMoneyGrantFor(D2_EXPLICIT_MONEY_ACTION_GRANTS, t), pinned, `table: ${label(t)}`);
+    assert.equal(explicitMoneyGrantFor(D2_DEFAULT_MONEY_ACTION_GRANTS, t), pinned, `table: ${label(t)}`);
   }
   // The non-owner tenant roles already carry explicit catalog booleans for the two money subs; the D2
   // table repeats them, so the re-pin changes how those tuples are decided, not their answer.
@@ -185,12 +188,12 @@ test('no approve-level mapping becomes a money action by its threshold, and no o
   assert.equal(answered, 1659 - 17);
   // A grant written for an approve-level tuple no document names is refused, and cannot allow it.
   const rogue = { plane: 'tenant', stratum: 'domain_threshold', role: 'sales_staff', scope: 'returns', action: 'require:approve', granted: true };
-  const audit = auditExplicitMoneyGrants([...D2_EXPLICIT_MONEY_ACTION_GRANTS, rogue]);
+  const audit = auditExplicitMoneyGrants([...D2_DEFAULT_MONEY_ACTION_GRANTS, rogue]);
   assert.equal(audit.ok, false);
   assert.ok(audit.problems.some((p) => p.includes('not a money action')), audit.problems.join('; '));
   const t = tupleAt('tenant/domain_threshold/sales_staff/returns/require:approve');
   assert.equal(t.d2Classification, 'unresolved');
-  assert.equal(evaluateAfterRepinCandidate(t, CTX, [...D2_EXPLICIT_MONEY_ACTION_GRANTS, rogue]), 'denied');
+  assert.equal(evaluateAfterRepinCandidate(t, CTX, [...D2_DEFAULT_MONEY_ACTION_GRANTS, rogue]), 'denied');
 });
 
 test('every money action needs its explicit grant: `approve`, `manage` and `full` holders are denied without one', () => {
@@ -209,7 +212,7 @@ test('every money action needs its explicit grant: `approve`, `manage` and `full
   assert.equal(held('tenant/domain_threshold/manager/refunds/require:approve'), 'approve');
   assert.equal(held('tenant/sub_permission/manager/returns/approve_return'), 'manage');
   assert.equal(candidateMeetsLevel('manage', 'approve'), true, 'control: manage clears approve on the unified ordering');
-  const allFalse = D2_EXPLICIT_MONEY_ACTION_GRANTS.map((g) => ({ ...g, granted: false }));
+  const allFalse = D2_DEFAULT_MONEY_ACTION_GRANTS.map((g) => ({ ...g, granted: false }));
   assert.equal(auditExplicitMoneyGrants(allFalse).ok, true, 'a sound table that grants nothing');
   for (const t of MONEY) assert.equal(evaluateAfterRepinCandidate(t, CTX, allFalse), 'denied', label(t));
 });
@@ -231,12 +234,12 @@ test('missing, false, malformed and unknown grants deny — and an unsound table
     ['boxed true', withEntry(first, { ...entry, granted: Object(true) }), 'not a boolean'],
     ['throwing getter', withEntry(first, throwingGrant), 'cannot be read'],
     ['not an object', withEntry(first, 'grant'), 'not an object'],
-    ['duplicate, same value', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, entry], 'duplicate grant'],
-    ['unknown role', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, { ...entry, role: 'super_admin' }], 'names no canonical tuple'],
-    ['unknown action', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, { ...entry, action: 'approve_everything' }], 'names no canonical tuple'],
-    ['padded role', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, { ...entry, role: ` ${entry.role}` }], 'names no canonical tuple'],
-    ['NUL in a field', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, { ...entry, scope: `${entry.scope}${String.fromCharCode(0)}` }], 'names no canonical tuple'],
-    ['wrong plane', [...D2_EXPLICIT_MONEY_ACTION_GRANTS, { ...entry, plane: entry.plane === 'tenant' ? 'platform' : 'tenant' }], 'names no canonical tuple'],
+    ['duplicate, same value', [...D2_DEFAULT_MONEY_ACTION_GRANTS, entry], 'duplicate grant'],
+    ['unknown role', [...D2_DEFAULT_MONEY_ACTION_GRANTS, { ...entry, role: 'super_admin' }], 'names no canonical tuple'],
+    ['unknown action', [...D2_DEFAULT_MONEY_ACTION_GRANTS, { ...entry, action: 'approve_everything' }], 'names no canonical tuple'],
+    ['padded role', [...D2_DEFAULT_MONEY_ACTION_GRANTS, { ...entry, role: ` ${entry.role}` }], 'names no canonical tuple'],
+    ['NUL in a field', [...D2_DEFAULT_MONEY_ACTION_GRANTS, { ...entry, scope: `${entry.scope}${String.fromCharCode(0)}` }], 'names no canonical tuple'],
+    ['wrong plane', [...D2_DEFAULT_MONEY_ACTION_GRANTS, { ...entry, plane: entry.plane === 'tenant' ? 'platform' : 'tenant' }], 'names no canonical tuple'],
   ];
   for (const [why, table, problem] of tables) {
     const audit = auditExplicitMoneyGrants(table);
@@ -367,7 +370,7 @@ test('a getter that rewrites JavaScript built-ins cannot make a table grant what
   try {
     // 1. An all-`false` table whose first entry's getter rewrites Map lookups to answer `true`, drops
     //    every push and passes every `every` — while itself reading `false`.
-    const allFalse = D2_EXPLICIT_MONEY_ACTION_GRANTS.map((g) => ({ ...g, granted: false }));
+    const allFalse = D2_DEFAULT_MONEY_ACTION_GRANTS.map((g) => ({ ...g, granted: false }));
     Object.defineProperty(allFalse[0], 'granted', {
       get() {
         Map.prototype.get = function poisoned() { return true; } as never;
@@ -391,7 +394,7 @@ test('a getter that rewrites JavaScript built-ins cannot make a table grant what
     restore();
     // 3. A table missing its last entry, whose first getter drops every push, fakes every freeze as a
     //    clean audit and makes every string replace throw: it must still audit unsound, without throwing.
-    const short = D2_EXPLICIT_MONEY_ACTION_GRANTS.slice(0, 16).map((g) => ({ ...g }));
+    const short = D2_DEFAULT_MONEY_ACTION_GRANTS.slice(0, 16).map((g) => ({ ...g }));
     Object.defineProperty(short[0], 'granted', {
       get() {
         Array.prototype.push = function poisoned() { return 0; } as never;
@@ -562,7 +565,7 @@ test('the table and the post-D2 diff are deterministic, frozen, and fingerprinte
   assert.equal(Object.isFrozen(d), true);
   assert.equal(Object.isFrozen(d.rows), true);
   assert.ok(d.rows.every((r) => Object.isFrozen(r)));
-  const inputs = JSON.parse(normalizedAuthorizationInputs()) as { d2: { explicitGrants: D2ExplicitMoneyGrant[] } };
+  const inputs = JSON.parse(normalizedAuthorizationInputs()) as { d2: { explicitGrants: D2DefaultMoneyGrant[] } };
   assert.deepEqual(inputs.d2.explicitGrants.map((g) => `${label(g)}=${g.granted}`),
-    D2_EXPLICIT_MONEY_ACTION_GRANTS.map((g) => `${label(g)}=${g.granted}`), 'a changed grant value is a stale artifact');
+    D2_DEFAULT_MONEY_ACTION_GRANTS.map((g) => `${label(g)}=${g.granted}`), 'a changed grant value is a stale artifact');
 });

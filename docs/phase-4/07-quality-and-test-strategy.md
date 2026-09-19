@@ -13,7 +13,7 @@
 
 | Layer | What it proves | When |
 |---|---|---|
-| **Pure unit** | domain logic, resolvers, comparators (incl. the **unified permission comparator**, [04](./04-canonical-iam-and-four-user-migration.md)) | M2 + every domain |
+| **Pure unit** | domain logic, resolvers, family-aware comparators (incl. the **family-aware permission contract**, [04](./04-canonical-iam-and-four-user-migration.md)) | M2 + every domain |
 | **Authorization matrix** | every (role × scope × domain × action) → allow/deny; parity/cap; suspended/plan-disabled fail closed | M2 (framework), M5 (canonical), each M7 |
 | **Database repository** | CRUD + constraints + FKs + optimistic concurrency against a real DB | M3 + each M7 |
 | **Migration** | forward+rollback apply cleanly; up/down symmetry; no data loss | M3 + each migration |
@@ -24,7 +24,7 @@
 | **Browser accessibility** | WCAG basics on tenant + admin SPAs | M8 |
 | **Tenant-isolation** | tenant A cannot read/write tenant B; store roles cannot escape store | M5 + each M7 (**hard gate**) |
 | **RLS negative** | the scoped app role **cannot** read/write another tenant, cannot touch audit tables, and cannot operate without tenant context (proves RLS, not just "policies exist") | M3/M5 + each M7 (**hard gate**) |
-| **Security behavior** | authn/authz, unified permission-ordering, CSRF, MFA/step-up, SSRF egress allow/deny-list, webhook signature verification, audit immutability (UPDATE/DELETE rejected) | M2/M4/M8 |
+| **Security behavior** | authn/authz, family-aware permission semantics, CSRF, MFA/step-up, SSRF egress allow/deny-list, webhook signature verification, audit immutability (UPDATE/DELETE rejected) | M2/M4/M8 |
 | **SAST + dependency (SCA)** | static code flaws + third-party vulnerabilities on every PR | **M2 (G-APPSEC)** |
 | **DAST** | runtime vulnerability scan against staging | M8 (G-APPSEC) |
 | **Provider adapter** | egress uses allowlisted hosts; no request-controlled URL; webhook signature verified | M7e/M8 |

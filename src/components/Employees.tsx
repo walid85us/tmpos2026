@@ -3,10 +3,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Employee, EmployeeTimeLog, EmployeeActivityLog,
-  EmployeeCommission, EmployeePayroll, PermissionLevel
+  EmployeeCommission, EmployeePayroll, PermissionLevel, EmployeeRole
 } from '../types';
 import { useAccess } from '../context/AccessContext';
-import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS, getSubPermissionsForDomain, getDomainsWithSubPermissions, meetsPermissionLevel, isSubPermissionPlanAvailable, getFeatureGatesForSubPermission } from '../context/accessConfig';
+import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS, getSubPermissionsForDomain, getDomainsWithSubPermissions, isSubPermissionPlanAvailable, getFeatureGatesForSubPermission, type SubPermissionDef } from '../context/accessConfig';
+import { subPermissionMatrixStatus } from '../context/tenantAccessDecisions';
+import { isTenantMoneyCapability } from '../authorization/moneyCapabilities';
 import PendingApproval from './PendingApproval';
 
 const MOCK_EMPLOYEES: Employee[] = [
@@ -793,19 +795,11 @@ export default function Employees() {
     return role.permissions?.[domainId] || 'none';
   };
 
-  const resolveSubPermGranted = (role: any, actionId: string, parentDomainId: string, minModuleLevel: string, defaultLevel: string): 'granted' | 'denied' | 'na' => {
-    const parentLevel = resolveRoleLevel(role, parentDomainId);
-    const parentIdx = PERMISSION_HIERARCHY.indexOf(parentLevel as any);
-    const minIdx = PERMISSION_HIERARCHY.indexOf(minModuleLevel as any);
-    if (parentIdx < minIdx) return 'na';
-
-    if (role.subPermissions && actionId in role.subPermissions) {
-      return role.subPermissions[actionId] ? 'granted' : 'denied';
-    }
-
-    const defaultIdx = PERMISSION_HIERARCHY.indexOf(defaultLevel as any);
-    return parentIdx >= defaultIdx ? 'granted' : 'denied';
-  };
+  // The matrix shows exactly what the runtime check decides for this role configuration
+  // (tenantAccessDecisions.subPermissionMatrixStatus): tenant/store-family comparisons, and money
+  // capabilities shown by their explicit grant only.
+  const resolveSubPermGranted = (role: EmployeeRole, sub: SubPermissionDef): 'granted' | 'denied' | 'na' =>
+    subPermissionMatrixStatus(role, sub);
 
   const renderPermissions = () => {
     const domainsWithSubs = getDomainsWithSubPermissions();
@@ -935,13 +929,15 @@ export default function Employees() {
                               {sub.label}
                             </span>
                             <span className="block text-[9px] text-slate-400 font-medium mt-0.5 ml-4">
-                              {`Default at ${LEVEL_LABELS[sub.defaultLevel]}+ · Requires ${domain.label} access`}
+                              {isTenantMoneyCapability(sub.id)
+                                ? `Money approval · explicit grant only (never implied by a level) · Requires ${domain.label} access`
+                                : `Default at ${LEVEL_LABELS[sub.defaultLevel]}+ · Requires ${domain.label} access`}
                             </span>
                           </td>
                           {tenantRolesState.map(role => {
                             const isStoreOwnerRole = role.id === 'store_owner';
                             const isLocked = isStoreOwnerRole || (session?.role === 'manager' && (role.id === 'manager' || !checkSubPermission('manage_role_permissions')));
-                            const status = isStoreOwnerRole ? 'granted' : resolveSubPermGranted(role, sub.id, sub.parentDomain, sub.minModuleLevel, sub.defaultLevel);
+                            const status = isStoreOwnerRole ? 'granted' : resolveSubPermGranted(role, sub);
 
                             return (
                               <td key={role.id} className="px-4 py-2.5 text-center">
@@ -1400,11 +1396,14 @@ export default function Employees() {
                             </select>
                           </div>
                           {expandedCreateDomains.has(domain.id) && domainSubs.map(sub => {
-                            const parentIdx = PERMISSION_HIERARCHY.indexOf(currentLevel as any);
-                            const minIdx = PERMISSION_HIERARCHY.indexOf(sub.minModuleLevel);
-                            const isActive = parentIdx >= minIdx;
-                            const defaultIdx = PERMISSION_HIERARCHY.indexOf(sub.defaultLevel);
-                            const isGranted = newRole.subPermissions[sub.id] ?? (isActive && parentIdx >= defaultIdx);
+                            // The preview is the decision the new role will get: tenant/store family,
+                            // and a money capability only when explicitly granted here.
+                            const previewStatus = subPermissionMatrixStatus(
+                              { id: 'new_role_preview', name: newRole.name, permissions: newRole.permissions, subPermissions: newRole.subPermissions },
+                              sub,
+                            );
+                            const isActive = previewStatus !== 'na';
+                            const isGranted = previewStatus === 'granted';
                             return (
                               <div key={sub.id} className={`flex items-center justify-between pl-8 pr-3 py-2 rounded-lg border ml-4 ${isActive ? 'bg-white border-slate-200' : 'bg-slate-50/50 border-slate-100'}`}>
                                 <span className={`text-[11px] font-bold flex items-center gap-1.5 ${isActive ? 'text-slate-600' : 'text-slate-300'}`}>

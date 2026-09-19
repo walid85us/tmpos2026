@@ -169,7 +169,11 @@ test('an unknown kind, feature, domain, sub-permission or level is a 403 — eve
     assert.deepEqual(Object.keys(r.body).sort(), ['actionId', 'decision', 'reasonCode', 'requestId'], why);
   }
   // Control for the tenant kind, so the refusals above are the vocabulary, not the kind.
-  assert.equal((await call({ kind: 'tenant', domain: 'refunds', level: 'approve' }, tenantActor('store_owner'))).status, 200);
+  assert.equal((await call({ kind: 'tenant', domain: 'refunds', level: 'full' }, tenantActor('store_owner'))).status, 200);
+  // M5-GAP11-P5: Refunds at Approve is the retired level form of refund approval — refused, owner included.
+  const levelForm = await call({ kind: 'tenant', domain: 'refunds', level: 'approve' }, tenantActor('store_owner'));
+  assert.equal(levelForm.status, 403);
+  assert.equal(levelForm.body.reasonCode, 'denied_money_level_form');
   // Each refusal is audited with the decision's own reason code.
   const codes = log.map((l) => l[1]).filter((e): e is Record<string, unknown> => typeof e === 'object' && e !== null)
     .map((e) => e.reasonCode);
@@ -253,7 +257,14 @@ test('an unknown role and a malformed held level deny through the wrapper; canon
   }
   // The dev adapter hands the decision the snapshot AS ASSERTED: a revoke written as a string, a padded
   // role and a non-string level are refused, not tidied into an absent entry or a canonical id.
-  assert.equal((await call(subReq, tenantActor('manager', { refunds: 'approve' }, {}))).status, 200, 'control: no entry, default applies');
+  // M5-GAP11-P5: a money capability has no default — no entry is no grant.
+  const noGrant = await call(subReq, tenantActor('manager', { refunds: 'approve' }, {}));
+  assert.equal(noGrant.status, 403, 'no explicit money grant: denied');
+  assert.equal(noGrant.body.reasonCode, 'denied_missing_grant');
+  const nonMoney = TENANT_SUB_PERMISSIONS.find((s) => s.id === 'process_refunds')!;
+  assert.equal((await call({ kind: 'sub', subPermissionId: nonMoney.id,
+    subDef: { parentDomain: nonMoney.parentDomain, minModuleLevel: nonMoney.minModuleLevel, defaultLevel: nonMoney.defaultLevel, planAvailable: true } },
+  tenantActor('manager', { refunds: 'approve' }, {}))).status, 200, 'control: a non-money sub with no entry still takes its default');
   const malformedGrant = await call(subReq, tenantActor('manager', { refunds: 'approve' }, { approve_refunds: 'false' as never }));
   assert.equal(malformedGrant.status, 403);
   assert.equal(malformedGrant.body.reasonCode, 'denied_malformed_snapshot');

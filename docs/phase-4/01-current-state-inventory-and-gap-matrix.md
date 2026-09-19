@@ -176,7 +176,7 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 | GAP-08 | C | No durable business persistence — all POS/inventory/invoice/repair/customer/etc. writes lost on reload. | M7a–e | G-PERSIST |
 | GAP-09 | C | No tenant/store isolation — `tenant-1` hardcoded; global seed; no `tenantId` scoping in the app. | M5/M7 | G-ISOLATION |
 | GAP-10 | C | Four noncanonical Firebase users hold client-presentation roles only; no canonical principal. | M5 | G-4USER |
-| GAP-11 | H | Two conflicting permission-level orderings (`manage↔approve` swapped) across tenant vs platform code. | M5 | G-IAMUNIFY |
+| GAP-11 | H | Two conflicting permission-level orderings (`manage↔approve` swapped) across tenant vs platform code. | M5 | G-IAMUNIFY — **CLOSED at repository level (M5-GAP11-P5):** one family-aware permission contract replaces the planned single ordering. Tenant/store and platform permissions use separate, authoritative orderings implemented through the canonical family contract (`src/authorization/permissionFamilies.ts`). Every comparison names its family; unknown/malformed family or level denies; cross-family comparison is refused. Money actions are explicit editable boolean capabilities (src/authorization/moneyCapabilities.ts). Intended-outcome tests for edited and custom roles delivered. |
 | GAP-12 | H | Plan/feature entitlements & platform permissions are `sessionStorage`-authoritative and forgeable. | M5/M7f | G-ENTITLE |
 | GAP-13 | H | Suspended/inactive/read-only/overdue status not enforced client-side; `isWriteBlocked` = preview mode only. | M5 | G-STATUS |
 | GAP-14 | H | Webhook ingest/replay has no provider-signature verification. | M8 | G-WEBHOOK |
