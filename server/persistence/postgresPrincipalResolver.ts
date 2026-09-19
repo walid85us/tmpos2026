@@ -15,8 +15,8 @@
 //
 // AUTHORITY. The runtime role holds no privilege on platform_identity, app_user, identity_link or the
 // version helper (migration 005 section 8; migration 007 section 4). This file names none of them: it
-// reaches trusted identity only through 007's two entry routines, which run as the schema's owner and
-// answer one bounded row. A caller cannot ask for an actor — it asks about a provider reference the
+// reaches trusted identity only through 007's resolution routine and 009's platform-authority routine
+// (M5-GIAM-D1-P1-R1), which run as their schema's owner and answer one bounded row. A caller cannot ask for an actor — it asks about a provider reference the
 // authentication boundary already verified, and the database decides what that names.
 //
 // NOTHING IS LOGGED. The provider reference is bound as a parameter and never appears in a message,
@@ -50,8 +50,6 @@ const UNAVAILABLE: PrincipalResolution = Object.freeze({ outcome: 'unavailable' 
 const PROVIDERS: ReadonlySet<string> = new Set(['firebase', 'supabase']);
 /** The longest provider reference the routine accepts; a longer one is refused without a read. */
 const MAX_UID_LENGTH = 255;
-/** A role id as migration 003 pins it — the grammar principals.ts validates a scope's own role with. */
-const ROLE_RE = /^[a-z_]{1,64}$/;
 /**
  * A syntactically valid reference that names nobody. Readiness must exercise the whole lookup —
  * platform_identity, then app_user, then the version helper — so a definer routine that has lost a
@@ -120,32 +118,34 @@ function principalOf(row: Row): PrincipalResolution | null {
 }
 
 /**
- * Re-read an actor's authority INSIDE the caller's transaction, on the caller's own statement handle.
+ * Re-read a platform actor's authority INSIDE the caller's transaction, on the caller's own statement
+ * handle (M5-GIAM-D1-P1-R1), through migration 009's m5_revalidate_platform_authority.
  *
  * It is deliberately a plain function over a transaction scope rather than a port method: it must run
  * on the SAME transaction as the mutation it guards, and a port that owned its own transaction could
- * not. The store calls it after the idempotency fence and before any business state.
+ * not. The store calls it, through the revalidator the composition root builds, after the idempotency
+ * fence and before any business state.
  *
- * Answers the role the database still grants at that exact scope, or null for every failure —
- * suspended account, moved version, withdrawn membership, suspended tenant or store, a scope that was
- * never this actor's, or a malformed answer. One value for all of them: a caller cannot tell which.
+ * True only when the database still holds EXACTLY the authority the scope was selected under: the account
+ * neither denied nor read-only, the security version equal, exactly one active platform grant, and that
+ * grant the scope's own membership with the scope's own role — locked, so a change racing the command waits
+ * for it. False for every failure — a suspended or read-only account, a moved version, a grant withdrawn,
+ * added, duplicated, replaced or re-roled, a scope that is not platform, a malformed answer — one value for
+ * all of them: a caller cannot tell which. It supersedes 007's m5_revalidate_principal_context, which takes
+ * the first grant at the scope and so could answer for a grant the request was never authorized under.
  */
-export async function revalidateTrustedScope(sql: PgTransactionScope, scope: TrustedScope): Promise<string | null> {
-  if (!isTrustedScope(scope)) return null;
+export async function revalidatePlatformAuthority(sql: PgTransactionScope, scope: TrustedScope): Promise<boolean> {
+  if (!isTrustedScope(scope) || scope.scope !== 'platform') return false;
   try {
-    const rows = await sql`select outcome, granted_role_id from tmpos_identity.m5_revalidate_principal_context(
-      ${scope.actor}::uuid, ${scope.securityVersion}::text, ${scope.scope}::text, ${scope.tenant}::uuid, ${scope.store}::uuid)`;
-    const row = onlyRow(rows, ['outcome', 'granted_role_id']);
-    if (row === null || row.outcome !== 'valid') return null;
-    const role = row.granted_role_id;
-    // The same grammar the scope's own role was checked against: a value the database hands back is
-    // not trusted more loosely than the one it is about to be compared with.
-    return typeof role === 'string' && ROLE_RE.test(role) ? role : null;
+    const rows = await sql`select outcome from tmpos_command.m5_revalidate_platform_authority(
+      ${scope.actor}::uuid, ${scope.securityVersion}::text, ${scope.membershipId}::uuid, ${scope.roleId}::text)`;
+    const row = onlyRow(rows, ['outcome']);
+    return row !== null && row.outcome === 'valid';
   } catch {
     // A statement or connection error carries a SQLSTATE, a hint, a schema and a host:port. None of
     // that crosses this boundary: the caller learns the one value every other failure gives it. The
     // transaction is the caller's, and its rollback is the kernel's.
-    return null;
+    return false;
   }
 }
 

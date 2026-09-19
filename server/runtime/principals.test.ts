@@ -33,14 +33,16 @@ test('a request acts only under a grant the database already recorded, at exactl
   assert.equal(platform.outcome, 'selected');
   assert.deepEqual(platform.outcome === 'selected' ? platform.scope : null, {
     actor: ACTOR, securityVersion: VERSION, scope: 'platform', tenant: null, store: null,
-    roleId: 'system_owner', limitation: 'none',
-  });
+    membershipId: PLATFORM.membershipId, roleId: 'system_owner', limitation: 'none',
+  }, 'the scope names the very grant selected, so the transaction can require exactly it (M5-GIAM-D1-P1-R1)');
 
   const tenant = selectScope(p, 'tenant', { tenant: TENANT_A, store: null });
   assert.equal(tenant.outcome === 'selected' && tenant.scope.roleId, 'manager');
+  assert.equal(tenant.outcome === 'selected' && tenant.scope.membershipId, TENANT.membershipId);
 
   const store = selectScope(p, 'store', { tenant: TENANT_A, store: STORE_A });
   assert.equal(store.outcome === 'selected' && store.scope.roleId, 'technician');
+  assert.equal(store.outcome === 'selected' && store.scope.membershipId, STORE.membershipId);
 });
 
 test('a selector that names something the actor does not hold is refused, whatever it names', () => {
@@ -132,5 +134,7 @@ test('a scope the store is asked to revalidate must be one selection could have 
     { ...scope, store: null }, //      a store scope must carry both
     { ...scope, roleId: 'Technician' },
     { ...scope, limitation: 'partial' },
+    { ...scope, membershipId: undefined }, // no grant named: nothing for the transaction to require exactly
+    { ...scope, membershipId: 'technician' },
   ]) assert.equal(isTrustedScope(broken), false, String(JSON.stringify(broken)).slice(0, 80));
 });

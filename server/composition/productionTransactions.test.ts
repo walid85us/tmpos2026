@@ -604,7 +604,38 @@ test('the composed authorizer decides over the composed resolver: the one the bo
   const granted = await decide('support_admin') as { granted: boolean; context: Record<string, unknown> };
   assert.equal(granted.granted, true);
   assert.deepEqual({ ...granted.context }, {
-    actor: ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null, roleId: 'support_admin', limitation: 'none',
-  }, 'the grant carries the resolved actor and role');
+    actor: ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
+    membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId: 'support_admin', limitation: 'none',
+  }, 'the grant carries the resolved actor, the very grant selected and its role');
   assert.equal(await decide('billing_admin'), false, 'a role below Edit on tenant_management is denied');
+});
+
+test('the store is composed with the platform revalidator: migration 009\'s exact-authority routine, then the permission on the same roles', async () => {
+  // M5-GIAM-D1-P1-R1: not merely "a function" — the revalidator the boundary hands the store asks the database about the
+  // very grant selected, and re-decides the route's permission on that role, exactly as the composed authorizer decides it.
+  let revalidate: ((sql: never, scope: never, permission: string) => Promise<unknown>) | undefined;
+  const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
+  const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
+    client: () => stub as never,
+    store: (options) => { revalidate = options.revalidate as never; return createPostgresTransactionalStore(options); },
+    principals: (client) => createPostgresPrincipalResolver({ client }),
+  });
+  assert.ok(boundary !== null && revalidate !== undefined);
+  const texts: string[] = [];
+  const bound: unknown[][] = [];
+  const valid = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    texts.push(strings.join('?')); bound.push(values); return Promise.resolve([{ outcome: 'valid' }]);
+  }) as never;
+  const scope = (roleId: string) => Object.freeze({
+    actor: '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
+    membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId, limitation: 'none',
+  }) as never;
+  assert.equal(await revalidate(valid, scope('support_admin'), 'edit_tenant_profile'), true);
+  assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine');
+  assert.deepEqual(bound[0], ['6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', 'sv-1', '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', 'support_admin']);
+  assert.equal(await revalidate(valid, scope('billing_admin'), 'edit_tenant_profile'), false,
+    'the database confirming the grant does not make a View role an editor: the permission is decided again');
+  const invalid = (() => Promise.resolve([{ outcome: 'invalid' }])) as never;
+  assert.equal(await revalidate(invalid, scope('support_admin'), 'edit_tenant_profile'), false, 'and nothing holds once the database says invalid');
+  await boundary.close();
 });

@@ -54,13 +54,13 @@
 // driver message, statement, parameter, identifier or stack is kept, logged or returned.
 import { writeAuditEvent } from '../platform-identity/auditEventWriter';
 import { isTrustedScope } from '../runtime/principals.js';
-// A frozen copy of a trusted scope's seven scalar fields, or undefined when the value is not one.
+// A frozen copy of a trusted scope's eight scalar fields, or undefined when the value is not one.
 // Every field is read exactly once, so the context validated is the context committed under, and a
 // hostile getter cannot answer differently to the audit record and to the revalidation's parameters.
 const trustedScopeOf = (raw: unknown): TrustedScope | undefined => {
   if (!isTrustedScope(raw)) return undefined;
-  const { actor, securityVersion, scope, tenant, store, roleId, limitation } = raw;
-  const copy = Object.freeze({ actor, securityVersion, scope, tenant, store, roleId, limitation });
+  const { actor, securityVersion, scope, tenant, store, membershipId, roleId, limitation } = raw;
+  const copy = Object.freeze({ actor, securityVersion, scope, tenant, store, membershipId, roleId, limitation });
   return isTrustedScope(copy) ? copy : undefined;
 };
 import type { TrustedScope } from '../runtime/principals.js';
@@ -91,19 +91,23 @@ export interface AggregateMutator {
    * Apply the mutation on the open transaction through fixed, parameterized statements: 'applied' once
    * exactly its row was created (mode create) or moved from expectedVersion to the next (mode update), or
    * 'conflict' when that precondition does not hold. An update may also answer 'not_found' — its aggregate
-   * does not exist — or 'unchanged' — its changes already hold at expectedVersion, so it wrote nothing
-   * (M5-GIAM-D1-P1). Anything else — another answer, a throw — commits nothing.
+   * does not exist — or 'unchanged' — its changes already hold at expectedVersion, so it wrote nothing,
+   * and it holds the aggregate's row locked until the transaction ends, so the store's completion of the
+   * no-op is recorded at the moment it was decided (M5-GIAM-D1-P1-R1). Anything else — another answer, a
+   * throw — commits nothing.
    */
   readonly apply: (sql: PgStatement, mutation: TransactionMutation) => Promise<unknown>;
 }
 
 /**
- * Re-reads a command's trusted context on the committing transaction's own handle, answering the role
- * still granted at that exact scope or null for every failure (M5-ID-P1). The store is handed it
+ * Re-reads a command's trusted context on the committing transaction's own handle: exactly true only while
+ * the authority the command was authorized under still holds exactly — the actor, the security version, the
+ * very grant and role selected, and the route's `permission` decided again on that role's current
+ * definition (M5-GIAM-D1-P1-R1). Anything else, a throw included, commits nothing. The store is handed it
  * rather than owning it, so no authorization policy lives in persistence and a command can be proven
  * against a synthetic revalidator with no database at all.
  */
-export type ContextRevalidator = (sql: PgTransactionScope, scope: TrustedScope) => Promise<string | null>;
+export type ContextRevalidator = (sql: PgTransactionScope, scope: TrustedScope, permission: string) => Promise<boolean>;
 
 export interface TransactionalStoreOptions {
   readonly client: SupervisedPgClient;
@@ -151,7 +155,7 @@ const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
-const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'mutation', 'audit', 'events', 'context'];
+const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'mutation', 'audit', 'events', 'context'];
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
 const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId'];
 const EVENT_FIELDS: readonly string[] = [
@@ -159,6 +163,8 @@ const EVENT_FIELDS: readonly string[] = [
 ];
 /** Who the audit record says wrote it: this adapter, for a command the runtime chain authorized. */
 export const COMMAND_AUDIT_EVALUATED_BY = 'm6_postgres_command_transaction@v1';
+/** The aggregate type whose commands name their target as the audit record's subject tenant (migration 009). */
+const TENANT_AGGREGATE = 'tenant';
 
 /** Transaction-local bounds under a port deadline: lock waits, then any one statement, then an idle transaction. */
 const boundsUnder = (deadlineMs: number): TransactionBounds => Object.freeze({
@@ -319,9 +325,9 @@ interface EventDraft {
   readonly correlationId: string; readonly payload: ScalarRecord;
 }
 interface Command {
-  readonly scope: string; readonly lease: string; readonly response: string; readonly mutator: AggregateMutator;
-  readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput; readonly events: readonly EventDraft[];
-  readonly context: TrustedScope | null;
+  readonly scope: string; readonly lease: string; readonly response: string; readonly unchanged: string | null;
+  readonly mutator: AggregateMutator; readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput;
+  readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
 }
 
 
@@ -336,13 +342,15 @@ interface Command {
 function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
-    const { scope, lease, response, mutation, audit, events, context: rawContext } = raw;
+    const { scope, lease, response, unchanged, mutation, audit, events, context: rawContext } = raw;
     if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST;
     if (!isSealed(response) || response.length === 0 || !isRecord(mutation) || !hasExactKeys(mutation, MUTATION_FIELDS)) return UNAVAILABLE;
     const { kind, aggregateType, aggregateId, expectedVersion, changes: rawChanges } = mutation;
     const mutator = typeof kind === 'string' ? mutators.get(kind) : undefined;
     if (mutator === undefined || aggregateType !== mutator.aggregateType || typeof aggregateId !== 'string' || !UUID_RE.test(aggregateId)) return UNAVAILABLE;
     if (mutator.mode === 'create' ? expectedVersion !== null : !isInteger(expectedVersion, 1, Number.MAX_SAFE_INTEGER - 1)) return UNAVAILABLE;
+    // An unchanged response belongs to an update alone, and is sealed text exactly like the response.
+    if (unchanged !== null && (mutator.mode !== 'update' || !isSealed(unchanged) || unchanged.length === 0)) return UNAVAILABLE;
     const changes = scalarRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
     // The trusted context, read once. A command carries one or it does not; anything that is not a
@@ -400,12 +408,18 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       scopeType: 'platform', tenantId: null, storeId: null, actionId: kind as string, requiredPermission: permission, decision: 'allow',
       reasonCode: 'command_committed', humanReadableReason: 'An authorized command committed atomically with its idempotency completion and outbox events.',
       resultStatus: 'succeeded', sourceOfTruth: 'command_transaction', evaluatedBy: COMMAND_AUDIT_EVALUATED_BY, evidenceLevel: 'durable_compliance_event', metadata: {},
+      // The record's direct subject (migration 009): a tenant command's own target — the aggregate ID checked
+      // above, which its mutator locks and changes — never a value the caller's audit record names. So the
+      // record finds its tenant without the outbox event it shares a correlation with.
+      subjectTenantId: mutator.aggregateType === TENANT_AGGREGATE ? aggregateId : null,
     };
     // The mutator is handed this copy — the values checked above, frozen — never the caller's live object.
     const checked: TransactionMutation = Object.freeze({
       kind: mutator.kind, aggregateType: mutator.aggregateType, aggregateId, expectedVersion: expectedVersion as number | null, changes,
     });
-    return Object.freeze({ scope, lease, response, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context });
+    return Object.freeze({
+      scope, lease, response, unchanged: unchanged as string | null, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
+    });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
   }
@@ -420,20 +434,29 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   //     (M5-ID-P1; docs/phase-4/08 G-CPLOGIN). The lease is judged first and learns nothing about the
   //     actor, so a stale attempt still answers 'lease_lost' and no more. A context that no longer
   //     holds — a suspended account, a moved security version, a withdrawn membership, a suspended
-  //     tenant or store — rolls the whole transaction back: no mutation, no completion, no audit
+  //     tenant or store, a grant added, duplicated, replaced or re-roled, a permission the role no
+  //     longer carries — rolls the whole transaction back: no mutation, no completion, no audit
   //     record, no event. The refusal is 'unavailable', the same answer an outage gives, so nothing
-  //     distinguishes a revoked actor from a database that could not answer.
+  //     distinguishes a revoked actor from a database that could not answer. The permission is the
+  //     route's own requirement, which the runtime put on the audit record (M5-GIAM-D1-P1-R1).
   if (c.context !== null) {
     if (revalidate === null) return refuse(UNAVAILABLE);
-    const role = await revalidate(sql, c.context);
-    if (role === null || role !== c.context.roleId) return refuse(UNAVAILABLE);
+    if ((await revalidate(sql, c.context, c.audit.requiredPermission)) !== true) return refuse(UNAVAILABLE);
   }
-  // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent, or whose changes
-  //    already hold, wrote nothing: both roll back, so no completion, audit record or event exists for them.
+  // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent wrote nothing and
+  //    rolls back, so no completion, audit record or event exists for it.
   const applied = await c.mutator.apply(sql, c.mutation);
   if (applied === 'conflict') return refuse(CONFLICT);
   if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
-  if (c.mutator.mode === 'update' && applied === 'unchanged') return refuse(UNCHANGED);
+  // 2b. Changes already in place (M5-GIAM-D1-P1-R1): the mutator moved nothing and still holds the aggregate's row
+  //     locked, so the no-op's sealed response is recorded as the completion HERE, under the lease held since step 1,
+  //     and commits with the decision — no change can land between them, and a retry replays exactly it. Nothing
+  //     else is written: no audit record and no event, since nothing changed. A command with no unchanged response,
+  //     or a completion that does not hold, commits nothing.
+  if (c.mutator.mode === 'update' && applied === 'unchanged') {
+    if (c.unchanged === null) return refuse(UNAVAILABLE);
+    return (await completed(sql, c.scope, c.lease, c.unchanged)) ? UNCHANGED : refuse(UNAVAILABLE);
+  }
   if (applied !== 'applied') return refuse(UNAVAILABLE);
   // 3. The audit record, through the existing writer, on this transaction and nowhere else.
   const executor: AuditSqlExecutor = Object.assign((strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {

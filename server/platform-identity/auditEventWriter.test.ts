@@ -436,3 +436,47 @@ test('S3-W-16: a denial with no tenant context is recordable at scope none', asy
   assert.equal(r.calls[0].values[8], null);
   assert.equal(r.calls[0].values[9], null);
 });
+
+// ---------------------------------------------------------------------------
+// M5-GIAM-D1-P1-R1 — the record's direct subject (migration 009)
+// ---------------------------------------------------------------------------
+
+test('S3-W-17: a subject tenant is its own bound column; without one the statement is exactly the pre-009 one', async () => {
+  const withSubject = recorder();
+  const event = { ...baseEvent(), scopeType: 'platform' as const, tenantId: null, storeId: null, subjectTenantId: T1 };
+  const receipt = await writeAuditEvent(event, { executor: withSubject.executor });
+  const { strings, values, sql } = withSubject.calls[0];
+  assert.equal(withSubject.calls.length, 1, 'one statement');
+  assert.equal(values.length, 21);
+  assert.equal(strings.length, 22);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_tenant_id\s*\)/, 'the subject column follows metadata');
+  assert.ok(!strings.join(' ').includes(T1), 'bound as a value, never spliced into the text');
+  // The COMPLETE positional map of the subject variant, in column order — the same anti-transposition pin
+  // S3-W-10 applies to the other statement: a sample cannot catch a swap between two like-typed columns.
+  assert.equal(values[0], receipt.eventId, 'event_id is the id handed back in the receipt');
+  assert.deepEqual(values.slice(1, 19), [
+    AUDIT_CONTRACT_VERSION, event.requestId, event.traceId, event.actorInternalUserId, event.actorAuthProvider,
+    event.onBehalfOfInternalUserId, event.scopeType, event.tenantId, event.storeId, event.actionId,
+    event.requiredPermission, event.decision, event.reasonCode, event.humanReadableReason, event.resultStatus,
+    event.sourceOfTruth, event.evaluatedBy, event.evidenceLevel,
+  ]);
+  // (Distinctness of those values is S3-W-10's pin; a platform-scope event deliberately nulls tenant_id and store_id.)
+  assert.deepEqual(values[19], { __json: event.metadata ?? {} }, 'metadata still goes through the driver\'s json helper');
+  assert.equal(values[20], T1, 'and the subject is the last binding, its own column');
+  assert.deepEqual([values[7], values[8], values[9]], ['platform', null, null], 'the scope stays platform, naming no tenant_id');
+
+  for (const absent of [undefined, null]) {
+    const without = recorder();
+    await writeAuditEvent({ ...baseEvent(), subjectTenantId: absent }, { executor: without.executor });
+    assert.equal(without.calls[0].values.length, 20, `subject ${String(absent)}: 20 values`);
+    assert.ok(!without.calls[0].sql.includes('subject_tenant_id'), `subject ${String(absent)}: the column is not named`);
+  }
+});
+
+test('S3-W-18: a subject that is not a UUID is refused before any statement', async () => {
+  for (const subjectTenantId of ['not-a-uuid', '', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa', `${T1} `]) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), subjectTenantId }, { executor: r.executor }), AuditEventValidationError, JSON.stringify(subjectTenantId));
+    assert.equal(r.calls.length, 0, 'nothing sent');
+  }
+});

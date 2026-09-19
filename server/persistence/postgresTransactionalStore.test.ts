@@ -20,6 +20,7 @@ import { createIdempotencyKeyring } from '../runtime/idempotency.js';
 import { TEST_IDEMPOTENCY_KEY } from '../runtime/idempotencyStore.testkit.js';
 import { defineOutboxEvents } from '../runtime/outbox.js';
 import { TEST_CREATE, TEST_EVENTS } from '../runtime/transactionalOutbox.testkit.js';
+import { TENANT_DISPLAY_NAME_CONTRACT, TENANT_DISPLAY_NAME_EVENTS, planTenantDisplayName } from '../runtime/tenantDisplayName.js';
 
 const UNAVAILABLE = { outcome: 'unavailable' };
 const LEASE_LOST = { outcome: 'lease_lost' };
@@ -62,14 +63,15 @@ async function within(answer: Promise<unknown>, ms: number): Promise<unknown> {
  * driver would make to a dropped socket (doc 08, DA-15). `texts` is every statement handed over on the reserved connection, in
  * order; the statement the kernel opens a new pool's connection with answers and is not recorded.
  */
-function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error; spent?: () => number } = {}) {
+function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error; spent?: () => number; completion?: string } = {}) {
   let writesAfterLoss = 0;
   const texts: string[] = [];
+  const values: unknown[][] = [];
   let close: (err: Error) => void = () => undefined;
   const rowsFor = (text: string, values: readonly unknown[]): Record<string, unknown>[] => {
     if (text.includes('m6_command_fence')) return [{ held: values[1] === lease }];
     if (text.includes('m6_command_enqueue')) return [{ inserted: true }];
-    if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
+    if (text.includes('m6_idempotency_complete')) return [{ outcome: options.completion ?? 'completed' }];
     if (text.includes('m6_outbox_claim')) return [{ spent: options.spent?.() ?? 0, event_id: null }];
     return [{ ok: true }];
   };
@@ -82,7 +84,7 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
       inFlight?.reject(err);
       (driverOptions.onclose as (id: number) => void)(1);
     };
-    const build = (reservedConnection: boolean) => (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const build = (reservedConnection: boolean) => (strings: TemplateStringsArray, ...boundValues: unknown[]) => {
       const text = strings.join('$');
       let resolveFn: (v: unknown) => void = () => undefined;
       let rejectFn: (e: unknown) => void = () => undefined;
@@ -91,7 +93,7 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
       const query = {
         handler: (q: typeof query) => {
           if (closed) { writesAfterLoss++; return; }
-          if (reservedConnection) texts.push(text);
+          if (reservedConnection) { texts.push(text); values.push(boundValues); }
           inFlight = q;
           const failed = reservedConnection && options.failAt !== undefined && text.includes(options.failAt);
           const commitFails = text === 'commit' && options.commit !== undefined;
@@ -100,7 +102,7 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
             if (failed && options.lost === true) { rejectFn(options.error); close(options.error as Error); } // the statement first, then the close
             else if (failed) rejectFn(options.error);
             else if (commitFails) rejectFn(options.commit);
-            else { const rows = rowsFor(text, values); resolveFn(Object.assign(rows, { count: rows.length, command: text.split(/\s/)[0].toUpperCase() })); }
+            else { const rows = rowsFor(text, boundValues); resolveFn(Object.assign(rows, { count: rows.length, command: text.split(/\s/)[0].toUpperCase() })); }
           });
         },
         then: (a?: (v: unknown) => unknown, b?: (e: unknown) => unknown) => {
@@ -116,7 +118,7 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
     return Object.assign(build(false), { reserve: async () => reserved, end: async () => { closed = true; } }) as unknown as DriverPool;
   };
   const client = createSupervisedPgClient(driver, 'postgres://unit.invalid/db', { max: 1 });
-  return { transaction: client.transaction, end: client.end, writesAfterLoss: () => writesAfterLoss, lose: (err: Error) => close(err), texts };
+  return { transaction: client.transaction, end: client.end, writesAfterLoss: () => writesAfterLoss, lose: (err: Error) => close(err), texts, values };
 }
 
 const events = defineOutboxEvents(TEST_EVENTS);
@@ -126,7 +128,7 @@ const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 /** A trusted context as scope selection produces one: a platform actor with a security version. */
 const TRUSTED: TrustedScope = Object.freeze({
   actor: '11111111-1111-4111-8111-111111111111', securityVersion: 'a'.repeat(64),
-  scope: 'platform', tenant: null, store: null, roleId: 'system_owner', limitation: 'none',
+  scope: 'platform', tenant: null, store: null, membershipId: '55555555-5555-4555-8555-555555555555', roleId: 'system_owner', limitation: 'none',
 });
 
 /** A command exactly as the runtime prepares one. */
@@ -344,7 +346,12 @@ test('a trusted context is re-read after the fence and before any business state
   });
   const store = createPostgresTransactionalStore({
     client, mutators: [mutator],
-    revalidate: async (_sql, scope) => { order.push('revalidate'); assert.deepEqual(scope, TRUSTED); return 'system_owner'; },
+    revalidate: async (_sql, scope, permission) => {
+      order.push('revalidate');
+      assert.deepEqual(scope, TRUSTED);
+      assert.equal(permission, 'conformance.write', 'the route\'s own requirement, from the audit record the runtime built');
+      return true;
+    },
   });
 
   assert.deepEqual(await store.transactions.commit(c, live()), COMMITTED);
@@ -358,21 +365,23 @@ test('a lost lease refuses before the context is read at all', async () => {
   const c = command(TRUSTED);
   const store = createPostgresTransactionalStore({
     client: scripted('a'.repeat(43)), mutators: [CREATE_MUTATOR],
-    revalidate: async () => { asked = true; return 'system_owner'; },
+    revalidate: async () => { asked = true; return true; },
   });
   assert.deepEqual(await store.transactions.commit(c, live()), LEASE_LOST);
   assert.equal(asked, false, 'a stale attempt learns nothing about the actor');
 });
 
 test('a context that no longer holds commits nothing — no mutation, completion, audit or event', async () => {
-  for (const [label, answer] of [['revoked', null], ['a different role', 'support_admin']] as const) {
+  // Exactly true commits; false, a truthy value that is not true (a role name, as 007's routine answered) and a throw do not.
+  for (const [label, answer] of [['revoked', async () => false], ['a truthy non-boolean', async () => 'system_owner' as never],
+    ['a throw', async () => { throw new Error('M6-UNIT-CANARY revalidation fault'); }]] as const) {
     let applied = 0;
     const c = command(TRUSTED);
     const client = scripted(c.lease);
     const store = createPostgresTransactionalStore({
       client,
       mutators: [Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply: async () => { applied++; return 'applied'; } })],
-      revalidate: async () => answer,
+      revalidate: answer,
     });
     assert.deepEqual(await store.transactions.commit(c, live()), UNAVAILABLE, label);
     assert.equal(applied, 0, `${label}: no mutator runs`);
@@ -406,7 +415,7 @@ test('a context whose scope this transaction cannot prove is refused before any 
   ]) {
     const c = command(scope);
     const store = untouched();
-    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'manager' })
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => true })
       .transactions.commit(c, live()), UNAVAILABLE, scope.scope);
     assert.equal(store.begins(), 0, 'no transaction opens');
   }
@@ -418,7 +427,7 @@ test('a read-only context may not commit a command at all', async () => {
   for (const limitation of ['read_only'] as const) {
     const c = command({ ...TRUSTED, limitation });
     const store = untouched();
-    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => true })
       .transactions.commit(c, live()), UNAVAILABLE, limitation);
     assert.equal(store.begins(), 0, 'no transaction opens');
   }
@@ -431,7 +440,7 @@ test('an outbox event names no actor, tenant or store even under a trusted conte
   assert.deepEqual(c.events.map((e) => [e.tenant, e.store, e.actor]), c.events.map(() => [null, null, null]));
   assert.equal(c.audit.actor, TRUSTED.actor, 'the audit record does name it');
   const client = scripted(c.lease);
-  assert.deepEqual(await createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+  assert.deepEqual(await createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR], revalidate: async () => true })
     .transactions.commit(c, live()), COMMITTED);
 });
 
@@ -446,8 +455,109 @@ test('a command may not name an actor, tenant or store its context did not give 
   ];
   for (const raw of forged) {
     const store = untouched();
-    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => 'system_owner' })
+    assert.deepEqual(await createPostgresTransactionalStore({ client: store.client, mutators: [CREATE_MUTATOR], revalidate: async () => true })
       .transactions.commit(raw as TransactionCommand, live()), UNAVAILABLE, JSON.stringify(raw).slice(0, 60));
     assert.equal(store.begins(), 0);
   }
+});
+
+// ---------------------------------------------------------------------------
+// M5-GIAM-D1-P1-R1 — the no-op's completion, and the audit record's subject
+// ---------------------------------------------------------------------------
+
+const TARGET_TENANT = '66666666-6666-4666-8666-666666666666';
+const tenantEvents = defineOutboxEvents(TENANT_DISPLAY_NAME_EVENTS);
+
+/** A display-name command exactly as the runtime prepares one: an update whose plan names its unchanged response. */
+function renaming(context: TrustedScope | null = TRUSTED): TransactionCommand {
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+  });
+  const plan = planTenantDisplayName({ audience: 'admin', body: { tenantId: TARGET_TENANT, displayName: 'Acme', expectedVersion: 3 }, newAggregateId: randomUUID() });
+  const prepared = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, tenantEvents, plan, {
+    scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'platform', permission: 'edit_tenant_profile' }),
+    context, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null && prepared.command.unchanged !== null);
+  return prepared.command;
+}
+const tenantMutator = (answer: string): AggregateMutator => Object.freeze({
+  kind: TENANT_DISPLAY_NAME_CONTRACT.kind, mode: 'update', aggregateType: 'tenant', apply: async () => answer,
+});
+
+test('changes already in place commit exactly their sealed unchanged response as the completion, in the same transaction — no audit record, no event', async () => {
+  const c = renaming();
+  const client = scripted(c.lease);
+  const store = createPostgresTransactionalStore({ client, mutators: [tenantMutator('unchanged')], revalidate: async () => true });
+  assert.deepEqual(await store.transactions.commit(c, live()), { outcome: 'unchanged' });
+  const at = (name: string): number => client.texts.findIndex((t) => t.includes(name));
+  assert.ok(at('m6_command_fence') >= 0 && at('m6_command_fence') < at('m6_idempotency_complete'), 'the fence, then the completion, on one transaction');
+  assert.notEqual(c.unchanged, c.response);
+  assert.deepEqual(client.values[at('m6_idempotency_complete')], [c.scope, c.lease, c.unchanged],
+    'the sealed unchanged response, under this attempt\'s lease — never the response of a change');
+  for (const forbidden of ['m6_command_enqueue', 'insert into']) {
+    assert.ok(!client.texts.some((t) => t.toLowerCase().includes(forbidden)), `nothing changed, so no ${forbidden}`);
+  }
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit'], 'and the decision commits with its completion');
+});
+
+test('a no-op whose completion does not hold, or that carries no unchanged response, commits nothing', async () => {
+  for (const [label, c, completion] of [
+    ['a completion under a lease that no longer holds', renaming(), 'lease_lost'],
+    ['a completion answer the store does not know', renaming(), 'maybe'],
+    ['no unchanged response to record', { ...renaming(), unchanged: null }, 'completed'],
+  ] as const) {
+    const client = scripted(c.lease, { completion });
+    const store = createPostgresTransactionalStore({ client, mutators: [tenantMutator('unchanged')], revalidate: async () => true });
+    assert.deepEqual(await store.transactions.commit(c, live()), UNAVAILABLE, label);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], `${label}: rolled back, never committed`);
+  }
+  // With no response to record, nothing is even attempted: no completion statement reaches the store.
+  const noResponse = { ...renaming(), unchanged: null };
+  const client = scripted(noResponse.lease);
+  await createPostgresTransactionalStore({ client, mutators: [tenantMutator('unchanged')], revalidate: async () => true }).transactions.commit(noResponse, live());
+  assert.ok(!client.texts.some((t) => t.includes('m6_idempotency_complete')), 'no completion without an unchanged response');
+});
+
+test('an unchanged response belongs to an update alone, sealed exactly like the response — anything else is refused before a statement', async () => {
+  const create = command();
+  const update = renaming();
+  const { client, begins } = untouched();
+  const store = createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR, tenantMutator('applied')], revalidate: async () => true });
+  const { unchanged: _dropped, ...withoutField } = update;
+  for (const [label, raw] of [
+    ['a create carrying one', { ...create, unchanged: update.unchanged }],
+    ['one that is not sealed text', { ...update, unchanged: 'a=b' }],
+    ['an empty one', { ...update, unchanged: '' }],
+    ['one that is not text', { ...update, unchanged: 7 }],
+    ['a command without the field', withoutField],
+  ] as const) assert.deepEqual(await store.transactions.commit(raw as never, live()), UNAVAILABLE, label);
+  assert.equal(begins(), 0, 'not one of them opened a transaction');
+});
+
+test('the audit record names a tenant command\'s own target as its subject — no caller value, and no other command names one', async () => {
+  const c = renaming();
+  const client = scripted(c.lease);
+  assert.deepEqual(await createPostgresTransactionalStore({ client, mutators: [tenantMutator('applied')], revalidate: async () => true })
+    .transactions.commit(c, live()), COMMITTED);
+  const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
+  assert.ok(audit >= 0 && client.texts[audit].includes('subject_tenant_id'), 'the statement names the subject column');
+  const bound = client.values[audit];
+  assert.equal(bound[bound.length - 1], TARGET_TENANT, 'the subject is the command\'s own validated target');
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9]], [TRUSTED.actor, 'platform', null, null],
+    'the actor stays the trusted context\'s, the scope stays platform, and the scope still names no tenant');
+
+  // A command of another aggregate names no subject: its statement is the one every writer used before 009.
+  const other = command(TRUSTED);
+  const otherClient = scripted(other.lease);
+  assert.deepEqual(await createPostgresTransactionalStore({ client: otherClient, mutators: [CREATE_MUTATOR], revalidate: async () => true })
+    .transactions.commit(other, live()), COMMITTED);
+  const otherAudit = otherClient.texts.findIndex((t) => t.includes('insert into public.audit_event'));
+  assert.ok(otherAudit >= 0 && !otherClient.texts[otherAudit].includes('subject_tenant_id'));
+
+  // The caller cannot hand one in: the audit record it sends has exactly its seven fields.
+  const { client: untouchedClient, begins } = untouched();
+  assert.deepEqual(await createPostgresTransactionalStore({ client: untouchedClient, mutators: [tenantMutator('applied')], revalidate: async () => true })
+    .transactions.commit({ ...c, audit: { ...c.audit, subjectTenantId: randomUUID() } } as never, live()), UNAVAILABLE);
+  assert.equal(begins(), 0);
 });

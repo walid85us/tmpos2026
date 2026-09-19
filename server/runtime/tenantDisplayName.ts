@@ -22,8 +22,12 @@
 //
 // INPUT (owner decision D1). displayName must be a string; leading and trailing whitespace is trimmed;
 // the trimmed value must hold 1-120 Unicode scalar values, with no control character (C0, DEL, C1) and no
-// line or paragraph separator, which no display name carries and no event payload accepts; internal
-// whitespace and every other character are kept exactly — no case folding, no normalization. Names may
+// line or paragraph separator, which no display name carries and no event payload accepts, and no
+// Bidi_Control character — the directional marks, embeddings, overrides and isolates, which make a name
+// render other than it reads (M5-GIAM-D1-P1-R1; migration 009's operation re-checks the same set). Every
+// other format character stays allowed: the joiners emoji and many scripts need are no Bidi_Control.
+// Internal whitespace and every other character are kept exactly — no case folding, no normalization, and
+// stored names are not rewritten. Names may
 // repeat across tenants. expectedVersion is a positive safe integer. tenantId is a canonical lowercase
 // UUID. Anything else is a 400 invalid_request, decided once the idempotency record is acquired; like a
 // conflict it commits and records nothing, and the attempt's lease waits out its time.
@@ -75,8 +79,9 @@ export const TENANT_DISPLAY_NAME_CONTRACT: CommandContract = Object.freeze({
 
 const BODY_FIELDS: readonly string[] = ['tenantId', 'displayName', 'expectedVersion'];
 // C0 controls (NUL included), DEL, C1 controls, and the line and paragraph separators; a lone surrogate is
-// no Unicode scalar value at all.
-const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}/u;
+// no Unicode scalar value at all; and every Bidi_Control character (U+061C, U+200E, U+200F, U+202A-U+202E,
+// U+2066-U+2069 — the property the engine's own Unicode tables define, which migration 009 lists).
+const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
 
 /** The display name as it is stored — trimmed, 1-120 Unicode scalar values, no refused character — or null. */
 export function normalizeTenantDisplayName(raw: unknown): string | null {

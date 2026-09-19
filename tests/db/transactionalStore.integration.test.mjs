@@ -698,7 +698,7 @@ const insertRecord = (r) => observer`insert into tmpos_internal.idempotency_reco
 test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback, reverses cleanly and re-applies', async () => {
   assert.equal(applyReport.outcome, 'complete', `the trusted apply failed: ${applyReport.code}`);
   const ledger = await observer`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008'].map((v) => [v, false]),
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009'].map((v) => [v, false]),
     '001-006 are recorded clean in the ledger of the disposable database');
   await assertStorePosture('after the trusted apply');
   const [{ roles }] = await observer`select count(*)::int as roles from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')`;

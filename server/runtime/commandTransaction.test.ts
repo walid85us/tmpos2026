@@ -63,7 +63,8 @@ test('a plan becomes one command: runtime-generated identities, null scope and a
   const prepared = prepareCommand(create, events, createPlan(b.newAggregateId), b);
   assert.ok(prepared);
   const { command } = prepared;
-  assert.deepEqual(Object.keys(command).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope'], 'values only: no SQL, relation or raw request');
+  assert.deepEqual(Object.keys(command).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
+  assert.equal(command.unchanged, null, 'a create names no unchanged response');
   assert.deepEqual(command.mutation, { kind: 'conformance.item.create', aggregateType: 'item', aggregateId: b.newAggregateId, expectedVersion: null, changes: { name: 'n', quantity: 1 } });
   assert.match(command.audit.correlationId, UUID_V4);
   assert.deepEqual(command.audit, { action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null, correlationId: command.audit.correlationId });
@@ -298,7 +299,7 @@ const renamePlanner = (ctx: CommandContext): CommandPlan => {
 
 interface Harness { port: number; logs: string[]; plans: CommandContext[]; commits: TransactionCommand[]; state: MemoryTransactionalState; clock: { t: number } }
 interface Setup {
-  plan?: CommandPlanner; renamePlan?: CommandPlanner; port?: (inner: CommandTransactionPort) => CommandTransactionPort; deadlineMs?: number;
+  plan?: CommandPlanner; renamePlan?: CommandPlanner; port?: (inner: CommandTransactionPort, state: MemoryTransactionalState) => CommandTransactionPort; deadlineMs?: number;
   store?: (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ReturnType<typeof createMemoryIdempotencyStore>;
 }
 
@@ -310,7 +311,7 @@ async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Pr
   const clock = { t: T0 };
   const state = createMemoryTransactionalState({ now: () => clock.t });
   const inner = createMemoryCommandTransaction(state);
-  const base = setup.port === undefined ? inner : setup.port(inner);
+  const base = setup.port === undefined ? inner : setup.port(inner, state);
   const port: CommandTransactionPort = { commit: (c, s) => { commits.push(c); return base.commit(c, s); }, probe: (s) => base.probe(s) };
   const planner = setup.plan ?? createPlanner;
   const routes: RouteDefinition[] = [
@@ -357,7 +358,7 @@ test('a command commits every part together, answers only once committed, and ev
     });
     assert.ok(UUID_V4.test(audit.correlationId) && audit.correlationId !== 'client-chosen-request-id', 'the correlation ID is the server’s, never the client’s request ID');
     assert.deepEqual(committed.events.map((e) => [e.envelope.aggregateId, e.envelope.correlationId, e.envelope.occurredAt]), [[id, audit.correlationId, audit.at]]);
-    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope']);
+    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged']);
     assert.deepEqual(Object.keys(plans[0]).sort(), ['audience', 'body', 'newAggregateId'], 'the planner sees its context and nothing else');
     assert.equal(plans[0].newAggregateId, id, 'a create names the runtime’s aggregate ID');
     for (const retry of [await post(port, { key }), await post(port, { key: key.toUpperCase() })]) {
@@ -583,7 +584,11 @@ test('an update plan may carry its unchanged 200; nothing else, and never on a c
   const withUnchanged = prepareCommand(rename, events, { ...update, unchanged: { status: 200, body: { id, name: 'm', version: 4 } } }, b);
   assert.ok(withUnchanged);
   assert.deepEqual(withUnchanged.unchanged, { status: 200, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ id, name: 'm', version: 4 }) });
+  // M5-GIAM-D1-P1-R1: the command carries it sealed, for the store to record as the completion in the same transaction.
+  assert.ok(withUnchanged.command.unchanged !== null && withUnchanged.command.unchanged !== withUnchanged.command.response);
+  assert.deepEqual(keyring.unseal(withUnchanged.command.unchanged as string, op), withUnchanged.unchanged, 'sealed for this operation, exactly the unchanged response');
   assert.equal(prepareCommand(rename, events, update, b)?.unchanged, null, 'an update without one carries null');
+  assert.equal(prepareCommand(rename, events, update, b)?.command.unchanged, null, 'and so does its command');
   assert.equal(prepareCommand(create, events, createPlan(b.newAggregateId), b)?.unchanged, null, 'a create carries null');
   for (const [label, plan, contract] of [
     ['unchanged as a 201', { ...update, unchanged: { status: 201, body: {} } }, rename],
@@ -615,23 +620,41 @@ test('not_found is a 404 on an update and a 503 on a create; it commits and reco
   });
 });
 
-test('unchanged sends the plan\'s own 200, recorded under the lease and replayed; without one it is a 503', async () => {
+/**
+ * A port that answers 'unchanged' as the store does since M5-GIAM-D1-P1-R1: in the one commit, under the fence, it records
+ * the command's sealed unchanged response as the completion — the memory adapter does not model the update outcomes (doc 08
+ * DA-25), so this stands in for it here.
+ */
+const recordingUnchanged = (_inner: CommandTransactionPort, state: MemoryTransactionalState): CommandTransactionPort => ({
+  commit: (c) => {
+    const record = state.idempotency.records.get(c.scope);
+    if (record === undefined || record.lease !== c.lease || record.response !== null || c.unchanged === null) return { outcome: 'unavailable' };
+    state.idempotency.records.set(c.scope, { ...record, response: c.unchanged });
+    return { outcome: 'unchanged' };
+  },
+  probe: () => true,
+});
+const withUnchangedPlan: CommandPlanner = (ctx) => {
+  const body = ctx.body as { id: string; version: number; name: string };
+  return { ...renamePlanner(ctx), unchanged: { status: 200, body: { id: body.id, name: body.name, version: body.version } } };
+};
+
+test('unchanged sends the plan\'s own 200 once the store confirms it recorded it in the commit, and it replays; without one it is a 503', async () => {
   await withCommands({ port: answering('unchanged') }, async ({ port, logs }) => {
     const refused = await post(port, { key: randomUUID(), path: '/v1/items/rename', body: renameBody() });
-    assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable']);
+    assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable'], 'an answer the plan named no response for confirms nothing');
     assert.equal((await reasons(logs, 1))[0], 'transaction_unchanged');
   });
-  const withUnchanged: CommandPlanner = (ctx) => {
-    const body = ctx.body as { id: string; version: number; name: string };
-    return { ...renamePlanner(ctx), unchanged: { status: 200, body: { id: body.id, name: body.name, version: body.version } } };
-  };
-  await withCommands({ port: answering('unchanged'), renamePlan: withUnchanged }, async ({ port, commits }) => {
+  await withCommands({ port: recordingUnchanged, renamePlan: withUnchangedPlan }, async ({ port, commits, state }) => {
     const key = randomUUID();
     const id = randomUUID();
     const first = await post(port, { key, path: '/v1/items/rename', body: renameBody(id) });
     assert.deepEqual([first.status, JSON.parse(first.body), first.headers['idempotent-replayed']], [200, { id, name: 'second', version: 1 }, undefined]);
+    assert.equal(commits.length, 1);
+    assert.ok(commits[0].unchanged !== null && commits[0].unchanged !== commits[0].response, 'the command carried the sealed unchanged response beside the committed one');
+    assert.deepEqual([...state.idempotency.records.values()].map((r) => r.response), [commits[0].unchanged], 'the store recorded exactly it, in the commit');
     const retry = await post(port, { key, path: '/v1/items/rename', body: renameBody(id) });
-    assert.deepEqual([retry.status, retry.body, retry.headers['idempotent-replayed']], [200, first.body, 'true'], 'recorded, so the retry replays it');
+    assert.deepEqual([retry.status, retry.body, retry.headers['idempotent-replayed']], [200, first.body, 'true'], 'so the retry replays it byte for byte');
     assert.equal(commits.length, 1, 'the replay reached no commit');
   });
 });
@@ -670,21 +693,17 @@ test('a key already completed answers any other body — malformed included — 
   });
 });
 
-test('an unchanged answer whose completion then fails is a 503 that records nothing: the key stays in progress', async () => {
-  const withUnchanged: CommandPlanner = (ctx) => {
-    const body = ctx.body as { id: string; version: number; name: string };
-    return { ...renamePlanner(ctx), unchanged: { status: 200, body: { id: body.id, name: body.name, version: body.version } } };
-  };
-  const failingComplete = (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ({ ...inner, complete: () => ({ outcome: 'unavailable' }) });
-  await withCommands({ port: answering('unchanged'), renamePlan: withUnchanged, store: failingComplete }, async ({ port, logs, commits, state }) => {
+test('the runtime makes no completion of its own for unchanged: the store\'s committed answer is the only record', async () => {
+  // Before M5-GIAM-D1-P1-R1 the runtime completed an unchanged answer itself, after the store's transaction had ended — a
+  // window in which a real change could land. Now an idempotency store whose completion always fails is never even asked.
+  let completions = 0;
+  const countingComplete = (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ({ ...inner, complete: () => { completions += 1; return { outcome: 'unavailable' }; } });
+  await withCommands({ port: recordingUnchanged, renamePlan: withUnchangedPlan, store: countingComplete }, async ({ port, commits, state }) => {
     const key = randomUUID();
-    const body = renameBody();
-    const refused = await post(port, { key, path: '/v1/items/rename', body });
-    assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable']);
-    assert.deepEqual([...state.idempotency.records.values()].map((r) => r.response), [null], 'no response recorded');
-    const retry = await post(port, { key, path: '/v1/items/rename', body });
-    assert.deepEqual([retry.status, errorOf(retry)], [409, 'request_in_progress'], 'the key waits out its lease');
-    assert.deepEqual([commits.length, inspectMemoryState(state).aggregates.length], [1, 0], 'one commit attempt, nothing committed');
-    assert.equal((await reasons(logs, 1))[0], 'idempotency_unavailable');
+    const id = randomUUID();
+    const first = await post(port, { key, path: '/v1/items/rename', body: renameBody(id) });
+    assert.deepEqual([first.status, JSON.parse(first.body)], [200, { id, name: 'second', version: 1 }]);
+    assert.equal(completions, 0, 'no completion call beside the commit');
+    assert.deepEqual([commits.length, inspectMemoryState(state).aggregates.length], [1, 0], 'one commit, and no aggregate moved');
   });
 });

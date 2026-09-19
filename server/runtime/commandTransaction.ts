@@ -33,15 +33,18 @@
 //            fenced attempt learns nothing of business state — and (2) the mutation's precondition —
 //            else 'conflict', or for an update whose aggregate does not exist 'not_found'; then writes
 //            every part → 'committed'. An update whose changes already hold at the expected version
-//            writes nothing and answers 'unchanged' (M5-GIAM-D1-P1): no business state moved, so there
-//            is nothing to keep atomic, and the runtime records the plan's own unchanged response
-//            through the idempotency store's lease-checked completion instead. An event ID that is not new is a
-//            fault of the runtime or the store, never a conflict: nothing commits, and the answer is
-//            'unavailable' or a rejection. 'lease_lost', 'conflict', 'not_found', 'unchanged' and 'unavailable' change nothing —
-//            'unavailable' only when the adapter knows nothing committed; one that cannot tell rejects —
-//            and a call handed an already-aborted signal changes nothing. A call that throws, rejects,
-//            times out or is aborted in flight has an INDETERMINATE effect: it committed entirely or not
-//            at all, never in part.
+//            moves no business state and answers 'unchanged' (M5-GIAM-D1-P1-R1): in the SAME transaction —
+//            the lease fenced, the context revalidated, the aggregate's row still locked by its mutator —
+//            it records the command's sealed unchanged response as the completion, and writes nothing
+//            else: no audit record, no event. The no-op is decided and its response recorded at one
+//            serialization point, so no change can land between them; a command that carries no unchanged
+//            response, or whose completion does not hold, commits nothing and answers 'unavailable'. An
+//            event ID that is not new is a fault of the runtime or the store, never a conflict: nothing
+//            commits, and the answer is 'unavailable' or a rejection. 'lease_lost', 'conflict', 'not_found'
+//            and 'unavailable' change nothing — 'unavailable' only when the adapter knows nothing committed;
+//            one that cannot tell rejects — and a call handed an already-aborted signal changes nothing. A
+//            call that throws, rejects, times out or is aborted in flight has an INDETERMINATE effect: it
+//            committed entirely or not at all, never in part.
 //   probe  — exactly `true` only while commits can be served; readiness reports it.
 // One adapter serves this port and the idempotency store over one database, since the lease it checks is
 // that store's (createApp composes neither alone). It must pass assertIdempotencyStoreContract and
@@ -59,7 +62,8 @@
 // The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
 // 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
 // attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
-// 200, sent once the idempotency store has recorded it under the attempt's lease. Every other outcome — an
+// 200, sent once the store confirms it committed with the completion — the same confirmation 'committed'
+// is; the runtime makes no completion of its own. Every other outcome — an
 // explicit 'unavailable', 'lease_lost', a throw, a timeout or a malformed answer — is a bounded 503 that
 // assumes no rollback: the runtime never releases or replaces a lease (there is no such call), so a retry
 // replays the record if the commit landed, or waits (409 request_in_progress) until the lease expires and
@@ -152,6 +156,12 @@ export interface TransactionCommand {
   readonly lease: string;
   /** The sealed response, recorded as the completion. */
   readonly response: string;
+  /**
+   * The sealed response for an update whose changes already hold (M5-GIAM-D1-P1-R1): recorded as the
+   * completion, in the same transaction, when the store answers 'unchanged'. null when the plan names
+   * none — always for a create — and then an 'unchanged' outcome commits nothing.
+   */
+  readonly unchanged: string | null;
   readonly mutation: TransactionMutation;
   readonly audit: TransactionAudit;
   readonly events: readonly OutboxEventDraft[];
@@ -197,11 +207,15 @@ export interface PreparedCommand {
   readonly command: TransactionCommand;
   /** The response to send once — and only once — the commit is confirmed. */
   readonly response: ReplayEnvelope;
-  /** An update's response when the store answers 'unchanged', recorded before it is sent; null when the plan names none. */
+  /** An update's response when the store answers 'unchanged' — which it recorded, sealed, in that commit; null when the plan names none. */
   readonly unchanged: ReplayEnvelope | null;
 }
 
-/** Why a commit did not commit: a refusal, or — for an update — a missing aggregate or changes already in place. */
+/**
+ * What a commit answered other than 'committed': a refusal or, for an update, a missing aggregate — or
+ * 'transaction_unchanged', the one other committed answer: changes already in place, the plan's unchanged
+ * response recorded as the completion in that same transaction and nothing else written.
+ */
 export type CommandRefusal =
   | 'transaction_lease_lost'
   | 'transaction_conflict'
@@ -348,6 +362,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
       scope: binding.scope,
       lease: binding.lease,
       response: binding.seal(envelope),
+      unchanged: unchanged === null ? null : binding.seal(unchanged),
       mutation: Object.freeze({
         kind: contract.kind, aggregateType: contract.aggregateType, aggregateId: id, expectedVersion: expectedVersion as number | null, changes: mutationChanges,
       }),
@@ -367,7 +382,8 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
 
 /**
  * Commit under the transaction deadline (the port deadline, capped at COMMAND_TRANSACTION_DEADLINE_MS),
- * obeying only an exact answer. null once the store has committed; otherwise why not — a fenced lease, a
+ * obeying only an exact answer. null once the store has committed; 'transaction_unchanged' once it has
+ * committed an update's no-op with its unchanged completion; otherwise why not — a fenced lease, a
  * conflict, or an outage, overrun or broken answer, none of which the runtime treats as a rollback.
  */
 export async function commitCommand(transactions: CommandTransactions, command: TransactionCommand, deadlineMs: number): Promise<CommandRefusal | null> {

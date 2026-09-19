@@ -41,6 +41,8 @@ const unit = (code: number): string => String.fromCharCode(code); // a lone UTF-
 // --- 1. the planner's input contract --------------------------------------------------------------------------------------
 
 const plan = (body: unknown) => planTenantDisplayName({ audience: 'admin', body, newAggregateId: randomUUID() });
+/** Every code point with the Unicode Bidi_Control property, listed as migration 009's operation lists them. */
+const BIDI_CONTROLS: readonly number[] = [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
 const valid = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ tenantId: TENANT, displayName: 'Acme Repairs', expectedVersion: 3, ...over });
 
 test('a body the contract refuses plans nothing: COMMAND_REQUEST_INVALID for every malformed shape, field and name', () => {
@@ -72,6 +74,10 @@ test('a body the contract refuses plans nothing: COMMAND_REQUEST_INVALID for eve
     ['a C1 control (NEL)', valid({ displayName: `A${ch(0x85)}B` })], ['a leading C1 control', valid({ displayName: `${ch(0x9f)}A` })],
     ['a line separator', valid({ displayName: `A${ch(0x2028)}B` })], ['a paragraph separator', valid({ displayName: `A${ch(0x2029)}B` })],
     ['a lone high surrogate', valid({ displayName: `A${unit(0xd800)}B` })], ['a lone low surrogate', valid({ displayName: `A${unit(0xdc00)}` })],
+    // Bidi_Control (M5-GIAM-D1-P1-R1): marks, embeddings, overrides and isolates, anywhere in the name.
+    ...BIDI_CONTROLS.map((code): [string, unknown] => [`Bidi_Control U+${code.toString(16).toUpperCase().padStart(4, '0')}`, valid({ displayName: `A${ch(code)}B` })]),
+    ['a right-to-left override spoofing an extension', valid({ displayName: `invoice${ch(0x202e)}fdp.exe` })],
+    ['a leading left-to-right mark', valid({ displayName: `${ch(0x200e)}Acme` })], ['a trailing isolate terminator', valid({ displayName: `Acme${ch(0x2069)}` })],
   ];
   for (const [label, body] of invalid) assert.equal(plan(body), COMMAND_REQUEST_INVALID, label);
 });
@@ -156,7 +162,8 @@ const ADMIN_ORIGIN = 'http://admin.trusted.test';
 const BEARER = 'tok-admin-5e2a';
 const UID = 'uid-admin-5e2a';
 const SCOPE: TrustedScope = Object.freeze({
-  actor: ACTOR, securityVersion: 'sv-5e2a', scope: 'platform', tenant: null, store: null, roleId: 'support_admin', limitation: 'none',
+  actor: ACTOR, securityVersion: 'sv-5e2a', scope: 'platform', tenant: null, store: null,
+  membershipId: '5c4b3a29-1807-4f6e-9d5c-4b3a29180706', roleId: 'support_admin', limitation: 'none',
 });
 const GRANTED = Object.freeze({ granted: true, context: SCOPE });
 
@@ -219,6 +226,12 @@ async function withRoute(setup: Setup, fn: (h: Harness) => Promise<void>): Promi
     async commit(c, s) {
       commits.push(c);
       if (answer === 'throw') throw new Error('store-secret-detail');
+      if (answer === 'unchanged') {
+        // As the store does since M5-GIAM-D1-P1-R1: the no-op's sealed response IS the completion, recorded in the one commit.
+        if (c.unchanged === null) return { outcome: 'unavailable' };
+        const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.unchanged }), s);
+        return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'unchanged' : 'lease_lost' };
+      }
       if (answer !== 'committed') return { outcome: answer };
       const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.response }), s);
       return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'committed' : 'lease_lost' };
@@ -434,7 +447,9 @@ test('each store answer maps to its response: 409, 404, the unchanged 200 (recor
     assert.equal(unchanged.headers['idempotent-replayed'], undefined);
     assertPolicyHeaders(unchanged, 'unchanged');
     const commitsBefore = h.commits.length;
-    assert.deepEqual(h.storeCalls.slice(-2), ['acquire', 'complete'], 'the unchanged response is recorded under the lease');
+    assert.deepEqual(h.storeCalls.slice(-1), ['acquire'], 'the runtime makes no completion of its own: the commit recorded it (M5-GIAM-D1-P1-R1)');
+    const sealed = h.commits[commitsBefore - 1].unchanged;
+    assert.ok(sealed !== null && sealed !== h.commits[commitsBefore - 1].response, 'the command carried the sealed unchanged response');
     const again = await h.patch({ key });
     assert.deepEqual([again.status, again.body, again.headers['idempotent-replayed']], [200, unchanged.body, 'true'], 'and replays');
     assert.equal(h.commits.length, commitsBefore, 'a replay commits nothing');
@@ -513,4 +528,38 @@ test('the log never carries the display name, the idempotency key, the cookie, t
       if (record.event === 'request' && record.route !== sessionPaths('admin').login) assert.equal(record.route, 'other', 'the route logs as a bounded class, never its path');
     }
   });
+});
+
+test('Bidi_Control is exactly the twelve characters migration 009 lists, and the validator refuses each while allowing every other format character', () => {
+  // The engine's own Unicode tables, scanned across every code point, agree with the list the database operation carries.
+  const property = /\p{Bidi_Control}/u;
+  const found: number[] = [];
+  for (let code = 0; code <= 0x10ffff; code++) {
+    if (code >= 0xd800 && code <= 0xdfff) continue;
+    if (property.test(String.fromCodePoint(code))) found.push(code);
+  }
+  assert.deepEqual(found, [...BIDI_CONTROLS]);
+  for (const code of BIDI_CONTROLS) assert.equal(normalizeTenantDisplayName(`A${ch(code)}B`), null, `U+${code.toString(16)}`);
+  // Not every format character: the joiners, the word joiner, the soft hyphen and the variation selector serve real text.
+  const kept: Array<[string, string]> = [
+    ['a zero-width joiner in an emoji sequence', ch(0x1f469, 0x200d, 0x1f527)],
+    ['a zero-width non-joiner in Persian', `${ch(0x0645, 0x06cc)}${ch(0x200c)}${ch(0x062e, 0x0648, 0x0627, 0x0647, 0x0645)}`],
+    ['a zero-width space', `Acme${ch(0x200b)}Repairs`], ['a word joiner', `Acme${ch(0x2060)}Repairs`], ['a soft hyphen', `Acme${ch(0xad)}Repairs`],
+    ['a variation selector', `${ch(0x2764, 0xfe0f)} Repairs`], ['an Arabic letter mark only in sequence', ch(0x0645, 0x062d, 0x0644)],
+  ];
+  for (const [label, name] of kept) assert.equal(normalizeTenantDisplayName(name), name, label);
+});
+
+test('right-to-left text, combining marks, emoji and internal whitespace stay valid without any directional control', () => {
+  const names: Array<[string, string]> = [
+    ['Arabic', ch(0x0645, 0x062a, 0x062c, 0x0631, 0x0020, 0x0627, 0x0644, 0x0625, 0x0635, 0x0644, 0x0627, 0x062d)],
+    ['Hebrew', ch(0x05ea, 0x05d9, 0x05e7, 0x05d5, 0x05df, 0x0020, 0x05de, 0x05d4, 0x05d9, 0x05e8)],
+    ['Hebrew beside Latin and digits', `Acme ${ch(0x05d7, 0x05e0, 0x05d5, 0x05ea)} 24`],
+    ['combining marks', `Cafe${ch(0x301)} Re${ch(0x301)}paration${ch(0x323)}`],
+    ['emoji with a skin tone', `${ch(0x1f527, 0x1f3fd)} Fix${ch(0x00a0)}It`], ['a double internal space', 'Acme  Repairs'],
+  ];
+  for (const [label, name] of names) {
+    assert.equal(normalizeTenantDisplayName(name), name, label);
+    assert.equal((plan(valid({ displayName: ` ${name} ` })) as CommandPlan).changes.displayName, name, `${label}: planned, trimmed only`);
+  }
 });

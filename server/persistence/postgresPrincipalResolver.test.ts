@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPostgresPrincipalResolver, revalidateTrustedScope } from './postgresPrincipalResolver.js';
+import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from './postgresPrincipalResolver.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
 
@@ -23,7 +23,7 @@ const RESOLVED_ROW = Object.freeze({
 
 const SCOPE: TrustedScope = Object.freeze({
   actor: ACTOR, securityVersion: VERSION, scope: 'platform', tenant: null, store: null,
-  roleId: 'system_owner', limitation: 'none',
+  membershipId: MEMBERSHIP, roleId: 'system_owner', limitation: 'none',
 });
 
 /** A client that answers every statement from `rows` (or throws `fault`), recording what it was asked. */
@@ -122,23 +122,31 @@ test('readiness is the routine answering, not a connection existing', async () =
   assert.equal(await createPostgresPrincipalResolver({ client: fakeClient([], new Error('down')) }).probe(live()), false);
 });
 
-test('revalidation answers the still-granted role, and one value for every failure', async () => {
+test('platform revalidation is exactly the routine saying valid for exactly this grant, and one value for every failure', async () => {
+  // M5-GIAM-D1-P1-R1: migration 009's routine, handed the very membership and role the scope was selected
+  // under — never 007's first-match routine, which answered with whichever grant came first.
+  const bound: unknown[][] = [];
+  const texts: string[] = [];
   const handle = (rows: unknown): PgTransactionScope =>
-    (() => Promise.resolve(rows as never)) as unknown as PgTransactionScope;
+    ((strings: TemplateStringsArray, ...values: unknown[]) => { texts.push(strings.join('?')); bound.push(values); return Promise.resolve(rows as never); }) as unknown as PgTransactionScope;
 
-  assert.equal(await revalidateTrustedScope(handle([{ outcome: 'valid', granted_role_id: 'system_owner' }]), SCOPE), 'system_owner');
+  assert.equal(await revalidatePlatformAuthority(handle([{ outcome: 'valid' }]), SCOPE), true);
+  assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine, schema-qualified');
+  assert.doesNotMatch(texts[0], /m5_revalidate_principal_context/, 'never the superseded first-match routine');
+  assert.deepEqual(bound[0], [ACTOR, VERSION, MEMBERSHIP, 'system_owner'], 'the actor, the version, the selected grant and its role — bound, never spliced');
   for (const rows of [
-    [{ outcome: 'invalid', granted_role_id: null }],
-    [{ outcome: 'valid', granted_role_id: null }],
-    [{ outcome: 'valid', granted_role_id: '' }],
-    [{ outcome: 'valid', granted_role_id: 'x'.repeat(65) }],
-    [{ outcome: 'valid', granted_role_id: 'system_owner', extra: 1 }],
-    [], [{ outcome: 'valid', granted_role_id: 'a' }, { outcome: 'valid', granted_role_id: 'b' }],
-  ]) assert.equal(await revalidateTrustedScope(handle(rows), SCOPE), null, JSON.stringify(rows));
+    [{ outcome: 'invalid' }], [{ outcome: 'VALID' }], [{ outcome: true }], [{ outcome: 'valid', extra: 1 }], [{ granted_role_id: 'system_owner' }],
+    [], [{ outcome: 'valid' }, { outcome: 'valid' }], ['valid'],
+  ]) assert.equal(await revalidatePlatformAuthority(handle(rows), SCOPE), false, JSON.stringify(rows));
+  const faulty = ((): Promise<never> => Promise.reject(new Error('FATAL: M5-UNIT-CANARY'))) as unknown as PgTransactionScope;
+  assert.equal(await revalidatePlatformAuthority(faulty, SCOPE), false, 'a driver fault is the same false, and nothing of it crosses');
 
-  // A scope that selection could not have produced is never sent to the database at all.
+  // A scope that selection could not have produced, or one that is not platform, is never sent to the database at all.
   let asked = false;
-  const watching = ((): Promise<never> => { asked = true; return Promise.resolve([] as never); }) as unknown as PgTransactionScope;
-  assert.equal(await revalidateTrustedScope(watching, { ...SCOPE, actor: 'root' } as TrustedScope), null);
+  const watching = ((): Promise<never> => { asked = true; return Promise.resolve([{ outcome: 'valid' }] as never); }) as unknown as PgTransactionScope;
+  for (const scope of [
+    { ...SCOPE, actor: 'root' }, { ...SCOPE, membershipId: 'not-a-grant' }, { ...SCOPE, membershipId: undefined },
+    { ...SCOPE, scope: 'tenant', tenant: '22222222-2222-4222-8222-222222222222', roleId: 'manager' },
+  ]) assert.equal(await revalidatePlatformAuthority(watching, scope as TrustedScope), false, JSON.stringify(scope));
   assert.equal(asked, false);
 });

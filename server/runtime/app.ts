@@ -63,8 +63,8 @@
 //                record and its outbox events — through the transaction port under the runtime's own
 //                deadline (commandTransaction.ts), its response sent only once committed: a conflict
 //                -> 409, an update whose aggregate does not exist -> 404, an update whose changes
-//                already hold -> the plan's unchanged 200, recorded under the lease before it is sent,
-//                and anything else -> 503 that assumes no rollback and
+//                already hold -> the plan's unchanged 200, which the store recorded as the completion in
+//                the same transaction, and anything else -> 503 that assumes no rollback and
 //                releases nothing; any other route's handler exactly once, with the principal, the
 //                session view and the parsed value as ctx.body; a throw or rejection -> bounded 500.
 //   notFoundHandler / errorHandler — the terminal bounded 404 / 500;
@@ -869,13 +869,10 @@ export function createApp(deps: AppDeps): Express {
           const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
           if (refused === 'transaction_conflict') return refuse(req, res, 409, 'write_conflict', refused);
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
-          if (refused === 'transaction_unchanged' && prepared.unchanged !== null) {
-            // Nothing moved, so there is no business effect to keep atomic with the completion: the plan's own
-            // unchanged response is recorded under this attempt's lease, and sent only once recorded.
-            const unrecorded = await completeIdempotency(store, Object.freeze({ scope: operation.scope, lease, response: store.keyring.seal(prepared.unchanged, operation) }), deadlineMs);
-            if (unrecorded !== null) return refuse(req, res, 503, 'service_unavailable', unrecorded);
-            return sendRecorded(res, prepared.unchanged, false);
-          }
+          // Changes already in place: the store recorded the plan's unchanged response as the completion in the
+          // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as
+          // committed. An answer the plan named no response for is no confirmation of anything: a 503.
+          if (refused === 'transaction_unchanged' && prepared.unchanged !== null) return sendRecorded(res, prepared.unchanged, false);
           if (refused !== null) return refuse(req, res, 503, 'service_unavailable', refused);
           return sendRecorded(res, prepared.response, false);
         }

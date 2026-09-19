@@ -24,10 +24,18 @@
 // (productionTransactions.ts uncataloguedRoutePermissions). The target of a command — the tenant whose
 // name it changes — is a resource, never a scope, and never reaches this decision.
 //
+// THE SAME DECISION, AGAIN, INSIDE THE TRANSACTION (M5-GIAM-D1-P1-R1). createPlatformContextRevalidator
+// is the store's revalidator for the scope this authorizer hands a command: after the idempotency fence the
+// database confirms that EXACTLY that authority still holds — the account neither denied nor read-only,
+// the security version, one active platform grant and it the very membership and role selected (migration
+// 009, postgresPrincipalResolver.ts revalidatePlatformAuthority) — and the route's permission is then
+// decided again, by the same canonical rule over the same role definitions, on that role. Both halves fail
+// closed identically: whatever would deny here denies there, and nothing commits.
+//
 // NOTHING IS LOGGED OR KEPT. No principal, actor, role or decision leaves this file except as the answer.
 import type { RouteAuthorizer, RouteView } from '../runtime/access.js';
 import { isTrustedPrincipal, selectScope } from '../runtime/principals.js';
-import type { PrincipalResolutionPort } from '../runtime/principals.js';
+import type { PrincipalResolutionPort, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import { BUILT_IN_PLATFORM_ROLES, evaluateCanonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PlatformRoleDefinition } from '../platform-identity/m5CanonicalPermissions.js';
@@ -70,4 +78,37 @@ export function createPlatformRouteAuthorizer(deps: PlatformAuthorizerDeps): Rou
       return decision === 'granted' ? Object.freeze({ granted: true, context: scope }) : false;
     },
   });
+}
+
+/**
+ * The database half of the transaction-time check: exactly the authority `scope` was selected under still holds, read on
+ * the committing transaction's own statement handle — which this file never touches, so it names it only as a type
+ * parameter (the transaction root alone imports the persistence layer).
+ */
+export type PlatformAuthorityCheck<Handle> = (sql: Handle, scope: TrustedScope) => Promise<boolean>;
+
+export interface PlatformRevalidatorDeps<Handle> {
+  /** In production postgresPrincipalResolver.ts revalidatePlatformAuthority (migration 009). */
+  readonly authority: PlatformAuthorityCheck<Handle>;
+  /** The same role definitions the authorizer decides over: a deployment has the built-in ones only. */
+  readonly roles?: ReadonlyMap<string, PlatformRoleDefinition>;
+}
+
+/**
+ * The store's ContextRevalidator (postgresTransactionalStore.ts) for a platform command: exactly true only when the scope is the one the
+ * authorizer could have handed out (platform, not read-only), the database confirms that exact authority
+ * still holds on the committing transaction, and the route's `permission` is still granted to that role by
+ * its current definition. Anything else — a throw included, which the store's kernel turns into a rollback
+ * — commits nothing.
+ */
+export function createPlatformContextRevalidator<Handle>(deps: PlatformRevalidatorDeps<Handle>): (sql: Handle, scope: TrustedScope, permission: string) => Promise<boolean> {
+  const authority = deps?.authority;
+  const roles = deps?.roles ?? BUILT_IN_PLATFORM_ROLES;
+  if (typeof authority !== 'function' || !(roles instanceof Map)) throw new TypeError('platform revalidator dependencies invalid');
+  return async (sql: Handle, scope: TrustedScope, permission: string): Promise<boolean> => {
+    if (scope.scope !== 'platform' || scope.limitation !== 'none') return false;
+    if ((await authority(sql, scope)) !== true) return false;
+    // The database confirmed the very grant and its role; the permission is decided on that role again.
+    return evaluateCanonicalPermission({ scope: 'platform', roleId: scope.roleId, permission, limitation: 'none', roles }) === 'granted';
+  };
 }

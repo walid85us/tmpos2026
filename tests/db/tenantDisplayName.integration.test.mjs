@@ -1,6 +1,9 @@
 // Phase 4.0 M5-GIAM-D1-P1 — the first server-authorized business command against REAL PostgreSQL: migration 008 (the
 // tenant's row version, its trigger, and the one fixed display-name operation), the M6 store committing the command with
 // its mutator and the trusted context's revalidation, and the whole HTTP chain over the real resolver and store.
+// M5-GIAM-D1-P1-R1 adds migration 009 and its proofs: the no-op's completion committed with its decision, the exact
+// transaction-time authority (changes and races included), the legacy direct write closed for every runtime principal,
+// the audit record's direct subject, the Bidi_Control rule in both validators, and 009's rollback, upgrade and verify.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
@@ -24,9 +27,9 @@ import { createNodeFsPort } from '../../server/platform-identity/migrationEngine
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
-import { createPostgresPrincipalResolver, revalidateTrustedScope } from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../../server/persistence/tenantDisplayNameMutator.ts';
-import { createPlatformRouteAuthorizer } from '../../server/composition/platformAuthorization.ts';
+import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { prepareCommand } from '../../server/runtime/commandTransaction.ts';
 import { IDEMPOTENCY_POLICY, createIdempotencyKeyring } from '../../server/runtime/idempotency.ts';
@@ -43,6 +46,7 @@ import {
   TENANT_DISPLAY_NAME_EVENTS,
   TENANT_DISPLAY_NAME_PATH,
   TENANT_DISPLAY_NAME_ROUTE,
+  normalizeTenantDisplayName,
   planTenantDisplayName,
 } from '../../server/runtime/tenantDisplayName.ts';
 
@@ -50,6 +54,10 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_008 = readFileSync(`${MIG_DIR}/008_m5_tenant_display_name_command.up.sql`, 'utf8');
 const DOWN_008 = readFileSync(`${MIG_DIR}/008_m5_tenant_display_name_command.down.sql`, 'utf8');
+const UP_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.up.sql`, 'utf8');
+const DOWN_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.down.sql`, 'utf8');
+/** The production revalidator: 009's exact-authority routine, then the permission on the built-in definitions. */
+const REVALIDATE = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority });
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm5d-migrator', runtimeRef: 'm5d-runtime' };
 const LOCK_KEY = 528_508;
 const NOW = () => new Date().toISOString();
@@ -59,6 +67,8 @@ const RUNTIME_LOGIN = 'tmpos_m5d_probe';
 const SUFFIX = randomUUID().slice(0, 8);
 const ADMIN_ORIGIN = 'http://admin.trusted.test';
 const REQUIREMENT = Object.freeze({ scope: 'platform', permission: 'edit_tenant_profile' });
+/** Every code point with the Unicode Bidi_Control property (migration 009 section 5). */
+const BIDI_CONTROLS = [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
 const signal = () => AbortSignal.timeout(10_000);
 
 // ---------------------------------------------------------------------------
@@ -159,7 +169,7 @@ client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN)
   ...CLIENT_OPTS,
   user: RUNTIME_LOGIN,
 });
-const store = createPostgresTransactionalStore({ client, mutators: [TENANT_DISPLAY_NAME_MUTATOR], revalidate: revalidateTrustedScope });
+const store = createPostgresTransactionalStore({ client, mutators: [TENANT_DISPLAY_NAME_MUTATOR], revalidate: REVALIDATE });
 const principals = createPostgresPrincipalResolver({ client });
 const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 const EVENTS = defineOutboxEvents(TENANT_DISPLAY_NAME_EVENTS);
@@ -178,13 +188,19 @@ async function actor(label, membership) {
 }
 const tenantRow = async (id) => (await owner`select display_name, legal_name, status, plan_key, row_version from tenant where tenant_id = ${id}`)[0];
 const newTenant = async (name) => (await owner`insert into tenant (display_name) values (${name}) returning tenant_id`)[0].tenant_id;
-const auditFor = (correlation) => owner`select actor_internal_user_id, scope_type, tenant_id, store_id, action_id, required_permission, request_id, decision, result_status
-  from audit_event where request_id = ${correlation}`;
+const auditFor = (correlation) => owner`select actor_internal_user_id, scope_type, tenant_id, store_id, subject_tenant_id, action_id, required_permission,
+  request_id, decision, result_status from audit_event where request_id = ${correlation}`;
+/** Every audit record whose action targeted `tenant`, found by its subject alone — no join to the outbox (migration 009). */
+const auditsOf = (tenant) => owner`select actor_internal_user_id, scope_type, tenant_id, action_id, request_id from audit_event
+  where subject_tenant_id = ${tenant} order by occurred_at, request_id`;
 const eventsFor = (tenant) => owner`select event_type, event_version, aggregate_type, aggregate_id, aggregate_version, correlation_id, tenant_digest,
   store_digest, actor_digest, payload from tmpos_internal.outbox_event where aggregate_id = ${tenant} order by aggregate_version`;
 const auditCountFor = async (action) => (await owner`select count(*)::int as n from audit_event where action_id = ${action}`)[0].n;
 const recordDone = async (scope) => (await owner`select response is not null as done from tmpos_internal.idempotency_record where scope = ${scope}`)[0]?.done;
 const call = async (tenant, expected, name, sql = runtime) =>
+  (await sql`select o_outcome, o_version from tmpos_command.m5_tenant_display_name_update_v2(${tenant}::uuid, ${expected}::bigint, ${name}::text)`)[0];
+/** 008's operation, which 009 supersedes: the runtime role may no longer call it. */
+const call008 = async (tenant, expected, name, sql = runtime) =>
   (await sql`select o_outcome, o_version from tmpos_command.m5_tenant_display_name_update(${tenant}::uuid, ${expected}::bigint, ${name}::text)`)[0];
 const refusalCode = async (fn) => {
   try { await fn(); return null; } catch (err) { return err.code ?? String(err.message); }
@@ -234,10 +250,10 @@ const commit = (command) => store.transactions.commit(command, signal());
 // migration 008 as applied
 // ---------------------------------------------------------------------------
 
-test('M5D-01: 001-008 apply clean, and 008 is exactly its column, its trigger, its two functions and their grants', async () => {
+test('M5D-01: 001-009 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk
@@ -248,7 +264,9 @@ test('M5D-01: 001-008 apply clean, and 008 is exactly its column, its trigger, i
   const fns = await owner`select p.proname, p.prosecdef, p.provolatile, p.proconfig, p.proowner = n.nspowner as owned
     from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace where n.nspname = 'tmpos_command' order by p.proname`;
   assert.deepEqual(fns.map((f) => ({ ...f })), [
+    { proname: 'm5_revalidate_platform_authority', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
     { proname: 'm5_tenant_display_name_update', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
+    { proname: 'm5_tenant_display_name_update_v2', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
     { proname: 'm5_tenant_row_version', prosecdef: false, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
   ]);
 
@@ -256,8 +274,17 @@ test('M5D-01: 001-008 apply clean, and 008 is exactly its column, its trigger, i
     from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     cross join pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
    where n.nspname = 'tmpos_command' and a.grantee <> p.proowner order by p.proname`;
-  assert.deepEqual(acl.map((r) => ({ ...r })), [{ proname: 'm5_tenant_display_name_update', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false }],
-    'tmpos_app may execute the operation only, never grant it; nobody holds the trigger function');
+  assert.deepEqual(acl.map((r) => ({ ...r })), [
+    { proname: 'm5_revalidate_platform_authority', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false },
+    { proname: 'm5_tenant_display_name_update_v2', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false },
+  ], 'tmpos_app may execute 009\'s two routines only, never grant them; 008\'s superseded operation and the trigger function are nobody\'s');
+  const [subject] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, a.atthasdef as has_default,
+      pg_catalog.to_regclass('public.idx_audit_event_subject_tenant_occurred') is not null as indexed
+    from pg_catalog.pg_attribute a where a.attrelid = 'public.audit_event'::regclass and a.attname = 'subject_tenant_id' and not a.attisdropped`;
+  assert.deepEqual({ ...subject }, { type: 'uuid', not_null: false, has_default: false, indexed: true }, 'the audit subject: a nullable uuid, indexed');
+  const [{ indexdef }] = await owner`select pg_catalog.pg_get_indexdef('public.idx_audit_event_subject_tenant_occurred'::regclass) as indexdef`;
+  assert.match(indexdef, /\(subject_tenant_id, occurred_at DESC\) WHERE \(subject_tenant_id IS NOT NULL\)/,
+    'the partial index the subject search uses, on exactly those columns');
 
   const [trigger] = await owner`select g.tgname, g.tgenabled, g.tgtype::int as tgtype, p.proname from pg_catalog.pg_trigger g
     join pg_catalog.pg_proc p on p.oid = g.tgfoid where g.tgrelid = 'public.tenant'::regclass and g.tgname = 'trg_tenant_row_version'`;
@@ -274,9 +301,9 @@ test('M5D-02: the runtime role may call the operation and nothing else: no versi
     assert.equal((await runtime`select pg_catalog.has_column_privilege('public.tenant', 'row_version', ${privilege}) as ok`)[0].ok, false, `${privilege} as the login`);
   }
   assert.equal(await refusalCode(() => runtime`update public.tenant set row_version = 99 where tenant_id = ${tenant}`), '42501', 'no version write');
-  // 005's column grant answers only under a tenant/store RLS context, which a platform command never installs.
-  const direct = await runtime`update public.tenant set display_name = 'direct' where tenant_id = ${tenant}`;
-  assert.equal(direct.count, 0, 'a direct platform-scope write reaches no row');
+  // 009 revoked 005's column grant: a direct write of the name is refused outright (M5D-15 proves every principal and path).
+  assert.equal(await refusalCode(() => runtime`update public.tenant set display_name = 'direct' where tenant_id = ${tenant}`), '42501', 'no direct name write');
+  assert.equal(await refusalCode(() => call008(tenant, 2, 'Via 008')), '42501', '008\'s superseded operation answers the runtime no longer');
   assert.equal((await tenantRow(tenant)).display_name, 'Priv Two');
   assert.equal(await refusalCode(() => runtime.unsafe('create function tmpos_command.m5d_evil() returns int language sql as $$ select 1 $$')), '42501',
     'nothing may be added to the schema');
@@ -315,6 +342,8 @@ test('M5D-03: the operation\'s answers — invalid, not_found, conflict before t
     // No leading or trailing character ECMAScript's trim removes (M5-GIAM-D1-P1 cross-model review): the routine re-checks it.
     ['only spaces', [tenant, 2, '   ']], ['a leading space', [tenant, 2, ' Acme']], ['a trailing no-break space', [tenant, 2, 'Acme\u00a0']],
     ['a leading ideographic space', [tenant, 2, '\u3000Acme']], ['a trailing tab', [tenant, 2, 'Acme\t']], ['a leading BOM', [tenant, 2, '\ufeffAcme']],
+    // 009: every Bidi_Control character, anywhere (M5D-20 proves the runtime agrees character by character).
+    ...BIDI_CONTROLS.map((code) => [`Bidi_Control U+${code.toString(16)}`, [tenant, 2, `a${String.fromCodePoint(code)}b`]]),
   ]) assert.deepEqual({ ...(await call(...args)) }, { o_outcome: 'invalid', o_version: null }, label);
   assert.deepEqual({ ...(await call(randomUUID(), 1, 'n')) }, { o_outcome: 'not_found', o_version: null });
   assert.deepEqual({ ...(await call(tenant, 1, `m5d-ops-${SUFFIX}`)) }, { o_outcome: 'conflict', o_version: null }, 'a stale version conflicts even when the name matches');
@@ -355,9 +384,11 @@ test('M5D-05: a committed command moves the name and the version together with o
   assert.deepEqual({ ...(await tenantRow(tenant)) }, { display_name: 'Acme  Holdings\u00a0Ltd', legal_name: null, status: 'active', plan_key: 'starter', row_version: '2' });
   const audit = await auditFor(command.audit.correlationId);
   assert.deepEqual(audit.map((r) => ({ ...r })), [{
-    actor_internal_user_id: OWNER.id, scope_type: 'platform', tenant_id: null, store_id: null, action_id: 'platform.tenant.display_name.update',
-    required_permission: 'edit_tenant_profile', request_id: command.audit.correlationId, decision: 'allow', result_status: 'succeeded',
-  }], 'one audit record naming the app-owned actor, never the provider UID');
+    actor_internal_user_id: OWNER.id, scope_type: 'platform', tenant_id: null, store_id: null, subject_tenant_id: tenant,
+    action_id: 'platform.tenant.display_name.update', required_permission: 'edit_tenant_profile', request_id: command.audit.correlationId,
+    decision: 'allow', result_status: 'succeeded',
+  }], 'one audit record naming the app-owned actor, never the provider UID, and the tenant it changed as its direct subject');
+  assert.deepEqual((await auditsOf(tenant)).map((r) => r.request_id), [command.audit.correlationId], 'found by its subject alone, with no outbox join');
   const events = await eventsFor(tenant);
   assert.deepEqual(events.map((e) => ({ ...e })), [{
     event_type: 'tenant.display_name_changed', event_version: 1, aggregate_type: 'tenant', aggregate_id: tenant, aggregate_version: '2',
@@ -394,11 +425,13 @@ test('M5D-06: a stale version, a missing tenant, changes already in place, a los
   assert.deepEqual(await commit(command), { outcome: 'not_found' });
   await nothingMoved('missing tenant', record, command.audit.correlationId);
 
+  // Changes already in place commit their unchanged response as the completion and nothing else (M5-GIAM-D1-P1-R1; M5D-16).
   const same = { tenantId: tenant, displayName: ` m5d-refuse-${SUFFIX} `, expectedVersion: 1 };
   record = await acquired(OWNER, same);
   command = prepared(record, context, same).command;
   assert.deepEqual(await commit(command), { outcome: 'unchanged' });
-  await nothingMoved('unchanged', record, command.audit.correlationId);
+  await nothingMoved('unchanged', null, command.audit.correlationId);
+  assert.equal(await recordDone(record.operation.scope), true, 'unchanged: the record is completed, in the same transaction');
 
   const change = { tenantId: tenant, displayName: 'Would Change', expectedVersion: 1 };
   record = await acquired(OWNER, change);
@@ -445,13 +478,14 @@ test('M5D-07: a fault after the mutation rolls back the name, the version, the a
   const throwing = createPostgresTransactionalStore({
     client,
     mutators: [{ ...TENANT_DISPLAY_NAME_MUTATOR, apply: async (sql, mutation) => { await TENANT_DISPLAY_NAME_MUTATOR.apply(sql, mutation); throw new Error('m5d injected'); } }],
-    revalidate: revalidateTrustedScope,
+    revalidate: REVALIDATE,
   });
   const record2 = await acquired(OWNER, body);
   const command2 = prepared(record2, context, body).command;
   assert.deepEqual(await throwing.transactions.commit(command2, signal()), { outcome: 'unavailable' });
   assert.equal((await tenantRow(second)).row_version, '1');
   assert.equal((await auditFor(command2.audit.correlationId)).length, 0);
+  assert.equal((await auditsOf(second)).length, 0, 'rollback leaves no audit record naming the tenant either');
   assert.equal(await recordDone(record2.operation.scope), false);
 });
 
@@ -494,7 +528,7 @@ function send(port, method, path, headers = {}, body) {
 }
 
 async function withChain(fn, over = {}) {
-  const tokens = new Map([OWNER, SUPPORT, BILLING, TENANT_ONLY, STORE_ONLY].map((who) => [`tok-${who.uid}`, who.uid]));
+  const tokens = new Map([OWNER, SUPPORT, BILLING, TENANT_ONLY, STORE_ONLY, ...(over.actors ?? [])].map((who) => [`tok-${who.uid}`, who.uid]));
   tokens.set('tok-unknown', `m5d-unknown-${SUFFIX}`);
   const readiness = createReadinessState();
   readiness.setReady();
@@ -569,10 +603,9 @@ test('M5D-09: over HTTP the canonical authorizer admits System Owner and support
   });
 });
 
+/** The actors of every audit record whose action targeted `tenant` — by its direct subject (migration 009), never the outbox. */
 async function owner_audits(tenant) {
-  const rows = await owner`select a.actor_internal_user_id from audit_event a join tmpos_internal.outbox_event e on e.correlation_id::text = a.request_id
-    where e.aggregate_id = ${tenant} order by e.aggregate_version`;
-  return rows.map((r) => r.actor_internal_user_id);
+  return (await auditsOf(tenant)).map((r) => r.actor_internal_user_id);
 }
 
 test('M5D-10: over HTTP — 200, replay, 409, 404, 400 that records nothing, 422 key reuse, and the unchanged 200 with its replay', async () => {
@@ -640,22 +673,32 @@ test('M5D-11: readiness reflects the store and the resolver, and health touches 
 // rollback and upgrade — inside one transaction that is rolled back
 // ---------------------------------------------------------------------------
 
-test('M5D-12: 008 refuses to roll back past a moved version or over a stray object, otherwise reverses exactly, and re-applies over existing rows', async () => {
+test('M5D-12: rollback runs newest first — 009 refuses over audit subjects, 008 over 009 — each reverses exactly, and 008 then 009 re-apply over existing rows', async () => {
   const ROLLBACK = new Error('m5d: roll the proof back');
   const outcome = await owner.begin(async (tx) => {
-    const code = async (fn) => {
-      try { await tx.savepoint(fn); return null; } catch (err) { return err.code ?? String(err.message); }
-    };
-    // This suite has moved versions, so the rollback refuses and drops nothing.
+    const code = refusalIn(tx);
+    // This suite has committed commands, so audit records name their subject: 009's rollback refuses and drops nothing.
+    assert.ok((await tx`select count(*)::int as n from public.audit_event where subject_tenant_id is not null`)[0].n > 0);
+    assert.equal(await code((sp) => sp.unsafe(DOWN_009).simple()), '55006', 'an audit subject refuses 009\'s rollback');
+    // 008's own guard still stands: this suite has moved versions, so its rollback refuses before anything else.
     assert.ok((await tx`select count(*)::int as n from public.tenant where row_version > 1`)[0].n > 0);
-    assert.equal(await code((sp) => sp.unsafe(DOWN_008).simple()), '55006', 'a moved version refuses the rollback');
-    // Reset every version (only inside this transaction), then a stray object in the schema still refuses it.
+    assert.equal(await code((sp) => sp.unsafe(DOWN_008).simple()), '55006', 'a moved version refuses 008\'s rollback');
+    // And 008 cannot go first anyway: even with every version reset (inside this transaction only), 009's routines live in its schema.
     await tx.unsafe('alter table public.tenant disable trigger trg_tenant_row_version');
     await tx.unsafe('update public.tenant set row_version = 1 where row_version <> 1');
     await tx.unsafe('alter table public.tenant enable always trigger trg_tenant_row_version');
-    await tx.unsafe('create table tmpos_command.m5d_stray (id integer)');
-    assert.equal(await code((sp) => sp.unsafe(DOWN_008).simple()), '2BP01', 'a stray object refuses the rollback');
-    await tx.unsafe('drop table tmpos_command.m5d_stray');
+    assert.equal(await code((sp) => sp.unsafe(DOWN_008).simple()), '2BP01', '008\'s rollback refuses while 009 is applied');
+    // Clear the subjects (the append-only trigger lifted and restored inside this transaction), then 009 reverses exactly.
+    await clearSubjects(tx);
+    await tx.unsafe(DOWN_009).simple();
+    const [after009] = await tx`select
+        pg_catalog.to_regprocedure('tmpos_command.m5_revalidate_platform_authority(uuid, text, uuid, text)') is null as authority_gone,
+        pg_catalog.to_regprocedure('tmpos_command.m5_tenant_display_name_update_v2(uuid, bigint, text)') is null as v2_gone,
+        pg_catalog.has_function_privilege('tmpos_app', 'tmpos_command.m5_tenant_display_name_update(uuid, bigint, text)', 'EXECUTE') as op008,
+        pg_catalog.has_column_privilege('tmpos_app', 'public.tenant', 'display_name', 'UPDATE') as name_grant,
+        (select count(*)::int from pg_catalog.pg_attribute
+          where attrelid = 'public.audit_event'::regclass and attname = 'subject_tenant_id' and not attisdropped) as subject_columns`;
+    assert.deepEqual({ ...after009 }, { authority_gone: true, v2_gone: true, op008: true, name_grant: true, subject_columns: 0 }, 'exactly the 008 state');
 
     await tx.unsafe(DOWN_008).simple();
     const [gone] = await tx`select pg_catalog.to_regnamespace('tmpos_command') is null as schema,
@@ -664,22 +707,51 @@ test('M5D-12: 008 refuses to roll back past a moved version or over a stray obje
       pg_catalog.to_regnamespace('tmpos_internal') is not null as store_schema, pg_catalog.to_regnamespace('tmpos_identity') is not null as identity_schema`;
     assert.deepEqual({ ...gone }, { schema: true, columns: 0, triggers: 0, store_schema: true, identity_schema: true }, 'exactly 008 is gone; 006 and 007 stay');
 
-    // The upgrade from 007: rows that exist before 008 each start at version 1, and the verify section passes.
-    const [{ tenant_id: pre }] = await tx`insert into public.tenant (display_name) values (${`m5d-pre-${SUFFIX}`}) returning tenant_id`;
+    // The upgrade from 007: rows that exist before 008 each start at version 1; then 009 over them — a name carrying a
+    // Bidi_Control character stored before 009 is not rewritten, and every existing audit record keeps a null subject.
+    const legacyName = `m5d-pre-${SUFFIX}${String.fromCodePoint(0x202e)}txt`;
+    const [{ tenant_id: pre }] = await tx`insert into public.tenant (display_name) values (${legacyName}) returning tenant_id`;
     await tx.unsafe(UP_008).simple();
-    const [{ row_version: preVersion }] = await tx`select row_version from public.tenant where tenant_id = ${pre}`;
-    assert.equal(preVersion, '1');
-    const [{ other }] = await tx`select count(*)::int as other from public.tenant where row_version <> 1`;
-    assert.equal(other, 0, 'every existing row starts at 1');
-    const [answer] = await tx`select o_outcome, o_version from tmpos_command.m5_tenant_display_name_update(${pre}::uuid, 1::bigint, 'After Upgrade'::text)`;
+    assert.equal((await tx`select row_version from public.tenant where tenant_id = ${pre}`)[0].row_version, '1');
+    assert.equal((await tx`select count(*)::int as other from public.tenant where row_version <> 1`)[0].other, 0, 'every existing row starts at 1');
+    await tx.unsafe(UP_009).simple();
+    assert.equal((await tx`select display_name from public.tenant where tenant_id = ${pre}`)[0].display_name, legacyName, 'a stored name is not rewritten');
+    assert.equal((await tx`select count(*)::int as n from public.audit_event where subject_tenant_id is not null`)[0].n, 0);
+    const [answer] = await tx`select o_outcome, o_version from tmpos_command.m5_tenant_display_name_update_v2(${pre}::uuid, 1::bigint, 'After Upgrade'::text)`;
     assert.deepEqual({ ...answer }, { o_outcome: 'applied', o_version: '2' }, 'and the re-applied operation works');
     throw ROLLBACK;
   }).then(() => 'committed', (err) => (err === ROLLBACK ? 'rolled back' : Promise.reject(err)));
   assert.equal(outcome, 'rolled back');
-  const [present] = await owner`select pg_catalog.to_regprocedure('tmpos_command.m5_tenant_display_name_update(uuid, bigint, text)') is not null as operation,
+  const [present] = await owner`select pg_catalog.to_regprocedure('tmpos_command.m5_tenant_display_name_update_v2(uuid, bigint, text)') is not null as operation,
     (select count(*)::int from pg_catalog.pg_trigger where tgrelid = 'public.tenant'::regclass and tgname = 'trg_tenant_row_version') as triggers`;
-  assert.deepEqual({ ...present }, { operation: true, triggers: 1 }, 'the shared database keeps 008');
+  assert.deepEqual({ ...present }, { operation: true, triggers: 1 }, 'the shared database keeps 008 and 009');
 });
+
+/** Every audit subject cleared — the append-only trigger lifted and restored — inside the caller's own (rolled-back) transaction. */
+async function clearSubjects(tx) {
+  await tx.unsafe('alter table public.audit_event disable trigger trg_audit_event_reject_mutation');
+  await tx.unsafe('update public.audit_event set subject_tenant_id = null where subject_tenant_id is not null');
+  await tx.unsafe('alter table public.audit_event enable trigger trg_audit_event_reject_mutation');
+}
+/** A refusal's SQLSTATE, or null: `fn` runs in a savepoint of `tx`, so a refusal leaves `tx` usable. */
+function refusalIn(tx) {
+  return async (fn) => {
+    try { await tx.savepoint(fn); return null; } catch (err) { return err.code ?? String(err.message); }
+  };
+}
+/** `fn` over `tx` inside one transaction that is always rolled back; `to008` first rolls 009 back within it. */
+async function rolledBack(fn, { to008 = false } = {}) {
+  const ROLLBACK = new Error('m5d: roll the proof back');
+  const outcome = await owner.begin(async (tx) => {
+    if (to008) {
+      await clearSubjects(tx);
+      await tx.unsafe(DOWN_009).simple();
+    }
+    await fn(tx);
+    throw ROLLBACK;
+  }).then(() => 'committed', (err) => (err === ROLLBACK ? 'rolled back' : Promise.reject(err)));
+  assert.equal(outcome, 'rolled back');
+}
 
 test('M5D-13: 008 refuses to finish while any role the runtime could hold is a member of its owner, SET-only included, or the schema grants more than USAGE', async () => {
   // A clean apply leaves exactly the owner and tmpos_app's non-grantable USAGE on the schema.
@@ -687,15 +759,12 @@ test('M5D-13: 008 refuses to finish while any role the runtime could hold is a m
     from pg_catalog.pg_namespace n cross join pg_catalog.aclexplode(coalesce(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a
     where n.nspname = 'tmpos_command' and a.grantee <> n.nspowner`;
   assert.deepEqual(acl.map((r) => ({ ...r })), [{ grantee: 'tmpos_app', privilege: 'USAGE', grantable: false }]);
-  // Section 6 is the up file's last DO block; it is re-run over a state it must refuse, inside a transaction rolled back.
+  // 008's section 6 enumerates exactly its own two functions, so it is re-run over the 008 state: 009 rolled back inside the proof.
   const VERIFY = UP_008.slice(UP_008.lastIndexOf('do $$'));
   const [{ ownerRole }] = await owner`select n.nspowner::regrole::text as "ownerRole" from pg_catalog.pg_namespace n where n.nspname = 'tmpos_command'`;
-  const ROLLBACK = new Error('m5d: roll the proof back');
-  const outcome = await owner.begin(async (tx) => {
-    const code = async (fn) => {
-      try { await tx.savepoint(fn); return null; } catch (err) { return err.code ?? String(err.message); }
-    };
-    assert.equal(await code((sp) => sp.unsafe(VERIFY).simple()), null, 'the verify section passes over the applied state (positive control)');
+  await rolledBack(async (tx) => {
+    const code = refusalIn(tx);
+    assert.equal(await code((sp) => sp.unsafe(VERIFY).simple()), null, 'the verify section passes over the 008 state (positive control)');
     assert.equal(await code(async (sp) => {
       await sp.unsafe('grant create on schema tmpos_command to tmpos_app');
       await sp.unsafe(VERIFY).simple();
@@ -705,9 +774,306 @@ test('M5D-13: 008 refuses to finish while any role the runtime could hold is a m
       assert.equal((await sp`select pg_catalog.pg_has_role('tmpos_app', ${ownerRole}, 'USAGE') as usage`)[0].usage, false, 'USAGE does not report a SET-only membership');
       await sp.unsafe(VERIFY).simple();
     }), '55000', 'a SET-only membership in the owner refuses');
-    throw ROLLBACK;
-  }).then(() => 'committed', (err) => (err === ROLLBACK ? 'rolled back' : Promise.reject(err)));
-  assert.equal(outcome, 'rolled back');
+  }, { to008: true });
   const [{ member }] = await owner`select pg_catalog.pg_has_role('tmpos_app', ${ownerRole}, 'MEMBER') as member`;
   assert.equal(member, false, 'the shared database keeps no membership');
+});
+
+test('M5D-14: 009 refuses to finish while a runtime role reaches an owner, the name is writable again, 008\'s operation is re-granted, or the schema holds more', async () => {
+  const VERIFY = UP_009.slice(UP_009.lastIndexOf('do $$'));
+  const [{ schemaOwner, tenantOwner }] = await owner`select
+      (select n.nspowner::regrole::text from pg_catalog.pg_namespace n where n.nspname = 'tmpos_command') as "schemaOwner",
+      (select c.relowner::regrole::text from pg_catalog.pg_class c where c.oid = 'public.tenant'::regclass) as "tenantOwner"`;
+  await rolledBack(async (tx) => {
+    const code = refusalIn(tx);
+    assert.equal(await code((sp) => sp.unsafe(VERIFY).simple()), null, 'the verify section passes over the applied state (positive control)');
+    for (const [label, setup] of [
+      ['UPDATE of the name re-granted to tmpos_app', 'grant update (display_name) on table public.tenant to tmpos_app'],
+      ['UPDATE of the whole tenant row to PUBLIC', 'grant update on table public.tenant to public'],
+      ['INSERT of the name to authenticated', 'grant insert (display_name) on table public.tenant to authenticated'],
+      ['UPDATE of the name to tmpos_audit_writer', 'grant update (display_name) on table public.tenant to tmpos_audit_writer'],
+      ['008\'s operation re-granted to tmpos_app', 'grant execute on function tmpos_command.m5_tenant_display_name_update(uuid, bigint, text) to tmpos_app'],
+      ['the authority routine to PUBLIC', 'grant execute on function tmpos_command.m5_revalidate_platform_authority(uuid, text, uuid, text) to public'],
+      ['the v2 operation WITH GRANT OPTION', 'grant execute on function tmpos_command.m5_tenant_display_name_update_v2(uuid, bigint, text) to tmpos_app with grant option'],
+      ['a fifth function in the schema', 'create function tmpos_command.m5d_extra() returns integer language sql as $$ select 1 $$'],
+      ['CREATE on the schema', 'grant create on schema tmpos_command to tmpos_app'],
+      ['a SET-only membership in the tenant\'s owner', `grant "${tenantOwner}" to tmpos_app with inherit false, set true`],
+      ['the audit writer a member of the schema owner', `grant "${schemaOwner}" to tmpos_audit_writer`],
+    ]) {
+      assert.equal(await code(async (sp) => { await sp.unsafe(setup); await sp.unsafe(VERIFY).simple(); }), '55000', label);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M5-GIAM-D1-P1-R1 — the legacy direct write, the no-op's completion, exact authority, Unicode
+// ---------------------------------------------------------------------------
+
+test('M5D-15: no runtime principal writes a display name outside the command — directly, under a tenant context it sets itself, or as a role it can become', async () => {
+  const tenant = await newTenant(`m5d-legacy-${SUFFIX}`);
+  const update = (tx) => tx`update public.tenant set display_name = 'Legacy Write' where tenant_id = ${tenant}`;
+  // The tenant-scope RLS context is two settings any session may set: that is what made 005's grant reachable.
+  const asTenant = (sql, fn) => sql.begin(async (tx) => {
+    await tx`select pg_catalog.set_config('app.scope_type', 'tenant', true)`;
+    await tx`select pg_catalog.set_config('app.tenant_id', ${tenant}, true)`;
+    return fn(tx);
+  });
+  // The production-composed runtime LOGIN (tmpos_app and tmpos_audit_writer, inherited), and each role it can become.
+  assert.equal(await refusalCode(() => update(runtime)), '42501', 'the login, no context');
+  assert.equal(await refusalCode(() => asTenant(runtime, update)), '42501', 'the login, under a tenant context it set itself');
+  for (const role of ['tmpos_app', 'tmpos_audit_writer']) {
+    assert.equal(await refusalCode(() => asTenant(runtime, async (tx) => { await tx.unsafe(`set local role ${role}`); return update(tx); })), '42501', `as ${role}`);
+  }
+  // A login holding tmpos_app only through SET (INHERIT FALSE): no privilege of its own, and none by becoming the role.
+  const setOnly = `tmpos_m5d_setonly_${SUFFIX.replace(/-/g, '')}`;
+  await owner.unsafe(`create role ${setOnly} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls noinherit`);
+  await owner.unsafe(`grant tmpos_app to ${setOnly} with inherit false, set true`);
+  const setOnlySql = connect(setOnly, 1);
+  try {
+    assert.equal(await refusalCode(() => asTenant(setOnlySql, update)), '42501', 'the SET-only login');
+    assert.equal(await refusalCode(() => asTenant(setOnlySql, async (tx) => { await tx.unsafe('set local role tmpos_app'); return update(tx); })), '42501',
+      'the SET-only login as tmpos_app');
+  } finally {
+    await setOnlySql.end({ timeout: 5 });
+    await owner.unsafe(`drop role ${setOnly}`);
+  }
+  // The privilege matrix: no runtime-holdable role may write the name — directly, through a membership or through PUBLIC.
+  for (const role of ['tmpos_app', 'tmpos_audit_writer', 'anon', 'authenticated']) {
+    for (const privilege of ['UPDATE', 'INSERT']) {
+      assert.equal((await owner`select pg_catalog.has_column_privilege(${role}, 'public.tenant', 'display_name', ${privilege}) as ok`)[0].ok, false, `${role} ${privilege}`);
+    }
+  }
+  assert.equal((await runtime`select pg_catalog.has_column_privilege('public.tenant', 'display_name', 'UPDATE') as ok`)[0].ok, false, 'the login itself');
+  assert.equal((await tenantRow(tenant)).display_name, `m5d-legacy-${SUFFIX}`, 'nothing was written');
+  // The unrelated half of 005's grant stays (legal_name serves no command yet), and still moves the version for every writer.
+  const legal = await asTenant(runtime, (tx) => tx`update public.tenant set legal_name = 'Legacy Legal' where tenant_id = ${tenant}`);
+  assert.equal(legal.count, 1);
+  const row = await tenantRow(tenant);
+  assert.deepEqual([row.display_name, row.legal_name, row.row_version], [`m5d-legacy-${SUFFIX}`, 'Legacy Legal', '2']);
+  // The fixed command operation still answers the same login.
+  assert.deepEqual({ ...(await call(tenant, 2, 'Via Command')) }, { o_outcome: 'applied', o_version: '3' });
+});
+
+/** A store whose display-name mutator, once its operation has answered, runs `extra` and then holds the transaction until released. */
+function heldStore(extra = async () => undefined) {
+  let arrive = () => undefined;
+  const arrived = new Promise((resolve) => { arrive = resolve; });
+  let release = () => undefined;
+  const released = new Promise((resolve) => { release = resolve; });
+  const held = createPostgresTransactionalStore({
+    client, revalidate: REVALIDATE,
+    mutators: [{ ...TENANT_DISPLAY_NAME_MUTATOR, apply: async (sql, mutation) => {
+      const answer = await TENANT_DISPLAY_NAME_MUTATOR.apply(sql, mutation);
+      await extra(sql);
+      arrive();
+      await released;
+      return answer;
+    } }],
+  });
+  return { held, arrived, release };
+}
+/** How many backends of this database are waiting on a lock right now. */
+const lockWaiters = async () =>
+  (await owner`select pg_catalog.count(*)::int as n from pg_catalog.pg_stat_activity
+     where datname = pg_catalog.current_database() and wait_event_type = 'Lock'`)[0].n;
+/** 'settled' once `promise` settles, 'pending' if it has not within `ms`. */
+async function settlesWithin(promise, ms) {
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, 'pending'); });
+  try {
+    return await Promise.race([promise.then(() => 'settled', () => 'settled'), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test('M5D-16: a same-name request seals its response in the transaction that locked the row and found it — a concurrent change waits, and the replay is that response', async () => {
+  const tenant = await newTenant(`m5d-noop-${SUFFIX}`);
+  const sameBody = { tenantId: tenant, displayName: `m5d-noop-${SUFFIX}`, expectedVersion: 1 };
+  const record = await acquired(OWNER, sameBody);
+  const noop = prepared(record, await contextOf(OWNER), sameBody);
+  const { held, arrived, release } = heldStore();
+  const noopAnswer = held.transactions.commit(noop.command, signal());
+  await arrived; // the operation answered unchanged and still holds the tenant row
+  // A real change at the same expected version, by another actor, cannot land between the decision and the completion.
+  const changeBody = { tenantId: tenant, displayName: 'Changed After', expectedVersion: 1 };
+  const change = prepared(await acquired(SUPPORT, changeBody), await contextOf(SUPPORT), changeBody);
+  const changeAnswer = commit(change.command);
+  assert.equal(await settlesWithin(changeAnswer, 300), 'pending', 'the change waits on the row the no-op locked');
+  assert.ok((await lockWaiters()) > 0, 'and it is waiting on a lock, not merely slow');
+  assert.equal(await recordDone(record.operation.scope), false, 'nothing of the no-op is visible before it commits');
+  release();
+  assert.deepEqual(await noopAnswer, { outcome: 'unchanged' });
+  assert.deepEqual(await changeAnswer, { outcome: 'committed' }, 'then the change lands, after the no-op committed at version 1');
+  // The exact retry replays the sealed unchanged response byte for byte: the state the no-op observed and committed at.
+  const replay = await store.idempotency.acquire({ ...record.operation, lease: randomBytes(32).toString('base64url'), ...IDEMPOTENCY_POLICY }, signal());
+  assert.deepEqual(replay, { outcome: 'replay', response: noop.command.unchanged });
+  assert.equal(keyring.unseal(replay.response, record.operation)?.body, JSON.stringify({ tenantId: tenant, displayName: `m5d-noop-${SUFFIX}`, version: 1 }));
+  // The no-op wrote nothing else: one version step, one audit record and one event — all the change's.
+  assert.equal((await tenantRow(tenant)).row_version, '2');
+  assert.deepEqual((await auditsOf(tenant)).map((r) => r.request_id), [change.command.audit.correlationId]);
+  assert.equal((await auditFor(noop.command.audit.correlationId)).length, 0, 'no audit record for the no-op');
+  assert.equal((await eventsFor(tenant)).length, 1, 'no event for it');
+});
+
+test('M5D-17: a no-op whose completion cannot hold rolls back whole — no completion, and the record stays in progress', async () => {
+  const tenant = await newTenant(`m5d-noop-fail-${SUFFIX}`);
+  const body = { tenantId: tenant, displayName: `m5d-noop-fail-${SUFFIX}`, expectedVersion: 1 };
+  // A record retained for 300 ms, and a transaction that outlives it after the operation answered: 006's completion judges
+  // retention again on the store's clock, refuses, and the no-op's decision rolls back with it.
+  const operation = keyring.operationOf(randomUUID(), OWNER.principal, {
+    method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, body: Buffer.from(JSON.stringify(body)),
+  });
+  const lease = randomBytes(32).toString('base64url');
+  // Everything the commit needs is built BEFORE the short-lived record is acquired, so only the mutator's own
+  // sleep outlives the retention: the fence still holds when the transaction starts, and the completion does not.
+  const { held, release } = heldStore(async (sql) => { await sql`select pg_catalog.pg_sleep(1.2)`; });
+  release();
+  const context = await contextOf(OWNER);
+  assert.deepEqual(await store.idempotency.acquire({ ...operation, lease, leaseMs: 800, retentionMs: 800 }, signal()), { outcome: 'acquired', reclaimed: false });
+  const { command } = prepared({ operation, lease }, context, body);
+  assert.deepEqual(await held.transactions.commit(command, signal()), { outcome: 'unavailable' });
+  assert.equal(await recordDone(operation.scope), false, 'no completion was recorded');
+  assert.deepEqual([(await tenantRow(tenant)).row_version, (await auditsOf(tenant)).length, (await eventsFor(tenant)).length], ['1', 0, 0]);
+});
+
+/** Another active platform grant for `who`, at a chosen membership_id so its order against the authorized one is fixed. */
+const addGrant = (who, membershipId, role) => owner`insert into user_membership (membership_id, internal_user_id, scope_type, role_id, status)
+  values (${membershipId}::uuid, ${who.id}, 'platform', ${role}, 'active')`;
+
+test('M5D-18: authority changed after authorization commits nothing — removed, disabled, added in any order, re-issued, re-roled, read-only, re-versioned or substituted', async () => {
+  const tenant = await newTenant(`m5d-authz-${SUFFIX}`);
+  const refusedAfter = async (label, who, context) => {
+    const body = { tenantId: tenant, displayName: `Authz ${label}`, expectedVersion: 1 };
+    const record = await acquired(who, body);
+    const { command } = prepared(record, context, body);
+    assert.deepEqual(await commit(command), { outcome: 'unavailable' }, label);
+    assert.equal((await tenantRow(tenant)).row_version, '1', `${label}: no version moved`);
+    assert.equal((await auditFor(command.audit.correlationId)).length, 0, `${label}: no audit record`);
+    assert.equal((await eventsFor(tenant)).length, 0, `${label}: no event`);
+    assert.equal(await recordDone(record.operation.scope), false, `${label}: no completion`);
+  };
+  const changes = [
+    ['the grant removed', (who) => owner`delete from user_membership where internal_user_id = ${who.id}`],
+    ['the grant disabled', (who) => owner`update user_membership set status = 'suspended' where internal_user_id = ${who.id}`],
+    ['a second grant added, ordered before it', (who) => addGrant(who, `00000000${randomUUID().slice(8)}`, 'support_admin')],
+    ['a second grant added, ordered after it', (who) => addGrant(who, `ffffffff${randomUUID().slice(8)}`, 'support_admin')],
+    ['the grant re-issued under a new id', async (who) => {
+      await owner`delete from user_membership where internal_user_id = ${who.id}`;
+      await owner`insert into user_membership (internal_user_id, scope_type, role_id, status) values (${who.id}, 'platform', 'system_owner', 'active')`;
+    }],
+    ['the grant re-roled below Edit', (who) => owner`update user_membership set role_id = 'billing_admin' where internal_user_id = ${who.id}`],
+    ['the grant re-roled to another editor', (who) => owner`update user_membership set role_id = 'support_admin' where internal_user_id = ${who.id}`],
+    ['the account made read-only', (who) => owner`update app_user set status = 'read_only' where internal_user_id = ${who.id}`],
+    ['the account made overdue', (who) => owner`update app_user set status = 'overdue' where internal_user_id = ${who.id}`],
+    ['the account suspended', (who) => owner`update app_user set status = 'suspended' where internal_user_id = ${who.id}`],
+    ['the account returned to pending activation', (who) => owner`update app_user set status = 'pending_activation' where internal_user_id = ${who.id}`],
+    ['the security version moved', (who) => owner`update app_user set status = 'active' where internal_user_id = ${who.id}`],
+  ];
+  for (const [label, change] of changes) {
+    const who = await actor(`authz-${label.replace(/[^a-z]+/gi, '-')}`, { scope: 'platform', role: 'system_owner' });
+    const context = await contextOf(who);
+    await change(who);
+    await refusedAfter(label, who, context);
+  }
+  // A different grant never answers for the authorized one: another actor's, or this actor's own tenant grant.
+  const other = await actor('authz-other', { scope: 'platform', role: 'system_owner' });
+  const [{ membership_id: othersGrant }] = await owner`select membership_id from user_membership where internal_user_id = ${other.id}`;
+  const mixed = await actor('authz-mixed', { scope: 'platform', role: 'system_owner' });
+  await owner`insert into user_membership (internal_user_id, tenant_id, scope_type, role_id, status) values (${mixed.id}, ${T_STORE}, 'tenant', 'manager', 'active')`;
+  const [{ membership_id: ownTenantGrant }] = await owner`select membership_id from user_membership where internal_user_id = ${mixed.id} and scope_type = 'tenant'`;
+  await refusedAfter('another actor\'s grant substituted', mixed, { ...(await contextOf(mixed)), membershipId: othersGrant });
+  await refusedAfter('the actor\'s tenant grant substituted', mixed, { ...(await contextOf(mixed)), membershipId: ownTenantGrant });
+  // Control: unchanged authority commits.
+  const body = { tenantId: tenant, displayName: 'Authz Control', expectedVersion: 1 };
+  const { command } = prepared(await acquired(mixed, body), await contextOf(mixed), body);
+  assert.deepEqual(await commit(command), { outcome: 'committed' }, 'the same actor, its authority unchanged, commits');
+});
+
+test('M5D-19: a grant added or revoked while a command holds its revalidated authority waits for that command, never slipping in between', async () => {
+  const tenant = await newTenant(`m5d-race-authz-${SUFFIX}`);
+  let version = 1;
+  for (const [label, change] of [
+    ['a second platform grant inserted', (sql, who) => sql`insert into user_membership (internal_user_id, scope_type, role_id, status) values (${who.id}, 'platform', 'support_admin', 'active')`],
+    ['the authorized grant suspended', (sql, who) => sql`update user_membership set status = 'suspended' where internal_user_id = ${who.id}`],
+    ['the account suspended', (sql, who) => sql`update app_user set status = 'suspended' where internal_user_id = ${who.id}`],
+  ]) {
+    const who = await actor(`race-${label.replace(/[^a-z]+/gi, '-')}`, { scope: 'platform', role: 'system_owner' });
+    const body = { tenantId: tenant, displayName: `Race ${label}`, expectedVersion: version };
+    const { command } = prepared(await acquired(who, body), await contextOf(who), body);
+    const { held, arrived, release } = heldStore();
+    const answer = held.transactions.commit(command, signal());
+    await arrived; // revalidated and mutated, the authority rows locked
+    const racer = connect(undefined, 1);
+    try {
+      const racing = change(racer, who);
+      assert.equal(await settlesWithin(racing, 300), 'pending', `${label}: waits on the command's locks`);
+      assert.ok((await lockWaiters()) > 0, `${label}: waiting on a lock, not merely slow`);
+      release();
+      assert.deepEqual(await answer, { outcome: 'committed' }, `${label}: the command committed on the authority it held`);
+      await racing;
+    } finally {
+      await racer.end({ timeout: 5 });
+    }
+    version += 1;
+    const resolution = await principals.resolve(who.principal, signal());
+    const after = resolution.outcome === 'resolved' ? selectScope(resolution.principal, 'platform', { tenant: null, store: null }).outcome : 'refused';
+    assert.equal(after, 'refused', `${label}: afterwards the actor is refused at the chain`);
+  }
+});
+
+test('M5D-20: over HTTP one platform grant authorizes, none or two refuse, and authority changed after the authorizer and before the transaction commits nothing', async () => {
+  const tenant = await newTenant(`m5d-http-authority-${SUFFIX}`);
+  const single = await actor('http-single', { scope: 'platform', role: 'system_owner' });
+  const double = await actor('http-double', { scope: 'platform', role: 'system_owner' });
+  await addGrant(double, randomUUID(), 'support_admin');
+  const changing = [];
+  for (const label of ['removed', 'added', 'rerolled']) changing.push(await actor(`http-${label}`, { scope: 'platform', role: 'system_owner' }));
+  let beforeCommit = async () => undefined;
+  const port = { commit: async (c, s) => { await beforeCommit(); return store.transactions.commit(c, s); }, probe: (s) => store.transactions.probe(s) };
+  await withChain(async ({ signIn }) => {
+    const none = await signIn(TENANT_ONLY);
+    const refusedNone = await none({ tenantId: tenant, displayName: 'None', expectedVersion: 1 });
+    assert.deepEqual([refusedNone.status, errorOf(refusedNone)], [403, 'forbidden'], 'no platform grant');
+    const two = await signIn(double);
+    const refusedTwo = await two({ tenantId: tenant, displayName: 'Two', expectedVersion: 1 });
+    assert.deepEqual([refusedTwo.status, errorOf(refusedTwo)], [403, 'forbidden'], 'two platform grants are ambiguous');
+    for (const [who, change] of [
+      [changing[0], () => owner`delete from user_membership where internal_user_id = ${changing[0].id}`],
+      [changing[1], () => addGrant(changing[1], randomUUID(), 'support_admin')],
+      [changing[2], () => owner`update user_membership set role_id = 'billing_admin' where internal_user_id = ${changing[2].id}`],
+    ]) {
+      const patch = await signIn(who);
+      beforeCommit = async () => { beforeCommit = async () => undefined; await change(); };
+      const refused = await patch({ tenantId: tenant, displayName: 'Changed Underneath', expectedVersion: 1 });
+      assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable'], 'authorized, then changed before the transaction: nothing commits');
+    }
+    assert.deepEqual([(await tenantRow(tenant)).row_version, (await auditsOf(tenant)).length, (await eventsFor(tenant)).length], ['1', 0, 0], 'nothing moved');
+    const one = await signIn(single);
+    const granted = await one({ tenantId: tenant, displayName: 'Single Grant', expectedVersion: 1 });
+    assert.deepEqual([granted.status, JSON.parse(granted.body)], [200, { tenantId: tenant, displayName: 'Single Grant', version: 2 }], 'one grant authorizes');
+    assert.deepEqual(await owner_audits(tenant), [single.id]);
+  }, { port, actors: [single, double, ...changing] });
+});
+
+test('M5D-21: the runtime validator and the database operation agree character by character — every Bidi_Control refused by both, ordinary text accepted by both', async () => {
+  const tenant = await newTenant(`m5d-unicode-${SUFFIX}`);
+  const cp = (...codes) => String.fromCodePoint(...codes);
+  const corpus = [
+    ...BIDI_CONTROLS.map((code) => `Acme${cp(code)}Repairs`), `${cp(0x200f)}Acme`, `Acme${cp(0x2069)}`, `invoice${cp(0x202e)}fdp.exe`,
+    cp(0x645, 0x62a, 0x62c, 0x631, 0x20, 0x627, 0x644, 0x625, 0x635, 0x644, 0x627, 0x62d), cp(0x5ea, 0x5d9, 0x5e7, 0x5d5, 0x5df),
+    `Acme ${cp(0x5d7, 0x5e0, 0x5d5, 0x5ea)} 24`, `Cafe${cp(0x301)} Re${cp(0x301)}paration`, `${cp(0x1f469, 0x200d, 0x1f527)} Fix`,
+    `Acme${cp(0x200b)}Repairs`, `Acme${cp(0x2060)}Repairs`, `Acme${cp(0xad)}Repairs`, `${cp(0x2764, 0xfe0f)} Repairs`, 'Acme  Repairs',
+  ];
+  let version = 1;
+  let refused = 0;
+  for (const name of corpus) {
+    const runtimeAccepts = normalizeTenantDisplayName(name) === name;
+    const answer = await call(tenant, version, name);
+    assert.equal(answer.o_outcome !== 'invalid', runtimeAccepts, `${JSON.stringify(name)}: runtime ${runtimeAccepts}, database ${answer.o_outcome}`);
+    if (answer.o_outcome === 'applied') version += 1;
+    if (!runtimeAccepts) refused += 1;
+  }
+  assert.equal(refused, BIDI_CONTROLS.length + 3, 'exactly the Bidi_Control names are refused');
+  assert.equal(version, corpus.length - refused + 1, 'and every other name was written');
 });

@@ -86,9 +86,11 @@ export interface ScopeSelector {
 }
 
 /**
- * A selected scope: the actor, the version to revalidate against, the scope tuple and the role the
- * database says is granted there. This is what a command transaction carries — never a principal,
- * a provider reference or a request.
+ * A selected scope: the actor, the version to revalidate against, the scope tuple, the one grant
+ * selected there and the role the database says it carries. This is what a command transaction
+ * carries — never a principal, a provider reference or a request. The membership is the grant
+ * itself (M5-GIAM-D1-P1-R1): a command commits only while exactly that grant still holds, so a
+ * different grant at the same scope never answers for it.
  */
 export interface TrustedScope {
   readonly actor: string;
@@ -96,6 +98,7 @@ export interface TrustedScope {
   readonly scope: AuthorizationScope;
   readonly tenant: string | null;
   readonly store: string | null;
+  readonly membershipId: string;
   readonly roleId: string;
   readonly limitation: AccountLimitation;
 }
@@ -185,6 +188,7 @@ export function selectScope(
       scope: required,
       tenant,
       store,
+      membershipId: grant.membershipId,
       roleId: grant.roleId,
       limitation: limited ? 'read_only' : 'none',
     }),
@@ -196,7 +200,7 @@ export function isTrustedScope(value: unknown): value is TrustedScope {
   if (typeof value !== 'object' || value === null) return false;
   const s = value as Record<string, unknown>;
   if (!isUuid(s.actor) || typeof s.securityVersion !== 'string' || !VERSION_RE.test(s.securityVersion)) return false;
-  if (typeof s.roleId !== 'string' || !ROLE_RE.test(s.roleId)) return false;
+  if (!isUuid(s.membershipId) || typeof s.roleId !== 'string' || !ROLE_RE.test(s.roleId)) return false;
   if (s.limitation !== 'none' && s.limitation !== 'read_only') return false;
   if (s.scope === 'platform') return s.tenant === null && s.store === null;
   if (s.scope === 'tenant') return isUuid(s.tenant) && s.store === null;

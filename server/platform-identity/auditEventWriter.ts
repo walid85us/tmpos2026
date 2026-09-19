@@ -172,6 +172,14 @@ export interface AuditEventWriteInput {
   evidenceLevel: EvidenceLevel;
 
   metadata?: AuditMetadata;
+
+  /**
+   * The tenant the recorded action targeted, independent of the scope above (migration 009,
+   * M5-GIAM-D1-P1-R1): a platform-scope command that changes a tenant names it here, since its scope
+   * carries no tenant_id. A UUID or null; set only by a caller that derived it from a server-validated
+   * target — never from request metadata. Absent or null, the row is written exactly as before 009.
+   */
+  subjectTenantId?: string | null;
 }
 
 /** Non-sensitive validation error (carries a label only — never an input value). */
@@ -239,6 +247,9 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
   }
   if (event.storeId !== null && !UUID_RE.test(event.storeId)) {
     throw new AuditEventValidationError('audit event storeId must be a UUID or null');
+  }
+  if (event.subjectTenantId != null && !UUID_RE.test(event.subjectTenantId)) {
+    throw new AuditEventValidationError('audit event subjectTenantId must be a UUID or null');
   }
 
   // Scope fields must be MUTUALLY consistent, not merely well-typed. Reaching the database
@@ -432,6 +443,58 @@ export async function writeAuditEvent(
   const eventId = randomUUID();
 
   // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
+  // Two fixed statements, never a fragment: subject_tenant_id (migration 009) is named only when the event names a
+  // subject, so every other caller's statement — and every database before 009 — is exactly as it was.
+  if (validated.subjectTenantId != null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_tenant_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectTenantId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
   await executor`
     insert into public.audit_event (
       event_id,

@@ -32,12 +32,12 @@ import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoin
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
-import { createPostgresPrincipalResolver, revalidateTrustedScope } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import type { RouteAuthorizer } from '../runtime/access.js';
-import { createPlatformRouteAuthorizer } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -100,7 +100,7 @@ export interface TransactionFactories {
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
-// PATCH /admin/v1/tenants/display-name with its one mutator over migration 008's fixed operation, so a deployment serving it
+// PATCH /admin/v1/tenants/display-name with its one mutator over migration 009's fixed operation, so a deployment serving it
 // requires the whole boundary below — the database, the idempotency key and the store — and refuses to start without it. The
 // entry that composes it also hands createApp the route's own contracts (tenantDisplayName.ts); none is deployed yet.
 export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
@@ -158,8 +158,10 @@ export function assembleTransactions(
   let store: TransactionalStore;
   try {
     // The revalidator the store runs inside each command transaction, over the same client and the
-    // same governed endpoint: one credential, one boundary, no second connection.
-    store = factories.store({ client, mutators: inventory.mutators, revalidate: revalidateTrustedScope });
+    // same governed endpoint: one credential, one boundary, no second connection. It re-decides exactly
+    // what the authorizer below decided — the very grant and role, then the permission on the same role
+    // definitions — on the committing transaction (M5-GIAM-D1-P1-R1).
+    store = factories.store({ client, mutators: inventory.mutators, revalidate: createPlatformContextRevalidator({ authority: revalidatePlatformAuthority }) });
   } catch (err) {
     void client.end(); // nothing opened yet: the kernel connects only when a transaction runs
     throw err;

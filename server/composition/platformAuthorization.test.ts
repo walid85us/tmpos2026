@@ -5,12 +5,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPlatformRouteAuthorizer } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import { selectScope } from '../runtime/principals.js';
-import type { PrincipalResolutionPort, TrustedMembership, TrustedPrincipal } from '../runtime/principals.js';
+import type { PrincipalResolutionPort, TrustedMembership, TrustedPrincipal, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
+import { BUILT_IN_PLATFORM_ROLES, CANONICAL_PLATFORM_PERMISSIONS } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PlatformRoleDefinition } from '../platform-identity/m5CanonicalPermissions.js';
+import type { PgTransactionScope } from '../persistence/supervisedPgClient.js';
 
 const ACTOR = '11111111-1111-4111-8111-111111111111';
 const TENANT = '22222222-2222-4222-8222-222222222222';
@@ -63,8 +65,9 @@ test('built-in roles on edit_tenant_profile: Edit or above on tenant_management 
     const answer = await decide(p);
     assertGranted(answer, p, roleId);
     assert.deepEqual((answer as { context: unknown }).context, {
-      actor: ACTOR, securityVersion: VERSION, scope: 'platform', tenant: null, store: null, roleId, limitation: 'none',
-    }, `${roleId}: the context is the resolved actor at platform scope`);
+      actor: ACTOR, securityVersion: VERSION, scope: 'platform', tenant: null, store: null,
+      membershipId: p.memberships[0].membershipId, roleId, limitation: 'none',
+    }, `${roleId}: the context is the resolved actor at platform scope, naming the very grant selected`);
   }
   for (const roleId of ['billing_admin', 'security_admin']) assert.equal(await decide(platformRole(roleId)), false, `${roleId}: insufficient level`);
 });
@@ -73,7 +76,8 @@ test('System Owner is decided through the same evaluator: a View definition unde
   const viewOwner = new Map([['system_owner', { levels: { tenant_management: 'view' }, moneyGrants: {} } as PlatformRoleDefinition]]);
   assert.equal(await decide(platformRole('system_owner'), EDIT, viewOwner), false);
   const fullOwner = new Map([['system_owner', { levels: { tenant_management: 'full' }, moneyGrants: {} } as PlatformRoleDefinition]]);
-  assertGranted(await decide(platformRole('system_owner'), EDIT, fullOwner), platformRole('system_owner'), 'system_owner by its definition');
+  const owner = platformRole('system_owner');
+  assertGranted(await decide(owner, EDIT, fullOwner), owner, 'system_owner by its definition');
 });
 
 test('a custom platform role is decided by its definition: Edit granted, View denied, unknown id and malformed levels denied', async () => {
@@ -104,7 +108,8 @@ test('a read-only actor holds no write permission — System Owner included', as
     assert.equal(await decide(platformRole(roleId, { limitation: 'read_only' })), false, roleId);
   }
   // Control: the same actor, not limited, is granted.
-  assertGranted(await decide(platformRole('system_owner')), platformRole('system_owner'), 'unlimited control');
+  const control = platformRole('system_owner');
+  assertGranted(await decide(control), control, 'unlimited control');
 });
 
 test('two active platform grants are ambiguous, and none is no grant: both are denied', async () => {
@@ -178,5 +183,93 @@ test('the authorizer refuses to be built without a resolver or with roles that a
   const principals = resolver({ outcome: 'refused' });
   for (const roles of [{}, [], { system_owner: { levels: {}, moneyGrants: {} } }, 'roles']) {
     assert.throws(() => createPlatformRouteAuthorizer({ principals, roles: roles as never }), TypeError, JSON.stringify(roles));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M5-GIAM-D1-P1-R1 — the same decision, again, inside the committing transaction
+// ---------------------------------------------------------------------------
+
+/** The committing transaction's handle: the synthetic authority check below never sends a statement on it. */
+const SQL = (() => Promise.reject(new Error('no statement: the authority check is synthetic'))) as unknown as PgTransactionScope;
+const scopeOf = (p: TrustedPrincipal): TrustedScope => {
+  const selection = selectScope(p, 'platform', { tenant: null, store: null });
+  assert.equal(selection.outcome, 'selected');
+  return (selection as { scope: TrustedScope }).scope;
+};
+/** An authority check answering `answer`, recording what it was handed. */
+function authorityCheck(answer: unknown | (() => unknown)): { check: (sql: PgTransactionScope, scope: TrustedScope) => Promise<boolean>; calls: unknown[][] } {
+  const calls: unknown[][] = [];
+  return { calls, check: async (...args: unknown[]) => { calls.push(args); return (typeof answer === 'function' ? (answer as () => unknown)() : answer) as boolean; } };
+}
+
+test('the transaction revalidator asks the database about exactly the scope handed out, then decides the permission on its role', async () => {
+  const authority = authorityCheck(true);
+  const revalidate = createPlatformContextRevalidator({ authority: authority.check });
+  const scope = scopeOf(platformRole('support_admin'));
+  assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile'), true);
+  assert.equal(authority.calls.length, 1);
+  assert.equal(authority.calls[0][0], SQL, 'on the committing transaction\'s own handle');
+  assert.equal(authority.calls[0][1], scope, 'the scope itself — actor, version, the very grant and its role');
+  // The database confirming the grant is not enough: the role's current definition must still carry the permission.
+  for (const roleId of ['billing_admin', 'security_admin']) {
+    assert.equal(await revalidate(SQL, scopeOf(platformRole(roleId)), 'edit_tenant_profile'), false, `${roleId}: Tenants at View`);
+  }
+  for (const permission of ['tenants:edit', 'Edit_Tenant_Profile', '', 'edit_tenant']) {
+    assert.equal(await revalidate(SQL, scope, permission), false, `vocabulary the catalog does not define: ${permission}`);
+  }
+});
+
+test('initial authorization and transaction revalidation agree on every built-in role and every canonical platform permission', async () => {
+  // Equivalent fail-closed semantics: for an unlimited actor holding one platform grant, whatever the authorizer
+  // grants the revalidator grants, and whatever it denies the revalidator denies — over the same role definitions.
+  const revalidate = createPlatformContextRevalidator({ authority: async () => true });
+  let compared = 0;
+  for (const roleId of BUILT_IN_PLATFORM_ROLES.keys()) {
+    const p = platformRole(roleId);
+    for (const permission of CANONICAL_PLATFORM_PERMISSIONS.keys()) {
+      const initial = (await decide(p, { scope: 'platform', permission })) !== false;
+      assert.equal(await revalidate(SQL, scopeOf(p), permission), initial, `${roleId} / ${permission}`);
+      compared += 1;
+    }
+  }
+  assert.ok(compared >= BUILT_IN_PLATFORM_ROLES.size * 10, `a real comparison (${compared} pairs)`);
+});
+
+test('a custom definition is re-decided through the same injected roles, and a changed definition is honoured at commit time', async () => {
+  const p = platformRole('custom_tenant_editor');
+  const at = (level: unknown) => createPlatformContextRevalidator({ authority: async () => true, roles: custom(level) });
+  assert.equal(await at('edit')(SQL, scopeOf(p), 'edit_tenant_profile'), true, 'custom role at Edit');
+  assert.equal(await at('view')(SQL, scopeOf(p), 'edit_tenant_profile'), false, 'the same grant, its definition lowered to View before the commit');
+  assert.equal(await createPlatformContextRevalidator({ authority: async () => true })(SQL, scopeOf(p), 'edit_tenant_profile'), false,
+    'a role id the deployment\'s definitions do not name');
+});
+
+test('the database half decides first and alone: anything but exactly true denies, and a throw propagates to the store\'s rollback', async () => {
+  const scope = scopeOf(platformRole('system_owner'));
+  for (const answer of [false, 'valid', 1, null, undefined, {}]) {
+    assert.equal(await createPlatformContextRevalidator({ authority: authorityCheck(answer).check })(SQL, scope, 'edit_tenant_profile'), false, JSON.stringify(answer));
+  }
+  await assert.rejects(createPlatformContextRevalidator({ authority: async () => { throw new Error('db down'); } })(SQL, scope, 'edit_tenant_profile'), /db down/);
+});
+
+test('a scope the authorizer could not have handed a command is refused before the database is asked', async () => {
+  const authority = authorityCheck(true);
+  const revalidate = createPlatformContextRevalidator({ authority: authority.check });
+  const scope = scopeOf(platformRole('system_owner'));
+  for (const refused of [
+    { ...scope, limitation: 'read_only' },
+    { ...scope, scope: 'tenant', tenant: TENANT, roleId: 'manager' },
+    { ...scope, scope: 'store', tenant: TENANT, store: STORE, roleId: 'technician' },
+  ] as TrustedScope[]) assert.equal(await revalidate(SQL, refused, 'edit_tenant_profile'), false, JSON.stringify(refused));
+  assert.equal(authority.calls.length, 0);
+});
+
+test('the revalidator refuses to be built without an authority check or with roles that are not a Map', () => {
+  for (const deps of [undefined, {}, { authority: null }, { authority: 'check' }]) {
+    assert.throws(() => createPlatformContextRevalidator(deps as never), TypeError, JSON.stringify(deps));
+  }
+  for (const roles of [{}, [], 'roles']) {
+    assert.throws(() => createPlatformContextRevalidator({ authority: async () => true, roles: roles as never }), TypeError, JSON.stringify(roles));
   }
 });

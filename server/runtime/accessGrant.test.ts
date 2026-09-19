@@ -14,7 +14,7 @@ const PLATFORM: AuthorizationRequirement = Object.freeze({ scope: 'platform', pe
 const ROUTE: RouteView = Object.freeze({ method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin' });
 const SCOPE: TrustedScope = Object.freeze({
   actor: '11111111-1111-4111-8111-111111111111', securityVersion: 'c'.repeat(64), scope: 'platform',
-  tenant: null, store: null, roleId: 'support_admin', limitation: 'none',
+  tenant: null, store: null, membershipId: '55555555-5555-4555-8555-555555555555', roleId: 'support_admin', limitation: 'none',
 });
 const TENANT_SCOPE: TrustedScope = Object.freeze({ ...SCOPE, scope: 'tenant', tenant: '22222222-2222-4222-8222-222222222222', roleId: 'manager' });
 
@@ -63,6 +63,9 @@ test('anything but exactly true or a well-formed grant is a denial', async () =>
     ['a null context', { granted: true, context: null }],
     ['a bad actor uuid', { granted: true, context: { ...SCOPE, actor: 'not-a-uuid' } }],
     ['a bad role', { granted: true, context: { ...SCOPE, roleId: 'System Owner!' } }],
+    // M5-GIAM-D1-P1-R1: the context names the one grant it was selected under, or it is no context.
+    ['no membership', { granted: true, context: { ...SCOPE, membershipId: undefined } }],
+    ['a membership that is not a uuid', { granted: true, context: { ...SCOPE, membershipId: 'system_owner' } }],
     ['a bad limitation', { granted: true, context: { ...SCOPE, limitation: 'x' } }],
     ['a platform context naming a tenant', { granted: true, context: { ...SCOPE, tenant: TENANT_SCOPE.tenant } }],
     ['a class instance', new Grant()],
@@ -76,7 +79,7 @@ test('anything but exactly true or a well-formed grant is a denial', async () =>
 test('a context read once: a getter cannot validate one scope and hand on another', async () => {
   let reads = 0;
   const context = {
-    actor: SCOPE.actor, securityVersion: SCOPE.securityVersion, scope: 'platform', tenant: null, store: null, limitation: 'none',
+    actor: SCOPE.actor, securityVersion: SCOPE.securityVersion, scope: 'platform', tenant: null, store: null, membershipId: SCOPE.membershipId, limitation: 'none',
     get roleId() { reads += 1; return reads === 1 ? 'support_admin' : 'system_owner'; },
   };
   const allowed = await run(answering({ granted: true, context }));

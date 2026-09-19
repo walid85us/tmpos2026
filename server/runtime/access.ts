@@ -160,8 +160,8 @@ function grantedContextOf(decision: unknown, scope: AuthorizationRequirement['sc
   if (granted !== true || typeof context !== 'object' || context === null) return undefined;
   // Each field read exactly once into a frozen copy; only the copy is checked and only the copy travels, so a
   // getter cannot answer one way to the check and another way to the command.
-  const { actor, securityVersion, scope: selected, tenant, store, roleId, limitation } = context as Record<string, unknown>;
-  const copy = Object.freeze({ actor, securityVersion, scope: selected, tenant, store, roleId, limitation });
+  const { actor, securityVersion, scope: selected, tenant, store, membershipId, roleId, limitation } = context as Record<string, unknown>;
+  const copy = Object.freeze({ actor, securityVersion, scope: selected, tenant, store, membershipId, roleId, limitation });
   return isTrustedScope(copy) && copy.scope === scope ? copy : undefined;
 }
 

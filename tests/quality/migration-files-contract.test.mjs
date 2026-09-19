@@ -90,19 +90,26 @@ const PINNED = {
   // committed migration, which this stage does not authorize; the exact-[005] gate is unchanged and still refuses the longer plan.
   '008_m5_tenant_display_name_command.up.sql': 'cfaa5724bd4b9bb1681f6a8633a282aa8dd3ea3ed3d3cf9a89a8e28d33a51d5e',
   '008_m5_tenant_display_name_command.down.sql': '532ef95098745971cabbef107fe8a8b1fad02fe7f29e4b8722b1a38e3362718f',
+  // Phase 4.0 M5-GIAM-D1-P1-R1 — hardening the first command: the exact platform-authority routine and the Bidi_Control-refusing
+  // display-name operation (both in tmpos_command, EXECUTE to tmpos_app; 008's operation no longer granted to it), the audit
+  // record's subject_tenant_id and its index, and 005's UPDATE(display_name) revoked from tmpos_app. Proved by
+  // tests/db/tenantDisplayName.integration.test.mjs against disposable PostgreSQL only; applied to no managed, persistent or
+  // application database. D4 now names the contiguous chain through 009; the exact-[005] gate is unchanged and still refuses.
+  '009_m5_first_command_hardening.up.sql': '032842618ee71ca1e523502a75d9824ea5c922236e03670defb99f0e0764b54c',
+  '009_m5_first_command_hardening.down.sql': 'b08558c05c36b0248713409cb2d1924f9d773eb5301707ff77d792a50f75f2b3',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the sixteen expected files', () => {
+test('the migrations directory holds exactly the eighteen expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');
