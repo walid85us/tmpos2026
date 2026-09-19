@@ -26,8 +26,11 @@ export interface TenantDecisionInput {
   /** The runtime store roles: built-in, owner-edited and custom. */
   readonly roles: readonly EmployeeRole[];
   /** The tenant whose plan gates sub-permissions, or null. */
-  readonly tenant: { readonly id: string; readonly plan: string } | null;
+  readonly tenant: { readonly id: string; readonly plan: string; readonly status?: string } | null;
 }
+
+/** Account statuses in which the store is read-only: no money action runs (M5-GAP11-P5-R1). */
+const READ_ONLY_TENANT_STATUSES: readonly string[] = ['read_only', 'suspended'];
 
 const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 const isKnownDomain = (domain: string): boolean => PERMISSION_DOMAINS.some(d => d.id === domain);
@@ -75,7 +78,8 @@ export function decideTenantPermission(input: TenantDecisionInput, domain: strin
 /**
  * The one store money-capability decision. Refund approval (the sub-permission and the POS supervisor
  * check) and return approval both come here. Gates, in order: session; a tenant (no store context, no
- * money approval — the DEV spine's denied_missing_tenant); the tenant's plan; a store role
+ * money approval — the DEV spine's denied_missing_tenant); the tenant's plan; a tenant that is not
+ * read-only or suspended (other writes stay GAP-13); a store role
  * configuration (the platform System Owner has none, so it is denied); the catalog's parent-module
  * minimum; and finally the explicit grant, which must be exactly `true`.
  */
@@ -88,6 +92,7 @@ export function decideTenantMoneyCapability(
   const def = SUB_PERMISSIONS.find(sp => sp.id === capability);
   if (!def) return false;
   if (!input.tenant || !isSubPermissionPlanAvailable(def, input.tenant.plan, input.tenant.id)) return false;
+  if (input.tenant.status !== undefined && READ_ONLY_TENANT_STATUSES.includes(input.tenant.status)) return false;
   const roleConfig = input.roleConfig;
   if (!roleConfig) return false;
   if (!meetsFamilyLevel('tenant_store', resolveRoleLevel(roleConfig, def.parentDomain), def.minModuleLevel)) return false;
@@ -125,6 +130,87 @@ export function decideSupervisorRefundApproval(input: TenantDecisionInput, super
     { hasSession: input.hasSession, tenant: input.tenant, roleConfig: roleConfigFor(input, supervisorRoleId) },
     'approve_refunds',
   );
+}
+
+/** A POS refund decision: the store decision input plus who is at the till, the request and the write block. */
+export interface PosRefundInput extends TenantDecisionInput {
+  /** The signed-in user. */
+  readonly userId: string | null;
+  /** The active POS operator (the signed-in user when no operator is switched in). */
+  readonly operatorKey: string | null;
+  /** The refund request being authorized or executed; null when none is open. */
+  readonly requestId: string | null;
+  /** Read-only mode: every state-changing money action is denied. */
+  readonly writeBlocked: boolean;
+}
+
+/**
+ * A supervisor's refund approval (M5-GAP11-P5-R1). It is not an authorization on its own: it records
+ * what it was decided on, decidePosRefundExecution re-decides from current state at execution, and any
+ * recorded input that no longer matches voids it. It covers one refund request, under one operator.
+ */
+export interface SupervisorRefundApproval {
+  readonly supervisorRoleId: string;
+  readonly supervisorName: string;
+  readonly userId: string;
+  readonly operatorKey: string;
+  readonly operatorRole: string;
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly plan: string;
+  /** The supervisor role configuration decided on. Roles are replaced, never mutated, on every edit,
+   * so a changed Refunds level or approve_refunds value (even one changed back) no longer matches. */
+  readonly supervisorConfig: EmployeeRole;
+}
+
+/** The gates every POS refund decision shares; returns the operator's runtime store role or undefined. */
+function posRefundOperator(input: PosRefundInput): EmployeeRole | undefined {
+  if (!input.hasSession || !input.tenant || input.writeBlocked || !input.userId || !input.operatorKey) return undefined;
+  // A store role only: the platform System Owner and unknown roles have none and are denied.
+  return roleConfigFor(input, input.effectiveRole);
+}
+
+/** requestSupervisorRefundAuth (after the PIN): the approval, bound to this request, or null. */
+export function grantSupervisorRefundApproval(
+  input: PosRefundInput,
+  supervisorRoleId: string,
+  supervisorName: string,
+): SupervisorRefundApproval | null {
+  if (!posRefundOperator(input) || !input.requestId || !input.userId || !input.operatorKey || !input.tenant) return null;
+  const supervisorConfig = roleConfigFor(input, supervisorRoleId);
+  if (!supervisorConfig || !decideSupervisorRefundApproval(input, supervisorRoleId)) return null;
+  return Object.freeze({
+    supervisorRoleId, supervisorName,
+    userId: input.userId, operatorKey: input.operatorKey, operatorRole: input.effectiveRole, requestId: input.requestId,
+    tenantId: input.tenant.id, plan: input.tenant.plan, supervisorConfig,
+  });
+}
+
+/**
+ * Whether the POS may execute a refund now, decided from current state only. The operator's own
+ * authority is Process Refunds plus the explicit approve_refunds grant (Refunds at View or above); a
+ * level alone never suffices. Otherwise a supervisor approval counts only for the request it was given
+ * for, under the same user, operator and operator role, tenant and plan, and the same supervisor role
+ * configuration — and the supervisor's approve_refunds decision is then taken again.
+ */
+export function decidePosRefundExecution(input: PosRefundInput, approval: SupervisorRefundApproval | null): boolean {
+  const operatorConfig = posRefundOperator(input);
+  if (!operatorConfig || !input.tenant) return false;
+  if (
+    decideTenantSubPermission(input, 'process_refunds') &&
+    decideTenantMoneyCapability({ hasSession: input.hasSession, tenant: input.tenant, roleConfig: operatorConfig }, 'approve_refunds')
+  ) return true;
+  if (!approval || !input.requestId) return false;
+  if (
+    approval.requestId !== input.requestId ||
+    approval.userId !== input.userId ||
+    approval.operatorKey !== input.operatorKey ||
+    approval.operatorRole !== input.effectiveRole ||
+    approval.tenantId !== input.tenant.id ||
+    approval.plan !== input.tenant.plan ||
+    roleConfigFor(input, approval.supervisorRoleId) !== approval.supervisorConfig
+  ) return false;
+  return decideSupervisorRefundApproval(input, approval.supervisorRoleId);
 }
 
 /**

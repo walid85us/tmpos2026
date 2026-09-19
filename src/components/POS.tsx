@@ -57,13 +57,31 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, checkSubPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
+  const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, checkSubPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, canExecutePosRefund, clearSupervisorRefundAuth } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement, updateInvoice, addStockMovement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
   const hasInventoryPermission = checkPermission('inventory', 'manage');
-  const canProcessRefund = checkSubPermission('process_refunds') || (supervisorRefundAuth?.active ?? false);
+  // POS refund authority (M5-GAP11-P5-R1), decided from current state every time it is asked. The
+  // operator's own authority opens a refund directly; otherwise a supervisor approves one refund request.
+  const refundOperatorKey = posOperator?.id ?? session?.user.id ?? null;
+  const [refundRequestId, setRefundRequestId] = useState<string | null>(null);
+  const refundRequestSeq = useRef(0);
+  const canProcessRefund = canExecutePosRefund({ operatorKey: refundOperatorKey, requestId: null });
+  const refundAuthorized = canExecutePosRefund({ operatorKey: refundOperatorKey, requestId: refundRequestId });
+  const startRefundRequest = () => {
+    refundRequestSeq.current += 1;
+    setRefundRequestId(`refund-${Date.now()}-${refundRequestSeq.current}`);
+  };
+  const endRefundRequest = () => {
+    setRefundRequestId(null);
+    clearSupervisorRefundAuth();
+  };
+  // A change of operator at the till ends any supervisor approval, even if the same operator returns.
+  useEffect(() => {
+    clearSupervisorRefundAuth();
+  }, [refundOperatorKey, clearSupervisorRefundAuth]);
   const canFileWarranty = checkPermission('warranties', 'create');
   const canProcessExpiredWarranty = checkSubPermission('process_expired_warranty');
   const canAddStock = checkPermission('inventory', 'create');
@@ -168,6 +186,39 @@ export const POS: React.FC = () => {
   const [refundMethod, setRefundMethod] = useState('Original Payment Method');
   const [refundStep, setRefundStep] = useState<'search' | 'detail' | 'confirm'>('search');
   const [refundSuccess, setRefundSuccess] = useState(false);
+
+  const processRefund = (refundItemsList: { itemId: string; name: string; qty: number; amount: number }[], refundTotal: number) => {
+    if (!refundSelectedOrder) return;
+    // Re-decided at execution: a changed operator, role, Refunds level, grant, plan, tenant, request or
+    // read-only mode denies here, whatever the screen was opened under.
+    if (!canExecutePosRefund({ operatorKey: refundOperatorKey, requestId: refundRequestId })) {
+      clearSupervisorRefundAuth();
+      return;
+    }
+    addRefundRecord({
+      id: `ref-${Date.now()}`,
+      originalOrderId: refundSelectedOrder.id,
+      invoiceNumber: refundSelectedOrder.invoiceNumber,
+      customerName: refundSelectedOrder.customerName,
+      items: refundItemsList,
+      totalRefunded: refundTotal,
+      reason: refundReason,
+      method: refundMethod,
+      processedBy: posOperator?.name || 'Unknown',
+      createdAt: new Date().toISOString(),
+    });
+    const updatedItems = refundSelectedOrder.items.map(item => {
+      const refQty = refundItems[item.id] || 0;
+      return refQty > 0 ? { ...item, refundedQty: (item.refundedQty || 0) + refQty } : item;
+    });
+    const allFullyRefunded = updatedItems.every(item => (item.refundedQty || 0) >= item.qty);
+    updateCompletedOrder(refundSelectedOrder.id, {
+      items: updatedItems,
+      status: allFullyRefunded ? 'Fully Refunded' : 'Partially Refunded',
+    });
+    setRefundSuccess(true);
+    endRefundRequest();
+  };
   const [warrantySearch, setWarrantySearch] = useState('');
   const [warrantySelectedOrder, setWarrantySelectedOrder] = useState<CompletedOrder | null>(null);
   const [warrantySelectedItem, setWarrantySelectedItem] = useState<CompletedOrderItem | null>(null);
@@ -1116,6 +1167,7 @@ export const POS: React.FC = () => {
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Switch User</span>
                   </button>
                   <button onClick={() => {
+                    startRefundRequest();
                     if (canProcessRefund) {
                       setIsRefundModalOpen(true);
                     } else {
@@ -1127,7 +1179,7 @@ export const POS: React.FC = () => {
                   }} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group" title={!canProcessRefund ? 'Supervisor authorization required for refunds' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">keyboard_return</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Refund</span>
-                    {!checkSubPermission('process_refunds') && !supervisorRefundAuth?.active && (
+                    {!canProcessRefund && !refundAuthorized && (
                       <span className="material-symbols-outlined text-amber-500 text-[10px]">lock</span>
                     )}
                   </button>
@@ -1657,6 +1709,7 @@ export const POS: React.FC = () => {
                   {ordersSelectedOrder.status === 'Paid' && (
                     <div className="flex gap-3">
                       <button onClick={() => {
+                        startRefundRequest();
                         if (canProcessRefund) {
                           setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail');
                         } else {
@@ -1664,7 +1717,7 @@ export const POS: React.FC = () => {
                         }
                       }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
                         <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
-                        {!checkSubPermission('process_refunds') && !supervisorRefundAuth?.active && <span className="material-symbols-outlined text-amber-500 text-[10px] ml-1">lock</span>}
+                        {!canProcessRefund && !refundAuthorized && <span className="material-symbols-outlined text-amber-500 text-[10px] ml-1">lock</span>}
                       </button>
                       {canFileWarranty && (
                         <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">
@@ -2034,7 +2087,7 @@ export const POS: React.FC = () => {
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border max-h-[90vh] overflow-y-auto">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Refund / Exchange</h3>
-                <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); endRefundRequest(); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
 
               {refundSuccess ? (
@@ -2044,7 +2097,7 @@ export const POS: React.FC = () => {
                   </div>
                   <h4 className="text-xl font-black text-primary mb-2">Refund Processed</h4>
                   <p className="text-sm text-slate-500 mb-6">The refund has been recorded and applied.</p>
-                  <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
+                  <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); endRefundRequest(); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
                 </div>
               ) : refundStep === 'search' ? (
                 <div className="space-y-4">
@@ -2190,31 +2243,8 @@ export const POS: React.FC = () => {
                             <span>${refundTotal.toFixed(2)}</span>
                           </div>
                         </div>
-                        <button disabled={!refundReason} onClick={() => {
-                          addRefundRecord({
-                            id: `ref-${Date.now()}`,
-                            originalOrderId: refundSelectedOrder.id,
-                            invoiceNumber: refundSelectedOrder.invoiceNumber,
-                            customerName: refundSelectedOrder.customerName,
-                            items: refundItemsList,
-                            totalRefunded: refundTotal,
-                            reason: refundReason,
-                            method: refundMethod,
-                            processedBy: posOperator?.name || 'Unknown',
-                            createdAt: new Date().toISOString(),
-                          });
-                          const updatedItems = refundSelectedOrder.items.map(item => {
-                            const refQty = refundItems[item.id] || 0;
-                            return refQty > 0 ? { ...item, refundedQty: (item.refundedQty || 0) + refQty } : item;
-                          });
-                          const allFullyRefunded = updatedItems.every(item => (item.refundedQty || 0) >= item.qty);
-                          updateCompletedOrder(refundSelectedOrder.id, {
-                            items: updatedItems,
-                            status: allFullyRefunded ? 'Fully Refunded' : 'Partially Refunded',
-                          });
-                          setRefundSuccess(true);
-                          clearSupervisorRefundAuth();
-                        }} className="w-full py-5 bg-rose-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Process Refund</button>
+                        {!refundAuthorized && <p className="text-xs font-bold text-rose-600">Refund authorization is no longer valid. Ask a supervisor to authorize this refund again.</p>}
+                        <button disabled={!refundReason || !refundAuthorized} onClick={() => processRefund(refundItemsList, refundTotal)} className="w-full py-5 bg-rose-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Process Refund</button>
                       </>
                     );
                   })()}
@@ -2767,7 +2797,7 @@ export const POS: React.FC = () => {
                 <input type="password" maxLength={4} value={supervisorAuthPin} onChange={(e) => { setSupervisorAuthPin(e.target.value.replace(/\D/g, '')); setSupervisorAuthError(''); }} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-center tracking-[0.5em] focus:ring-secondary" placeholder="••••" />
               </div>
               {supervisorAuthError && <p className="text-xs text-red-500 font-bold">{supervisorAuthError}</p>}
-              {supervisorRefundAuth?.active && (
+              {refundAuthorized && supervisorRefundAuth && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-2">
                   <span className="material-symbols-outlined text-emerald-500 text-sm">check_circle</span>
                   <p className="text-xs font-bold text-emerald-700">Authorized by {supervisorRefundAuth.supervisorName}</p>
@@ -2775,16 +2805,16 @@ export const POS: React.FC = () => {
               )}
             </div>
             <div className="p-6 pt-0 flex gap-3">
-              <button onClick={() => { setIsSupervisorAuthOpen(false); setSupervisorAuthPin(''); setSupervisorAuthTarget(''); setSupervisorAuthError(''); clearSupervisorRefundAuth(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">
+              <button onClick={() => { setIsSupervisorAuthOpen(false); setSupervisorAuthPin(''); setSupervisorAuthTarget(''); setSupervisorAuthError(''); endRefundRequest(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">
                 Cancel
               </button>
-              {supervisorRefundAuth?.active ? (
+              {refundAuthorized ? (
                 <button onClick={() => { setIsSupervisorAuthOpen(false); setIsRefundModalOpen(true); }} className="flex-1 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all">
                   Proceed to Refund
                 </button>
               ) : (
                 <button disabled={!supervisorAuthTarget || supervisorAuthPin.length !== 4} onClick={() => {
-                  const success = requestSupervisorRefundAuth(supervisorAuthTarget, supervisorAuthPin);
+                  const success = requestSupervisorRefundAuth(supervisorAuthTarget, supervisorAuthPin, { operatorKey: refundOperatorKey, requestId: refundRequestId });
                   if (!success) {
                     setSupervisorAuthError('Invalid PIN or insufficient authority');
                   }

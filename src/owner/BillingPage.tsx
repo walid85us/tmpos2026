@@ -1,6 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { tenants, billingTransactions, invoiceHistory, creditNotes as initialCreditNotes } from './mockData';
 import { motion, AnimatePresence } from 'motion/react';
+import { hasPlatformPermission } from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
+import { useAccess } from '../context/AccessContext';
 
 type BillingTab = 'transactions' | 'invoices' | 'credits' | 'ledger';
 type TxFilter = 'all' | 'paid' | 'failed' | 'refunded';
@@ -25,6 +28,13 @@ export function getCreditEligibleInvoices<T extends { tenant: string; status: st
 }
 
 const BillingPage: React.FC = () => {
+  const { session } = useAccess();
+  const billingRole = (session?.role as Role | undefined) || null;
+  // Refunds and credits are the approve_billing_actions money capability (M5-GAP11-P5-R1): a platform
+  // role, Billing at View or above and the explicit grant; a level never grants it. The page reads it
+  // to decide what it offers, and every money handler reads it again before acting, because a stored
+  // owner edit can change in between. Client-side only: no server billing route exists yet.
+  const canApproveBillingActions = hasPlatformPermission(billingRole, 'approve_billing_actions').allowed;
   const [activeTab, setActiveTab] = useState<BillingTab>('transactions');
   const [txFilter, setTxFilter] = useState<TxFilter>('all');
   const [invFilter, setInvFilter] = useState<InvFilter>('all');
@@ -149,6 +159,11 @@ const BillingPage: React.FC = () => {
 
   const executeConfirmedAction = () => {
     if (!confirmAction) return;
+    if (confirmAction.type === 'refund' && !hasPlatformPermission(billingRole, 'approve_billing_actions').allowed) {
+      console.warn('[billing] permission denied: approve_billing_actions');
+      setConfirmAction(null);
+      return;
+    }
     const label = confirmAction.type === 'retry'
       ? `Payment retry queued for ${confirmAction.tenant}`
       : `Refund of $${confirmAction.amount} initiated for ${confirmAction.tenant}`;
@@ -172,6 +187,11 @@ const BillingPage: React.FC = () => {
 
   const submitForm = () => {
     if (!formModal) return;
+    if (formModal !== 'invoice' && !hasPlatformPermission(billingRole, 'approve_billing_actions').allowed) {
+      console.warn('[billing] permission denied: approve_billing_actions');
+      closeFormModal();
+      return;
+    }
     if (!formConfirmStep) {
       setFormConfirmStep(true);
       return;
@@ -230,14 +250,18 @@ const BillingPage: React.FC = () => {
             <span className="material-symbols-outlined text-sm">receipt</span>
             Issue Invoice
           </button>
-          <button onClick={() => { setFormModal('credit'); setFormTenant(''); setFormAmount(''); setFormReason(''); }} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5">
-            <span className="material-symbols-outlined text-sm">note_add</span>
-            Issue Credit
-          </button>
-          <button onClick={() => { setFormModal('apply_credit'); setFormCreditId(''); setFormInvoiceId(''); }} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5">
-            <span className="material-symbols-outlined text-sm">link</span>
-            Apply Credit
-          </button>
+          {canApproveBillingActions && (
+            <>
+              <button onClick={() => { setFormModal('credit'); setFormTenant(''); setFormAmount(''); setFormReason(''); }} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-sm">note_add</span>
+                Issue Credit
+              </button>
+              <button onClick={() => { setFormModal('apply_credit'); setFormCreditId(''); setFormInvoiceId(''); }} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-sm">link</span>
+                Apply Credit
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -365,7 +389,7 @@ const BillingPage: React.FC = () => {
                             {tx.status === 'failed' && (
                               <button onClick={() => setConfirmAction({ type: 'retry', tenant: tx.tenant, amount: tx.amount, invoiceNo: tx.invoiceNo })} className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800">Retry</button>
                             )}
-                            {tx.status === 'paid' && tx.amount > 0 && (
+                            {tx.status === 'paid' && tx.amount > 0 && canApproveBillingActions && (
                               <button onClick={() => setConfirmAction({ type: 'refund', tenant: tx.tenant, amount: tx.amount, invoiceNo: tx.invoiceNo })} className="text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-600">Refund</button>
                             )}
                           </div>
@@ -612,7 +636,9 @@ const BillingPage: React.FC = () => {
                   </div>
                   <div className="flex gap-1">
                     <button onClick={() => { setFormModal('invoice'); setFormTenant(t.name); setFormAmount(String(t.mrr)); setFormPlan(t.plan); setFormReason(''); }} className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800 px-2 py-1">Invoice</button>
-                    <button onClick={() => { setFormModal('credit'); setFormTenant(t.name); setFormAmount(''); setFormReason(''); }} className="text-[9px] font-black text-amber-600 uppercase tracking-widest hover:text-amber-800 px-2 py-1">Credit</button>
+                    {canApproveBillingActions && (
+                      <button onClick={() => { setFormModal('credit'); setFormTenant(t.name); setFormAmount(''); setFormReason(''); }} className="text-[9px] font-black text-amber-600 uppercase tracking-widest hover:text-amber-800 px-2 py-1">Credit</button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -632,7 +658,9 @@ const BillingPage: React.FC = () => {
                       <p className="text-sm font-bold text-slate-900">{cr.tenant}</p>
                       <p className="text-[10px] text-slate-400">{cr.creditNo} · ${cr.amount - cr.appliedAmount} remaining</p>
                     </div>
-                    <button onClick={() => { setFormModal('apply_credit'); setFormCreditId(cr.creditNo); setFormInvoiceId(''); }} className="text-[9px] font-black text-violet-600 uppercase tracking-widest hover:text-violet-800">Apply</button>
+                    {canApproveBillingActions && (
+                      <button onClick={() => { setFormModal('apply_credit'); setFormCreditId(cr.creditNo); setFormInvoiceId(''); }} className="text-[9px] font-black text-violet-600 uppercase tracking-widest hover:text-violet-800">Apply</button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -876,7 +904,7 @@ const BillingPage: React.FC = () => {
                         )}
                       </div>
 
-                      {remaining > 0 && (
+                      {remaining > 0 && canApproveBillingActions && (
                         <button
                           onClick={() => { setDetailModal(null); setFormModal('apply_credit'); setFormCreditId(cr.creditNo); setFormInvoiceId(''); }}
                           className="w-full py-3 bg-violet-600 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-violet-700 transition-all shadow-lg shadow-violet-600/20"

@@ -45,6 +45,9 @@ const TenantDetailPage: React.FC = () => {
   const canGrantTrial = hasPlatformPermission(tdpRole, 'grant_trial').allowed;
   const canGrantPaidOverride = hasPlatformPermission(tdpRole, 'grant_paid_override').allowed;
   const canRevokeOverride = hasPlatformPermission(tdpRole, 'revoke_addon_override').allowed;
+  // Refunds and credits are the approve_billing_actions money capability (M5-GAP11-P5-R1): read here to
+  // decide what the page offers and again in each money handler before acting. Client-side only.
+  const canApproveBillingActions = hasPlatformPermission(tdpRole, 'approve_billing_actions').allowed;
   const tenant = tenants.find(t => t.id === id);
   const [activeTab, setActiveTab] = useState<Tab>('Overview');
   const [noteInput, setNoteInput] = useState('');
@@ -669,6 +672,16 @@ const TenantDetailPage: React.FC = () => {
   };
 
   const handleConfirmRevoke = (featureId: string, issueRefund: boolean) => {
+    // Execution-time recheck (M5-GAP11-P5-R1): the revoke needs revoke_addon_override and the refund
+    // half needs approve_billing_actions, read again here rather than from what the modal rendered with.
+    if (!hasPlatformPermission(tdpRole, 'revoke_addon_override').allowed) {
+      console.warn('[tenant-detail] permission denied: revoke_addon_override');
+      return;
+    }
+    if (issueRefund && !hasPlatformPermission(tdpRole, 'approve_billing_actions').allowed) {
+      console.warn('[tenant-detail] permission denied: approve_billing_actions');
+      return;
+    }
     const today = new Date().toISOString().slice(0, 10);
     const ov = localOverrides.find(o => o.featureId === featureId);
     setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, revokedDate: today, revokedBy: 'System Owner', revokeReason: issueRefund ? 'Revoked + refund' : 'Revoked' } : o));
@@ -2146,7 +2159,9 @@ const TenantDetailPage: React.FC = () => {
                       {getRefundEligibility(revokeOverride?.addedDate).eligible ? (
                         <>
                           <button onClick={() => handleConfirmRevoke(revokeModal, false)} className="py-4 px-5 bg-amber-500 text-white font-black text-[10px] rounded-2xl uppercase tracking-widest transition-all hover:bg-amber-600">Revoke Only</button>
-                          <button onClick={() => handleConfirmRevoke(revokeModal, true)} className="py-4 px-5 bg-red-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Revoke + Refund</button>
+                          {canApproveBillingActions && (
+                            <button onClick={() => handleConfirmRevoke(revokeModal, true)} className="py-4 px-5 bg-red-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Revoke + Refund</button>
+                          )}
                         </>
                       ) : (
                         <button onClick={() => handleConfirmRevoke(revokeModal, false)} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Revoke Override</button>
@@ -2379,9 +2394,13 @@ const TenantDetailPage: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <span className="font-black text-violet-600">${cr.amount.toFixed(2)}</span>
                         {statusBadge(cr.status)}
-                        {cr.status === 'issued' && (
+                        {cr.status === 'issued' && canApproveBillingActions && (
                           <div className="flex gap-1 ml-1" onClick={e => e.stopPropagation()}>
                             <button onClick={() => {
+                              if (!hasPlatformPermission(tdpRole, 'approve_billing_actions').allowed) {
+                                console.warn('[tenant-detail] permission denied: approve_billing_actions');
+                                return;
+                              }
                               const target = eligibleInvoicesForCredit[0];
                               if (target) {
                                 setLocalCreditStatuses(prev => ({ ...prev, [cr.id]: 'applied' }));
@@ -2735,8 +2754,12 @@ const TenantDetailPage: React.FC = () => {
                       )}
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
-                      {selectedCredit.status === 'issued' && (
+                      {selectedCredit.status === 'issued' && canApproveBillingActions && (
                         <button onClick={() => {
+                          if (!hasPlatformPermission(tdpRole, 'approve_billing_actions').allowed) {
+                            console.warn('[tenant-detail] permission denied: approve_billing_actions');
+                            return;
+                          }
                           const target = eligibleInvoicesForCredit[0];
                           if (target) {
                             setLocalCreditStatuses(prev => ({ ...prev, [selectedCredit.id]: 'applied' }));
@@ -2751,7 +2774,7 @@ const TenantDetailPage: React.FC = () => {
                           <span className="material-symbols-outlined text-xs">check</span> Apply Credit
                         </button>
                       )}
-                      {selectedCredit.status === 'issued' && (
+                      {selectedCredit.status === 'issued' && canApproveBillingActions && (
                         <button onClick={() => { setCreditDetailId(null); setVoidConfirmId(selectedCredit.id); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Void</button>
                       )}
                       <button onClick={() => { setCreditDetailId(null); showToast('Credit note PDF downloaded'); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1">
@@ -2792,7 +2815,7 @@ const TenantDetailPage: React.FC = () => {
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
                       <button onClick={() => setVoidConfirmId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button onClick={() => { setLocalCreditStatuses(prev => ({ ...prev, [voidConfirmId]: 'voided' })); setVoidConfirmId(null); showToast(`${voidCredit.creditNo} has been voided`); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Void Credit</button>
+                      <button onClick={() => { if (!hasPlatformPermission(tdpRole, 'approve_billing_actions').allowed) { console.warn('[tenant-detail] permission denied: approve_billing_actions'); setVoidConfirmId(null); return; } setLocalCreditStatuses(prev => ({ ...prev, [voidConfirmId]: 'voided' })); setVoidConfirmId(null); showToast(`${voidCredit.creditNo} has been voided`); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Void Credit</button>
                     </div>
                   </motion.div>
                 </div>

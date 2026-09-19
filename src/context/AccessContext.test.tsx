@@ -24,11 +24,14 @@ vi.mock('firebase/firestore', () => ({
 import { AccessProvider, useAccess, isKnownNavigationFeature } from './AccessContext';
 import { CANONICAL_DIFF_CONTEXT, computeRepinnedGrantDiff } from '../../server/platform-identity/gap11GrantDiff';
 import { BUILT_IN_MONEY_GRANT_DEFAULTS } from '../authorization/moneyCapabilities';
+import { hasPlatformPermission } from '../owner/platformPermissionsConfig';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const PLATFORM_ROLE = platformRoles[0].id;
+// A POS refund request: the operator at the till and the open refund request (M5-GAP11-P5-R1).
+const TILL = { operatorKey: 'op-till', requestId: 'req-till' } as const;
 const TENANT_ROLE = '__definitely_not_a_platform_role__';
 
 function Probe() {
@@ -271,26 +274,26 @@ describe('AccessProvider (Firebase-boundary render behavior)', () => {
   it('21. requestSupervisorRefundAuth is the one refund-approval capability: explicit grant exactly true, a session, the plan (M5-GAP11-P5)', async () => {
     render(<AccessProvider><CaptureCtx /></AccessProvider>);
     // No session: the converged capability denies (checkSubPermission always required one).
-    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(false);
+    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234', TILL)).toBe(false);
     getDoc.mockResolvedValue(existing('sales_staff'));
     await fireAuth({ uid: 'u-sup', email: 'sup@synthetic.test' });
-    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234')).toBe(true); // control: store_owner's explicit default grant
+    expect(ctx!.requestSupervisorRefundAuth('store_owner', '1234', TILL)).toBe(true); // control: store_owner's explicit default grant
     act(() => { ctx!.clearSupervisorRefundAuth(); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(true); // control: present and exactly true
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234', TILL)).toBe(true); // control: present and exactly true
     act(() => { ctx!.clearSupervisorRefundAuth(); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '0000')).toBe(false); // the PIN still gates first
+    expect(ctx!.requestSupervisorRefundAuth('manager', '0000', TILL)).toBe(false); // the PIN still gates first
 
     act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', 'not-a-boolean' as unknown as boolean); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // malformed: denied
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234', TILL)).toBe(false); // malformed: denied
     act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', false); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // owner revoke is honoured
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234', TILL)).toBe(false); // owner revoke is honoured
     act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', true); });
     // Refunds lowered to Create, grant kept: the capability's gate is the catalog minimum (Refunds View),
     // so both refund-approval forms answer the same — the supervisor check and checkSubPermission.
     act(() => { ctx!.updateTenantRole('manager', { refunds: 'create' } as Record<string, PermissionLevel>); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(true);
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234', TILL)).toBe(true);
     act(() => { ctx!.updateTenantRole('manager', { refunds: 'none' } as Record<string, PermissionLevel>); });
-    expect(ctx!.requestSupervisorRefundAuth('manager', '1234')).toBe(false); // parent-module minimum still denies
+    expect(ctx!.requestSupervisorRefundAuth('manager', '1234', TILL)).toBe(false); // parent-module minimum still denies
   });
 
   it('22. canAccess: System Owner denies an unknown/empty feature (F5) (controls: a real platform nav feature and a navigation-only placeholder both true)', async () => {
@@ -375,7 +378,7 @@ describe('AccessProvider — POS operator switch onto edited and custom roles (M
     expect(ctx!.checkPermission('inventory', 'manage')).toBe(true);
     act(() => { ctx!.updateTenantRoleSubPermission('custom_counter', 'approve_return', true); });
     expect(ctx!.checkSubPermission('approve_return')).toBe(true);
-    expect(ctx!.requestSupervisorRefundAuth('custom_counter', '1234')).toBe(false); // no refund grant
+    expect(ctx!.requestSupervisorRefundAuth('custom_counter', '1234', TILL)).toBe(false); // no refund grant
     // A custom role named like a built-in or platform role gets its own id: it never shares or shadows
     // that role's levels and money grants.
     act(() => { ctx!.addTenantRole({ id: 'manager', name: 'Manager', permissions: { refunds: 'full' }, subPermissions: {} }); });
@@ -387,7 +390,186 @@ describe('AccessProvider — POS operator switch onto edited and custom roles (M
     act(() => { ctx!.updateTenantRoleSubPermission('manager_2', 'approve_refunds', false); });
     expect(ctx!.tenantRolesState.find((r) => r.id === 'manager')!.subPermissions!.approve_refunds).toBe(true); // the built-in manager keeps its grant
     expect(ctx!.tenantRolesState.find((r) => r.id === 'manager_2')!.subPermissions!.approve_refunds).toBe(false);
-    expect(ctx!.requestSupervisorRefundAuth('system_owner', '1234')).toBe(false); // still no store role with that id
+    expect(ctx!.requestSupervisorRefundAuth('system_owner', '1234', TILL)).toBe(false); // still no store role with that id
+  });
+});
+
+describe('AccessProvider — POS refund execution is re-decided from current state (M5-GAP11-P5-R1)', () => {
+  const req = (operatorKey: string, requestId: string | null) => ({ operatorKey, requestId });
+  // The approval is React state: commit it before the next decision reads it.
+  const approve = (supervisorId: string, request: { operatorKey: string; requestId: string | null }) => {
+    let ok = false;
+    act(() => { ok = ctx!.requestSupervisorRefundAuth(supervisorId, '1234', request); });
+    return ok;
+  };
+
+  it('26. the operator\'s own authority: Process Refunds plus the explicit approve_refunds grant, Refunds at View, never in read-only mode', async () => {
+    getDoc.mockResolvedValue(existing('sales_staff'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-till', email: 'till@synthetic.test' });
+    expect(ctx!.canExecutePosRefund(req('op-2', null))).toBe(false); // sales_staff: no own authority
+    act(() => { ctx!.setPosOperatorRole('manager'); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(true); // control: the current authorized operator
+    expect(ctx!.canExecutePosRefund({ operatorKey: null, requestId: null })).toBe(false); // no operator at the till
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', false); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(false); // revoked: the next attempt is denied
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', 'yes' as unknown as boolean); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(false); // malformed: denied
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', true); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(true);
+    act(() => { ctx!.updateTenantRole('manager', { refunds: 'none' } as Record<string, PermissionLevel>); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(false); // Refunds below View
+    act(() => { ctx!.updateTenantRole('manager', { refunds: 'view' } as Record<string, PermissionLevel>); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(true); // View is the minimum
+    // A level alone never suffices: Refunds at Full with Process Refunds but no refund grant.
+    act(() => { ctx!.addTenantRole({ id: 'custom_till', name: 'Till', permissions: { refunds: 'full' }, subPermissions: { process_refunds: true } }); });
+    act(() => { ctx!.setPosOperatorRole('custom_till'); });
+    expect(ctx!.canExecutePosRefund(req('op-9', null))).toBe(false); // approve_refunds missing
+    act(() => { ctx!.updateTenantRoleSubPermission('custom_till', 'approve_refunds', true); });
+    expect(ctx!.canExecutePosRefund(req('op-9', null))).toBe(true); // owner grant honoured
+    // The grant alone is not enough either: approve_refunds without Process Refunds.
+    act(() => { ctx!.updateTenantRoleSubPermission('custom_till', 'process_refunds', false); });
+    expect(ctx!.canExecutePosRefund(req('op-9', null))).toBe(false);
+    act(() => { ctx!.updateTenantRoleSubPermission('custom_till', 'process_refunds', true); });
+    act(() => { ctx!.enablePreviewMode(); });
+    expect(ctx!.isWriteBlocked).toBe(true);
+    expect(ctx!.canExecutePosRefund(req('op-9', null))).toBe(false); // read-only denies
+    act(() => { ctx!.disableWriteBlock(); });
+    expect(ctx!.canExecutePosRefund(req('op-9', null))).toBe(true);
+  });
+
+  it('27. a supervisor approval covers one request under one operator, and does not survive a grant, level, operator or read-only change', async () => {
+    getDoc.mockResolvedValue(existing('sales_staff'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-till2', email: 'till2@synthetic.test' });
+    // Mike (op-2) and Dana (op-4) are both Sales Associates: the same role, different operators.
+    expect(approve('manager', req('op-2', null))).toBe(false); // no request, no approval
+    expect(approve('manager', req('op-2', 'req-A'))).toBe(true);
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-A'))).toBe(true); // control
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-B'))).toBe(false); // another request
+    expect(ctx!.canExecutePosRefund(req('op-2', null))).toBe(false);
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-A'))).toBe(false); // operator changed, same role
+    act(() => { ctx!.setPosOperatorRole('technician'); });
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-A'))).toBe(false); // operator role changed
+    act(() => { ctx!.setPosOperatorRole(null); });
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-A'))).toBe(false); // changing it back does not revive it
+    // A fresh approval under the new operator succeeds.
+    expect(approve('manager', req('op-4', 'req-C'))).toBe(true);
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-C'))).toBe(true);
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-A'))).toBe(false); // the earlier approval was replaced
+    // An unrelated role edit keeps it; revoking the supervisor's grant voids it, and re-granting does not revive it.
+    act(() => { ctx!.updateTenantRole('technician', { repairs: 'edit' } as Record<string, PermissionLevel>); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-C'))).toBe(true);
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', false); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-C'))).toBe(false);
+    act(() => { ctx!.updateTenantRoleSubPermission('manager', 'approve_refunds', true); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-C'))).toBe(false);
+    // A Refunds level change voids an approval even when the new level still meets View.
+    expect(approve('manager', req('op-4', 'req-D'))).toBe(true);
+    act(() => { ctx!.updateTenantRole('manager', { refunds: 'view' } as Record<string, PermissionLevel>); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-D'))).toBe(false);
+    expect(approve('manager', req('op-4', 'req-E'))).toBe(true); // View + grant still approves
+    act(() => { ctx!.enablePreviewMode(); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-E'))).toBe(false); // read-only denies execution
+    expect(approve('manager', req('op-4', 'req-F'))).toBe(false); // and approval
+    act(() => { ctx!.disableWriteBlock(); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-E'))).toBe(false); // leaving read-only does not revive it
+    expect(approve('manager', req('op-4', 'req-H'))).toBe(true);
+    act(() => { ctx!.clearSupervisorRefundAuth(); });
+    expect(ctx!.canExecutePosRefund(req('op-4', 'req-H'))).toBe(false); // cleared
+    expect(approve('system_owner', req('op-4', 'req-G'))).toBe(false); // no store role
+  });
+
+  it('28. the platform System Owner has no store refund authority, as operator or as supervisor', async () => {
+    getDoc.mockResolvedValue(existing('system_owner'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-sysown', email: 'sysown@synthetic.test' });
+    expect(ctx!.session?.userType).toBe('platform');
+    expect(ctx!.checkSubPermission('process_refunds')).toBe(true); // the non-money owner shortcut this path no longer relies on
+    expect(ctx!.canExecutePosRefund(req('u-sysown', null))).toBe(false);
+    expect(approve('manager', req('u-sysown', 'req-S'))).toBe(false); // no tenant
+    expect(ctx!.canExecutePosRefund(req('u-sysown', 'req-S'))).toBe(false);
+  });
+
+  // A store context switched in through the DEV preview, so the tenant, its plan and its status can change.
+  type PreviewTenant = Parameters<NonNullable<typeof ctx>['setPreviewTenant']>[0];
+  const previewTenant = (over: Record<string, string> = {}) =>
+    ({ id: 't-r1', name: 'R1 Store', plan: 'advanced', status: 'active', onboardingStage: 'active', ...over }) as unknown as PreviewTenant;
+  const previewSession = (id: string, userType: 'tenant' | 'platform', role: string) =>
+    ({ user: { id, name: 'Synthetic', email: `${id}@synthetic.test` }, userType, role, status: 'active' }) as Parameters<NonNullable<typeof ctx>['setPreviewSession']>[0];
+
+  it('30. an approval is bound to the tenant and plan; a read-only or suspended tenant takes no money action; a System Owner in a store context has none', async () => {
+    getDoc.mockResolvedValue(existing('sales_staff'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-till3', email: 'till3@synthetic.test' });
+    act(() => {
+      ctx!.activateDevSession();
+      ctx!.setPreviewSession(previewSession('u-dev', 'tenant', 'sales_staff'));
+      ctx!.setPreviewTenant(previewTenant());
+    });
+    expect(ctx!.tenant?.id).toBe('t-r1'); // control: the preview store context is active
+    expect(approve('manager', req('op-2', 'req-P'))).toBe(true);
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-P'))).toBe(true); // control
+    act(() => { ctx!.setPreviewTenant(previewTenant({ plan: 'growth' })); });
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-P'))).toBe(false); // plan changed
+    act(() => { ctx!.setPreviewTenant(previewTenant()); });
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-P'))).toBe(false); // changing it back does not revive it
+    expect(approve('manager', req('op-2', 'req-Q'))).toBe(true);
+    act(() => { ctx!.setPreviewTenant(previewTenant({ id: 't-other' })); });
+    expect(ctx!.canExecutePosRefund(req('op-2', 'req-Q'))).toBe(false); // another tenant
+    // Read-only and suspended tenants: no money action, even with the write block off.
+    act(() => { ctx!.setPreviewTenant(previewTenant()); });
+    act(() => { ctx!.setPosOperatorRole('manager'); });
+    expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(true); // control: the manager's own authority
+    expect(ctx!.checkSubPermission('approve_return')).toBe(true); // control
+    for (const status of ['read_only', 'suspended']) {
+      act(() => { ctx!.setPreviewTenant(previewTenant({ status })); });
+      expect(ctx!.isWriteBlocked).toBe(false);
+      expect(ctx!.canExecutePosRefund(req('op-1', null))).toBe(false);
+      expect(ctx!.checkSubPermission('approve_refunds')).toBe(false);
+      expect(ctx!.checkSubPermission('approve_return')).toBe(false);
+      expect(approve('manager', req('op-1', `req-${status}`))).toBe(false);
+    }
+    // The platform System Owner in a store context still has no store role: no refund, no approval.
+    act(() => {
+      ctx!.setPreviewSession(previewSession('u-own', 'platform', 'system_owner'));
+      ctx!.setPreviewTenant(previewTenant());
+    });
+    expect(ctx!.tenant?.id).toBe('t-r1'); // control: a tenant is present
+    expect(ctx!.effectiveRole).toBe('system_owner');
+    expect(ctx!.canExecutePosRefund(req('u-own', null))).toBe(false);
+    expect(approve('manager', req('u-own', 'req-S2'))).toBe(false);
+  });
+});
+
+describe('AccessProvider — custom platform role ids (M5-GAP11-P5-R1)', () => {
+  it('29. a new platform role never takes an id a platform or store role uses; suffixes are deterministic and the new role shares nothing', async () => {
+    getDoc.mockResolvedValue(existing('system_owner'));
+    render(<AccessProvider><CaptureCtx /></AccessProvider>);
+    await fireAuth({ uid: 'u-roles', email: 'roles@synthetic.test' });
+    const original = structuredClone(ctx!.platformRolesState.find((r) => r.id === 'billing_admin'));
+    act(() => { ctx!.addPlatformRole({ id: 'billing_admin', name: 'Billing Copy', permissions: { billing_subscriptions: 'full' }, subPermissions: { approve_billing_actions: true } }); });
+    act(() => { ctx!.addPlatformRole({ id: 'manager', name: 'Platform Manager', permissions: { tenants: 'view' } }); });
+    act(() => { ctx!.addPlatformRole({ id: 'custom_ops', name: 'Ops 1', permissions: { tenants: 'view' } }); });
+    act(() => { ctx!.addPlatformRole({ id: 'custom_ops', name: 'Ops 2', permissions: { tenants: 'edit' } }); });
+    act(() => { ctx!.addPlatformRole({ id: 'custom_ops', name: 'Ops 3', permissions: { tenants: 'full' } }); });
+    act(() => { ctx!.addTenantRole({ id: 'custom_desk', name: 'Desk', permissions: { refunds: 'view' }, subPermissions: {} }); });
+    act(() => { ctx!.addPlatformRole({ id: 'custom_desk', name: 'Platform Desk', permissions: {} }); });
+    const ids = ctx!.platformRolesState.map((r) => r.id);
+    expect(ids.slice(-6)).toEqual(['billing_admin_2', 'manager_2', 'custom_ops', 'custom_ops_2', 'custom_ops_3', 'custom_desk_2']);
+    const all = [...ctx!.platformRolesState, ...ctx!.tenantRolesState].map((r) => r.id);
+    expect(new Set(all).size).toBe(all.length); // every id is unique across both planes
+    expect(ctx!.platformRolesState.find((r) => r.id === 'custom_ops_2')!.name).toBe('Ops 2');
+    // The collided roles are untouched: same levels, same grants.
+    expect(ctx!.platformRolesState.find((r) => r.id === 'billing_admin')).toEqual(original);
+    expect(ctx!.tenantRolesState.find((r) => r.id === 'manager')!.subPermissions!.approve_refunds).toBe(true);
+    // Money grants are decided by role id: the copy asked for approve_billing_actions and holds none.
+    expect(hasPlatformPermission('billing_admin', 'approve_billing_actions').allowed).toBe(true);
+    expect(hasPlatformPermission('billing_admin_2' as never, 'approve_billing_actions').allowed).toBe(false);
+    // Editing the new role cannot reach the original.
+    act(() => { ctx!.updatePlatformRole('billing_admin_2', { billing_subscriptions: 'none' }); });
+    expect(ctx!.platformRolesState.find((r) => r.id === 'billing_admin')).toEqual(original);
+    expect(ctx!.platformRolesState.find((r) => r.id === 'billing_admin_2')!.permissions).toEqual({ billing_subscriptions: 'none' });
   });
 });
 

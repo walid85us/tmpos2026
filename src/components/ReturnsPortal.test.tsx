@@ -81,7 +81,7 @@ vi.mock('../context/StoreLocalState', () => ({ useStoreLocalState: () => storeVa
 const accessValue = {
   session: { user: { name: 'Tester' } },
   checkPermission: () => true,
-  checkSubPermission: () => true,
+  checkSubPermission: (_id: string): boolean => true,
   isWriteBlocked: false,
   canAccess: () => true,
 };
@@ -220,6 +220,35 @@ describe('ReturnsPortal — provider label URL containment', () => {
     expect(openSpy).toHaveBeenCalled();
     for (const call of openSpy.mock.calls) {
       expect(decodeURIComponent(String(call[0]))).not.toContain(SENTINEL);
+    }
+  });
+});
+
+// M5-GAP11-P5-R1 — approving a return is the approve_return money capability, decided again when the
+// transition runs: a grant revoked after the screen offered the button changes nothing.
+describe('ReturnsPortal — return approval re-decides approve_return', () => {
+  it('a revoked grant approves nothing; with the grant the approval is recorded (control)', () => {
+    const requested = { ...returnRecord, id: 'ret-9', returnNumber: 'RET-0009', status: 'Requested', returnShipmentId: undefined };
+    const updateReturn = vi.fn();
+    let approveGrant = true;
+    const saved = { returns: storeValue.returns, updateReturn: storeValue.updateReturn, check: accessValue.checkSubPermission };
+    storeValue.returns = [requested as typeof returnRecord];
+    storeValue.updateReturn = updateReturn;
+    accessValue.checkSubPermission = (id: string) => id !== 'approve_return' || approveGrant;
+    try {
+      renderPortal();
+      fireEvent.click(screen.getAllByText('RET-0009')[0]);
+      const approve = screen.getByRole('button', { name: /→ Approved/ }); // offered while the grant is held
+      approveGrant = false;
+      fireEvent.click(approve);
+      expect(updateReturn).not.toHaveBeenCalled();
+      approveGrant = true;
+      fireEvent.click(approve);
+      expect(updateReturn).toHaveBeenCalledWith('ret-9', expect.objectContaining({ status: 'Approved' }));
+    } finally {
+      storeValue.returns = saved.returns;
+      storeValue.updateReturn = saved.updateReturn;
+      accessValue.checkSubPermission = saved.check;
     }
   });
 });

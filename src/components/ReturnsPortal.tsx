@@ -245,6 +245,8 @@ export default function ReturnsPortal() {
 
   const handleStatusTransition = (ret: Return, newStatus: ReturnStatus, notes?: string) => {
     if (isWriteBlocked) return;
+    // Return approval is the approve_return money capability, decided again at execution (M5-GAP11-P5-R1).
+    if ((newStatus === 'Approved' || newStatus === 'Rejected') && !checkSubPermission('approve_return')) return;
     const now = new Date().toISOString();
     const entry: ReturnStatusHistoryEntry = {
       id: `rsh-${Date.now()}`,

@@ -5,10 +5,13 @@ import { auth, db } from '../firebase';
 import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_DOMAINS } from './accessConfig';
 import { isPermissionLevel, meetsFamilyLevel } from '../authorization/permissionFamilies';
 import {
-  decideSupervisorRefundApproval,
+  decidePosRefundExecution,
   decideTenantPermission,
   decideTenantSubPermission,
+  grantSupervisorRefundApproval,
   tenantPermissionLevel,
+  type PosRefundInput,
+  type SupervisorRefundApproval,
   type TenantDecisionInput,
 } from './tenantAccessDecisions';
 import { EmployeeRole, PermissionLevel } from '../types';
@@ -120,9 +123,17 @@ interface AccessContextType {
   checkPermission: (domain: string, requiredLevel: PermissionLevel) => boolean;
   checkSubPermission: (actionId: string) => boolean;
   updateTenantRoleSubPermission: (roleId: string, actionId: string, granted: boolean) => void;
-  supervisorRefundAuth: { active: boolean; supervisorName: string } | null;
-  requestSupervisorRefundAuth: (supervisorId: string, pin: string) => boolean;
+  supervisorRefundAuth: SupervisorRefundApproval | null;
+  requestSupervisorRefundAuth: (supervisorId: string, pin: string, request: PosRefundRequest) => boolean;
+  /** Whether the POS may execute this refund now, re-decided from current state (M5-GAP11-P5-R1). */
+  canExecutePosRefund: (request: PosRefundRequest) => boolean;
   clearSupervisorRefundAuth: () => void;
+}
+
+/** The POS refund a decision is for: the active operator and the open refund request, if any. */
+export interface PosRefundRequest {
+  readonly operatorKey: string | null;
+  readonly requestId: string | null;
 }
 
 const AccessContext = createContext<AccessContextType | undefined>(undefined);
@@ -145,7 +156,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [previewSession, setPreviewSession] = useState<Session | null>(null);
   const [previewTenant, setPreviewTenant] = useState<Tenant | null>(null);
   const [posOperatorRole, setPosOperatorRole] = useState<string | null>(null);
-  const [supervisorRefundAuth, setSupervisorRefundAuth] = useState<{ active: boolean; supervisorName: string } | null>(null);
+  const [supervisorRefundAuth, setSupervisorRefundAuth] = useState<SupervisorRefundApproval | null>(null);
 
   // Phase 1.6 M8 — PRIVATE, non-authoritative observer ref (NOT React state, NOT in the
   // provider value). Holds the latest dormant Supabase awareness record for DEV-only
@@ -264,7 +275,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     hasSession: session !== null,
     effectiveRole,
     roles: tenantRolesState,
-    tenant: tenant ? { id: tenant.id, plan: tenant.plan } : null,
+    tenant: tenant ? { id: tenant.id, plan: tenant.plan, status: tenant.status } : null,
   }), [session, effectiveRole, tenantRolesState, tenant]);
 
   const getPermissionLevel = useCallback(
@@ -440,21 +451,42 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     setTenantRolesState(prev => prev.map(r => r.id === roleId ? { ...r, permissions } : r));
   };
 
-  const requestSupervisorRefundAuth = (supervisorId: string, pin: string): boolean => {
+  const posRefundInput = (request: PosRefundRequest): PosRefundInput => ({
+    ...decisionInput,
+    userId: session?.user.id ?? null,
+    operatorKey: request.operatorKey,
+    requestId: request.requestId,
+    writeBlocked: isWriteBlocked,
+  });
+
+  const requestSupervisorRefundAuth = (supervisorId: string, pin: string, request: PosRefundRequest): boolean => {
     if (pin !== '1234') return false;
     const supervisorRole = tenantRolesState.find(r => r.id === supervisorId);
     if (!supervisorRole) return false;
     // The same refund-approval capability checkSubPermission('approve_refunds') decides: plan, the
-    // Refunds parent-module minimum, and the explicit grant (exactly true). No level grants it.
-    if (!decideSupervisorRefundApproval(decisionInput, supervisorId)) return false;
+    // Refunds parent-module minimum, and the explicit grant (exactly true). No level grants it. The
+    // approval is bound to this request, operator and supervisor configuration (M5-GAP11-P5-R1).
     const names: Record<string, string> = { store_owner: 'Store Owner', manager: 'Manager' };
-    setSupervisorRefundAuth({ active: true, supervisorName: names[supervisorId] || supervisorRole.name });
+    const approval = grantSupervisorRefundApproval(posRefundInput(request), supervisorId, names[supervisorId] || supervisorRole.name);
+    if (!approval) return false;
+    setSupervisorRefundAuth(approval);
     return true;
   };
 
-  const clearSupervisorRefundAuth = () => {
+  const canExecutePosRefund = (request: PosRefundRequest): boolean =>
+    decidePosRefundExecution(posRefundInput(request), supervisorRefundAuth);
+
+  const clearSupervisorRefundAuth = useCallback(() => {
     setSupervisorRefundAuth(null);
-  };
+  }, []);
+
+  // An approval never outlives what it was decided on, even when that input is changed back: a
+  // change of the signed-in user, the effective role, the tenant, its plan or status, or read-only
+  // mode ends it. (decidePosRefundExecution already refuses a mismatch in the same render.) Each input
+  // is its own dependency, so no two different contexts can compare equal.
+  useEffect(() => {
+    setSupervisorRefundAuth(null);
+  }, [session?.user.id, effectiveRole, tenant?.id, tenant?.plan, tenant?.status, isWriteBlocked]);
 
   return (
     <AccessContext.Provider value={{
@@ -492,6 +524,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       updateTenantRoleSubPermission,
       supervisorRefundAuth,
       requestSupervisorRefundAuth,
+      canExecutePosRefund,
       clearSupervisorRefundAuth
     }}>
       {children}

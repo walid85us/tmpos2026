@@ -45,7 +45,8 @@ const OBSERVATIONAL_MODULES = [
 /**
  * The only files permitted to name them, until a cutover is decided. Every entry but the modules
  * themselves is a test suite (M5-GAP11-P2 adds the D2 suite and the two client suites that check
- * server/client agreement; M5-GAP11-P3/P5 the compatibility-pins-turned-convergence suite). The
+ * server/client agreement; M5-GAP11-P3/P5 the compatibility-pins-turned-convergence suite;
+ * M5-GAP11-P5-R1 the money-action inventory, which lists the diff module as a non-entry file). The
  * generator is gone (M5-GAP11-P5): the artifact is frozen history, never regenerated.
  */
 const PERMITTED_NAMERS = [
@@ -56,6 +57,7 @@ const PERMITTED_NAMERS = [
   'server/platform-identity/gap11ShadowComparator.test.ts',
   'server/platform-identity/gap11ShadowComparator.ts',
   'src/authorization/authorizationContainment.test.ts',
+  'src/authorization/moneyActionInventory.test.ts',
   'src/context/AccessContext.test.tsx',
   'src/context/authorizationVocabulary.test.ts',
   'tests/quality/gap11-grant-diff-artifact.test.mjs',

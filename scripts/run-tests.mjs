@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 128; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites (sentinels below)
+export const MIN_SUITES = 129; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory (sentinels below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -71,6 +71,7 @@ export const REQUIRED_SENTINELS = [
   'src/authorization/moneyCapabilities.test.ts',              // M5-GAP11-P5: explicit editable money grants, defaults, owner edits, custom roles, one refund capability
   'src/context/reachableRoleStates.test.ts',                  // M5-GAP11-P5: the P4 reachable store states regenerated; non-money unchanged, money changes enumerated
   'src/authorization/authorizationContainment.test.ts',       // M5-GAP11-P5: no route live, store plane undecidable, no pin/candidate in a decision path, families named
+  'src/authorization/moneyActionInventory.test.ts',           // M5-GAP11-P5-R1: every money entry point names one capability and re-decides it before acting
   'server/platform-identity/migrationEngine.test.ts',          // migration-engine contract (checksum/dirty/lock/reserved-session)
   'server/platform-identity/migrationExecutor.test.ts',        // trusted-executor safety boundary + effect interpretation
   'server/platform-identity/dbPrincipals.test.ts',             // migration/admin vs runtime principal separation + tenant context
