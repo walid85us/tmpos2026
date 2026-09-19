@@ -36,7 +36,14 @@ test('D1. no route becomes live and the M5 route catalogue still refuses every s
     }
   }
   assert.equal(n, 2 * TENANT_ROLE_IDS.length * TENANT_SUB_PERMISSIONS.length * 2);
-  assert.deepEqual({ routes: PRODUCTION_INVENTORY.routes.length, mutators: PRODUCTION_INVENTORY.mutators.length }, { routes: 0, mutators: 0 }, 'the production route inventory stays empty');
+  // M5-GIAM-D1-P1 (owner decision D1) adds the first production route: one PLATFORM-scope command, the tenant display name.
+  // Every route in the inventory stays platform-scoped and canonical; no tenant or store requirement becomes live.
+  assert.deepEqual({ routes: PRODUCTION_INVENTORY.routes.length, mutators: PRODUCTION_INVENTORY.mutators.length }, { routes: 1, mutators: 1 },
+    'the production route inventory holds exactly the tenant display-name command');
+  for (const route of PRODUCTION_INVENTORY.routes) {
+    const requirement = route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null;
+    assert.deepEqual(requirement, { scope: 'platform', permission: 'edit_tenant_profile' }, `${route.method} ${route.path}`);
+  }
 });
 
 test('D2. the browser bundle imports no server module, and the contract modules import nothing at runtime', () => {

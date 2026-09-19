@@ -140,10 +140,28 @@ export interface CommandPlan {
   readonly events: readonly Readonly<{ type: string; payload: PlanRecord }>[];
   /** 200 or 201 only. */
   readonly response: IdempotentOutcome;
+  /**
+   * An update contract only, and optional: the 200 to send when the store finds the changes already in
+   * place at the expected version — nothing is written but the idempotency completion, so no version
+   * moves and no audit record or event exists. Without it such an answer is a fault (503).
+   */
+  readonly unchanged?: IdempotentOutcome;
 }
 
-/** Plans from the body alone: synchronous, no I/O, no write — the runtime commits the plan. */
-export type CommandPlanner = (ctx: CommandContext) => CommandPlan;
+/**
+ * A planner's answer for a body that is not a valid request: a bounded 400 invalid_request. It is decided
+ * once the idempotency record is acquired and, like a conflict, commits and records nothing — the attempt's
+ * lease waits out its time, so the key stays bound to this request's fingerprint. A symbol, so no parsed
+ * body can spell it.
+ */
+export const COMMAND_REQUEST_INVALID: unique symbol = Symbol('command_request_invalid');
+
+/**
+ * Plans from the body alone: synchronous, no I/O, no write — the runtime commits the plan. It runs once
+ * the idempotency record is acquired (never for a replay), validates the body first and answers
+ * COMMAND_REQUEST_INVALID for anything its contract refuses.
+ */
+export type CommandPlanner = (ctx: CommandContext) => CommandPlan | typeof COMMAND_REQUEST_INVALID;
 
 /** A command operation: its contract (validated at startup against the event contracts) and its planner. */
 export interface CommandRoute {

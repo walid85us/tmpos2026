@@ -14,6 +14,8 @@ import ts from 'typescript';
 import {
   MONEY_CAPABILITIES,
   PLATFORM_MONEY_PARENT_MINIMUM,
+  isPlatformMoneyCapability,
+  isTenantMoneyCapability,
   type MoneyCapability,
 } from './moneyCapabilities';
 import type { PermissionFamily } from './permissionFamilies';
@@ -286,7 +288,11 @@ test('I6. every entry is client-only and says so; no production route enforces a
     assert.doesNotMatch(read(e.file), /server[- ]enforced|enforced (by|on) the server/i, `${e.file} claims server enforcement`);
   }
   for (const file of [BILLING, TENANT]) assert.match(read(file), /Client-side only/, `${file} records the platform money gate as client-side only`);
-  assert.deepEqual({ routes: PRODUCTION_INVENTORY.routes.length, mutators: PRODUCTION_INVENTORY.mutators.length }, { routes: 0, mutators: 0 });
+  // M5-GIAM-D1-P1 adds the first production route — the tenant display-name command, a platform edit_tenant_profile write — and
+  // no money action: no production route requires a money capability, so every money entry above stays client-only.
+  const required = PRODUCTION_INVENTORY.routes.map((r) => (r.policy.access === 'session' || r.policy.access === 'authenticated' ? r.policy.authorization?.permission : null));
+  assert.deepEqual(required, ['edit_tenant_profile'], 'the one production route is the tenant display-name command');
+  for (const permission of required) assert.equal(isTenantMoneyCapability(permission) || isPlatformMoneyCapability(permission), false, `${permission} is no money capability`);
 });
 
 /**

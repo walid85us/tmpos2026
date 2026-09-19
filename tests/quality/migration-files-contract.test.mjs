@@ -83,19 +83,26 @@ const PINNED = {
   // plan simply lengthens, and that gate refuses any plan that is not exactly [005].
   '007_m5_trusted_principal_resolution.up.sql': 'a3a9aa98b299cd343e35df6b9048ea1468f5b11668e7ea6996045cb514f7bcbe',
   '007_m5_trusted_principal_resolution.down.sql': '1f3a130489d2c19a9cba27ece60d2937fa92956bf7b1d5e13cfa63602b697984',
+  // Phase 4.0 M5-GIAM-D1-P1 — the first server-authorized business command (owner decision D1): the tenant's row version,
+  // the trigger that alone moves it, and one SECURITY DEFINER operation in its own schema, tmpos_command. Proved by
+  // tests/db/tenantDisplayName.integration.test.mjs against disposable PostgreSQL only; applied to no managed, persistent or
+  // application database. Owner decision D4 fixes a future managed apply to the complete contiguous chain through the newest
+  // committed migration, which this stage does not authorize; the exact-[005] gate is unchanged and still refuses the longer plan.
+  '008_m5_tenant_display_name_command.up.sql': 'cfaa5724bd4b9bb1681f6a8633a282aa8dd3ea3ed3d3cf9a89a8e28d33a51d5e',
+  '008_m5_tenant_display_name_command.down.sql': '532ef95098745971cabbef107fe8a8b1fad02fe7f29e4b8722b1a38e3362718f',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the fourteen expected files', () => {
+test('the migrations directory holds exactly the sixteen expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

@@ -4,10 +4,11 @@
 // One authority. This is the one production module that composes the store, its transaction kernel and IDEMPOTENCY_KEY; the
 // sessions root (productionSessions.ts) composes the session boundaries and the request limits, and nothing else. It is driven
 // by the production route inventory below, validated by the runtime's own route table (defineRoutes):
-//   - no route declares `idempotency: 'required'` — today's inventory is empty — so nothing is read, built or probed: not
-//     APP_DATABASE_URL, not IDEMPOTENCY_KEY, no client, kernel, store or readiness probe. The answer is null, and createApp keeps
-//     serving the probes and the bounded fallback exactly as before;
-//   - at least one does, so the runtime database configuration and the idempotency key are required and validated first; only
+//   - no route declares `idempotency: 'required'`, so nothing is read, built or probed: not APP_DATABASE_URL, not IDEMPOTENCY_KEY,
+//     no client, kernel, store or readiness probe. The answer is null, and createApp keeps serving the probes and the bounded
+//     fallback exactly as before;
+//   - at least one does — the production inventory's does since M5-GIAM-D1-P1 (the tenant display-name command) — so the
+//     runtime database configuration and the idempotency key are required and validated first; only
 //     then is the kernel built over the classified endpoint, and the store over the kernel, each once. The idempotency store
 //     and the command-transaction port are returned together, never one alone. Anything absent, invalid or unsupported refuses
 //     with every blocker it names as a bounded code, before any client exists; nothing is composed while one remains, and there
@@ -21,8 +22,9 @@
 //     key refuses, however padded);
 //   - DATABASE_CA_CERT: the shared transport policy's trust anchor (db.ts), read from the process environment, as the driver reads
 //     its own.
-// What crosses. The composition hands back the two ports, the key and `close` — never the kernel, a pool, the driver, a statement
-// function, the URL or its credential. createApp probes both ports, each the store's read-only probe routine under the established
+// What crosses. The composition hands back the two ports, the key, the trusted principal resolver, the canonical platform
+// authorizer over it (platformAuthorization.ts) and `close` — never the kernel, a pool, the driver, a statement function, the URL
+// or its credential. createApp probes both ports, each the store's read-only probe routine under the established
 // readiness deadline and sharing, only because they are composed. `close` ends the kernel within its bounded grace
 // (RETIRED_POOL_GRACE_S); the entry that composes this runs it as a shutdown hook.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
@@ -32,6 +34,10 @@ import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identi
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import { createPostgresPrincipalResolver, revalidateTrustedScope } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
+import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
+import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
+import type { RouteAuthorizer } from '../runtime/access.js';
+import { createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -76,6 +82,12 @@ export interface ProductionTransactions {
   readonly transactions: CommandTransactionDeps;
   /** The trusted principal resolver over the same kernel (M5-ID-P1), for the chain that resolves an actor. */
   readonly principals: PrincipalResolutionPort;
+  /**
+   * The canonical platform route authorizer over that same resolver (M5-GIAM-D1-P1): the administrative
+   * session boundary's authorizer, which resolves each request's actor, decides the route's canonical
+   * platform permission and hands the command its trusted scope (platformAuthorization.ts).
+   */
+  readonly authorizer: RouteAuthorizer;
   /** Ends the store's kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
 }
@@ -87,9 +99,14 @@ export interface TransactionFactories {
   readonly principals: (client: SupervisedPgClient) => PrincipalResolutionPort;
 }
 
-// The production route inventory. No business route is roadmapped into it yet, so no route requires idempotency and nothing
-// below is composed; the first real business route and its mutators are added here, and only here.
-export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({ routes: Object.freeze([]), mutators: Object.freeze([]) });
+// The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
+// PATCH /admin/v1/tenants/display-name with its one mutator over migration 008's fixed operation, so a deployment serving it
+// requires the whole boundary below — the database, the idempotency key and the store — and refuses to start without it. The
+// entry that composes it also hands createApp the route's own contracts (tenantDisplayName.ts); none is deployed yet.
+export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
+  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE]),
+  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR]),
+});
 
 // The approved production factories: the runtime principal's kernel over the classified endpoint, and the M6 PostgreSQL store.
 const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
@@ -147,13 +164,15 @@ export function assembleTransactions(
     void client.end(); // nothing opened yet: the kernel connects only when a transaction runs
     throw err;
   }
+  // The trusted principal resolver over the SAME kernel. It is built here, with the store, so a
+  // deployment can never hold one without the other, and never resolves an identity through a client
+  // this composition did not classify — and the canonical platform authorizer decides over it alone.
+  const principals = factories.principals(client);
   return Object.freeze({
     idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
     transactions: Object.freeze({ port: store.transactions }),
-    // The trusted principal resolver over the SAME kernel. It is built here, with the store, so a
-    // deployment can never hold one without the other, and never resolves an identity through a client
-    // this composition did not classify.
-    principals: factories.principals(client),
+    principals,
+    authorizer: createPlatformRouteAuthorizer({ principals }),
     close: () => client.end(),
   });
 }

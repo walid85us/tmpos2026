@@ -18,7 +18,7 @@ import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyStore } from './idempotenc
 import { defineOutboxEvents } from './outbox.js';
 import { testRequestLimits } from './rateLimiter.testkit.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from './requestSecurity.js';
-import { EnforcementSetupError } from './routes.js';
+import { COMMAND_REQUEST_INVALID, EnforcementSetupError } from './routes.js';
 import type { CommandContext, CommandPlan, CommandPlanner, RouteDefinition } from './routes.js';
 import {
   TEST_CREATE, TEST_EVENTS, TEST_RENAME, assertCommandTransactionContract, createMemoryCommandTransaction, createMemoryTransactionalHarness,
@@ -281,14 +281,14 @@ function open(port: number, { key = null, body = '{"name":"first"}', path = '/v1
 const post = (port: number, send: Send = {}): Promise<Reply> => open(port, send).reply;
 const errorOf = (reply: Reply): unknown => (JSON.parse(reply.body) as Record<string, unknown>).error;
 
-const createPlanner: CommandPlanner = (ctx) => {
+const createPlanner = (ctx: CommandContext): CommandPlan => {
   const name = String((ctx.body as { name?: unknown } | undefined)?.name ?? 'unnamed');
   return {
     aggregateId: ctx.newAggregateId, expectedVersion: null, changes: { name, quantity: 1 }, events: [{ type: 'conformance.item.created', payload: { name, quantity: 1 } }],
     response: { status: 201, body: { id: ctx.newAggregateId }, headers: { location: `/v1/items/${ctx.newAggregateId}` } },
   };
 };
-const renamePlanner: CommandPlanner = (ctx) => {
+const renamePlanner = (ctx: CommandContext): CommandPlan => {
   const body = ctx.body as { id: string; version: number; name: string };
   return {
     aggregateId: body.id, expectedVersion: body.version, changes: { name: body.name }, events: [{ type: 'conformance.item.renamed', payload: { name: body.name } }],
@@ -297,7 +297,10 @@ const renamePlanner: CommandPlanner = (ctx) => {
 };
 
 interface Harness { port: number; logs: string[]; plans: CommandContext[]; commits: TransactionCommand[]; state: MemoryTransactionalState; clock: { t: number } }
-interface Setup { plan?: CommandPlanner; port?: (inner: CommandTransactionPort) => CommandTransactionPort; deadlineMs?: number }
+interface Setup {
+  plan?: CommandPlanner; renamePlan?: CommandPlanner; port?: (inner: CommandTransactionPort) => CommandTransactionPort; deadlineMs?: number;
+  store?: (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ReturnType<typeof createMemoryIdempotencyStore>;
+}
 
 /** Serve synthetic command routes over one synthetic store, recording what crosses the port; always closes the server. */
 async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Promise<void> {
@@ -312,7 +315,7 @@ async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Pr
   const planner = setup.plan ?? createPlanner;
   const routes: RouteDefinition[] = [
     { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_CREATE, plan: (ctx) => { plans.push(ctx); return planner(ctx); } } },
-    { method: 'POST', path: '/v1/items/rename', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_RENAME, plan: (ctx) => { plans.push(ctx); return renamePlanner(ctx); } } },
+    { method: 'POST', path: '/v1/items/rename', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_RENAME, plan: (ctx) => { plans.push(ctx); return (setup.renamePlan ?? renamePlanner)(ctx); } } },
   ];
   const readiness = createReadinessState();
   readiness.setReady();
@@ -320,7 +323,7 @@ async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Pr
     readiness, now: () => clock.t, log: { log: (line: string) => { logs.push(line); } }, routes, events: TEST_EVENTS, trustedOrigins: [TRUSTED],
     limits: testRequestLimits(), ...(setup.deadlineMs === undefined ? {} : { portDeadlineMs: setup.deadlineMs }),
     authenticator: { async verify(view): Promise<unknown> { return PRINCIPALS[view.bearerToken] ?? null; } }, authorizer: { authorize: () => true },
-    idempotency: { store: createMemoryIdempotencyStore(state.idempotency), keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
+    idempotency: { store: (setup.store ?? ((s) => s))(createMemoryIdempotencyStore(state.idempotency)), keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
   });
   const server = createBoundedServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -555,4 +558,133 @@ test('readiness reports the transaction port through one shared probe per second
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
+});
+
+// --- M5-GIAM-D1-P1: the two update outcomes, the unchanged response and a planner's 400 -------------------------------
+
+test('not_found and unchanged are obeyed only as exact answers; anything near them is out of contract', async () => {
+  const command = commandOf();
+  const verdictOf = (answer: unknown): Promise<unknown> =>
+    commitCommand(createCommandTransactions({ port: { commit: () => answer, probe: () => true } }), command, 1_000);
+  assert.equal(await verdictOf({ outcome: 'not_found' }), 'transaction_not_found');
+  assert.equal(await verdictOf({ outcome: 'unchanged' }), 'transaction_unchanged');
+  for (const answer of [{ outcome: 'not_found', extra: 1 }, { outcome: 'Unchanged' }, { outcome: 'NOT_FOUND' }, { outcome: 'unchanged', version: 1 }]) {
+    assert.equal(await verdictOf(answer), 'transaction_outcome_invalid', JSON.stringify(answer));
+  }
+});
+
+test('an update plan may carry its unchanged 200; nothing else, and never on a create', () => {
+  const b = binding();
+  const id = randomUUID();
+  const update = {
+    aggregateId: id, expectedVersion: 4, changes: { name: 'm' }, events: [{ type: 'conformance.item.renamed', payload: { name: 'm' } }],
+    response: { status: 200, body: { id, name: 'm', version: 5 } },
+  };
+  const withUnchanged = prepareCommand(rename, events, { ...update, unchanged: { status: 200, body: { id, name: 'm', version: 4 } } }, b);
+  assert.ok(withUnchanged);
+  assert.deepEqual(withUnchanged.unchanged, { status: 200, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ id, name: 'm', version: 4 }) });
+  assert.equal(prepareCommand(rename, events, update, b)?.unchanged, null, 'an update without one carries null');
+  assert.equal(prepareCommand(create, events, createPlan(b.newAggregateId), b)?.unchanged, null, 'a create carries null');
+  for (const [label, plan, contract] of [
+    ['unchanged as a 201', { ...update, unchanged: { status: 201, body: {} } }, rename],
+    ['unchanged as a 409', { ...update, unchanged: { status: 409, body: {} } }, rename],
+    ['unchanged with no body', { ...update, unchanged: { status: 200 } }, rename],
+    ['unchanged setting a cookie', { ...update, unchanged: { status: 200, body: {}, headers: { 'set-cookie': 'sid=1' } } }, rename],
+    ['unchanged beside an extra key', { ...update, unchanged: { status: 200, body: {} }, extra: 1 }, rename],
+    ['a create carrying unchanged', { ...createPlan(b.newAggregateId), unchanged: { status: 200, body: {} } }, create],
+  ] as const) {
+    assert.equal(prepareCommand(contract, events, plan, b), null, label);
+  }
+});
+
+const renameBody = (id = randomUUID()): string => JSON.stringify({ id, version: 1, name: 'second' });
+const answering = (outcome: string) => (inner: CommandTransactionPort): CommandTransactionPort => ({ ...inner, commit: () => ({ outcome }) });
+
+test('not_found is a 404 on an update and a 503 on a create; it commits and records nothing', async () => {
+  await withCommands({ port: answering('not_found') }, async ({ port, logs, state }) => {
+    const created = await post(port, { key: randomUUID() });
+    assert.deepEqual([created.status, errorOf(created)], [503, 'service_unavailable'], 'a create never answers 404');
+    const key = randomUUID();
+    const body = renameBody();
+    const renamed = await post(port, { key, path: '/v1/items/rename', body });
+    assert.deepEqual([renamed.status, JSON.parse(renamed.body).error, Object.keys(JSON.parse(renamed.body)).sort()], [404, 'not_found', ['error', 'requestId']]);
+    const waiting = await post(port, { key, path: '/v1/items/rename', body });
+    assert.deepEqual([waiting.status, errorOf(waiting)], [409, 'request_in_progress'], 'nothing recorded: the key waits out its lease');
+    assert.equal(inspectMemoryState(state).aggregates.length, 0);
+    assert.deepEqual((await reasons(logs, 3)).slice(0, 2), ['transaction_not_found', 'transaction_not_found']);
+  });
+});
+
+test('unchanged sends the plan\'s own 200, recorded under the lease and replayed; without one it is a 503', async () => {
+  await withCommands({ port: answering('unchanged') }, async ({ port, logs }) => {
+    const refused = await post(port, { key: randomUUID(), path: '/v1/items/rename', body: renameBody() });
+    assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable']);
+    assert.equal((await reasons(logs, 1))[0], 'transaction_unchanged');
+  });
+  const withUnchanged: CommandPlanner = (ctx) => {
+    const body = ctx.body as { id: string; version: number; name: string };
+    return { ...renamePlanner(ctx), unchanged: { status: 200, body: { id: body.id, name: body.name, version: body.version } } };
+  };
+  await withCommands({ port: answering('unchanged'), renamePlan: withUnchanged }, async ({ port, commits }) => {
+    const key = randomUUID();
+    const id = randomUUID();
+    const first = await post(port, { key, path: '/v1/items/rename', body: renameBody(id) });
+    assert.deepEqual([first.status, JSON.parse(first.body), first.headers['idempotent-replayed']], [200, { id, name: 'second', version: 1 }, undefined]);
+    const retry = await post(port, { key, path: '/v1/items/rename', body: renameBody(id) });
+    assert.deepEqual([retry.status, retry.body, retry.headers['idempotent-replayed']], [200, first.body, 'true'], 'recorded, so the retry replays it');
+    assert.equal(commits.length, 1, 'the replay reached no commit');
+  });
+});
+
+test('a planner\'s COMMAND_REQUEST_INVALID is a 400 decided after acquisition that records nothing: the key waits out its lease', async () => {
+  const planner: CommandPlanner = (ctx) => ((ctx.body as { name?: unknown } | undefined)?.name === 'bad' ? COMMAND_REQUEST_INVALID : createPlanner(ctx));
+  await withCommands({ plan: planner }, async ({ port, logs, commits, state, clock }) => {
+    const key = randomUUID();
+    const bad = JSON.stringify({ name: 'bad' });
+    const refused = await post(port, { key, body: bad });
+    assert.deepEqual([refused.status, errorOf(refused)], [400, 'invalid_request']);
+    assert.equal((await reasons(logs, 1))[0], 'command_request_invalid');
+    assert.equal(commits.length, 0, 'no commit attempted');
+    assert.deepEqual([...state.idempotency.records.values()].map((r) => r.response), [null], 'one record, in progress, with no response');
+    const same = await post(port, { key, body: bad });
+    assert.deepEqual([same.status, errorOf(same)], [409, 'request_in_progress'], 'the same bytes wait on the lease');
+    const other = await post(port, { key, body: JSON.stringify({ name: 'good' }) });
+    assert.deepEqual([other.status, errorOf(other)], [422, 'idempotency_key_reused'], 'another body under the key is the existing conflict');
+    clock.t += IDEMPOTENCY_POLICY.leaseMs;
+    const reclaimed = await post(port, { key, body: bad });
+    assert.deepEqual([reclaimed.status, errorOf(reclaimed)], [400, 'invalid_request'], 'after the lease a reclaim decides again');
+    assert.equal(commits.length, 0);
+  });
+});
+
+test('a key already completed answers any other body — malformed included — with the existing 422, never a 400', async () => {
+  const planner: CommandPlanner = (ctx) => ((ctx.body as { name?: unknown } | undefined)?.name === 'bad' ? COMMAND_REQUEST_INVALID : createPlanner(ctx));
+  await withCommands({ plan: planner }, async ({ port, plans, commits }) => {
+    const key = randomUUID();
+    assert.equal((await post(port, { key, body: JSON.stringify({ name: 'good' }) })).status, 201);
+    for (const body of [JSON.stringify({ name: 'bad' }), '{}', JSON.stringify({ name: 'other' })]) {
+      const reused = await post(port, { key, body });
+      assert.deepEqual([reused.status, errorOf(reused)], [422, 'idempotency_key_reused'], body);
+    }
+    assert.deepEqual([plans.length, commits.length], [1, 1], 'the reuses plan nothing and commit nothing');
+  });
+});
+
+test('an unchanged answer whose completion then fails is a 503 that records nothing: the key stays in progress', async () => {
+  const withUnchanged: CommandPlanner = (ctx) => {
+    const body = ctx.body as { id: string; version: number; name: string };
+    return { ...renamePlanner(ctx), unchanged: { status: 200, body: { id: body.id, name: body.name, version: body.version } } };
+  };
+  const failingComplete = (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ({ ...inner, complete: () => ({ outcome: 'unavailable' }) });
+  await withCommands({ port: answering('unchanged'), renamePlan: withUnchanged, store: failingComplete }, async ({ port, logs, commits, state }) => {
+    const key = randomUUID();
+    const body = renameBody();
+    const refused = await post(port, { key, path: '/v1/items/rename', body });
+    assert.deepEqual([refused.status, errorOf(refused)], [503, 'service_unavailable']);
+    assert.deepEqual([...state.idempotency.records.values()].map((r) => r.response), [null], 'no response recorded');
+    const retry = await post(port, { key, path: '/v1/items/rename', body });
+    assert.deepEqual([retry.status, errorOf(retry)], [409, 'request_in_progress'], 'the key waits out its lease');
+    assert.deepEqual([commits.length, inspectMemoryState(state).aggregates.length], [1, 0], 'one commit attempt, nothing committed');
+    assert.equal((await reasons(logs, 1))[0], 'idempotency_unavailable');
+  });
 });

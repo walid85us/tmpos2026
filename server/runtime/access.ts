@@ -20,7 +20,11 @@
 //     happened, and with which second factor — which a boundary's login policy judges
 //     (sessions.ts). A malformed value is no evidence, and nothing the client asserts is.
 //   - RouteAuthorizer is handed that principal, the route's declared requirement, a frozen route
-//     view { method, path, audience } and the deadline signal. Only an exact `true` allows.
+//     view { method, path, audience } and the deadline signal. Only an exact `true` allows — or, from
+//     an authorizer that resolved the principal to its app-owned actor (M5-GIAM-D1-P1), a
+//     `{ granted: true, context }` whose context is a TrustedScope at exactly the requirement's scope
+//     (principals.ts): the scope the canonical decision was made on, handed to the command so the
+//     transaction revalidates and audits that same actor. Anything else denies.
 // Before the authenticator runs, the request must carry exactly ONE Authorization line of the
 // form `Bearer <b64token>` (RFC 6750) of bounded length, so absent, malformed, duplicated or
 // oversized evidence is refused without ever reaching verifier code. Every port call is bounded
@@ -30,6 +34,8 @@
 // port text ever leaves here.
 import type { Request } from 'express';
 import { outage, withDeadline } from './deadline.js';
+import { isTrustedScope } from './principals.js';
+import type { TrustedScope } from './principals.js';
 import type { AuthorizationRequirement, SessionAudience, VerifiedPrincipal } from './routes.js';
 
 /** The header-only credential view: the one field an authenticator needs, frozen. */
@@ -135,19 +141,52 @@ export async function authenticate(
   return toVerifiedIdentity(verified) ?? 'authn_rejected';
 }
 
-/** null when the authorizer returns exactly `true`; else the refusal: a denial (403) or an outage (503). */
+/** An allowed request: the trusted scope its authorizer decided on, or null when the authorizer named none. */
+export interface AuthorizedAccess {
+  readonly context: TrustedScope | null;
+}
+
+const NO_CONTEXT: AuthorizedAccess = Object.freeze({ context: null });
+
+/**
+ * The trusted scope a granted decision carries, as a frozen copy with each field read once, or undefined
+ * when the answer is not exactly `{ granted: true, context }` with a TrustedScope at `scope`.
+ */
+function grantedContextOf(decision: unknown, scope: AuthorizationRequirement['scope']): TrustedScope | undefined {
+  if (typeof decision !== 'object' || decision === null || Object.getPrototypeOf(decision) !== Object.prototype) return undefined;
+  const keys = Reflect.ownKeys(decision);
+  if (keys.length !== 2 || !keys.includes('granted') || !keys.includes('context')) return undefined;
+  const { granted, context } = decision as Record<string, unknown>;
+  if (granted !== true || typeof context !== 'object' || context === null) return undefined;
+  // Each field read exactly once into a frozen copy; only the copy is checked and only the copy travels, so a
+  // getter cannot answer one way to the check and another way to the command.
+  const { actor, securityVersion, scope: selected, tenant, store, roleId, limitation } = context as Record<string, unknown>;
+  const copy = Object.freeze({ actor, securityVersion, scope: selected, tenant, store, roleId, limitation });
+  return isTrustedScope(copy) && copy.scope === scope ? copy : undefined;
+}
+
+/**
+ * The allowed access when the authorizer returns exactly `true` (no context) or a granted decision with a
+ * trusted scope at the requirement's own scope; else the refusal: a denial (403) or an outage (503).
+ */
 export async function authorize(
   authorizer: RouteAuthorizer,
   principal: VerifiedPrincipal,
   requirement: AuthorizationRequirement,
   route: RouteView,
   deadlineMs: number,
-): Promise<AccessRefusal | null> {
+): Promise<AccessRefusal | AuthorizedAccess> {
   let decision: unknown;
   try {
     decision = await withDeadline(deadlineMs, (signal) => authorizer.authorize(principal, requirement, route, signal));
   } catch (err) {
     return outage('authz', err);
   }
-  return decision === true ? null : 'authz_denied';
+  if (decision === true) return NO_CONTEXT;
+  try {
+    const context = grantedContextOf(decision, requirement.scope);
+    return context === undefined ? 'authz_denied' : Object.freeze({ context });
+  } catch {
+    return 'authz_denied'; // a hostile answer is no grant
+  }
 }

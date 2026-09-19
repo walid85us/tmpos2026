@@ -90,7 +90,9 @@ export interface AggregateMutator {
   /**
    * Apply the mutation on the open transaction through fixed, parameterized statements: 'applied' once
    * exactly its row was created (mode create) or moved from expectedVersion to the next (mode update), or
-   * 'conflict' when that precondition does not hold. Anything else — another answer, a throw — commits nothing.
+   * 'conflict' when that precondition does not hold. An update may also answer 'not_found' — its aggregate
+   * does not exist — or 'unchanged' — its changes already hold at expectedVersion, so it wrote nothing
+   * (M5-GIAM-D1-P1). Anything else — another answer, a throw — commits nothing.
    */
   readonly apply: (sql: PgStatement, mutation: TransactionMutation) => Promise<unknown>;
 }
@@ -128,6 +130,8 @@ const ACQUIRED = Object.freeze({ outcome: 'acquired', reclaimed: false });
 const RECLAIMED = Object.freeze({ outcome: 'acquired', reclaimed: true });
 const IN_PROGRESS = answer('in_progress');
 const CONFLICT = answer('conflict');
+const NOT_FOUND = answer('not_found');
+const UNCHANGED = answer('unchanged');
 const COMPLETED = answer('completed');
 const LEASE_LOST = answer('lease_lost');
 const COMMITTED = answer('committed');
@@ -424,9 +428,12 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
     const role = await revalidate(sql, c.context);
     if (role === null || role !== c.context.roleId) return refuse(UNAVAILABLE);
   }
-  // 2. The business mutation, by the kind's own mutator.
+  // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent, or whose changes
+  //    already hold, wrote nothing: both roll back, so no completion, audit record or event exists for them.
   const applied = await c.mutator.apply(sql, c.mutation);
   if (applied === 'conflict') return refuse(CONFLICT);
+  if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
+  if (c.mutator.mode === 'update' && applied === 'unchanged') return refuse(UNCHANGED);
   if (applied !== 'applied') return refuse(UNAVAILABLE);
   // 3. The audit record, through the existing writer, on this transaction and nowhere else.
   const executor: AuditSqlExecutor = Object.assign((strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {

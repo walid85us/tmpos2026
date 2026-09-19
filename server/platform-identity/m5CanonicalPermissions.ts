@@ -34,15 +34,33 @@
 // This matches what the runtime already enforces: routes.ts admits an idempotency-required route only
 // under a platform-scope requirement, precisely because M5 has not landed.
 //
+// M5-GIAM-D1-P1 UPDATE. The platform decision reads a role through its DEFINITION — levels and money
+// grants as data (PlatformRoleDefinition) — rather than through its id, so owner decision D1's rules hold
+// by construction: no role-name shortcut, System Owner decided by the same rule as every role, and a
+// custom platform role with sufficient authority granted like a built-in one. The built-in definitions
+// are the catalog's defaults, so every built-in answer is unchanged. The first route to depend on this is
+// PATCH /admin/v1/tenants/display-name (edit_tenant_profile), decided by the canonical platform
+// authorizer (server/composition/platformAuthorization.ts).
+//
 // PURE AND INERT: no database, no environment, no network, no I/O, no logging, no side effect. It
-// imports only the inert catalog and constants.
+// imports only the inert catalog, the constants and the pure money-capability contract
+// (src/authorization/moneyCapabilities.ts, which itself imports nothing at runtime).
 import {
+  PLATFORM_PERMISSION_DEPENDENCIES,
+  PLATFORM_ROLE_FEATURE_DEFAULTS,
   PLATFORM_SUB_PERMISSIONS,
   TENANT_SUB_PERMISSIONS,
-  materializePlatformSubPermissions,
+  isPermissionLevel,
+  meetsPlatformPermissionLevel,
 } from './permissionCatalog';
 import { PLATFORM_ROLE_IDS } from './authorizationConstants';
 import type { PermissionLevelValue } from './authorizationConstants';
+import {
+  PLATFORM_MONEY_PARENT_MINIMUM,
+  builtInMoneyGrants,
+  hasExplicitMoneyGrant,
+  isPlatformMoneyCapability,
+} from '../../src/authorization/moneyCapabilities';
 
 /** The scope a permission is evaluated at — identical to routes.ts AuthorizationScope. */
 export type CanonicalPermissionScope = 'platform' | 'tenant' | 'store';
@@ -108,6 +126,72 @@ export function canonicalPermission(scope: CanonicalPermissionScope, key: unknow
 }
 
 /**
+ * A platform role as the canonical decision reads it: its level on each platform feature and its
+ * explicit money grants (M5-GIAM-D1-P1). DATA, NEVER A NAME. The decision reads a role only through its
+ * definition, so a built-in role and a custom role holding the same definition are decided identically,
+ * and no role id is a shortcut — System Owner included, whose definition is Full on every feature with
+ * its locked money grant. A level that is not a canonical one, a grant that is not exactly `true`, and a
+ * key read through a prototype all deny.
+ */
+export interface PlatformRoleDefinition {
+  readonly levels: Readonly<Record<string, PermissionLevelValue>>;
+  readonly moneyGrants: Readonly<Record<string, boolean>>;
+}
+
+/**
+ * The five built-in platform roles' definitions: the catalog's own role defaults and built-in money
+ * grants, unchanged — so for them this decision answers exactly what materializePlatformSubPermissions
+ * answers (m5CanonicalPermissions.test.ts proves it for every role, permission and limitation). This is
+ * the only source a deployment has: the server holds no custom platform role, since migration 003's
+ * user_membership_role_scope_chk admits the five built-in ids alone and no durable role store exists.
+ */
+export const BUILT_IN_PLATFORM_ROLES: ReadonlyMap<string, PlatformRoleDefinition> = Object.freeze(new Map(
+  PLATFORM_ROLE_IDS.map((roleId) => [roleId, Object.freeze({
+    levels: Object.freeze({ ...PLATFORM_ROLE_FEATURE_DEFAULTS[roleId] }),
+    moneyGrants: Object.freeze({ ...builtInMoneyGrants(roleId) }) as Readonly<Record<string, boolean>>,
+  })] as const),
+));
+
+const hasOwn = (o: object, key: string): boolean => Object.prototype.hasOwnProperty.call(o, key);
+const isPlainRecord = (v: unknown): v is Readonly<Record<string, unknown>> => {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const proto: unknown = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
+
+/** The role's own level on `feature`, or 'none' for an absent, inherited or non-canonical one. */
+function featureLevelOf(role: PlatformRoleDefinition, feature: string): PermissionLevelValue {
+  const levels: unknown = role.levels;
+  if (!isPlainRecord(levels) || !hasOwn(levels, feature)) return 'none';
+  const level = levels[feature];
+  return isPermissionLevel(level) ? level : 'none';
+}
+
+/**
+ * Whether the role's definition grants the platform sub-permission: the parent feature's level meets the
+ * sub's threshold on the platform ordering — or, for a money capability, meets the View minimum AND the
+ * role holds the explicit grant — and every prerequisite is granted in turn (transitive, cycle-safe).
+ * The same rule materializePlatformSubPermissions applies to the built-in defaults.
+ */
+function platformSubGranted(role: PlatformRoleDefinition, key: string, visiting: ReadonlySet<string>): boolean {
+  const entry = CANONICAL_PLATFORM_PERMISSIONS.get(key);
+  if (entry === undefined || entry.threshold === null) return false;
+  const level = featureLevelOf(role, entry.parent);
+  if (isPlatformMoneyCapability(key)) {
+    if (!meetsPlatformPermissionLevel(level, PLATFORM_MONEY_PARENT_MINIMUM)) return false;
+    if (!hasExplicitMoneyGrant(role.moneyGrants, key)) return false;
+  } else if (!meetsPlatformPermissionLevel(level, entry.threshold)) {
+    return false;
+  }
+  const prerequisites = hasOwn(PLATFORM_PERMISSION_DEPENDENCIES, key) ? PLATFORM_PERMISSION_DEPENDENCIES[key] : [];
+  for (const prerequisite of prerequisites) {
+    if (visiting.has(prerequisite)) continue; // cycle guard
+    if (!platformSubGranted(role, prerequisite, new Set([...visiting, key]))) return false;
+  }
+  return true;
+}
+
+/**
  * Whether a role holds a canonical permission at a scope.
  *
  * 'granted' / 'denied' are decisions. 'undecidable' is NOT a denial a caller may cache or report as
@@ -116,23 +200,28 @@ export function canonicalPermission(scope: CanonicalPermissionScope, key: unknow
  * belong to the scope's plane, a limitation that is neither 'none' nor 'read_only' — is 'denied',
  * fail-closed. An unrecognised limitation is not "no limitation". Each input field is read once.
  *
- * The platform evaluation is the existing one, unchanged: materializePlatformSubPermissions applies
- * the role's default feature levels, the sub's threshold on the platform ordering, its prerequisites,
- * and the read-only cap that leaves only non-sensitive view-threshold grants standing. `system_owner`
- * keeps its locked Full short-circuit inside that function.
+ * The platform evaluation decides the role through its DEFINITION (`roles`, the built-in definitions
+ * unless a caller supplies others): the sub's threshold on the platform ordering against the role's
+ * level on the parent feature, the explicit grant for a money capability, every prerequisite, and the
+ * read-only cap that leaves only non-sensitive view-threshold grants standing. No role id is special:
+ * System Owner is granted because its definition is Full everywhere, through this same rule.
  */
 export function evaluateCanonicalPermission(input: {
   readonly scope: CanonicalPermissionScope;
   readonly roleId: string;
   readonly permission: string;
   readonly limitation: 'none' | 'read_only';
+  readonly roles?: ReadonlyMap<string, PlatformRoleDefinition>;
 }): 'granted' | 'denied' | 'undecidable' {
-  const { scope, roleId, permission, limitation } = input;
+  const { scope, roleId, permission, limitation, roles } = input;
   const entry = canonicalPermission(scope, permission);
   if (entry === null) return 'denied';
   if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
   if (scope !== 'platform') return 'undecidable';
-  if (!(PLATFORM_ROLE_IDS as readonly string[]).includes(roleId)) return 'denied';
-  const granted = materializePlatformSubPermissions(roleId, limitation === 'read_only');
-  return granted[entry.key] === true ? 'granted' : 'denied';
+  const definitions = roles ?? BUILT_IN_PLATFORM_ROLES;
+  const role = typeof roleId === 'string' && definitions instanceof Map ? definitions.get(roleId) : undefined;
+  if (role === undefined || role === null || typeof role !== 'object') return 'denied';
+  if (!platformSubGranted(role, entry.key, new Set())) return 'denied';
+  if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
+  return 'granted';
 }

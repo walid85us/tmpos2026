@@ -34,6 +34,9 @@ import { createLifecycle } from '../runtime/lifecycle.js';
 import { testRequestLimits } from '../runtime/rateLimiter.testkit.js';
 import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
 import type { RouteDefinition } from '../runtime/routes.js';
+import type { PrincipalResolutionPort } from '../runtime/principals.js';
+import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
+import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolvePath(HERE, '..', '..');
@@ -219,13 +222,18 @@ function appWith(boundary: ProductionTransactions | null, routes: readonly Route
 
 // --- A. today's production inventory ---------------------------------------------------------------------------------------
 
-test('today\'s inventory requires no transaction boundary: nothing is read, built or probed', () => {
-  assert.deepEqual(PRODUCTION_INVENTORY.routes, [], 'no production route is roadmapped into the inventory yet');
+test('the production inventory holds the tenant display-name command and its one mutator, so it composes nothing without the whole boundary', () => {
+  // M5-GIAM-D1-P1 (owner decision D1): the first business route. Serving it requires the database, the idempotency key and the
+  // store, so the production root refuses, naming every blocker, when the configuration lacks them — never a partial composition.
+  assert.deepEqual(PRODUCTION_INVENTORY.routes, [TENANT_DISPLAY_NAME_ROUTE], 'exactly the one business route');
+  assert.deepEqual(PRODUCTION_INVENTORY.mutators, [TENANT_DISPLAY_NAME_MUTATOR], 'and exactly its mutator');
   assert.ok(Object.isFrozen(PRODUCTION_INVENTORY) && Object.isFrozen(PRODUCTION_INVENTORY.routes) && Object.isFrozen(PRODUCTION_INVENTORY.mutators));
-  const { env, read } = recording({ APP_DATABASE_URL: 'postgres://x@127.0.0.1:6543/db', IDEMPOTENCY_KEY: 'short', DATABASE_CA_CERT: 'nonsense' });
-  assert.equal(composeProductionTransactions(env), null);
-  assert.deepEqual([...read], [], 'not APP_DATABASE_URL, not IDEMPOTENCY_KEY, not any key');
-  // Any inventory without a route requiring idempotency is the same: its routes are still validated, nothing else happens.
+  assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), [], 'its permission is one canonical platform key');
+  const { env, read } = recording({});
+  assert.throws(() => composeProductionTransactions(env),
+    (err: unknown) => err instanceof TransactionCompositionError && JSON.stringify(err.blockers) === JSON.stringify(['app_database_url_missing', 'idempotency_key_missing']));
+  assert.ok(read.has('APP_DATABASE_URL') && read.has('IDEMPOTENCY_KEY'), 'it reads its own configuration');
+  // Any inventory without a route requiring idempotency composes nothing and reads nothing: its routes are still validated.
   const none = recording({});
   assert.equal(assembleTransactions({ routes: [STATUS], mutators: [] }, none.env, NEVER), null);
   assert.deepEqual([...none.read], []);
@@ -237,7 +245,8 @@ test('today\'s inventory requires no transaction boundary: nothing is read, buil
 });
 
 test('without a transaction boundary the runtime serves its probes and bounded fallback exactly as the production entry does', async () => {
-  const composed = composeProductionTransactions({});
+  // The provider-free entry (server.ts) composes no inventory at all; an inventory with no required route is the same: null.
+  const composed = assembleTransactions({ routes: [STATUS], mutators: [] }, {}, NEVER);
   assert.equal(composed, null);
   const responses = async (app: Express): Promise<unknown[]> => {
     const out: unknown[] = [];
@@ -306,7 +315,8 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.ok(boundary !== null);
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
-    assert.deepEqual(Object.keys(boundary).sort(), ['close', 'idempotency', 'principals', 'transactions']);
+    assert.deepEqual(Object.keys(boundary).sort(), ['authorizer', 'close', 'idempotency', 'principals', 'transactions']);
+    assert.equal(typeof boundary.authorizer.authorize, 'function', 'the canonical platform authorizer over the same resolver');
     assert.deepEqual(Object.keys(boundary.idempotency).sort(), ['keySecret', 'store']);
     assert.deepEqual(Object.keys(boundary.transactions), ['port']);
     assert.ok(Object.isFrozen(boundary) && Object.isFrozen(boundary.idempotency) && Object.isFrozen(boundary.transactions));
@@ -353,7 +363,9 @@ test('a command route needs its mutator, a partial construction composes nothing
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
-  assert.equal(composeProductionTransactions({ ...CONFIGURED, idempotencyStore: 'memory', store: 'memory' }), null, 'extra configuration composes nothing');
+  assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
+    (err: unknown) => err instanceof TransactionCompositionError && JSON.stringify(err.blockers) === JSON.stringify(['app_database_url_missing', 'idempotency_key_missing']),
+    'extra configuration selects nothing: no in-memory store, no fallback');
 });
 
 test('a refused configuration makes no contact, and the real client dials only the classified endpoint once a transaction runs', async () => {
@@ -560,4 +572,39 @@ test('the resolver is composed with the store, over the same client, and never a
   assert.deepEqual(built, ['client', 'store', 'principals'], 'one client, then both consumers of it');
   assert.equal(typeof boundary!.principals.resolve, 'function');
   assert.equal(typeof boundary!.principals.probe, 'function');
+});
+
+test('the composed authorizer decides over the composed resolver: the one the boundary hands back, and nothing else', async () => {
+  // M5-GIAM-D1-P1 review: typeof checks alone would pass a stub. Swap only the resolver factory for a synthetic port, and the
+  // authorizer the boundary returns must be the canonical platform authorizer deciding over that exact object.
+  const ACTOR = '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5';
+  const decide = async (roleId: string): Promise<unknown> => {
+    const { factories } = counted();
+    let built: PrincipalResolutionPort | undefined;
+    const synthetic: PrincipalResolutionPort = {
+      resolve: () => ({
+        outcome: 'resolved',
+        principal: {
+          actor: ACTOR, accountStatus: 'active', limitation: 'none', securityVersion: 'sv-1',
+          memberships: [{ membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', scopeType: 'platform', tenant: null, store: null, roleId, tenantStatus: null, storeStatus: null }],
+        },
+      }),
+      probe: () => true,
+    };
+    const boundary = assembleTransactions(REQUIRED, CONFIGURED, { ...factories, principals: () => { built = synthetic; return synthetic; } });
+    assert.ok(boundary !== null);
+    try {
+      assert.equal(boundary.principals, built, 'the boundary hands back the resolver it built');
+      return await boundary.authorizer.authorize({ authProvider: 'firebase', authProviderUid: 'u' }, { scope: 'platform', permission: 'edit_tenant_profile' },
+        { method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin' }, new AbortController().signal);
+    } finally {
+      await boundary.close();
+    }
+  };
+  const granted = await decide('support_admin') as { granted: boolean; context: Record<string, unknown> };
+  assert.equal(granted.granted, true);
+  assert.deepEqual({ ...granted.context }, {
+    actor: ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null, roleId: 'support_admin', limitation: 'none',
+  }, 'the grant carries the resolved actor and role');
+  assert.equal(await decide('billing_admin'), false, 'a role below Edit on tenant_management is denied');
 });

@@ -31,9 +31,13 @@
 // The port (CommandTransactionPort):
 //   commit — checks, in this order and inside the transaction, (1) the lease — else 'lease_lost', so a
 //            fenced attempt learns nothing of business state — and (2) the mutation's precondition —
-//            else 'conflict'; then writes every part → 'committed'. An event ID that is not new is a
+//            else 'conflict', or for an update whose aggregate does not exist 'not_found'; then writes
+//            every part → 'committed'. An update whose changes already hold at the expected version
+//            writes nothing and answers 'unchanged' (M5-GIAM-D1-P1): no business state moved, so there
+//            is nothing to keep atomic, and the runtime records the plan's own unchanged response
+//            through the idempotency store's lease-checked completion instead. An event ID that is not new is a
 //            fault of the runtime or the store, never a conflict: nothing commits, and the answer is
-//            'unavailable' or a rejection. 'lease_lost', 'conflict' and 'unavailable' change nothing —
+//            'unavailable' or a rejection. 'lease_lost', 'conflict', 'not_found', 'unchanged' and 'unavailable' change nothing —
 //            'unavailable' only when the adapter knows nothing committed; one that cannot tell rejects —
 //            and a call handed an already-aborted signal changes nothing. A call that throws, rejects,
 //            times out or is aborted in flight has an INDETERMINATE effect: it committed entirely or not
@@ -52,8 +56,10 @@
 // never holds the idempotency row; and stamps the audit record and every event with the one transaction
 // timestamp — the transaction's start time (audit_event.occurred_at's default), not its commit order.
 //
-// The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict:
-// nothing committed, nothing recorded, and the attempt's lease simply expires. Every other outcome — an
+// The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
+// 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
+// attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
+// 200, sent once the idempotency store has recorded it under the attempt's lease. Every other outcome — an
 // explicit 'unavailable', 'lease_lost', a throw, a timeout or a malformed answer — is a bounded 503 that
 // assumes no rollback: the runtime never releases or replaces a lease (there is no such call), so a retry
 // replays the record if the commit landed, or waits (409 request_in_progress) until the lease expires and
@@ -92,6 +98,8 @@ const MAX_EXPECTED_VERSION = Number.MAX_SAFE_INTEGER - 1;
 const PARTS: readonly string[] = ['port'];
 const PORT_METHODS: readonly string[] = ['commit', 'probe'];
 const PLAN_FIELDS: readonly string[] = ['aggregateId', 'expectedVersion', 'changes', 'events', 'response'];
+/** An update's plan may also carry the response for changes already in place (routes.ts CommandPlan.unchanged). */
+const UPDATE_PLAN_FIELDS: readonly string[] = [...PLAN_FIELDS, 'unchanged'];
 
 /** One closed command contract: whether it creates or updates, the aggregate, its change schema and the events it may enqueue. */
 export interface CommandContract {
@@ -189,11 +197,16 @@ export interface PreparedCommand {
   readonly command: TransactionCommand;
   /** The response to send once — and only once — the commit is confirmed. */
   readonly response: ReplayEnvelope;
+  /** An update's response when the store answers 'unchanged', recorded before it is sent; null when the plan names none. */
+  readonly unchanged: ReplayEnvelope | null;
 }
 
+/** Why a commit did not commit: a refusal, or — for an update — a missing aggregate or changes already in place. */
 export type CommandRefusal =
   | 'transaction_lease_lost'
   | 'transaction_conflict'
+  | 'transaction_not_found'
+  | 'transaction_unchanged'
   | 'transaction_unavailable'
   | 'transaction_timeout'
   | 'transaction_outcome_invalid';
@@ -289,9 +302,13 @@ function refuseThenable(value: unknown): boolean {
 export function prepareCommand(contract: CommandContract, events: OutboxEventRegistry, raw: unknown, binding: CommandBinding): PreparedCommand | null {
   if (refuseThenable(raw)) return null;
   try {
-    if (!isRecord(raw) || !hasExactKeys(raw, PLAN_FIELDS)) return null;
+    if (!isRecord(raw)) return null;
+    // An update's plan may name the response for changes already in place; a create's never does.
+    const withUnchanged = contract.mode === 'update' && hasExactKeys(raw, UPDATE_PLAN_FIELDS);
+    if (!withUnchanged && !hasExactKeys(raw, PLAN_FIELDS)) return null;
     // Read once each: a plan cannot validate one value and hand back another.
     const { aggregateId, expectedVersion, changes, events: planned, response } = raw;
+    const unchangedOutcome: unknown = withUnchanged ? raw.unchanged : undefined;
     if (contract.mode === 'create' ? expectedVersion !== null || aggregateId !== binding.newAggregateId
       : !(typeof aggregateId === 'string' && UUID_RE.test(aggregateId) && typeof expectedVersion === 'number'
         && Number.isSafeInteger(expectedVersion) && expectedVersion >= 1 && expectedVersion <= MAX_EXPECTED_VERSION)) return null;
@@ -324,6 +341,9 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     }
     const envelope = envelopeFromOutcome(response);
     if (envelope === null || !COMMAND_RESPONSE_STATUSES.has(envelope.status)) return null;
+    // Changes already in place are no creation: their response is a 200 and nothing else.
+    const unchanged = withUnchanged ? envelopeFromOutcome(unchangedOutcome) : null;
+    if (withUnchanged && (unchanged === null || unchanged.status !== 200)) return null;
     const command: TransactionCommand = Object.freeze({
       scope: binding.scope,
       lease: binding.lease,
@@ -339,7 +359,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
       events: Object.freeze(drafts),
       context: ctx,
     });
-    return Object.freeze({ command, response: envelope });
+    return Object.freeze({ command, response: envelope, unchanged });
   } catch {
     return null; // a hostile getter: not in contract
   }
@@ -363,6 +383,8 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'committed') return null;
     if (outcome === 'lease_lost') return 'transaction_lease_lost';
     if (outcome === 'conflict') return 'transaction_conflict';
+    if (outcome === 'not_found') return 'transaction_not_found';
+    if (outcome === 'unchanged') return 'transaction_unchanged';
     return outcome === 'unavailable' ? 'transaction_unavailable' : 'transaction_outcome_invalid';
   } catch {
     return 'transaction_outcome_invalid'; // a hostile answer breaks the contract too

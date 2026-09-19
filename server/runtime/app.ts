@@ -24,7 +24,10 @@
 //             6. access, by the route's policy — no port is ever handed `req` or `res`, and
 //                every port call runs under the port deadline with its AbortSignal
 //                (deadline.ts): a port that throws or overruns is an outage, a bounded
-//                503, never a credential or authorization verdict:
+//                503, never a credential or authorization verdict. An authorizer that resolves
+//                the principal to its app-owned actor hands back the trusted scope it decided on
+//                (access.ts), and that scope — never anything from the request — is the
+//                command's context (M5-GIAM-D1-P1) — a session route's command refuses (403) without one:
 //                authenticated: the Bearer credential view -> authenticator (401),
 //                  then authorizer (403) (access.ts);
 //                login: the boundary's login client limit (429), the credential view
@@ -54,10 +57,14 @@
 //                outcome recorded before it is sent (a malformed outcome -> 500, an overrun or a
 //                store that cannot record -> 503; neither is recorded); a `required` route's
 //                `command` planned synchronously from its body alone (a throw or a plan out of its
-//                contract -> 500) and committed atomically — the lease check, the mutation, the
-//                completion, its audit record and its outbox events — through the transaction port
-//                under the runtime's own deadline (commandTransaction.ts), its response sent only once
-//                committed: a conflict -> 409, and anything else -> 503 that assumes no rollback and
+//                contract -> 500; a body its contract refuses, COMMAND_REQUEST_INVALID -> 400; each
+//                records nothing, and the lease waits out its time) and committed atomically — the lease
+//                check, the trusted context's revalidation, the mutation, the completion, its audit
+//                record and its outbox events — through the transaction port under the runtime's own
+//                deadline (commandTransaction.ts), its response sent only once committed: a conflict
+//                -> 409, an update whose aggregate does not exist -> 404, an update whose changes
+//                already hold -> the plan's unchanged 200, recorded under the lease before it is sent,
+//                and anything else -> 503 that assumes no rollback and
 //                releases nothing; any other route's handler exactly once, with the principal, the
 //                session view and the parsed value as ctx.body; a throw or rejection -> bounded 500.
 //   notFoundHandler / errorHandler — the terminal bounded 404 / 500;
@@ -118,8 +125,9 @@ import type { CommandContract, CommandTransactionDeps, CommandTransactions } fro
 import { defineOutboxEvents } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
-import { EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
+import { COMMAND_REQUEST_INVALID, EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
 import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
+import type { TrustedScope } from './principals.js';
 
 export interface ReadinessState {
   isReady(): boolean;
@@ -731,14 +739,17 @@ export function createApp(deps: AppDeps): Express {
       }
       let principal: VerifiedPrincipal | null = null;
       let session: SessionContext | null = null;
+      // The trusted scope the authorizer decided on, when it resolved the principal to its app-owned actor.
+      let context: TrustedScope | null = null;
       const { policy } = route;
       if (policy.access === 'authenticated') {
         // Both ports are proven present at startup for any authenticated route.
         const authn = await authenticate(req, authenticator as RequestAuthenticator, deadlineMs);
         if (typeof authn === 'string') return challenge(req, res, authn);
-        const denied = await authorize(authorizer as RouteAuthorizer, authn.principal, policy.authorization, viewOf(route, null), deadlineMs);
-        if (denied !== null) return verdict(req, res, denied, 403);
+        const allowed = await authorize(authorizer as RouteAuthorizer, authn.principal, policy.authorization, viewOf(route, null), deadlineMs);
+        if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
         principal = authn.principal;
+        context = allowed.context;
       } else if (policy.access === 'login') {
         // Startup proved this boundary composed. The client limit is spent before any
         // credential is examined. The account limit is keyed by the verified principal's
@@ -773,8 +784,12 @@ export function createApp(deps: AppDeps): Express {
           if (csrf !== null) return refuse(req, res, 403, 'forbidden', csrf);
         }
         if (policy.authorization !== null) {
-          const denied = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs);
-          if (denied !== null) return verdict(req, res, denied, 403);
+          const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs);
+          if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
+          context = allowed.context;
+          // A command on a session route commits only under the trusted scope its authorizer decided on: an
+          // authorizer that resolved no actor (a bare `true`) cannot authorize one, so nothing is acquired or committed.
+          if ('command' in route && context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
           // The idle window slides only when an authorized route answers 2xx — never on a
           // refusal, a failure, the current-session read or logout. A refresh that cannot be
           // stored cannot fail the request it follows; the session then lapses sooner.
@@ -835,20 +850,32 @@ export function createApp(deps: AppDeps): Express {
           } catch {
             return refuse(req, res, 500, 'internal_error', 'command_plan_failed'); // nothing committed; the lease waits out its time
           }
+          // A body the contract refuses is a 400 that commits and records nothing, exactly like a conflict: the attempt's
+          // lease waits out its time, so the key stays bound to this request's fingerprint (idempotency.ts).
+          if (plan === COMMAND_REQUEST_INVALID) return refuse(req, res, 400, 'invalid_request', 'command_request_invalid');
           const requirement = 'authorization' in policy ? policy.authorization : null;
           const prepared = prepareCommand(contract, outboxEvents, plan, {
             scope: operation.scope, lease, newAggregateId, authorization: requirement as AuthorizationRequirement,
-            // No route resolves a principal yet (M5-ID-P1 delivers the boundary, not a business route),
-            // so every command still commits without a trusted context — and the store audits it as such.
-            context: null,
+            // The trusted scope the authorizer decided on (M5-GIAM-D1-P1), or null when it resolved no actor:
+            // the store revalidates it inside the transaction and audits its actor, and nothing else is one.
+            context,
             seal: (envelope) => store.keyring.seal(envelope, operation),
           });
           if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');
           // The response goes out only once the authoritative store confirms the commit, which runs under the
-          // runtime's own deadline whatever the client's connection does. A conflict committed nothing; any
-          // other refusal may or may not have committed, so none releases the lease: a retry replays or waits.
+          // runtime's own deadline whatever the client's connection does. A conflict or a missing aggregate
+          // committed nothing; any other refusal may or may not have committed, so none releases the lease: a
+          // retry replays or waits.
           const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
           if (refused === 'transaction_conflict') return refuse(req, res, 409, 'write_conflict', refused);
+          if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
+          if (refused === 'transaction_unchanged' && prepared.unchanged !== null) {
+            // Nothing moved, so there is no business effect to keep atomic with the completion: the plan's own
+            // unchanged response is recorded under this attempt's lease, and sent only once recorded.
+            const unrecorded = await completeIdempotency(store, Object.freeze({ scope: operation.scope, lease, response: store.keyring.seal(prepared.unchanged, operation) }), deadlineMs);
+            if (unrecorded !== null) return refuse(req, res, 503, 'service_unavailable', unrecorded);
+            return sendRecorded(res, prepared.unchanged, false);
+          }
           if (refused !== null) return refuse(req, res, 503, 'service_unavailable', refused);
           return sendRecorded(res, prepared.response, false);
         }

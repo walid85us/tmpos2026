@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 129; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory (sentinels below)
+export const MIN_SUITES = 132; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer (sentinels below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -108,6 +108,9 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/adminWeb.test.ts',                          // admin web policy: canonical API path, document CSP/headers, HSTS flag
   'server/runtime/adminWebServer.test.ts',                    // admin host web entry: preloaded build, API/health paths never the SPA
   'server/runtime/commandCenter.test.ts',                     // Command Center read model: session + view_command_center, fail closed, no reader string
+  'server/runtime/tenantDisplayName.test.ts',                 // first server-authorized command: validation, chain order, outcomes, replay (M5-GIAM-D1-P1)
+  'server/runtime/accessGrant.test.ts',                       // an authorizer's granted trusted scope: exact shape, same scope, read once (M5-GIAM-D1-P1)
+  'server/composition/platformAuthorization.test.ts',         // canonical platform authorizer: actor resolution, definition-driven decision, fail closed
 ];
 
 export const isTestPath = (f) =>
