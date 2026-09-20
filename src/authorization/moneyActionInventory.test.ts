@@ -288,10 +288,14 @@ test('I6. every entry is client-only and says so; no production route enforces a
     assert.doesNotMatch(read(e.file), /server[- ]enforced|enforced (by|on) the server/i, `${e.file} claims server enforcement`);
   }
   for (const file of [BILLING, TENANT]) assert.match(read(file), /Client-side only/, `${file} records the platform money gate as client-side only`);
-  // M5-GIAM-D1-P1 adds the first production route — the tenant display-name command, a platform edit_tenant_profile write — and
-  // no money action: no production route requires a money capability, so every money entry above stays client-only.
+  // M5-GIAM-D1-P1 adds the first production route — the tenant display-name command, a platform edit_tenant_profile
+  // write — and M5-GIAM-D1-P2 the second, the tenant lifecycle command under change_tenant_status. Neither is a money
+  // action: no production route requires a money capability, so every money entry above stays client-only.
   const required = PRODUCTION_INVENTORY.routes.map((r) => (r.policy.access === 'session' || r.policy.access === 'authenticated' ? r.policy.authorization?.permission : null));
-  assert.deepEqual(required, ['edit_tenant_profile'], 'the one production route is the tenant display-name command');
+  assert.deepEqual(required, ['edit_tenant_profile', 'change_tenant_status'], 'the two production routes are the tenant commands');
+  for (const permission of required) {
+    assert.ok(!MONEY_ACTION_ENTRY_POINTS.some((e) => e.capability === permission), `${permission} is no money capability`);
+  }
   for (const permission of required) assert.equal(isTenantMoneyCapability(permission) || isPlatformMoneyCapability(permission), false, `${permission} is no money capability`);
 });
 

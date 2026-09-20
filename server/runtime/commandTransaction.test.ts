@@ -37,6 +37,20 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 // --- plans, commands and contracts ------------------------------------------------------------------
 
 const events = defineOutboxEvents(TEST_EVENTS);
+/**
+ * What a real authorizer hands a state-changing route since M5-GIAM-D1-P2: the resolved actor and the one
+ * grant it decided on, not a bare `true`. A route declaring `trustedContext: 'required'` is refused (403)
+ * without it, so every idempotent route here presents one.
+ */
+const GRANTED = Object.freeze({
+  granted: true,
+  context: Object.freeze({
+    actor: '00000000-0000-4000-8000-000000000001', securityVersion: 'sv1', scope: 'platform' as const,
+    tenant: null, store: null, membershipId: '00000000-0000-4000-8000-000000000002',
+    roleId: 'support_admin', limitation: 'none' as const,
+  }),
+});
+
 const commands = defineCommands([TEST_CREATE, TEST_RENAME], events);
 const create = commands.contract(TEST_CREATE.kind) as CommandContract;
 const rename = commands.contract(TEST_RENAME.kind) as CommandContract;
@@ -47,6 +61,7 @@ const op = keyring.operationOf(randomUUID(), { authProvider: 'synthetic', authPr
 const binding = (newAggregateId = randomUUID()) => ({
   scope: op.scope, lease: 'l'.repeat(43), newAggregateId, authorization: Object.freeze({ scope: 'platform' as const, permission: 'items.write' }),
   context: null,
+  authNotAfter: null,
   seal: (e: Parameters<typeof keyring.seal>[0]) => keyring.seal(e, op),
 });
 const createPlan = (id: string) => ({
@@ -63,11 +78,12 @@ test('a plan becomes one command: runtime-generated identities, null scope and a
   const prepared = prepareCommand(create, events, createPlan(b.newAggregateId), b);
   assert.ok(prepared);
   const { command } = prepared;
-  assert.deepEqual(Object.keys(command).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
+  assert.deepEqual(Object.keys(command).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
   assert.equal(command.unchanged, null, 'a create names no unchanged response');
   assert.deepEqual(command.mutation, { kind: 'conformance.item.create', aggregateType: 'item', aggregateId: b.newAggregateId, expectedVersion: null, changes: { name: 'n', quantity: 1 } });
   assert.match(command.audit.correlationId, UUID_V4);
-  assert.deepEqual(command.audit, { action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null, correlationId: command.audit.correlationId });
+  assert.deepEqual(command.audit, { action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null,
+    correlationId: command.audit.correlationId, reasonCode: null, reason: null });
   const [event] = command.events;
   assert.match(event.eventId, UUID_V4);
   assert.deepEqual(event, {
@@ -103,6 +119,46 @@ test('a plan out of its contract is refused whole: identifiers, versions, fields
     ['a thenable', rejecting, create], ['null', null, create], ['an array', [good], create],
   ] as const) {
     assert.equal(prepareCommand(contract, events, plan, b), null, label);
+  }
+});
+
+test('the audit annex and the step-up deadline are validated, and a plan out of their contract is refused whole', () => {
+  const b = binding();
+  const good = createPlan(b.newAggregateId);
+  const annexed = { ...good, audit: { reasonCode: 'tenant_status_active_to_suspended', reason: 'Payment dispute escalated.' } };
+  const ok = prepareCommand(create, events, annexed, b);
+  assert.ok(ok, 'a well-formed annex is accepted');
+  assert.deepEqual([ok.command.audit.reasonCode, ok.command.audit.reason],
+    ['tenant_status_active_to_suspended', 'Payment dispute escalated.'], 'both reach the audit record');
+  assert.equal(prepareCommand(create, events, good, b)?.command.audit.reasonCode, null, 'a plan without one carries nulls');
+  assert.equal(prepareCommand(create, events, good, b)?.command.audit.reason, null);
+  const ch = (code) => String.fromCodePoint(code);
+  const annexes: Array<[string, unknown]> = [
+    ['no reason', { reasonCode: 'x_y' }], ['no code', { reason: 'a'.repeat(20) }],
+    ['an extra key', { reasonCode: 'x_y', reason: 'a'.repeat(20), note: 1 }],
+    ['a null code', { reasonCode: null, reason: 'a'.repeat(20) }], ['a null reason', { reasonCode: 'x_y', reason: null }],
+    ['a numeric code', { reasonCode: 1, reason: 'a'.repeat(20) }],
+    ['an uppercase code', { reasonCode: 'X_Y', reason: 'a'.repeat(20) }],
+    ['a dotted code', { reasonCode: 'x.y', reason: 'a'.repeat(20) }],
+    ['a code starting with a digit', { reasonCode: '1x', reason: 'a'.repeat(20) }],
+    ['a 65-character code', { reasonCode: `a${'b'.repeat(64)}`, reason: 'a'.repeat(20) }],
+    ['an empty reason', { reasonCode: 'x_y', reason: '' }],
+    ['a 1001-unit reason', { reasonCode: 'x_y', reason: 'a'.repeat(1_001) }],
+    ['a reason with a control character', { reasonCode: 'x_y', reason: `a${ch(1)}b` }],
+    ['a reason with a newline', { reasonCode: 'x_y', reason: `a${ch(10)}b` }],
+    ['a reason with a line separator', { reasonCode: 'x_y', reason: `a${ch(0x2028)}b` }],
+    ['a reason with a Bidi_Control', { reasonCode: 'x_y', reason: `a${ch(0x202e)}b` }],
+    ['a reason with a lone surrogate', { reasonCode: 'x_y', reason: `a${String.fromCharCode(0xd800)}b` }],
+  ];
+  for (const [label, audit] of annexes) {
+    assert.equal(prepareCommand(create, events, { ...good, audit }, b), null, label);
+  }
+  // The step-up deadline is the runtime's own value, and only a positive safe integer or null is one.
+  const fresh = prepareCommand(create, events, good, { ...b, authNotAfter: 1_700_000_600_000 });
+  assert.equal(fresh?.command.authNotAfter, 1_700_000_600_000, 'it travels to the store unchanged');
+  const deadlines: unknown[] = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '1', true, {}, Number.MAX_SAFE_INTEGER + 1];
+  for (const bad of deadlines) {
+    assert.equal(prepareCommand(create, events, good, { ...b, authNotAfter: bad as number }), null, `authNotAfter ${String(bad)}`);
   }
 });
 
@@ -315,15 +371,15 @@ async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Pr
   const port: CommandTransactionPort = { commit: (c, s) => { commits.push(c); return base.commit(c, s); }, probe: (s) => base.probe(s) };
   const planner = setup.plan ?? createPlanner;
   const routes: RouteDefinition[] = [
-    { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_CREATE, plan: (ctx) => { plans.push(ctx); return planner(ctx); } } },
-    { method: 'POST', path: '/v1/items/rename', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_RENAME, plan: (ctx) => { plans.push(ctx); return (setup.renamePlan ?? renamePlanner)(ctx); } } },
+    { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_CREATE, plan: (ctx) => { plans.push(ctx); return planner(ctx); } } },
+    { method: 'POST', path: '/v1/items/rename', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_RENAME, plan: (ctx) => { plans.push(ctx); return (setup.renamePlan ?? renamePlanner)(ctx); } } },
   ];
   const readiness = createReadinessState();
   readiness.setReady();
   const app = createApp({
     readiness, now: () => clock.t, log: { log: (line: string) => { logs.push(line); } }, routes, events: TEST_EVENTS, trustedOrigins: [TRUSTED],
     limits: testRequestLimits(), ...(setup.deadlineMs === undefined ? {} : { portDeadlineMs: setup.deadlineMs }),
-    authenticator: { async verify(view): Promise<unknown> { return PRINCIPALS[view.bearerToken] ?? null; } }, authorizer: { authorize: () => true },
+    authenticator: { async verify(view): Promise<unknown> { return PRINCIPALS[view.bearerToken] ?? null; } }, authorizer: { authorize: () => GRANTED },
     idempotency: { store: (setup.store ?? ((s) => s))(createMemoryIdempotencyStore(state.idempotency)), keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
   });
   const server = createBoundedServer(app);
@@ -354,11 +410,14 @@ test('a command commits every part together, answers only once committed, and ev
     assert.equal(committed.audit.length, 1);
     const [audit] = committed.audit;
     assert.deepEqual({ ...audit, at: 0 }, {
-      action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null, correlationId: audit.correlationId, at: 0,
+      action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null,
+      // The chain now resolves an actor for every idempotent route (M5-GIAM-D1-P2), and the audit record
+      // names it; this command records no sensitive reason, so its bounded pair stays null.
+      actor: '00000000-0000-4000-8000-000000000001', correlationId: audit.correlationId, reasonCode: null, reason: null, at: 0,
     });
     assert.ok(UUID_V4.test(audit.correlationId) && audit.correlationId !== 'client-chosen-request-id', 'the correlation ID is the server’s, never the client’s request ID');
     assert.deepEqual(committed.events.map((e) => [e.envelope.aggregateId, e.envelope.correlationId, e.envelope.occurredAt]), [[id, audit.correlationId, audit.at]]);
-    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged']);
+    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged']);
     assert.deepEqual(Object.keys(plans[0]).sort(), ['audience', 'body', 'newAggregateId'], 'the planner sees its context and nothing else');
     assert.equal(plans[0].newAggregateId, id, 'a create names the runtime’s aggregate ID');
     for (const retry of [await post(port, { key }), await post(port, { key: key.toUpperCase() })]) {
@@ -503,7 +562,7 @@ test('no raw key, principal, credential, cookie or request body crosses the tran
 
 test('startup refuses a command route without its port, a port without the idempotency store, a malformed port and an out-of-line contract', () => {
   const route = (contract: unknown = TEST_CREATE, path = '/v1/items'): RouteDefinition => ({
-    method: 'POST', path, policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: contract as CommandContract, plan: createPlanner },
+    method: 'POST', path, policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: contract as CommandContract, plan: createPlanner },
   });
   const state = createMemoryTransactionalState();
   const idempotency = { store: createMemoryIdempotencyStore(state.idempotency), keySecret: TEST_IDEMPOTENCY_KEY };
@@ -511,7 +570,7 @@ test('startup refuses a command route without its port, a port without the idemp
     try {
       createApp({
         readiness: createReadinessState(), trustedOrigins: [TRUSTED], limits: testRequestLimits(), authenticator: { verify: async () => null },
-        authorizer: { authorize: () => true }, events: TEST_EVENTS, ...over,
+        authorizer: { authorize: () => GRANTED }, events: TEST_EVENTS, ...over,
       });
     } catch (err) {
       return err instanceof EnforcementSetupError ? err.code : 'unexpected';

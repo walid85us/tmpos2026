@@ -268,7 +268,7 @@ const outcome = (): { status: number; body: unknown } => ({ status: 200, body: {
 const BARE_SESSION = (audience: string): Record<string, unknown> => ({ access: 'session', audience, authorization: null });
 /** An idempotency-required definition: a `perform`, and no handler. */
 const required = (over: Record<string, unknown>): Record<string, unknown> =>
-  ({ method: 'POST', path: '/v1/probe', policy: AUTHED, body: NONE, idempotency: 'required', perform: outcome, ...over });
+  ({ method: 'POST', path: '/v1/probe', policy: AUTHED, body: NONE, idempotency: 'required', trustedContext: 'required', perform: outcome, ...over });
 
 test('a route without an idempotency policy is rejected at registration', () => {
   const undeclared = route({});

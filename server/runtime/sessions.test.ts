@@ -256,12 +256,12 @@ function probeRoutes(probe: Probe): RouteDefinition[] {
   const tenant = (permission: string) => ({ access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission } }) as const;
   const admin = (permission: string) => ({ access: 'session', audience: 'admin', authorization: { scope: 'platform', permission } }) as const;
   return [
-    { method: 'POST', path: '/api/v1/probe', body: NONE, idempotency: 'none', handler: handle('tenantWrite'), policy: tenant('probe.write') },
-    { method: 'GET', path: '/api/v1/probe', body: NONE, idempotency: 'none', handler: handle('tenantRead'), policy: tenant('probe.read') },
-    { method: 'GET', path: '/api/v1/probe/denied', body: NONE, idempotency: 'none', handler: handle('tenantDenied'), policy: tenant('probe.denied') },
-    { method: 'GET', path: '/api/v1/probe/fail', body: NONE, idempotency: 'none', handler: () => { throw new Error('handler-secret-detail'); }, policy: tenant('probe.read') },
-    { method: 'POST', path: '/admin/v1/probe', body: NONE, idempotency: 'none', handler: handle('adminWrite'), policy: admin('probe.admin') },
-    { method: 'GET', path: '/admin/v1/probe', body: NONE, idempotency: 'none', handler: handle('adminRead'), policy: admin('probe.admin') },
+    { method: 'POST', path: '/api/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('tenantWrite'), policy: tenant('probe.write') },
+    { method: 'GET', path: '/api/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('tenantRead'), policy: tenant('probe.read') },
+    { method: 'GET', path: '/api/v1/probe/denied', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('tenantDenied'), policy: tenant('probe.denied') },
+    { method: 'GET', path: '/api/v1/probe/fail', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: () => { throw new Error('handler-secret-detail'); }, policy: tenant('probe.read') },
+    { method: 'POST', path: '/admin/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('adminWrite'), policy: admin('probe.admin') },
+    { method: 'GET', path: '/admin/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('adminRead'), policy: admin('probe.admin') },
   ];
 }
 
@@ -360,7 +360,8 @@ test('tenant login issues a fresh host-locked session cookie and CSRF token, and
     assert.equal(active.status, 200);
     assert.equal(active.headers['set-cookie'], undefined, 'reading the session never re-issues its cookie');
     assert.equal((JSON.parse(active.body) as { csrfToken: string }).csrfToken, csrfToken);
-    assert.deepEqual(probe.admissions.map(([, audience]) => audience), ['tenant']);
+    // The tenant boundary revalidates on EVERY protected request (M5-GIAM-D1-P2), so the read after login asks again.
+    assert.deepEqual(probe.admissions.map(([, audience]) => audience), ['tenant', 'tenant']);
   });
 });
 
@@ -602,13 +603,13 @@ test('a session boundary cannot start without every port, a distinct host or a b
     }, 'session_origins_shared'],
     ['a route standing in for a session endpoint', {
       sessions: { tenant: full },
-      routes: [{ method: 'POST', path: TENANT.login, policy: { access: 'login', audience: 'tenant' }, body: NONE, idempotency: 'none', handler: () => {} }],
+      routes: [{ method: 'POST', path: TENANT.login, policy: { access: 'login', audience: 'tenant' }, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: () => {} }],
     }, 'route_duplicate'],
     ['a session route whose boundary is not composed', { routes: probeRoutes(newProbe()) }, 'session_boundary_unconfigured'],
     ['a business route borrowing the logout path with another method', {
       sessions: { tenant: full },
       routes: [{
-        method: 'GET', path: TENANT.logout, body: NONE, idempotency: 'none', handler: () => {},
+        method: 'GET', path: TENANT.logout, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: () => {},
         policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'probe.read' } },
       }],
     }, 'route_session_endpoint_invalid'],
@@ -924,10 +925,15 @@ test('an unavailable session store fails closed: nothing is issued, read or half
     assert.equal(setCookieOf(unreadLogout).value, '', 'still clears the cookie');
     // A GET on the logout path is no logout: it neither clears the cookie nor skips a check.
     assert.equal((await send(port, 'GET', TENANT.logout, cookie('tenant', s.id))).status, 404);
-    // A due revalidation that cannot be recorded fails closed as well.
+    // A due revalidation that cannot be RECORDED fails closed only on a boundary that records one. The tenant
+    // boundary has no window (M5-GIAM-D1-P2), so it never writes validatedAt and never reads it to skip a
+    // re-check: a failing write there is not a dependency of the request at all, and the admission it just
+    // asked — which this store's failure does not touch — is what decides. (The admin boundary keeps its
+    // interval and its stamp; this harness's failing store is the tenant boundary's.)
     failing.op = 'update:validatedAt';
     clock.t += ADMISSION_REVALIDATE_MS.tenant;
-    assertRefusal(await current(port, 'tenant', s.id), 503, 'service_unavailable', 'the revalidation cannot be recorded');
+    assert.equal((await current(port, 'tenant', s.id)).status, 200,
+      'the tenant boundary stores no validatedAt, so a failing write cannot fail the request');
     failing.op = undefined;
     assert.equal((await current(port, 'tenant', s.id)).status, 200, 'the session outlived the outage');
     // A refresh that cannot be stored never fails the request it follows; it is logged.
@@ -1011,27 +1017,28 @@ test('a hanging verifier, admission, store, authorizer or limiter is cut off at 
 
 // --- admission revalidation and revocation -----------------------------------------------------
 
-test('admission is re-checked at each boundary\'s own bounded interval, the administrative one stricter', async () => {
-  assert.ok(ADMISSION_REVALIDATE_MS.admin < ADMISSION_REVALIDATE_MS.tenant, 'admin revalidates more often');
-  for (const audience of ['tenant', 'admin'] as const) {
-    assert.ok(ADMISSION_REVALIDATE_MS[audience] < SESSION_TTL[audience].idleMs, `${audience}: revalidation inside the idle window`);
-  }
+test('the tenant boundary re-asks admission on every protected request; the administrative one keeps its interval', async () => {
+  // M5-GIAM-D1-P2 (GAP-13). A suspended tenant must lose access on its people's NEXT request, so the tenant
+  // boundary allows no window at all: an interval of any length is exactly the grace period the product rules
+  // forbid. The administrative boundary keeps one — a platform administrator's session must survive a tenant's
+  // state changing, since that is who reactivates it.
+  assert.equal(ADMISSION_REVALIDATE_MS.tenant, 0, 'the tenant boundary has no revalidation window');
+  assert.ok(ADMISSION_REVALIDATE_MS.admin > 0 && ADMISSION_REVALIDATE_MS.admin < SESSION_TTL.admin.idleMs,
+    'the admin interval is bounded and inside its idle window');
   await withSessions({}, async ({ port, probe, clock }) => {
     const tenant = await signIn(port, 'tenant', 'tok-owner');
     const admin = await signIn(port, 'admin', 'tok-owner');
     const asked = (audience: SessionAudience): number => probe.admissions.filter(([, a]) => a === audience).length;
     const [t0, a0] = [asked('tenant'), asked('admin')];
-    clock.t += ADMISSION_REVALIDATE_MS.admin - 1;
+    // No time passes at all: the tenant boundary still asks, every time; the admin boundary does not.
     for (const [audience, s] of [['tenant', tenant], ['admin', admin]] as const) assert.equal((await current(port, audience, s.id)).status, 200);
-    assert.deepEqual([asked('tenant'), asked('admin')], [t0, a0], 'inside both intervals, admission stands');
-    clock.t += 1;
+    assert.deepEqual([asked('tenant'), asked('admin')], [t0 + 1, a0], 'the tenant asks again immediately; the admin stands');
+    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
+    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
+    assert.equal(asked('tenant'), t0 + 3, 'once per protected request, with no window to wait out');
+    clock.t += ADMISSION_REVALIDATE_MS.admin;
     assert.equal((await current(port, 'admin', admin.id)).status, 200);
-    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
-    assert.deepEqual([asked('tenant'), asked('admin')], [t0, a0 + 1], 'the admin interval passed; the tenant one has not');
-    clock.t += ADMISSION_REVALIDATE_MS.tenant - ADMISSION_REVALIDATE_MS.admin;
-    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
-    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
-    assert.equal(asked('tenant'), t0 + 1, 'once per tenant interval');
+    assert.equal(asked('admin'), a0 + 1, 'the admin interval passed exactly once');
   });
 });
 
@@ -1315,7 +1322,7 @@ test('a malformed, inconsistent or future-dated store record is refused, never t
   const member = principal('uid-member');
   const base = {
     audience: 'tenant', authProvider: 'synthetic', authProviderUid: 'uid-member', principalKey: principalKeyOf(member),
-    securityVersion: 'v1', createdAt: T0 - 1000, lastSeenAt: T0 - 1000, validatedAt: T0 - 1000,
+    securityVersion: 'v1', authenticatedAt: T0 - 2000, createdAt: T0 - 1000, lastSeenAt: T0 - 1000, validatedAt: T0 - 1000,
   };
   const records: unknown[] = [
     'a string', 42, [], { ...base, authProviderUid: '' }, { ...base, authProviderUid: 'x'.repeat(129) }, { ...base, authProvider: undefined },
@@ -1324,6 +1331,10 @@ test('a malformed, inconsistent or future-dated store record is refused, never t
     { ...base, createdAt: '0' }, { ...base, lastSeenAt: Number.NaN }, { ...base, createdAt: T0, lastSeenAt: T0 - 1, validatedAt: T0 },
     { ...base, lastSeenAt: T0 + 60_000 }, { ...base, validatedAt: T0 + 60_000 }, { ...base, validatedAt: T0 - 2000 },
     { ...base, validatedAt: undefined }, { ...base, createdAt: T0 + 60_000, lastSeenAt: T0 + 60_000, validatedAt: T0 + 60_000 },
+    // The trusted authentication time is read exactly as strictly (M5-GIAM-D1-P2): a record that omits it
+    // is malformed, and one dated past the skew allowance, at zero or not a whole number is no evidence.
+    { ...base, authenticatedAt: undefined }, { ...base, authenticatedAt: T0 + 60_000 }, { ...base, authenticatedAt: 0 },
+    { ...base, authenticatedAt: -1 }, { ...base, authenticatedAt: 1.5 }, { ...base, authenticatedAt: '1' },
   ];
   let served: unknown;
   const store: SessionStore = {
@@ -1397,7 +1408,9 @@ test('login and session ports receive frozen views and a deadline signal, never 
     assert.equal(probe.tokenViews.length, 1);
     frozenPlain(probe.tokenViews[0], ['bearerToken'], 'the credential view');
     assert.ok(probe.verifySignals[0] instanceof AbortSignal, "the verifier's other argument is the deadline signal");
-    assert.equal(probe.admissions.length, 1);
+    // Login admits once; the protected request that follows re-asks, since the tenant boundary keeps no
+    // revalidation window (M5-GIAM-D1-P2). Both calls receive the same frozen view.
+    assert.equal(probe.admissions.length, 2);
     const [admitted, audience, admissionSignal, ...restA] = probe.admissions[0];
     assert.equal(restA.length, 0, 'admission gets exactly its three arguments');
     frozenPlain(admitted, ['authProvider', 'authProviderUid'], 'the admitted principal');

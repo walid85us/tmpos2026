@@ -35,7 +35,9 @@ import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions
 import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
+import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
+import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import type { RouteAuthorizer } from '../runtime/access.js';
 import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
@@ -103,9 +105,13 @@ export interface TransactionFactories {
 // PATCH /admin/v1/tenants/display-name with its one mutator over migration 009's fixed operation, so a deployment serving it
 // requires the whole boundary below — the database, the idempotency key and the store — and refuses to start without it. The
 // entry that composes it also hands createApp the route's own contracts (tenantDisplayName.ts); none is deployed yet.
+// The second (M5-GIAM-D1-P2) is PATCH /admin/v1/tenants/status over migration 010's fixed operation: the tenant lifecycle
+// command, which additionally requires a recent trusted authentication and moves the tenant access version that tenant and
+// store sessions are admitted against. Both declare `trustedContext: 'required'`, so neither can be served by a deployment
+// whose authorizer resolves no actor, and both take their permission from the canonical catalog.
 export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
-  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE]),
-  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR]),
+  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE]),
+  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),
 });
 
 // The approved production factories: the runtime principal's kernel over the classified endpoint, and the M6 PostgreSQL store.

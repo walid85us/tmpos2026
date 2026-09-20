@@ -56,6 +56,9 @@ const UP_008 = readFileSync(`${MIG_DIR}/008_m5_tenant_display_name_command.up.sq
 const DOWN_008 = readFileSync(`${MIG_DIR}/008_m5_tenant_display_name_command.down.sql`, 'utf8');
 const UP_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.up.sql`, 'utf8');
 const DOWN_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.down.sql`, 'utf8');
+// M5-GIAM-D1-P2: 010 now sits above 009, and the chain rolls back NEWEST FIRST — so every proof below that
+// replays 008's or 009's own verify, or rolls one of them back, takes 010 off first.
+const DOWN_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.down.sql`, 'utf8');
 /** The production revalidator: 009's exact-authority routine, then the permission on the built-in definitions. */
 const REVALIDATE = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority });
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm5d-migrator', runtimeRef: 'm5d-runtime' };
@@ -239,7 +242,8 @@ async function acquired(who, body) {
 function prepared({ operation, lease }, context, body) {
   const plan = planTenantDisplayName({ audience: 'admin', body, newAggregateId: randomUUID() });
   const command = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, EVENTS, plan, {
-    scope: operation.scope, lease, newAggregateId: randomUUID(), authorization: REQUIREMENT, context, seal: (envelope) => keyring.seal(envelope, operation),
+    scope: operation.scope, lease, newAggregateId: randomUUID(), authorization: REQUIREMENT, context, authNotAfter: null,
+    seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(command !== null, 'the plan is in contract');
   return command;
@@ -253,7 +257,7 @@ const commit = (command) => store.transactions.commit(command, signal());
 test('M5D-01: 001-009 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk
@@ -268,6 +272,8 @@ test('M5D-01: 001-009 apply clean; 008 is its column, trigger and operation, and
     { proname: 'm5_tenant_display_name_update', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
     { proname: 'm5_tenant_display_name_update_v2', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
     { proname: 'm5_tenant_row_version', prosecdef: false, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
+    // M5-GIAM-D1-P2: migration 010 adds the fifth routine to the same schema.
+    { proname: 'm5_tenant_status_change', prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], owned: true },
   ]);
 
   const acl = await owner`select p.proname, a.grantee::regrole::text as grantee, a.privilege_type, a.is_grantable
@@ -277,6 +283,7 @@ test('M5D-01: 001-009 apply clean; 008 is its column, trigger and operation, and
   assert.deepEqual(acl.map((r) => ({ ...r })), [
     { proname: 'm5_revalidate_platform_authority', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false },
     { proname: 'm5_tenant_display_name_update_v2', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false },
+    { proname: 'm5_tenant_status_change', grantee: 'tmpos_app', privilege_type: 'EXECUTE', is_grantable: false },
   ], 'tmpos_app may execute 009\'s two routines only, never grant them; 008\'s superseded operation and the trigger function are nobody\'s');
   const [subject] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, a.atthasdef as has_default,
       pg_catalog.to_regclass('public.idx_audit_event_subject_tenant_occurred') is not null as indexed
@@ -677,6 +684,7 @@ test('M5D-12: rollback runs newest first — 009 refuses over audit subjects, 00
   const ROLLBACK = new Error('m5d: roll the proof back');
   const outcome = await owner.begin(async (tx) => {
     const code = refusalIn(tx);
+    await tx.unsafe(DOWN_010).simple(); // newest first: 010 comes off before 009 can be asked
     // This suite has committed commands, so audit records name their subject: 009's rollback refuses and drops nothing.
     assert.ok((await tx`select count(*)::int as n from public.audit_event where subject_tenant_id is not null`)[0].n > 0);
     assert.equal(await code((sp) => sp.unsafe(DOWN_009).simple()), '55006', 'an audit subject refuses 009\'s rollback');
@@ -764,6 +772,7 @@ test('M5D-13: 008 refuses to finish while any role the runtime could hold is a m
   const [{ ownerRole }] = await owner`select n.nspowner::regrole::text as "ownerRole" from pg_catalog.pg_namespace n where n.nspname = 'tmpos_command'`;
   await rolledBack(async (tx) => {
     const code = refusalIn(tx);
+    await tx.unsafe(`drop function if exists tmpos_command.m5_tenant_status_change(uuid, bigint, text, text); alter table public.tenant drop column if exists access_version;`).simple(); // 008's section 6 counts its own routines: 010's objects come off first
     assert.equal(await code((sp) => sp.unsafe(VERIFY).simple()), null, 'the verify section passes over the 008 state (positive control)');
     assert.equal(await code(async (sp) => {
       await sp.unsafe('grant create on schema tmpos_command to tmpos_app');
@@ -786,6 +795,7 @@ test('M5D-14: 009 refuses to finish while a runtime role reaches an owner, the n
       (select c.relowner::regrole::text from pg_catalog.pg_class c where c.oid = 'public.tenant'::regclass) as "tenantOwner"`;
   await rolledBack(async (tx) => {
     const code = refusalIn(tx);
+    await tx.unsafe(`drop function if exists tmpos_command.m5_tenant_status_change(uuid, bigint, text, text); alter table public.tenant drop column if exists access_version;`).simple(); // 009's section 7 counts the schema's routines: 010's objects come off first
     assert.equal(await code((sp) => sp.unsafe(VERIFY).simple()), null, 'the verify section passes over the applied state (positive control)');
     for (const [label, setup] of [
       ['UPDATE of the name re-granted to tmpos_app', 'grant update (display_name) on table public.tenant to tmpos_app'],

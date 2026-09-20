@@ -145,6 +145,7 @@ function command(context: TrustedScope | null = null): TransactionCommand {
   }, {
     scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
     context,
+    authNotAfter: null,
     seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null);
@@ -452,6 +453,23 @@ test('a command may not name an actor, tenant or store its context did not give 
     { ...c, audit: { ...c.audit, tenant: '22222222-2222-4222-8222-222222222222' } },
     { ...c, context: { ...TRUSTED, actor: 'root' } }, //                a context selection could not produce
     { ...c, events: c.events.map((e) => ({ ...e, actor: 'someone-else' })) },
+    // M5-GIAM-D1-P2 — the bounded reason pair is both or neither, within the bounds the runtime applied,
+    // and a freshness deadline is a positive safe integer that only a command carrying a context may claim.
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y' } }, //                       a code with no reason
+    { ...c, audit: { ...c.audit, reason: 'a'.repeat(20) } }, //                  a reason with no code
+    { ...c, audit: { ...c.audit, reasonCode: 'X_Y', reason: 'a'.repeat(20) } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x.y', reason: 'a'.repeat(20) } },
+    { ...c, audit: { ...c.audit, reasonCode: 1, reason: 'a'.repeat(20) } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y', reason: '' } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y', reason: 'a'.repeat(1_001) } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y', reason: `a${String.fromCodePoint(10)}b` } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y', reason: `a${String.fromCodePoint(0x202e)}b` } },
+    { ...c, audit: { ...c.audit, reasonCode: 'x_y', reason: `a${String.fromCharCode(0xd800)}b` } },
+    { ...c, authNotAfter: 0 },
+    { ...c, authNotAfter: -1 },
+    { ...c, authNotAfter: 1.5 },
+    { ...c, authNotAfter: '1700000000000' },
+    { ...c, context: null, audit: { ...c.audit, actor: null, tenant: null, store: null }, authNotAfter: 1_700_000_600_000 },
   ];
   for (const raw of forged) {
     const store = untouched();
@@ -476,7 +494,7 @@ function renaming(context: TrustedScope | null = TRUSTED): TransactionCommand {
   const plan = planTenantDisplayName({ audience: 'admin', body: { tenantId: TARGET_TENANT, displayName: 'Acme', expectedVersion: 3 }, newAggregateId: randomUUID() });
   const prepared = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, tenantEvents, plan, {
     scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'platform', permission: 'edit_tenant_profile' }),
-    context, seal: (envelope) => keyring.seal(envelope, operation),
+    context, authNotAfter: null, seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null && prepared.command.unchanged !== null);
   return prepared.command;

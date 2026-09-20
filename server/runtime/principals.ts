@@ -21,6 +21,7 @@
 // EVERY REFUSAL IS ONE VALUE. 'refused' does not say whether the actor, the tenant, the store or the
 // grant was the problem, so a caller cannot probe for the existence of any of them.
 import type { AuthorizationScope, VerifiedPrincipal } from './routes.js';
+import { decideTenantState } from './tenantState.js';
 
 /** Whether the account, tenant or store status limits this context to reads (docs/phase-4/04 §2). */
 export type AccountLimitation = 'none' | 'read_only';
@@ -36,8 +37,8 @@ const ROLE_RE = /^[a-z_]{1,64}$/;
 /** More grants than any real principal holds; the resolver refuses beyond it and so does this. */
 const MAX_MEMBERSHIPS = 200;
 
-/** The statuses that limit a context to reads — authorizationConstants.ts, mirrored for the runtime. */
-const READ_ONLY_STATUSES: ReadonlySet<string> = new Set(['read_only', 'overdue']);
+// The lifecycle decision itself lives in ONE place (tenantState.ts): this module asks it rather than
+// keeping a second list that could drift from it.
 
 /** One usable grant: this actor holds `roleId` at this scope, and the scope itself is whole. */
 export interface TrustedMembership {
@@ -176,9 +177,19 @@ export function selectScope(
   if (matches.length !== 1) return REFUSED; // none is unauthorized; more than one is ambiguous
   const grant = matches[0];
 
-  const limited = principal.limitation === 'read_only'
-    || (grant.tenantStatus !== null && READ_ONLY_STATUSES.has(grant.tenantStatus))
-    || (grant.storeStatus !== null && READ_ONLY_STATUSES.has(grant.storeStatus));
+  // The ONE lifecycle decision (tenantState.ts, M5-GIAM-D1-P2): a suspended tenant or store — or one whose
+  // status this runtime does not recognise — is refused here, whatever grant it carries, rather than
+  // selected and left for a later check to remember. A platform scope has neither status and is unaffected.
+  //
+  // A scope that HAS a status must present one. `isTrustedPrincipal` accepts a null there (002 allows no such
+  // row, but a resolver, a double or a future migration could produce one), and a null would otherwise reach
+  // the decision as "no status to judge" and select an unrestricted scope — the one shape that fails OPEN.
+  if (required !== 'platform' && grant.tenantStatus === null) return REFUSED;
+  if (required === 'store' && grant.storeStatus === null) return REFUSED;
+  const state = decideTenantState(grant.tenantStatus, grant.storeStatus);
+  if (state === 'denied') return REFUSED;
+
+  const limited = principal.limitation === 'read_only' || state === 'read_only';
 
   return Object.freeze({
     outcome: 'selected',

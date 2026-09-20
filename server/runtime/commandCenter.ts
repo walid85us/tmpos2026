@@ -238,6 +238,9 @@ export function commandCenterRoutes(
     policy: Object.freeze({ access: 'session', audience: 'admin', authorization: COMMAND_CENTER_REQUIREMENT }),
     body: Object.freeze({ kind: 'none' }),
     idempotency: 'none',
+    // A read: it changes nothing, so it needs no resolved actor of its own and no recent authentication.
+    trustedContext: 'none',
+    recentAuth: 'none',
     handler,
   };
   return Object.freeze([Object.freeze(route)]);

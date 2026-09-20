@@ -328,11 +328,15 @@ test('control: the census catches the evasions a text regex misses', () => {
 
 test('no migration is changed, and no role default or explicit grant is re-pinned', async () => {
   // A grant-diff stage that quietly edited the grants it measures would be measuring itself.
-  // Migrations: file level — tracked changes AND untracked files, so a new, not-yet-staged migration
-  // fails this too.
-  const changed = [...gitPaths(['diff', '--name-only', 'HEAD', '--']), ...gitPaths(['ls-files', '--others', '--exclude-standard'])];
+  // Migrations: file level — a migration that EXISTS may never be modified, so no committed grant can move
+  // under this comparison. A migration that is merely ADDED is a different matter: every later stage adds
+  // one, and its bytes are pinned the moment it lands (tests/quality/migration-files-contract.test.mjs pins
+  // the exact file list and each file's sha256, which is what keeps 005-009 byte-identical across stages).
+  // Forbidding additions here would forbid the chain from ever growing, and would prove nothing that
+  // fingerprint does not already prove.
+  const changed = gitPaths(['diff', '--name-only', 'HEAD', '--']);
   assert.deepEqual(changed.filter((f) => f.startsWith('server/platform-identity/migrations/')), [],
-    'no migration may be modified or added');
+    'no migration that already exists may be modified');
   // Grants: DATA level. M5-GAP11-P1-R1 had to change the catalog's and the client's COMPARISON code
   // (deny-by-default on unknown vocabulary), so a file-level ban on those files would forbid the very
   // correction; what must never move without an owner decision is the grant data they hold. Every role

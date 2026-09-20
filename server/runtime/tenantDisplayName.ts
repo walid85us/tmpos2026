@@ -125,6 +125,12 @@ const ROUTE: RouteDefinition = {
   policy: { access: 'session', audience: 'admin', authorization: { scope: 'platform', permission: TENANT_DISPLAY_NAME_PERMISSION } },
   body: { kind: 'json', maxBytes: MAX_BODY_BYTES, required: true },
   idempotency: 'required',
+  // A state-changing business route commits only under a RESOLVED actor and grant (M5-GIAM-D1-P2, closing
+  // DA-31): the chain refuses it before its body is read when its authorizer resolved none, and startup
+  // refuses the route itself if it ever declared otherwise. This command is not sensitive enough to demand
+  // a fresh authentication — renaming a tenant is reversible and audited — so it requires no step-up.
+  trustedContext: 'required',
+  recentAuth: 'none',
   command: { contract: TENANT_DISPLAY_NAME_CONTRACT, plan: planTenantDisplayName },
 };
 

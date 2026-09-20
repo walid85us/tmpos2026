@@ -366,6 +366,8 @@ interface Setup {
   store?: (memory: DurableIdempotencyStore) => DurableIdempotencyStore;
   limits?: AppDeps['limits'];
   deadlineMs?: number;
+  /** What the authorizer answers for an admitted principal; the default resolves a trusted context. */
+  authorize?: () => unknown;
 }
 
 /** One POST on its own connection: the request (so a test can hang up) and its reply. */
@@ -392,6 +394,20 @@ function open(port: number, { token = 'tok-alice', key = null, body = '{"n":1}',
 const post = (port: number, send: Send = {}): Promise<Reply> => open(port, send).reply;
 
 /** Serve synthetic idempotency-required routes over a recording store for `fn`; always closes the server. */
+/**
+ * What a real authorizer hands a state-changing route since M5-GIAM-D1-P2: the resolved actor and the one
+ * grant it decided on, not a bare `true`. A route declaring `trustedContext: 'required'` is refused (403)
+ * without it, so every idempotent route here presents one.
+ */
+const GRANTED = Object.freeze({
+  granted: true,
+  context: Object.freeze({
+    actor: '00000000-0000-4000-8000-000000000001', securityVersion: 'sv1', scope: 'platform' as const,
+    tenant: null, store: null, membershipId: '00000000-0000-4000-8000-000000000002',
+    roleId: 'support_admin', limitation: 'none' as const,
+  }),
+});
+
 async function withIdem(setup: Setup, fn: (h: Harness) => Promise<void>): Promise<void> {
   const logs: string[] = [];
   const runs: IdempotentContext[] = [];
@@ -409,8 +425,8 @@ async function withIdem(setup: Setup, fn: (h: Harness) => Promise<void>): Promis
     return setup.perform === undefined ? { status: 201, body: { created: runs.length }, headers: { location: `/v1/items/${runs.length}` } } : setup.perform(ctx);
   };
   const routes: RouteDefinition[] = [
-    { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', perform },
-    { method: 'POST', path: '/v1/items/other', policy: WRITE, body: JSON_BODY, idempotency: 'required', perform },
+    { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', perform },
+    { method: 'POST', path: '/v1/items/other', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', perform },
   ];
   const readiness = createReadinessState();
   readiness.setReady();
@@ -418,7 +434,7 @@ async function withIdem(setup: Setup, fn: (h: Harness) => Promise<void>): Promis
     readiness, now: () => clock.t, log: { log: (line: string) => { logs.push(line); } }, routes, trustedOrigins: [TRUSTED],
     limits: setup.limits ?? testRequestLimits(), ...(setup.deadlineMs === undefined ? {} : { portDeadlineMs: setup.deadlineMs }),
     authenticator: { async verify(view): Promise<unknown> { return PRINCIPALS[view.bearerToken] ?? null; } },
-    authorizer: { authorize: (p: VerifiedPrincipal) => p.authProviderUid !== 'uid-mallory' },
+    authorizer: { authorize: (p: VerifiedPrincipal) => (p.authProviderUid === 'uid-mallory' ? false : (setup.authorize === undefined ? GRANTED : setup.authorize())) },
     idempotency: { store, keySecret: TEST_IDEMPOTENCY_KEY },
   });
   const server = createBoundedServer(app);
@@ -638,7 +654,7 @@ test('no raw key, principal, credential, body or cookie crosses the port or reac
 // --- startup and readiness -------------------------------------------------------------------------
 
 test('startup refuses a required route without a store and key, a malformed store, and a secret shared with the limiter', () => {
-  const route: RouteDefinition = { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', perform: () => ({ status: 200, body: {} }) };
+  const route: RouteDefinition = { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', perform: () => ({ status: 200, body: {} }) };
   const code = (over: Partial<AppDeps>): string | undefined => {
     try {
       createApp({
@@ -683,4 +699,22 @@ test('readiness reports the idempotency store through one shared probe per secon
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
+});
+
+test('a perform route refuses without a resolved actor, before its key is acquired and before it runs (DA-31)', async () => {
+  // M5-GIAM-D1-P2: the trusted-context rule is the ROUTE's, not the command path's. An authorizer that
+  // answers a bare `true` authorized the request but resolved no actor, so a state-changing route that
+  // declares `trustedContext: 'required'` — every route that requires idempotency — refuses it, and the
+  // operation is never entered and no key is spent.
+  await withIdem({ authorize: () => true }, async ({ port, runs, recorded }) => {
+    const r = await post(port, { key: randomUUID() });
+    assert.equal(r.status, 403, r.body);
+    assert.equal((JSON.parse(r.body) as { error: string }).error, 'forbidden');
+    assert.deepEqual([runs.length, recorded.acquires.length], [0, 0], 'no perform ran and no record was acquired');
+  });
+  // The same route with a resolved context runs exactly once.
+  await withIdem({}, async ({ port, runs, recorded }) => {
+    assert.equal((await post(port, { key: randomUUID() })).status, 201);
+    assert.deepEqual([runs.length, recorded.acquires.length], [1, 1]);
+  });
 });

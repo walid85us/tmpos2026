@@ -207,16 +207,23 @@ test('the transaction revalidator asks the database about exactly the scope hand
   const authority = authorityCheck(true);
   const revalidate = createPlatformContextRevalidator({ authority: authority.check });
   const scope = scopeOf(platformRole('support_admin'));
-  assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile'), true);
+  assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile', null), true);
   assert.equal(authority.calls.length, 1);
   assert.equal(authority.calls[0][0], SQL, 'on the committing transaction\'s own handle');
   assert.equal(authority.calls[0][1], scope, 'the scope itself — actor, version, the very grant and its role');
+  assert.equal(authority.calls[0][2], null, 'a route that required no recent authentication claims no freshness');
+  // A route that DID require one hands its deadline to the database half unchanged (M5-GIAM-D1-P2): the
+  // revalidator must forward it, not drop it.
+  const stepUp = authorityCheck(true);
+  const withDeadline = createPlatformContextRevalidator({ authority: stepUp.check });
+  assert.equal(await withDeadline(SQL, scope, 'edit_tenant_profile', 1_700_000_600_000), true);
+  assert.equal(stepUp.calls[0][2], 1_700_000_600_000, 'the step-up deadline reaches the database half');
   // The database confirming the grant is not enough: the role's current definition must still carry the permission.
   for (const roleId of ['billing_admin', 'security_admin']) {
-    assert.equal(await revalidate(SQL, scopeOf(platformRole(roleId)), 'edit_tenant_profile'), false, `${roleId}: Tenants at View`);
+    assert.equal(await revalidate(SQL, scopeOf(platformRole(roleId)), 'edit_tenant_profile', null), false, `${roleId}: Tenants at View`);
   }
   for (const permission of ['tenants:edit', 'Edit_Tenant_Profile', '', 'edit_tenant']) {
-    assert.equal(await revalidate(SQL, scope, permission), false, `vocabulary the catalog does not define: ${permission}`);
+    assert.equal(await revalidate(SQL, scope, permission, null), false, `vocabulary the catalog does not define: ${permission}`);
   }
 });
 
@@ -229,7 +236,7 @@ test('initial authorization and transaction revalidation agree on every built-in
     const p = platformRole(roleId);
     for (const permission of CANONICAL_PLATFORM_PERMISSIONS.keys()) {
       const initial = (await decide(p, { scope: 'platform', permission })) !== false;
-      assert.equal(await revalidate(SQL, scopeOf(p), permission), initial, `${roleId} / ${permission}`);
+      assert.equal(await revalidate(SQL, scopeOf(p), permission, null), initial, `${roleId} / ${permission}`);
       compared += 1;
     }
   }
@@ -239,18 +246,18 @@ test('initial authorization and transaction revalidation agree on every built-in
 test('a custom definition is re-decided through the same injected roles, and a changed definition is honoured at commit time', async () => {
   const p = platformRole('custom_tenant_editor');
   const at = (level: unknown) => createPlatformContextRevalidator({ authority: async () => true, roles: custom(level) });
-  assert.equal(await at('edit')(SQL, scopeOf(p), 'edit_tenant_profile'), true, 'custom role at Edit');
-  assert.equal(await at('view')(SQL, scopeOf(p), 'edit_tenant_profile'), false, 'the same grant, its definition lowered to View before the commit');
-  assert.equal(await createPlatformContextRevalidator({ authority: async () => true })(SQL, scopeOf(p), 'edit_tenant_profile'), false,
+  assert.equal(await at('edit')(SQL, scopeOf(p), 'edit_tenant_profile', null), true, 'custom role at Edit');
+  assert.equal(await at('view')(SQL, scopeOf(p), 'edit_tenant_profile', null), false, 'the same grant, its definition lowered to View before the commit');
+  assert.equal(await createPlatformContextRevalidator({ authority: async () => true })(SQL, scopeOf(p), 'edit_tenant_profile', null), false,
     'a role id the deployment\'s definitions do not name');
 });
 
 test('the database half decides first and alone: anything but exactly true denies, and a throw propagates to the store\'s rollback', async () => {
   const scope = scopeOf(platformRole('system_owner'));
   for (const answer of [false, 'valid', 1, null, undefined, {}]) {
-    assert.equal(await createPlatformContextRevalidator({ authority: authorityCheck(answer).check })(SQL, scope, 'edit_tenant_profile'), false, JSON.stringify(answer));
+    assert.equal(await createPlatformContextRevalidator({ authority: authorityCheck(answer).check })(SQL, scope, 'edit_tenant_profile', null), false, JSON.stringify(answer));
   }
-  await assert.rejects(createPlatformContextRevalidator({ authority: async () => { throw new Error('db down'); } })(SQL, scope, 'edit_tenant_profile'), /db down/);
+  await assert.rejects(createPlatformContextRevalidator({ authority: async () => { throw new Error('db down'); } })(SQL, scope, 'edit_tenant_profile', null), /db down/);
 });
 
 test('a scope the authorizer could not have handed a command is refused before the database is asked', async () => {
@@ -261,7 +268,7 @@ test('a scope the authorizer could not have handed a command is refused before t
     { ...scope, limitation: 'read_only' },
     { ...scope, scope: 'tenant', tenant: TENANT, roleId: 'manager' },
     { ...scope, scope: 'store', tenant: TENANT, store: STORE, roleId: 'technician' },
-  ] as TrustedScope[]) assert.equal(await revalidate(SQL, refused, 'edit_tenant_profile'), false, JSON.stringify(refused));
+  ] as TrustedScope[]) assert.equal(await revalidate(SQL, refused, 'edit_tenant_profile', null), false, JSON.stringify(refused));
   assert.equal(authority.calls.length, 0);
 });
 

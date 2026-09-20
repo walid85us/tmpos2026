@@ -27,7 +27,12 @@
 //                503, never a credential or authorization verdict. An authorizer that resolves
 //                the principal to its app-owned actor hands back the trusted scope it decided on
 //                (access.ts), and that scope — never anything from the request — is the
-//                command's context (M5-GIAM-D1-P1) — a session route's command refuses (403) without one:
+//                command's context (M5-GIAM-D1-P1). A route declaring `trustedContext: 'required'` —
+//                every route that requires idempotency, on EITHER boundary — refuses (403) unless the
+//                authorizer resolved one, before its body is read, its key acquired or its operation
+//                entered (M5-GIAM-D1-P2, closing DA-31); one declaring `recentAuth: 'required'` refuses
+//                (403 step_up_required) unless its session carries provider-verified authentication no
+//                older than RECENT_AUTH_MAX_AGE_MS, and the same deadline travels into the transaction:
 //                authenticated: the Bearer credential view -> authenticator (401),
 //                  then authorizer (403) (access.ts);
 //                login: the boundary's login client limit (429), the credential view
@@ -114,7 +119,7 @@ import { UNSAFE_METHODS, evaluateRequestSecurity, parseTrustedOrigins } from './
 import { authenticate, authorize } from './access.js';
 import type { RequestAuthenticator, RouteAuthorizer, RouteView } from './access.js';
 import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
-import { createSessionBoundaries, principalKeyOf, sessionCsrfRefusal } from './sessions.js';
+import { RECENT_AUTH_MAX_AGE_MS, createSessionBoundaries, principalKeyOf, sessionCsrfRefusal } from './sessions.js';
 import type { SessionBoundary, SessionDeps } from './sessions.js';
 import {
   IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, acquireIdempotency, completeIdempotency, createIdempotency, envelopeFromOutcome, readIdempotencyKey,
@@ -741,6 +746,9 @@ export function createApp(deps: AppDeps): Express {
       let session: SessionContext | null = null;
       // The trusted scope the authorizer decided on, when it resolved the principal to its app-owned actor.
       let context: TrustedScope | null = null;
+      // The provider-verified authentication time bound to this request's session, when it has one: read
+      // from the session record alone (sessions.ts), never from the request.
+      let authenticatedAt: number | null = null;
       const { policy } = route;
       if (policy.access === 'authenticated') {
         // Both ports are proven present at startup for any authenticated route.
@@ -768,6 +776,9 @@ export function createApp(deps: AppDeps): Express {
         if (evidence !== null) return challenge(req, res, evidence); // indistinguishable from a bad credential
         if (await limited(namespace, 'account', principalKeyOf(authn.principal), RATE_LIMITS.loginAccount, 'login_account_limited')) return;
         principal = authn.principal;
+        // The verifier's own reading of the credential, which the policy above just judged: the boundary's
+        // login handler binds it into the session record (sessions.ts) and nothing else ever sets it.
+        authenticatedAt = authn.evidence.authenticatedAt;
       } else if (policy.access === 'session') {
         const boundary = boundaries[policy.audience] as SessionBoundary;
         // Logout needs no fresh admission decision: revoking a session is always allowed.
@@ -787,9 +798,6 @@ export function createApp(deps: AppDeps): Express {
           const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs);
           if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
           context = allowed.context;
-          // A command on a session route commits only under the trusted scope its authorizer decided on: an
-          // authorizer that resolved no actor (a bare `true`) cannot authorize one, so nothing is acquired or committed.
-          if ('command' in route && context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
           // The idle window slides only when an authorized route answers 2xx — never on a
           // refusal, a failure, the current-session read or logout. A refresh that cannot be
           // stored cannot fail the request it follows; the session then lapses sooner.
@@ -802,6 +810,21 @@ export function createApp(deps: AppDeps): Express {
         }
         principal = active.principal;
         session = active.context;
+        authenticatedAt = active.authenticatedAt;
+      }
+      // The declared trusted-authorization context (routes.ts, M5-GIAM-D1-P2; docs/phase-4/08 DA-31). Every
+      // route that requires idempotency declares it — startup refuses one that does not — so no `perform`
+      // and no `command` is ever entered under a verified principal alone, on EITHER boundary: an authorizer
+      // that answered a bare `true` resolved no actor and no grant, and authorizes no state change. This
+      // stands before the body is read and before any key is acquired, so a refused request reserves nothing.
+      if (route.trustedContext === 'required' && context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
+      // Step-up (routes.ts `recentAuth`). Only a session route may require it, and the evidence is the
+      // provider's own authentication time bound to the session record at login — never anything this
+      // request carried. Missing, unverifiable or older than the bound is one bounded refusal; exactly at
+      // the bound it still holds. The public word says a fresh authentication is needed, and nothing else.
+      if (route.recentAuth === 'required'
+        && (authenticatedAt === null || now() - authenticatedAt > RECENT_AUTH_MAX_AGE_MS)) {
+        return refuse(req, res, 403, 'step_up_required', 'recent_auth_required');
       }
       let parsed: unknown;
       let bytes: Buffer = NO_BYTES;
@@ -859,6 +882,12 @@ export function createApp(deps: AppDeps): Express {
             // The trusted scope the authorizer decided on (M5-GIAM-D1-P1), or null when it resolved no actor:
             // the store revalidates it inside the transaction and audits its actor, and nothing else is one.
             context,
+            // When the route required a recent authentication, the instant that evidence goes stale — the
+            // session's bound provider authentication plus the fixed window, computed here and re-judged
+            // inside the transaction against the DATABASE's clock, so evidence that expired while the
+            // request was in flight commits nothing (M5-GIAM-D1-P2). null when the route required none.
+            authNotAfter: route.recentAuth === 'required' && authenticatedAt !== null
+              ? authenticatedAt + RECENT_AUTH_MAX_AGE_MS : null,
             seal: (envelope) => store.keyring.seal(envelope, operation),
           });
           if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');
@@ -869,6 +898,10 @@ export function createApp(deps: AppDeps): Express {
           const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
           if (refused === 'transaction_conflict') return refuse(req, res, 409, 'write_conflict', refused);
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
+          // The aggregate exists at the expected version, but the change its contract asks for is not one
+          // its current state allows — a lifecycle transition from the wrong state, or to the state it is
+          // already in (M5-GIAM-D1-P2). Nothing committed and nothing recorded, exactly like a conflict.
+          if (refused === 'transaction_invalid_state' && contract.mode === 'update') return refuse(req, res, 409, 'invalid_state', refused);
           // Changes already in place: the store recorded the plan's unchanged response as the completion in the
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as
           // committed. An answer the plan named no response for is no confirmation of anything: a 503.
@@ -895,7 +928,12 @@ export function createApp(deps: AppDeps): Express {
         if (unrecorded !== null) return refuse(req, res, 503, 'service_unavailable', unrecorded);
         return sendRecorded(res, envelope, false);
       }
-      await route.handler(req, res, Object.freeze({ requestId: requestIdOf(res), principal, session, body: parsed }));
+      // Login-only, as RouteContext declares it: the boundary's own login handler binds it into the session
+      // it issues, and no business handler ever receives a provider authentication time.
+      await route.handler(req, res, Object.freeze({
+        requestId: requestIdOf(res), principal, session, body: parsed,
+        authenticatedAt: policy.access === 'login' ? authenticatedAt : null,
+      }));
     } catch (err) {
       next(err); // bounded 500; the error itself is never logged or echoed
     }

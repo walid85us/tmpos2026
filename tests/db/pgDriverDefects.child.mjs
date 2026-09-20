@@ -181,6 +181,7 @@ async function held(store) {
     // These proofs are about the driver's close window, not about identity: no route resolves a
     // principal yet, so the command commits without a trusted context, as the runtime does.
     context: null,
+    authNotAfter: null, // no route here requires a recent authentication
     seal: (envelope) => KEYRING.seal(envelope, op),
   });
   return { op, acquired: acquired.outcome, command: prepared.command };

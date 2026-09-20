@@ -36,14 +36,17 @@ test('D1. no route becomes live and the M5 route catalogue still refuses every s
     }
   }
   assert.equal(n, 2 * TENANT_ROLE_IDS.length * TENANT_SUB_PERMISSIONS.length * 2);
-  // M5-GIAM-D1-P1 (owner decision D1) adds the first production route: one PLATFORM-scope command, the tenant display name.
-  // Every route in the inventory stays platform-scoped and canonical; no tenant or store requirement becomes live.
-  assert.deepEqual({ routes: PRODUCTION_INVENTORY.routes.length, mutators: PRODUCTION_INVENTORY.mutators.length }, { routes: 1, mutators: 1 },
-    'the production route inventory holds exactly the tenant display-name command');
-  for (const route of PRODUCTION_INVENTORY.routes) {
-    const requirement = route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null;
-    assert.deepEqual(requirement, { scope: 'platform', permission: 'edit_tenant_profile' }, `${route.method} ${route.path}`);
-  }
+  // M5-GIAM-D1-P1 (owner decision D1) adds the first production route: one PLATFORM-scope command, the tenant display
+  // name. M5-GIAM-D1-P2 adds the second, the tenant lifecycle command. Every route in the inventory stays
+  // platform-scoped and canonical; no tenant or store requirement becomes live.
+  assert.deepEqual({ routes: PRODUCTION_INVENTORY.routes.length, mutators: PRODUCTION_INVENTORY.mutators.length }, { routes: 2, mutators: 2 },
+    'the production route inventory holds exactly the two tenant commands');
+  const requirements = PRODUCTION_INVENTORY.routes.map((route) =>
+    (route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null));
+  assert.deepEqual(requirements, [
+    { scope: 'platform', permission: 'edit_tenant_profile' },
+    { scope: 'platform', permission: 'change_tenant_status' },
+  ], 'both requirements are canonical platform keys');
 });
 
 test('D2. the browser bundle imports no server module, and the contract modules import nothing at runtime', () => {

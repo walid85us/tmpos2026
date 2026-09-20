@@ -113,6 +113,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/tenantDisplayName.integration.test.mjs
+      # Phase 4.0 M5-GIAM-D1-P2 — migration 010 and the tenant lifecycle command (suspend/reactivate) through the
+      # store: the access version, the privilege containment, the audit record and event, concurrency, and 010's
+      # apply, upgrade and rollback — against the SAME disposable service after 001-009 are applied to it.
+      # Same binding, no new service, no secret, no permission change.
+      - name: Tenant status command against disposable PostgreSQL (M5-GIAM-D1-P2)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/tenantStatus.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

@@ -130,16 +130,16 @@ test('platform revalidation is exactly the routine saying valid for exactly this
   const handle = (rows: unknown): PgTransactionScope =>
     ((strings: TemplateStringsArray, ...values: unknown[]) => { texts.push(strings.join('?')); bound.push(values); return Promise.resolve(rows as never); }) as unknown as PgTransactionScope;
 
-  assert.equal(await revalidatePlatformAuthority(handle([{ outcome: 'valid' }]), SCOPE), true);
+  assert.equal(await revalidatePlatformAuthority(handle([{ outcome: 'valid' }]), SCOPE, null), true);
   assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine, schema-qualified');
   assert.doesNotMatch(texts[0], /m5_revalidate_principal_context/, 'never the superseded first-match routine');
   assert.deepEqual(bound[0], [ACTOR, VERSION, MEMBERSHIP, 'system_owner'], 'the actor, the version, the selected grant and its role — bound, never spliced');
   for (const rows of [
     [{ outcome: 'invalid' }], [{ outcome: 'VALID' }], [{ outcome: true }], [{ outcome: 'valid', extra: 1 }], [{ granted_role_id: 'system_owner' }],
     [], [{ outcome: 'valid' }, { outcome: 'valid' }], ['valid'],
-  ]) assert.equal(await revalidatePlatformAuthority(handle(rows), SCOPE), false, JSON.stringify(rows));
+  ]) assert.equal(await revalidatePlatformAuthority(handle(rows), SCOPE, null), false, JSON.stringify(rows));
   const faulty = ((): Promise<never> => Promise.reject(new Error('FATAL: M5-UNIT-CANARY'))) as unknown as PgTransactionScope;
-  assert.equal(await revalidatePlatformAuthority(faulty, SCOPE), false, 'a driver fault is the same false, and nothing of it crosses');
+  assert.equal(await revalidatePlatformAuthority(faulty, SCOPE, null), false, 'a driver fault is the same false, and nothing of it crosses');
 
   // A scope that selection could not have produced, or one that is not platform, is never sent to the database at all.
   let asked = false;
@@ -147,6 +147,6 @@ test('platform revalidation is exactly the routine saying valid for exactly this
   for (const scope of [
     { ...SCOPE, actor: 'root' }, { ...SCOPE, membershipId: 'not-a-grant' }, { ...SCOPE, membershipId: undefined },
     { ...SCOPE, scope: 'tenant', tenant: '22222222-2222-4222-8222-222222222222', roleId: 'manager' },
-  ]) assert.equal(await revalidatePlatformAuthority(watching, scope as TrustedScope), false, JSON.stringify(scope));
+  ]) assert.equal(await revalidatePlatformAuthority(watching, scope as TrustedScope, null), false, JSON.stringify(scope));
   assert.equal(asked, false);
 });

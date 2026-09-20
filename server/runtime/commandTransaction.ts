@@ -74,8 +74,10 @@
 // Audit coupling. The existing durable writer (server/platform-identity/auditEventWriter.ts) joins a
 // transaction through its executor seam, but the runtime cannot import it. So the command carries a
 // transaction-local audit record the runtime builds from trusted sources only — the route's registered
-// kind (the action) and authorization requirement, and the command's server-generated correlation ID —
-// never the planner's output. A PostgreSQL adapter writes it through that writer on the same transaction
+// kind (the action) and authorization requirement, and the command's server-generated correlation ID.
+// A plan contributes exactly one thing to it and can contribute no other: the bounded reason pair of a
+// sensitive command (M5-GIAM-D1-P2), a closed lowercase code and the operator's own words, both validated
+// here before they can reach a durable row. Identity, scope, action and permission are never a plan's. A PostgreSQL adapter writes it through that writer on the same transaction
 // handle (an append-only INSERT; a failed write aborts the commit) — never after the commit. It records
 // committed mutations only. Since M5-ID-P1 the actor is the app-owned internal_user_id, taken from the
 // command's trusted context and from nowhere else; it stays null for a command prepared without one.
@@ -102,8 +104,32 @@ const MAX_EXPECTED_VERSION = Number.MAX_SAFE_INTEGER - 1;
 const PARTS: readonly string[] = ['port'];
 const PORT_METHODS: readonly string[] = ['commit', 'probe'];
 const PLAN_FIELDS: readonly string[] = ['aggregateId', 'expectedVersion', 'changes', 'events', 'response'];
+/** Any plan may carry the bounded audit annex (routes.ts CommandPlan.audit): a reason code and a reason. */
+const AUDITED_PLAN_FIELDS: readonly string[] = [...PLAN_FIELDS, 'audit'];
 /** An update's plan may also carry the response for changes already in place (routes.ts CommandPlan.unchanged). */
 const UPDATE_PLAN_FIELDS: readonly string[] = [...PLAN_FIELDS, 'unchanged'];
+/** An update's plan may carry both. */
+const UPDATE_AUDITED_PLAN_FIELDS: readonly string[] = [...UPDATE_PLAN_FIELDS, 'audit'];
+
+/** A closed lowercase token naming what an audited action did, e.g. `tenant_status_active_to_suspended`. */
+const REASON_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+/**
+ * The longest reason one may record, in UTF-16 code units: 500 Unicode scalar values, each at most two
+ * units. A reason is kept verbatim in a durable, append-only row people read, so the same characters a
+ * display name refuses are refused here — controls, the separators, a lone surrogate and Bidi_Control.
+ */
+const MAX_REASON_UNITS = 1_000;
+const REFUSED_REASON_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
+
+/** The plan's audit annex as the two bounded values, `null` when it names none, or undefined when malformed. */
+function auditAnnexOf(raw: unknown): Readonly<{ reasonCode: string; reason: string }> | null | undefined {
+  if (raw === undefined) return null;
+  if (!isRecord(raw) || !hasExactKeys(raw, ['reasonCode', 'reason'])) return undefined;
+  const { reasonCode, reason } = raw; // read once each
+  if (typeof reasonCode !== 'string' || !REASON_CODE_RE.test(reasonCode)) return undefined;
+  if (typeof reason !== 'string' || reason.length === 0 || reason.length > MAX_REASON_UNITS || REFUSED_REASON_RE.test(reason)) return undefined;
+  return Object.freeze({ reasonCode, reason });
+}
 
 /** One closed command contract: whether it creates or updates, the aggregate, its change schema and the events it may enqueue. */
 export interface CommandContract {
@@ -129,7 +155,12 @@ export interface TransactionMutation {
   readonly changes: RecordValue;
 }
 
-/** The transaction-local audit record, built by the runtime from trusted sources only. */
+/**
+ * The transaction-local audit record, built by the runtime from trusted sources only: the route's own
+ * registered kind and requirement, the server-generated correlation ID and the trusted context's scope and
+ * actor. A sensitive command may add the bounded reason pair below — and nothing else: no identity, scope,
+ * action or permission ever comes from a plan.
+ */
 export interface TransactionAudit {
   /** The route's registered command kind. */
   readonly action: string;
@@ -146,6 +177,15 @@ export interface TransactionAudit {
   readonly actor: string | null;
   /** The command's server-generated correlation ID (a UUID version 4), shared by its events. */
   readonly correlationId: string;
+  /**
+   * A sensitive command's bounded reason pair, from its plan's audit annex (routes.ts CommandPlan.audit):
+   * a closed lowercase token naming what the action did, and the operator's own words as the planner's
+   * contract validated them. Both null for a command that records none, and the store then writes the
+   * fixed pair it always has. They reach the audit record and nothing else — never the aggregate, never an
+   * event, never a response.
+   */
+  readonly reasonCode: string | null;
+  readonly reason: string | null;
 }
 
 /** What one commit is handed: the fence, the sealed completion, the mutation, its audit record and its events. */
@@ -173,6 +213,14 @@ export interface TransactionCommand {
    * declared requirement and travels on the audit record. null while no route resolves a principal.
    */
   readonly context: TrustedScope | null;
+  /**
+   * The instant this request's TRUSTED authentication evidence goes stale, in epoch milliseconds, for a
+   * route that declared `recentAuth: 'required'` (routes.ts, sessions.ts): the provider-verified
+   * authentication bound to the session plus the fixed window. The committing transaction judges it again
+   * against the database's own clock, so evidence that expired between the chain's check and the commit
+   * commits nothing. null when the route required none, and then no freshness is claimed or checked.
+   */
+  readonly authNotAfter: number | null;
 }
 
 /** The port. Each call is handed its deadline's AbortSignal and may return a Promise. */
@@ -200,6 +248,8 @@ export interface CommandBinding {
   readonly authorization: AuthorizationRequirement;
   /** The trusted context the chain derived for this attempt, or null while no route resolves one. */
   readonly context: TrustedScope | null;
+  /** When this attempt's recent-authentication evidence goes stale, or null when the route required none. */
+  readonly authNotAfter: number | null;
   readonly seal: (envelope: ReplayEnvelope) => string;
 }
 
@@ -220,6 +270,7 @@ export type CommandRefusal =
   | 'transaction_lease_lost'
   | 'transaction_conflict'
   | 'transaction_not_found'
+  | 'transaction_invalid_state'
   | 'transaction_unchanged'
   | 'transaction_unavailable'
   | 'transaction_timeout'
@@ -317,12 +368,17 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
   if (refuseThenable(raw)) return null;
   try {
     if (!isRecord(raw)) return null;
-    // An update's plan may name the response for changes already in place; a create's never does.
-    const withUnchanged = contract.mode === 'update' && hasExactKeys(raw, UPDATE_PLAN_FIELDS);
-    if (!withUnchanged && !hasExactKeys(raw, PLAN_FIELDS)) return null;
+    // An update's plan may name the response for changes already in place; a create's never does. Either
+    // may carry the audit annex. Exactly one of the four shapes, so no field is ever silently ignored.
+    const update = contract.mode === 'update';
+    const withUnchanged = update && (hasExactKeys(raw, UPDATE_PLAN_FIELDS) || hasExactKeys(raw, UPDATE_AUDITED_PLAN_FIELDS));
+    const withAudit = hasExactKeys(raw, AUDITED_PLAN_FIELDS) || (update && hasExactKeys(raw, UPDATE_AUDITED_PLAN_FIELDS));
+    if (!withUnchanged && !withAudit && !hasExactKeys(raw, PLAN_FIELDS)) return null;
     // Read once each: a plan cannot validate one value and hand back another.
     const { aggregateId, expectedVersion, changes, events: planned, response } = raw;
     const unchangedOutcome: unknown = withUnchanged ? raw.unchanged : undefined;
+    const annex = auditAnnexOf(withAudit ? raw.audit : undefined);
+    if (annex === undefined) return null;
     if (contract.mode === 'create' ? expectedVersion !== null || aggregateId !== binding.newAggregateId
       : !(typeof aggregateId === 'string' && UUID_RE.test(aggregateId) && typeof expectedVersion === 'number'
         && Number.isSafeInteger(expectedVersion) && expectedVersion >= 1 && expectedVersion <= MAX_EXPECTED_VERSION)) return null;
@@ -337,6 +393,8 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     // changed it between the audit and the revalidation would not be handing back the same object.
     const ctx = binding.context === null ? null : (isTrustedScope(binding.context) ? binding.context : undefined);
     if (ctx === undefined) return null; // a context that is not a trusted scope is not a context
+    const authNotAfter = binding.authNotAfter;
+    if (authNotAfter !== null && !(typeof authNotAfter === 'number' && Number.isSafeInteger(authNotAfter) && authNotAfter > 0)) return null;
     const drafts: OutboxEventDraft[] = [];
     // inv: drafts holds a valid draft for each item below i, their types distinct and allowed by the contract; term: i rises to count.
     for (let i = 0; i < count; i++) {
@@ -370,9 +428,12 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
         action: contract.kind, permission: binding.authorization.permission, scope: binding.authorization.scope,
         tenant: ctx === null ? null : ctx.tenant, store: ctx === null ? null : ctx.store, actor: ctx === null ? null : ctx.actor,
         correlationId,
+        reasonCode: annex === null ? null : annex.reasonCode,
+        reason: annex === null ? null : annex.reason,
       }),
       events: Object.freeze(drafts),
       context: ctx,
+      authNotAfter,
     });
     return Object.freeze({ command, response: envelope, unchanged });
   } catch {
@@ -400,6 +461,7 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'lease_lost') return 'transaction_lease_lost';
     if (outcome === 'conflict') return 'transaction_conflict';
     if (outcome === 'not_found') return 'transaction_not_found';
+    if (outcome === 'invalid_state') return 'transaction_invalid_state';
     if (outcome === 'unchanged') return 'transaction_unchanged';
     return outcome === 'unavailable' ? 'transaction_unavailable' : 'transaction_outcome_invalid';
   } catch {

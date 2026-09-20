@@ -28,9 +28,9 @@ export function createMemorySessionStore(): SessionStore {
   };
 }
 
-const record = (audience: SessionAudience, principalKey: string, t: number): SessionRecord => Object.freeze({
+const record = (audience: SessionAudience, principalKey: string, t: number, authenticatedAt: number | null = t): SessionRecord => Object.freeze({
   audience, authProvider: 'synthetic', authProviderUid: `uid-${principalKey}`, principalKey,
-  securityVersion: 'v1', createdAt: t, lastSeenAt: t, validatedAt: t,
+  securityVersion: 'v1', authenticatedAt, createdAt: t, lastSeenAt: t, validatedAt: t,
 });
 
 /**

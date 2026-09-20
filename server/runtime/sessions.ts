@@ -26,7 +26,9 @@
 // slides ONLY when an authorized session route (one that declares a requirement) answers 2xx:
 // the current-session read (passive polling), logout, a refused or failed request and the
 // operational probes never slide it. Admission is asked again once a session's last decision is
-// older than its boundary's interval (ADMISSION_REVALIDATE_MS: admin 1 min, tenant 5 min). A
+// older than its boundary's interval (ADMISSION_REVALIDATE_MS: admin 1 min; the TENANT boundary has no
+// interval at all and re-asks on EVERY protected request, so a suspended tenant loses access on the next
+// one — M5-GIAM-D1-P2). A
 // denial — there, or at login — revokes every session of the principal in that boundary
 // (revokePrincipal); a changed security version revokes the presented session, since one issued
 // after the change carries the new version. Either is a 401, and the reason records a revocation
@@ -78,9 +80,23 @@ export const SESSION_TTL: Readonly<Record<SessionAudience, { readonly absoluteMs
   admin: Object.freeze({ absoluteMs: 60 * 60_000, idleMs: 15 * 60_000 }),
 });
 
-/** How long an admission decision stands before the session's next request asks again: admin is tighter. */
+/**
+ * How long an admission decision stands before the session's next request asks again.
+ *
+ * The TENANT boundary asks on EVERY protected request (M5-GIAM-D1-P2; GAP-13). A tenant that is suspended
+ * must lose access on its people's next server request, with no grace period at all — an interval of any
+ * length is exactly such a grace period, and the five minutes this boundary once allowed was one. Its
+ * admission MUST report a version incorporating the tenant's access version (see SessionAdmission below,
+ * and migration 010) — no such adapter exists yet, so today this buys the freshest admission decision a
+ * composed adapter could give, and nothing more. The cost is one admission call per protected request; the
+ * validatedAt stamp is not written at all here, since nothing reads it to skip a re-check. Logout never
+ * revalidates, so it still works while suspended, and the operational probes carry no session at all.
+ *
+ * The ADMIN boundary keeps its own interval: a platform administrator's session must survive a tenant's
+ * state changing — that is who reactivates it — and is governed by its own security version instead.
+ */
 export const ADMISSION_REVALIDATE_MS: Readonly<Record<SessionAudience, number>> = Object.freeze({
-  tenant: 5 * 60_000,
+  tenant: 0,
   admin: 60_000,
 });
 
@@ -101,6 +117,17 @@ export const LOGIN_POLICIES: Readonly<Record<SessionAudience, LoginPolicy>> = Ob
 /** The header carrying the session-bound CSRF token on an unsafe session request. */
 export const SESSION_CSRF_HEADER = 'x-tmpos-session-csrf';
 
+/**
+ * How recent a TRUSTED authentication must be for a route that declares `recentAuth: 'required'`
+ * (routes.ts, M5-GIAM-D1-P2). The evidence is the provider's own verified authentication time, taken at
+ * login and bound to the session record beside the principal's digest and the security version admission
+ * reported — so it is bound to that session, that actor and that version together, and a changed version
+ * revokes the session rather than carrying the evidence forward. Exactly at the bound it still holds; past
+ * it the chain refuses with a bounded step-up refusal and the request commits nothing. Nothing a request
+ * carries — a body field, a header, a query parameter — can set, extend or stand in for it.
+ */
+export const RECENT_AUTH_MAX_AGE_MS = 10 * 60_000;
+
 // Instances sharing a store, or a provider and this server, may disagree slightly on the time;
 // a value dated no further ahead than this is not taken as tampered.
 const MAX_CLOCK_SKEW_MS = 5_000;
@@ -114,6 +141,14 @@ export interface SessionRecord {
   readonly principalKey: string;
   /** The security version admission reported when it last admitted this session. */
   readonly securityVersion: string;
+  /**
+   * When the identity authenticated AT THE PROVIDER, in epoch milliseconds, as the verified credential
+   * presented at login reported it (access.ts AuthenticationEvidence) — never a client's claim and never
+   * this server's clock. null when the credential carried none, which this boundary's login policy may
+   * allow; a route that requires recent authentication then refuses. It is written once, at login, and no
+   * update may change it: re-proving a recent authentication means logging in again.
+   */
+  readonly authenticatedAt: number | null;
   readonly createdAt: number;
   /** The last activity: slid only by a successful authorized request. */
   readonly lastSeenAt: number;
@@ -146,6 +181,13 @@ export interface SessionStore {
  * printable token of at most 128 characters that changes whenever the principal's standing
  * changes (the revocation witness a session is re-checked against). Any other value is a denial;
  * a throw or an overrun is an outage.
+ *
+ * THE TENANT BOUNDARY'S VERSION (binding on whoever writes that adapter; M5-GIAM-D1-P2, doc 08 DA-32). It
+ * must incorporate the tenant access version migration 010 maintains, so that suspending or reactivating a
+ * tenant moves it and every session admitted before that transition is refused on its next protected
+ * request — which is also why this boundary keeps no revalidation window. No such adapter exists yet
+ * (`productionSessions.ts` composes none), so that link is specified and not yet enforced by anything;
+ * `tenantState.ts` holds the comparison it must apply.
  */
 export interface SessionAdmission {
   admit(principal: VerifiedPrincipal, audience: SessionAudience, signal: AbortSignal): unknown;
@@ -196,6 +238,8 @@ export interface ActiveSession {
   /** The record's key (the identifier's digest) and last activity: what an idle refresh needs. */
   readonly key: string;
   readonly lastSeenAt: number;
+  /** The provider-verified authentication time bound to this session at login, or null when it carried none. */
+  readonly authenticatedAt: number | null;
 }
 
 export interface SessionBoundary {
@@ -272,6 +316,7 @@ interface LiveRecord {
   readonly lastSeenAt: number;
   readonly validatedAt: number;
   readonly securityVersion: string;
+  readonly authenticatedAt: number | null;
 }
 
 /** The record's principal and state while its session is live for `audience`, or why it is not. */
@@ -280,19 +325,25 @@ function liveSession(raw: unknown, audience: SessionAudience, now: number): Live
   if (typeof raw !== 'object') return 'session_record_invalid';
   // Read once each: a replaceable store cannot validate one value and hand back another.
   const {
-    audience: owner, authProvider, authProviderUid, principalKey, securityVersion, createdAt, lastSeenAt, validatedAt,
+    audience: owner, authProvider, authProviderUid, principalKey, securityVersion, authenticatedAt, createdAt, lastSeenAt, validatedAt,
   } = raw as Record<string, unknown>;
   const principal = asPrincipal(authProvider, authProviderUid);
   // A stamp is no earlier than the record's creation and no later than now plus the skew allowance.
   const stamped = (t: unknown, since: number): t is number => typeof t === 'number' && since <= t && t <= now + MAX_CLOCK_SKEW_MS;
+  // The provider's authentication PRECEDES the session it issued, so it has no lower bound but zero; a
+  // value dated into the future beyond the skew allowance is no evidence. A record that omits the field
+  // entirely is malformed, exactly as one omitting its security version is: the reader takes no default.
+  const authenticated = authenticatedAt === null
+    || (typeof authenticatedAt === 'number' && Number.isSafeInteger(authenticatedAt)
+      && authenticatedAt > 0 && authenticatedAt <= now + MAX_CLOCK_SKEW_MS);
   if (principal === null || principalKey !== principalKeyOf(principal) || typeof securityVersion !== 'string'
-    || !VERSION_RE.test(securityVersion) || typeof createdAt !== 'number'
+    || !VERSION_RE.test(securityVersion) || typeof createdAt !== 'number' || !authenticated
     || !stamped(lastSeenAt, createdAt) || !stamped(validatedAt, createdAt)) return 'session_record_invalid';
   if (owner !== audience) return 'session_wrong_audience';
   const { absoluteMs, idleMs } = SESSION_TTL[audience];
   if (now - createdAt >= absoluteMs) return 'session_expired';
   if (now - lastSeenAt >= idleMs) return 'session_idle_expired';
-  return { principal, lastSeenAt, validatedAt, securityVersion };
+  return { principal, lastSeenAt, validatedAt, securityVersion, authenticatedAt: authenticatedAt as number | null };
 }
 
 // A per-boundary limiter is no port: a stale composition that passes one is refused as unknown.
@@ -392,7 +443,12 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       return outage('session', err);
     }
     if (typeof live === 'string') return live;
-    if (revalidate && t - live.validatedAt >= ADMISSION_REVALIDATE_MS[audience]) {
+    // A boundary with no window re-asks unconditionally: `t - validatedAt >= 0` would be FALSE whenever an
+    // instance whose clock runs ahead stamped validatedAt (the reader accepts one up to MAX_CLOCK_SKEW_MS in
+    // the future), which would hand that session a grace period of up to the skew — the very thing a zero
+    // interval exists to abolish (M5-GIAM-D1-P2).
+    const due = ADMISSION_REVALIDATE_MS[audience] === 0 || t - live.validatedAt >= ADMISSION_REVALIDATE_MS[audience];
+    if (revalidate && due) {
       const decision = await admissionOf(live.principal);
       if (decision === 'admission_unavailable' || decision === 'admission_timeout') return decision; // fail closed; revoke nothing
       if (decision === 'admission_denied') {
@@ -403,13 +459,19 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
         // This session only: one issued since the change already carries the new version.
         return (await revoked((signal) => sessions.revoke(key, signal))) ? 'session_version_mismatch' : 'session_version_mismatch_unrevoked';
       }
-      try {
-        await call((signal) => sessions.update(key, { validatedAt: t }, signal));
-      } catch (err) {
-        return outage('session', err);
+      // Only a boundary that HAS a window needs the stamp: with none, nothing ever reads it to skip a
+      // re-check, so the write would be a per-request availability dependency for no benefit.
+      if (ADMISSION_REVALIDATE_MS[audience] > 0) {
+        try {
+          await call((signal) => sessions.update(key, { validatedAt: t }, signal));
+        } catch (err) {
+          return outage('session', err);
+        }
       }
     }
-    return Object.freeze({ principal: live.principal, context: contextOf(read.id, key), key, lastSeenAt: live.lastSeenAt });
+    return Object.freeze({
+      principal: live.principal, context: contextOf(read.id, key), key, lastSeenAt: live.lastSeenAt, authenticatedAt: live.authenticatedAt,
+    });
   }
 
   async function refresh(session: ActiveSession): Promise<void> {
@@ -433,9 +495,15 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     const presentedKey = typeof presented === 'string' ? null : digestOf(presented.id);
     const id = randomBytes(32).toString('base64url');
     const t = now();
+    // The provider's own verified authentication time, as the chain read it from the credential this login
+    // presented and this boundary's policy accepted (app.ts, access.ts) — bound here, with the principal's
+    // digest and the admitted security version, and never written again. A boundary whose policy requires
+    // no recency may bind null, and a route that requires recent authentication then refuses.
+    const authenticatedAt = typeof ctx.authenticatedAt === 'number' && Number.isSafeInteger(ctx.authenticatedAt)
+      && ctx.authenticatedAt > 0 && ctx.authenticatedAt <= t + MAX_CLOCK_SKEW_MS ? ctx.authenticatedAt : null;
     const record: SessionRecord = Object.freeze({
       audience, authProvider: principal.authProvider, authProviderUid: principal.authProviderUid,
-      principalKey: principalKeyOf(principal), securityVersion: decision.securityVersion,
+      principalKey: principalKeyOf(principal), securityVersion: decision.securityVersion, authenticatedAt,
       createdAt: t, lastSeenAt: t, validatedAt: t,
     });
     try {
@@ -468,10 +536,22 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     res.status(204).end();
   };
 
+  // The three session endpoints keep their existing special contracts (M5-GIAM-D1-P2): none changes
+  // business state, none may declare a trusted context — login has no session and the other two no
+  // requirement — and none may require a recent authentication, since login is how one is proved.
   const routes: RouteDefinition[] = [
-    { method: 'POST', path: paths.login, policy: { access: 'login', audience }, body: NO_BODY, idempotency: 'none', handler: login },
-    { method: 'GET', path: paths.current, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, idempotency: 'none', handler: current },
-    { method: 'POST', path: paths.logout, policy: { access: 'session', audience, authorization: null }, body: NO_BODY, idempotency: 'none', handler: logout },
+    {
+      method: 'POST', path: paths.login, policy: { access: 'login', audience }, body: NO_BODY,
+      idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: login,
+    },
+    {
+      method: 'GET', path: paths.current, policy: { access: 'session', audience, authorization: null }, body: NO_BODY,
+      idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: current,
+    },
+    {
+      method: 'POST', path: paths.logout, policy: { access: 'session', audience, authorization: null }, body: NO_BODY,
+      idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: logout,
+    },
   ];
   return Object.freeze({
     audience,

@@ -267,7 +267,7 @@ test('no per-process limiter, fallback or second proxy contract exists in the pr
   assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
 });
 
-test('durable idempotency is composed only by the transaction root, for a route that requires it: only the tenant display-name command requires one, and its port imports no database or provider adapter', () => {
+test('durable idempotency is composed only by the transaction root, for a route that requires it: only the two tenant commands require one, and its port imports no database or provider adapter', () => {
   // M6-IDEMPOT-P2, M6-PG-P7-R1: the port is provider-independent; the transaction root (productionTransactions.ts) is the one
   // production authority for it, composing the approved PostgreSQL store only for a route in its inventory that requires
   // idempotency — and nothing in the production graph registers such a route yet.
@@ -277,20 +277,21 @@ test('durable idempotency is composed only by the transaction root, for a route 
   // A registration, never the type that names the value or a comment that explains it.
   const REQUIRED_ROUTE = /(?<!readonly )\bidempotency\s*:\s*['"`]required['"`]/;
   for (const sample of ["{ idempotency: 'required', perform }", 'idempotency:"required"']) assert.match(sample, REQUIRED_ROUTE, `the scan must catch: ${sample}`);
-  // M5-GIAM-D1-P1 (owner decision D1): the one production route that requires idempotency is the tenant display-name command,
-  // declared in its own runtime module. Any other production file that registers one fails.
-  const REQUIRED_ROUTE_FILES = [join(RUNTIME_DIR, 'tenantDisplayName.ts')];
+  // M5-GIAM-D1-P1 (owner decision D1) and M5-GIAM-D1-P2: the production routes that require idempotency are the tenant
+  // display-name command and the tenant status command, each declared in its own runtime module. Any other production file
+  // that registers one fails.
+  const REQUIRED_ROUTE_FILES = [join(RUNTIME_DIR, 'tenantDisplayName.ts'), join(RUNTIME_DIR, 'tenantStatus.ts')];
   const registering = [];
   for (const f of production) {
     const code = readFileSync(f, 'utf8').replace(/\/\/.*$/gm, ''); // code only: a comment may name what it explains
     assert.doesNotMatch(code, /createMemoryIdempotencyStore|assertIdempotencyStoreContract|idempotencyStore\.testkit/, `${f}: a per-process idempotency store in production`);
     if (REQUIRED_ROUTE.test(code)) registering.push(f);
   }
-  assert.deepEqual(registering, REQUIRED_ROUTE_FILES, 'only the tenant display-name command registers a route that requires idempotency');
-  const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR\]\),\n\}\);$/m;
-  assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR]),\n});", INVENTORY,
+  assert.deepEqual(registering.sort(), [...REQUIRED_ROUTE_FILES].sort(), 'only the two tenant commands register a route that requires idempotency');
+  const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR\]\),\n\}\);$/m;
+  assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n});", INVENTORY,
     'the scan must catch a route added to the inventory');
-  assert.match(readFileSync(join(COMPOSITION_DIR, 'productionTransactions.ts'), 'utf8'), INVENTORY, 'the production inventory holds exactly the tenant display-name route and its mutator');
+  assert.match(readFileSync(join(COMPOSITION_DIR, 'productionTransactions.ts'), 'utf8'), INVENTORY, 'the production inventory holds exactly the two tenant commands and their mutators');
   // IDEMPOTENCY_KEY and APP_DATABASE_URL belong to the transaction root alone in the composition layer.
   const OWNED = /\bIDEMPOTENCY_KEY\b|\bAPP_DATABASE_URL(?:_VAR)?\b|\bidempotencyStore\b|\bIdempotencyDeps\b/;
   for (const sample of ['env.IDEMPOTENCY_KEY', 'env[APP_DATABASE_URL_VAR]', 'idempotencyStore: null,']) assert.match(sample, OWNED, `the scan must catch: ${sample}`);

@@ -36,7 +36,9 @@ import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import type { PrincipalResolutionPort } from '../runtime/principals.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
+import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
+import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolvePath(HERE, '..', '..');
@@ -51,10 +53,10 @@ const CONFIGURED = { APP_DATABASE_URL: DIRECT_URL, IDEMPOTENCY_KEY, RATE_LIMIT_K
 const WRITE = { access: 'authenticated', authorization: { scope: 'platform', permission: 'items.write' } } as const;
 const JSON_BODY = { kind: 'json', maxBytes: 1_024, required: false } as const;
 const PERFORM: RouteDefinition = {
-  method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required',
+  method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none',
   perform: () => ({ status: 201, body: { ok: true } }),
 };
-const STATUS: RouteDefinition = { method: 'GET', path: '/v1/status', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none', handler: (_req, res) => { res.status(200).json({ ok: true }); } };
+const STATUS: RouteDefinition = { method: 'GET', path: '/v1/status', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: (_req, res) => { res.status(200).json({ ok: true }); } };
 const REQUIRED: TransactionInventory = Object.freeze({ routes: [PERFORM], mutators: [] });
 
 // --- an in-test driver: answers the kernel's statements, records them, and never touches a socket ---------------------------
@@ -225,8 +227,10 @@ function appWith(boundary: ProductionTransactions | null, routes: readonly Route
 test('the production inventory holds the tenant display-name command and its one mutator, so it composes nothing without the whole boundary', () => {
   // M5-GIAM-D1-P1 (owner decision D1): the first business route. Serving it requires the database, the idempotency key and the
   // store, so the production root refuses, naming every blocker, when the configuration lacks them — never a partial composition.
-  assert.deepEqual(PRODUCTION_INVENTORY.routes, [TENANT_DISPLAY_NAME_ROUTE], 'exactly the one business route');
-  assert.deepEqual(PRODUCTION_INVENTORY.mutators, [TENANT_DISPLAY_NAME_MUTATOR], 'and exactly its mutator');
+  assert.deepEqual(PRODUCTION_INVENTORY.routes, [TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE], 'exactly the two business routes');
+  assert.deepEqual(PRODUCTION_INVENTORY.mutators, [TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR], 'and exactly their mutators');
+  // Both declare a trusted context, so neither can be served by a deployment whose authorizer resolves no actor.
+  assert.ok(PRODUCTION_INVENTORY.routes.every((r) => r.trustedContext === 'required'), 'every business route requires a resolved actor');
   assert.ok(Object.isFrozen(PRODUCTION_INVENTORY) && Object.isFrozen(PRODUCTION_INVENTORY.routes) && Object.isFrozen(PRODUCTION_INVENTORY.mutators));
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), [], 'its permission is one canonical platform key');
   const { env, read } = recording({});
@@ -332,7 +336,7 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
 });
 
 test('a command route needs its mutator, a partial construction composes nothing, and no fallback stands in', async () => {
-  const command: RouteDefinition = { method: 'POST', path: '/v1/orders', policy: WRITE, body: JSON_BODY, idempotency: 'required', command: { contract: TEST_CREATE, plan: () => assert.fail('never planned') } };
+  const command: RouteDefinition = { method: 'POST', path: '/v1/orders', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_CREATE, plan: () => assert.fail('never planned') } };
   assert.deepEqual(blockersOf({ routes: [command], mutators: [] }, CONFIGURED), ['command_mutator_unavailable']);
   const mutator: AggregateMutator = { kind: TEST_CREATE.kind, mode: 'create', aggregateType: TEST_CREATE.aggregateType, apply: async () => 'applied' };
   const ok = counted();
@@ -532,7 +536,7 @@ test('a deployed route may require only a canonical platform permission, and sta
     method: 'POST' as const, path: '/v1/unit',
     policy: Object.freeze({ access: 'authenticated' as const, authorization: Object.freeze({ scope, permission }) }),
     body: Object.freeze({ kind: 'json' as const, maxBytes: 1024, required: true }),
-    idempotency: 'none' as const,
+    idempotency: 'none' as const, trustedContext: 'none' as const, recentAuth: 'none' as const,
     handler: () => undefined,
   });
   // A real catalog key at platform scope is the only thing that passes.
@@ -550,7 +554,8 @@ test('a deployed route may require only a canonical platform permission, and sta
   // A public route declares no permission and needs none.
   assert.deepEqual(uncataloguedRoutePermissions([Object.freeze({
     method: 'GET' as const, path: '/v1/open', policy: Object.freeze({ access: 'public' as const }),
-    body: Object.freeze({ kind: 'none' as const }), idempotency: 'none' as const, handler: () => undefined,
+    body: Object.freeze({ kind: 'none' as const }), idempotency: 'none' as const,
+    trustedContext: 'none' as const, recentAuth: 'none' as const, handler: () => undefined,
   })]), []);
   // Today's production inventory declares no route at all, so it clears the gate.
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
@@ -613,7 +618,7 @@ test('the composed authorizer decides over the composed resolver: the one the bo
 test('the store is composed with the platform revalidator: migration 009\'s exact-authority routine, then the permission on the same roles', async () => {
   // M5-GIAM-D1-P1-R1: not merely "a function" — the revalidator the boundary hands the store asks the database about the
   // very grant selected, and re-decides the route's permission on that role, exactly as the composed authorizer decides it.
-  let revalidate: ((sql: never, scope: never, permission: string) => Promise<unknown>) | undefined;
+  let revalidate: ((sql: never, scope: never, permission: string, authNotAfter: number | null) => Promise<unknown>) | undefined;
   const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
   const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
     client: () => stub as never,
@@ -630,12 +635,29 @@ test('the store is composed with the platform revalidator: migration 009\'s exac
     actor: '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
     membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId, limitation: 'none',
   }) as never;
-  assert.equal(await revalidate(valid, scope('support_admin'), 'edit_tenant_profile'), true);
+  assert.equal(await revalidate(valid, scope('support_admin'), 'edit_tenant_profile', null), true);
   assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine');
   assert.deepEqual(bound[0], ['6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', 'sv-1', '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', 'support_admin']);
-  assert.equal(await revalidate(valid, scope('billing_admin'), 'edit_tenant_profile'), false,
+  assert.equal(await revalidate(valid, scope('billing_admin'), 'edit_tenant_profile', null), false,
     'the database confirming the grant does not make a View role an editor: the permission is decided again');
   const invalid = (() => Promise.resolve([{ outcome: 'invalid' }])) as never;
-  assert.equal(await revalidate(invalid, scope('support_admin'), 'edit_tenant_profile'), false, 'and nothing holds once the database says invalid');
+  assert.equal(await revalidate(invalid, scope('support_admin'), 'edit_tenant_profile', null), false, 'and nothing holds once the database says invalid');
+  // M5-GIAM-D1-P2: a route that required a recent authentication has its deadline judged on the database's
+  // clock, on this same transaction, BEFORE the authority routine is asked.
+  texts.length = 0; bound.length = 0;
+  const fresh = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    texts.push(strings.join('?')); bound.push(values);
+    return Promise.resolve(strings.join('').includes('clock_timestamp') ? [{ fresh: true }] : [{ outcome: 'valid' }]);
+  }) as never;
+  assert.equal(await revalidate(fresh, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000), true);
+  assert.match(texts[0], /clock_timestamp\(\)/, 'the freshness statement runs first, on the database clock');
+  assert.deepEqual(bound[0], ['1700000600000'], 'the deadline is bound as a value, never interpolated');
+  assert.match(texts[1], /m5_revalidate_platform_authority\(/, 'and the authority routine follows it');
+  const stale = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    texts.push(strings.join('?')); bound.push(values);
+    return Promise.resolve(strings.join('').includes('clock_timestamp') ? [{ fresh: false }] : [{ outcome: 'valid' }]);
+  }) as never;
+  assert.equal(await revalidate(stale, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000), false,
+    'expired evidence denies whatever the authority routine would have said');
   await boundary.close();
 });

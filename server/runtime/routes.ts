@@ -59,6 +59,25 @@ export type BodyPolicy =
 /** Whether a route's requests run under a durable Idempotency-Key (idempotency.ts): never, or always. */
 export type IdempotencyPolicy = 'none' | 'required';
 
+/**
+ * Whether a route may execute only once the chain has a RESOLVED trusted authorization context for it —
+ * the app-owned actor and the one grant its authorizer decided on (principals.ts TrustedScope), not merely
+ * a verified principal (M5-GIAM-D1-P2, closing docs/phase-4/08 DA-31). Every route that requires
+ * idempotency must declare `required`: those are the state-changing business routes, and startup refuses
+ * one that could reach its operation without a context, whichever boundary it sits on. An authorizer that
+ * answers a bare `true` resolves no actor, so such a route is refused at run time (403) before its body is
+ * read, its key acquired or its operation entered — a `perform` and a `command` alike.
+ */
+export type TrustedContextPolicy = 'none' | 'required';
+
+/**
+ * Whether a route requires TRUSTED RECENT AUTHENTICATION — a provider-verified authentication time bound to
+ * the session at login and no older than RECENT_AUTH_MAX_AGE_MS (sessions.ts, app.ts). Only a session route
+ * with a declared authorization may require it: a Bearer-authenticated request carries no session, so no
+ * trusted authentication time is bound to it, and nothing a request supplies may stand in for one.
+ */
+export type RecentAuthPolicy = 'none' | 'required';
+
 /** The largest byte cap any route may declare for a JSON body (1 MiB). */
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
@@ -85,6 +104,12 @@ export interface RouteContext {
   readonly principal: VerifiedPrincipal | null;
   /** The session the request authenticated with, on a `session` route; otherwise null. */
   readonly session: SessionContext | null;
+  /**
+   * The provider-verified authentication time (epoch ms) of the credential a LOGIN request presented, for
+   * the runtime's own login handler to bind into the session it issues (sessions.ts) — null on every other
+   * route, so no business handler ever receives one. It is never read from a request body or header.
+   */
+  readonly authenticatedAt: number | null;
   /** The parsed JSON body — still untrusted input — or undefined when none was taken. */
   readonly body: unknown;
 }
@@ -146,6 +171,15 @@ export interface CommandPlan {
    * moves and no audit record or event exists. Without it such an answer is a fault (503).
    */
   readonly unchanged?: IdempotentOutcome;
+  /**
+   * A sensitive command's audit annex, and optional (M5-GIAM-D1-P2): the bounded reason pair the durable
+   * audit row already carries — `reasonCode`, a closed lowercase token naming what the action did, and
+   * `reason`, the operator's own bounded words, validated by the planner's own contract. It reaches the
+   * audit record and nothing else: never the aggregate, never an event payload, never a response. Identity,
+   * scope, action and permission are NOT here and never will be — those stay the runtime's own, taken from
+   * the route and the trusted context (commandTransaction.ts).
+   */
+  readonly audit?: Readonly<{ reasonCode: string; reason: string }>;
 }
 
 /**
@@ -174,6 +208,9 @@ interface RouteDefinitionBase {
   readonly path: string;
   readonly policy: RoutePolicy;
   readonly body: BodyPolicy;
+  /** Declared, never defaulted for a route that requires idempotency: startup refuses one that omits it. */
+  readonly trustedContext: TrustedContextPolicy;
+  readonly recentAuth: RecentAuthPolicy;
 }
 
 export type RouteDefinition =
@@ -217,6 +254,8 @@ export type EnforcementSetupCode =
   | 'port_deadline_invalid'
   | 'route_idempotency_policy_missing'
   | 'route_idempotency_policy_invalid'
+  | 'route_trusted_context_invalid'
+  | 'route_recent_auth_invalid'
   | 'idempotency_required'
   | 'idempotency_invalid'
   | 'idempotency_key_invalid'
@@ -351,9 +390,39 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
 function parseIdempotency(raw: unknown, method: string, policy: RoutePolicy): IdempotencyPolicy {
   if (raw === undefined || raw === null) throw new EnforcementSetupError('route_idempotency_policy_missing');
   if (raw === 'none') return 'none';
-  const requirement = policy.access === 'authenticated' || policy.access === 'session' ? policy.authorization : null;
+  const requirement = requirementOf(policy);
   if (raw === 'required' && method !== 'GET' && requirement !== null && requirement.scope === 'platform') return 'required';
   throw new EnforcementSetupError('route_idempotency_policy_invalid');
+}
+
+/** The requirement a policy declares, or null: an authenticated or session route's, and nothing else. */
+function requirementOf(policy: RoutePolicy): AuthorizationRequirement | null {
+  return policy.access === 'authenticated' || policy.access === 'session' ? policy.authorization : null;
+}
+
+/**
+ * The trusted-context policy (M5-GIAM-D1-P2; docs/phase-4/08 DA-31). `required` needs a declared
+ * authorization — without one no authorizer runs and no context could ever be resolved — and EVERY route
+ * that requires idempotency must declare it: a state-changing business route that could reach its `perform`
+ * or `command` with a verified principal alone fails startup rather than committing under no actor.
+ */
+function parseTrustedContext(raw: unknown, idempotency: IdempotencyPolicy, policy: RoutePolicy): TrustedContextPolicy {
+  const declared = raw === undefined || raw === null ? 'none' : raw;
+  if (declared === 'required' && requirementOf(policy) !== null) return 'required';
+  if (declared === 'none' && idempotency === 'none') return 'none';
+  throw new EnforcementSetupError('route_trusted_context_invalid');
+}
+
+/**
+ * The recent-authentication policy. `required` only on a session route with a declared authorization: the
+ * trusted authentication time is bound to a session record at login, so a public, login, Bearer or
+ * requirement-less route has none to present and may not claim one.
+ */
+function parseRecentAuth(raw: unknown, policy: RoutePolicy): RecentAuthPolicy {
+  const declared = raw === undefined || raw === null ? 'none' : raw;
+  if (declared === 'none') return 'none';
+  if (declared === 'required' && policy.access === 'session' && policy.authorization !== null) return 'required';
+  throw new EnforcementSetupError('route_recent_auth_invalid');
 }
 
 /** The session-boundary rules in the header: a path's namespace and its policy's audience agree. */
@@ -388,7 +457,8 @@ function parseCommand(raw: unknown): CommandRoute {
 }
 
 function parseDefinition(raw: unknown): RouteDefinition {
-  if (!isPlainObject(raw) || !hasOnlyKeys(raw, ['method', 'path', 'policy', 'body', 'idempotency', 'handler', 'perform', 'command'])) {
+  if (!isPlainObject(raw) || !hasOnlyKeys(raw,
+    ['method', 'path', 'policy', 'body', 'idempotency', 'trustedContext', 'recentAuth', 'handler', 'perform', 'command'])) {
     throw new EnforcementSetupError('route_definition_invalid');
   }
   const { method, path, handler, perform, command } = raw;
@@ -401,15 +471,18 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
   const idempotency = parseIdempotency(raw.idempotency, method, policy);
+  const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
+  const recentAuth = parseRecentAuth(raw.recentAuth, policy);
+  const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth };
   // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {
     if (typeof handler !== 'function' || 'perform' in raw || 'command' in raw) throw new EnforcementSetupError('route_handler_invalid');
-    return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, handler: handler as RouteHandler });
+    return Object.freeze({ ...declared, idempotency, handler: handler as RouteHandler });
   }
   if ('handler' in raw || ('perform' in raw) === ('command' in raw)) throw new EnforcementSetupError('route_handler_invalid');
-  if ('command' in raw) return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, command: parseCommand(command) });
+  if ('command' in raw) return Object.freeze({ ...declared, idempotency, command: parseCommand(command) });
   if (typeof perform !== 'function') throw new EnforcementSetupError('route_handler_invalid');
-  return Object.freeze({ method: method as RouteMethod, path, policy, body, idempotency, perform: perform as IdempotentOperation });
+  return Object.freeze({ ...declared, idempotency, perform: perform as IdempotentOperation });
 }
 
 /** Validate every definition and build the closed, frozen table (key: `METHOD path`). */

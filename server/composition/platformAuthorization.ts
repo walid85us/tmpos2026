@@ -85,7 +85,7 @@ export function createPlatformRouteAuthorizer(deps: PlatformAuthorizerDeps): Rou
  * the committing transaction's own statement handle — which this file never touches, so it names it only as a type
  * parameter (the transaction root alone imports the persistence layer).
  */
-export type PlatformAuthorityCheck<Handle> = (sql: Handle, scope: TrustedScope) => Promise<boolean>;
+export type PlatformAuthorityCheck<Handle> = (sql: Handle, scope: TrustedScope, authNotAfter: number | null) => Promise<boolean>;
 
 export interface PlatformRevalidatorDeps<Handle> {
   /** In production postgresPrincipalResolver.ts revalidatePlatformAuthority (migration 009). */
@@ -101,13 +101,16 @@ export interface PlatformRevalidatorDeps<Handle> {
  * its current definition. Anything else — a throw included, which the store's kernel turns into a rollback
  * — commits nothing.
  */
-export function createPlatformContextRevalidator<Handle>(deps: PlatformRevalidatorDeps<Handle>): (sql: Handle, scope: TrustedScope, permission: string) => Promise<boolean> {
+export function createPlatformContextRevalidator<Handle>(deps: PlatformRevalidatorDeps<Handle>): (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null) => Promise<boolean> {
   const authority = deps?.authority;
   const roles = deps?.roles ?? BUILT_IN_PLATFORM_ROLES;
   if (typeof authority !== 'function' || !(roles instanceof Map)) throw new TypeError('platform revalidator dependencies invalid');
-  return async (sql: Handle, scope: TrustedScope, permission: string): Promise<boolean> => {
+  return async (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null): Promise<boolean> => {
     if (scope.scope !== 'platform' || scope.limitation !== 'none') return false;
-    if ((await authority(sql, scope)) !== true) return false;
+    // The authority AND, when the route required one, the recent-authentication deadline — both decided on
+    // the committing transaction by the database (M5-GIAM-D1-P2): stale evidence denies exactly as a
+    // withdrawn grant does, with the same one value.
+    if ((await authority(sql, scope, authNotAfter)) !== true) return false;
     // The database confirmed the very grant and its role; the permission is decided on that role again.
     return evaluateCanonicalPermission({ scope: 'platform', roleId: scope.roleId, permission, limitation: 'none', roles }) === 'granted';
   };

@@ -28,6 +28,20 @@ const CANARY = 'SECRET-CANARY-7f3a';
 
 // --- synthetic identities, ports and routes ------------------------------------------
 
+/**
+ * What a real authorizer hands a state-changing route since M5-GIAM-D1-P2: the resolved actor and the one
+ * grant it decided on, not a bare `true`. A route declaring `trustedContext: 'required'` is refused (403)
+ * without it, so every idempotent route here presents one.
+ */
+const GRANTED = Object.freeze({
+  granted: true,
+  context: Object.freeze({
+    actor: '00000000-0000-4000-8000-000000000001', securityVersion: 'sv1', scope: 'platform' as const,
+    tenant: null, store: null, membershipId: '00000000-0000-4000-8000-000000000002',
+    roleId: 'support_admin', limitation: 'none' as const,
+  }),
+});
+
 const PRINCIPALS: Record<string, unknown> = {
   'tok-writer': { authProvider: 'synthetic', authProviderUid: 'uid-writer', verified: true },
   'tok-reader': { authProvider: 'synthetic', authProviderUid: 'uid-reader', verified: true },
@@ -60,12 +74,12 @@ function probeRoutes(seen: Seen): RouteDefinition[] {
     res.status(200).json({ ok: true });
   };
   return [
-    { method: 'POST', path: '/v1/json-required', policy: WRITE, body: JSON_REQUIRED, idempotency: 'none', handler: record('required') },
-    { method: 'POST', path: '/v1/json-optional', policy: WRITE, body: JSON_OPTIONAL, idempotency: 'none', handler: record('optional') },
-    { method: 'POST', path: '/v1/no-body', policy: WRITE, body: NONE, idempotency: 'none', handler: record('noBody') },
-    { method: 'GET', path: '/v1/smuggled', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: record('smuggled') },
-    { method: 'GET', path: '/v1/slow-keep', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: slow(false) },
-    { method: 'GET', path: '/v1/slow-close', policy: { access: 'public' }, body: NONE, idempotency: 'none', handler: slow(true) },
+    { method: 'POST', path: '/v1/json-required', policy: WRITE, body: JSON_REQUIRED, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: record('required') },
+    { method: 'POST', path: '/v1/json-optional', policy: WRITE, body: JSON_OPTIONAL, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: record('optional') },
+    { method: 'POST', path: '/v1/no-body', policy: WRITE, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: record('noBody') },
+    { method: 'GET', path: '/v1/smuggled', policy: { access: 'public' }, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: record('smuggled') },
+    { method: 'GET', path: '/v1/slow-keep', policy: { access: 'public' }, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: slow(false) },
+    { method: 'GET', path: '/v1/slow-close', policy: { access: 'public' }, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: slow(true) },
   ];
 }
 
@@ -87,6 +101,7 @@ async function withBodyApp(fn: (h: Harness) => Promise<void>): Promise<void> {
     trustedOrigins: [TRUSTED],
     limits: testRequestLimits(),
     // The ports record exactly what they are handed: frozen views, never the request.
+
     authenticator: {
       async verify(tokenView: BearerTokenView): Promise<unknown> {
         calls.authn++;
@@ -95,10 +110,10 @@ async function withBodyApp(fn: (h: Harness) => Promise<void>): Promise<void> {
       },
     },
     authorizer: {
-      authorize(principal: VerifiedPrincipal, ...rest: unknown[]): boolean {
+      authorize(principal: VerifiedPrincipal, ...rest: unknown[]): unknown {
         calls.authz++;
         ports.authorizations.push([principal, ...rest]);
-        return principal.authProviderUid === 'uid-writer';
+        return principal.authProviderUid === 'uid-writer' ? GRANTED : false;
       },
     },
   });
@@ -223,7 +238,7 @@ test('a body-free route is served without a body, and its handler finds nothing 
     assert.equal(seen.calls.noBody, 2);
     assert.deepEqual(seen.bodies, [undefined, undefined]);
     assert.deepEqual(seen.streamBytes, [0, 0]);
-    assert.deepEqual(Object.keys(seen.ctx[0]).sort(), ['body', 'principal', 'requestId', 'session']);
+    assert.deepEqual(Object.keys(seen.ctx[0]).sort(), ['authenticatedAt', 'body', 'principal', 'requestId', 'session']);
     assert.equal(seen.ctx[0].session, null, 'a route outside the session boundaries carries no session');
     assert.ok(Object.isFrozen(seen.ctx[0]));
   });

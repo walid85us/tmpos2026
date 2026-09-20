@@ -134,9 +134,26 @@ function principalOf(row: Row): PrincipalResolution | null {
  * all of them: a caller cannot tell which. It supersedes 007's m5_revalidate_principal_context, which takes
  * the first grant at the scope and so could answer for a grant the request was never authorized under.
  */
-export async function revalidatePlatformAuthority(sql: PgTransactionScope, scope: TrustedScope): Promise<boolean> {
+export async function revalidatePlatformAuthority(
+  sql: PgTransactionScope,
+  scope: TrustedScope,
+  // No default: a caller that forgets it would silently skip the one database-side freshness gate. Passing
+  // null is how a command whose route required no recent authentication says so, explicitly.
+  authNotAfter: number | null,
+): Promise<boolean> {
   if (!isTrustedScope(scope) || scope.scope !== 'platform') return false;
+  if (authNotAfter !== null && !(Number.isSafeInteger(authNotAfter) && authNotAfter > 0)) return false;
   try {
+    // The recent-authentication deadline, judged on THIS transaction by the database's own clock
+    // (M5-GIAM-D1-P2). The chain already refused a stale session before the request got here; this is the
+    // same question asked again where the write happens, so evidence that expired in between commits
+    // nothing. clock_timestamp() is the wall clock inside the transaction, not its start time, so a long
+    // commit cannot keep stale evidence alive. Nothing here comes from the request.
+    if (authNotAfter !== null) {
+      const fresh = onlyRow(await sql`select (pg_catalog.clock_timestamp() <=
+        pg_catalog.to_timestamp(${String(authNotAfter)}::bigint / 1000.0)) as fresh`, ['fresh']);
+      if (fresh === null || fresh.fresh !== true) return false;
+    }
     const rows = await sql`select outcome from tmpos_command.m5_revalidate_platform_authority(
       ${scope.actor}::uuid, ${scope.securityVersion}::text, ${scope.membershipId}::uuid, ${scope.roleId}::text)`;
     const row = onlyRow(rows, ['outcome']);

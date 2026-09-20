@@ -313,6 +313,7 @@ function conformanceKit(h: TransactionalOutboxHarness) {
     const result = prepareCommand(contract, events, plan, {
       scope: attempt.operation.scope, lease: held, newAggregateId, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
       context: null,
+      authNotAfter: null,
       seal: (envelope) => keyring.seal(envelope, attempt.operation),
     });
     assert.ok(result !== null, 'the conformance plans are in contract');
@@ -384,8 +385,13 @@ export async function assertCommandTransactionContract(h: TransactionalOutboxHar
   assert.deepEqual(fa.aggregate, { type: 'item', id: first.mutation.aggregateId, version: 1, state: { name: hostile, quantity: 1 } },
     'the aggregate is created at version 1 with exactly its changes, every value bound as data');
   assert.equal(fa.audit.length, 1, 'with exactly one audit record');
-  const { at, ...audited } = fa.audit[0];
-  assert.deepEqual(audited, first.audit, 'the audit record as the command carried it');
+  // The bounded reason pair is a sensitive command's, and a conformance command is not one: it carries
+  // nulls, and an adapter may either keep them or write its own fixed pair in their place
+  // (M5-GIAM-D1-P2), so it is compared separately from the fields every adapter copies through unchanged.
+  const { at, reasonCode: _rc, reason: _r, ...audited } = fa.audit[0];
+  const { reasonCode, reason, ...carried } = first.audit;
+  assert.deepEqual(audited, carried, 'the audit record as the command carried it');
+  assert.deepEqual([reasonCode, reason], [null, null], 'a conformance command records no sensitive reason');
   assert.ok(Number.isSafeInteger(at) && at > 0, 'stamped with the transaction timestamp');
   assert.deepEqual(fa.events.map((e) => e.envelope), first.events.map((draft) => ({ ...draft, occurredAt: at })),
     'every event enqueued as sent, stamped with that same transaction timestamp');

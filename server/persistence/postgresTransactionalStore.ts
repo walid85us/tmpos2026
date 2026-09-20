@@ -91,7 +91,9 @@ export interface AggregateMutator {
    * Apply the mutation on the open transaction through fixed, parameterized statements: 'applied' once
    * exactly its row was created (mode create) or moved from expectedVersion to the next (mode update), or
    * 'conflict' when that precondition does not hold. An update may also answer 'not_found' — its aggregate
-   * does not exist — or 'unchanged' — its changes already hold at expectedVersion, so it wrote nothing,
+   * does not exist — 'invalid_state' — the aggregate is there at the expected version but its current state
+   * does not admit this change, so nothing was written and nothing commits (M5-GIAM-D1-P2) — or 'unchanged'
+   * — its changes already hold at expectedVersion, so it wrote nothing,
    * and it holds the aggregate's row locked until the transaction ends, so the store's completion of the
    * no-op is recorded at the moment it was decided (M5-GIAM-D1-P1-R1). Anything else — another answer, a
    * throw — commits nothing.
@@ -107,7 +109,18 @@ export interface AggregateMutator {
  * rather than owning it, so no authorization policy lives in persistence and a command can be proven
  * against a synthetic revalidator with no database at all.
  */
-export type ContextRevalidator = (sql: PgTransactionScope, scope: TrustedScope, permission: string) => Promise<boolean>;
+export type ContextRevalidator = (
+  sql: PgTransactionScope,
+  scope: TrustedScope,
+  permission: string,
+  /**
+   * When this attempt's trusted authentication evidence goes stale (epoch ms), for a command whose route
+   * required a recent authentication — judged against the DATABASE's clock, not this process's, so a
+   * request that was fresh when the chain admitted it cannot commit once the evidence has expired
+   * (M5-GIAM-D1-P2). null when the route required none, and then no freshness is checked.
+   */
+  authNotAfter: number | null,
+) => Promise<boolean>;
 
 export interface TransactionalStoreOptions {
   readonly client: SupervisedPgClient;
@@ -135,6 +148,8 @@ const RECLAIMED = Object.freeze({ outcome: 'acquired', reclaimed: true });
 const IN_PROGRESS = answer('in_progress');
 const CONFLICT = answer('conflict');
 const NOT_FOUND = answer('not_found');
+/** The aggregate is there at the expected version, but its current state does not allow this change. */
+const INVALID_STATE = answer('invalid_state');
 const UNCHANGED = answer('unchanged');
 const COMPLETED = answer('completed');
 const LEASE_LOST = answer('lease_lost');
@@ -155,9 +170,19 @@ const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
-const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'mutation', 'audit', 'events', 'context'];
+const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'mutation', 'audit', 'events', 'context', 'authNotAfter'];
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
-const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId'];
+const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId', 'reasonCode', 'reason'];
+/** A closed lowercase token naming what an audited action did; the runtime validated it before it got here. */
+const REASON_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+/** 500 Unicode scalar values at two UTF-16 units each: the bound the runtime's own contract applies. */
+const MAX_REASON_LENGTH = 1_000;
+/**
+ * The characters a recorded reason may not carry, re-checked here independently of the runtime that built
+ * it: controls, the line and paragraph separators, a lone surrogate and every Bidi_Control character. The
+ * value is kept verbatim in a durable, append-only row people read, so two layers refuse it, not one.
+ */
+const REASON_REFUSED_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
 const EVENT_FIELDS: readonly string[] = [
   'eventId', 'type', 'version', 'aggregateType', 'aggregateId', 'aggregateVersion', 'tenant', 'store', 'actor', 'correlationId', 'payload',
 ];
@@ -328,6 +353,8 @@ interface Command {
   readonly scope: string; readonly lease: string; readonly response: string; readonly unchanged: string | null;
   readonly mutator: AggregateMutator; readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput;
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
+  /** When this attempt's trusted authentication evidence goes stale, or null when its route required none. */
+  readonly authNotAfter: number | null;
 }
 
 
@@ -342,7 +369,10 @@ interface Command {
 function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
-    const { scope, lease, response, unchanged, mutation, audit, events, context: rawContext } = raw;
+    const { scope, lease, response, unchanged, mutation, audit, events, context: rawContext, authNotAfter } = raw;
+    // The instant this attempt's trusted authentication evidence goes stale, when its route required one
+    // (M5-GIAM-D1-P2). Read once here and judged inside the transaction against the database's clock.
+    if (authNotAfter !== null && !isInteger(authNotAfter, 1, Number.MAX_SAFE_INTEGER)) return UNAVAILABLE;
     if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST;
     if (!isSealed(response) || response.length === 0 || !isRecord(mutation) || !hasExactKeys(mutation, MUTATION_FIELDS)) return UNAVAILABLE;
     const { kind, aggregateType, aggregateId, expectedVersion, changes: rawChanges } = mutation;
@@ -360,6 +390,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // be proved against one actor and audited as another.
     const context = rawContext === null ? null : trustedScopeOf(rawContext);
     if (context === undefined) return UNAVAILABLE;
+    // A freshness claim with no actor to hold it is not one this store can judge, and it is refused here —
+    // at validation, before a transaction is opened — rather than inside the commit.
+    if (context === null && authNotAfter !== null) return UNAVAILABLE;
     // A command is a write. A context the resolver marked read-only — because the account, the tenant
     // or the store is `read_only` or `overdue` — may not perform one, and that limiting is applied
     // here rather than left to a caller who might forget it.
@@ -368,8 +401,14 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // context, only a PLATFORM-scope context commits here; a tenant- or store-scoped one is refused
     // rather than audited at a scope this transaction cannot prove.
     if (context !== null && context.scope !== 'platform') return UNAVAILABLE;
-    const { action, permission, scope: auditScope, tenant, store, actor, correlationId } = audit;
+    const { action, permission, scope: auditScope, tenant, store, actor, correlationId, reasonCode, reason } = audit;
     if (action !== kind || auditScope !== 'platform') return UNAVAILABLE;
+    // The bounded reason pair a sensitive command records: both present or both absent, each within the
+    // same bounds the runtime's own contract applied. A reason with no code, or a code with no reason,
+    // is not a pair this store will write.
+    if ((reasonCode === null) !== (reason === null)) return UNAVAILABLE;
+    if (reasonCode !== null && (typeof reasonCode !== 'string' || !REASON_CODE_RE.test(reasonCode))) return UNAVAILABLE;
+    if (reason !== null && (typeof reason !== 'string' || reason.length === 0 || reason.length > MAX_REASON_LENGTH || REASON_REFUSED_RE.test(reason))) return UNAVAILABLE;
     // With no context the audit names no tenant, store or actor, exactly as before. With one, it names
     // that context's own values and nothing else — never a value the caller chose independently.
     if (tenant !== (context === null ? null : context.tenant) || store !== (context === null ? null : context.store)
@@ -406,7 +445,14 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       requestId: correlationId, traceId: null, actorInternalUserId: context === null ? null : context.actor,
       actorAuthProvider: null, onBehalfOfInternalUserId: null,
       scopeType: 'platform', tenantId: null, storeId: null, actionId: kind as string, requiredPermission: permission, decision: 'allow',
-      reasonCode: 'command_committed', humanReadableReason: 'An authorized command committed atomically with its idempotency completion and outbox events.',
+      // A sensitive command's own bounded pair when it carries one — the transition it performed, and the
+      // operator's words as its planner validated them (M5-GIAM-D1-P2) — otherwise the fixed pair every
+      // command has always written. Neither is ever taken from a caller-named audit field: the runtime
+      // built both from the plan its own contract accepted.
+      reasonCode: reasonCode === null ? 'command_committed' : reasonCode as string,
+      humanReadableReason: reason === null
+        ? 'An authorized command committed atomically with its idempotency completion and outbox events.'
+        : reason as string,
       resultStatus: 'succeeded', sourceOfTruth: 'command_transaction', evaluatedBy: COMMAND_AUDIT_EVALUATED_BY, evidenceLevel: 'durable_compliance_event', metadata: {},
       // The record's direct subject (migration 009): a tenant command's own target — the aggregate ID checked
       // above, which its mutator locks and changes — never a value the caller's audit record names. So the
@@ -419,6 +465,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     });
     return Object.freeze({
       scope, lease, response, unchanged: unchanged as string | null, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
+      authNotAfter: authNotAfter as number | null,
     });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
@@ -441,13 +488,17 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   //     route's own requirement, which the runtime put on the audit record (M5-GIAM-D1-P1-R1).
   if (c.context !== null) {
     if (revalidate === null) return refuse(UNAVAILABLE);
-    if ((await revalidate(sql, c.context, c.audit.requiredPermission)) !== true) return refuse(UNAVAILABLE);
+    if ((await revalidate(sql, c.context, c.audit.requiredPermission, c.authNotAfter)) !== true) return refuse(UNAVAILABLE);
   }
   // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent wrote nothing and
   //    rolls back, so no completion, audit record or event exists for it.
   const applied = await c.mutator.apply(sql, c.mutation);
   if (applied === 'conflict') return refuse(CONFLICT);
   if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
+  // 2a. The aggregate is there at the expected version, but its current state does not admit this change —
+  //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2). The
+  //     mutator wrote nothing and the whole transaction rolls back: no completion, audit record or event.
+  if (c.mutator.mode === 'update' && applied === 'invalid_state') return refuse(INVALID_STATE);
   // 2b. Changes already in place (M5-GIAM-D1-P1-R1): the mutator moved nothing and still holds the aggregate's row
   //     locked, so the no-op's sealed response is recorded as the completion HERE, under the lease held since step 1,
   //     and commits with the decision — no change can land between them, and a retry replays exactly it. Nothing

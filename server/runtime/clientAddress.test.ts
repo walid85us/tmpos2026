@@ -199,7 +199,7 @@ test('entries left of the client are never examined: whatever the client wrote t
 // --- real loopback sockets ---------------------------------------------------------------------------
 
 const OPEN: RouteDefinition = {
-  method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none',
+  method: 'GET', path: '/v1/open', policy: { access: 'public' }, body: { kind: 'none' }, idempotency: 'none', trustedContext: 'none', recentAuth: 'none',
   handler: (_req, res) => { res.status(200).json({ ok: true }); },
 };
 const keyring = createLimiterKeyring(TEST_RATE_LIMIT_KEY);

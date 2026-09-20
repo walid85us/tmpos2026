@@ -396,6 +396,8 @@ test('a committed update answers exactly its representation, and the port receiv
     }, 'only displayName changes');
     assert.deepEqual({ ...c.audit, correlationId: '' }, {
       action: 'platform.tenant.display_name.update', permission: 'edit_tenant_profile', scope: 'platform', tenant: null, store: null, actor: ACTOR, correlationId: '',
+      // This command records no sensitive reason, so the bounded pair stays null and the store writes its fixed one.
+      reasonCode: null, reason: null,
     }, 'the audit names the resolved actor, at platform scope');
     assert.equal(c.events.length, 1, 'exactly one event');
     const [e] = c.events;
