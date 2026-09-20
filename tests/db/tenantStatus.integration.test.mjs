@@ -448,7 +448,11 @@ test('M5S-05: a suspension commits the status, both versions, one audit record, 
     ['tenant_status_active_to_suspended', 'tenant_status_suspended_to_active']);
 });
 
-test('M5S-06: a refusal commits nothing at all — no status, no version, no audit record, no event, no completion', async () => {
+test('M5S-06: a deterministic rejection writes no business state and SEALS its own 409 as the completion; a missing tenant seals nothing', async () => {
+  // M5-GIAM-D1-P2-R1. The two post-authorization rejections are decided inside the transaction that
+  // already fenced the lease, revalidated the authority and locked the tenant row — so each records its
+  // own bounded 409 there and commits that alone. Nothing else: no status, no version, no audit record,
+  // no event. The intent is then terminal for the rest of its retention.
   for (const [label, status, expected, outcome] of [
     ['a stale expected version', 'suspended', 99_999, 'conflict'],
     ['a state the transition cannot start from', 'active', null, 'invalid_state'],
@@ -456,14 +460,22 @@ test('M5S-06: a refusal commits nothing at all — no status, no version, no aud
     const tenant = await newTenant(`refusal-${outcome}`);
     const before = await tenantRow(tenant);
     const version = expected === null ? Number(before.row_version) : expected;
-    const { record, answer } = await transition(OWNER, tenant, status, version);
+    const { record, answer, command } = await transition(OWNER, tenant, status, version);
     assert.deepEqual(answer, { outcome }, label);
     assert.deepEqual(await tenantRow(tenant), before, `${label}: the row is untouched`);
     assert.equal((await auditsOf(tenant)).length, 0, `${label}: no audit record`);
     assert.equal((await eventsFor(tenant)).length, 0, `${label}: no event`);
-    assert.equal(await recordDone(record.operation.scope), false, `${label}: the record is not completed`);
+    assert.equal(await recordDone(record.operation.scope), true, `${label}: the rejection IS the completion`);
+    // The record replays the exact sealed 409 the command carried for this rejection, and nothing else.
+    const replay = await store.idempotency.acquire({ ...record.operation, lease: randomBytes(32).toString('base64url'), ...IDEMPOTENCY_POLICY }, signal());
+    const sealed = outcome === 'conflict' ? command.rejected.conflict : command.rejected.invalidState;
+    assert.equal(replay.outcome, 'replay', `${label}: the sealed rejection replays`);
+    assert.equal(replay.response, sealed, `${label}: byte for byte, the 409 the commit recorded`);
+    // And the key is terminal: the same lease can never turn the refused intent into a mutation.
+    assert.deepEqual(await commit(command), { outcome: 'lease_lost' }, `${label}: no second commit under the sealed record`);
+    assert.deepEqual(await tenantRow(tenant), before, `${label}: still untouched`);
   }
-  // A missing tenant: the same, and the answer says only that.
+  // A missing tenant is NOT sealed: the aggregate may yet exist, so the lease is left to expire.
   const missing = await transition(OWNER, randomUUID(), 'suspended', 1);
   assert.deepEqual(missing.answer, { outcome: 'not_found' });
   assert.equal(await recordDone(missing.record.operation.scope), false);

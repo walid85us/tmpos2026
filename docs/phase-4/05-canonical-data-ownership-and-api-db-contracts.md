@@ -62,10 +62,10 @@ For each domain: canonical tables, aggregate root, tenant/store ownership, lifec
 | Versioned paths | `/api/v1/...` (tenant), `/admin/v1/...` (Backend CP) |
 | Request/response schemas | typed, validated at the boundary; reject unknown fields on writes |
 | Pagination/filtering/sorting | cursor pagination; explicit allowlisted filter/sort fields |
-| Concurrency | `version`/`updated_at` optimistic concurrency; conflicting write → 409 `write_conflict`, never recorded for replay |
+| Concurrency | `version`/`updated_at` optimistic concurrency; conflicting write → 409 `write_conflict`, sealed as the idempotency record's completion in the transaction that decided it (M5-GIAM-D1-P2-R1), so an identical retry replays it and the key cannot mutate while that record is retained |
 | Idempotency | `Idempotency-Key` header for retryable/mutating requests; durable key store in PostgreSQL, completed in the mutation's own transaction ([ADR-17](./10-architecture-decision-records.md)) |
 | Correlation | server-generated `request_id`/`trace_id`; **no sensitive identifier** in correlation values |
-| Error envelope | bounded `{ error: { code, message, correlationId } }`; **no stack traces, no raw DB/provider errors** |
+| Error envelope | bounded `{ error: { code, message, correlationId } }`; **no stack traces, no raw DB/provider errors**. The shipped runtime's own refusals carry `{ error, requestId }`, and a RECORDED rejection (M5-GIAM-D1-P2-R1) carries the refusal word alone — a body replayed byte for byte may hold no correlation value, so the fresh one travels on `X-Request-Id` |
 | Auth errors | 401 (unauthenticated), sanitized |
 | Authz errors | 403 (authenticated but not permitted), sanitized reason code |
 | Validation | 422 with field-level codes (no echoed secrets) |

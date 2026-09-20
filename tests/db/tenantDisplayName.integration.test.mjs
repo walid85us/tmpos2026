@@ -410,21 +410,31 @@ test('M5D-05: a committed command moves the name and the version together with o
   assert.equal((await tenantRow(tenant)).row_version, '2');
 });
 
-test('M5D-06: a stale version, a missing tenant, changes already in place, a lost lease and a stale context each commit nothing', async () => {
+test('M5D-06: a stale version, a missing tenant, changes already in place, a lost lease and a stale context each write no business state; only the deterministic and no-op answers commit a completion', async () => {
   const tenant = await newTenant(`m5d-refuse-${SUFFIX}`);
   const context = await contextOf(OWNER);
-  const nothingMoved = async (label, record, correlation) => {
+  // `sealed` is the one difference between the two kinds of refusal (M5-GIAM-D1-P2-R1): a conflict is
+  // deterministic, so it records its own bounded 409 as the completion inside the transaction that
+  // decided it; every other refusal here records nothing at all and leaves the lease to expire.
+  const nothingMoved = async (label, record, correlation, sealed = false) => {
     assert.deepEqual({ ...(await tenantRow(tenant)) }.row_version, '1', `${label}: no version moved`);
     assert.equal((await tenantRow(tenant)).display_name, `m5d-refuse-${SUFFIX}`, `${label}: no name moved`);
     assert.equal((await auditFor(correlation)).length, 0, `${label}: no audit record`);
     assert.equal((await eventsFor(tenant)).length, 0, `${label}: no event`);
-    if (record !== null) assert.equal(await recordDone(record.operation.scope), false, `${label}: the record stays in progress`);
+    if (record !== null) {
+      assert.equal(await recordDone(record.operation.scope), sealed,
+        `${label}: ${sealed ? 'the rejection IS the completion' : 'the record stays in progress'}`);
+    }
   };
   const stale = { tenantId: tenant, displayName: 'Stale', expectedVersion: 7 };
   let record = await acquired(OWNER, stale);
   let command = prepared(record, context, stale).command;
   assert.deepEqual(await commit(command), { outcome: 'conflict' });
-  await nothingMoved('stale version', record, command.audit.correlationId);
+  await nothingMoved('stale version', record, command.audit.correlationId, true);
+  // The sealed 409 is what the key now answers with, for the rest of its retention.
+  const sealedReplay = await store.idempotency.acquire({ ...record.operation, lease: randomBytes(32).toString('base64url'), ...IDEMPOTENCY_POLICY }, signal());
+  assert.equal(sealedReplay.outcome, 'replay', 'the conflict replays');
+  assert.equal(sealedReplay.response, command.rejected.conflict, 'byte for byte, the 409 the commit recorded');
 
   const missing = { tenantId: randomUUID(), displayName: 'Nobody', expectedVersion: 1 };
   record = await acquired(OWNER, missing);

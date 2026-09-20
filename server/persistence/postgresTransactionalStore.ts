@@ -90,9 +90,10 @@ export interface AggregateMutator {
   /**
    * Apply the mutation on the open transaction through fixed, parameterized statements: 'applied' once
    * exactly its row was created (mode create) or moved from expectedVersion to the next (mode update), or
-   * 'conflict' when that precondition does not hold. An update may also answer 'not_found' — its aggregate
+   * 'conflict' when that precondition does not hold, having written nothing. An update may also answer 'not_found' — its aggregate
    * does not exist — 'invalid_state' — the aggregate is there at the expected version but its current state
-   * does not admit this change, so nothing was written and nothing commits (M5-GIAM-D1-P2) — or 'unchanged'
+   * does not admit this change, so nothing was written and no business state commits — only the sealed
+   * rejection's own completion may (M5-GIAM-D1-P2; M5-GIAM-D1-P2-R1) — or 'unchanged'
    * — its changes already hold at expectedVersion, so it wrote nothing,
    * and it holds the aggregate's row locked until the transaction ends, so the store's completion of the
    * no-op is recorded at the moment it was decided (M5-GIAM-D1-P1-R1). Anything else — another answer, a
@@ -170,7 +171,9 @@ const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
-const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'mutation', 'audit', 'events', 'context', 'authNotAfter'];
+const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'rejected', 'mutation', 'audit', 'events', 'context', 'authNotAfter'];
+/** The sealed responses for the two deterministic post-authorization rejections (M5-GIAM-D1-P2-R1). */
+const REJECTED_FIELDS: readonly string[] = ['conflict', 'invalidState'];
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
 const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId', 'reasonCode', 'reason'];
 /** A closed lowercase token naming what an audited action did; the runtime validated it before it got here. */
@@ -351,6 +354,8 @@ interface EventDraft {
 }
 interface Command {
   readonly scope: string; readonly lease: string; readonly response: string; readonly unchanged: string | null;
+  /** The sealed 409 this transaction records as the completion when it determines that rejection, in it. */
+  readonly rejected: Readonly<{ conflict: string; invalidState: string | null }>;
   readonly mutator: AggregateMutator; readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput;
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
   /** When this attempt's trusted authentication evidence goes stale, or null when its route required none. */
@@ -369,7 +374,7 @@ interface Command {
 function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
-    const { scope, lease, response, unchanged, mutation, audit, events, context: rawContext, authNotAfter } = raw;
+    const { scope, lease, response, unchanged, rejected: rawRejected, mutation, audit, events, context: rawContext, authNotAfter } = raw;
     // The instant this attempt's trusted authentication evidence goes stale, when its route required one
     // (M5-GIAM-D1-P2). Read once here and judged inside the transaction against the database's clock.
     if (authNotAfter !== null && !isInteger(authNotAfter, 1, Number.MAX_SAFE_INTEGER)) return UNAVAILABLE;
@@ -381,6 +386,14 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     if (mutator.mode === 'create' ? expectedVersion !== null : !isInteger(expectedVersion, 1, Number.MAX_SAFE_INTEGER - 1)) return UNAVAILABLE;
     // An unchanged response belongs to an update alone, and is sealed text exactly like the response.
     if (unchanged !== null && (mutator.mode !== 'update' || !isSealed(unchanged) || unchanged.length === 0)) return UNAVAILABLE;
+    // The two sealed deterministic rejections, read once and re-checked here (M5-GIAM-D1-P2-R1). Every
+    // command carries a conflict; only an update can be in a state that refuses its change, so a create
+    // must carry no invalidState and an update must carry one — a command missing the response for the
+    // rejection its own mode can reach would otherwise reach the commit and roll back there instead.
+    if (!isRecord(rawRejected) || !hasExactKeys(rawRejected, REJECTED_FIELDS)) return UNAVAILABLE;
+    const { conflict, invalidState } = rawRejected;
+    if (!isSealed(conflict) || conflict.length === 0) return UNAVAILABLE;
+    if (mutator.mode === 'update' ? !(isSealed(invalidState) && invalidState.length > 0) : invalidState !== null) return UNAVAILABLE;
     const changes = scalarRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
     // The trusted context, read once. A command carries one or it does not; anything that is not a
@@ -464,7 +477,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       kind: mutator.kind, aggregateType: mutator.aggregateType, aggregateId, expectedVersion: expectedVersion as number | null, changes,
     });
     return Object.freeze({
-      scope, lease, response, unchanged: unchanged as string | null, mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
+      scope, lease, response, unchanged: unchanged as string | null,
+      rejected: Object.freeze({ conflict: conflict as string, invalidState: (invalidState ?? null) as string | null }),
+      mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
       authNotAfter: authNotAfter as number | null,
     });
   } catch {
@@ -492,14 +507,34 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   }
   // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent wrote nothing and
   //    rolls back, so no completion, audit record or event exists for it.
+  // A sealed rejection COMMITS (M5-GIAM-D1-P2-R1), so — unlike the rollback it replaced — it would carry
+  // anything the mutator had written before deciding to refuse. The mutator contract forbids that: a
+  // mutator answers 'conflict' or 'invalid_state' having written nothing. The store CANNOT verify it
+  // here: the kernel's statement gate admits DML only, so a SAVEPOINT around the mutation is not
+  // available to this file (supervisedPgClient.ts: 'Anything else — transaction control, SAVEPOINT,
+  // COPY, SET, DO, CALL, LOCK — is refused before the driver is asked'). The guarantee is therefore the
+  // mutator's, stated in its contract above and held by both registered mutators, each of which decides
+  // and writes inside one fixed definer routine. Recorded as DA-36.
   const applied = await c.mutator.apply(sql, c.mutation);
-  if (applied === 'conflict') return refuse(CONFLICT);
+  // 2a. The aggregate is not at the version this request named (M5-GIAM-D1-P2-R1). The mutator wrote
+  //     nothing, and still holds whatever row it read under the lease this transaction fenced at step 1
+  //     and the authority it revalidated at step 1b — so the rejection is a decided property of the
+  //     intent, and its sealed 409 is recorded as the completion HERE and commits with that decision.
+  //     Nothing else is written: no mutation, no audit record, no event. The key is then terminal for
+  //     the rest of its retention, so the same intent can never be replanned into a mutation; an
+  //     identical retry replays this exact 409 instead. A completion that does not hold — a lease
+  //     reclaimed, or a retention that ended while this transaction ran — rolls the whole thing back to
+  //     'unavailable', which records nothing and leaves the lease to expire as it did before.
+  if (applied === 'conflict') return (await completed(sql, c.scope, c.lease, c.rejected.conflict)) ? CONFLICT : refuse(UNAVAILABLE);
   if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
-  // 2a. The aggregate is there at the expected version, but its current state does not admit this change —
-  //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2). The
-  //     mutator wrote nothing and the whole transaction rolls back: no completion, audit record or event.
-  if (c.mutator.mode === 'update' && applied === 'invalid_state') return refuse(INVALID_STATE);
-  // 2b. Changes already in place (M5-GIAM-D1-P1-R1): the mutator moved nothing and still holds the aggregate's row
+  // 2b. The aggregate is there at the expected version, but its current state does not admit this change —
+  //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2).
+  //     Sealed and recorded exactly as the conflict above, and for the same reason.
+  if (c.mutator.mode === 'update' && applied === 'invalid_state') {
+    if (c.rejected.invalidState === null) return refuse(UNAVAILABLE);
+    return (await completed(sql, c.scope, c.lease, c.rejected.invalidState)) ? INVALID_STATE : refuse(UNAVAILABLE);
+  }
+  // 2c. Changes already in place (M5-GIAM-D1-P1-R1): the mutator moved nothing and still holds the aggregate's row
   //     locked, so the no-op's sealed response is recorded as the completion HERE, under the lease held since step 1,
   //     and commits with the decision — no change can land between them, and a retry replays exactly it. Nothing
   //     else is written: no audit record and no event, since nothing changed. A command with no unchanged response,

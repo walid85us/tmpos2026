@@ -122,7 +122,15 @@ const MAX_ENVELOPE_BYTES = 2 * MAX_REPLAY_BODY_BYTES + 1_024;
 export const MAX_SEALED_LENGTH = Math.ceil(((IV_BYTES + MAX_ENVELOPE_BYTES + TAG_BYTES) * 4) / 3);
 
 // The error words only the runtime answers with: an operation's outcome may not borrow one.
-const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict']);
+const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state']);
+/**
+ * The deterministic post-authorization rejections a command seals as its own completion
+ * (M5-GIAM-D1-P2-R1): the aggregate was not at the version the request named, or its current state does
+ * not admit the change. Both are decided inside the committing transaction — after the fence, the
+ * authority revalidation and the row lock — so each is a property of the intent, not of the moment,
+ * which is what makes it safe to record and replay. Every other refusal stays unsealed.
+ */
+const SEALED_REFUSALS: ReadonlySet<string> = new Set(['write_conflict', 'invalid_state']);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
 const LOCATION_RE = /^\/(?!\/)(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$/;
@@ -247,8 +255,13 @@ export function readIdempotencyKey(rawHeaders: readonly string[]): { readonly ke
   return typeof value === 'string' && value.length === 36 && KEY_RE.test(value) ? Object.freeze({ key: value.toLowerCase() }) : 'idempotency_key_invalid';
 }
 
-/** A strictly valid envelope as a fresh frozen copy, or null; a malformed body throws (callers catch). */
-function envelopeOf(raw: unknown): ReplayEnvelope | null {
+/**
+ * A strictly valid envelope as a fresh frozen copy, or null; a malformed body throws (callers catch).
+ * This is the structural bound alone — it is applied both when minting a record from an outcome and when
+ * reading a sealed one back, so the rule about which error words an OUTCOME may use lives at the minting
+ * site (envelopeFromOutcome) and not here.
+ */
+function envelopeOf(raw: unknown, fromOutcome: boolean): ReplayEnvelope | null {
   if (!isRecord(raw) || !hasOnlyKeys(raw, ENVELOPE_FIELDS)) return null;
   // Read once each: an answer cannot validate one value and hand back another.
   const { status, contentType, headers, body } = raw;
@@ -258,8 +271,17 @@ function envelopeOf(raw: unknown): ReplayEnvelope | null {
   if (location !== undefined && (typeof location !== 'string' || location.length > MAX_LOCATION_LENGTH || !LOCATION_RE.test(location))) return null;
   if (typeof body !== 'string' || LONE_SURROGATE_RE.test(body) || Buffer.byteLength(body, 'utf8') > MAX_REPLAY_BODY_BYTES) return null;
   const value: unknown = JSON.parse(body);
-  // The runtime's own refusal words stay the runtime's, so a client can tell them from an outcome.
-  if (isRecord(value) && typeof value.error === 'string' && RESERVED_ERRORS.has(value.error)) return null;
+  // The runtime's own refusal words stay the runtime's, so a client can tell them from an operation's
+  // answer. Judged HERE, on the SERIALIZED text: a getter that answers one way while its value is
+  // validated and another way while it is serialized cannot smuggle a word through, because by this
+  // point the value is the exact text that will be recorded and nothing can read differently again.
+  //
+  // `fromOutcome` is the one difference between the two callers. An outcome or a plan may spell NONE of
+  // the reserved words. A record being read back may carry the two a command seals as its own completion
+  // (refusalEnvelope, M5-GIAM-D1-P2-R1): those ARE the runtime answering, and a record that could not be
+  // read back would be a record no retry could replay.
+  if (isRecord(value) && typeof value.error === 'string'
+    && RESERVED_ERRORS.has(value.error) && (fromOutcome || !SEALED_REFUSALS.has(value.error))) return null;
   return Object.freeze({ status, contentType, headers: Object.freeze(typeof location === 'string' ? { location } : {}), body });
 }
 
@@ -274,10 +296,30 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
     const { status, body, headers } = raw;
     // Plain JSON data only: nothing JSON.stringify would drop or rewrite is recorded as if it were intended.
     if (!isJsonData(body)) return null;
-    return envelopeOf({ status, contentType: REPLAY_CONTENT_TYPE, headers: headers === undefined ? {} : headers, body: JSON.stringify(body) });
+    // An outcome may spell none of the runtime's own refusal words — judged by envelopeOf on the text
+    // this serialization produces, never on the live value, which a getter could change underneath it.
+    return envelopeOf({ status, contentType: REPLAY_CONTENT_TYPE, headers: headers === undefined ? {} : headers, body: JSON.stringify(body) }, true);
   } catch {
     return null; // a hostile getter: not retainable
   }
+}
+
+/**
+ * The runtime's OWN sealed refusal for a deterministic post-authorization rejection (M5-GIAM-D1-P2-R1):
+ * a bounded 409 carrying exactly one refusal word and nothing else, or null for any word that is not
+ * one of the two. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
+ * one — and this is the single place that mints it, from a fixed token this module owns: never from a
+ * plan, a port, a handler or a request.
+ *
+ * It carries no correlation ID, unlike the refusals `refuse` sends (app.ts). A recorded response is
+ * replayed byte for byte, so a request ID inside the body would name, for a whole day, a request that
+ * is long over; the fresh one travels on the X-Request-Id header of every replay instead.
+ */
+export function refusalEnvelope(error: string): ReplayEnvelope | null {
+  if (!SEALED_REFUSALS.has(error)) return null;
+  return Object.freeze({
+    status: 409, contentType: REPLAY_CONTENT_TYPE, headers: Object.freeze({}), body: JSON.stringify({ error }),
+  });
 }
 
 const MAX_JSON_DEPTH = 64;
@@ -327,7 +369,7 @@ export function createIdempotencyKeyring(secret: unknown): IdempotencyKeyring {
         decipher.setAAD(associated(operation));
         decipher.setAuthTag(bytes.subarray(bytes.length - TAG_BYTES));
         const plain = Buffer.concat([decipher.update(bytes.subarray(IV_BYTES, bytes.length - TAG_BYTES)), decipher.final()]);
-        return envelopeOf(JSON.parse(UTF8.decode(plain)) as unknown);
+        return envelopeOf(JSON.parse(UTF8.decode(plain)) as unknown, false);
       } catch {
         return null; // sealed for another operation or key, altered, or not an envelope
       }

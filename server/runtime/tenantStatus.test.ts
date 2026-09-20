@@ -259,7 +259,7 @@ interface Harness {
   advance(ms: number): void;
   patch(over?: { body?: string; key?: string | null; headers?: Record<string, string | null> }): Promise<Reply>;
 }
-interface Setup { answer?: Answer; authorize?: (...args: unknown[]) => unknown }
+interface Setup { answer?: Answer; authorize?: (...args: unknown[]) => unknown; completion?: 'lease_lost' }
 
 async function withRoute(setup: Setup, fn: (h: Harness) => Promise<void>): Promise<void> {
   const rec: Recorder = { authorizations: [] };
@@ -277,6 +277,18 @@ async function withRoute(setup: Setup, fn: (h: Harness) => Promise<void>): Promi
     async commit(c, s) {
       commits.push(c);
       if (answer === 'throw') throw new Error('store-secret-detail');
+      // As the store does since M5-GIAM-D1-P2-R1: each deterministic post-authorization rejection records
+      // its own sealed 409 as the completion inside the same commit, so the intent is decided once. A
+      // completion that does not hold rolls the whole thing back and records nothing.
+      if (answer === 'conflict' || answer === 'invalid_state') {
+        const sealed = answer === 'conflict' ? c.rejected.conflict : c.rejected.invalidState;
+        if (sealed === null) return { outcome: 'unavailable' };
+        // A completion that does not hold — a reclaimed lease, a retention that ended — rolls the whole
+        // transaction back, so nothing is recorded and the lease is left exactly as it was.
+        if (setup.completion === 'lease_lost') return { outcome: 'unavailable' };
+        const recorded = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: sealed }), s);
+        return { outcome: (recorded as { outcome?: unknown }).outcome === 'completed' ? answer : 'unavailable' };
+      }
       if (answer !== 'committed') return { outcome: answer };
       const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.response }), s);
       return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'committed' : 'lease_lost' };
@@ -413,11 +425,9 @@ test('a committed transition answers exactly its representation, and the port re
   });
 });
 
-test('every port answer maps to its own bounded outcome, and an invalid transition is a 409 that commits nothing', async () => {
+test('every unsealed port answer maps to its own bounded refusal, and no port detail crosses the boundary', async () => {
   for (const [answer, status, error] of [
-    ['conflict', 409, 'write_conflict'],
     ['not_found', 404, 'not_found'],
-    ['invalid_state', 409, 'invalid_state'],
     ['unavailable', 503, 'service_unavailable'],
     ['lease_lost', 503, 'service_unavailable'],
     ['throw', 503, 'service_unavailable'],
@@ -429,6 +439,37 @@ test('every port answer maps to its own bounded outcome, and an invalid transiti
       assert.equal(h.commits.length, 1, `${answer}: the command reached the port exactly once`);
     });
   }
+});
+
+test('each deterministic rejection is sealed in the commit that decided it: the 409 is sent once, then replayed, and the key can never mutate', async () => {
+  for (const [answer, error] of [['conflict', 'write_conflict'], ['invalid_state', 'invalid_state']] as const) {
+    await withRoute({ answer }, async (h) => {
+      const key = randomUUID();
+      const first = await h.patch({ key });
+      assert.equal(first.status, 409, `${answer}: ${first.body}`);
+      // The store's own record, so it carries the refusal word alone: a request ID inside it would be
+      // replayed for a whole day, naming a request long over (M5-GIAM-D1-P2-R1).
+      assert.deepEqual(JSON.parse(first.body), { error }, answer);
+      assert.equal(first.headers['idempotent-replayed'], undefined, `${answer}: the first answer is the decision`);
+      const again = await h.patch({ key });
+      assert.deepEqual([again.status, again.body, again.headers['idempotent-replayed']], [409, first.body, 'true'],
+        `${answer}: an identical retry replays the exact stored 409`);
+      assert.equal(h.commits.length, 1, `${answer}: the replay never reached the port`);
+      assertRefusal(await h.patch({ key, body: JSON.stringify(valid({ reason: 'A different reason, stated at length.' })) }), 422, 'idempotency_key_reused',
+        `${answer}: the key cannot be reused for a changed request`);
+      assert.equal(h.commits.length, 1, `${answer}: and it still committed exactly once`);
+    });
+  }
+});
+
+test('a rejection whose completion does not hold rolls the whole transaction back: a bounded 503, and the lease is left to expire', async () => {
+  await withRoute({ answer: 'conflict', completion: 'lease_lost' }, async (h) => {
+    const key = randomUUID();
+    assertRefusal(await h.patch({ key }), 503, 'service_unavailable', 'the seal did not hold');
+    const retry = await h.patch({ key });
+    assert.deepEqual([retry.status, (JSON.parse(retry.body) as { error?: unknown }).error], [409, 'request_in_progress'],
+      'nothing was recorded: the key waits out its lease, exactly as it did before sealing existed');
+  });
 });
 
 test('an exact retry replays the recorded response byte for byte; the same key with a different transition is refused', async () => {

@@ -232,6 +232,13 @@ async function withRoute(setup: Setup, fn: (h: Harness) => Promise<void>): Promi
         const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.unchanged }), s);
         return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'unchanged' : 'lease_lost' };
       }
+      // As the store does since M5-GIAM-D1-P2-R1: a deterministic post-authorization rejection records
+      // its own sealed 409 as the completion in the same commit, so the key is terminal and a retry
+      // replays it. Only a conflict is reachable here — this command's mutator has no invalid state.
+      if (answer === 'conflict') {
+        const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.rejected.conflict }), s);
+        return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'conflict' : 'unavailable' };
+      }
       if (answer !== 'committed') return { outcome: answer };
       const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.response }), s);
       return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'committed' : 'lease_lost' };
@@ -430,9 +437,24 @@ test('an exact retry replays the recorded response byte for byte without a secon
   });
 });
 
-test('each store answer maps to its response: 409, 404, the unchanged 200 (recorded and replayed), and a 503 for everything else', async () => {
+test('each store answer maps to its response: the sealed 409, 404, the unchanged 200 (recorded and replayed), and a 503 for everything else', async () => {
   await withRoute({ answer: 'conflict' }, async (h) => {
-    assertRefusal(await h.patch(), 409, 'write_conflict', 'another version');
+    // A conflict is decided inside the commit and recorded there, so the answer is the store's own
+    // record: the refusal word alone, with no request ID a replay would carry for a day
+    // (M5-GIAM-D1-P2-R1). The same rule the tenant-status command follows, through the shared contract.
+    const conflictKey = randomUUID();
+    const conflicted = await h.patch({ key: conflictKey });
+    assert.equal(conflicted.status, 409, conflicted.body);
+    assert.deepEqual(JSON.parse(conflicted.body), { error: 'write_conflict' }, 'another version');
+    assert.equal(conflicted.headers['idempotent-replayed'], undefined, 'the first answer is the decision itself');
+    assertPolicyHeaders(conflicted, 'another version');
+    const commitsAtConflict = h.commits.length;
+    const replayed = await h.patch({ key: conflictKey });
+    assert.deepEqual([replayed.status, replayed.body, replayed.headers['idempotent-replayed']], [409, conflicted.body, 'true'],
+      'an identical retry replays the stored 409 and never reaches the store');
+    assert.equal(h.commits.length, commitsAtConflict, 'a replay commits nothing');
+    assertRefusal(await h.patch({ key: conflictKey, body: JSON.stringify(valid({ displayName: 'Other' })) }), 422, 'idempotency_key_reused',
+      'and the key cannot be reused for a different request');
     h.setAnswer('not_found');
     const missing = await h.patch();
     assertRefusal(missing, 404, 'not_found', 'no such tenant');
@@ -459,8 +481,9 @@ test('each store answer maps to its response: 409, 404, the unchanged 200 (recor
       h.setAnswer(answer);
       assertRefusal(await h.patch(), 503, 'service_unavailable', answer);
     }
-    const logged = await reasons(h.logs, 9);
-    assert.deepEqual(logged.slice(1, 3), ['transaction_conflict', 'transaction_not_found']);
+    const logged = await reasons(h.logs, 11);
+    assert.deepEqual(logged.slice(1, 5), ['transaction_conflict', 'idempotency_replayed', 'idempotency_conflict', 'transaction_not_found'],
+      'the sealed rejection keeps its own reason in the log, and its replay reads as a replay');
     assert.deepEqual(logged.slice(-3), ['transaction_lease_lost', 'transaction_unavailable', 'transaction_unavailable']);
     assert.doesNotMatch(h.logs.join(''), /store-secret-detail/);
   });

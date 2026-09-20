@@ -15,6 +15,7 @@ import type { AppDeps } from './app.js';
 import {
   IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, MAX_REPLAY_BODY_BYTES, MAX_SEALED_LENGTH, REPLAY_CONTENT_TYPE,
   acquireIdempotency, completeIdempotency, createIdempotency, createIdempotencyKeyring, envelopeFromOutcome, readIdempotencyKey,
+  refusalEnvelope,
 } from './idempotency.js';
 import type { DurableIdempotencyStore, IdempotencyAcquireRequest, IdempotencyCompleteRequest, ReplayEnvelope } from './idempotency.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from './requestSecurity.js';
@@ -717,4 +718,46 @@ test('a perform route refuses without a resolved actor, before its key is acquir
     assert.equal((await post(port, { key: randomUUID() })).status, 201);
     assert.deepEqual([runs.length, recorded.acquires.length], [1, 1]);
   });
+});
+
+test('the runtime mints its own sealed refusal for exactly two words, and an outcome may borrow neither', () => {
+  // M5-GIAM-D1-P2-R1. A command's deterministic rejection is recorded and replayed, so the runtime needs
+  // an envelope carrying its own refusal word. That word may be minted HERE and nowhere else.
+  for (const error of ['write_conflict', 'invalid_state']) {
+    assert.deepEqual(refusalEnvelope(error), {
+      status: 409, contentType: REPLAY_CONTENT_TYPE, headers: {}, body: JSON.stringify({ error }),
+    }, error);
+    assert.ok(Object.isFrozen(refusalEnvelope(error)), `${error}: frozen`);
+  }
+  // Only those two: no other refusal is deterministic enough to record, and none may be invented here.
+  for (const error of ['request_in_progress', 'idempotency_key_reused', 'not_found', 'forbidden', 'service_unavailable', 'internal_error', '', 'WRITE_CONFLICT']) {
+    assert.equal(refusalEnvelope(error), null, error);
+  }
+  // The body carries the word alone. A recorded response is replayed byte for byte, so a correlation ID
+  // inside it would name, for a whole retention window, a request that is long over.
+  assert.deepEqual(Object.keys(JSON.parse(refusalEnvelope('write_conflict')!.body) as Record<string, unknown>), ['error']);
+  // And an operation's own outcome may answer with NONE of the words the runtime reserves for itself —
+  // including the two it now seals, which a retry would otherwise be unable to tell from a real rejection.
+  for (const error of ['write_conflict', 'invalid_state', 'request_in_progress', 'idempotency_key_reused']) {
+    assert.equal(envelopeFromOutcome({ status: 409, body: { error } }), null, `an outcome may not borrow ${error}`);
+    assert.equal(envelopeFromOutcome({ status: 422, body: { error, detail: 'x' } }), null, `nor at another retained status: ${error}`);
+  }
+  // A getter that answers one way while the outcome is validated and another way while it is serialized
+  // cannot smuggle one through: the word is judged on the text that will actually be recorded.
+  let reads = 0;
+  const shifty = { get error() { reads += 1; return reads > 3 ? 'write_conflict' : 'ordinary'; } };
+  const smuggled = envelopeFromOutcome({ status: 409, body: shifty });
+  assert.ok(smuggled === null || !smuggled.body.includes('write_conflict'),
+    'a value that serializes as a reserved word is refused, however it answered while it was checked');
+  // A sealed refusal must read back, or no retry could replay it: the bound is structural, not lexical.
+  const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+  const operation = keyring.operationOf(randomUUID(), { authProvider: 'p', authProviderUid: 'u' }, {
+    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+  });
+  const sealed = keyring.seal(refusalEnvelope('write_conflict')!, operation);
+  assert.deepEqual(keyring.unseal(sealed, operation), refusalEnvelope('write_conflict'), 'it unseals for its own operation');
+  const other = keyring.operationOf(randomUUID(), { authProvider: 'p', authProviderUid: 'u' }, {
+    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+  });
+  assert.equal(keyring.unseal(sealed, other), null, 'and for no other');
 });

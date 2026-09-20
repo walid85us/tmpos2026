@@ -448,11 +448,15 @@ function idempotencyRefusal(req: Request, res: Response, reason: IdempotencyRefu
  * allowlisted Location and the body — beside the request's own security headers and fresh
  * X-Request-Id from the frame. A replay is marked so, and carries nothing else.
  */
-function sendRecorded(res: Response, envelope: ReplayEnvelope, replayed: boolean): void {
+function sendRecorded(res: Response, envelope: ReplayEnvelope, replayed: boolean, reason?: string): void {
   if (envelope.headers.location !== undefined) res.setHeader('Location', envelope.headers.location);
   if (replayed) {
     res.setHeader('Idempotent-Replayed', 'true');
     (res.locals as Record<string, unknown>).refusal = 'idempotency_replayed'; // the request log's reason marks a replay
+  } else if (reason !== undefined) {
+    // A recorded refusal sent for the first time: the log keeps the reason a `refuse` would have
+    // carried, though the body is the store's own record rather than one built here.
+    (res.locals as Record<string, unknown>).refusal = reason;
   }
   res.setHeader('Content-Type', envelope.contentType);
   res.status(envelope.status).end(envelope.body);
@@ -892,16 +896,23 @@ export function createApp(deps: AppDeps): Express {
           });
           if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');
           // The response goes out only once the authoritative store confirms the commit, which runs under the
-          // runtime's own deadline whatever the client's connection does. A conflict or a missing aggregate
-          // committed nothing; any other refusal may or may not have committed, so none releases the lease: a
-          // retry replays or waits.
+          // runtime's own deadline whatever the client's connection does. A missing aggregate committed
+          // nothing; any refusal beyond the sealed ones may or may not have committed, so none releases the
+          // lease: a retry replays or waits.
           const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
-          if (refused === 'transaction_conflict') return refuse(req, res, 409, 'write_conflict', refused);
+          // The aggregate was not at the version this request named. The store determined that inside the
+          // transaction that already held the lease and the row, and recorded this exact 409 as the
+          // completion there (M5-GIAM-D1-P2-R1) — so it is sent as a decided answer, and every later
+          // attempt under the same key replays it rather than planning the intent again.
+          if (refused === 'transaction_conflict') return sendRecorded(res, prepared.rejected.conflict, false, refused);
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
           // The aggregate exists at the expected version, but the change its contract asks for is not one
           // its current state allows — a lifecycle transition from the wrong state, or to the state it is
-          // already in (M5-GIAM-D1-P2). Nothing committed and nothing recorded, exactly like a conflict.
-          if (refused === 'transaction_invalid_state' && contract.mode === 'update') return refuse(req, res, 409, 'invalid_state', refused);
+          // already in (M5-GIAM-D1-P2). Sealed exactly like a conflict; a create seals none, and an
+          // 'invalid_state' from one committed nothing and is the 503 below.
+          if (refused === 'transaction_invalid_state' && contract.mode === 'update' && prepared.rejected.invalidState !== null) {
+            return sendRecorded(res, prepared.rejected.invalidState, false, refused);
+          }
           // Changes already in place: the store recorded the plan's unchanged response as the completion in the
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as
           // committed. An answer the plan named no response for is no confirmation of anything: a 503.

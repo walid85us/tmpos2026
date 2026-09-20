@@ -78,8 +78,13 @@ test('a plan becomes one command: runtime-generated identities, null scope and a
   const prepared = prepareCommand(create, events, createPlan(b.newAggregateId), b);
   assert.ok(prepared);
   const { command } = prepared;
-  assert.deepEqual(Object.keys(command).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
+  assert.deepEqual(Object.keys(command).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
   assert.equal(command.unchanged, null, 'a create names no unchanged response');
+  // The runtime's own deterministic rejections, sealed for this operation and no other (M5-GIAM-D1-P2-R1).
+  assert.deepEqual(keyring.unseal(command.rejected.conflict, op),
+    { status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: '{"error":"write_conflict"}' },
+    'a conflict is sealed as a bounded 409 carrying the refusal word alone — no request ID a replay would carry for a day');
+  assert.equal(command.rejected.invalidState, null, 'a create can only conflict: it seals no invalid_state');
   assert.deepEqual(command.mutation, { kind: 'conformance.item.create', aggregateType: 'item', aggregateId: b.newAggregateId, expectedVersion: null, changes: { name: 'n', quantity: 1 } });
   assert.match(command.audit.correlationId, UUID_V4);
   assert.deepEqual(command.audit, { action: 'conformance.item.create', permission: 'items.write', scope: 'platform', tenant: null, store: null, actor: null,
@@ -216,7 +221,8 @@ test('the transaction-local audit record maps onto a valid append-only audit eve
 
 type TxDefect =
   | 'nonAtomic' | 'leaseBlind' | 'conflictBeforeLease' | 'versionBlind' | 'partialOnFailure' | 'dropsAudit' | 'dropsEvents' | 'noCompletion'
-  | 'eventIdOverwrite' | 'strictLeaseExpiry' | 'skewedPeer' | 'ignoresAbort' | 'failsOpen' | 'probesOpen' | 'losesState' | 'queuesOutage' | 'staleTimestamp';
+  | 'eventIdOverwrite' | 'strictLeaseExpiry' | 'skewedPeer' | 'ignoresAbort' | 'failsOpen' | 'probesOpen' | 'losesState' | 'queuesOutage' | 'staleTimestamp'
+  | 'unsealedConflict' | 'rejectionBlind';
 
 /**
  * An independent commit adapter — two instances, as over a remote store, with a network gap between its
@@ -241,7 +247,18 @@ function transactionHarness(defect: TxDefect | null): TransactionalOutboxHarness
       const inVersion = defect === 'versionBlind' || (mutation.expectedVersion === null ? current === undefined : current?.version === mutation.expectedVersion);
       if (defect === 'conflictBeforeLease' && !inVersion) return CONFLICT;
       if (!leaseHeld) return LEASE_LOST;
-      if (!inVersion) return CONFLICT;
+      // Every command carries the sealed 409 for each rejection its own mode can reach (M5-GIAM-D1-P2-R1).
+      const isUpdate = mutation.expectedVersion !== null;
+      const slots = command.rejected;
+      const sealedSlot = (v) => typeof v === 'string' && v.length > 0;
+      if (defect !== 'rejectionBlind'
+        && (!sealedSlot(slots?.conflict) || (isUpdate ? !sealedSlot(slots.invalidState) : slots.invalidState !== null))) return UNAVAILABLE;
+      if (!inVersion) {
+        // The rejection is decided under the lease already held, so its own sealed 409 is recorded as the
+        // completion in the same step and nothing else is written.
+        if (defect !== 'unsealedConflict' && record !== undefined) state.idempotency.records.set(command.scope, { ...record, response: command.rejected.conflict });
+        return CONFLICT;
+      }
       if (defect !== 'eventIdOverwrite' && command.events.some((e) => state.outbox.has(e.eventId))) return UNAVAILABLE;
       if (defect === 'nonAtomic') await new Promise((resolve) => setImmediate(resolve)); // the gap between the checks and the writes
       const fault = state.fault;
@@ -296,6 +313,7 @@ test('the conformance suite passes a correct independent adapter and fails every
     ['conflictBeforeLease', /a completed operation accepts no second commit/], ['versionBlind', /creating an existing aggregate conflicts/],
     ['partialOnFailure', /leaves no part behind/], ['dropsAudit', /with exactly one audit record/], ['dropsEvents', /every event enqueued as sent/],
     ['noCompletion', /the completion replays byte for byte/], ['eventIdOverwrite', /a reused event ID is a fault/],
+    ['unsealedConflict', /it recorded its own sealed 409 as the completion/], ['rejectionBlind', /an update carrying no sealed invalid_state response commits nothing/],
     ['strictLeaseExpiry', /an expired lease nobody reclaimed still commits/], ['skewedPeer', /on the peer too, until its retention ends/],
     ['ignoresAbort', /and changes nothing/], ['failsOpen', /an unreachable store commits nothing/], ['probesOpen', /never answers the probe with true/],
     ['losesState', /a committed operation survived the outage/], ['queuesOutage', /no commit attempted during the outage was queued/],
@@ -417,7 +435,7 @@ test('a command commits every part together, answers only once committed, and ev
     });
     assert.ok(UUID_V4.test(audit.correlationId) && audit.correlationId !== 'client-chosen-request-id', 'the correlation ID is the server’s, never the client’s request ID');
     assert.deepEqual(committed.events.map((e) => [e.envelope.aggregateId, e.envelope.correlationId, e.envelope.occurredAt]), [[id, audit.correlationId, audit.at]]);
-    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'response', 'scope', 'unchanged']);
+    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'unchanged']);
     assert.deepEqual(Object.keys(plans[0]).sort(), ['audience', 'body', 'newAggregateId'], 'the planner sees its context and nothing else');
     assert.equal(plans[0].newAggregateId, id, 'a create names the runtime’s aggregate ID');
     for (const retry of [await post(port, { key }), await post(port, { key: key.toUpperCase() })]) {
@@ -441,22 +459,33 @@ test('the response waits for the commit: nothing is sent before the store confir
   });
 });
 
-test('a conflict is a 409 write_conflict that commits and records nothing; the lease then simply expires', async () => {
-  await withCommands({}, async ({ port, logs, state, clock }) => {
+test('a conflict is a sealed 409 write_conflict: it commits only its own completion, and every later attempt replays it', async () => {
+  await withCommands({}, async ({ port, logs, plans, state, clock }) => {
     const { id } = JSON.parse((await post(port, { key: randomUUID() })).body) as { id: string };
     const key = randomUUID();
     const stale = JSON.stringify({ id, version: 5, name: 'stale' });
     const refused = await post(port, { key, path: '/v1/items/rename', body: stale });
     assert.deepEqual([refused.status, errorOf(refused)], [409, 'write_conflict']);
-    assert.deepEqual(inspectMemoryState(state).aggregates.map((a) => a.version), [1], 'nothing committed');
-    const waiting = await post(port, { key, path: '/v1/items/rename', body: stale });
-    assert.deepEqual([waiting.status, errorOf(waiting)], [409, 'request_in_progress'], 'nothing recorded: the key waits out its lease');
+    assert.deepEqual(JSON.parse(refused.body), { error: 'write_conflict' },
+      'the recorded body carries the refusal word alone — a request ID inside it would be replayed for a day');
+    assert.equal(refused.headers['idempotent-replayed'], undefined, 'the first answer is the decision, not a replay');
+    const after = inspectMemoryState(state);
+    assert.deepEqual([after.aggregates.map((a) => a.version), after.audit.length, after.events.length], [[1], 1, 1],
+      'the rejection committed nothing but its own completion: no change, and no audit record or event beyond the create’s');
+    const replay = await post(port, { key, path: '/v1/items/rename', body: stale });
+    assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed']], [409, refused.body, 'true'],
+      'an identical retry replays the exact stored 409 rather than waiting on a lease');
     clock.t += IDEMPOTENCY_POLICY.leaseMs;
-    const again = await post(port, { key, path: '/v1/items/rename', body: stale });
-    assert.deepEqual([again.status, errorOf(again)], [409, 'write_conflict'], 'a reclaim plans again, and conflicts again');
+    const later = await post(port, { key, path: '/v1/items/rename', body: stale });
+    assert.deepEqual([later.status, later.body, later.headers['idempotent-replayed']], [409, refused.body, 'true'],
+      'and past the lease it replays still: a sealed refusal is terminal, never replanned, so the key can never turn into a mutation');
+    const changed = await post(port, { key, path: '/v1/items/rename', body: JSON.stringify({ id, version: 1, name: 'changed' }) });
+    assert.deepEqual([changed.status, errorOf(changed)], [422, 'idempotency_key_reused'], 'nor may the key be reused for any other request');
+    assert.equal(plans.length, 2, 'the rename was planned once: every attempt after the seal answered from the record');
     assert.equal((await post(port, { key: randomUUID(), path: '/v1/items/rename', body: JSON.stringify({ id, version: 1, name: 'second' }) })).status, 200);
     assert.deepEqual(inspectMemoryState(state).aggregates.map((a) => [a.version, a.state.name]), [[2, 'second']]);
-    assert.deepEqual(await reasons(logs, 5), [undefined, 'transaction_conflict', 'idempotency_in_progress', 'transaction_conflict', undefined]);
+    assert.deepEqual(await reasons(logs, 6),
+      [undefined, 'transaction_conflict', 'idempotency_replayed', 'idempotency_replayed', 'idempotency_conflict', undefined]);
   });
 });
 

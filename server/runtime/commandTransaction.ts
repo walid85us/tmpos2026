@@ -85,7 +85,7 @@
 import { randomUUID } from 'node:crypto';
 import { types } from 'node:util';
 import { outage, withDeadline } from './deadline.js';
-import { envelopeFromOutcome } from './idempotency.js';
+import { envelopeFromOutcome, refusalEnvelope } from './idempotency.js';
 import type { ReplayEnvelope } from './idempotency.js';
 import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, isContractName, parseRecordSchema, recordOf } from './outbox.js';
 import type { EventContract, OutboxEventDraft, OutboxEventRegistry, RecordSchema, RecordValue } from './outbox.js';
@@ -202,6 +202,20 @@ export interface TransactionCommand {
    * none — always for a create — and then an 'unchanged' outcome commits nothing.
    */
   readonly unchanged: string | null;
+  /**
+   * The sealed responses for the two deterministic post-authorization rejections (M5-GIAM-D1-P2-R1),
+   * recorded as the completion — in the very transaction that fenced the lease, revalidated the
+   * authority and the authentication evidence, locked the aggregate's row and determined the refusal —
+   * so that the intent is answered once and answered the same way for the rest of its retention.
+   *
+   * `conflict` is the aggregate not being at the version the request named; every command has one.
+   * `invalidState` is the aggregate being at that version in a state the change does not admit; only an
+   * update can be, so a create's is null and an 'invalid_state' answer from a create commits nothing.
+   *
+   * The runtime mints both from its own fixed refusal words: a plan may not spell them, and neither is
+   * ever built from an outcome, a body or a request.
+   */
+  readonly rejected: Readonly<{ conflict: string; invalidState: string | null }>;
   readonly mutation: TransactionMutation;
   readonly audit: TransactionAudit;
   readonly events: readonly OutboxEventDraft[];
@@ -259,12 +273,23 @@ export interface PreparedCommand {
   readonly response: ReplayEnvelope;
   /** An update's response when the store answers 'unchanged' — which it recorded, sealed, in that commit; null when the plan names none. */
   readonly unchanged: ReplayEnvelope | null;
+  /** The two deterministic rejections as the store recorded whichever it answered: sent once, then replayed for the rest of the retention. */
+  readonly rejected: Readonly<{ conflict: ReplayEnvelope; invalidState: ReplayEnvelope | null }>;
 }
 
 /**
- * What a commit answered other than 'committed': a refusal or, for an update, a missing aggregate — or
- * 'transaction_unchanged', the one other committed answer: changes already in place, the plan's unchanged
- * response recorded as the completion in that same transaction and nothing else written.
+ * What a commit answered other than 'committed': a refusal or, for an update, a missing aggregate.
+ *
+ * Three of these are COMMITTED answers, not rollbacks — each recorded its own sealed response as the
+ * completion in the same transaction that decided it, and wrote nothing else:
+ *   - 'transaction_unchanged' — changes already in place, the plan's unchanged response recorded;
+ *   - 'transaction_conflict' — the aggregate was not at the version named, the sealed 409 recorded;
+ *   - 'transaction_invalid_state' — the state did not admit the change, the sealed 409 recorded.
+ * The last two are M5-GIAM-D1-P2-R1: before it they rolled back and left the lease in progress, so the
+ * key could later be replanned and could mutate. An adapter that cannot record the sealed refusal rolls
+ * its transaction back and answers 'transaction_unavailable' instead, which changes nothing at all.
+ *
+ * Every other member is a rollback or an unknown, and none of them releases the lease.
  */
 export type CommandRefusal =
   | 'transaction_lease_lost'
@@ -416,11 +441,23 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     // Changes already in place are no creation: their response is a 200 and nothing else.
     const unchanged = withUnchanged ? envelopeFromOutcome(unchangedOutcome) : null;
     if (withUnchanged && (unchanged === null || unchanged.status !== 200)) return null;
+    // The two deterministic post-authorization rejections, sealed here so the store can record one as
+    // the completion inside the very transaction that determined it (M5-GIAM-D1-P2-R1). Minted from the
+    // runtime's own words, never from the plan: a body an operation supplied may not spell one of them.
+    // Only an update can be in a state that refuses its change, so a create seals no invalid_state.
+    const conflict = refusalEnvelope('write_conflict');
+    const invalidState = update ? refusalEnvelope('invalid_state') : null;
+    if (conflict === null || (update && invalidState === null)) return null;
+    const rejected = Object.freeze({ conflict, invalidState });
     const command: TransactionCommand = Object.freeze({
       scope: binding.scope,
       lease: binding.lease,
       response: binding.seal(envelope),
       unchanged: unchanged === null ? null : binding.seal(unchanged),
+      rejected: Object.freeze({
+        conflict: binding.seal(conflict),
+        invalidState: invalidState === null ? null : binding.seal(invalidState),
+      }),
       mutation: Object.freeze({
         kind: contract.kind, aggregateType: contract.aggregateType, aggregateId: id, expectedVersion: expectedVersion as number | null, changes: mutationChanges,
       }),
@@ -435,7 +472,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
       context: ctx,
       authNotAfter,
     });
-    return Object.freeze({ command, response: envelope, unchanged });
+    return Object.freeze({ command, response: envelope, unchanged, rejected });
   } catch {
     return null; // a hostile getter: not in contract
   }

@@ -97,9 +97,22 @@ export function createMemoryCommandTransaction(state: MemoryTransactionalState):
       // The fence first: a stale, reclaimed or completed attempt learns nothing of business state.
       if (record === undefined || t >= record.expiresAt || record.response !== null || record.lease !== command.lease) return { outcome: 'lease_lost' };
       const { mutation } = command;
+      // Every command carries the sealed 409 for each deterministic rejection its own mode can reach
+      // (M5-GIAM-D1-P2-R1): a create can only conflict, an update can also be in a state that refuses
+      // its change. A command missing the one it needs commits nothing, here as in the durable adapter.
+      const isUpdate = mutation.expectedVersion !== null;
+      const slots = command.rejected;
+      const sealedSlot = (v) => typeof v === 'string' && v.length > 0;
+      if (!sealedSlot(slots?.conflict) || (isUpdate ? !sealedSlot(slots.invalidState) : slots.invalidState !== null)) return { outcome: 'unavailable' };
       const key = aggregateKey(mutation.aggregateType, mutation.aggregateId);
       const current = state.aggregates.get(key);
-      if (mutation.expectedVersion === null ? current !== undefined : current?.version !== mutation.expectedVersion) return { outcome: 'conflict' };
+      if (mutation.expectedVersion === null ? current !== undefined : current?.version !== mutation.expectedVersion) {
+        // The rejection was decided under the lease this commit fenced above, so its own sealed 409 is
+        // recorded as the completion in the same step and nothing else is written: no aggregate change,
+        // no audit record, no event. An identical retry then replays it instead of planning again.
+        records.set(command.scope, { ...record, response: command.rejected.conflict });
+        return { outcome: 'conflict' };
+      }
       const ids = command.events.map((event) => event.eventId);
       if (new Set(ids).size !== ids.length || ids.some((id) => state.outbox.has(id))) return { outcome: 'unavailable' }; // a fault, never a conflict
       // Every write lands together or not at all: one synchronous step, in which an injected failure is
@@ -360,8 +373,9 @@ const isCommitted = (answer: unknown): boolean => isDeepStrictEqual(answer, COMM
  * (stamped with the audit record's transaction timestamp, every value bound as data) and the completion,
  * which replays; an operation commits once; a lease never granted, an operation never acquired and a
  * reclaimed lease commit nothing, the lease checked before business state; an expired lease nobody
- * reclaimed commits until its retention ends; a conflict writes nothing and keeps the lease, and a reused
- * event ID is a fault; a failure at any part leaves no part and keeps the lease; of concurrent commits
+ * reclaimed commits until its retention ends; a conflict writes nothing but seals its own 409 as the
+ * completion, so the key is terminal and an identical retry replays it, while a reused event ID is a
+ * fault that seals nothing; a failure at any part leaves no part and keeps the lease; of concurrent commits
  * exactly one lands; an aborted commit changes nothing and one aborted in flight is all or nothing; a
  * commit whose answer is lost replays; each commit carries its own transaction's time; an unreachable
  * store fails closed on both instances, keeps its state and queues nothing.
@@ -434,23 +448,46 @@ export async function assertCommandTransactionContract(h: TransactionalOutboxHar
   assert.deepEqual(await k.commit(goneCommand, peer), LEASE_LOST, 'past its retention an operation commits nothing');
   assert.deepEqual(await k.footprint(goneCommand), NOTHING);
 
-  // 5. A conflict — creating an existing aggregate, updating at a version it is not at — writes nothing and
-  //    keeps the lease; a reused event ID is a fault, never committed. The same instance then commits.
-  const c = await k.begin();
+  // 5. A conflict — creating an existing aggregate, or updating at a version it is not at — writes no
+  //    aggregate change, no audit record and no event, and SEALS its own bounded 409 as the completion in
+  //    the transaction that decided it (M5-GIAM-D1-P2-R1). The key is then terminal: an identical retry
+  //    replays that 409, and nothing else commits under its lease. A command that carries no sealed
+  //    response for a rejection its mode can reach commits nothing. A reused event ID is a fault, never a
+  //    rejection: it seals nothing, keeps the lease, and the holder commits after it.
   const id = first.mutation.aggregateId;
+  const c = await k.begin();
   const exists = k.creating(c, { aggregateId: id });
   assert.deepEqual(await k.commit(exists), CONFLICT, 'creating an existing aggregate conflicts');
-  const staleVersion = k.renaming(c, id, 7);
-  assert.deepEqual(await k.commit(staleVersion), CONFLICT, 'updating at a version it is not at conflicts');
-  const renamed = k.renaming(c, id, 1);
+  assert.deepEqual(await k.footprint(exists), { aggregate: fa.aggregate, audit: [], events: [] },
+    'the conflict changed no aggregate, wrote no audit record and enqueued no event');
+  assert.deepEqual(await k.acquire(c.operation, k.lease()), { outcome: 'replay', response: exists.rejected.conflict },
+    'it recorded its own sealed 409 as the completion, which replays byte for byte');
+  assert.deepEqual(await k.commit(k.renaming(c, id, 1)), LEASE_LOST, 'and the key is terminal: nothing commits under it afterwards');
+
+  const s = await k.begin();
+  const staleVersion = k.renaming(s, id, 7);
+  assert.deepEqual(await k.commit(staleVersion, peer), CONFLICT, 'updating at a version it is not at conflicts, through either instance');
+  assert.deepEqual((await k.footprint(staleVersion)).audit, [], 'writing no audit record');
+  assert.deepEqual(await k.acquire(s.operation, k.lease()), { outcome: 'replay', response: staleVersion.rejected.conflict },
+    'and sealing the same 409 for an update');
+
+  const m = await k.begin();
+  const missing = k.renaming(m, id, 7);
+  assert.deepEqual(await k.settled(k.commit(Object.freeze({ ...missing, rejected: Object.freeze({ conflict: missing.rejected.conflict, invalidState: null }) }))),
+    UNAVAILABLE, 'an update carrying no sealed invalid_state response commits nothing');
+  assert.deepEqual(await k.footprint(missing), { aggregate: fa.aggregate, audit: [], events: [] }, 'and wrote nothing');
+  assert.deepEqual(await k.commit(missing), CONFLICT, 'the lease it left alone still serves the command in contract');
+
+  const r = await k.begin();
+  const renamed = k.renaming(r, id, 1);
   const reusing: TransactionCommand = Object.freeze({
     ...renamed, events: Object.freeze([Object.freeze({ ...renamed.events[0], eventId: first.events[0].eventId })]),
   });
   assert.deepEqual(await k.settled(k.commit(reusing)), UNAVAILABLE, 'a reused event ID is a fault: nothing commits, and it is no conflict');
-  for (const refused of [exists, staleVersion, reusing]) assert.deepEqual((await k.footprint(refused)).audit, [], 'no refusal wrote an audit record');
+  assert.deepEqual((await k.footprint(reusing)).audit, [], 'a fault writes no audit record');
   assert.equal((await k.footprint(renamed)).aggregate?.version, 1, 'nor changed the aggregate');
   assert.deepEqual((await k.footprint(first)).events, fa.events, 'nor the event whose ID was reused');
-  assert.deepEqual(await k.commit(renamed), COMMITTED, 'no refusal changed anything: the holder commits, on the same instance');
+  assert.deepEqual(await k.commit(renamed), COMMITTED, 'a fault seals nothing: the holder commits, on the same instance');
   const fr = await k.footprint(renamed);
   assert.deepEqual([fr.aggregate?.version, fr.aggregate?.state.name, fr.audit.length, fr.events.length], [2, renamed.mutation.changes.name, 1, 1],
     'the update is written at the next version');

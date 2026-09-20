@@ -1084,16 +1084,22 @@ test('M6-PG-08: a fenced attempt runs nothing; a conflict and a reused event ID 
   assert.deepEqual(await B.transactions.commit(creating({ ...stale, lease: lease() }), live()), LEASE_LOST);
   assert.deepEqual(ranSince(before, await witness()), { mutation: 0, audit: 0, outbox: 0, completion: 0 }, 'a fenced attempt reaches no business statement');
 
-  // A conflict: the mutation ran and found its precondition false; nothing else ran, nothing stayed.
+  // A conflict: the mutation ran and found its precondition false. Nothing else ran and nothing stayed —
+  // except the rejection's OWN sealed 409, recorded as the completion in that same transaction
+  // (M5-GIAM-D1-P2-R1), so the refused intent is answered once and can never be replanned into a mutation.
   const rival = creating(stale, 'rival', created.mutation.aggregateId);
   const b2 = await witness();
   assert.deepEqual(await A.transactions.commit(rival, live()), CONFLICT);
-  assert.deepEqual(ranSince(b2, await witness()), { mutation: 1, audit: 0, outbox: 0, completion: 0 }, 'a conflict stops after the mutation');
-  assert.deepEqual(await footprint(rival), { version: 1, audit: 0, events: 0, completed: 0 }, 'and leaves the existing aggregate as it was');
-  assert.deepEqual(await B.idempotency.acquire(acquireRequest(stale.op, lease()), live()), IN_PROGRESS, 'the lease is kept, to expire');
+  assert.deepEqual(ranSince(b2, await witness()), { mutation: 1, audit: 0, outbox: 0, completion: 1 },
+    'a conflict stops after the mutation, and records only its own completion');
+  assert.deepEqual(await footprint(rival), { version: 1, audit: 0, events: 0, completed: 1 }, 'and leaves the existing aggregate as it was');
+  const sealed = await B.idempotency.acquire(acquireRequest(stale.op, lease()), live());
+  assert.deepEqual(sealed, { outcome: 'replay', response: rival.rejected.conflict }, 'the key replays the sealed 409 instead of waiting out a lease');
 
   // A reused event ID: a fault, detected at the outbox insert, and everything before it is rolled back.
-  const renamed = renaming(stale, created.mutation.aggregateId, 1);
+  // It needs its own attempt: the conflict above made the previous key terminal.
+  const faulty = await begin(A);
+  const renamed = renaming(faulty, created.mutation.aggregateId, 1);
   const reusing = Object.freeze({ ...renamed, events: Object.freeze([Object.freeze({ ...renamed.events[0], eventId: created.events[0].eventId })]) });
   const b3 = await witness();
   assert.deepEqual(await A.transactions.commit(reusing, live()), UNAVAILABLE, 'a reused event ID is a fault, never a conflict');
@@ -1117,7 +1123,14 @@ test('M6-PG-09: of sixteen concurrent commands on one aggregate version across t
   assert.ok(answers.every((a) => a.outcome === 'committed' || a.outcome === 'conflict'), 'every other conflicts');
   const traces = await Promise.all(renames.map(footprint));
   assert.deepEqual([traces[0].version, traces.reduce((n, t) => n + t.audit, 0), traces.reduce((n, t) => n + t.events, 0), traces.reduce((n, t) => n + t.completed, 0)],
-    [2, 1, 1, 1], 'one version step, one audit record, one event, one completion');
+    [2, 1, 1, 16], 'one version step, one audit record, one event — and sixteen completions: one success and fifteen sealed 409s');
+  // Each loser sealed its OWN key, under its own operation: no key was left in progress to be replanned.
+  const losers = renames.map((command, i) => ({ command, i })).filter(({ i }) => answers[i].outcome === 'conflict');
+  assert.equal(losers.length, 15, 'fifteen of the sixteen were refused');
+  for (const { command, i } of losers) {
+    const replay = await A.idempotency.acquire(acquireRequest(attempts[i].op, lease()), live());
+    assert.deepEqual(replay, { outcome: 'replay', response: command.rejected.conflict }, 'every loser replays exactly its own sealed 409');
+  }
 });
 
 test('M6-PG-10: a COMMIT whose acknowledgement is lost rejects as indeterminate; it landed once, replays, and is never repeated', async () => {
