@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { evaluateCanonicalPermission } from '../../server/platform-identity/m5CanonicalPermissions';
 import { TENANT_SUB_PERMISSIONS } from '../../server/platform-identity/permissionCatalog';
 import { TENANT_ROLE_IDS } from '../../server/platform-identity/authorizationConstants';
-import { PRODUCTION_INVENTORY } from '../../server/composition/productionTransactions';
+import { PRODUCTION_INVENTORY, productionRouteDeclarations } from '../../server/composition/productionTransactions';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 function files(dir: string): string[] {
@@ -47,6 +47,16 @@ test('D1. no route becomes live and the M5 route catalogue still refuses every s
     { scope: 'platform', permission: 'edit_tenant_profile' },
     { scope: 'platform', permission: 'change_tenant_status' },
   ], 'both requirements are canonical platform keys');
+  // M5-GIAM-D1-P3 adds the first read route, the platform tenant directory. It too is platform-scoped and canonical:
+  // the served set still declares no tenant or store requirement.
+  assert.equal(PRODUCTION_INVENTORY.reads?.length, 1, 'exactly one read route');
+  const served = productionRouteDeclarations().map((route) =>
+    (route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null));
+  assert.deepEqual(served, [
+    { scope: 'platform', permission: 'edit_tenant_profile' },
+    { scope: 'platform', permission: 'change_tenant_status' },
+    { scope: 'platform', permission: 'view_tenants' },
+  ], 'the served set: two commands and the tenant directory, all canonical platform keys');
 });
 
 test('D2. the browser bundle imports no server module, and the contract modules import nothing at runtime', () => {

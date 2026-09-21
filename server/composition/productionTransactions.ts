@@ -35,13 +35,16 @@ import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions
 import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
+import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
 import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
+import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
+import type { TenantDirectoryPort, TenantDirectoryPorts } from '../runtime/tenantDirectory.js';
 import type { RouteAuthorizer } from '../runtime/access.js';
-import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformPermits, createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -62,7 +65,9 @@ export type TransactionCompositionBlocker =
   /** A route requires a permission no canonical catalog entry defines, at its declared scope. */
   | 'route_permission_uncatalogued'
   /** A route requires a tenant- or store-scope permission, which GAP-11 leaves undecidable. */
-  | 'route_permission_undecidable';
+  | 'route_permission_undecidable'
+  /** The inventory has read routes but no route that requires idempotency, so no kernel exists to serve them over. */
+  | 'read_route_without_boundary';
 
 /** Composition refusal: every blocker, as bounded codes only. */
 export class TransactionCompositionError extends Error {
@@ -75,10 +80,19 @@ export class TransactionCompositionError extends Error {
   }
 }
 
+/**
+ * A read route over this root's kernel (M5-GIAM-D1-P3). A definition holds its port, and the port exists only once the
+ * kernel does, so the inventory names the route's FACTORY and this root builds it — once, over the same client as the
+ * store — from the read ports it composed. Building a definition runs nothing: it is inert until served.
+ */
+export type ReadRouteFactory = (ports: TenantDirectoryPorts) => RouteDefinition;
+
 /** The routes a deployment serves beyond the probes, and the mutator each command kind commits through: trusted source. */
 export interface TransactionInventory {
   readonly routes: readonly RouteDefinition[];
   readonly mutators: readonly AggregateMutator[];
+  /** The read routes, built over this root's kernel; none when absent. They are composed with the command boundary. */
+  readonly reads?: readonly ReadRouteFactory[];
 }
 
 /** createApp's `idempotency` and `transactions`, always together, and the kernel's shutdown. */
@@ -105,6 +119,11 @@ export interface ProductionTransactions {
    * whether a tenant session may continue, and at which witness. The session root binds it.
    */
   readonly tenantAdmission: TenantAdmissionPort;
+  /**
+   * Every route the inventory serves, as served: its commands, and its read routes bound to the read ports this root
+   * composed over that same kernel (M5-GIAM-D1-P3) — the list an entry hands createApp as `routes`.
+   */
+  readonly routes: readonly RouteDefinition[];
   /** Ends the store's kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
 }
@@ -116,6 +135,8 @@ export interface TransactionFactories {
   readonly principals: (client: SupervisedPgClient) => PrincipalResolutionPort;
   readonly sessionStore: (client: SupervisedPgClient) => SessionStore;
   readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
+  /** The platform tenant directory's read over migration 012, for the inventory's read routes. */
+  readonly tenantDirectory: (client: SupervisedPgClient) => TenantDirectoryPort;
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
@@ -126,9 +147,13 @@ export interface TransactionFactories {
 // command, which additionally requires a recent trusted authentication and moves the tenant access version that tenant and
 // store sessions are admitted against. Both declare `trustedContext: 'required'`, so neither can be served by a deployment
 // whose authorizer resolves no actor, and both take their permission from the canonical catalog.
+// The first read route (M5-GIAM-D1-P3) is GET /admin/v1/tenants over migration 012's one bounded read: the platform
+// tenant directory the Tenant Management page lists tenants through, under view_tenants and a resolved trusted scope,
+// built here over the SAME kernel as the store (ReadRouteFactory). It is platform-scoped like both commands.
 export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
   routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE]),
   mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),
+  reads: Object.freeze([createTenantDirectoryRoute]),
 });
 
 // The approved production factories: the runtime principal's kernel over the classified endpoint, and the M6 PostgreSQL store.
@@ -138,6 +163,7 @@ const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   principals: (client: SupervisedPgClient) => createPostgresPrincipalResolver({ client }),
   sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
+  tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
 });
 
 /**
@@ -149,9 +175,18 @@ export function assembleTransactions(
   env: Readonly<Record<string, string | undefined>>,
   factories: TransactionFactories,
 ): ProductionTransactions | null {
+  const reads = inventory.reads ?? [];
+  // The whole table the root would serve, as declared over ports that answer nothing, is validated before any client
+  // exists: a read route that collides with a command or fails its own setup refuses here, with nothing to close.
+  defineRoutes([...inventory.routes, ...reads.map((build) => build(INERT_READ_PORTS))]);
   const routes = defineRoutes(inventory.routes).list();
   const required = routes.filter((route) => route.idempotency === 'required');
-  if (required.length === 0) return null;
+  // Read routes ride the command boundary's kernel; with no command there is none, and dropping them silently would
+  // turn a declared route into a 404, so that refuses instead.
+  if (required.length === 0) {
+    if (reads.length > 0) throw new TransactionCompositionError(['read_route_without_boundary']);
+    return null;
+  }
 
   const blockers: TransactionCompositionBlocker[] = [];
   const endpoint = classifyRuntimeDatabaseUrl(env[APP_DATABASE_URL_VAR]);
@@ -195,6 +230,11 @@ export function assembleTransactions(
   // deployment can never hold one without the other, and never resolves an identity through a client
   // this composition did not classify — and the canonical platform authorizer decides over it alone.
   const principals = factories.principals(client);
+  // The read routes, over the SAME kernel (M5-GIAM-D1-P3): the tenant directory's port, and the canonical permission
+  // decision its `actions` are presented from — the same rule and role definitions as the authorizer below. The whole
+  // served set is validated once more as one table, so a read route can never shadow a command or register twice.
+  const readPorts: TenantDirectoryPorts = Object.freeze({ tenantDirectory: factories.tenantDirectory(client), permits: createPlatformPermits() });
+  const served = defineRoutes([...inventory.routes, ...reads.map((build) => build(readPorts))]).list();
   // The session boundary's two durable adapters, over the SAME kernel and the same classified endpoint
   // (M5-GIAM-D1-P2-R1). Built here, with the store and the resolver, so a deployment can never hold one
   // without the others and never reaches a session or an admission through a client this composition
@@ -206,6 +246,7 @@ export function assembleTransactions(
     authorizer: createPlatformRouteAuthorizer({ principals }),
     sessionStore: factories.sessionStore(client),
     tenantAdmission: factories.tenantAdmission(client),
+    routes: served,
     close: () => client.end(),
   });
 }
@@ -215,9 +256,26 @@ export function assembleTransactions(
  * naming every missing or refused part. Configuration is the only input; no store, client or factory can be handed to it.
  */
 export function composeProductionTransactions(env: Readonly<Record<string, string | undefined>>): ProductionTransactions | null {
-  const uncatalogued = uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes);
+  const uncatalogued = uncataloguedRoutePermissions(productionRouteDeclarations());
   if (uncatalogued.length > 0) throw new TransactionCompositionError(uncatalogued);
   return assembleTransactions(PRODUCTION_INVENTORY, env, PRODUCTION_FACTORIES);
+}
+
+/**
+ * Ports that answer nothing, for building the inventory's read routes BEFORE any client exists — a definition is inert
+ * until served, so its declared permission can be checked here and refused before anything is composed.
+ */
+const INERT_READ_PORTS: TenantDirectoryPorts = Object.freeze({
+  tenantDirectory: Object.freeze({ page: (): never => { throw new Error('read port not composed'); } }),
+  permits: () => false,
+});
+
+/**
+ * Every route the production inventory would serve — its commands and its read routes — as declared, for the
+ * permission check. Nothing is composed: the read routes are built over ports that answer nothing.
+ */
+export function productionRouteDeclarations(): readonly RouteDefinition[] {
+  return Object.freeze([...PRODUCTION_INVENTORY.routes, ...(PRODUCTION_INVENTORY.reads ?? []).map((build) => build(INERT_READ_PORTS))]);
 }
 
 /**

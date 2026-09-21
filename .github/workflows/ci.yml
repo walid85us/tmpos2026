@@ -129,6 +129,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/tenantAdmission.integration.test.mjs
+      # Phase 4.0 M5-GIAM-D1-P3 — migration 012 and the platform tenant directory: the gated read routine, its privilege
+      # containment, and the Tenant Management page's read and commands over the real resolver, authorizer and store on real
+      # local sockets, against the SAME disposable service after 001-012 are applied to it. Same binding, no new service, no
+      # secret, no permission change.
+      - name: Platform tenant directory against disposable PostgreSQL (M5-GIAM-D1-P3)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/tenantDirectory.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

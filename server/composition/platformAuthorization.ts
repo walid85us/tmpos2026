@@ -34,9 +34,10 @@
 //
 // NOTHING IS LOGGED OR KEPT. No principal, actor, role or decision leaves this file except as the answer.
 import type { RouteAuthorizer, RouteView } from '../runtime/access.js';
-import { isTrustedPrincipal, selectScope } from '../runtime/principals.js';
+import { isTrustedPrincipal, isTrustedScope, selectScope } from '../runtime/principals.js';
 import type { PrincipalResolutionPort, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
+import type { PlatformPermits } from '../runtime/tenantDirectory.js';
 import { BUILT_IN_PLATFORM_ROLES, evaluateCanonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PlatformRoleDefinition } from '../platform-identity/m5CanonicalPermissions.js';
 
@@ -78,6 +79,21 @@ export function createPlatformRouteAuthorizer(deps: PlatformAuthorizerDeps): Rou
       return decision === 'granted' ? Object.freeze({ granted: true, context: scope }) : false;
     },
   });
+}
+
+/**
+ * Whether a scope this authorizer already selected holds `permission`, by the SAME canonical rule over the same role
+ * definitions (M5-GIAM-D1-P3). It exists for one purpose: the tenant directory's `actions`, which tell the console which
+ * controls to show (server/runtime/tenantDirectory.ts). That answer is presentation and grants nothing — every command is
+ * authorized again, from the beginning, by the chain that serves it. Only a platform scope can hold a platform
+ * permission; the read-only cap applies exactly as it does in the authorizer; anything else is false.
+ */
+export function createPlatformPermits(deps: { readonly roles?: ReadonlyMap<string, PlatformRoleDefinition> } = {}): PlatformPermits {
+  const roles = deps?.roles ?? BUILT_IN_PLATFORM_ROLES;
+  if (!(roles instanceof Map)) throw new TypeError('platform permits dependencies invalid');
+  return (scope: TrustedScope, permission: string): boolean =>
+    isTrustedScope(scope) && scope.scope === 'platform'
+      && evaluateCanonicalPermission({ scope: 'platform', roleId: scope.roleId, permission, limitation: scope.limitation, roles }) === 'granted';
 }
 
 /**

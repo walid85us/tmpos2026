@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the eleven committed migration pairs through the engine's Node fs port (node:fs
+// Reads the twelve committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -113,19 +113,26 @@ const PINNED = {
   // application database. D4 now names the contiguous chain through 011; the exact-[005] gate is unchanged and still refuses.
   '011_m5_tenant_admission.up.sql': 'b3944f909c4298f700746784cd52385c5410acd3a15ad39f0a7138d5d6911c7d',
   '011_m5_tenant_admission.down.sql': 'c272ab6656c7a37e62d007bf60404bfaebe21a40ef95dc906efacd7914f7495b',
+  // Phase 4.0 M5-GIAM-D1-P3 — the platform tenant directory, in its OWN schema tmpos_directory: one STABLE SECURITY DEFINER
+  // read (EXECUTE to tmpos_app alone, not grantable) that answers a bounded keyset page of (tenant id, display name, status,
+  // row version) only while the caller's named platform grant still holds. No table, no write, no role. Proved by
+  // tests/db/tenantDirectory.integration.test.mjs against disposable PostgreSQL only; applied to no managed, persistent or
+  // application database. D4 now names the contiguous chain through 012; the exact-[005] gate is unchanged and still refuses.
+  '012_m5_platform_tenant_directory.up.sql': '6e71d4d5223576b86bd6acc46ed429bbcff64390d69a6d3980a3bc9baf3efce6',
+  '012_m5_platform_tenant_directory.down.sql': '9d359194edc3031ff5dd1dd60bd54bbe448d850c58d393876993cb5301f47a89',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twenty-two expected files', () => {
+test('the migrations directory holds exactly the twenty-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

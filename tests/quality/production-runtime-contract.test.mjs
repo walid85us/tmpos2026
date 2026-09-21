@@ -287,10 +287,12 @@ test('the tenant-admission witness is harness-only: no production source declare
   // store requirement at all, because every such permission is undecidable until owner decision D1
   // (GAP-11) and the transaction root refuses to start with one. That is also the honest statement of
   // what this stage did NOT deliver: there is no production tenant business route yet.
-  const { PRODUCTION_INVENTORY } = await import('../../server/composition/productionTransactions.ts');
-  const paths = PRODUCTION_INVENTORY.routes.map((r) => r.path);
+  const { productionRouteDeclarations } = await import('../../server/composition/productionTransactions.ts');
+  // Every route the inventory would serve, its read routes included (M5-GIAM-D1-P3), built over ports that answer nothing.
+  const served = productionRouteDeclarations();
+  const paths = served.map((r) => r.path);
   assert.equal(paths.includes(WITNESS_PATH) || paths.includes(STORE_WITNESS_PATH), false, 'neither witness is registered');
-  const tenantScoped = PRODUCTION_INVENTORY.routes
+  const tenantScoped = served
     .filter((r) => (r.policy.authorization ?? null) !== null && r.policy.authorization.scope !== 'platform')
     .map((r) => `${r.method} ${r.path}`);
   assert.deepEqual(tenantScoped, [], 'no shipped route declares a tenant or store authorization requirement');
@@ -345,10 +347,13 @@ test('durable idempotency is composed only by the transaction root, for a route 
     if (REQUIRED_ROUTE.test(code)) registering.push(f);
   }
   assert.deepEqual(registering.sort(), [...REQUIRED_ROUTE_FILES].sort(), 'only the two tenant commands register a route that requires idempotency');
-  const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR\]\),\n\}\);$/m;
-  assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n});", INVENTORY,
+  // M5-GIAM-D1-P3: and exactly one read route factory, the platform tenant directory (GET /admin/v1/tenants), which requires no key.
+  const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR\]\),\n {2}reads: Object\.freeze\(\[createTenantDirectoryRoute\]\),\n\}\);$/m;
+  assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n  reads: Object.freeze([createTenantDirectoryRoute]),\n});", INVENTORY,
     'the scan must catch a route added to the inventory');
-  assert.match(readFileSync(join(COMPOSITION_DIR, 'productionTransactions.ts'), 'utf8'), INVENTORY, 'the production inventory holds exactly the two tenant commands and their mutators');
+  assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n  reads: Object.freeze([createTenantDirectoryRoute, createOrdersRoute]),\n});", INVENTORY,
+    'the scan must catch a read route added to the inventory');
+  assert.match(readFileSync(join(COMPOSITION_DIR, 'productionTransactions.ts'), 'utf8'), INVENTORY, 'the production inventory holds exactly the two tenant commands, their mutators and the tenant directory read');
   // IDEMPOTENCY_KEY and APP_DATABASE_URL belong to the transaction root alone in the composition layer.
   const OWNED = /\bIDEMPOTENCY_KEY\b|\bAPP_DATABASE_URL(?:_VAR)?\b|\bidempotencyStore\b|\bIdempotencyDeps\b/;
   for (const sample of ['env.IDEMPOTENCY_KEY', 'env[APP_DATABASE_URL_VAR]', 'idempotencyStore: null,']) assert.match(sample, OWNED, `the scan must catch: ${sample}`);
@@ -536,7 +541,8 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     'server/platform-identity/db.ts': ['CONTEXT_SETTINGS', 'DB_SESSION_BOUNDS', 'DRIVER_TLS_ENV_VAR', 'DatabaseTlsRefusal', 'assertTenantContext', 'closeDb', 'closeRuntimeDb',
       'createRuntimeStoreClient', 'discardNotice', 'getDb', 'getRuntimeDb', 'readTenantContext', 'resolveDatabaseTls', 'runtimeClientOptions', 'withTenantContext'],
     'server/platform-identity/databaseEndpoint.ts': ['ENDPOINT_GRAMMAR', 'classifyRuntimeDatabaseUrl', 'sealedRuntimeTarget'],
-    'server/composition/productionTransactions.ts': ['PRODUCTION_INVENTORY', 'TransactionCompositionError', 'assembleTransactions', 'composeProductionTransactions', 'uncataloguedRoutePermissions'],
+    'server/composition/productionTransactions.ts': ['PRODUCTION_INVENTORY', 'TransactionCompositionError', 'assembleTransactions', 'composeProductionTransactions',
+      'productionRouteDeclarations', 'uncataloguedRoutePermissions'],
   };
   for (const [file, expected] of Object.entries(surfaces)) {
     assert.deepEqual(surfaceOf(trees.get(join(REPO, file))), [...expected].sort(), `${file}: exact value export surface`);

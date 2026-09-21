@@ -253,11 +253,11 @@ async function transition(who, tenant, status, expectedVersion, over = {}) {
 // migration 010 as applied
 // ---------------------------------------------------------------------------
 
-test('M5S-01: 001-011 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
+test('M5S-01: 001-012 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null,
       pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,

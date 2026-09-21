@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 138; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions (sentinels below)
+export const MIN_SUITES = 140; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +2, the platform tenant directory route and its PostgreSQL adapter (sentinels below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -117,6 +117,8 @@ export const REQUIRED_SENTINELS = [
   'server/persistence/postgresSessionStore.test.ts',          // M5 durable session store: only the database may say "no such session"; every other doubt is an outage (M5-GIAM-D1-P2-R1)
   'server/persistence/postgresTenantAdmission.test.ts',       // M5 tenant admission: the witness moves on suspension AND reactivation, and a grant with no access version is never admitted (DA-32)
   'server/composition/tenantAuthorization.test.ts',           // the tenant boundary's two decisions: denial vs outage, the actor's own selector, the lifecycle decision, the read classification
+  'server/runtime/tenantDirectory.test.ts',                   // the platform tenant directory: strict query, canonical cursor, untrusted answer, trusted scope only, bounded refusals (M5-GIAM-D1-P3)
+  'server/persistence/postgresTenantDirectory.test.ts',       // the one fixed call into migration 012 and every row shape it refuses to read as a page (M5-GIAM-D1-P3)
 ];
 
 export const isTestPath = (f) =>

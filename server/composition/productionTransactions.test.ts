@@ -20,13 +20,14 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import {
-  PRODUCTION_INVENTORY, TransactionCompositionError, assembleTransactions, composeProductionTransactions, uncataloguedRoutePermissions,
+  PRODUCTION_INVENTORY, TransactionCompositionError, assembleTransactions, composeProductionTransactions, uncataloguedRoutePermissions, productionRouteDeclarations,
 } from './productionTransactions.js';
 import type { ProductionTransactions, TransactionFactories, TransactionInventory } from './productionTransactions.js';
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { createPostgresPrincipalResolver } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
+import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator, TransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { RETIRED_POOL_GRACE_S, createSupervisedPgClient } from '../persistence/supervisedPgClient.js';
@@ -41,11 +42,14 @@ import { createApp, createBoundedServer, createReadinessState } from '../runtime
 const SESSION_FACTORIES = Object.freeze({
   sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
+  tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
 });
 import { createLifecycle } from '../runtime/lifecycle.js';
 import { testRequestLimits } from '../runtime/rateLimiter.testkit.js';
 import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
 import type { RouteDefinition } from '../runtime/routes.js';
+import { EnforcementSetupError } from '../runtime/routes.js';
+import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { PrincipalResolutionPort } from '../runtime/principals.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
@@ -140,6 +144,7 @@ const NEVER: TransactionFactories = Object.freeze({
   principals: () => assert.fail('no resolver may be built'),
   sessionStore: () => assert.fail('no session store may be built'),
   tenantAdmission: () => assert.fail('no tenant admission may be built'),
+  tenantDirectory: () => assert.fail('no tenant directory may be built'),
 });
 
 function blockersOf(inventory: TransactionInventory, env: Record<string, string | undefined>, factories: TransactionFactories = NEVER): readonly string[] {
@@ -248,6 +253,20 @@ test('the production inventory holds the tenant display-name command and its one
   assert.ok(PRODUCTION_INVENTORY.routes.every((r) => r.trustedContext === 'required'), 'every business route requires a resolved actor');
   assert.ok(Object.isFrozen(PRODUCTION_INVENTORY) && Object.isFrozen(PRODUCTION_INVENTORY.routes) && Object.isFrozen(PRODUCTION_INVENTORY.mutators));
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), [], 'its permission is one canonical platform key');
+  // M5-GIAM-D1-P3: exactly one read route — the platform tenant directory — built over the composed kernel, platform-scoped,
+  // requiring a resolved actor like both commands, and checked for a canonical permission before anything is composed.
+  assert.deepEqual(PRODUCTION_INVENTORY.reads, [createTenantDirectoryRoute], 'exactly one read route factory: the tenant directory');
+  assert.ok(Object.isFrozen(PRODUCTION_INVENTORY.reads));
+  const declared = productionRouteDeclarations();
+  assert.deepEqual(declared.map((r) => `${r.method} ${r.path}`),
+    ['PATCH /admin/v1/tenants/display-name', 'PATCH /admin/v1/tenants/status', 'GET /admin/v1/tenants'], 'the served set, as declared');
+  assert.deepEqual(declared.map((r) => (r.policy.access === 'session' ? r.policy.authorization : null)), [
+    { scope: 'platform', permission: 'edit_tenant_profile' },
+    { scope: 'platform', permission: 'change_tenant_status' },
+    { scope: 'platform', permission: 'view_tenants' },
+  ], 'three canonical platform keys, and no tenant or store requirement');
+  assert.ok(declared.every((r) => r.trustedContext === 'required' && r.policy.access === 'session' && r.policy.audience === 'admin'));
+  assert.deepEqual(uncataloguedRoutePermissions(declared), [], 'every declared permission is canonical');
   const { env, read } = recording({});
   assert.throws(() => composeProductionTransactions(env),
     (err: unknown) => err instanceof TransactionCompositionError && JSON.stringify(err.blockers) === JSON.stringify(['app_database_url_missing', 'idempotency_key_missing']));
@@ -335,8 +354,8 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
     assert.deepEqual(Object.keys(boundary).sort(),
-      ['authorizer', 'close', 'idempotency', 'principals', 'sessionStore', 'tenantAdmission', 'transactions'],
-      'the two ports, the resolver and authorizer, the two session-boundary adapters, and close — nothing else');
+      ['authorizer', 'close', 'idempotency', 'principals', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
+      'the two ports, the resolver and authorizer, the two session-boundary adapters, the served routes, and close — nothing else');
     assert.equal(typeof boundary.authorizer.authorize, 'function', 'the canonical platform authorizer over the same resolver');
     assert.deepEqual(Object.keys(boundary.idempotency).sort(), ['keySecret', 'store']);
     assert.deepEqual(Object.keys(boundary.transactions), ['port']);
@@ -376,14 +395,15 @@ test('a command route needs its mutator, a partial construction composes nothing
     principals: NEVER.principals,
     sessionStore: NEVER.sessionStore,
     tenantAdmission: NEVER.tenantAdmission,
+    tenantDirectory: NEVER.tenantDirectory,
   };
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, failing), /transactional store mutator invalid/);
   assert.equal(ended, 1);
   // The transport policy refuses: a bounded blocker, and no store is built.
-  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission }),
+  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }),
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
-  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission }), RangeError);
+  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
   assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
@@ -595,12 +615,55 @@ test('the resolver is composed with the store, over the same client, and never a
     principals: (client) => { built.push('principals'); assert.equal(client, sharedClient, 'the resolver takes the SAME client'); return createPostgresPrincipalResolver({ client }); },
     sessionStore: (client) => { built.push('sessionStore'); assert.equal(client, sharedClient, 'the session store takes the SAME client'); return createPostgresSessionStore({ client }); },
     tenantAdmission: (client) => { built.push('tenantAdmission'); assert.equal(client, sharedClient, 'tenant admission takes the SAME client'); return createPostgresTenantAdmission({ client }); },
+    tenantDirectory: (client) => { built.push('tenantDirectory'); assert.equal(client, sharedClient, 'the tenant directory takes the SAME client'); return createPostgresTenantDirectory({ client }); },
   });
   assert.ok(boundary !== null);
-  assert.deepEqual(built, ['client', 'store', 'principals', 'sessionStore', 'tenantAdmission'],
-    'one client, then every consumer of it: the store, the resolver and the two session-boundary adapters');
+  assert.deepEqual(built, ['client', 'store', 'principals', 'tenantDirectory', 'sessionStore', 'tenantAdmission'],
+    'one client, then every consumer of it: the store, the resolver, the tenant directory and the two session-boundary adapters');
   assert.equal(typeof boundary!.principals.resolve, 'function');
   assert.equal(typeof boundary!.principals.probe, 'function');
+});
+
+test('the served routes are the inventory\'s commands plus its read routes, each served read route built over the composed ports', () => {
+  // M5-GIAM-D1-P3: a read route holds its port, so the root builds it from the ports it composed over its one client.
+  const seen: unknown[] = [];
+  const probeRoute = (ports: { tenantDirectory: unknown; permits: unknown }): RouteDefinition => {
+    seen.push(ports);
+    return createTenantDirectoryRoute(ports as never);
+  };
+  const { factories } = counted();
+  const boundary = assembleTransactions({ routes: [TENANT_DISPLAY_NAME_ROUTE], mutators: [TENANT_DISPLAY_NAME_MUTATOR], reads: [probeRoute] }, CONFIGURED, factories);
+  assert.ok(boundary !== null);
+  assert.deepEqual(boundary!.routes.map((r) => `${r.method} ${r.path}`), ['PATCH /admin/v1/tenants/display-name', 'GET /admin/v1/tenants']);
+  // Built twice: once declared over ports that answer nothing (the table check before any client exists), once served.
+  assert.equal(seen.length, 2, 'declared once, served once');
+  assert.throws(() => (seen[0] as { tenantDirectory: { page: () => unknown } }).tenantDirectory.page(), /read port not composed/,
+    'the declaration is built over ports that answer nothing');
+  const ports = seen[1] as { tenantDirectory: { page: unknown }; permits: unknown };
+  assert.notEqual(ports, seen[0], 'and the served route over the composed ports');
+  // The composed decision is the canonical one, not merely a function: a full role holds both command permissions, a
+  // View-only role holds neither, and a read-only limitation caps a full role at View.
+  const scopeOf = (roleId: string, limitation: 'none' | 'read_only' = 'none') => ({
+    actor: '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
+    membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId, limitation,
+  });
+  const decide = ports.permits as (scope: unknown, permission: string) => unknown;
+  assert.deepEqual(['view_tenants', 'edit_tenant_profile', 'change_tenant_status'].map((p) => decide(scopeOf('system_owner'), p)), [true, true, true]);
+  assert.deepEqual(['view_tenants', 'edit_tenant_profile', 'change_tenant_status'].map((p) => decide(scopeOf('billing_admin'), p)), [true, false, false]);
+  assert.deepEqual(['view_tenants', 'edit_tenant_profile', 'change_tenant_status'].map((p) => decide(scopeOf('system_owner', 'read_only'), p)), [true, false, false]);
+  assert.equal(typeof ports.tenantDirectory.page, 'function', 'over the tenant directory port');
+  assert.equal(typeof ports.permits, 'function', 'and the canonical permission decision');
+  assert.ok(Object.isFrozen(boundary!.routes));
+  // A read route that collides with a command is refused as one table, never served twice — and before any client exists.
+  const collision = counted();
+  assert.throws(() => assembleTransactions({ routes: [TENANT_DISPLAY_NAME_ROUTE], mutators: [TENANT_DISPLAY_NAME_MUTATOR], reads: [() => TENANT_DISPLAY_NAME_ROUTE] }, CONFIGURED, collision.factories),
+    (err: unknown) => err instanceof EnforcementSetupError && err.code === 'route_duplicate');
+  assert.equal(collision.calls.client, 0, 'refused before the client, or any consumer of it, is built');
+  // Read routes ride the command boundary's kernel: without a route that requires idempotency they refuse, never vanish.
+  assert.throws(() => assembleTransactions({ routes: [STATUS], mutators: [], reads: [probeRoute] }, CONFIGURED, NEVER),
+    (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'read_route_without_boundary');
+  // With neither, nothing is composed, exactly as before.
+  assert.equal(assembleTransactions({ routes: [STATUS], mutators: [] }, CONFIGURED, NEVER), null);
 });
 
 test('the composed authorizer decides over the composed resolver: the one the boundary hands back, and nothing else', async () => {

@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformPermits, createPlatformRouteAuthorizer } from './platformAuthorization.js';
 import { selectScope } from '../runtime/principals.js';
 import type { PrincipalResolutionPort, TrustedMembership, TrustedPrincipal, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
@@ -279,4 +279,61 @@ test('the revalidator refuses to be built without an authority check or with rol
   for (const roles of [{}, [], 'roles']) {
     assert.throws(() => createPlatformContextRevalidator({ authority: async () => true, roles: roles as never }), TypeError, JSON.stringify(roles));
   }
+});
+
+// --- M5-GIAM-D1-P3: the permits the tenant directory presents its `actions` from ----------------------------------------
+
+const TENANT_MANAGEMENT = ['view_tenants', 'edit_tenant_profile', 'change_tenant_status'] as const;
+const platformScopeOf = (principal: TrustedPrincipal): TrustedScope => {
+  const selection = selectScope(principal, 'platform', { tenant: null, store: null });
+  assert.equal(selection.outcome, 'selected');
+  return (selection as { scope: TrustedScope }).scope;
+};
+
+test('createPlatformPermits answers exactly what the authorizer decides — every built-in role, both limitations, the three tenant-management keys', async () => {
+  const permits = createPlatformPermits();
+  let n = 0;
+  for (const roleId of BUILT_IN_PLATFORM_ROLES.keys()) {
+    for (const limitation of ['none', 'read_only'] as const) {
+      for (const permission of TENANT_MANAGEMENT) {
+        const principal = platformRole(roleId, { limitation });
+        const decided = await createPlatformRouteAuthorizer({ principals: resolver({ outcome: 'resolved', principal }) })
+          .authorize(PRINCIPAL, { scope: 'platform', permission }, ROUTE, SIGNAL);
+        assert.equal(permits(platformScopeOf(principal), permission), decided !== false, `${roleId} ${limitation} ${permission}`);
+        n++;
+      }
+    }
+  }
+  assert.equal(n, BUILT_IN_PLATFORM_ROLES.size * 2 * 3);
+});
+
+test('the tenant-management matrix, stated outright: View reads, Edit renames, Manage changes status, and a read-only actor only reads', () => {
+  const permits = createPlatformPermits();
+  const row = (roleId: string, limitation: 'none' | 'read_only' = 'none') =>
+    TENANT_MANAGEMENT.map((permission) => permits(platformScopeOf(platformRole(roleId, { limitation })), permission));
+  assert.deepEqual(row('system_owner'), [true, true, true], 'Full');
+  assert.deepEqual(row('operations_admin'), [true, true, true], 'Full');
+  assert.deepEqual(row('support_admin'), [true, true, false], 'Edit: renames, never suspends');
+  assert.deepEqual(row('billing_admin'), [true, false, false], 'View only');
+  assert.deepEqual(row('security_admin'), [true, false, false], 'View only');
+  for (const roleId of BUILT_IN_PLATFORM_ROLES.keys()) assert.deepEqual(row(roleId, 'read_only'), [true, false, false], `${roleId} read-only`);
+});
+
+test('permits hold nothing outside a well-formed platform scope, and read a role only through the definitions it was given', () => {
+  const permits = createPlatformPermits();
+  const owner = platformScopeOf(platformRole('system_owner'));
+  assert.equal(permits({ ...owner, scope: 'tenant', tenant: TENANT }, 'view_tenants'), false, 'a tenant scope');
+  assert.equal(permits({ ...owner, scope: 'store', tenant: TENANT, store: STORE }, 'view_tenants'), false, 'a store scope');
+  assert.equal(permits({ ...owner, actor: 'nobody' }, 'view_tenants'), false, 'a malformed scope');
+  assert.equal(permits(null as never, 'view_tenants'), false, 'no scope');
+  for (const permission of ['View_Tenants', 'tenant_management', 'view_tenant', '', 'change_tenant_status ']) {
+    assert.equal(permits(owner, permission), false, `not a canonical key: ${JSON.stringify(permission)}`);
+  }
+  const custom: ReadonlyMap<string, PlatformRoleDefinition> = new Map([
+    ['support_admin', { levels: { tenant_management: 'manage' }, moneyGrants: {} }],
+  ]);
+  const support = platformScopeOf(platformRole('support_admin'));
+  assert.equal(createPlatformPermits({ roles: custom })(support, 'change_tenant_status'), true, 'the injected definition decides');
+  assert.equal(createPlatformPermits()(support, 'change_tenant_status'), false, 'the built-in definition decides otherwise');
+  for (const roles of [{}, [], 'roles']) assert.throws(() => createPlatformPermits({ roles: roles as never }), TypeError, JSON.stringify(roles));
 });

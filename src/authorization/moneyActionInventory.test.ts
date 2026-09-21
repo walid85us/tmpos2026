@@ -29,7 +29,7 @@ import {
   type PosRefundInput,
 } from '../context/tenantAccessDecisions';
 import { hasPlatformPermission } from '../owner/platformPermissionsConfig';
-import { PRODUCTION_INVENTORY } from '../../server/composition/productionTransactions';
+import { productionRouteDeclarations } from '../../server/composition/productionTransactions';
 import type { EmployeeRole, PermissionLevel } from '../types';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -291,8 +291,9 @@ test('I6. every entry is client-only and says so; no production route enforces a
   // M5-GIAM-D1-P1 adds the first production route — the tenant display-name command, a platform edit_tenant_profile
   // write — and M5-GIAM-D1-P2 the second, the tenant lifecycle command under change_tenant_status. Neither is a money
   // action: no production route requires a money capability, so every money entry above stays client-only.
-  const required = PRODUCTION_INVENTORY.routes.map((r) => (r.policy.access === 'session' || r.policy.access === 'authenticated' ? r.policy.authorization?.permission : null));
-  assert.deepEqual(required, ['edit_tenant_profile', 'change_tenant_status'], 'the two production routes are the tenant commands');
+  // M5-GIAM-D1-P3 adds the tenant directory read, under view_tenants: no money capability either.
+  const required = productionRouteDeclarations().map((r) => (r.policy.access === 'session' || r.policy.access === 'authenticated' ? r.policy.authorization?.permission : null));
+  assert.deepEqual(required, ['edit_tenant_profile', 'change_tenant_status', 'view_tenants'], 'the production routes are the two tenant commands and the tenant directory');
   for (const permission of required) {
     assert.ok(!MONEY_ACTION_ENTRY_POINTS.some((e) => e.capability === permission), `${permission} is no money capability`);
   }
