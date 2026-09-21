@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 140; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +2, the platform tenant directory route and its PostgreSQL adapter (sentinels below)
+export const MIN_SUITES = 141; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +3, the platform tenant directory route, its PostgreSQL adapter and the console's name/reason parity with the server (sentinels below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -105,6 +105,8 @@ export const REQUIRED_SENTINELS = [
   'src/backend-control-plane/console/adminSurface.test.ts',       // production admin-host enforcement
   'src/backend-control-plane/console/navigation.test.ts',         // navigation vocabulary + strict return path
   'src/backend-control-plane/console/commandCenterClient.test.ts', // Command Center client: no bearer, strict schema, abort/race, statuses
+  'src/backend-control-plane/console/TenantManagement.test.tsx',  // Tenant Management workspace: server-decided actions, one key per intent, confirmed-only changes (M5-GIAM-D1-P3)
+  'src/backend-control-plane/console/tenantManagementParity.test.ts', // the console's name/reason checks accept and refuse exactly what the server does (M5-GIAM-D1-P3)
   'server/runtime/adminWeb.test.ts',                          // admin web policy: canonical API path, document CSP/headers, HSTS flag
   'server/runtime/adminWebServer.test.ts',                    // admin host web entry: preloaded build, API/health paths never the SPA
   'server/runtime/commandCenter.test.ts',                     // Command Center read model: session + view_command_center, fail closed, no reader string

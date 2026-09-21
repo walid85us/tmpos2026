@@ -134,7 +134,7 @@ export function UnavailablePanel() {
   );
 }
 
-/** Every workspace, grouped as in the navigation, each "Coming later" until its server capability ships. */
+/** Every workspace, grouped as in the navigation; each is "Coming later" until its server capability ships. */
 export function WorkspaceDirectory() {
   return (
     <section aria-labelledby="workspace-directory">
@@ -142,7 +142,7 @@ export function WorkspaceDirectory() {
         Workspaces
       </h2>
       <p className="mt-1 max-w-prose text-sm text-slate-400">
-        None is open yet. Each one opens here when its server capability ships.
+        Tenant Management is open. Each other workspace opens here when its server capability ships.
       </p>
       <div className="mt-5 space-y-6">
         {CONSOLE_GROUPS.map((group) => (
@@ -160,7 +160,7 @@ export function WorkspaceDirectory() {
                   >
                     <span className="w-52 shrink-0 text-sm font-semibold text-white">{module.label}</span>
                     <span className="flex-1 text-sm text-slate-400">{module.summary}</span>
-                    <ComingLater />
+                    {module.open ? null : <ComingLater />}
                   </Link>
                 </li>
               ))}

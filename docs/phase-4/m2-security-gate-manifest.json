@@ -203,11 +203,14 @@
       "milestone": "M4",
       "expectedFindingCount": 2,
       "expectedFindings": [
-        { "rule": "jwt", "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "line": 15 },
+        { "rule": "jwt", "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "line": 17 },
         { "rule": "jwt", "file": "src/backend-control-plane/console/adminSessionClient.test.ts", "line": 9 }
       ],
+      "historyOnlyFindings": [
+        { "rule": "jwt", "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "line": 15 }
+      ],
       "containingFiles": [
-        { "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "blobOid": "35b0ad7cc8a6ba59e7c9dbb49e6a6eb27f2ad441" },
+        { "file": "src/backend-control-plane/console/AdminConsole.test.tsx", "blobOid": "ba0199892e4fa955c9377ff8ff14941e50f979a3" },
         { "file": "src/backend-control-plane/console/adminSessionClient.test.ts", "blobOid": "77fd6139cd803c18613431c1be4aea117a8f512c" }
       ],
       "rationale": "Two JWT-shaped strings that the admin console unit tests use as the Firebase ID token handed to in-memory fakes (the ID_TOKEN constant in AdminConsole.test.tsx and adminSessionClient.test.ts). They are synthetic fixtures, not tokens: the header is only {alg: RS256}, the payload is only a synthetic subject (uid-synthetic-7f3a / uid-synthetic) with no issuer, audience, expiry or project, and the signature segment is the base64url encoding of the literal word 'signature', so no key signed them and no identity provider would accept them. Reconciled EXACTLY by rule id + repository-relative path + line and bound to each test file's whole-file Git blob OID; the jwt rule itself stays active everywhere.",

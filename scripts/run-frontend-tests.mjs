@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 17;
-export const MIN_FRONTEND_CASES = 199;
+export const MIN_FRONTEND_FILES = 18;
+export const MIN_FRONTEND_CASES = 368;
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated
@@ -61,6 +61,7 @@ export const REQUIRED_FRONTEND_SUITES = [
   'src/backend-control-plane/console/firebaseAdminIdentity.test.tsx', // in-memory provider, one token, discarded session
   'src/backend-control-plane/console/CommandCenter.test.tsx',         // read-only command center states and refusals
   'src/backend-control-plane/console/ApiPathNotFound.test.tsx',       // an API address loads a bounded page, never the console shell
+  'src/backend-control-plane/console/TenantManagement.test.tsx',      // tenant workspace: server-decided actions, one key per intent, confirmed-only changes (M5-GIAM-D1-P3)
 ];
 
 /** A case vitest actually ran. Skipped and todo cases are not executed. */

@@ -10,7 +10,9 @@ import type { AdminIdentityProvider, IdentityOutcome, SecondFactorChallenge } fr
 import { createAdminSessionClient } from './adminSessionClient';
 import { currentSurface } from './adminSurface';
 import { createCommandCenterClient } from './commandCenterClient';
-import { CONSOLE_MODULES, modulePath } from './navigation';
+import { CONSOLE_MODULES, TENANT_MANAGEMENT_SLUG, modulePath } from './navigation';
+import { createTenantManagementClient } from './tenantManagementClient';
+import type { AdminSessionClient } from './adminSessionClient';
 
 const ID_TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1aWQtc3ludGhldGljLTdmM2EifQ.c2lnbmF0dXJl';
 const UID = 'uid-synthetic-7f3a';
@@ -93,6 +95,21 @@ function commandCenterServer() {
   return { fetch, client: createCommandCenterClient({ fetch: fetch as unknown as typeof globalThis.fetch }) };
 }
 
+/**
+ * The Tenant Management directory rides its own scripted fetch too (TenantManagement.test.tsx covers the page): it
+ * answers every read with an empty page and no actions. Its commands would go through the session client, so any
+ * command would show in the session server's request list.
+ */
+function tenantsServer(session: AdminSessionClient) {
+  const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    new Response(JSON.stringify({ tenants: [], nextCursor: null, actions: { editDisplayName: false, changeStatus: false } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+  return { fetch, client: createTenantManagementClient({ session, fetch: fetch as unknown as typeof globalThis.fetch }) };
+}
+
 function renderConsole(
   script: Script,
   identity: AdminIdentityProvider = identityOf({ kind: 'failed', failure: 'unavailable' }),
@@ -101,14 +118,15 @@ function renderConsole(
   const server = fakeServer(script);
   const commandCenter = commandCenterServer();
   const client = createAdminSessionClient({ fetch: server.fetch as unknown as typeof fetch });
+  const tenants = tenantsServer(client);
   const view = render(
-    <ConsoleProvider client={client} identity={identity} commandCenter={commandCenter.client}>
+    <ConsoleProvider client={client} identity={identity} commandCenter={commandCenter.client} tenants={tenants.client}>
       <MemoryRouter initialEntries={[path]}>
         <ConsoleRoutes />
       </MemoryRouter>
     </ConsoleProvider>,
   );
-  return { ...view, server, commandCenter, user: userEvent.setup() };
+  return { ...view, server, commandCenter, tenants, user: userEvent.setup() };
 }
 
 const requests = (sent: readonly Sent[], key: string) => sent.filter((request) => `${request.method} ${request.url}` === key);
@@ -382,7 +400,7 @@ describe('console sign-in', () => {
         return null;
       }
       const { unmount } = render(
-        <ConsoleProvider client={client} identity={identityOf(TOKEN_OUTCOME)} commandCenter={commandCenter.client}>
+        <ConsoleProvider client={client} identity={identityOf(TOKEN_OUTCOME)} commandCenter={commandCenter.client} tenants={tenantsServer(client).client}>
           <MemoryRouter initialEntries={[path]}>
             <ConsoleRoutes />
             <Where />
@@ -515,9 +533,11 @@ describe('console shell', () => {
     expect(screen.getByRole('main')).toHaveFocus();
   });
 
-  it('shows every workspace as coming later, with no action and no request beyond the session read', async () => {
-    for (const module of CONSOLE_MODULES) {
-      const { server, commandCenter, unmount } = renderConsole({ [GET]: ['active'] }, undefined, modulePath(module));
+  it('shows every workspace but Tenant Management as coming later, with no action and no request beyond the session read', async () => {
+    // Tenant Management is the one open workspace (M5-GIAM-D1-P3); every other entry is still a placeholder.
+    expect(CONSOLE_MODULES.filter((module) => module.open).map((module) => module.slug)).toEqual([TENANT_MANAGEMENT_SLUG]);
+    for (const module of CONSOLE_MODULES.filter((entry) => !entry.open)) {
+      const { server, commandCenter, tenants, unmount } = renderConsole({ [GET]: ['active'] }, undefined, modulePath(module));
       expect(await screen.findByRole('heading', { level: 1, name: module.label })).toBeInTheDocument();
       const main = screen.getByRole('main');
       expect(within(main).getAllByText('Coming later').length).toBeGreaterThan(0);
@@ -526,8 +546,28 @@ describe('console shell', () => {
       for (const link of within(main).getAllByRole('link')) expect(link.getAttribute('href')).toMatch(/^\/admin(\/[a-z-]+)?$/);
       expect(server.sent.map((request) => `${request.method} ${request.url}`)).toEqual([GET]);
       expect(commandCenter.fetch).not.toHaveBeenCalled();
+      expect(tenants.fetch).not.toHaveBeenCalled();
       unmount();
     }
+  });
+
+  it('opens Tenant Management as a workspace that reads the tenant directory, and sends no command', async () => {
+    const module = CONSOLE_MODULES.find((entry) => entry.slug === TENANT_MANAGEMENT_SLUG)!;
+    const { server, commandCenter, tenants } = renderConsole({ [GET]: ['active'] }, undefined, modulePath(module));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Tenant Management' })).toBeInTheDocument();
+    const main = screen.getByRole('main');
+    expect(await within(main).findAllByText('No tenants to show.')).not.toHaveLength(0);
+    expect(within(main).queryByText('Coming later')).toBeNull();
+    expect(within(main).queryByText("This workspace isn't open yet")).toBeNull();
+    expect(tenants.fetch).toHaveBeenCalledTimes(1);
+    expect(tenants.fetch.mock.calls[0][0]).toBe('/admin/v1/tenants?limit=25');
+    expect(tenants.fetch.mock.calls[0][1]?.method).toBe('GET');
+    // The session server saw only the session read: no command, no other request.
+    expect(server.sent.map((request) => `${request.method} ${request.url}`)).toEqual([GET]);
+    expect(commandCenter.fetch).not.toHaveBeenCalled();
+    // With no actions granted, the page offers no rename form and no lifecycle control.
+    expect(main.querySelector('form, input, select, textarea')).toBeNull();
+    expect(within(main).queryByRole('button', { name: /suspend|reactivate|save/i })).toBeNull();
   });
 
   it('opens on the one Command Center, where an old Command Center address also lands', async () => {
@@ -540,7 +580,7 @@ describe('console shell', () => {
       }
       const client = createAdminSessionClient({ fetch: fakeServer({ [GET]: ['active'] }).fetch as unknown as typeof fetch });
       const { unmount } = render(
-        <ConsoleProvider client={client} identity={identityOf(TOKEN_OUTCOME)} commandCenter={commandCenter.client}>
+        <ConsoleProvider client={client} identity={identityOf(TOKEN_OUTCOME)} commandCenter={commandCenter.client} tenants={tenantsServer(client).client}>
           <MemoryRouter initialEntries={[path]}>
             <ConsoleRoutes />
             <Path />
@@ -583,6 +623,10 @@ describe('console shell', () => {
           client: createAdminSessionClient({ fetch: fetchSpy as unknown as typeof fetch }),
           identity: identityOf(TOKEN_OUTCOME),
           commandCenter: createCommandCenterClient({ fetch: fetchSpy as unknown as typeof fetch }),
+          tenants: createTenantManagementClient({
+            session: createAdminSessionClient({ fetch: fetchSpy as unknown as typeof fetch }),
+            fetch: fetchSpy as unknown as typeof fetch,
+          }),
         }}
       />,
     );

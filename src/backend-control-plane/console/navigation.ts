@@ -1,5 +1,6 @@
 // Phase 4.0 M4 — the console's navigation: the accepted platform feature vocabulary. The home
-// entry is the Command Center (CommandCenterPage.tsx), the one read-only dashboard; every other
+// entry is the Command Center (CommandCenterPage.tsx), the one read-only dashboard; Tenant
+// Management is the one open workspace (M5-GIAM-D1-P3, TenantManagementPage.tsx); every other
 // entry is a placeholder with no implemented destination yet. An entry is a destination, never a
 // grant — the server decides what a session may do (docs/phase-4/03 §6).
 
@@ -14,6 +15,8 @@ export interface ConsoleModule {
   readonly slug: string;
   readonly label: string;
   readonly summary: string;
+  /** Whether its workspace is open: a server capability backs it. Everything else is "Coming later". */
+  readonly open?: boolean;
 }
 
 export interface ConsoleGroup {
@@ -32,7 +35,7 @@ export const CONSOLE_GROUPS: readonly ConsoleGroup[] = [
   {
     label: 'Tenants',
     modules: [
-      { slug: 'tenant-management', label: 'Tenant Management', summary: 'Tenant accounts, their stores and their lifecycle status.' },
+      { slug: 'tenant-management', label: 'Tenant Management', summary: 'Tenant accounts, their display names and their lifecycle status.', open: true },
       { slug: 'provisioning', label: 'Provisioning', summary: 'Create and onboard new tenants.' },
       { slug: 'domains', label: 'Domains', summary: 'Tenant web addresses and domain verification.' },
     ],
@@ -53,6 +56,8 @@ export const CONSOLE_GROUPS: readonly ConsoleGroup[] = [
     ],
   },
 ];
+
+export const TENANT_MANAGEMENT_SLUG = 'tenant-management';
 
 export const CONSOLE_MODULES: readonly ConsoleModule[] = CONSOLE_GROUPS.flatMap((group) => group.modules);
 

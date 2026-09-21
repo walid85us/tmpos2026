@@ -4,8 +4,9 @@
 // Admin-host pages, assets and unknown API paths are forwarded to the REAL production listener
 // (server/runtime/adminWebServer.ts) on a loopback port and fulfilled with its exact status, headers
 // and body, so the shipped serving code and header policy are what Chromium enforces. The scripted
-// "runtime" here answers only the session and Command Center routes; the identity provider is
-// synthetic; everything else is failed. The build runs with a sanitized environment.
+// "runtime" here answers only the session, Command Center and tenant directory routes (the list and
+// its two commands, over synthetic tenants); the identity provider is synthetic; everything else is
+// failed. The build runs with a sanitized environment.
 //
 //   tsx --test tests/browser/admin-console.browser.test.mjs
 import { after, before, test } from 'node:test';
@@ -19,6 +20,7 @@ import { dirname, extname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adminWebHeaders, apiPathRefusal, isApiPath } from '../../server/runtime/adminWeb.ts';
 import { createAdminWebListener, loadAdminBuild } from '../../server/runtime/adminWebServer.ts';
+import { encodeTenantCursor } from '../../server/runtime/tenantDirectory.ts';
 import { CONSOLE_MODULES } from '../../src/backend-control-plane/console/navigation.ts';
 import { findChromium, launch, redact } from './cdp.mjs';
 
@@ -33,6 +35,7 @@ const LOGS = join(EVIDENCE, '..', 'logs');
 const DESKTOP = [1440, 900, false];
 const TABLET = [768, 1024, false];
 const MOBILE = [390, 844, true];
+const ZOOM_400 = [320, 256, false]; // a 1280×1024 desktop at 400% zoom: the WCAG 1.4.10 reflow width
 const CHROMIUM = findChromium();
 const SKIP = 'Chromium not found: set CHROMIUM_PATH, or provide /repl/tools/bin/chromium or `chromium` on PATH';
 
@@ -53,7 +56,11 @@ const SESSION = '/admin/v1/session';
 const LOGIN = '/admin/v1/session/login';
 const LOGOUT = '/admin/v1/session/logout';
 const CC = '/admin/v1/command-center';
-const KNOWN_API = new Set([`GET ${SESSION}`, `POST ${LOGIN}`, `POST ${LOGOUT}`, `GET ${CC}`]);
+const TENANTS = '/admin/v1/tenants';
+const RENAME = '/admin/v1/tenants/display-name';
+const LIFECYCLE = '/admin/v1/tenants/status';
+const KNOWN_API = new Set([`GET ${SESSION}`, `POST ${LOGIN}`, `POST ${LOGOUT}`, `GET ${CC}`, `GET ${TENANTS}`, `PATCH ${RENAME}`, `PATCH ${LIFECYCLE}`]);
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PROBE = '/__probe.html'; // test-only tenant-host pages (no CSP): a blank page and a framer
 const FRAMER = '/__framer.html';
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
@@ -125,20 +132,31 @@ function ccView({ tenants = 12, items = ATTENTION, stale = [], absent = {} } = {
   };
 }
 
+// The synthetic platform tenant directory (invented ids and names), oldest first. The script pages it
+// DIRECTORY_PAGE at a time — under the limit the page asks for — so the first page carries a cursor.
+const HARBOR = { tenantId: '5f0c2a1e-8b3d-4e7a-9c21-0d4b6e8f1a01', displayName: 'Harbor Lane Repairs', status: 'active', version: 3 };
+const UNNAMED = { tenantId: '5f0c2a1e-8b3d-4e7a-9c21-0d4b6e8f1a02', displayName: null, status: 'active', version: 1 };
+const CEDAR = { tenantId: '5f0c2a1e-8b3d-4e7a-9c21-0d4b6e8f1a03', displayName: 'Cedar Point Mobile', status: 'suspended', version: 7 };
+const NORTHWIND = { tenantId: '5f0c2a1e-8b3d-4e7a-9c21-0d4b6e8f1a04', displayName: 'Northwind Trial Shop', status: 'trialing', version: 2 };
+const DIRECTORY = [HARBOR, UNNAMED, CEDAR, NORTHWIND];
+const DIRECTORY_PAGE = 3;
+
 // ---------------------------------------------------------------------------------------------
 // Per-scenario server script + recordings.
 //   session: status for GET /admin/v1/session, a number or (request) => number. Default: 200 only
 //            when the browser presents the admin cookie this scenario set, else 401.
 //   cc:      the GET /admin/v1/command-center answer: a view object, a status number, 'malformed',
 //            or (request) => one of those. Default: a full view whenever the session would be 200.
+//   actions: the `actions` hint every GET /admin/v1/tenants page carries. Default: both allowed.
 //   login / logout: status for those POSTs. provider: 'mfa' | 'password' | 'invalid'.
 //   cspIssues: the exact CSP reports ('directive|type|blockedURL') the scenario provokes on purpose,
 //            each allowed once; cspLog: a RegExp for the console lines those same reports print.
 //   allowBlocked: the exact refused requests ('METHOD url') the scenario makes on purpose.
-function scenarioState({ session, cc, login = 200, logout = 204, provider = 'mfa', cspIssues = [], cspLog = null, allowBlocked = [] } = {}) {
+function scenarioState({ session, cc, actions = { editDisplayName: true, changeStatus: true }, login = 200, logout = 204, provider = 'mfa', cspIssues = [], cspLog = null, allowBlocked = [] } = {}) {
   return {
     session: session ?? ((r) => (hasAdminCookie(r) ? 200 : 401)),
     cc: cc ?? ((r) => (statusFrom(st.session, r) === 200 ? ccView() : 401)),
+    tenants: DIRECTORY.map((t) => ({ ...t })), actions,
     login, logout, provider, cspIssues, cspLog, allowBlocked,
     requests: [], idp: [], statics: [], served: [], blocked: [], csp: [], fontFiles: [], holds: new Map(), releases: [],
     ccHold: null, ccCount: 0, misroute: null, allowNav: new Set(),
@@ -160,7 +178,7 @@ const refusal = (status) => ({ status, headers: [...JSON_HEADERS, ...(status ===
 const active = (extra = []) => ({ status: 200, headers: [...JSON_HEADERS, ...extra], body: JSON.stringify({ status: 'active', csrfToken: st.csrfToken }) });
 const postBody = (request) => request.postData ?? (request.postDataEntries ?? []).map((e) => Buffer.from(e.bytes ?? '', 'base64').toString('utf8')).join('');
 
-/** Hold the identity-toolkit answer for `path` until release() (bounded at 10 s). */
+/** Hold the identity-toolkit or tenant-directory answer for `path` until release() (bounded at 10 s). */
 function hold(path) {
   let release;
   st.holds.set(path, new Promise((r) => { release = r; }));
@@ -206,7 +224,9 @@ async function adminHost(ev, u) {
   const rec = api ? apiRecord(ev, u) : null;
   let res;
   if (s.misroute === u.pathname) res = await forward('GET', '/admin', ev.request.headers);
-  else if (rec && KNOWN_API.has(`${method} ${u.pathname}`)) res = u.pathname === CC ? await commandCenterApi(s) : sessionApi(rec);
+  else if (rec && KNOWN_API.has(`${method} ${u.pathname}`)) {
+    res = u.pathname === CC ? await commandCenterApi(s) : u.pathname.startsWith(TENANTS) ? await tenantApi(s, rec, u, ev.request) : sessionApi(rec);
+  }
   else res = await forward(method, `${u.pathname}${u.search}`, ev.request.headers);
   if (rec) rec.status = res.status;
   s.served.push({ method, path: u.pathname, type: ev.resourceType, status: res.status, headers: lower(Object.fromEntries(res.headers)) });
@@ -284,6 +304,40 @@ async function commandCenterApi(s) {
   if (answer === 503) return { status: 503, headers: JSON_HEADERS, body: JSON.stringify({ error: 'service_unavailable', requestId: 'r1' }) };
   if (typeof answer === 'number') return refusal(answer);
   return { status: 200, headers: JSON_HEADERS, body: JSON.stringify(answer) };
+}
+
+/**
+ * The tenant directory (server/runtime/tenantDirectory.ts) and its two commands over this scenario's
+ * synthetic tenants, each refused as the session would be unless that is 200. A read answers a page;
+ * a command commits the change, bumps the version and answers 200 with exactly the committed fields.
+ * A hold(path) keeps the answer back after the change is made. A malformed command body throws: an
+ * interception error.
+ */
+async function tenantApi(s, rec, u, request) {
+  rec.query = u.search;
+  rec.body = postBody(request);
+  const session = statusFrom(s.session, rec);
+  let res;
+  if (rec.method === 'GET') {
+    const cursor = new URLSearchParams(u.search).get('cursor');
+    const start = cursor === null ? 0 : s.tenants.findIndex((t) => encodeTenantCursor(t.tenantId) === cursor) + 1;
+    const status = cursor !== null && start === 0 ? 400 : session; // a cursor naming no tenant: 400, as the route answers
+    const rows = s.tenants.slice(start, start + DIRECTORY_PAGE);
+    const nextCursor = start + DIRECTORY_PAGE < s.tenants.length ? encodeTenantCursor(rows.at(-1).tenantId) : null;
+    res = status === 200 ? { status, headers: JSON_HEADERS, body: JSON.stringify({ tenants: rows, nextCursor, actions: s.actions }) } : refusal(status);
+  } else if (session !== 200) {
+    res = refusal(session);
+  } else {
+    const body = JSON.parse(rec.body);
+    const field = rec.path === RENAME ? 'displayName' : 'status';
+    const tenant = s.tenants.find((t) => t.tenantId === body.tenantId);
+    tenant[field] = body[field];
+    tenant.version += 1;
+    res = { status: 200, headers: JSON_HEADERS, body: JSON.stringify({ tenantId: tenant.tenantId, [field]: tenant[field], version: tenant.version }) };
+  }
+  const gate = s.holds.get(rec.path);
+  if (gate) await Promise.race([gate, sleep(10_000)]);
+  return res;
 }
 
 // Shapes confirmed against node_modules/@firebase/auth (v1.12, firebase 12): _performSignInRequest
@@ -453,6 +507,50 @@ const chips = (page, text) => page.evaluate(`[...document.querySelectorAll('#mai
 const sessionReads = () => st.requests.filter((r) => r.method === 'GET' && r.path === SESSION);
 const ccReads = () => st.requests.filter((r) => r.method === 'GET' && r.path === CC);
 const logins = () => st.requests.filter((r) => r.method === 'POST' && r.path === LOGIN);
+const tenantReads = () => st.requests.filter((r) => r.method === 'GET' && r.path === TENANTS);
+const commands = (path) => st.requests.filter((r) => r.method === 'PATCH' && (path === undefined || r.path === path));
+
+// Tenant Management page probes.
+const TM = '/admin/tenant-management';
+const DIALOG = '[role=dialog]';
+const DIALOG_CONFIRM = '[role=dialog] button[aria-busy]'; // the dialog's own confirm: the trigger outside shares its name
+const detailsButton = (name) => `button[aria-label=${JSON.stringify(`Open details for ${name}`)}]`;
+const detailsStatus = (page) => page.evaluate(`document.querySelector('[aria-labelledby=tenant-details-title] dd')?.textContent.trim() ?? null`);
+const rowStatus = (page, name) => page.evaluate(`[...document.querySelectorAll('#main-content tbody tr')].find((tr) => tr.querySelector('th span')?.textContent.trim() === ${JSON.stringify(name)})?.querySelector('td')?.textContent.trim() ?? null`);
+const focusedIn = (page, selector) => page.evaluate(`!!document.querySelector(${JSON.stringify(selector)})?.contains(document.activeElement)`);
+const waitDetailsFocus = (page, name) => page.waitFor(`document.activeElement?.id === 'tenant-details-title' && document.activeElement.textContent.trim() === ${JSON.stringify(name)}`, 5000, `focus moves to the "${name}" details heading`);
+// Scrolled into view as focus would scroll it: inside the viewport (scrollbars excluded), and what a
+// pointer at its centre hits.
+const REACHABLE = `function () {
+  this.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = this.getBoundingClientRect();
+  const { clientWidth, clientHeight } = document.documentElement;
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= clientWidth && r.bottom <= clientHeight && (hit === this || this.contains(hit));
+}`;
+
+/** Press Tab until focus lands on `label`; that focus stop, or null after `max` presses. */
+async function tabTo(page, label, max = 60) {
+  for (let i = 0; i < max; i += 1) {
+    await page.press('Tab');
+    const stop = await page.evaluate(FOCUS_STOP);
+    if (stop.label === label) return stop;
+  }
+  return null;
+}
+
+/** No horizontal page scroll: nothing is wider than the viewport less its vertical scrollbar. */
+async function assertNoOverflow(page, where) {
+  const o = await page.evaluate(`({ doc: document.documentElement.scrollWidth, body: document.body.scrollWidth, win: document.documentElement.clientWidth })`);
+  assert.ok(o.doc <= o.win && o.body <= o.win, `no horizontal overflow ${where} (${o.doc}/${o.body} > ${o.win})`);
+}
+
+async function openTenants(page) {
+  if (st.cookieValue === null) await seedCookie(page);
+  await page.goto(`${ADMIN}${TM}`);
+  await waitVisible(page, el('heading', 'Tenant Management'));
+  await waitNotice(page, `${DIRECTORY_PAGE} tenants loaded.`);
+}
 
 async function shoot(page, name, { mobile = false } = {}) {
   await page.screenshot(join(EVIDENCE, `${name}-desktop.png`));
@@ -545,6 +643,27 @@ async function afterScenario(page, errorsBefore) {
     assert.equal(r.hasPostData, false, 'a Command Center read has no body');
   }
 
+  // Every tenant directory read rides the session cookie the same way. Every tenant command also carries
+  // the intent header, this session's CSRF token and a JSON body under a UUID v4 Idempotency-Key — a new
+  // key each time, since every scripted command answers definitively (a retry would reuse its key).
+  for (const r of tenantReads()) {
+    assert.ok(hasAdminCookie(r), 'a tenant directory read carries the admin session cookie');
+    assert.equal(r.headers.authorization, undefined, 'a tenant directory read carries no Authorization');
+    assert.equal(r.headers['x-tmpos-csrf'], undefined, 'a tenant directory read carries no CSRF header');
+    assert.equal(r.headers['x-tmpos-session-csrf'], undefined, 'a tenant directory read carries no session CSRF header');
+    assert.equal(r.hasPostData, false, 'a tenant directory read has no body');
+  }
+  for (const r of commands()) {
+    assert.ok(hasAdminCookie(r), `${r.path} carries the admin session cookie`);
+    assert.equal(r.headers.authorization, undefined, `${r.path} carries no Authorization`);
+    assert.equal(r.headers['x-tmpos-csrf'], '1', `${r.path} carries the intent header`);
+    assert.ok(r.headers['x-tmpos-session-csrf'] === st.csrfToken, `${r.path} carries the session's csrfToken as X-TMPOS-Session-CSRF`);
+    assert.match(r.headers['idempotency-key'] ?? '', UUID_V4, `${r.path} carries a UUID v4 Idempotency-Key`);
+    assert.match(r.headers['content-type'] ?? '', /^application\/json\s*(?:;|$)/i, `${r.path} sends JSON`);
+  }
+  const keys = commands().map((r) => r.headers['idempotency-key']);
+  assert.equal(new Set(keys).size, keys.length, 'each command intent carries its own Idempotency-Key');
+
   // CSP: Chromium's own reports, once late events have settled. Only the exact reports a scenario
   // provokes on purpose are allowed, each once; anything else is a product finding.
   await page.settle();
@@ -563,7 +682,7 @@ async function afterScenario(page, errorsBefore) {
   assert.deepEqual(st.blocked.filter((b) => FONT_HOSTS.some((h) => b.includes(h))), [], 'a Google Fonts request was made');
   assert.deepEqual(st.fontFiles, [], 'a served admin file references Google Fonts');
 
-  if (ccReads().length > 0) await assertNoLeak(page);
+  if (ccReads().length > 0 || tenantReads().length > 0) await assertNoLeak(page);
 }
 
 function writeLog(id, page) {
@@ -1243,6 +1362,170 @@ scenario('cc-navigation', 'Command Center: the sidebar marks it current; the mob
   await page.waitFor(async () => (await page.find(el('dialog', 'Navigation'))) === null, 5000, 'Escape closes the drawer');
   await page.waitFor(() => page.call(el('button', 'Open navigation'), function () { return this === document.activeElement; }), 5000, 'focus returns to "Open navigation"');
   await page.screenshot(join(EVIDENCE, 'cc-nav-closed-mobile.png'));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Tenant Management: the directory and its two commands through the real page, over synthetic tenants.
+scenario('tm-keyboard', 'Tenant Management: keyboard only — Tab to Details, Enter opens it, a rename submitted with Enter shows the server-confirmed name', {}, async (page) => {
+  await openTenants(page);
+  assert.equal(tenantReads()[0].query, '?limit=25', 'the first page is read at the default limit, with no cursor');
+  const details = await tabTo(page, 'Open details for Unnamed tenant');
+  assert.ok(details, 'Tab reaches the Details button of the unnamed tenant');
+  assert.equal(details.indicator, true, 'the Details button shows a visible focus ring');
+  await page.press('Enter');
+  await waitDetailsFocus(page, 'Unnamed tenant');
+  await page.press('Tab');
+  assert.equal(await page.evaluate('document.activeElement?.id'), 'display-name', 'Tab from the heading reaches the display-name field');
+  await page.type('  Lakeside Test Shop  ');
+  const saved = 'Display name saved as “Lakeside Test Shop”.';
+  const releaseCommand = hold(RENAME);
+  await page.press('Enter');
+  await page.waitFor(() => commands().length === 1, 5000, 'Enter submitted the rename');
+  const reads = tenantReads().length;
+  await page.settle();
+  assert.equal(await page.evaluate(noticeShown(saved)), false, 'nothing is shown as saved before the answer');
+  assert.equal(tenantReads().length, reads, 'no re-read before the answer');
+  releaseCommand();
+  await waitNotice(page, saved);
+  const sent = commands();
+  assert.equal(sent.length, 1, 'Enter submitted exactly one command');
+  assert.equal(sent[0].path, RENAME);
+  assert.equal(sent[0].status, 200);
+  assert.equal(sent[0].body, JSON.stringify({ tenantId: UNNAMED.tenantId, displayName: 'Lakeside Test Shop', expectedVersion: UNNAMED.version }), 'the exact JSON body: the trimmed name at the loaded version');
+  // The definitive answer re-reads the directory; the list then shows the committed name.
+  await page.waitFor(async () => (await rowStatus(page, 'Lakeside Test Shop')) === 'Active', 5000, 'the re-read list shows the new name');
+  assert.ok(tenantReads().length > reads, 'the directory was read again after the answer');
+  assert.equal(await page.evaluate(`document.getElementById('display-name').value`), 'Lakeside Test Shop', 'the field holds the server-confirmed name');
+});
+
+scenario('tm-suspend-dialog', 'Tenant Management: the suspend dialog opens from the keyboard and keeps focus, Escape returns it, and a confirmed reason sends one PATCH; the status changes only after the 200 and the re-read', {}, async (page) => {
+  await openTenants(page);
+  await page.click(detailsButton('Harbor Lane Repairs'));
+  await waitDetailsFocus(page, 'Harbor Lane Repairs');
+  assert.ok(await tabTo(page, 'Suspend tenant'), 'Tab reaches "Suspend tenant"');
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'focus lands on the reason field inside the dialog');
+
+  const cycle = [];
+  for (const shift of [false, false, false, false, true, true]) {
+    await page.press('Tab', { shift });
+    cycle.push(await page.evaluate(`document.querySelector('${DIALOG}').contains(document.activeElement) ? (document.activeElement.id || document.activeElement.textContent.trim()) : 'outside'`));
+  }
+  assert.deepEqual(cycle, ['Cancel', 'Suspend tenant', 'lifecycle-reason', 'Cancel', 'lifecycle-reason', 'Suspend tenant'], 'Tab and Shift+Tab cycle within the dialog');
+
+  await page.press('Escape');
+  await page.waitFor(`!document.querySelector('${DIALOG}')`, 5000, 'Escape closes the dialog');
+  await page.waitFor(`document.activeElement?.textContent.trim() === 'Suspend tenant'`, 5000, 'focus returns to "Suspend tenant"');
+  assert.equal(commands().length, 0, 'closing the dialog sent nothing');
+
+  // Reopen from the keyboard and confirm with a reason; hold the answer, then the re-read after it.
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'the reopened dialog focuses its reason field');
+  await page.type('Synthetic check: billing dispute under review');
+  const releaseCommand = hold(LIFECYCLE);
+  await page.press('Tab');
+  await page.press('Tab');
+  await page.press('Enter');
+  await page.waitFor(() => commands().length === 1, 5000, 'the PATCH was sent');
+  await page.waitFor(`document.querySelector('${DIALOG_CONFIRM}')?.textContent.trim() === 'Sending…'`, 5000, 'the confirm shows it is sending');
+  assert.equal(await detailsStatus(page), 'Active', 'no status change while the answer is pending');
+  const releaseRead = hold(TENANTS);
+  const reads = tenantReads().length;
+  releaseCommand();
+  await waitNotice(page, 'Tenant suspended. Every tenant and store session is refused from its next request.');
+  await page.waitFor(() => tenantReads().length === reads + 1, 5000, 'the 200 is followed by a re-read');
+  assert.equal(await page.evaluate(`!!document.querySelector('${DIALOG}')`), false, 'the dialog closed');
+  assert.equal(await detailsStatus(page), 'Active', 'the status text waits for the re-read');
+  assert.equal(await rowStatus(page, 'Harbor Lane Repairs'), 'Active');
+  releaseRead();
+  await page.waitFor(async () => (await detailsStatus(page)) === 'Suspended', 5000, 'the re-read shows the tenant suspended');
+  assert.equal(await rowStatus(page, 'Harbor Lane Repairs'), 'Suspended');
+  assert.equal(await page.isVisible(el('button', 'Reactivate tenant')), true, 'the lifecycle action is the one the new status allows');
+  const sent = commands();
+  assert.equal(sent.length, 1, 'exactly one PATCH');
+  assert.equal(sent[0].path, LIFECYCLE);
+  assert.equal(sent[0].body, JSON.stringify({ tenantId: HARBOR.tenantId, status: 'suspended', reason: 'Synthetic check: billing dispute under review', expectedVersion: HARBOR.version }), 'the exact JSON body');
+});
+
+scenario('tm-focus-visible', 'Tenant Management: status reads as text; "Suspend tenant" and the dialog controls show a visible focus ring; contrast holds', {}, async (page) => {
+  await openTenants(page);
+  for (const [name, status] of [['Harbor Lane Repairs', 'Active'], ['Unnamed tenant', 'Active'], ['Cedar Point Mobile', 'Suspended']]) {
+    assert.equal(await rowStatus(page, name), status, `${name}: status as text in the list`);
+  }
+  await page.click(detailsButton('Cedar Point Mobile'));
+  await waitDetailsFocus(page, 'Cedar Point Mobile');
+  assert.equal(await detailsStatus(page), 'Suspended', 'status as text in the details');
+  await page.click(detailsButton('Harbor Lane Repairs'));
+  await waitDetailsFocus(page, 'Harbor Lane Repairs');
+  assert.equal(await detailsStatus(page), 'Active');
+  await assertContrast(page, 'Tenant Management with details open');
+
+  const trigger = await tabTo(page, 'Suspend tenant');
+  assert.ok(trigger, 'Tab reaches "Suspend tenant"');
+  assert.equal(trigger.indicator, true, 'the destructive control shows a visible focus ring');
+  assert.equal(trigger.inView, true, 'the focused destructive control is in view');
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'focus inside the dialog');
+  const stops = [await page.evaluate(FOCUS_STOP)];
+  for (let i = 0; i < 2; i += 1) {
+    await page.press('Tab');
+    stops.push(await page.evaluate(FOCUS_STOP));
+  }
+  assert.deepEqual(stops.map((s) => s.label), ['TEXTAREA', 'Cancel', 'Suspend tenant'], 'the reason field, Cancel and the confirm');
+  assert.deepEqual(stops.filter((s) => !s.indicator || !s.inView).map((s) => s.label), [], 'every dialog control shows a visible focus ring, in view');
+  const { checked, fails } = await page.evaluate(`${KIT}.contrast(document.querySelector('${DIALOG}'))`);
+  assert.ok(checked >= 5, `the dialog contrast audit saw its text (${checked} elements)`);
+  assert.deepEqual(fails, [], 'WCAG contrast failures in the dialog');
+  await page.screenshot(join(EVIDENCE, 'tm-dialog-desktop.png'));
+});
+
+scenario('tm-reflow-320', 'Tenant Management at 400% zoom (320 CSS px): no horizontal page overflow; list, details, form and dialog controls stay reachable and visible', {}, async (page) => {
+  const reachable = async (targets, where) => {
+    for (const t of targets) assert.equal(await page.call(t, REACHABLE), true, `${typeof t === 'string' ? t : `${t.role} "${t.name}"`} is reachable and visible ${where}`);
+  };
+  await page.setViewport(...ZOOM_400);
+  await openTenants(page);
+  await assertNoOverflow(page, 'on the list at 320px');
+  await reachable([el('button', 'Refresh'), detailsButton('Harbor Lane Repairs'), detailsButton('Cedar Point Mobile'), el('button', 'Next page')], 'on the list at 320px');
+  await page.screenshot(join(EVIDENCE, 'tm-list-320.png'));
+
+  await page.click(detailsButton('Harbor Lane Repairs'));
+  await waitDetailsFocus(page, 'Harbor Lane Repairs');
+  await assertNoOverflow(page, 'with details open at 320px');
+  await reachable(['#display-name', el('button', 'Save display name'), el('button', 'Suspend tenant')], 'in the details at 320px');
+  await page.screenshot(join(EVIDENCE, 'tm-details-320.png'));
+
+  await page.click(el('button', 'Suspend tenant'));
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'focus inside the dialog');
+  await assertNoOverflow(page, 'with the dialog open at 320px');
+  await reachable(['#lifecycle-reason', `${DIALOG} button:not([aria-busy])`, DIALOG_CONFIRM], 'in the dialog at 320px');
+  await page.screenshot(join(EVIDENCE, 'tm-dialog-320.png'));
+  await page.press('Escape');
+  await page.waitFor(`!document.querySelector('${DIALOG}')`, 5000, 'Escape closes the dialog');
+});
+
+scenario('tm-view-only', 'Tenant Management: a View-only page (actions false/false) shows no rename form and no lifecycle button, on either page', { actions: { editDisplayName: false, changeStatus: false } }, async (page) => {
+  const controls = `(() => {
+    const s = document.querySelector('[aria-labelledby=tenant-details-title]');
+    return { fields: s.querySelectorAll('form, input, textarea').length, buttons: [...s.querySelectorAll('button')].map((b) => b.textContent.trim()), commandText: /Display name|Lifecycle|Suspend tenant|Reactivate tenant/.test(s.innerText) };
+  })()`;
+  const none = { fields: 0, buttons: [], commandText: false };
+  await openTenants(page);
+  for (const [name, status] of [['Harbor Lane Repairs', 'Active'], ['Cedar Point Mobile', 'Suspended']]) {
+    await page.click(detailsButton(name));
+    await waitDetailsFocus(page, name);
+    assert.equal(await detailsStatus(page), status, `${name}: the status still reads as text`);
+    assert.deepEqual(await page.evaluate(controls), none, `${name}: no rename form and no lifecycle button`);
+  }
+  // The next page, read with the first page's cursor, carries the same hint.
+  await page.click(el('button', 'Next page'));
+  await waitNotice(page, '1 tenant loaded.');
+  assert.deepEqual(tenantReads().map((r) => r.query), ['?limit=25', `?limit=25&cursor=${encodeTenantCursor(CEDAR.tenantId)}`], 'the second page is read after the cursor the first page returned');
+  await page.click(detailsButton('Northwind Trial Shop'));
+  await waitDetailsFocus(page, 'Northwind Trial Shop');
+  assert.equal(await detailsStatus(page), 'Trial');
+  assert.deepEqual(await page.evaluate(controls), none, 'no rename form and no lifecycle button on the second page');
+  assert.equal(commands().length, 0, 'no command was sent');
 });
 
 test('l. no emitted .js/.css/.html file contains the development-build badge', (t) => {

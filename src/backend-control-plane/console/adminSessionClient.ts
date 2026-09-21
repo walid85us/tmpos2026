@@ -4,8 +4,9 @@
 //   - The HttpOnly `__Host-` session cookie belongs to the browser: every request goes out with
 //     credentials "include", and this module never constructs, reads or sends a cookie.
 //   - The session CSRF token lives in this closure only — never in the published state,
-//     storage, a URL or the DOM — and rides the one unsafe request the console makes (logout),
-//     beside the intent header the runtime requires on every unsafe request.
+//     storage, a URL or the DOM — and rides the console's unsafe requests (logout, and the two
+//     platform tenant commands sent through `command`), beside the intent header the runtime
+//     requires on every unsafe request.
 //   - The provider ID token is handed in once, sent once as the login Bearer, and not kept.
 //   - Every operation that supersedes earlier work advances `epoch`; a response that arrives
 //     under an older epoch is dropped, so a slow read can never restore a session that a
@@ -25,6 +26,20 @@ const CSRF_RE = /^[A-Za-z0-9_-]{43}$/;
 const BEARER_RE = /^[A-Za-z0-9\-._~+/]+=*$/; // RFC 6750 b64token
 const MAX_BEARER_LENGTH = 4096; // server/runtime/access.ts MAX_TOKEN_LENGTH
 export const REQUEST_TIMEOUT_MS = 15_000;
+/** The only paths `command` sends to: the two platform tenant commands (server/runtime/tenantDisplayName.ts, tenantStatus.ts). */
+export const COMMAND_PATHS: readonly string[] = Object.freeze(['/admin/v1/tenants/display-name', '/admin/v1/tenants/status']);
+const IDEMPOTENCY_KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/; // server/runtime/idempotency.ts KEY_RE, lowercase
+const MAX_COMMAND_ANSWER_CHARS = 16_384;
+
+/**
+ * What one command attempt answered: the server's status and, for a JSON answer, its parsed body; `failed` when no answer
+ * arrived — a network failure or the timeout, which leaves the outcome UNKNOWN (retry under the same key); `no-session`
+ * when no active session exists here to send it on, so nothing was sent.
+ */
+export type CommandResponse =
+  | { readonly kind: 'response'; readonly status: number; readonly body: unknown }
+  | { readonly kind: 'failed' }
+  | { readonly kind: 'no-session' };
 
 export type SessionNotice = 'expired' | 'logged-out' | 'logged-out-unconfirmed' | 'denied' | 'rate-limited' | 'unavailable';
 
@@ -56,6 +71,12 @@ export interface AdminSessionClient {
   expire(): void;
   /** Abandon in-flight requests (unmount, navigation away); whatever they return is ignored. */
   abort(): void;
+  /**
+   * Send one platform command on the active session: PATCH `path` (one of COMMAND_PATHS) with a JSON body, the intent
+   * header, this closure's session CSRF token and the caller's Idempotency-Key. It never touches a cookie and never hands
+   * out the token. It decides nothing: the caller reads the answer, and the server decides everything.
+   */
+  command(request: { readonly path: string; readonly body: unknown; readonly idempotencyKey: string }): Promise<CommandResponse>;
 }
 
 type Outcome =
@@ -234,7 +255,51 @@ export function createAdminSessionClient(options: { fetch?: typeof fetch; timeou
     return run;
   }
 
+  async function command(request: { readonly path: string; readonly body: unknown; readonly idempotencyKey: string }): Promise<CommandResponse> {
+    const { path, body, idempotencyKey } = request;
+    if (!COMMAND_PATHS.includes(path) || !IDEMPOTENCY_KEY_RE.test(idempotencyKey)) throw new TypeError('command request invalid');
+    const token = csrf;
+    if (state.phase !== 'active' || token === null) return Object.freeze({ kind: 'no-session' });
+    // Joined to the session's epoch like every read: a logout, an expiry or a newer sign-in aborts it, and an answer
+    // that arrives after one is never reported as this session's, so it cannot end the session that replaced it.
+    const mine = epoch;
+    const controller = new AbortController();
+    controllers.add(controller);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await send(path, {
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/json', 'Content-Type': 'application/json',
+          [INTENT_HEADER]: '1', [SESSION_CSRF_HEADER]: token, 'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        credentials: 'include',
+        mode: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+        signal: controller.signal,
+      });
+      let parsed: unknown;
+      if (/^application\/json\s*(?:;|$)/i.test(res.headers.get('content-type') ?? '')) {
+        const text = await res.text().catch(() => '');
+        if (text.length <= MAX_COMMAND_ANSWER_CHARS) {
+          try { parsed = JSON.parse(text) as unknown; } catch { parsed = undefined; }
+        }
+      }
+      if (mine !== epoch) return Object.freeze({ kind: 'failed' }); // superseded: not an answer to the current session
+      return Object.freeze({ kind: 'response', status: res.status, body: parsed });
+    } catch {
+      return Object.freeze({ kind: 'failed' }); // no answer arrived: the outcome is unknown, never assumed either way
+    } finally {
+      clearTimeout(timer);
+      controllers.delete(controller);
+    }
+  }
+
   return Object.freeze({
+    command,
     getState: () => state,
     subscribe(listener: () => void): () => void {
       listeners.add(listener);

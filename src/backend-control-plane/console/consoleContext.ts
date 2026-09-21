@@ -5,11 +5,14 @@ import { createContext, useContext, useSyncExternalStore } from 'react';
 import type { AdminIdentityProvider } from './adminIdentity';
 import type { AdminSessionClient, SessionState } from './adminSessionClient';
 import type { CommandCenterClient } from './commandCenterClient';
+import type { TenantManagementClient } from './tenantManagementClient';
 
 export interface ConsoleServices {
   readonly client: AdminSessionClient;
   readonly identity: AdminIdentityProvider;
   readonly commandCenter: CommandCenterClient;
+  /** The Tenant Management workspace's reads and commands (M5-GIAM-D1-P3). */
+  readonly tenants: TenantManagementClient;
 }
 
 /** What a console screen gets: the services, and whether another screen came before it in this page. */

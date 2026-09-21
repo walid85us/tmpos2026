@@ -41,9 +41,11 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
               <li key={module.slug}>
                 <NavLink to={modulePath(module)} onClick={onNavigate} className={linkClass}>
                   <span className="truncate">{module.label}</span>
-                  <span className="shrink-0 text-[11px] font-medium text-slate-400" aria-hidden="true">
-                    Soon
-                  </span>
+                  {module.open ? null : (
+                    <span className="shrink-0 text-[11px] font-medium text-slate-400" aria-hidden="true">
+                      Soon
+                    </span>
+                  )}
                 </NavLink>
               </li>
             ))}

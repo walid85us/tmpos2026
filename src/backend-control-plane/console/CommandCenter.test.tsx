@@ -12,6 +12,7 @@ import type { AdminIdentityProvider } from './adminIdentity';
 import { createAdminSessionClient } from './adminSessionClient';
 import { COMMAND_CENTER_PATH, createCommandCenterClient, type CommandCenterClient, type CommandCenterOutcome } from './commandCenterClient';
 import { CONSOLE_MODULES, modulePath } from './navigation';
+import { createTenantManagementClient } from './tenantManagementClient';
 
 const CSRF = 'k'.repeat(43);
 const COOKIE = 'synthetic-admin-cookie-9d2c';
@@ -114,11 +115,15 @@ function renderPage(
   const cc = commandCenterServer(replies);
   const session = sessionServer(options.session ?? ['active']);
   const identity: AdminIdentityProvider = { signIn: vi.fn<AdminIdentityProvider['signIn']>(async () => ({ kind: 'failed', failure: 'unavailable' })) };
+  const client = createAdminSessionClient({ fetch: session as unknown as typeof fetch });
+  // The Tenant Management workspace's reads ride their own fetch; the Command Center page never calls it.
+  const tenantsFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => json(503, { error: 'unavailable' }));
   const tree = (
     <ConsoleProvider
-      client={createAdminSessionClient({ fetch: session as unknown as typeof fetch })}
+      client={client}
       identity={identity}
       commandCenter={options.commandCenter ?? createCommandCenterClient({ fetch: cc.fetch as unknown as typeof fetch })}
+      tenants={createTenantManagementClient({ session: client, fetch: tenantsFetch as unknown as typeof fetch })}
     >
       <MemoryRouter initialEntries={['/admin']}>
         <ConsoleRoutes />
@@ -126,7 +131,7 @@ function renderPage(
     </ConsoleProvider>
   );
   const view = render(options.strict ? <React.StrictMode>{tree}</React.StrictMode> : tree);
-  return { ...view, cc, session, user: userEvent.setup() };
+  return { ...view, cc, session, tenantsFetch, user: userEvent.setup() };
 }
 
 const main = () => screen.getByRole('main');
@@ -178,7 +183,7 @@ afterEach(() => {
 describe('Command Center', () => {
   it('shows every section of a complete view with its labels and values, under the one page heading', async () => {
     const at = Date.now();
-    const { cc } = renderPage([ok(fullView(at))]);
+    const { cc, tenantsFetch } = renderPage([ok(fullView(at))]);
     const summary = await screen.findByRole('region', { name: 'Platform summary' });
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.getByRole('heading', { level: 1, name: 'Command Center' })).toBeInTheDocument();
@@ -217,11 +222,14 @@ describe('Command Center', () => {
       'Identity link Healthy', 'Audit Healthy', 'Background jobs Warning',
     ]);
 
-    expect(within(region('Workspaces')).getAllByText('Coming later')).toHaveLength(CONSOLE_MODULES.length);
+    // Every workspace but the one open Tenant Management (M5-GIAM-D1-P3) is still "Coming later".
+    expect(within(region('Workspaces')).getAllByText('Coming later')).toHaveLength(CONSOLE_MODULES.filter((module) => !module.open).length);
+    expect(within(region('Workspaces')).getByRole('link', { name: /Tenant Management/ })).not.toHaveTextContent('Coming later');
     expect(screen.queryByText(PARTIAL)).toBeNull();
     for (const state of ['Unavailable', 'Not configured', 'Out of date']) expect(screen.queryByText(state)).toBeNull();
     expect(cc.fetch).toHaveBeenCalledTimes(1);
     expect(cc.fetch.mock.calls[0][0]).toBe(COMMAND_CENTER_PATH);
+    expect(tenantsFetch).not.toHaveBeenCalled();
   });
 
   it('says which sources are missing and shows no figure for them', async () => {

@@ -15,10 +15,12 @@ import { CONSOLE_BASE, isApiPath } from './adminSurface';
 import ApiPathNotFound from './ApiPathNotFound';
 import { createCommandCenterClient } from './commandCenterClient';
 import CommandCenterPage from './CommandCenterPage';
+import TenantManagementPage from './TenantManagementPage';
+import { createTenantManagementClient } from './tenantManagementClient';
 import { ConsoleContext, useSessionState, type ConsoleServices } from './consoleContext';
 import ConsoleShell from './ConsoleShell';
 import { HostRefused, LoadingScreen, ModulePage } from './ConsolePages';
-import { CONSOLE_HOME, CONSOLE_MODULES, SIGN_IN_PATH, safeReturnPath } from './navigation';
+import { CONSOLE_HOME, CONSOLE_MODULES, SIGN_IN_PATH, TENANT_MANAGEMENT_SLUG, safeReturnPath } from './navigation';
 import SignInScreen from './SignInScreen';
 
 function RequireSession({ children }: { children: React.ReactNode }) {
@@ -53,7 +55,9 @@ export function ConsoleRoutes() {
         <Route index element={<CommandCenterPage />} />
         {/* One Command Center, the console home: an old link to it lands there, never on a second dashboard. */}
         <Route path="command-center" element={<Navigate to={CONSOLE_HOME} replace />} />
-        {CONSOLE_MODULES.map((module) => (
+        {/* The one workspace open so far (M5-GIAM-D1-P3); every other entry stays a placeholder until its server capability ships. */}
+        <Route path={TENANT_MANAGEMENT_SLUG} element={<TenantManagementPage />} />
+        {CONSOLE_MODULES.filter((module) => !module.open).map((module) => (
           <Route key={module.slug} path={module.slug} element={<ModulePage module={module} />} />
         ))}
       </Route>
@@ -72,13 +76,13 @@ function UnknownAddress() {
 }
 
 /** Reads the session once on mount; an unmount abandons whatever is still in flight. */
-export function ConsoleProvider({ client, identity, commandCenter, children }: ConsoleServices & { children: React.ReactNode }) {
+export function ConsoleProvider({ client, identity, commandCenter, tenants, children }: ConsoleServices & { children: React.ReactNode }) {
   React.useEffect(() => {
     void client.bootstrap();
     return () => client.abort();
   }, [client]);
   const screens = React.useRef({ shown: false }).current;
-  const services = React.useMemo(() => ({ client, identity, commandCenter, screens }), [client, identity, commandCenter, screens]);
+  const services = React.useMemo(() => ({ client, identity, commandCenter, tenants, screens }), [client, identity, commandCenter, tenants, screens]);
   return <ConsoleContext.Provider value={services}>{children}</ConsoleContext.Provider>;
 }
 
@@ -94,7 +98,11 @@ function DevelopmentBadge() {
 
 export default function AdminConsoleApp({ surface, services }: { surface: 'admin' | 'admin-refused'; services?: ConsoleServices }) {
   const [resolved] = React.useState<ConsoleServices>(
-    () => services ?? { client: createAdminSessionClient(), identity: lazyFirebaseIdentity, commandCenter: createCommandCenterClient() },
+    () => {
+      if (services !== undefined) return services;
+      const client = createAdminSessionClient();
+      return { client, identity: lazyFirebaseIdentity, commandCenter: createCommandCenterClient(), tenants: createTenantManagementClient({ session: client }) };
+    },
   );
   if (surface === 'admin-refused') return <HostRefused />;
   return (
