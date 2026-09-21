@@ -687,6 +687,30 @@ describe('Tenant Management: suspend and reactivate', () => {
     expect(server.statuses()).toHaveLength(1);
   });
 
+  it('keeps focus in the dialog however late a frame from choosing the tenant runs', async () => {
+    // Hold every animation frame, open the dialog, then run them: no deferred focus may take the reason field's focus.
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => frames.push(callback));
+    try {
+      const { user } = renderPage({ list: [ok(pageOf([acme()]))] });
+      await open(user, 'Acme Retail');
+      const dialog = await lifecycle(user, 'Suspend tenant');
+      for (const frame of frames.splice(0)) frame(0); // a frame held since the tenant was chosen runs now
+      expect(within(dialog).getByLabelText('Reason')).toHaveFocus();
+      // Closing restores focus to the trigger at once, not in a later frame...
+      await user.keyboard('{Escape}');
+      const trigger = within(details()).getByRole('button', { name: 'Suspend tenant' });
+      expect(trigger).toHaveFocus();
+      // ...and no frame left behind can take focus from where the person moves next.
+      const refresh = within(main()).getByRole('button', { name: 'Refresh' });
+      refresh.focus();
+      for (const frame of frames.splice(0)) frame(0);
+      expect(refresh).toHaveFocus();
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
   it('offers the typed reason again when the same transition is reopened after a refusal', async () => {
     const { user, server } = renderPage({
       list: [ok(pageOf([acme()])), ok(pageOf([acme({ version: 4 })]))],

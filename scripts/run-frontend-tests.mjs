@@ -42,7 +42,7 @@ export const REPO_ROOT = resolve(HERE, '..');
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
 export const MIN_FRONTEND_FILES = 18;
-export const MIN_FRONTEND_CASES = 368;
+export const MIN_FRONTEND_CASES = 369;
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated

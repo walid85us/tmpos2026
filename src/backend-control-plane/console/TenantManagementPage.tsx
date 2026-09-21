@@ -267,6 +267,12 @@ function TenantDetails({ tenant, actions, onChanged }: {
   const unsettled = React.useRef<RenameRequest | null>(null); // the exact change whose answer never arrived
   const trigger = React.useRef<HTMLButtonElement>(null);
   const input = React.useRef<HTMLInputElement>(null);
+  // Focus goes back to the trigger in the commit that removes the dialog (a layout effect runs inside that commit),
+  // before any later input can move it — never in a deferred frame that could land after the person has moved on.
+  const [restore, setRestore] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (restore > 0) (trigger.current ?? document.getElementById('tenant-details-title'))?.focus();
+  }, [restore]);
 
   async function save(event?: React.FormEvent) {
     event?.preventDefault();
@@ -304,7 +310,7 @@ function TenantDetails({ tenant, actions, onChanged }: {
 
   function closeDialog() {
     setDialog(null);
-    requestAnimationFrame(() => (trigger.current ?? document.getElementById('tenant-details-title'))?.focus());
+    setRestore((n) => n + 1);
   }
 
   function lifecycleDone(outcome: CommandOutcome, reason: string) {
@@ -471,9 +477,15 @@ export default function TenantManagementPage() {
   const loading = load.phase === 'loading';
   const current = page?.tenants.find((t) => t.tenantId === selected) ?? null;
 
+  // Focus moves to the chosen tenant's heading in the commit that shows it (a layout effect), before any later input —
+  // a deferred frame could otherwise land after a dialog has opened and take focus out of it.
+  const [chosen, setChosen] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (chosen > 0) document.getElementById('tenant-details-title')?.focus();
+  }, [chosen]);
   function choose(tenant: TenantEntry) {
     setSelected(tenant.tenantId);
-    requestAnimationFrame(() => document.getElementById('tenant-details-title')?.focus());
+    setChosen((n) => n + 1);
   }
 
   let body: React.ReactNode;

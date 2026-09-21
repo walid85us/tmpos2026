@@ -158,7 +158,7 @@ test('the floors match the exact verified counts of the current suite', () => {
   // A guard on the guard: these must be the real numbers, not placeholders. If the suite
   // legitimately grows, both are raised deliberately and this updates with them.
   assert.equal(MIN_FRONTEND_FILES, 18);
-  assert.equal(MIN_FRONTEND_CASES, 368);
+  assert.equal(MIN_FRONTEND_CASES, 369);
   assert.ok(REQUIRED_FRONTEND_SUITES.length >= 4);
 });
 
