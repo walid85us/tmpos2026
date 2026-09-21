@@ -4,10 +4,13 @@
 
 ## 1. Existing durable schema (the canonical seed)
 
-10 tables (`server/platform-identity/migrations/001–007`), **identity/authz/audit/store only** — the 8
+11 tables (`server/platform-identity/migrations/001–011`), **identity/authz/audit/store/session only** — the 8
 below in `public` (001–004), plus `tmpos_internal.idempotency_record` and `tmpos_internal.outbox_event`
-(006, the transactional store). 005 creates no table (runtime roles, grants and RLS), and 007 creates
-no table either (three identity-resolution routines in 006's schema):
+(006, the transactional store) and `tmpos_session.session` (011, the durable session store). 005 creates no
+table (runtime roles, grants and RLS); 007 creates none either (three identity-resolution routines, in its
+own schema `tmpos_identity`); 008–010 create none either — command routines in `tmpos_command`, plus three columns on existing
+tables (`public.tenant.row_version` and `.access_version`, and `public.audit_event.subject_tenant_id`
+with its partial index):
 
 | Table | Role | Key constraints |
 |---|---|---|
@@ -19,9 +22,10 @@ no table either (three identity-resolution routines in 006's schema):
 | `tenant_feature_entitlement` | entitlement | FK → tenant; UNIQUE `(tenant_id, feature_key)`; `source` CHECK (plan/default/manual); **no rows seeded** |
 | `audit_event` | durable audit | PK; **no FKs (by design)**; rich CHECKs; forbidden-key guard; append-only trigger |
 | `identity_link` | Firebase↔Supabase link | composite FKs; partial UNIQUE WHERE active; **unwired** |
+| `tmpos_session.session` | one live session (011) | PK `session_key`, bounded printable ASCII 1-128 — the runtime stores a SHA-256 digest there and never the identifier, which the schema deliberately does NOT assert (a 43-character CHECK would encode the caller's invariant and refuse records the port calls valid); a CHECK on every text column (four shape regexes, one enumeration — `audience in ('tenant','admin')` — and one length bound); stamp CHECKs (`last_seen_at`/`validated_at` never precede `created_at`, `expires_at` strictly after it); `session_principal_idx (audience, principal_key)`; **`tmpos_app` holds no privilege on it at all**; no global expiry sweep — a login prunes only the arriving principal's own rows a day past expiry (doc 08 DA-37) |
 
 - **`audit_event` is append-only**: `reject_audit_event_mutation()` + `trg_audit_event_reject_mutation` (BEFORE UPDATE OR DELETE) raise `restrict_violation` for **all roles including the table owner**. Metadata is guarded (`audit_metadata_is_flat`, forbidden-key list: access/refresh tokens, raw JWT/JWKS, service-role key, DB URL, connection string, password, PAN, card number, provider secret). **Forward-hardening (M6/M7b):** when payments land, extend this guard + log/error redaction to **CVV/CVC, track1/2, and PIN block** so the enforced key-list matches the documented no-CHD boundary (§5), and make the [07](./07-quality-and-test-strategy.md) "no PAN/CVV/track/PIN" assertion check that guard. `evidence_level` ∈ `dev_sidecar_log_advisory | durable_compliance_event`.
-- **RLS enabled on all 10 tables.** At 001–004 there were zero policies and 7/8 `REVOKE ALL … FROM public/anon/authenticated` (001's was added by 005). Migration 005 then adds the runtime roles and **five** tenant/store-scoped policies (`tenant`, `store`, `user_membership`, `tenant_feature_entitlement` for `tmpos_app`; an append-only one for `tmpos_audit_writer`), and 006's two `tmpos_internal` tables are RLS-enabled with no policy — defence in depth, since the runtime role holds no privilege on them at all. Effect: PostgREST/anon/authenticated get deny-all; the owner-role connection still bypasses RLS, and GAP-17 (an app role that does not bypass RLS) stays open until a runtime LOGIN role exists (G-DBROLE).
+- **RLS enabled on all 11 tables.** At 001–004 there were zero policies and 7/8 `REVOKE ALL … FROM public/anon/authenticated` (001's was added by 005). Migration 005 then adds the runtime roles and **five** tenant/store-scoped policies (`tenant`, `store`, `user_membership`, `tenant_feature_entitlement` for `tmpos_app`; an append-only one for `tmpos_audit_writer`), and 006's two `tmpos_internal` tables and 011's `tmpos_session.session` are RLS-enabled with no policy — defence in depth, since the runtime role holds no privilege on them at all. Note two things the phrase "RLS enabled" does not mean here: `FORCE ROW LEVEL SECURITY` is set on NO table (deliberately — a `SECURITY DEFINER` routine must be able to read its owner's rows), and 6 of the 11 carry no policy at all, so for those RLS is a deny-all backstop rather than a filter. Effect: PostgREST/anon/authenticated get deny-all; the owner-role connection still bypasses RLS, and GAP-17 (an app role that does not bypass RLS) stays open until a runtime LOGIN role exists (G-DBROLE).
 
 ## 2. Canonical data ownership per business domain (introduced in M7)
 

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { selectScope } from './principals.js';
 import type { TrustedMembership, TrustedPrincipal } from './principals.js';
-import { decideStatus, decideTenantState, tenantAccessAdmitted } from './tenantState.js';
+import { decideStatus, decideTenantState } from './tenantState.js';
 
 const TENANT = '3f0c2a8e-9b1d-4c7e-8a2f-5d6e7f8a9b0c';
 const STORE = '9a8b7c6d-5e4f-4a3b-9c2d-1e0f2a3b4c5d';
@@ -66,19 +66,6 @@ test('the widest restriction wins across a tenant and its store, and a scope wit
   ];
   for (const [tenant, store, expected] of pairs) {
     assert.equal(decideTenantState(tenant, store), expected, `tenant ${tenant} + store ${store}`);
-  }
-});
-
-test('the access version admits only an exact, well-formed match: anything missing, malformed or moved is stale', () => {
-  assert.equal(tenantAccessAdmitted('7', '7'), true, 'the version the session was admitted under');
-  assert.equal(tenantAccessAdmitted('7', '8'), false, 'a suspension moved it');
-  assert.equal(tenantAccessAdmitted('7', '9'), false, 'a suspension and a reactivation moved it twice');
-  assert.equal(tenantAccessAdmitted('8', '7'), false, 'a version that went backwards is no match either');
-  for (const [bound, current] of [
-    [null, '7'], ['7', null], [undefined, '7'], ['7', undefined], [7, '7'], ['7', 7], ['', ''], ['', '7'], ['7', ''],
-    [{}, '7'], [['7'], '7'], [true, '7'],
-  ] as const) {
-    assert.equal(tenantAccessAdmitted(bound, current), false, `bound ${String(bound)} / current ${String(current)}`);
   }
 });
 

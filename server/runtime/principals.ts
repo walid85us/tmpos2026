@@ -80,6 +80,30 @@ export interface PrincipalResolutionPort {
   probe(signal: AbortSignal): unknown;
 }
 
+/**
+ * What the TENANT boundary's admission port answers (M5-GIAM-D1-P2-R1; doc 08 DA-32).
+ *
+ * `securityVersion` is DISTINCT from the principal's own: the principal's is the account security
+ * version migration 007 computes, which the command transaction revalidates a grant against, while
+ * this one is the SESSION witness — a value over the actor's whole standing, INCLUDING each tenant's
+ * access version (migration 010), so that suspending or reactivating any tenant the actor holds moves
+ * it and every session admitted before that transition is refused on its next protected request. It is
+ * opaque: compared for equality, never parsed.
+ *
+ * `refused` is a decision — this reference names nobody who may hold a tenant session; `unavailable`
+ * is an outage, which a caller must read as neither a denial it can cache nor permission.
+ */
+export type TenantAdmissionResult =
+  | { readonly outcome: 'admitted'; readonly principal: TrustedPrincipal; readonly securityVersion: string }
+  | { readonly outcome: 'refused' }
+  | { readonly outcome: 'unavailable' };
+
+/** The closed port. Each call is handed its deadline's AbortSignal and may return a Promise. */
+export interface TenantAdmissionPort {
+  admit(principal: VerifiedPrincipal, signal: AbortSignal): unknown;
+  probe(signal: AbortSignal): unknown;
+}
+
 /** The selector a request may carry. Both absent is the only shape a platform-scope route accepts. */
 export interface ScopeSelector {
   readonly tenant: string | null;

@@ -45,6 +45,8 @@ import { EnforcementSetupError } from '../runtime/routes.js';
 import type { SessionAudience } from '../runtime/routes.js';
 import { sharesHost } from '../runtime/sessions.js';
 import type { SessionAdmission, SessionBoundaryDeps, SessionDeps, SessionStore } from '../runtime/sessions.js';
+import type { TenantAdmissionPort } from '../runtime/principals.js';
+import { createTenantRouteAuthorizer, createTenantSessionAdmission } from './tenantAuthorization.js';
 
 export type CompositionBlocker =
   | 'session_origins_missing'
@@ -75,7 +77,13 @@ export class ProductionCompositionError extends Error {
 export interface SessionParts {
   readonly origins: Readonly<Record<SessionAudience, readonly string[]>> | CompositionBlocker;
   readonly verifier: RequestAuthenticator | null;
-  /** Each boundary's own store: the two trust boundaries share no store (docs/phase-4/03 §1a). */
+  /**
+   * The store each boundary is bound to. The two boundaries keep distinct cookies, origins and
+   * audiences, and neither ever reads the other's record (sessions.ts refuses one stamped with
+   * another audience) — but they are NOT given distinct stores today: the durable adapter is
+   * audience-agnostic by the port's own contract, so both are bound to one instance over one table
+   * and one runtime role. That residual is recorded as doc 08 DA-37, not hidden here.
+   */
   readonly store: Readonly<Record<SessionAudience, SessionStore | null>>;
   readonly admission: Readonly<Record<SessionAudience, SessionAdmission | null>>;
   readonly authorizer: Readonly<Record<SessionAudience, RouteAuthorizer | null>>;
@@ -118,6 +126,55 @@ const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorize
   authorizer: Object.freeze({ tenant: null, admin: null }),
   limiter: null,
 });
+
+/**
+ * The durable adapters the TRANSACTION root builds over its one kernel (productionTransactions.ts), handed
+ * to this root rather than rebuilt here (M5-GIAM-D1-P2-R1). This root still takes CONFIGURATION only: it
+ * reads no connection string, opens nothing and classifies no endpoint — that root remains the single
+ * production authority for the runtime database connection, so a deployment can never hold two clients
+ * or two credentials for the same database.
+ *
+ * Omitting it leaves every adapter slot null and the composition refuses exactly as before, naming each
+ * missing one. It is optional because a deployment whose inventory requires no transaction boundary has
+ * no kernel to build these over, and must then refuse rather than invent one.
+ */
+export interface DurableSessionAdapters {
+  /** The PostgreSQL session store. One store serves both boundaries; each row carries its own audience. */
+  readonly store: SessionStore;
+  /** The tenant boundary's PostgreSQL admission (migration 011). */
+  readonly tenantAdmission: TenantAdmissionPort;
+  /**
+   * The canonical platform route authorizer that root also builds — the ADMIN boundary's authorizer.
+   * Supplying it removes one blocker; the admin boundary's own admission adapter still does not exist,
+   * so that boundary, and therefore the whole composition, still refuses.
+   */
+  readonly adminAuthorizer?: RouteAuthorizer;
+  /**
+   * The tenant routes EXPLICITLY classified as reads, as `${method} ${path}` — the only ones a read-only
+   * actor may reach. Absent means none is, which is the closed default.
+   */
+  readonly tenantReads?: ReadonlySet<string>;
+}
+
+/**
+ * The adapter table for a composition handed the durable adapters: the tenant boundary's three slots are
+ * filled from them, and the admin boundary keeps every slot it has no adapter for. Nothing here is a
+ * fallback — an absent adapter stays null and is named as a blocker.
+ */
+function adaptersFrom(durable: DurableSessionAdapters): Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> {
+  return Object.freeze({
+    store: Object.freeze({ tenant: durable.store, admin: durable.store }),
+    admission: Object.freeze({
+      tenant: createTenantSessionAdmission({ admission: durable.tenantAdmission }),
+      admin: null,
+    }),
+    authorizer: Object.freeze({
+      tenant: createTenantRouteAuthorizer({ admission: durable.tenantAdmission, reads: durable.tenantReads }),
+      admin: durable.adminAuthorizer ?? null,
+    }),
+    limiter: null,
+  });
+}
 
 /** Each boundary's exact https origins, or why the configuration is refused. */
 function sessionOrigins(env: Readonly<Record<string, string | undefined>>): SessionParts['origins'] {
@@ -192,17 +249,26 @@ export function assembleSessions(parts: SessionParts): ProductionSessions {
 
 /**
  * The production composition: configuration in, both boundaries and their limits out — or a
- * refusal naming every missing dependency. Configuration is the only input; nothing else can be
- * injected.
+ * refusal naming every missing dependency. Configuration is the only REQUIRED input. The one other
+ * input is the durable adapter bundle the TRANSACTION root builds over its own classified endpoint
+ * (productionTransactions.ts); it is typed, not opaque, so nothing but review stops a caller handing
+ * this root a different bundle — which is why the composition that would pass it is the transaction
+ * root alone, and why an adapter smuggled in through the configuration composes nothing.
  */
-export function composeProductionSessions(env: Readonly<Record<string, string | undefined>>): ProductionSessions {
+export function composeProductionSessions(
+  env: Readonly<Record<string, string | undefined>>,
+  // Defaulted, not merely optional, so the CONFIGURATION remains this root's one required argument —
+  // the guarantee productionSessions.test.ts asserts on this function's arity.
+  durable: DurableSessionAdapters | undefined = undefined,
+): ProductionSessions {
   let verifier: RequestAuthenticator | null = null;
   try {
     verifier = createRuntimeIdentityVerifier(env);
   } catch (err) {
     if (!(err instanceof IdentityCompositionError)) throw err;
   }
+  const adapters = durable === undefined ? PRODUCTION_ADAPTERS : adaptersFrom(durable);
   return assembleSessions({
-    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env), ...PRODUCTION_ADAPTERS,
+    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env), ...adapters,
   });
 }

@@ -25,11 +25,23 @@ import {
 import type { ProductionTransactions, TransactionFactories, TransactionInventory } from './productionTransactions.js';
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { createPostgresPrincipalResolver } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
+import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator, TransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { RETIRED_POOL_GRACE_S, createSupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { DriverPool, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
+
+/**
+ * The two session-boundary adapters this root also builds over its one kernel (M5-GIAM-D1-P2-R1).
+ * Spread into a factories literal wherever the case under test is about the transaction ports and not
+ * about these, so adding them changed no existing expectation.
+ */
+const SESSION_FACTORIES = Object.freeze({
+  sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
+  tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
+});
 import { createLifecycle } from '../runtime/lifecycle.js';
 import { testRequestLimits } from '../runtime/rateLimiter.testkit.js';
 import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
@@ -112,6 +124,7 @@ function counted(fake = fakeDriver()) {
       return built.client;
     },
     principals: (client) => createPostgresPrincipalResolver({ client }),
+    ...SESSION_FACTORIES,
     store: (options) => {
       calls.store++;
       built.store = createPostgresTransactionalStore(options);
@@ -125,6 +138,8 @@ const NEVER: TransactionFactories = Object.freeze({
   client: () => assert.fail('no client may be built'),
   store: () => assert.fail('no store may be built'),
   principals: () => assert.fail('no resolver may be built'),
+  sessionStore: () => assert.fail('no session store may be built'),
+  tenantAdmission: () => assert.fail('no tenant admission may be built'),
 });
 
 function blockersOf(inventory: TransactionInventory, env: Record<string, string | undefined>, factories: TransactionFactories = NEVER): readonly string[] {
@@ -319,7 +334,9 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.ok(boundary !== null);
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
-    assert.deepEqual(Object.keys(boundary).sort(), ['authorizer', 'close', 'idempotency', 'principals', 'transactions']);
+    assert.deepEqual(Object.keys(boundary).sort(),
+      ['authorizer', 'close', 'idempotency', 'principals', 'sessionStore', 'tenantAdmission', 'transactions'],
+      'the two ports, the resolver and authorizer, the two session-boundary adapters, and close — nothing else');
     assert.equal(typeof boundary.authorizer.authorize, 'function', 'the canonical platform authorizer over the same resolver');
     assert.deepEqual(Object.keys(boundary.idempotency).sort(), ['keySecret', 'store']);
     assert.deepEqual(Object.keys(boundary.transactions), ['port']);
@@ -357,14 +374,16 @@ test('a command route needs its mutator, a partial construction composes nothing
     client: () => { const client = createSupervisedPgClient(fake.driver, '', { max: 1 }); return { transaction: client.transaction, end: () => { ended++; return client.end(); } }; },
     store: () => { throw new TypeError('transactional store mutator invalid'); },
     principals: NEVER.principals,
+    sessionStore: NEVER.sessionStore,
+    tenantAdmission: NEVER.tenantAdmission,
   };
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, failing), /transactional store mutator invalid/);
   assert.equal(ended, 1);
   // The transport policy refuses: a bounded blocker, and no store is built.
-  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals }),
+  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission }),
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
-  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals }), RangeError);
+  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
   assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
@@ -379,6 +398,7 @@ test('a refused configuration makes no contact, and the real client dials only t
       client: (endpoint) => { calls.client++; return createRuntimeStoreClient(endpoint); },
       store: (options) => { calls.store++; return createPostgresTransactionalStore(options); },
       principals: (client) => createPostgresPrincipalResolver({ client }),
+    ...SESSION_FACTORIES,
     };
     return { calls, factories };
   };
@@ -474,6 +494,7 @@ test('readiness is 503 when a composed port\'s probe throws, rejects, answers a 
     const factories: TransactionFactories = {
       client: () => ({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined }),
       principals: (client) => createPostgresPrincipalResolver({ client }),
+    ...SESSION_FACTORIES,
       store: () => ({ ...store, idempotency: { ...store.idempotency, probe }, transactions: { ...store.transactions, probe } }),
     };
     const boundary = assembleTransactions(REQUIRED, CONFIGURED, factories) as ProductionTransactions;
@@ -572,9 +593,12 @@ test('the resolver is composed with the store, over the same client, and never a
     client: () => { sharedClient = stub; built.push('client'); return stub as never; },
     store: (options) => { built.push('store'); assert.equal(options.client, sharedClient, 'the store takes the shared client'); assert.equal(typeof options.revalidate, 'function', 'and a revalidator'); return createPostgresTransactionalStore(options); },
     principals: (client) => { built.push('principals'); assert.equal(client, sharedClient, 'the resolver takes the SAME client'); return createPostgresPrincipalResolver({ client }); },
+    sessionStore: (client) => { built.push('sessionStore'); assert.equal(client, sharedClient, 'the session store takes the SAME client'); return createPostgresSessionStore({ client }); },
+    tenantAdmission: (client) => { built.push('tenantAdmission'); assert.equal(client, sharedClient, 'tenant admission takes the SAME client'); return createPostgresTenantAdmission({ client }); },
   });
   assert.ok(boundary !== null);
-  assert.deepEqual(built, ['client', 'store', 'principals'], 'one client, then both consumers of it');
+  assert.deepEqual(built, ['client', 'store', 'principals', 'sessionStore', 'tenantAdmission'],
+    'one client, then every consumer of it: the store, the resolver and the two session-boundary adapters');
   assert.equal(typeof boundary!.principals.resolve, 'function');
   assert.equal(typeof boundary!.principals.probe, 'function');
 });
@@ -624,6 +648,7 @@ test('the store is composed with the platform revalidator: migration 009\'s exac
     client: () => stub as never,
     store: (options) => { revalidate = options.revalidate as never; return createPostgresTransactionalStore(options); },
     principals: (client) => createPostgresPrincipalResolver({ client }),
+    ...SESSION_FACTORIES,
   });
   assert.ok(boundary !== null && revalidate !== undefined);
   const texts: string[] = [];

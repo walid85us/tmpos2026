@@ -185,9 +185,10 @@ export interface SessionStore {
  * THE TENANT BOUNDARY'S VERSION (binding on whoever writes that adapter; M5-GIAM-D1-P2, doc 08 DA-32). It
  * must incorporate the tenant access version migration 010 maintains, so that suspending or reactivating a
  * tenant moves it and every session admitted before that transition is refused on its next protected
- * request — which is also why this boundary keeps no revalidation window. No such adapter exists yet
- * (`productionSessions.ts` composes none), so that link is specified and not yet enforced by anything;
- * `tenantState.ts` holds the comparison it must apply.
+ * request — which is also why this boundary keeps no revalidation window. That adapter now exists and
+ * is composed: `postgresTenantAdmission.ts` derives the version from the actor's whole standing,
+ * including each tenant's access version, and `tenantAuthorization.ts` binds it to this port
+ * (M5-GIAM-D1-P2-R1, DA-32 closed).
  */
 export interface SessionAdmission {
   admit(principal: VerifiedPrincipal, audience: SessionAudience, signal: AbortSignal): unknown;

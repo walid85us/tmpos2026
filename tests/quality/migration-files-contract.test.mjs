@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the ten committed migration files through the engine's Node fs port (node:fs
+// Reads the eleven committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -105,19 +105,27 @@ const PINNED = {
   // unchanged and still refuses the longer plan.
   '010_m5_tenant_lifecycle_command.up.sql': 'a3a2f41107df582826c20001a91edff569507582e1d90df6c339778b2fb8748b',
   '010_m5_tenant_lifecycle_command.down.sql': '02b1633e9f22fa92ca458131c97ac2a79b6499b38802e67fc2c125cf6c240297',
+  // Phase 4.0 M5-GIAM-D1-P2-R1 — the tenant session store and the composed tenant/store admission read, in their OWN schema
+  // tmpos_session: one table no role may read directly, five session routines and one admission routine (EXECUTE to tmpos_app
+  // alone, none of it grantable). The admission routine digests the actor's whole standing — every grant, and every grant's
+  // tenant access_version from 010 — so a suspension and a later reactivation cannot return the same answer. Proved by
+  // tests/db/tenantAdmission.integration.test.mjs against disposable PostgreSQL only; applied to no managed, persistent or
+  // application database. D4 now names the contiguous chain through 011; the exact-[005] gate is unchanged and still refuses.
+  '011_m5_tenant_admission.up.sql': 'b3944f909c4298f700746784cd52385c5410acd3a15ad39f0a7138d5d6911c7d',
+  '011_m5_tenant_admission.down.sql': 'c272ab6656c7a37e62d007bf60404bfaebe21a40ef95dc906efacd7914f7495b',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twenty expected files', () => {
+test('the migrations directory holds exactly the twenty-two expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

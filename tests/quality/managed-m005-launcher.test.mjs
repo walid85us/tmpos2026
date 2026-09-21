@@ -2910,8 +2910,9 @@ test('V2/§4 (M6-PG-P4): while 006 and 007 are pending, a clean 001-004 ledger a
   // refuses it for the same reason it refused [005, 006] — the plan is not exactly the authorized one.
   // M5-GIAM-D1-P1: 008 lengthens it again, to [005 … 008]; the gate is still unchanged and still refuses (owner decision D4
   // fixes a future managed apply to the whole contiguous chain, which no stage has yet authorized). M5-GIAM-D1-P1-R1: 009
-  // lengthens it to [005 … 009], and the gate still refuses exactly as before.
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010'], 'this tree carries 006 through 010 after 005');
+  // lengthens it to [005 … 009], and the gate still refuses exactly as before. M5-GIAM-D1-P2 and -P2-R1 add 010 and 011,
+  // so the derived plan is now [005 … 011]; the gate is still the one written for [005] and still refuses every longer plan.
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011'], 'this tree carries 006 through 011 after 005');
   const w = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK });
   assert.deepEqual(await v2Run('apply(up)', w), V2_APPLY_PLAN_REFUSED);
   assert.equal(w.calls.length, 0, 'the trusted apply runner is never reached: no lock, no migration statement, no ledger write');
@@ -3271,6 +3272,7 @@ const V2R2_STATUS_007_PENDING = Object.freeze(['stdout', '  version=007  state=u
 const V2R2_STATUS_008_PENDING = Object.freeze(['stdout', '  version=008  state=unapplied  ledger=none']);
 const V2R2_STATUS_009_PENDING = Object.freeze(['stdout', '  version=009  state=unapplied  ledger=none']);
 const V2R2_STATUS_010_PENDING = Object.freeze(['stdout', '  version=010  state=unapplied  ledger=none']);
+const V2R2_STATUS_011_PENDING = Object.freeze(['stdout', '  version=011  state=unapplied  ledger=none']);
 const V2R2_STATUS_REPORT_001_004 = Object.freeze([
   ['stdout', '  version=001  state=applied  ledger=recorded'],
   ['stdout', '  version=002  state=applied  ledger=recorded'],
@@ -3282,6 +3284,7 @@ const V2R2_STATUS_REPORT_001_004 = Object.freeze([
   V2R2_STATUS_008_PENDING,
   V2R2_STATUS_009_PENDING,
   V2R2_STATUS_010_PENDING,
+  V2R2_STATUS_011_PENDING,
 ]);
 const V2R2_STATUS_DISPOSED = Object.freeze([
   ['dispose.requested'],
@@ -3316,7 +3319,7 @@ function v2r2TrappedPorts(world) {
 }
 
 test('V2-R2/status: a successful status — the whole ordered trace, open to completion, exit 0 without forced termination', async () => {
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010'], 'the fixture ledger is 001-004 of this tree');
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011'], 'the fixture ledger is 001-004 of this tree');
   const w = v2World({ argv: V2R2_STATUS_ARGV, ledger: V2_LEDGER_001_004 });
   assert.deepEqual(await v2Run('status', w), [
     ...V2R2_STATUS_PREFIX,
@@ -3341,7 +3344,8 @@ test('V2-R2/status: status selects only its trusted read — one client, no runn
     V2R2_STATUS_007_PENDING,
     V2R2_STATUS_008_PENDING,
     V2R2_STATUS_009_PENDING,
-  V2R2_STATUS_010_PENDING,
+    V2R2_STATUS_010_PENDING,
+    V2R2_STATUS_011_PENDING,
     ...V2R2_STATUS_DISPOSED,
     ...V2R2_STATUS_SUCCESS_TAIL,
   ]);

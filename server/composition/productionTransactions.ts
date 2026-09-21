@@ -33,6 +33,8 @@ import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platfor
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
+import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
 import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
@@ -47,7 +49,8 @@ import type { IdempotencyDeps } from '../runtime/idempotency.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { defineRoutes } from '../runtime/routes.js';
 import type { RouteDefinition } from '../runtime/routes.js';
-import type { PrincipalResolutionPort } from '../runtime/principals.js';
+import type { PrincipalResolutionPort, TenantAdmissionPort } from '../runtime/principals.js';
+import type { SessionStore } from '../runtime/sessions.js';
 
 export type TransactionCompositionBlocker =
   | RuntimeDatabaseRefusal
@@ -90,6 +93,18 @@ export interface ProductionTransactions {
    * platform permission and hands the command its trusted scope (platformAuthorization.ts).
    */
   readonly authorizer: RouteAuthorizer;
+  /**
+   * The durable session store over that same kernel (M5-GIAM-D1-P2-R1, migration 011): the store the
+   * session boundaries have always required and never had. It is built HERE, not in the session root,
+   * because this root is the one production authority for APP_DATABASE_URL — a second root reading it
+   * would be a second credential and a second classification of the same endpoint.
+   */
+  readonly sessionStore: SessionStore;
+  /**
+   * The tenant boundary's admission over that same kernel (migration 011): the read that decides
+   * whether a tenant session may continue, and at which witness. The session root binds it.
+   */
+  readonly tenantAdmission: TenantAdmissionPort;
   /** Ends the store's kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
 }
@@ -99,6 +114,8 @@ export interface TransactionFactories {
   readonly client: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
   readonly principals: (client: SupervisedPgClient) => PrincipalResolutionPort;
+  readonly sessionStore: (client: SupervisedPgClient) => SessionStore;
+  readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
@@ -119,6 +136,8 @@ const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   client: createRuntimeStoreClient,
   store: createPostgresTransactionalStore,
   principals: (client: SupervisedPgClient) => createPostgresPrincipalResolver({ client }),
+  sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
+  tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
 });
 
 /**
@@ -176,11 +195,17 @@ export function assembleTransactions(
   // deployment can never hold one without the other, and never resolves an identity through a client
   // this composition did not classify — and the canonical platform authorizer decides over it alone.
   const principals = factories.principals(client);
+  // The session boundary's two durable adapters, over the SAME kernel and the same classified endpoint
+  // (M5-GIAM-D1-P2-R1). Built here, with the store and the resolver, so a deployment can never hold one
+  // without the others and never reaches a session or an admission through a client this composition
+  // did not classify. The session root binds them; it reads no connection string of its own.
   return Object.freeze({
     idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
     transactions: Object.freeze({ port: store.transactions }),
     principals,
     authorizer: createPlatformRouteAuthorizer({ principals }),
+    sessionStore: factories.sessionStore(client),
+    tenantAdmission: factories.tenantAdmission(client),
     close: () => client.end(),
   });
 }

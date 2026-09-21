@@ -121,6 +121,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/tenantStatus.integration.test.mjs
+      # Phase 4.0 M5-GIAM-D1-P2-R1 — migration 011 and EFFECTIVE tenant revocation: the durable session store,
+      # the composed PostgreSQL admission, and the suspend/reactivate sequence over real local sockets, against
+      # the SAME disposable service after 001-011 are applied to it. This is the suite DA-32's closure rests on,
+      # so it runs here rather than only locally. Same binding, no new service, no secret, no permission change.
+      - name: Effective tenant revocation against disposable PostgreSQL (M5-GIAM-D1-P2-R1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/tenantAdmission.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

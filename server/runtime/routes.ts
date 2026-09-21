@@ -34,6 +34,7 @@
 // handler only as the parsed ctx.body. A `perform` or a planner receives no request or response at all.
 import type { Request, Response } from 'express';
 import type { CommandContract } from './commandTransaction.js';
+import type { TrustedScope } from './principals.js';
 
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type AuthorizationScope = 'platform' | 'tenant' | 'store';
@@ -110,6 +111,17 @@ export interface RouteContext {
    * route, so no business handler ever receives one. It is never read from a request body or header.
    */
   readonly authenticatedAt: number | null;
+  /**
+   * The TRUSTED SCOPE the route's authorizer decided on — the app-owned actor, the tenant and store it
+   * selected, the grant and role behind that decision — or null when the route declared no
+   * authorization or its authorizer resolved no actor (M5-GIAM-D1-P2-R1).
+   *
+   * It is the ONLY tenant or store a handler may treat as authority. A route that needs one declares
+   * `trustedContext: 'required'`, and the chain refuses the request before the handler when none was
+   * resolved, so such a handler never sees null. It is what the command path has always received
+   * through CommandContext; a read route needs the same, and had no way to reach it.
+   */
+  readonly trusted: TrustedScope | null;
   /** The parsed JSON body — still untrusted input — or undefined when none was taken. */
   readonly body: unknown;
 }

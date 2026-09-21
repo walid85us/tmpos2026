@@ -3,8 +3,9 @@
 // Synthetic configuration only: no secret is read, no provider is contacted (the identity
 // verifier initialises lazily, and no login reaches it here). The suite pins that production
 // composition refuses, naming every missing dependency, while any production adapter is absent;
-// that the origin topology is exact, https and host-distinct per boundary; that the root takes
-// configuration only, so no test double can be handed to it; and that, with every adapter
+// that the origin topology is exact, https and host-distinct per boundary; that configuration alone
+// composes no adapter, while the transaction root's durable bundle fills exactly the tenant slots and
+// one store for both boundaries; and that, with every adapter
 // present, assembly is all or nothing and yields boundaries the runtime serves end to end. Durable
 // idempotency is the transaction root's (productionTransactions.test.ts), never this one's.
 import test from 'node:test';
@@ -104,14 +105,44 @@ test('a refusal carries bounded codes only, never configuration content', () => 
   }
 });
 
-test('the production root takes configuration only: no adapter, store or test double can be handed to it', () => {
-  assert.equal(composeProductionSessions.length, 1, 'one parameter: the configuration');
+test('configuration alone composes no adapter, and none can be smuggled in through the configuration', () => {
+  // TWO parameters since M5-GIAM-D1-P2-R1: the second is the durable adapter bundle the TRANSACTION
+  // root builds over its own classified endpoint (productionTransactions.ts). It is a typed input, not
+  // an opaque capability, so this test no longer claims no adapter can be handed over — the next one
+  // proves what the bundle fills. This root still reads no connection string and constructs no client,
+  // and called with the configuration ALONE it composes nothing and names every adapter it lacks.
+  assert.equal(composeProductionSessions.length, 1, 'the durable adapters are optional: configuration alone is a complete call');
   const store = createMemorySessionStore();
   const limiter = createMemoryRateLimiter();
   const smuggled = {
     ...CONFIGURED, store, sessionStore: store, admission: { admit: () => true }, limiter, rateLimiter: limiter,
   } as unknown as Record<string, string>;
   assert.deepEqual(blockersOf(smuggled), [LIMITER, ...ADAPTER_BLOCKERS], 'an extra value in the configuration composes nothing');
+});
+
+test('the durable bundle fills exactly the tenant slots and ONE store for both boundaries, and nothing else', () => {
+  const store = createMemorySessionStore();
+  const tenantAdmission = { admit: () => ({ outcome: 'refused' }), probe: () => true };
+  const blockersWith = (durable: Parameters<typeof composeProductionSessions>[1]): readonly string[] => {
+    try {
+      composeProductionSessions(CONFIGURED, durable);
+    } catch (err) {
+      if (err instanceof ProductionCompositionError) return err.blockers;
+      throw err;
+    }
+    return assert.fail('production composition must still refuse: the admin boundary has no admission');
+  };
+  // The bundle removes the three tenant blockers AND the admin store's: one store serves both
+  // boundaries (DA-37). What remains is exactly what no adapter exists for yet.
+  assert.deepEqual(blockersWith({ store, tenantAdmission }),
+    [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
+  // The platform authorizer the transaction root also builds removes the admin authorizer's blocker, and
+  // only that one: the admin boundary's own admission adapter still does not exist.
+  const adminAuthorizer = { authorize: () => false };
+  assert.deepEqual(blockersWith({ store, tenantAdmission, adminAuthorizer }), [LIMITER, 'admin_admission_unavailable']);
+  // A malformed bundle is refused when the tenant adapters are built, not at the first request.
+  assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission: {} as never }), TypeError);
+  assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, tenantReads: ['GET /x'] as never }), TypeError);
 });
 
 test('the request limits are explicit configuration: exact trusted proxies, a canonical key, an approved limiter', () => {

@@ -28,6 +28,14 @@ export function createMemorySessionStore(): SessionStore {
   };
 }
 
+/**
+ * The instant every record in the contract below is created at. Exported because a DURABLE store
+ * expires its records at their absolute lifetime (sessions.ts SessionStore) and so must be built with
+ * a clock: one reading the wall clock would find every record here already long expired and return
+ * none of them. A store with no clock of its own can ignore this.
+ */
+export const SESSION_CONTRACT_EPOCH = 1_700_000_000_000;
+
 const record = (audience: SessionAudience, principalKey: string, t: number, authenticatedAt: number | null = t): SessionRecord => Object.freeze({
   audience, authProvider: 'synthetic', authProviderUid: `uid-${principalKey}`, principalKey,
   securityVersion: 'v1', authenticatedAt, createdAt: t, lastSeenAt: t, validatedAt: t,
@@ -41,7 +49,7 @@ const record = (audience: SessionAudience, principalKey: string, t: number, auth
  */
 export async function assertSessionStoreContract(store: SessionStore): Promise<void> {
   const signal = new AbortController().signal;
-  const t = 1_700_000_000_000;
+  const t = SESSION_CONTRACT_EPOCH;
   const put = (key: string, r: SessionRecord): unknown => store.create(key, r, signal);
   const get = async (key: string): Promise<unknown> => (await store.get(key, signal)) ?? undefined;
 

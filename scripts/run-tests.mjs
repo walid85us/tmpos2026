@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 135; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator (sentinels below)
+export const MIN_SUITES = 138; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions (sentinels below)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -114,6 +114,9 @@ export const REQUIRED_SENTINELS = [
   'server/persistence/tenantStatusMutator.test.ts',           // the one fixed call into migration 010, the derived from-status and every fault it maps (M5-GIAM-D1-P2)
   'server/runtime/accessGrant.test.ts',                       // an authorizer's granted trusted scope: exact shape, same scope, read once (M5-GIAM-D1-P1)
   'server/composition/platformAuthorization.test.ts',         // canonical platform authorizer: actor resolution, definition-driven decision, fail closed
+  'server/persistence/postgresSessionStore.test.ts',          // M5 durable session store: only the database may say "no such session"; every other doubt is an outage (M5-GIAM-D1-P2-R1)
+  'server/persistence/postgresTenantAdmission.test.ts',       // M5 tenant admission: the witness moves on suspension AND reactivation, and a grant with no access version is never admitted (DA-32)
+  'server/composition/tenantAuthorization.test.ts',           // the tenant boundary's two decisions: denial vs outage, the actor's own selector, the lifecycle decision, the read classification
 ];
 
 export const isTestPath = (f) =>

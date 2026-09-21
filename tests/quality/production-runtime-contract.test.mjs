@@ -24,6 +24,13 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import ts from 'typescript';
 
+// The harness-only tenant admission witness (M5-GIAM-D1-P2-R1 §E, Option 1). Importing it here is
+// what makes the containment assertions below name the REAL declaration rather than a copy of its
+// text that could drift away from it. The module declares route values and runs nothing.
+import {
+  STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_PERMISSION, WITNESS_ROUTES,
+} from '../db/tenantAdmissionWitness.harness.mjs';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..', '..');
 const RUNTIME_DIR = join(REPO, 'server', 'runtime');
@@ -128,6 +135,9 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
       const src = readFileSync(f, 'utf8');
       for (const bad of FORBIDDEN) assert.ok(!src.includes(bad), `${f}: emitted artifact references forbidden ${bad}`);
       assert.ok(!src.includes('createMemorySessionStore'), `${f}: the artifact carries no in-memory session store`);
+      for (const harnessOnly of [WITNESS_PATH, STORE_WITNESS_PATH, 'tenantAdmissionWitness']) {
+        assert.ok(!src.includes(harnessOnly), `${f}: the artifact carries the harness-only admission witness ${harnessOnly}`);
+      }
       assert.ok(!/createMemoryRateLimiter|assertRateLimiterContract/.test(src), `${f}: the artifact carries no per-process rate limiter`);
       assert.ok(!/createMemoryIdempotencyStore|assertIdempotencyStoreContract/.test(src), `${f}: the artifact carries no per-process idempotency store`);
       assert.ok(!/createMemoryCommandTransaction|createMemoryOutboxDeliveryStore|assertCommandTransactionContract|assertOutboxDeliveryContract/.test(src),
@@ -238,6 +248,53 @@ test('the in-memory session store is imported by test files only, anywhere in th
     }
   })(join(REPO, 'server'));
   assert.deepEqual(offenders, [], 'only test files may import the in-memory session store or rate limiter');
+});
+
+test('the tenant-admission witness is harness-only: no production source declares it, and the shipped inventory carries no tenant route at all', async () => {
+  // 1. IT IS A REAL ROUTE. Without this the rest of the test would pass vacuously.
+  assert.equal(WITNESS_ROUTES.length, 2, 'a tenant-scope witness and a store-scope one');
+  assert.deepEqual(WITNESS_ROUTES.map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization.scope]), [
+    ['GET', WITNESS_PATH, 'session', 'tenant', 'tenant'],
+    ['GET', STORE_WITNESS_PATH, 'session', 'tenant', 'store'],
+  ]);
+  assert.ok(WITNESS_ROUTES.every((r) => r.policy.authorization.permission === WITNESS_PERMISSION && r.trustedContext === 'required'));
+
+  // 2. NO PRODUCTION SOURCE DECLARES IT. Neither path, nor the permission on a shipping route, nor an
+  // import of the harness module, appears anywhere outside test files in the server and client trees.
+  const offenders = [];
+  const scanned = [];
+  for (const root of ['server', 'src']) {
+    (function walk(d) {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+        if (!/\.[cm]?[jt]sx?$/.test(p) || /\.test\.[cm]?[jt]sx?$/.test(p) || p.endsWith('.testkit.ts')) continue;
+        scanned.push(p.slice(REPO.length + 1));
+        const src = readFileSync(p, 'utf8');
+        for (const marker of [WITNESS_PATH, STORE_WITNESS_PATH, 'tenantAdmissionWitness']) {
+          if (src.includes(marker)) offenders.push(`${p.slice(REPO.length + 1)}: ${marker}`);
+        }
+      }
+    })(join(REPO, root));
+  }
+  // NON-VACUITY: the walk really did read the production source, including the files that would
+  // carry a shipped tenant route if one existed.
+  assert.ok(scanned.includes('server/runtime/app.ts') && scanned.includes('server/composition/productionTransactions.ts'),
+    `the scan covered the production tree (${scanned.length} files)`);
+  assert.deepEqual(offenders, [], 'the witness route exists only in the integration harness');
+
+  // 3. THE SHIPPED INVENTORY DOES NOT CARRY IT — and could not: no shipped route declares a tenant or
+  // store requirement at all, because every such permission is undecidable until owner decision D1
+  // (GAP-11) and the transaction root refuses to start with one. That is also the honest statement of
+  // what this stage did NOT deliver: there is no production tenant business route yet.
+  const { PRODUCTION_INVENTORY } = await import('../../server/composition/productionTransactions.ts');
+  const paths = PRODUCTION_INVENTORY.routes.map((r) => r.path);
+  assert.equal(paths.includes(WITNESS_PATH) || paths.includes(STORE_WITNESS_PATH), false, 'neither witness is registered');
+  const tenantScoped = PRODUCTION_INVENTORY.routes
+    .filter((r) => (r.policy.authorization ?? null) !== null && r.policy.authorization.scope !== 'platform')
+    .map((r) => `${r.method} ${r.path}`);
+  assert.deepEqual(tenantScoped, [], 'no shipped route declares a tenant or store authorization requirement');
+  assert.equal(paths.some((p) => p.startsWith('/api/v1/')), false, 'and no shipped route sits on the tenant boundary');
 });
 
 test('no per-process limiter, fallback or second proxy contract exists in the production runtime or composition', () => {

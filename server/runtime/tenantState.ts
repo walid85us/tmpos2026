@@ -21,19 +21,21 @@
 // STATUS_DENY_BEFORE_ROLE, migration 007's resolver, which filters such memberships out entirely), and this
 // module states the same rule in the runtime, where it is enforced whatever a resolver returns.
 //
-// THE ACCESS VERSION — WHAT EXISTS, AND WHAT DOES NOT (M5-GIAM-D1-P2; doc 08 DA-32). Migration 010 keeps
+// THE ACCESS VERSION, AND HOW IT IS ENFORCED (M5-GIAM-D1-P2-R1; doc 08 DA-32). Migration 010 keeps
 // public.tenant.access_version: it moves by exactly one on every suspension and every reactivation and never
-// returns to a value it has held, while a harmless profile edit moves only row_version. `tenantAccessAdmitted`
-// below is the COMPARISON a tenant/store session must be re-admitted by, and it fails closed — a missing or
-// malformed version on either side is stale.
+// returns to a value it has held, while a harmless profile edit moves only row_version.
 //
-// Nothing calls it yet, and this module says so rather than implying otherwise. The link is the tenant
-// boundary's SessionAdmission adapter, which must report a security version incorporating the tenant's access
-// version (sessions.ts states that as the adapter's contract); `productionSessions.ts` composes NO tenant
-// admission, store or authorizer, so no session is admitted against this version today. Until such an adapter
-// exists, a suspension's effect on a tenant session rests on the status denial alone — 007's resolver filters
-// a suspended tenant's grants out, so its scope selection refuses — and the version's own guarantee, that a
-// reactivated tenant does not revive a session suspension ended, is specified here and enforced by nobody.
+// THE COMPARISON IS NOT MADE HERE, and this module says so rather than keeping a second one that could drift
+// from the real one. The tenant boundary admits a session at ONE opaque security version and refuses it the
+// moment that version moves (sessions.ts), so the per-tenant comparison is folded into that one value: the
+// PostgreSQL admission adapter digests the actor's whole standing — every grant, and every grant's tenant
+// access version — into the witness the session is bound to (postgresTenantAdmission.ts, migration 011).
+// Suspension removes the grant AND moves the version; reactivation moves it again, to a value it has never
+// held, so the witness after a suspend-and-reactivate differs from the witness before it and an idle session
+// is not revived. A display-name edit moves only row_version, which is not digested, so it ends no session.
+//
+// WHAT THAT LEAVES THIS MODULE. The lifecycle decision below, which `selectScope` applies to every tenant and
+// store request, and which the admission adapter's answer feeds. It holds no version comparison of its own.
 //
 // PURE AND PORTABLE: part of the emitted runtime artifact, importing nothing outside server/runtime.
 
@@ -68,15 +70,4 @@ export function decideTenantState(tenantStatus: string | null, storeStatus: stri
   if (storeStatus !== null) decisions.push(decideStatus(storeStatus));
   if (decisions.includes('denied')) return 'denied';
   return decisions.includes('read_only') ? 'read_only' : 'active';
-}
-
-/**
- * Whether a session admitted under `bound` may still act on a tenant whose access version is now `current`:
- * true only when both are well-formed and equal. A missing, malformed or moved version is stale, and a
- * stale session is denied and must be admitted again — it is never repaired in place.
- */
-export function tenantAccessAdmitted(bound: unknown, current: unknown): boolean {
-  if (typeof bound !== 'string' || typeof current !== 'string') return false;
-  if (bound.length === 0 || current.length === 0) return false;
-  return bound === current;
 }

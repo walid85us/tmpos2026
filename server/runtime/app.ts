@@ -944,6 +944,10 @@ export function createApp(deps: AppDeps): Express {
       await route.handler(req, res, Object.freeze({
         requestId: requestIdOf(res), principal, session, body: parsed,
         authenticatedAt: policy.access === 'login' ? authenticatedAt : null,
+        // The scope the authorizer decided on, unchanged — the same value a command receives. A route
+        // declaring `trustedContext: 'required'` was refused above when this is null, so a handler that
+        // needs an actor or a tenant never has to consider the case.
+        trusted: context,
       }));
     } catch (err) {
       next(err); // bounded 500; the error itself is never logged or echoed
