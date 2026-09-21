@@ -25,16 +25,18 @@
 // Lifetimes. A session ends at its absolute lifetime and after its idle timeout. The idle window
 // slides ONLY when an authorized session route (one that declares a requirement) answers 2xx:
 // the current-session read (passive polling), logout, a refused or failed request and the
-// operational probes never slide it. Admission is asked again once a session's last decision is
-// older than its boundary's interval (ADMISSION_REVALIDATE_MS: admin 1 min; the TENANT boundary has no
-// interval at all and re-asks on EVERY protected request, so a suspended tenant loses access on the next
-// one — M5-GIAM-D1-P2). A
+// operational probes never slide it. Admission is asked again on EVERY protected request of either
+// boundary (ADMISSION_REVALIDATE_MS is zero for both: the tenant's since M5-GIAM-D1-P2, so a suspended
+// tenant loses access on the next one; the admin's since M5-GIAM-D1-P4, so a withdrawn platform grant
+// does). A
 // denial — there, or at login — revokes every session of the principal in that boundary
 // (revokePrincipal); a changed security version revokes the presented session, since one issued
 // after the change carries the new version. Either is a 401, and the reason records a revocation
 // that failed. An unavailable admission fails closed (503) and revokes nothing. Logout skips the
 // re-check: revoking is always allowed. A record that is unknown, malformed, inconsistent, dated
 // beyond the clock-skew allowance into the future, of the other audience, or expired is refused.
+// The scope an admission selects, when it names one, is handed to that same request's route
+// authorizer (ActiveSession.admitted), so authorization decides on the snapshot admission read.
 //
 // Login. The chain (app.ts) spends the client limit, verifies the credential, applies the
 // boundary's evidence policy (LOGIN_POLICIES: the administrative login needs a provider-verified
@@ -64,6 +66,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import type { Request, Response } from 'express';
 import { asPrincipal } from './access.js';
 import type { AuthenticationEvidence, RequestAuthenticator, RouteAuthorizer } from './access.js';
+import { trustedScopeOf } from './principals.js';
+import type { TrustedScope } from './principals.js';
 import { outage, withDeadline } from './deadline.js';
 import { parseTrustedOrigins } from './requestSecurity.js';
 import { EnforcementSetupError, sessionPaths } from './routes.js';
@@ -92,12 +96,15 @@ export const SESSION_TTL: Readonly<Record<SessionAudience, { readonly absoluteMs
  * validatedAt stamp is not written at all here, since nothing reads it to skip a re-check. Logout never
  * revalidates, so it still works while suspended, and the operational probes carry no session at all.
  *
- * The ADMIN boundary keeps its own interval: a platform administrator's session must survive a tenant's
- * state changing — that is who reactivates it — and is governed by its own security version instead.
+ * The ADMIN boundary asks on EVERY protected request too (M5-GIAM-D1-P4). Its admission (migration 013,
+ * platformAuthorization.ts) derives the witness from the actor's platform grant, role, account standing and
+ * platform authority version, so a withdrawn or re-roled grant ends the session on its next request instead of
+ * after a window. A tenant's state is not in that witness: a platform administrator's session survives a tenant
+ * being suspended — that is who reactivates it.
  */
 export const ADMISSION_REVALIDATE_MS: Readonly<Record<SessionAudience, number>> = Object.freeze({
   tenant: 0,
-  admin: 60_000,
+  admin: 0,
 });
 
 export interface LoginPolicy {
@@ -189,9 +196,16 @@ export interface SessionStore {
  * is composed: `postgresTenantAdmission.ts` derives the version from the actor's whole standing,
  * including each tenant's access version, and `tenantAuthorization.ts` binds it to this port
  * (M5-GIAM-D1-P2-R1, DA-32 closed).
+ *
+ * THE SCOPE IT SELECTED (M5-GIAM-D1-P4). An admission that decides on a trusted scope — the administrative
+ * one selects the actor's one platform grant — may answer `{ admitted: true, securityVersion, context }`, and
+ * the boundary hands a checked, frozen copy of that context to the SAME request's route authorizer
+ * (ActiveSession.admitted), so the request is authorized on the snapshot it was admitted on. A context that is
+ * not a TrustedScope is an outage, never a denial. `probe`, when present, is its readiness check.
  */
 export interface SessionAdmission {
   admit(principal: VerifiedPrincipal, audience: SessionAudience, signal: AbortSignal): unknown;
+  probe?(signal: AbortSignal): unknown;
 }
 
 export interface SessionBoundaryDeps {
@@ -241,6 +255,11 @@ export interface ActiveSession {
   readonly lastSeenAt: number;
   /** The provider-verified authentication time bound to this session at login, or null when it carried none. */
   readonly authenticatedAt: number | null;
+  /**
+   * The trusted scope THIS request's admission selected — asked on this request, witness unchanged — or null when
+   * admission was not asked (logout) or names no scope. The chain hands it to the route authorizer.
+   */
+  readonly admitted: TrustedScope | null;
 }
 
 export interface SessionBoundary {
@@ -251,6 +270,8 @@ export interface SessionBoundary {
   readonly authorizer: RouteAuthorizer;
   /** The Set-Cookie line clearing this boundary's cookie, with the attributes it is issued with. */
   readonly clearingCookie: string;
+  /** The admission's readiness check, or null when its admission offers none. */
+  readonly admissionProbe: ((signal: AbortSignal) => unknown) | null;
   /** Why this boundary's login policy refuses `evidence`, or null when it satisfies it. */
   loginEvidence(evidence: AuthenticationEvidence): LoginEvidenceRefusal | null;
   /**
@@ -371,7 +392,9 @@ function challenged(res: Response, ctx: RouteContext, reason: string): void {
   res.status(401).json({ error: 'unauthenticated', requestId: ctx.requestId });
 }
 
-type AdmissionDecision = { readonly securityVersion: string } | 'admission_denied' | 'admission_unavailable' | 'admission_timeout';
+type AdmissionDecision =
+  | { readonly securityVersion: string; readonly context: TrustedScope | null }
+  | 'admission_denied' | 'admission_unavailable' | 'admission_timeout';
 
 function createBoundary(audience: SessionAudience, raw: unknown, now: () => number, deadlineMs: number): SessionBoundary {
   if (!isPlainObject(raw) || !Object.keys(raw).every((key) => PORTS.includes(key))) {
@@ -411,11 +434,18 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       return outage('admission', err);
     }
     if (typeof decision !== 'object' || decision === null) return 'admission_denied';
-    // Read once each, as with a store record.
-    const { admitted, securityVersion } = decision as Record<string, unknown>;
-    return admitted === true && typeof securityVersion === 'string' && VERSION_RE.test(securityVersion)
-      ? Object.freeze({ securityVersion })
-      : 'admission_denied';
+    try {
+      // Read once each, as with a store record.
+      const { admitted, securityVersion, context } = decision as Record<string, unknown>;
+      if (admitted !== true || typeof securityVersion !== 'string' || !VERSION_RE.test(securityVersion)) return 'admission_denied';
+      if (context === undefined || context === null) return Object.freeze({ securityVersion, context: null });
+      // An admission that ADMITTED but named a scope that is not one is a faulty adapter, not a verdict about
+      // the principal: an outage, which revokes nothing.
+      const scope = trustedScopeOf(context);
+      return scope === null ? 'admission_unavailable' : Object.freeze({ securityVersion, context: scope });
+    } catch {
+      return 'admission_unavailable'; // a throwing getter on the answer
+    }
   }
 
   function loginEvidence(evidence: AuthenticationEvidence): LoginEvidenceRefusal | null {
@@ -444,6 +474,7 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       return outage('session', err);
     }
     if (typeof live === 'string') return live;
+    let admitted: TrustedScope | null = null;
     // A boundary with no window re-asks unconditionally: `t - validatedAt >= 0` would be FALSE whenever an
     // instance whose clock runs ahead stamped validatedAt (the reader accepts one up to MAX_CLOCK_SKEW_MS in
     // the future), which would hand that session a grace period of up to the skew — the very thing a zero
@@ -460,6 +491,8 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
         // This session only: one issued since the change already carries the new version.
         return (await revoked((signal) => sessions.revoke(key, signal))) ? 'session_version_mismatch' : 'session_version_mismatch_unrevoked';
       }
+      // The witness is unchanged, so the scope this very admission selected is the request's trusted context.
+      admitted = decision.context;
       // Only a boundary that HAS a window needs the stamp: with none, nothing ever reads it to skip a
       // re-check, so the write would be a per-request availability dependency for no benefit.
       if (ADMISSION_REVALIDATE_MS[audience] > 0) {
@@ -472,6 +505,7 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     }
     return Object.freeze({
       principal: live.principal, context: contextOf(read.id, key), key, lastSeenAt: live.lastSeenAt, authenticatedAt: live.authenticatedAt,
+      admitted,
     });
   }
 
@@ -561,6 +595,9 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     verifier: verifier as RequestAuthenticator,
     authorizer: authorizer as RouteAuthorizer,
     clearingCookie: cookieHeader(cookieName, '', 0),
+    admissionProbe: hasMethod(admitter, 'probe')
+      ? (signal: AbortSignal): unknown => (admitter as Required<SessionAdmission>).probe(signal)
+      : null,
     loginEvidence,
     authenticate,
     refresh,

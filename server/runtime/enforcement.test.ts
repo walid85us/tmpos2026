@@ -163,12 +163,20 @@ function tokenAuthenticator(): { calls: number; verify(tokenView: BearerTokenVie
   return a;
 }
 
-/** The EXISTING trusted-scope gate, fed synthetic memberships instead of the database. */
-function membershipAuthorizer(): { calls: number; authorize(p: VerifiedPrincipal, r: AuthorizationRequirement): boolean } {
+/**
+ * The EXISTING trusted-scope gate, fed synthetic memberships instead of the database. `handed` records each call's
+ * argument count and fifth argument — the scope a session admission selected (M5-GIAM-D1-P4), which a bearer
+ * route never has.
+ */
+function membershipAuthorizer(): {
+  calls: number; handed: unknown[][]; authorize(p: VerifiedPrincipal, r: AuthorizationRequirement, ...rest: unknown[]): boolean;
+} {
   const a = {
     calls: 0,
-    authorize(principal: VerifiedPrincipal, requirement: AuthorizationRequirement): boolean {
+    handed: [] as unknown[][],
+    authorize(principal: VerifiedPrincipal, requirement: AuthorizationRequirement, ...rest: unknown[]): boolean {
       a.calls++;
+      a.handed.push([2 + rest.length, rest[2]]);
       return isScopeBackedByActiveMembership({ scopeType: requirement.scope }, MEMBERSHIPS[principal.authProviderUid] ?? []);
     },
   };
@@ -338,6 +346,8 @@ test('an authorized request reaches its handler exactly once with a minimal, fro
     // RFC 7235: the auth-scheme is case-insensitive.
     assert.equal((await send(port, 'GET', '/v1/open/secret', { authorization: 'bearer tok-platform-admin' })).status, 200);
     assert.equal(hits.secret, 2);
+    // No session admission runs on a bearer route (M5-GIAM-D1-P4), so the authorizer's fifth argument is always null.
+    assert.deepEqual(authorizer.handed, [[5, null], [5, null]], 'five arguments, the fifth null, on every bearer request');
   });
 });
 
@@ -579,7 +589,8 @@ test('an unavailable limiter fails closed with a bounded 503 and never runs the 
 test('a hanging authenticator, authorizer or limiter is cut off at the port deadline with a bounded 503', async () => {
   const signals: AbortSignal[] = [];
   const hang = (...args: unknown[]): Promise<never> => {
-    signals.push(args[args.length - 1] as AbortSignal);
+    // The deadline signal is not always the last argument: the authorizer's fifth is the admitted scope (M5-GIAM-D1-P4).
+    signals.push(args.find((arg) => arg instanceof AbortSignal) as AbortSignal);
     return new Promise(() => {});
   };
   const cases: Array<[string, Partial<AppDeps>, string]> = [

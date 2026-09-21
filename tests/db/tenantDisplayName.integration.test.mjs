@@ -4,6 +4,9 @@
 // M5-GIAM-D1-P1-R1 adds migration 009 and its proofs: the no-op's completion committed with its decision, the exact
 // transaction-time authority (changes and races included), the legacy direct write closed for every runtime principal,
 // the audit record's direct subject, the Bidi_Control rule in both validators, and 009's rollback, upgrade and verify.
+// M5-GIAM-D1-P4 composes the chain's admin boundary with the durable pair: migration 013's admission (asked at login and
+// on every request) and the authorizer deciding on the scope that admission selected — so an actor with no platform
+// grant, or two, is refused at the login and never reaches the route.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
@@ -28,8 +31,11 @@ import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
 import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../../server/persistence/tenantDisplayNameMutator.ts';
-import { createPlatformContextRevalidator, createPlatformRouteAuthorizer } from '../../server/composition/platformAuthorization.ts';
+import {
+  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformSessionAdmission,
+} from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { prepareCommand } from '../../server/runtime/commandTransaction.ts';
 import { IDEMPOTENCY_POLICY, createIdempotencyKeyring } from '../../server/runtime/idempotency.ts';
@@ -526,7 +532,7 @@ test('M5D-08: concurrent commands at one expected version have exactly one winne
 });
 
 // ---------------------------------------------------------------------------
-// the whole chain over HTTP, on the real resolver, authorizer and store
+// the whole chain over HTTP, on the real admission, authorizer and store
 // ---------------------------------------------------------------------------
 
 function send(port, method, path, headers = {}, body) {
@@ -568,8 +574,10 @@ async function withChain(fn, over = {}) {
             return uid === undefined ? null : { verified: true, authProvider: 'firebase', authProviderUid: uid, authenticatedAt: Date.now(), secondFactor: 'totp' };
           },
         },
-        admission: { admit: () => ({ admitted: true, securityVersion: 'v1' }) },
-        authorizer: createPlatformRouteAuthorizer({ principals }),
+        // M5-GIAM-D1-P4: the durable pair — migration 013's admission, asked at login and on every request, and the
+        // authorizer deciding on the scope that request's admission selected.
+        admission: createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) }),
+        authorizer: createAdmittedPlatformAuthorizer(),
         store: createMemorySessionStore(),
       },
     },
@@ -577,36 +585,43 @@ async function withChain(fn, over = {}) {
   const server = createBoundedServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
+  /** The admin login's raw reply for `who` (null: a verified reference naming nobody), with any `extra` headers on it. */
+  const login = (who, extra = {}) => send(port, 'POST', sessionPaths('admin').login, {
+    origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE,
+    authorization: `Bearer ${who === null ? 'tok-unknown' : `tok-${who.uid}`}`, ...extra,
+  });
   const signIn = async (who) => {
-    const token = who === null ? 'tok-unknown' : `tok-${who.uid}`;
-    const login = await send(port, 'POST', sessionPaths('admin').login, {
-      origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${token}`,
-    });
-    assert.equal(login.status, 200, `admin login: ${login.body}`);
-    const cookie = (login.headers['set-cookie'] ?? [''])[0].split('; ')[0];
-    const csrf = JSON.parse(login.body).csrfToken;
+    const reply = await login(who);
+    assert.equal(reply.status, 200, `admin login: ${reply.body}`);
+    const cookie = (reply.headers['set-cookie'] ?? [''])[0].split('; ')[0];
+    const csrf = JSON.parse(reply.body).csrfToken;
     return (body, key = randomUUID(), extra = {}) => send(port, 'PATCH', TENANT_DISPLAY_NAME_PATH, {
       origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, [SESSION_CSRF_HEADER]: csrf, cookie,
       'content-type': 'application/json', 'idempotency-key': key, ...extra,
     }, typeof body === 'string' ? body : JSON.stringify(body));
   };
   try {
-    await fn({ port, signIn, logs });
+    await fn({ port, signIn, login, logs });
   } finally {
     await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
 }
 const errorOf = (reply) => JSON.parse(reply.body).error;
 
-test('M5D-09: over HTTP the canonical authorizer admits System Owner and support_admin and refuses every other actor with one generic 403', async () => {
+test('M5D-09: over HTTP the canonical authorizer admits System Owner and support_admin and refuses billing_admin with one generic 403; no other actor holds a session', async () => {
   const tenant = await newTenant(`m5d-http-authz-${SUFFIX}`);
-  await withChain(async ({ signIn }) => {
-    for (const [label, who] of [['billing_admin (Tenants at View)', BILLING], ['a tenant-role holder', TENANT_ONLY], ['a store-role holder', STORE_ONLY], ['no actor at all', null]]) {
-      const patch = await signIn(who);
-      const refused = await patch({ tenantId: tenant, displayName: 'Refused', expectedVersion: 1 }, randomUUID(), {
-        'x-internal-user-id': OWNER.id, 'x-role': 'system_owner', 'x-permission': 'edit_tenant_profile', 'x-tenant-id': tenant,
-      });
-      assert.deepEqual([refused.status, errorOf(refused)], [403, 'forbidden'], `${label}: request-supplied identity, role and scope are never read`);
+  await withChain(async ({ signIn, login }) => {
+    const forged = { 'x-internal-user-id': OWNER.id, 'x-role': 'system_owner', 'x-permission': 'edit_tenant_profile', 'x-tenant-id': tenant };
+    const patch = await signIn(BILLING);
+    const refused = await patch({ tenantId: tenant, displayName: 'Refused', expectedVersion: 1 }, randomUUID(), forged);
+    assert.deepEqual([refused.status, errorOf(refused)], [403, 'forbidden'],
+      'billing_admin (Tenants at View): request-supplied identity, role and scope are never read');
+    // M5-GIAM-D1-P4: an actor with no platform grant, or no actor at all, is refused by durable admission at the login
+    // itself — the generic 401 and no cookie — so it never reaches the route; the same forged headers change nothing there.
+    for (const [label, who] of [['a tenant-role holder', TENANT_ONLY], ['a store-role holder', STORE_ONLY], ['no actor at all', null]]) {
+      const denied = await login(who, forged);
+      assert.deepEqual([denied.status, errorOf(denied), denied.headers['set-cookie']], [401, 'unauthenticated', undefined],
+        `${label}: admission refuses, whatever the request names`);
     }
     assert.equal((await tenantRow(tenant)).row_version, '1', 'nothing moved');
     const asOwner = await signIn(OWNER);
@@ -1051,13 +1066,12 @@ test('M5D-20: over HTTP one platform grant authorizes, none or two refuse, and a
   for (const label of ['removed', 'added', 'rerolled']) changing.push(await actor(`http-${label}`, { scope: 'platform', role: 'system_owner' }));
   let beforeCommit = async () => undefined;
   const port = { commit: async (c, s) => { await beforeCommit(); return store.transactions.commit(c, s); }, probe: (s) => store.transactions.probe(s) };
-  await withChain(async ({ signIn }) => {
-    const none = await signIn(TENANT_ONLY);
-    const refusedNone = await none({ tenantId: tenant, displayName: 'None', expectedVersion: 1 });
-    assert.deepEqual([refusedNone.status, errorOf(refusedNone)], [403, 'forbidden'], 'no platform grant');
-    const two = await signIn(double);
-    const refusedTwo = await two({ tenantId: tenant, displayName: 'Two', expectedVersion: 1 });
-    assert.deepEqual([refusedTwo.status, errorOf(refusedTwo)], [403, 'forbidden'], 'two platform grants are ambiguous');
+  await withChain(async ({ signIn, login }) => {
+    // M5-GIAM-D1-P4: none or two are refused by durable admission at the login — the generic 401 — before any route.
+    const refusedNone = await login(TENANT_ONLY);
+    assert.deepEqual([refusedNone.status, errorOf(refusedNone)], [401, 'unauthenticated'], 'no platform grant');
+    const refusedTwo = await login(double);
+    assert.deepEqual([refusedTwo.status, errorOf(refusedTwo)], [401, 'unauthenticated'], 'two platform grants are ambiguous');
     for (const [who, change] of [
       [changing[0], () => owner`delete from user_membership where internal_user_id = ${changing[0].id}`],
       [changing[1], () => addGrant(changing[1], randomUUID(), 'support_admin')],

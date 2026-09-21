@@ -1,7 +1,9 @@
 // Phase 4.0 M5-GIAM-D1-P3 — the platform tenant directory against REAL PostgreSQL: migration 012 (one gated read routine in
 // its own schema), the adapter over the runtime's own non-owner login, and the Tenant Management page's whole server
 // surface over real loopback sockets — the read route and the two existing commands, decided by the canonical platform
-// authorizer over the real resolver, committed by the real store.
+// authorizer, committed by the real store. M5-GIAM-D1-P4: the admin boundary is the durable pair — migration 013's
+// admission, asked at login and on every request, and the authorizer deciding on the scope that admission selected — so
+// an account that is not eligible, or holds no platform grant or two, is refused at the login itself.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
@@ -22,11 +24,12 @@ import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
 import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
 import { createPostgresTenantDirectory } from '../../server/persistence/postgresTenantDirectory.ts';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../../server/persistence/tenantDisplayNameMutator.ts';
 import { TENANT_STATUS_MUTATOR } from '../../server/persistence/tenantStatusMutator.ts';
 import {
-  createPlatformContextRevalidator, createPlatformPermits, createPlatformRouteAuthorizer,
+  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformPermits, createPlatformSessionAdmission,
 } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { TEST_IDEMPOTENCY_KEY } from '../../server/runtime/idempotencyStore.testkit.ts';
@@ -432,8 +435,8 @@ async function withChain(fn) {
             return uid === undefined ? null : { verified: true, authProvider: 'firebase', authProviderUid: uid, authenticatedAt: Date.now(), secondFactor: 'totp' };
           },
         },
-        admission: { admit: () => ({ admitted: true, securityVersion: 'v1' }) },
-        authorizer: createPlatformRouteAuthorizer({ principals }),
+        admission: createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) }),
+        authorizer: createAdmittedPlatformAuthorizer(),
         store: createMemorySessionStore(),
       },
     },
@@ -441,13 +444,16 @@ async function withChain(fn) {
   const server = createBoundedServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
+  /** The admin login's raw reply for `who` (null: a verified reference naming nobody), with any `extra` headers on it. */
+  const login = (who, extra = {}) => send(port, 'POST', sessionPaths('admin').login, {
+    origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE,
+    authorization: `Bearer ${who === null ? 'tok-unknown' : `tok-${who.uid}`}`, ...extra,
+  });
   const signIn = async (who) => {
-    const login = await send(port, 'POST', sessionPaths('admin').login, {
-      origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${who === null ? 'tok-unknown' : `tok-${who.uid}`}`,
-    });
-    assert.equal(login.status, 200, `admin login: ${login.body}`);
-    const cookie = (login.headers['set-cookie'] ?? [''])[0].split('; ')[0];
-    const csrf = JSON.parse(login.body).csrfToken;
+    const reply = await login(who);
+    assert.equal(reply.status, 200, `admin login: ${reply.body}`);
+    const cookie = (reply.headers['set-cookie'] ?? [''])[0].split('; ')[0];
+    const csrf = JSON.parse(reply.body).csrfToken;
     const unsafe = { origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, [SESSION_CSRF_HEADER]: csrf, cookie, 'content-type': 'application/json' };
     return {
       list: (query = '', extra = {}) => send(port, 'GET', `${TENANT_DIRECTORY_PATH}${query}`, { cookie, ...extra }),
@@ -456,7 +462,7 @@ async function withChain(fn) {
     };
   };
   try {
-    await fn({ port, signIn });
+    await fn({ port, signIn, login });
   } finally {
     await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -478,14 +484,16 @@ async function listed(session, tenantId) {
 }
 
 test('M5T-07: unauthenticated, unknown, tenant- and store-scoped callers are refused the directory with one generic answer', async () => {
-  await withChain(async ({ port, signIn }) => {
+  await withChain(async ({ port, login }) => {
     const anonymous = await send(port, 'GET', TENANT_DIRECTORY_PATH);
     assert.deepEqual([anonymous.status, errorOf(anonymous)], [401, 'unauthenticated']);
     const bodies = [];
+    // M5-GIAM-D1-P4: durable admission refuses each of these at the login itself — the generic 401, no cookie — so none
+    // holds a session that could reach the directory; the forged headers on the login change nothing.
     for (const [label, who] of [['no actor at all', null], ['a tenant-role holder', TENANT_ONLY], ['a store-role holder', STORE_ONLY],
       ['a suspended platform account', SUSPENDED], ['two platform grants', TWO_GRANTS]]) {
-      const reply = await (await signIn(who)).list('', { 'x-tenant-id': T_HOME, 'x-role': 'system_owner', 'x-internal-user-id': OWNER.id });
-      assert.deepEqual([reply.status, errorOf(reply)], [403, 'forbidden'], label);
+      const reply = await login(who, { 'x-tenant-id': T_HOME, 'x-role': 'system_owner', 'x-internal-user-id': OWNER.id });
+      assert.deepEqual([reply.status, errorOf(reply), reply.headers['set-cookie']], [401, 'unauthenticated', undefined], label);
       bodies.push(Object.keys(JSON.parse(reply.body)).sort().join(','));
     }
     assert.deepEqual(new Set(bodies), new Set(['error,requestId']), 'every denial has the same shape: no hint of which part failed');
@@ -494,8 +502,12 @@ test('M5T-07: unauthenticated, unknown, tenant- and store-scoped callers are ref
 
 test('M5T-08: View reads but cannot rename or suspend; Edit renames but cannot suspend; Manage does both — decided by the canonical catalog on the server', async () => {
   const tenant = await newTenant(`m5t-matrix-${SUFFIX}`);
-  await withChain(async ({ signIn }) => {
-    for (const who of [BILLING, SECURITY, READ_ONLY]) {
+  await withChain(async ({ signIn, login }) => {
+    // M5-GIAM-D1-P4: an account limited to reads holds no administrative session at all — durable admission admits only
+    // an 'active' or 'trialing' account — so the read-only System Owner is refused at the login, not capped to View.
+    const readOnly = await login(READ_ONLY);
+    assert.deepEqual([readOnly.status, errorOf(readOnly)], [401, 'unauthenticated'], 'a read-only account is refused at the login');
+    for (const who of [BILLING, SECURITY]) {
       const session = await signIn(who);
       const { entry, actions } = await listed(session, tenant);
       assert.deepEqual(entry, { tenantId: tenant, displayName: `m5t-matrix-${SUFFIX}`, status: 'active', version: 1 }, `${who.uid} reads the tenant`);

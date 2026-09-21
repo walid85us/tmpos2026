@@ -24,7 +24,7 @@ import {
 } from './productionTransactions.js';
 import type { ProductionTransactions, TransactionFactories, TransactionInventory } from './productionTransactions.js';
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
-import { createPostgresPrincipalResolver } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
@@ -50,7 +50,8 @@ import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import { EnforcementSetupError } from '../runtime/routes.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
-import type { PrincipalResolutionPort } from '../runtime/principals.js';
+import type { PlatformAdmissionPort } from '../runtime/principals.js';
+import { durableSessionAdapters } from './productionSessions.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
@@ -127,7 +128,7 @@ function counted(fake = fakeDriver()) {
       built.client = createSupervisedPgClient(fake.driver, '', { max: 2 });
       return built.client;
     },
-    principals: (client) => createPostgresPrincipalResolver({ client }),
+    platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
     ...SESSION_FACTORIES,
     store: (options) => {
       calls.store++;
@@ -141,7 +142,7 @@ function counted(fake = fakeDriver()) {
 const NEVER: TransactionFactories = Object.freeze({
   client: () => assert.fail('no client may be built'),
   store: () => assert.fail('no store may be built'),
-  principals: () => assert.fail('no resolver may be built'),
+  platformAdmission: () => assert.fail('no platform admission may be built'),
   sessionStore: () => assert.fail('no session store may be built'),
   tenantAdmission: () => assert.fail('no tenant admission may be built'),
   tenantDirectory: () => assert.fail('no tenant directory may be built'),
@@ -354,9 +355,12 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
     assert.deepEqual(Object.keys(boundary).sort(),
-      ['authorizer', 'close', 'idempotency', 'principals', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
-      'the two ports, the resolver and authorizer, the two session-boundary adapters, the served routes, and close — nothing else');
-    assert.equal(typeof boundary.authorizer.authorize, 'function', 'the canonical platform authorizer over the same resolver');
+      ['close', 'idempotency', 'platformAdmission', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
+      'the two ports, the three session-boundary adapters, the served routes, and close — nothing else');
+    // M5-GIAM-D1-P4: the administrative boundary's admission crosses; the resolver and the authorizer over it no longer
+    // do — the session root builds the authorizer that decides on the scope this admission selects.
+    assert.deepEqual([typeof boundary.platformAdmission.admit, typeof boundary.platformAdmission.probe], ['function', 'function']);
+    assert.ok(!('principals' in boundary) && !('authorizer' in boundary), 'no resolver and no authorizer cross');
     assert.deepEqual(Object.keys(boundary.idempotency).sort(), ['keySecret', 'store']);
     assert.deepEqual(Object.keys(boundary.transactions), ['port']);
     assert.ok(Object.isFrozen(boundary) && Object.isFrozen(boundary.idempotency) && Object.isFrozen(boundary.transactions));
@@ -392,7 +396,7 @@ test('a command route needs its mutator, a partial construction composes nothing
   const failing: TransactionFactories = {
     client: () => { const client = createSupervisedPgClient(fake.driver, '', { max: 1 }); return { transaction: client.transaction, end: () => { ended++; return client.end(); } }; },
     store: () => { throw new TypeError('transactional store mutator invalid'); },
-    principals: NEVER.principals,
+    platformAdmission: NEVER.platformAdmission,
     sessionStore: NEVER.sessionStore,
     tenantAdmission: NEVER.tenantAdmission,
     tenantDirectory: NEVER.tenantDirectory,
@@ -400,10 +404,10 @@ test('a command route needs its mutator, a partial construction composes nothing
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, failing), /transactional store mutator invalid/);
   assert.equal(ended, 1);
   // The transport policy refuses: a bounded blocker, and no store is built.
-  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }),
+  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }),
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
-  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, principals: NEVER.principals, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }), RangeError);
+  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
   assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
@@ -417,7 +421,7 @@ test('a refused configuration makes no contact, and the real client dials only t
     const factories: TransactionFactories = {
       client: (endpoint) => { calls.client++; return createRuntimeStoreClient(endpoint); },
       store: (options) => { calls.store++; return createPostgresTransactionalStore(options); },
-      principals: (client) => createPostgresPrincipalResolver({ client }),
+      platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
     ...SESSION_FACTORIES,
     };
     return { calls, factories };
@@ -513,7 +517,7 @@ test('readiness is 503 when a composed port\'s probe throws, rejects, answers a 
   for (const [label, probe] of cases) {
     const factories: TransactionFactories = {
       client: () => ({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined }),
-      principals: (client) => createPostgresPrincipalResolver({ client }),
+      platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
     ...SESSION_FACTORIES,
       store: () => ({ ...store, idempotency: { ...store.idempotency, probe }, transactions: { ...store.transactions, probe } }),
     };
@@ -569,7 +573,7 @@ test('without a composed store readiness probes nothing, and shutdown with one i
 });
 
 // ---------------------------------------------------------------------------
-// M5-ID-P1 — the canonical permission gate and the resolver's composition
+// M5-ID-P1, M5-GIAM-D1-P4 — the canonical permission gate and the platform admission's composition
 // ---------------------------------------------------------------------------
 
 test('a deployed route may require only a canonical platform permission, and startup says so', () => {
@@ -602,7 +606,7 @@ test('a deployed route may require only a canonical platform permission, and sta
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
 });
 
-test('the resolver is composed with the store, over the same client, and never alone', () => {
+test('the platform admission is composed with the store, once, over the same client, and never alone', () => {
   const built: string[] = [];
   let sharedClient: unknown = null;
   // A stub client, not the real one: this proves WHO is handed the client, not how it is built (the
@@ -612,16 +616,16 @@ test('the resolver is composed with the store, over the same client, and never a
   const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
     client: () => { sharedClient = stub; built.push('client'); return stub as never; },
     store: (options) => { built.push('store'); assert.equal(options.client, sharedClient, 'the store takes the shared client'); assert.equal(typeof options.revalidate, 'function', 'and a revalidator'); return createPostgresTransactionalStore(options); },
-    principals: (client) => { built.push('principals'); assert.equal(client, sharedClient, 'the resolver takes the SAME client'); return createPostgresPrincipalResolver({ client }); },
+    platformAdmission: (client) => { built.push('platformAdmission'); assert.equal(client, sharedClient, 'the platform admission takes the SAME client'); return createPostgresPlatformAdmission({ client }); },
     sessionStore: (client) => { built.push('sessionStore'); assert.equal(client, sharedClient, 'the session store takes the SAME client'); return createPostgresSessionStore({ client }); },
     tenantAdmission: (client) => { built.push('tenantAdmission'); assert.equal(client, sharedClient, 'tenant admission takes the SAME client'); return createPostgresTenantAdmission({ client }); },
     tenantDirectory: (client) => { built.push('tenantDirectory'); assert.equal(client, sharedClient, 'the tenant directory takes the SAME client'); return createPostgresTenantDirectory({ client }); },
   });
   assert.ok(boundary !== null);
-  assert.deepEqual(built, ['client', 'store', 'principals', 'tenantDirectory', 'sessionStore', 'tenantAdmission'],
-    'one client, then every consumer of it: the store, the resolver, the tenant directory and the two session-boundary adapters');
-  assert.equal(typeof boundary!.principals.resolve, 'function');
-  assert.equal(typeof boundary!.principals.probe, 'function');
+  assert.deepEqual(built, ['client', 'store', 'tenantDirectory', 'platformAdmission', 'sessionStore', 'tenantAdmission'],
+    'one client, then every consumer of it, each once: the store, the tenant directory and the three session-boundary adapters');
+  assert.equal(typeof boundary!.platformAdmission.admit, 'function');
+  assert.equal(typeof boundary!.platformAdmission.probe, 'function');
 });
 
 test('the served routes are the inventory\'s commands plus its read routes, each served read route built over the composed ports', () => {
@@ -666,29 +670,42 @@ test('the served routes are the inventory\'s commands plus its read routes, each
   assert.equal(assembleTransactions({ routes: [STATUS], mutators: [] }, CONFIGURED, NEVER), null);
 });
 
-test('the composed authorizer decides over the composed resolver: the one the boundary hands back, and nothing else', async () => {
-  // M5-GIAM-D1-P1 review: typeof checks alone would pass a stub. Swap only the resolver factory for a synthetic port, and the
-  // authorizer the boundary returns must be the canonical platform authorizer deciding over that exact object.
+test('the platform admission the boundary hands back is the one it built, and the session root decides over exactly that object', async () => {
+  // M5-GIAM-D1-P1 review, carried into P4: typeof checks alone would pass a stub. Swap only the platform admission factory for
+  // a synthetic port; the boundary must hand back THAT object, and the administrative boundary the session root composes from
+  // it (durableSessionAdapters, as the deployed entry would) must admit through it and authorize on the scope it selected.
   const ACTOR = '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5';
+  const principal = { authProvider: 'firebase', authProviderUid: 'u' };
   const decide = async (roleId: string): Promise<unknown> => {
     const { factories } = counted();
-    let built: PrincipalResolutionPort | undefined;
-    const synthetic: PrincipalResolutionPort = {
-      resolve: () => ({
-        outcome: 'resolved',
-        principal: {
-          actor: ACTOR, accountStatus: 'active', limitation: 'none', securityVersion: 'sv-1',
-          memberships: [{ membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', scopeType: 'platform', tenant: null, store: null, roleId, tenantStatus: null, storeStatus: null }],
-        },
-      }),
+    let built: PlatformAdmissionPort | undefined;
+    let reads = 0;
+    const synthetic: PlatformAdmissionPort = {
+      admit: () => {
+        reads++;
+        return {
+          outcome: 'resolved', authorityVersion: '3',
+          principal: {
+            actor: ACTOR, accountStatus: 'active', limitation: 'none', securityVersion: 'sv-1',
+            memberships: [{ membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', scopeType: 'platform', tenant: null, store: null, roleId, tenantStatus: null, storeStatus: null }],
+          },
+        };
+      },
       probe: () => true,
     };
-    const boundary = assembleTransactions(REQUIRED, CONFIGURED, { ...factories, principals: () => { built = synthetic; return synthetic; } });
+    const boundary = assembleTransactions(REQUIRED, CONFIGURED, { ...factories, platformAdmission: () => { built = synthetic; return synthetic; } });
     assert.ok(boundary !== null);
     try {
-      assert.equal(boundary.principals, built, 'the boundary hands back the resolver it built');
-      return await boundary.authorizer.authorize({ authProvider: 'firebase', authProviderUid: 'u' }, { scope: 'platform', permission: 'edit_tenant_profile' },
-        { method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin' }, new AbortController().signal);
+      assert.equal(boundary.platformAdmission, built, 'the boundary hands back the platform admission it built');
+      const admin = durableSessionAdapters({ store: boundary.sessionStore, tenantAdmission: boundary.tenantAdmission, platformAdmission: boundary.platformAdmission });
+      const signal = new AbortController().signal;
+      const admitted = await admin.admission.admin!.admit(principal, 'admin', signal) as { admitted: true; context: never };
+      assert.equal(admitted.admitted, true, `${roleId}: one platform grant on an active account is admitted`);
+      assert.equal(reads, 1, 'admission reads the port once');
+      const decision = await admin.authorizer.admin!.authorize(principal, { scope: 'platform', permission: 'edit_tenant_profile' },
+        { method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin' }, signal, admitted.context);
+      assert.equal(reads, 1, 'and the authorizer decides on what it selected, without a second read');
+      return decision;
     } finally {
       await boundary.close();
     }
@@ -698,7 +715,7 @@ test('the composed authorizer decides over the composed resolver: the one the bo
   assert.deepEqual({ ...granted.context }, {
     actor: ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
     membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId: 'support_admin', limitation: 'none',
-  }, 'the grant carries the resolved actor, the very grant selected and its role');
+  }, 'the grant carries the admitted actor, the very grant selected and its role');
   assert.equal(await decide('billing_admin'), false, 'a role below Edit on tenant_management is denied');
 });
 
@@ -710,7 +727,7 @@ test('the store is composed with the platform revalidator: migration 009\'s exac
   const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
     client: () => stub as never,
     store: (options) => { revalidate = options.revalidate as never; return createPostgresTransactionalStore(options); },
-    principals: (client) => createPostgresPrincipalResolver({ client }),
+    platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
     ...SESSION_FACTORIES,
   });
   assert.ok(boundary !== null && revalidate !== undefined);

@@ -13,9 +13,10 @@
 //     mapped to a synthetic provider reference. Everything AFTER that point — admission, the session
 //     record, revalidation, authorization and the lifecycle decision — is the composed production
 //     path, and it is what every assertion below judges.
-//   * THE ADMIN BOUNDARY. It carries a stub admission and the in-memory store, because its own
-//     durable adapters are not this stage's work. It appears in one test (M5A-07), to observe that
-//     the PLATFORM plane is untouched while a tenant is suspended.
+//   * THE ADMIN BOUNDARY'S SESSION STORE. Since M5-GIAM-D1-P4 the admin boundary carries the durable
+//     pair — migration 013's admission and the authorizer deciding on the scope it selected — but keeps
+//     the in-memory store, because the admin plane is not what this suite proves. It appears in one
+//     test (M5A-07), to observe that the PLATFORM plane is untouched while a tenant is suspended.
 //
 // WHAT IS PROVED HERE. A suspension takes effect on the very next protected request, with no grace
 // window, and ends the session rather than merely refusing it; a reactivation does NOT revive the
@@ -51,9 +52,9 @@ import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { createPostgresTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
-import { createPostgresPrincipalResolver } from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
 import { createTenantRouteAuthorizer, createTenantSessionAdmission } from '../../server/composition/tenantAuthorization.ts';
-import { createPlatformRouteAuthorizer } from '../../server/composition/platformAuthorization.ts';
+import { createAdmittedPlatformAuthorizer, createPlatformSessionAdmission } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { sessionPaths } from '../../server/runtime/routes.ts';
 import { ADMISSION_REVALIDATE_MS } from '../../server/runtime/sessions.ts';
@@ -177,7 +178,6 @@ client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN)
 /** The real adapters, over that one client — exactly what productionTransactions.ts builds. */
 const sessionStore = createPostgresSessionStore({ client });
 const tenantAdmission = createPostgresTenantAdmission({ client });
-const principals = createPostgresPrincipalResolver({ client });
 
 /** A counting relay over the REAL admission: it delegates every call and adds nothing. */
 function counted(port) {
@@ -269,9 +269,9 @@ function send(port, method, path, headers = {}) {
 
 /**
  * One runtime instance with the witness routes, the REAL tenant boundary (PostgreSQL store,
- * PostgreSQL admission, the tenant authorizer) and the REAL platform authorizer on the admin
- * boundary. The admin boundary's own admission adapter is out of this stage's scope, so it carries
- * the one stub in this file — it is never on the tenant path anything below proves.
+ * PostgreSQL admission, the tenant authorizer) and, on the admin boundary, the REAL durable pair
+ * (M5-GIAM-D1-P4: migration 013's platform admission and the authorizer deciding on the scope it
+ * selected) over the in-memory store — never on the tenant path anything below proves.
  */
 async function withRuntime(fn, over = {}) {
   const uids = new Map([TENANT_ACTOR, STORE_ACTOR, PLATFORM_ACTOR, ...(over.actors ?? [])].map((who) => [`tok-${who.uid}`, who.uid]));
@@ -305,11 +305,10 @@ async function withRuntime(fn, over = {}) {
       admin: {
         trustedOrigins: [ADMIN_ORIGIN],
         verifier,
-        // The admin boundary's admission adapter is not this stage's work; it is stubbed so the
-        // PLATFORM plane can be observed while a tenant is suspended. Nothing below reads it as
+        // The PLATFORM plane, observed while a tenant is suspended (M5A-07). Nothing below reads it as
         // evidence about the tenant boundary.
-        admission: { admit: () => ({ admitted: true, securityVersion: 'admin-v1' }) },
-        authorizer: createPlatformRouteAuthorizer({ principals }),
+        admission: createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) }),
+        authorizer: createAdmittedPlatformAuthorizer(),
         store: createMemorySessionStore(),
       },
     },

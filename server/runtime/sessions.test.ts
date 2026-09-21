@@ -12,8 +12,10 @@
 //   - the host-locked cookie and its attributes, rotation and fixation, absolute and idle
 //     expiry (slid only by a successful authorized request), and logout revocation with a
 //     matching clearing cookie;
-//   - admission revalidation at each boundary's own interval, revocation on denial or a changed
-//     security version, and per-principal revocation;
+//   - admission revalidation on EVERY protected request of either boundary (never on logout, with
+//     no validatedAt stamp), revocation on denial or a changed security version, per-principal
+//     revocation, and the admitted scope handed to the same request's route authorizer;
+//   - each boundary's admission probe as part of readiness, shared per reuse window;
 //   - every port call bounded by the deadline and cancelled through its signal, an outage a 503
 //     and a rejection a 401;
 //   - opaque provider UIDs, cross-boundary isolation, session-bound CSRF and fail-closed storage;
@@ -377,8 +379,9 @@ test('an administrative session is issued only to an identity the admin admissio
     assert.deepEqual(c.attributes, ['HttpOnly', 'Max-Age=3600', 'Path=/', 'SameSite=Strict', 'Secure']);
     assert.equal(3600 * 1000, SESSION_TTL.admin.absoluteMs);
     assert.equal((await current(port, 'admin', c.value)).status, 200);
+    // The admin boundary re-asks on EVERY protected request too (M5-GIAM-D1-P4), so the read after login asks again.
     assert.deepEqual(probe.admissions.map(([p, audience]) => [(p as VerifiedPrincipal).authProviderUid, audience]),
-      [['uid-member', 'admin'], ['uid-owner', 'admin']]);
+      [['uid-member', 'admin'], ['uid-owner', 'admin'], ['uid-owner', 'admin']]);
   });
 });
 
@@ -901,9 +904,12 @@ test('login and current-session disclose only a status and the CSRF token, no id
         assert.deepEqual(Object.keys(body).sort(), ['csrfToken', 'status'], `${audience} ${label}`);
         assert.equal(body.status, 'active');
         assert.equal(body.csrfToken, csrf);
-        for (const detail of ['uid-owner', 'synthetic', 'platform', 'permission', 'audience', 'totp', 'v1', id]) {
+        for (const detail of ['uid-owner', 'synthetic', 'platform', 'permission', 'audience', 'totp', id]) {
           assert.ok(!reply.body.includes(detail), `${audience} ${label} disclosed ${detail}`);
         }
+        // The CSRF token is random base64url and contains 'v1' about once in a hundred tokens, so that one short detail
+        // is looked for outside the token only; every other detail above is looked for in the whole body, token included.
+        assert.ok(!reply.body.split(csrf).join('').includes('v1'), `${audience} ${label} disclosed v1`);
       }
     }
   });
@@ -925,11 +931,10 @@ test('an unavailable session store fails closed: nothing is issued, read or half
     assert.equal(setCookieOf(unreadLogout).value, '', 'still clears the cookie');
     // A GET on the logout path is no logout: it neither clears the cookie nor skips a check.
     assert.equal((await send(port, 'GET', TENANT.logout, cookie('tenant', s.id))).status, 404);
-    // A due revalidation that cannot be RECORDED fails closed only on a boundary that records one. The tenant
-    // boundary has no window (M5-GIAM-D1-P2), so it never writes validatedAt and never reads it to skip a
-    // re-check: a failing write there is not a dependency of the request at all, and the admission it just
-    // asked — which this store's failure does not touch — is what decides. (The admin boundary keeps its
-    // interval and its stamp; this harness's failing store is the tenant boundary's.)
+    // A revalidation that cannot be RECORDED could fail closed only on a boundary that records one, and none
+    // does: neither boundary has a window (tenant M5-GIAM-D1-P2, admin M5-GIAM-D1-P4), so neither writes
+    // validatedAt nor reads it to skip a re-check. A failing write is not a dependency of the request at all,
+    // and the admission it just asked — which this store's failure does not touch — is what decides.
     failing.op = 'update:validatedAt';
     clock.t += ADMISSION_REVALIDATE_MS.tenant;
     assert.equal((await current(port, 'tenant', s.id)).status, 200,
@@ -1017,28 +1022,41 @@ test('a hanging verifier, admission, store, authorizer or limiter is cut off at 
 
 // --- admission revalidation and revocation -----------------------------------------------------
 
-test('the tenant boundary re-asks admission on every protected request; the administrative one keeps its interval', async () => {
-  // M5-GIAM-D1-P2 (GAP-13). A suspended tenant must lose access on its people's NEXT request, so the tenant
-  // boundary allows no window at all: an interval of any length is exactly the grace period the product rules
-  // forbid. The administrative boundary keeps one — a platform administrator's session must survive a tenant's
-  // state changing, since that is who reactivates it.
-  assert.equal(ADMISSION_REVALIDATE_MS.tenant, 0, 'the tenant boundary has no revalidation window');
-  assert.ok(ADMISSION_REVALIDATE_MS.admin > 0 && ADMISSION_REVALIDATE_MS.admin < SESSION_TTL.admin.idleMs,
-    'the admin interval is bounded and inside its idle window');
-  await withSessions({}, async ({ port, probe, clock }) => {
-    const tenant = await signIn(port, 'tenant', 'tok-owner');
-    const admin = await signIn(port, 'admin', 'tok-owner');
+test('M5PR-01 both boundaries re-ask admission on every protected request, never on logout, and store no validatedAt stamp', async () => {
+  // M5-GIAM-D1-P2 (GAP-13) abolished the tenant window: a suspended tenant loses access on its people's NEXT
+  // request. M5-GIAM-D1-P4 abolishes the administrative one: the admin witness (migration 013,
+  // platformAuthorization.ts) moves with the actor's platform grant, role, account standing and authority
+  // version, so a withdrawn or re-roled grant must end the session on its next request — the current-session
+  // read included, which a 60 s window used to answer without asking. With no window nothing reads
+  // validatedAt to skip a re-check, so nothing writes it: that write would be a per-request dependency for
+  // no benefit.
+  assert.deepEqual({ ...ADMISSION_REVALIDATE_MS }, { tenant: 0, admin: 0 }, 'neither boundary has a revalidation window');
+  assert.ok(Object.isFrozen(ADMISSION_REVALIDATE_MS));
+  const ops: Record<SessionAudience, string[]> = { tenant: [], admin: [] };
+  await withSessions({ tenant: { store: instrumented(ops.tenant) }, admin: { store: instrumented(ops.admin) } }, async ({ port, probe }) => {
     const asked = (audience: SessionAudience): number => probe.admissions.filter(([, a]) => a === audience).length;
-    const [t0, a0] = [asked('tenant'), asked('admin')];
-    // No time passes at all: the tenant boundary still asks, every time; the admin boundary does not.
-    for (const [audience, s] of [['tenant', tenant], ['admin', admin]] as const) assert.equal((await current(port, audience, s.id)).status, 200);
-    assert.deepEqual([asked('tenant'), asked('admin')], [t0 + 1, a0], 'the tenant asks again immediately; the admin stands');
-    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
-    assert.equal((await current(port, 'tenant', tenant.id)).status, 200);
-    assert.equal(asked('tenant'), t0 + 3, 'once per protected request, with no window to wait out');
-    clock.t += ADMISSION_REVALIDATE_MS.admin;
-    assert.equal((await current(port, 'admin', admin.id)).status, 200);
-    assert.equal(asked('admin'), a0 + 1, 'the admin interval passed exactly once');
+    for (const audience of ['tenant', 'admin'] as const) {
+      const s = await signIn(port, audience, 'tok-owner');
+      const a0 = asked(audience);
+      // No time passes at all, and every protected request still asks: the current-session read...
+      for (let i = 1; i <= 3; i++) {
+        assert.equal((await current(port, audience, s.id)).status, 200);
+        assert.equal(asked(audience), a0 + i, `${audience}: current-session read ${i} asked again`);
+      }
+      // ...and an authorized route, safe or unsafe.
+      assert.equal((await send(port, 'GET', READ_ROUTE[audience], cookie(audience, s.id))).status, 200);
+      assert.equal((await send(port, 'POST', READ_ROUTE[audience], unsafe(audience, s))).status, 200);
+      assert.equal(asked(audience), a0 + 5, `${audience}: once per protected request, with no window to wait out`);
+      // Logout never asks: revoking a session is always allowed.
+      assert.equal((await send(port, 'POST', sessionPaths(audience).logout, unsafe(audience, s))).status, 204);
+      assert.equal(asked(audience), a0 + 5, `${audience}: logout asked nothing`);
+      assertRefusal(await current(port, audience, s.id), 401, 'unauthenticated', `${audience}: logged out`);
+    }
+    await tick();
+    for (const audience of ['tenant', 'admin'] as const) {
+      assert.ok(ops[audience].includes('update:lastSeenAt'), `${audience}: the control — the store saw the idle refresh`);
+      assert.ok(!ops[audience].some((op) => op.includes('validatedAt')), `${audience}: no validatedAt stamp is ever written`);
+    }
   });
 });
 
@@ -1191,6 +1209,160 @@ test('tenant and admin revalidation are separate: an admin denial ends only the 
     assert.equal((await current(port, 'tenant', tenant.id)).status, 200, 'the tenant session of the same principal stands');
     clock.t += ADMISSION_REVALIDATE_MS.tenant;
     assert.equal((await current(port, 'tenant', tenant.id)).status, 200, 'the tenant admission still admits');
+  });
+});
+
+// --- the admitted scope and the admission probe (M5-GIAM-D1-P4) -------------------------------------
+
+/** A platform TrustedScope as the administrative admission selects it: the actor's one platform grant (synthetic ids). */
+const PLATFORM_SCOPE = Object.freeze({
+  actor: '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f', securityVersion: 'v7', scope: 'platform', tenant: null, store: null,
+  membershipId: '5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170', roleId: 'platform_admin', limitation: 'none',
+});
+const ADMIT_PLATFORM = Object.freeze({ admitted: true, securityVersion: 'v1', context: PLATFORM_SCOPE });
+/** What a readiness request answers, as a status alone. */
+const readinessOf = async (port: number): Promise<number> => (await send(port, 'GET', '/readiness')).status;
+/** app.ts PROBE_REUSE_MS: advancing the clock this far makes the next readiness request probe afresh. */
+const PROBE_REUSE_MS = 1_000;
+
+test('M5PR-02 the scope admin admission selects reaches THIS request\'s route authorizer as a frozen copy; no scope is null', async () => {
+  let answer: unknown = ADMIT_PLATFORM;
+  const ops: string[] = [];
+  await withSessions({ admin: { admission: { admit: (): unknown => answer }, store: instrumented(ops) } }, async ({ port, probe }) => {
+    const s = await signIn(port, 'admin', 'tok-owner');
+    const lastHanded = (): unknown => (probe.authorizations.at(-1) as unknown[])[4];
+    assert.equal((await send(port, 'GET', '/admin/v1/probe', cookie('admin', s.id))).status, 200);
+    assert.equal((await send(port, 'POST', '/admin/v1/probe', unsafe('admin', s))).status, 200);
+    assert.equal(probe.authorizations.length, 2);
+    for (const [i, args] of probe.authorizations.entries()) {
+      assert.equal(args.length, 5, `request ${i}: the authorizer gets exactly its five arguments`);
+      assert.deepEqual(args[4], PLATFORM_SCOPE, `request ${i}: the admitted scope, field for field`);
+      assert.notEqual(args[4], PLATFORM_SCOPE, `request ${i}: a checked copy, never the adapter's own object`);
+      assert.ok(Object.isFrozen(args[4]), `request ${i}: the copy is frozen`);
+    }
+    assert.notEqual(probe.authorizations[0][4], probe.authorizations[1][4], "each request carries its own admission's copy");
+    // THIS request's admission decides: a grant re-roled at an unchanged witness reaches the very next request.
+    answer = { ...ADMIT_PLATFORM, context: { ...PLATFORM_SCOPE, roleId: 'platform_support' } };
+    assert.equal((await send(port, 'GET', '/admin/v1/probe', cookie('admin', s.id))).status, 200);
+    assert.deepEqual(lastHanded(), { ...PLATFORM_SCOPE, roleId: 'platform_support' });
+    // An admission that names no scope — the field absent, or null — hands the authorizer null.
+    for (const [label, admitted] of [['absent', { admitted: true, securityVersion: 'v1' }], ['null', { ...ADMIT_PLATFORM, context: null }]] as const) {
+      answer = admitted;
+      assert.equal((await send(port, 'GET', '/admin/v1/probe', cookie('admin', s.id))).status, 200, label);
+      assert.equal(lastHanded(), null, `a context ${label}: the authorizer receives null`);
+    }
+    // The current-session read declares no requirement: admission is asked there, the authorizer is not.
+    answer = ADMIT_PLATFORM;
+    const authorized = probe.authorizations.length;
+    assert.equal((await current(port, 'admin', s.id)).status, 200);
+    assert.equal(probe.authorizations.length, authorized, 'no authorizer behind the current-session read');
+    assert.deepEqual([probe.handled.adminRead, probe.handled.adminWrite], [4, 1]);
+    assert.ok(!ops.some((op) => op === 'revoke' || op === 'revokePrincipal'), 'nothing was revoked');
+  });
+});
+
+test('M5PR-03 an admitted scope that is not one, or an answer whose getter throws, is an outage: a 503 that revokes nothing', async () => {
+  let answer: unknown = ADMIT_PLATFORM;
+  const ops: string[] = [];
+  const secret = (): never => { throw new Error('admission-getter-secret'); };
+  const getterThrows = <T extends object>(base: T, field: string): T =>
+    Object.defineProperty({ ...base }, field, { get: secret, enumerable: true });
+  const contexts: Array<[string, unknown]> = [
+    ['a string', 'platform'], ['a number', 42], ['false', false], ['an array', [PLATFORM_SCOPE]],
+    ['an actor that is no UUID', { ...PLATFORM_SCOPE, actor: 'uid-owner' }],
+    ['no membership', { ...PLATFORM_SCOPE, membershipId: undefined }],
+    ['a role outside the catalogue pattern', { ...PLATFORM_SCOPE, roleId: 'Platform Admin' }],
+    ['an unknown limitation', { ...PLATFORM_SCOPE, limitation: 'full' }],
+    ['an unknown scope', { ...PLATFORM_SCOPE, scope: 'global' }],
+    ['a platform scope naming a tenant', { ...PLATFORM_SCOPE, tenant: PLATFORM_SCOPE.membershipId }],
+    ['a tenant scope without its tenant', { ...PLATFORM_SCOPE, scope: 'tenant' }],
+    ['a security version with a space', { ...PLATFORM_SCOPE, securityVersion: 'v 7' }],
+    ['a scope field whose getter throws', getterThrows(PLATFORM_SCOPE, 'roleId')],
+  ];
+  const answers: Array<[string, unknown]> = [
+    ...contexts.map(([label, context]): [string, unknown] => [label, { ...ADMIT_PLATFORM, context }]),
+    ['a throwing context getter', getterThrows(ADMIT_PLATFORM, 'context')],
+    ['a throwing admitted getter', getterThrows(ADMIT_PLATFORM, 'admitted')],
+    ['a throwing securityVersion getter', getterThrows(ADMIT_PLATFORM, 'securityVersion')],
+  ];
+  await withSessions({ admin: { admission: { admit: (): unknown => answer }, store: instrumented(ops) } }, async ({ port, probe, logs }) => {
+    const s = await signIn(port, 'admin', 'tok-owner');
+    ops.length = 0;
+    for (const [label, admitted] of answers) {
+      answer = admitted;
+      assertRefusal(await send(port, 'GET', '/admin/v1/probe', cookie('admin', s.id)), 503, 'service_unavailable', `${label}: a read`);
+      assertRefusal(await send(port, 'POST', '/admin/v1/probe', unsafe('admin', s)), 503, 'service_unavailable', `${label}: a write`);
+      assertRefusal(await current(port, 'admin', s.id), 503, 'service_unavailable', `${label}: the current-session read`);
+      // At login the same answer issues nothing — and, being no denial, ends none of the principal's sessions.
+      assertRefusal(await login(port, 'admin', 'tok-owner-again'), 503, 'service_unavailable', `${label}: a login`);
+    }
+    assert.equal(probe.authorizations.length, 0, 'the authorizer is never asked behind an outage');
+    assert.deepEqual([probe.handled.adminRead, probe.handled.adminWrite], [undefined, undefined], 'no handler ran');
+    assert.ok(ops.every((op) => op === 'get'), `the store was only read — nothing revoked, created or stamped: ${ops.join(' ')}`);
+    assert.ok(await logged(logs, 'admission_unavailable'));
+    assert.ok(!await logged(logs, 'session_admission_denied'), 'never read as a denial');
+    assert.ok(!logs.join('').includes('admission-getter-secret'), 'no getter text escapes');
+    answer = ADMIT_PLATFORM;
+    assert.equal((await send(port, 'GET', '/admin/v1/probe', cookie('admin', s.id))).status, 200, 'the session outlived every outage');
+  });
+});
+
+test('M5PR-04 a changed admin witness revokes the presented session before its authorizer is asked, whatever scope it names', async () => {
+  let version = 'v1';
+  const admission = { admit: (): unknown => ({ ...ADMIT_PLATFORM, securityVersion: version }) };
+  await withSessions({ admin: { admission } }, async ({ port, probe, logs }) => {
+    const stale = await signIn(port, 'admin', 'tok-owner');
+    const sibling = await signIn(port, 'admin', 'tok-owner-again');
+    version = 'v2';
+    assertRefusal(await send(port, 'GET', '/admin/v1/probe', cookie('admin', stale.id)), 401, 'unauthenticated', 'a moved witness');
+    assert.equal(probe.authorizations.length, 0, 'the authorizer is never asked on a stale witness');
+    assert.equal(probe.handled.adminRead, undefined);
+    assert.ok(await logged(logs, 'session_version_mismatch'));
+    version = 'v1';
+    assertRefusal(await current(port, 'admin', stale.id), 401, 'unauthenticated', 'the mismatched session stays revoked');
+    // Only the presented session is revoked: a mismatch is no denial of the principal.
+    assert.equal((await send(port, 'GET', '/admin/v1/probe', cookie('admin', sibling.id))).status, 200);
+    assert.equal(probe.authorizations.length, 1);
+    assert.deepEqual(probe.authorizations[0][4], PLATFORM_SCOPE, 'the scope reaches the authorizer once the witness holds');
+  });
+});
+
+test('M5PR-05 each boundary\'s admission probe joins readiness through one shared probe per reuse window; health never depends on it', async () => {
+  const answers: Record<SessionAudience, () => unknown> = { tenant: () => true, admin: () => true };
+  const calls: Record<SessionAudience, unknown[]> = { tenant: [], admin: [] };
+  const probing = (audience: SessionAudience): SessionBoundaryDeps['admission'] => ({
+    admit: (p: VerifiedPrincipal, a: SessionAudience): unknown => (ADMITTED[a].has(p.authProviderUid) ? ADMIT : { admitted: false }),
+    probe: (...args: unknown[]): unknown => { calls[audience].push(args); return answers[audience](); },
+  });
+  await withSessions({ tenant: { admission: probing('tenant') }, admin: { admission: probing('admin') } }, async ({ port, clock }) => {
+    assert.deepEqual([await readinessOf(port), await readinessOf(port), await readinessOf(port)], [200, 200, 200]);
+    assert.deepEqual([calls.tenant.length, calls.admin.length], [1, 1], 'one shared probe per boundary answers every request inside the window');
+    for (const audience of ['tenant', 'admin'] as const) {
+      const [args] = calls[audience] as unknown[][];
+      assert.equal(args.length, 1, `${audience}: the probe is handed exactly one argument`);
+      assert.ok(args[0] instanceof AbortSignal, `${audience}: its deadline signal`);
+    }
+    // Admission is a dependency of every protected request, so an admission that cannot answer makes the instance unready.
+    const failures: Array<[string, () => unknown]> = [
+      ['false', () => false], ['a truthy value that is not true', () => 'true'], ['a resolved false', () => Promise.resolve(false)],
+      ['a throw', () => { throw new Error('admission-probe-secret'); }], ['a rejection', () => Promise.reject(new Error('admission-probe-secret'))],
+    ];
+    for (const audience of ['tenant', 'admin'] as const) {
+      for (const [label, answer] of failures) {
+        answers[audience] = answer;
+        clock.t += PROBE_REUSE_MS;
+        assert.equal(await readinessOf(port), 503, `${audience} admission probe answering ${label}`);
+        assert.equal((await send(port, 'GET', '/health')).status, 200, `${audience} ${label}: liveness never depends on admission`);
+      }
+      answers[audience] = () => true;
+      assert.equal(await readinessOf(port), 503, `${audience}: a failed answer is reused inside its window`);
+      clock.t += PROBE_REUSE_MS;
+      assert.equal(await readinessOf(port), 200, `${audience}: ready again once its admission answers`);
+    }
+  });
+  // An admission without probe adds no check: the harness default offers none, and readiness answers as before.
+  await withSessions({}, async ({ port }) => {
+    assert.equal(await readinessOf(port), 200);
   });
 });
 
@@ -1418,8 +1590,10 @@ test('login and session ports receive frozen views and a deadline signal, never 
     assert.equal(audience, 'tenant');
     assert.ok(admissionSignal instanceof AbortSignal, 'a deadline signal, never the request');
     assert.equal(probe.authorizations.length, 1);
-    const [authorized, requirement, route, authzSignal, ...rest] = probe.authorizations[0];
-    assert.equal(rest.length, 0, 'the authorizer gets exactly its four arguments');
+    const [authorized, requirement, route, authzSignal, admittedScope, ...rest] = probe.authorizations[0];
+    assert.equal(rest.length, 0, 'the authorizer gets exactly its five arguments');
+    // The fifth is the scope THIS request's admission selected (M5-GIAM-D1-P4); this admission names none.
+    assert.equal(admittedScope, null, 'an admission that names no scope hands the authorizer null');
     frozenPlain(authorized, ['authProvider', 'authProviderUid'], 'the authorized principal');
     assert.deepEqual(requirement, { scope: 'tenant', permission: 'probe.write' });
     assert.ok(Object.isFrozen(requirement));

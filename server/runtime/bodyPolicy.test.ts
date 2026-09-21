@@ -531,13 +531,15 @@ test('the authenticator and authorizer receive frozen views only, so the body re
     assert.equal(Object.getPrototypeOf(tokenView), Object.prototype, 'a plain view, not the request stream');
     assert.deepEqual(tokenView, { bearerToken: 'tok-writer' });
     const [args] = ports.authorizations;
-    assert.equal(args.length, 4, 'principal, requirement, route view and the deadline signal only');
+    assert.equal(args.length, 5, 'principal, requirement, route view, the deadline signal and the admitted scope only');
     for (const arg of args.slice(0, 3)) {
       assert.ok(Object.isFrozen(arg));
       assert.equal(Object.getPrototypeOf(arg), Object.prototype);
     }
     assert.deepEqual(args[2], { method: 'POST', path: '/v1/json-required', audience: null });
-    assert.ok(args[3] instanceof AbortSignal, 'the last argument is the deadline signal, never the request');
+    assert.ok(args[3] instanceof AbortSignal, 'the fourth argument is the deadline signal, never the request');
+    // M5-GIAM-D1-P4: a bearer route has no session admission, so it hands the authorizer no admitted scope.
+    assert.equal(args[4], null, 'a bearer route carries no admitted scope');
     assert.deepEqual(seen.bodies, [{ a: 1 }], 'the whole body reached the handler through the policy read');
     assert.deepEqual(seen.streamBytes, [0]);
   });

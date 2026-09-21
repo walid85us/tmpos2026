@@ -12,9 +12,10 @@
 //     refuses;
 //   - the identity verifier: the existing Firebase adapter (createRuntimeIdentityVerifier), which
 //     refuses without a valid service-account configuration;
-//   - each boundary's own durable session store, admission and route authorizer: the approved
-//     production adapters below. None exists yet, and an absent adapter is a blocker — never a
-//     default, a fallback or an in-process stand-in;
+//   - each boundary's own durable session store, admission and route authorizer: the PostgreSQL
+//     adapters the transaction root builds and hands over (DurableSessionAdapters below; migrations
+//     011 and 013). An absent adapter is a blocker — never a default, a fallback or an in-process
+//     stand-in;
 // and the request limits every protected route is served with (server/runtime/rateLimit.ts):
 //   - TRUSTED_PROXY_CIDRS: the exact CIDRs of the proxies whose X-Forwarded-For the runtime
 //     believes, comma-separated. Trust is never inferred: absent or empty refuses, and so does
@@ -45,7 +46,8 @@ import { EnforcementSetupError } from '../runtime/routes.js';
 import type { SessionAudience } from '../runtime/routes.js';
 import { sharesHost } from '../runtime/sessions.js';
 import type { SessionAdmission, SessionBoundaryDeps, SessionDeps, SessionStore } from '../runtime/sessions.js';
-import type { TenantAdmissionPort } from '../runtime/principals.js';
+import type { PlatformAdmissionPort, TenantAdmissionPort } from '../runtime/principals.js';
+import { createAdmittedPlatformAuthorizer, createPlatformSessionAdmission } from './platformAuthorization.js';
 import { createTenantRouteAuthorizer, createTenantSessionAdmission } from './tenantAuthorization.js';
 
 export type CompositionBlocker =
@@ -103,23 +105,18 @@ export interface ProductionSessions {
 
 const AUDIENCES: readonly SessionAudience[] = ['tenant', 'admin'];
 
-// The approved production adapters for the ports the identity verifier does not cover. None is
-// approved yet:
-//   - the durable, shared session store (docs/phase-4/03 §2 #18): no backing store is chosen, and
-//     a Postgres-backed one needs a session schema (a new migration) and the non-owner runtime
-//     database role that migration 005 introduces (G-DBROLE; migration 005 is unexecuted);
-//   - admin admission and the M4→M5 interim admin authorizer (the pilot guard: system_owner by
-//     exact equality, permission floor manage): the canonical platform authorization reads
-//     through the owner database connection (G-DBROLE), and the pilot guard hard-denies in
-//     production;
-//   - tenant/store admission and authorization: the tenant plane (migration 005) and M5;
-//   - the distributed rate limiter (G-IDEMPOT, M6): no repository decision approves a shared
-//     backing store (docs/phase-4/02 §8 names one only as an example; every ADR is proposed), so
-//     none is bound and there is no per-process limiter to fall back to. An adapter must pass the
-//     port's conformance suite (assertRateLimiterContract) before it is approved here.
-// The durable idempotency store and the command-transaction port are not in this table: the
-// transaction root (productionTransactions.ts) composes both from the M6 PostgreSQL store, together,
-// for a route that requires them. No root composes the outbox delivery store or a worker (M8).
+// The adapter table when NO durable bundle is handed over: every slot null, so the composition refuses and
+// names each one. The durable session store, the tenant boundary's admission and authorizer, and the
+// administrative boundary's admission and authorizer are PostgreSQL adapters the TRANSACTION root builds
+// over its one classified kernel (migrations 011 and 013) and hands to this root (DurableSessionAdapters
+// below); none exists without that root, and none has an in-process stand-in. The one slot no adapter can
+// fill yet is the distributed rate limiter (G-IDEMPOT, M6): no repository decision approves a shared
+// backing store (docs/phase-4/02 §8 names one only as an example; every ADR is proposed), so none is bound
+// and there is no per-process limiter to fall back to — `rate_limit_store_unavailable` stays a blocker in
+// every composition. An adapter must pass the port's conformance suite (assertRateLimiterContract) before
+// it is approved here. The durable idempotency store and the command-transaction port are not in this
+// table: the transaction root composes both from the M6 PostgreSQL store, together, for a route that
+// requires them. No root composes the outbox delivery store or a worker (M8).
 const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> = Object.freeze({
   store: Object.freeze({ tenant: null, admin: null }),
   admission: Object.freeze({ tenant: null, admin: null }),
@@ -144,11 +141,12 @@ export interface DurableSessionAdapters {
   /** The tenant boundary's PostgreSQL admission (migration 011). */
   readonly tenantAdmission: TenantAdmissionPort;
   /**
-   * The canonical platform route authorizer that root also builds — the ADMIN boundary's authorizer.
-   * Supplying it removes one blocker; the admin boundary's own admission adapter still does not exist,
-   * so that boundary, and therefore the whole composition, still refuses.
+   * The administrative boundary's PostgreSQL admission (migration 013, M5-GIAM-D1-P4). It fills BOTH of that
+   * boundary's slots: the admission decision over it, and the canonical platform authorizer that decides on the
+   * scope that admission selected — the one cannot work without the other, so neither is bound alone. Absent,
+   * both stay null and the composition names both.
    */
-  readonly adminAuthorizer?: RouteAuthorizer;
+  readonly platformAdmission?: PlatformAdmissionPort;
   /**
    * The tenant routes EXPLICITLY classified as reads, as `${method} ${path}` — the only ones a read-only
    * actor may reach. Absent means none is, which is the closed default.
@@ -157,20 +155,22 @@ export interface DurableSessionAdapters {
 }
 
 /**
- * The adapter table for a composition handed the durable adapters: the tenant boundary's three slots are
- * filled from them, and the admin boundary keeps every slot it has no adapter for. Nothing here is a
- * fallback — an absent adapter stays null and is named as a blocker.
+ * The adapter table for a composition handed the durable adapters: each boundary's slots are filled from them,
+ * and a slot with no adapter stays null and is named as a blocker. Nothing here is a fallback. The limiter is
+ * never among them. Exported so a disposable-database harness can compose exactly this table with a synthetic
+ * identity verifier and a test limiter; it reads no configuration and builds nothing but these decisions.
  */
-function adaptersFrom(durable: DurableSessionAdapters): Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> {
+export function durableSessionAdapters(durable: DurableSessionAdapters): Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> {
+  const platform = durable.platformAdmission;
   return Object.freeze({
     store: Object.freeze({ tenant: durable.store, admin: durable.store }),
     admission: Object.freeze({
       tenant: createTenantSessionAdmission({ admission: durable.tenantAdmission }),
-      admin: null,
+      admin: platform === undefined ? null : createPlatformSessionAdmission({ admission: platform }),
     }),
     authorizer: Object.freeze({
       tenant: createTenantRouteAuthorizer({ admission: durable.tenantAdmission, reads: durable.tenantReads }),
-      admin: durable.adminAuthorizer ?? null,
+      admin: platform === undefined ? null : createAdmittedPlatformAuthorizer(),
     }),
     limiter: null,
   });
@@ -267,7 +267,7 @@ export function composeProductionSessions(
   } catch (err) {
     if (!(err instanceof IdentityCompositionError)) throw err;
   }
-  const adapters = durable === undefined ? PRODUCTION_ADAPTERS : adaptersFrom(durable);
+  const adapters = durable === undefined ? PRODUCTION_ADAPTERS : durableSessionAdapters(durable);
   return assembleSessions({
     origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env), ...adapters,
   });

@@ -603,6 +603,12 @@ export function createApp(deps: AppDeps): Express {
     route.idempotency === 'none' && (route.handler === health || route.handler === readinessHandler);
 
   const boundaries = createSessionBoundaries(deps.sessions, { now, deadlineMs });
+  // Each composed boundary's durable admission is a dependency of every protected request on it (M5-GIAM-D1-P4), so
+  // readiness asks it too — shared and reused exactly like the stores' probes, under the port deadline its calls get.
+  for (const boundary of Object.values(boundaries)) {
+    const probe = boundary?.admissionProbe ?? null;
+    if (probe !== null) readinessChecks.push(sharedProbe(probe, deadlineMs));
+  }
   const table = defineRoutes([
     { method: 'GET', path: '/health', policy: PUBLIC, body: NO_BODY, idempotency: 'none', handler: health },
     { method: 'GET', path: '/readiness', policy: PUBLIC, body: NO_BODY, idempotency: 'none', handler: readinessHandler },
@@ -799,7 +805,8 @@ export function createApp(deps: AppDeps): Express {
           if (csrf !== null) return refuse(req, res, 403, 'forbidden', csrf);
         }
         if (policy.authorization !== null) {
-          const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs);
+          // The scope this request's own admission selected travels with it: the authorizer decides on that snapshot.
+          const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs, active.admitted);
           if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
           context = allowed.context;
           // The idle window slides only when an authorized route answers 2xx — never on a

@@ -20,11 +20,14 @@
 //     happened, and with which second factor — which a boundary's login policy judges
 //     (sessions.ts). A malformed value is no evidence, and nothing the client asserts is.
 //   - RouteAuthorizer is handed that principal, the route's declared requirement, a frozen route
-//     view { method, path, audience } and the deadline signal. Only an exact `true` allows — or, from
-//     an authorizer that resolved the principal to its app-owned actor (M5-GIAM-D1-P1), a
-//     `{ granted: true, context }` whose context is a TrustedScope at exactly the requirement's scope
-//     (principals.ts): the scope the canonical decision was made on, handed to the command so the
-//     transaction revalidates and audits that same actor. Anything else denies.
+//     view { method, path, audience }, the deadline signal and — on a session route — the trusted
+//     scope THIS request's own session admission selected, or null when it selected none
+//     (sessions.ts ActiveSession.admitted, M5-GIAM-D1-P4), so an authorizer can decide on the very
+//     snapshot admission read instead of taking a second one that could disagree. Only an exact
+//     `true` allows — or, from an authorizer that resolved the principal to its app-owned actor
+//     (M5-GIAM-D1-P1), a `{ granted: true, context }` whose context is a TrustedScope at exactly the
+//     requirement's scope (principals.ts): the scope the canonical decision was made on, handed to the
+//     command so the transaction revalidates and audits that same actor. Anything else denies.
 // Before the authenticator runs, the request must carry exactly ONE Authorization line of the
 // form `Bearer <b64token>` (RFC 6750) of bounded length, so absent, malformed, duplicated or
 // oversized evidence is refused without ever reaching verifier code. Every port call is bounded
@@ -34,7 +37,7 @@
 // port text ever leaves here.
 import type { Request } from 'express';
 import { outage, withDeadline } from './deadline.js';
-import { isTrustedScope } from './principals.js';
+import { trustedScopeOf } from './principals.js';
 import type { TrustedScope } from './principals.js';
 import type { AuthorizationRequirement, SessionAudience, VerifiedPrincipal } from './routes.js';
 
@@ -55,7 +58,12 @@ export interface RouteView {
 }
 
 export interface RouteAuthorizer {
-  authorize(principal: VerifiedPrincipal, requirement: AuthorizationRequirement, route: RouteView, signal: AbortSignal): unknown;
+  /**
+   * `admitted` is the trusted scope this request's own session admission selected (a frozen, checked copy), or null:
+   * on a route that is not a session route, or when the boundary's admission names no scope. It is evidence from
+   * the same request, never from the client, and an authorizer that needs it must fail closed without it.
+   */
+  authorize(principal: VerifiedPrincipal, requirement: AuthorizationRequirement, route: RouteView, signal: AbortSignal, admitted: TrustedScope | null): unknown;
 }
 
 /** Provider-verified evidence of the authentication itself; null wherever absent or malformed. */
@@ -157,12 +165,11 @@ function grantedContextOf(decision: unknown, scope: AuthorizationRequirement['sc
   const keys = Reflect.ownKeys(decision);
   if (keys.length !== 2 || !keys.includes('granted') || !keys.includes('context')) return undefined;
   const { granted, context } = decision as Record<string, unknown>;
-  if (granted !== true || typeof context !== 'object' || context === null) return undefined;
+  if (granted !== true) return undefined;
   // Each field read exactly once into a frozen copy; only the copy is checked and only the copy travels, so a
   // getter cannot answer one way to the check and another way to the command.
-  const { actor, securityVersion, scope: selected, tenant, store, membershipId, roleId, limitation } = context as Record<string, unknown>;
-  const copy = Object.freeze({ actor, securityVersion, scope: selected, tenant, store, membershipId, roleId, limitation });
-  return isTrustedScope(copy) && copy.scope === scope ? copy : undefined;
+  const copy = trustedScopeOf(context);
+  return copy !== null && copy.scope === scope ? copy : undefined;
 }
 
 /**
@@ -175,10 +182,11 @@ export async function authorize(
   requirement: AuthorizationRequirement,
   route: RouteView,
   deadlineMs: number,
+  admitted: TrustedScope | null = null,
 ): Promise<AccessRefusal | AuthorizedAccess> {
   let decision: unknown;
   try {
-    decision = await withDeadline(deadlineMs, (signal) => authorizer.authorize(principal, requirement, route, signal));
+    decision = await withDeadline(deadlineMs, (signal) => authorizer.authorize(principal, requirement, route, signal, admitted));
   } catch (err) {
     return outage('authz', err);
   }

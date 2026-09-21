@@ -22,9 +22,10 @@
 //     key refuses, however padded);
 //   - DATABASE_CA_CERT: the shared transport policy's trust anchor (db.ts), read from the process environment, as the driver reads
 //     its own.
-// What crosses. The composition hands back the two ports, the key, the trusted principal resolver, the canonical platform
-// authorizer over it (platformAuthorization.ts) and `close` — never the kernel, a pool, the driver, a statement function, the URL
-// or its credential. createApp probes both ports, each the store's read-only probe routine under the established
+// What crosses. The composition hands back the two ports, the key, the session boundaries' durable adapters (the session store,
+// the tenant admission and — M5-GIAM-D1-P4 — the platform admission the administrative boundary is admitted and authorized
+// through), the routes as served and `close` — never the kernel, a pool, the driver, a statement function, the URL or its
+// credential. createApp probes both ports, each the store's read-only probe routine under the established
 // readiness deadline and sharing, only because they are composed. `close` ends the kernel within its bounded grace
 // (RETIRED_POOL_GRACE_S); the entry that composes this runs it as a shutdown hook.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
@@ -32,7 +33,8 @@ import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoin
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
-import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
+import { revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
@@ -43,8 +45,7 @@ import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { TenantDirectoryPort, TenantDirectoryPorts } from '../runtime/tenantDirectory.js';
-import type { RouteAuthorizer } from '../runtime/access.js';
-import { createPlatformContextRevalidator, createPlatformPermits, createPlatformRouteAuthorizer } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformPermits } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -52,7 +53,7 @@ import type { IdempotencyDeps } from '../runtime/idempotency.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { defineRoutes } from '../runtime/routes.js';
 import type { RouteDefinition } from '../runtime/routes.js';
-import type { PrincipalResolutionPort, TenantAdmissionPort } from '../runtime/principals.js';
+import type { PlatformAdmissionPort, TenantAdmissionPort } from '../runtime/principals.js';
 import type { SessionStore } from '../runtime/sessions.js';
 
 export type TransactionCompositionBlocker =
@@ -99,14 +100,12 @@ export interface TransactionInventory {
 export interface ProductionTransactions {
   readonly idempotency: IdempotencyDeps;
   readonly transactions: CommandTransactionDeps;
-  /** The trusted principal resolver over the same kernel (M5-ID-P1), for the chain that resolves an actor. */
-  readonly principals: PrincipalResolutionPort;
   /**
-   * The canonical platform route authorizer over that same resolver (M5-GIAM-D1-P1): the administrative
-   * session boundary's authorizer, which resolves each request's actor, decides the route's canonical
-   * platform permission and hands the command its trusted scope (platformAuthorization.ts).
+   * The administrative boundary's admission over that same kernel (migration 013, M5-GIAM-D1-P4): the read that decides
+   * whether an administrative session may continue, on which platform grant and at which witness. The session root binds
+   * it, and builds the canonical platform authorizer that decides on the scope it selects (platformAuthorization.ts).
    */
-  readonly authorizer: RouteAuthorizer;
+  readonly platformAdmission: PlatformAdmissionPort;
   /**
    * The durable session store over that same kernel (M5-GIAM-D1-P2-R1, migration 011): the store the
    * session boundaries have always required and never had. It is built HERE, not in the session root,
@@ -132,7 +131,7 @@ export interface ProductionTransactions {
 export interface TransactionFactories {
   readonly client: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
-  readonly principals: (client: SupervisedPgClient) => PrincipalResolutionPort;
+  readonly platformAdmission: (client: SupervisedPgClient) => PlatformAdmissionPort;
   readonly sessionStore: (client: SupervisedPgClient) => SessionStore;
   readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
   /** The platform tenant directory's read over migration 012, for the inventory's read routes. */
@@ -160,7 +159,7 @@ export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
 const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   client: createRuntimeStoreClient,
   store: createPostgresTransactionalStore,
-  principals: (client: SupervisedPgClient) => createPostgresPrincipalResolver({ client }),
+  platformAdmission: (client: SupervisedPgClient) => createPostgresPlatformAdmission({ client }),
   sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
@@ -226,24 +225,19 @@ export function assembleTransactions(
     void client.end(); // nothing opened yet: the kernel connects only when a transaction runs
     throw err;
   }
-  // The trusted principal resolver over the SAME kernel. It is built here, with the store, so a
-  // deployment can never hold one without the other, and never resolves an identity through a client
-  // this composition did not classify — and the canonical platform authorizer decides over it alone.
-  const principals = factories.principals(client);
   // The read routes, over the SAME kernel (M5-GIAM-D1-P3): the tenant directory's port, and the canonical permission
   // decision its `actions` are presented from — the same rule and role definitions as the authorizer below. The whole
   // served set is validated once more as one table, so a read route can never shadow a command or register twice.
   const readPorts: TenantDirectoryPorts = Object.freeze({ tenantDirectory: factories.tenantDirectory(client), permits: createPlatformPermits() });
   const served = defineRoutes([...inventory.routes, ...reads.map((build) => build(readPorts))]).list();
-  // The session boundary's two durable adapters, over the SAME kernel and the same classified endpoint
-  // (M5-GIAM-D1-P2-R1). Built here, with the store and the resolver, so a deployment can never hold one
-  // without the others and never reaches a session or an admission through a client this composition
-  // did not classify. The session root binds them; it reads no connection string of its own.
+  // The session boundaries' durable adapters, over the SAME kernel and the same classified endpoint
+  // (M5-GIAM-D1-P2-R1, -P4). Built here, with the store, so a deployment can never hold one without the
+  // others and never reaches a session or an admission through a client this composition did not
+  // classify. The session root binds them; it reads no connection string of its own.
   return Object.freeze({
     idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
     transactions: Object.freeze({ port: store.transactions }),
-    principals,
-    authorizer: createPlatformRouteAuthorizer({ principals }),
+    platformAdmission: factories.platformAdmission(client),
     sessionStore: factories.sessionStore(client),
     tenantAdmission: factories.tenantAdmission(client),
     routes: served,

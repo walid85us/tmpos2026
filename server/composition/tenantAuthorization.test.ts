@@ -65,7 +65,7 @@ const live = (): AbortSignal => new AbortController().signal;
  */
 const answered = (value: unknown): Promise<unknown> => Promise.resolve(value);
 const authorize = (port: TenantAdmissionPort, requirement = TENANT_REQUIREMENT, reads?: ReadonlySet<string>): Promise<unknown> =>
-  answered(createTenantRouteAuthorizer({ admission: port, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, ROUTE, live()));
+  answered(createTenantRouteAuthorizer({ admission: port, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, ROUTE, live(), null));
 
 // --- admission ----------------------------------------------------------------------------------
 
@@ -137,7 +137,7 @@ test('the read classification is copied at construction, so mutating the caller\
   const shared = new Set<string>();
   const authorizer = createTenantRouteAuthorizer({ admission: readOnly, reads: shared });
   shared.add(readKey(ROUTE.method, ROUTE.path));
-  assert.equal(await answered(authorizer.authorize(PRINCIPAL, TENANT_REQUIREMENT, ROUTE, live())), false,
+  assert.equal(await answered(authorizer.authorize(PRINCIPAL, TENANT_REQUIREMENT, ROUTE, live(), null)), false,
     'a route classified after construction is still not a read for this authorizer');
 });
 

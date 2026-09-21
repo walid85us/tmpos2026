@@ -4,8 +4,9 @@
 // verifier initialises lazily, and no login reaches it here). The suite pins that production
 // composition refuses, naming every missing dependency, while any production adapter is absent;
 // that the origin topology is exact, https and host-distinct per boundary; that configuration alone
-// composes no adapter, while the transaction root's durable bundle fills exactly the tenant slots and
-// one store for both boundaries; and that, with every adapter
+// composes no adapter, while the transaction root's durable bundle fills the tenant slots, one store for
+// both boundaries and — only when it carries the platform admission (M5-GIAM-D1-P4) — the administrative
+// boundary's admission and authorizer together, leaving the rate limiter the one blocker; and that, with every adapter
 // present, assembly is all or nothing and yields boundaries the runtime serves end to end. Durable
 // idempotency is the transaction root's (productionTransactions.test.ts), never this one's.
 import test from 'node:test';
@@ -13,7 +14,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { generateKeyPairSync } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { ProductionCompositionError, assembleSessions, composeProductionSessions } from './productionSessions.js';
+import { ProductionCompositionError, assembleSessions, composeProductionSessions, durableSessionAdapters } from './productionSessions.js';
 import type { SessionParts } from './productionSessions.js';
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 import type { BearerTokenView } from '../runtime/access.js';
@@ -116,11 +117,34 @@ test('configuration alone composes no adapter, and none can be smuggled in throu
   const limiter = createMemoryRateLimiter();
   const smuggled = {
     ...CONFIGURED, store, sessionStore: store, admission: { admit: () => true }, limiter, rateLimiter: limiter,
+    platformAdmission: { admit: () => ({ outcome: 'refused' }), probe: () => true }, adminAuthorizer: { authorize: () => true },
   } as unknown as Record<string, string>;
   assert.deepEqual(blockersOf(smuggled), [LIMITER, ...ADAPTER_BLOCKERS], 'an extra value in the configuration composes nothing');
 });
 
-test('the durable bundle fills exactly the tenant slots and ONE store for both boundaries, and nothing else', () => {
+// A synthetic administrative admission port (migration 013's shape): one System Owner grant on an active account at
+// platform authority version 1, counting every read. Nothing here is a deployment's.
+const PLATFORM_ACTOR = '11111111-1111-4111-8111-111111111111';
+const PLATFORM_GRANT = '66666666-6666-4666-8666-666666666666';
+function platformPort(): { admit: () => unknown; probe: () => unknown; reads: number } {
+  const port = {
+    reads: 0,
+    admit: () => {
+      port.reads++;
+      return {
+        outcome: 'resolved', authorityVersion: '1',
+        principal: {
+          actor: PLATFORM_ACTOR, accountStatus: 'active', limitation: 'none', securityVersion: 'sv-1',
+          memberships: [{ membershipId: PLATFORM_GRANT, scopeType: 'platform', tenant: null, store: null, roleId: 'system_owner', tenantStatus: null, storeStatus: null }],
+        },
+      };
+    },
+    probe: () => true,
+  };
+  return port;
+}
+
+test('the durable bundle fills the tenant slots and ONE store for both boundaries, and the admin slots only from the platform admission', () => {
   const store = createMemorySessionStore();
   const tenantAdmission = { admit: () => ({ outcome: 'refused' }), probe: () => true };
   const blockersWith = (durable: Parameters<typeof composeProductionSessions>[1]): readonly string[] => {
@@ -130,19 +154,70 @@ test('the durable bundle fills exactly the tenant slots and ONE store for both b
       if (err instanceof ProductionCompositionError) return err.blockers;
       throw err;
     }
-    return assert.fail('production composition must still refuse: the admin boundary has no admission');
+    return assert.fail('production composition must still refuse: no distributed rate limiter is approved');
   };
-  // The bundle removes the three tenant blockers AND the admin store's: one store serves both
-  // boundaries (DA-37). What remains is exactly what no adapter exists for yet.
+  // Without the platform admission the bundle removes the three tenant blockers AND the admin store's: one store
+  // serves both boundaries (DA-37). The admin boundary's admission and authorizer stay named, both of them.
   assert.deepEqual(blockersWith({ store, tenantAdmission }),
     [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
-  // The platform authorizer the transaction root also builds removes the admin authorizer's blocker, and
-  // only that one: the admin boundary's own admission adapter still does not exist.
-  const adminAuthorizer = { authorize: () => false };
-  assert.deepEqual(blockersWith({ store, tenantAdmission, adminAuthorizer }), [LIMITER, 'admin_admission_unavailable']);
-  // A malformed bundle is refused when the tenant adapters are built, not at the first request.
+  // M5-GIAM-D1-P4: the platform admission the transaction root builds (migration 013) fills BOTH admin slots, and
+  // what remains is exactly the one slot no adapter can fill yet — the distributed limiter.
+  assert.deepEqual(blockersWith({ store, tenantAdmission, platformAdmission: platformPort() }), [LIMITER]);
+  // The removed P1 slot is no way in: an authorizer handed over on its own fills nothing, whatever it answers.
+  assert.deepEqual(blockersWith({ store, tenantAdmission, adminAuthorizer: { authorize: () => true } } as never),
+    [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
+  // A malformed bundle is refused when the adapters are built, not at the first request: the tenant ones ...
   assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission: {} as never }), TypeError);
   assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, tenantReads: ['GET /x'] as never }), TypeError);
+  // ... and a platform admission that is not a whole port — admit AND probe — never becomes a boundary.
+  const admit = () => ({ outcome: 'refused' });
+  const probe = () => true;
+  for (const platformAdmission of [null, 'port', {}, { admit }, { probe }, { admit: 'admit', probe }, { admit, probe: true }]) {
+    assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, platformAdmission: platformAdmission as never }), TypeError,
+      JSON.stringify(platformAdmission));
+  }
+});
+
+test('durableSessionAdapters fills the admin admission and authorizer only together, from the platform admission, and never a limiter', async () => {
+  const store = createMemorySessionStore();
+  const tenantAdmission = { admit: () => ({ outcome: 'refused' }), probe: () => true };
+  const without = durableSessionAdapters({ store, tenantAdmission });
+  assert.deepEqual({ admission: without.admission.admin, authorizer: without.authorizer.admin, limiter: without.limiter },
+    { admission: null, authorizer: null, limiter: null }, 'no platform admission: neither admin slot, and no limiter');
+  const port = platformPort();
+  const adapters = durableSessionAdapters({ store, tenantAdmission, platformAdmission: port });
+  for (const table of [without, adapters]) {
+    assert.equal(table.store.tenant, store, 'the one store ...');
+    assert.equal(table.store.admin, store, '... serves both boundaries');
+    assert.ok(table.admission.tenant !== null && table.authorizer.tenant !== null, 'the tenant slots, from the tenant admission');
+    assert.equal(table.limiter, null, 'the limiter is never among the durable adapters');
+    assert.ok(Object.isFrozen(table) && Object.isFrozen(table.store) && Object.isFrozen(table.admission) && Object.isFrozen(table.authorizer));
+  }
+  const admission = adapters.admission.admin;
+  const authorizer = adapters.authorizer.admin;
+  assert.ok(admission !== null && authorizer !== null, 'with it: both admin slots');
+  // Not merely two functions: the admission is the platform decision over THAT port, and the authorizer decides on
+  // the scope that admission selected — without asking the port again.
+  const principal = Object.freeze({ authProvider: 'firebase', authProviderUid: 'uid-operator' });
+  const signal = new AbortController().signal;
+  const admitted = await admission.admit(principal, 'admin', signal) as { admitted: true; securityVersion: string; context: Record<string, unknown> };
+  assert.equal(admitted.admitted, true);
+  assert.match(admitted.securityVersion, /^p1:[A-Za-z0-9_-]{43}$/, 'the platform witness');
+  assert.deepEqual({ ...admitted.context }, {
+    actor: PLATFORM_ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
+    membershipId: PLATFORM_GRANT, roleId: 'system_owner', limitation: 'none',
+  });
+  assert.equal(port.reads, 1);
+  await assert.rejects(Promise.resolve().then(() => admission.admit(principal, 'tenant', signal)), /^Error: platform admission unavailable$/,
+    'bound to the administrative boundary alone');
+  assert.equal(admission.probe?.(signal), true, 'its readiness probe is the port\'s');
+  const route = Object.freeze({ method: 'PATCH', path: '/admin/v1/tenants/status', audience: 'admin' } as const);
+  const requirement = Object.freeze({ scope: 'platform', permission: 'change_tenant_status' } as const);
+  assert.deepEqual(await authorizer.authorize(principal, requirement, route, signal, admitted.context as never),
+    { granted: true, context: { ...admitted.context } }, 'System Owner, decided on the admitted scope');
+  await assert.rejects(Promise.resolve().then(() => authorizer.authorize(principal, requirement, route, signal, null)),
+    /^Error: platform authorization unavailable$/, 'no admitted scope is a wiring fault, never a verdict');
+  assert.equal(port.reads, 1, 'the authorizer never reads the port: it decides on what admission selected');
 });
 
 test('the request limits are explicit configuration: exact trusted proxies, a canonical key, an approved limiter', () => {
