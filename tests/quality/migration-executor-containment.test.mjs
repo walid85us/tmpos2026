@@ -462,6 +462,11 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // 012's routine, its privilege containment or the read route over the real resolver, and applies them through the SAME
     // trusted executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/tenantDirectory.integration.test.mjs',
+    // M5-GIAM-D1-P4: migration 013's proof needs 001-012 applied before it can say anything about its version triggers,
+    // its admission read or their privilege containment, and applies them — and 013's own rollback and re-application —
+    // through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the containment property above
+    // is untouched.
+    'tests/db/platformAdmission.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

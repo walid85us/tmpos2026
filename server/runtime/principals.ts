@@ -104,6 +104,29 @@ export interface TenantAdmissionPort {
   probe(signal: AbortSignal): unknown;
 }
 
+/**
+ * What the ADMINISTRATIVE boundary's admission port answers (M5-GIAM-D1-P4; migration 013).
+ *
+ * `principal` is the actor as migration 007 resolves it, with its memberships narrowed to the PLATFORM-scope
+ * grants; `authorityVersion` is the actor's platform authority version — a counter that only increases, moved by
+ * the database on every change to those grants — as decimal text, compared for equality and never parsed. The
+ * port reports the standing and decides nothing: whether it admits a session (exactly one platform grant, an
+ * eligible account, a catalogued role) is the composition's decision (platformAuthorization.ts).
+ *
+ * `refused` is a decision — this reference names nobody the database resolves; `unavailable` is an outage, which
+ * a caller must read as neither a denial it can cache nor permission.
+ */
+export type PlatformAdmissionResult =
+  | { readonly outcome: 'resolved'; readonly principal: TrustedPrincipal; readonly authorityVersion: string }
+  | { readonly outcome: 'refused' }
+  | { readonly outcome: 'unavailable' };
+
+/** The closed port. Each call is handed its deadline's AbortSignal and may return a Promise. */
+export interface PlatformAdmissionPort {
+  admit(principal: VerifiedPrincipal, signal: AbortSignal): unknown;
+  probe(signal: AbortSignal): unknown;
+}
+
 /** The selector a request may carry. Both absent is the only shape a platform-scope route accepts. */
 export interface ScopeSelector {
   readonly tenant: string | null;
@@ -228,6 +251,19 @@ export function selectScope(
       limitation: limited ? 'read_only' : 'none',
     }),
   });
+}
+
+/**
+ * A frozen copy of `value` with each TrustedScope field read exactly once, or null when that copy is not a
+ * TrustedScope. Only the copy is checked and only the copy travels, so a getter cannot answer one way to the
+ * check and another way to whatever acts on the scope. A throwing getter throws here; callers treat that as no
+ * scope.
+ */
+export function trustedScopeOf(value: unknown): TrustedScope | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { actor, securityVersion, scope, tenant, store, membershipId, roleId, limitation } = value as Record<string, unknown>;
+  const copy = Object.freeze({ actor, securityVersion, scope, tenant, store, membershipId, roleId, limitation });
+  return isTrustedScope(copy) ? copy : null;
 }
 
 /** True when `value` is a TrustedScope in every field — the guard the store applies before it locks. */

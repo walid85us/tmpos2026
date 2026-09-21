@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the twelve committed migration pairs through the engine's Node fs port (node:fs
+// Reads the thirteen committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -120,19 +120,33 @@ const PINNED = {
   // application database. D4 now names the contiguous chain through 012; the exact-[005] gate is unchanged and still refuses.
   '012_m5_platform_tenant_directory.up.sql': '6e71d4d5223576b86bd6acc46ed429bbcff64390d69a6d3980a3bc9baf3efce6',
   '012_m5_platform_tenant_directory.down.sql': '9d359194edc3031ff5dd1dd60bd54bbe448d850c58d393876993cb5301f47a89',
+  // Phase 4.0 M5-GIAM-D1-P4 — durable platform-administrator admission, in its OWN schema tmpos_admission: one per-actor
+  // platform authority version that only increases (RLS on, no grant to any role, no foreign key: it outlives the account),
+  // moved by one SECURITY DEFINER trigger function granted to nobody through four AFTER INSERT/UPDATE/DELETE row triggers,
+  // each ENABLE ALWAYS so a replica-mode session moves it too — on public.platform_identity (its anchor only: internal user
+  // id, provider and provider uid), app_user, identity_link and user_membership (a platform-scope grant only, before or
+  // after the write) — on every change to the actor's standing but an updated_at-only UPDATE; and one STABLE SECURITY
+  // DEFINER read (EXECUTE to tmpos_app alone, not grantable) answering 007's resolution narrowed to platform grants plus
+  // that version. Its only change to earlier objects is those four triggers, which its postcondition requires exactly,
+  // and the up and the rollback each refuse while an administrative session exists.
+  // Proved by tests/db/platformAdmission.integration.test.mjs against disposable PostgreSQL only; applied to no managed,
+  // persistent or application database. D4 now names the contiguous chain through 013; the exact-[005] gate is unchanged
+  // and still refuses.
+  '013_m5_platform_admission.up.sql': 'c6df3d2e3559270243a52477c8acc9b8d7cca71c576acc00caf8d267a5151f7a',
+  '013_m5_platform_admission.down.sql': 'b0d07b580154e6e387d8093b98ad2889273dcd659c0b53aa15a03cf6c3a0b0ab',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twenty-four expected files', () => {
+test('the migrations directory holds exactly the twenty-six expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

@@ -5,7 +5,7 @@
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
-// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-012 and left tenants of
+// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-013 and left tenants of
 // their own: every directory assertion is made against the owner's own ordered read of the whole table, never a count this
 // suite assumes. Every rollback and refusal proof runs inside one transaction that is rolled back.
 import test from 'node:test';
@@ -199,11 +199,11 @@ const routine = (sql, s, after = null, limit = 51) => sql`select o_outcome, o_te
 // migration 012 as applied
 // ---------------------------------------------------------------------------
 
-test('M5T-01: 001-012 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
+test('M5T-01: 001-013 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013'].map((v) => [v, false]));
   const routines = await owner`select p.proname, p.prosecdef, p.provolatile, p.proconfig
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_directory'::regnamespace`;
   assert.deepEqual(routines.map((r) => ({ ...r })), [{
