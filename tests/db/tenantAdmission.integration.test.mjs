@@ -349,8 +349,12 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // ---------------------------------------------------------------------------
 
 test('M5A-01: migrations 001-011 applied, and the runtime role reaches the session table only through 011\'s routines', async () => {
-  const versions = (applyReport.applied ?? []).map((a) => a.version ?? a);
-  assert.ok(versions.includes('011'), `applied through 011: ${versions.join(',')}`);
+  // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
+  // 001-011, so this run applies nothing and its report lists no version.
+  assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
+  const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011'].map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.
   for (const statement of ['select count(*) from tmpos_session.session',
@@ -365,9 +369,10 @@ test('M5A-01: migrations 001-011 applied, and the runtime role reaches the sessi
   const [{ touched }] = await runtime`select tmpos_session.m5_session_touch(${`m5a-absent-${SUFFIX}`}::text, null::text, 1::bigint) as touched`;
   assert.equal(touched, 'invalid');
   // And the routines it MAY call are exactly six.
-  const [{ n }] = await owner`select count(*)::int as n from pg_catalog.pg_proc
-    where pronamespace = 'tmpos_session'::regnamespace`;
-  assert.equal(n, 6, 'five session operations and one admission read');
+  const routines = await owner`select proname::text as name from pg_catalog.pg_proc
+    where pronamespace = 'tmpos_session'::regnamespace order by proname`;
+  assert.deepEqual(routines.map((r) => r.name), ['m5_admit_tenant_session', 'm5_session_create', 'm5_session_get',
+    'm5_session_revoke', 'm5_session_revoke_principal', 'm5_session_touch'], 'five session operations and one admission read');
 });
 
 test('M5A-02: the production session store satisfies the port\'s own conformance contract against real PostgreSQL', async () => {
