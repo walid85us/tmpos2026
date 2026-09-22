@@ -134,7 +134,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-013, a real non-owner runtime login, the production composition
+// setup: real migrations 001-014, a real non-owner runtime login, the production composition
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -363,11 +363,11 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-013 applied, the production roots compose over them, and only the limiter keeps them from composing alone', async () => {
+test('M5E-00: 001-014 applied, the production roots compose over them, and only the limiter keeps them from composing alone', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
 
   // The transaction root classified the configured endpoint before building its one client, and hands back the ports
   // the two boundaries are served with — never the kernel, a pool or the URL.

@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 142; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +3, the platform tenant directory route, its PostgreSQL adapter and the console's name/reason parity with the server; M5-GIAM-D1-P4: +1, the platform admission adapter (sentinels below)
+export const MIN_SUITES = 143; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +3, the platform tenant directory route, its PostgreSQL adapter and the console's name/reason parity with the server; M5-GIAM-D1-P4: +1, the platform admission adapter (sentinels below); M6-RATE-P2: +1, the PostgreSQL rate limiter adapter
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -122,6 +122,7 @@ export const REQUIRED_SENTINELS = [
   'server/runtime/tenantDirectory.test.ts',                   // the platform tenant directory: strict query, canonical cursor, untrusted answer, trusted scope only, bounded refusals (M5-GIAM-D1-P3)
   'server/persistence/postgresTenantDirectory.test.ts',       // the one fixed call into migration 012 and every row shape it refuses to read as a page (M5-GIAM-D1-P3)
   'server/persistence/postgresPlatformAdmission.test.ts',     // the one fixed call into migration 013: platform grants only, 007's seven keys, a decimal version, every row or driver fault an outage (M5-GIAM-D1-P4)
+  'server/persistence/postgresRateLimiter.test.ts',            // the one fixed call into migration 014: the fingerprint, the request's own bounds, the two trusted row shapes, the deadline and abort cleanup (M6-RATE-P2)
 ];
 
 export const isTestPath = (f) =>

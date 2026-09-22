@@ -29,7 +29,9 @@
 // digest (sessions.ts: principalKeyOf). No raw address, provider UID, token, cookie or request
 // object reaches a limiter, and the keys are the only client data the limiter stores. The secret
 // arrives only through the composition boundary and is the same on every instance, so one client
-// maps to one bucket everywhere; rotating it starts every bucket afresh.
+// maps to one bucket everywhere. Rotating it is not a restart with a new value: the production
+// store registers the key's fingerprint on first use and refuses any other key thereafter
+// (migration 014, ADR-26), so a rotation needs a coordinated procedure, and none exists yet.
 //
 // Every answer is validated before it is obeyed (consumeRateLimit): only an exact, in-contract
 // allowance passes; an in-contract limit is a 429 whose Retry-After is the wait in whole seconds;

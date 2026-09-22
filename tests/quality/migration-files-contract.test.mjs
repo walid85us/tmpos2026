@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the thirteen committed migration pairs through the engine's Node fs port (node:fs
+// Reads the fourteen committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -134,19 +134,31 @@ const PINNED = {
   // and still refuses.
   '013_m5_platform_admission.up.sql': 'c6df3d2e3559270243a52477c8acc9b8d7cca71c576acc00caf8d267a5151f7a',
   '013_m5_platform_admission.down.sql': 'b0d07b580154e6e387d8093b98ad2889273dcd659c0b53aa15a03cf6c3a0b0ab',
+  // Phase 4.0 M6-RATE-P2 — the distributed rate-limit store, in its OWN schema tmpos_rate_limit: two tables (the bucket
+  // table keyed by namespace/dimension/limiter key/limit/window, and a one-row key-fingerprint table) and three routines
+  // — a key-admission check (SECURITY INVOKER), a consume (SECURITY DEFINER, EXECUTE to tmpos_app alone) that locks and
+  // atomically updates or opens a bucket against the database's own clock and reclaims a bounded number of expired
+  // buckets, and a probe (EXECUTE to tmpos_app alone) that never touches a bucket. No new role, no type, no trigger, no
+  // sequence, and nothing an earlier migration created changes: migrations 001-013 are untouched, byte for byte. The
+  // rollback refuses (object_in_use) while any bucket has not yet expired. Proved by tests/db/rateLimiter.integration.
+  // test.mjs and tests/db/rateLimitRuntime.integration.test.mjs against disposable PostgreSQL only; applied to no
+  // managed, persistent or application database. D4 now names the contiguous chain through 014; the exact-[005] gate is
+  // unchanged and still refuses.
+  '014_m6_distributed_rate_limit.up.sql': '48ff3e4bc2b3d4c6ee3cc2c54e4111d8647669d349d1449b249303a9dcc4cf62',
+  '014_m6_distributed_rate_limit.down.sql': '72aab6e28ff512e2c8061cfae510e073466f4f5d5bb9ca9d27e3a5e333a63846',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twenty-six expected files', () => {
+test('the migrations directory holds exactly the twenty-eight expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');
