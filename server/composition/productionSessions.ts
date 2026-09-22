@@ -28,7 +28,10 @@
 //   - RATE_LIMIT_KEY: the keyed-hash secret that turns client addresses and account digests into
 //     pseudonymous limiter keys — unpadded base64url of 32–64 random bytes from the secrets store,
 //     the same on every instance. Absent or malformed refuses;
-//   - the distributed limiter: the approved shared-store adapter below.
+//   - the distributed limiter: the PostgreSQL adapter over migration 014 (M6-RATE-P2, ADR-26). The
+//     transaction root builds it over its one kernel and hands over a binding; this root binds it to
+//     the RATE_LIMIT_KEY bytes it parsed itself, so the keyring the runtime keys pseudonyms with and
+//     the fingerprint the store checks every instance's key against are one key, never two.
 // Durable idempotency and the command-transaction port — IDEMPOTENCY_KEY, APP_DATABASE_URL and the
 // M6 PostgreSQL store — are not this root's: the transaction root (productionTransactions.ts) is
 // their one production authority, and composes them only for a route that requires them.
@@ -106,16 +109,17 @@ export interface ProductionSessions {
 const AUDIENCES: readonly SessionAudience[] = ['tenant', 'admin'];
 
 // The adapter table when NO durable bundle is handed over: every slot null, so the composition refuses and
-// names each one. The durable session store, the tenant boundary's admission and authorizer, and the
-// administrative boundary's admission and authorizer are PostgreSQL adapters the TRANSACTION root builds
-// over its one classified kernel (migrations 011 and 013) and hands to this root (DurableSessionAdapters
-// below); none exists without that root, and none has an in-process stand-in. The one slot no adapter can
-// fill yet is the distributed rate limiter (G-IDEMPOT, M6): no repository decision approves a shared
-// backing store (docs/phase-4/02 §8 names one only as an example; every ADR is proposed), so none is bound
-// and there is no per-process limiter to fall back to — `rate_limit_store_unavailable` stays a blocker in
-// every composition. An adapter must pass the port's conformance suite (assertRateLimiterContract) before
-// it is approved here. The durable idempotency store and the command-transaction port are not in this
-// table: the transaction root composes both from the M6 PostgreSQL store, together, for a route that
+// names each one. The durable session store, the tenant boundary's admission and authorizer, the
+// administrative boundary's admission and authorizer, and the distributed rate limiter are PostgreSQL
+// adapters the TRANSACTION root builds over its one classified kernel (migrations 011, 013 and 014) and
+// hands to this root (DurableSessionAdapters below); none exists without that root, and none has an
+// in-process stand-in. The limiter is the one approved adapter of its port (M6-RATE-P2, ADR-26): it passes
+// the port's conformance suite (assertRateLimiterContract) against real shared PostgreSQL state, and it is
+// bound only to this root's own parsed RATE_LIMIT_KEY — with no bundle, or with the key refused, its slot
+// stays null and `rate_limit_store_unavailable` stays a blocker. There is no per-process limiter to fall
+// back to, and an unreachable or differently keyed store answers every consume unavailable and fails
+// readiness rather than allowing. The durable idempotency store and the command-transaction port are not in
+// this table: the transaction root composes both from the M6 PostgreSQL store, together, for a route that
 // requires them. No root composes the outbox delivery store or a worker (M8).
 const PRODUCTION_ADAPTERS: Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> = Object.freeze({
   store: Object.freeze({ tenant: null, admin: null }),
@@ -152,16 +156,30 @@ export interface DurableSessionAdapters {
    * actor may reach. Absent means none is, which is the closed default.
    */
   readonly tenantReads?: ReadonlySet<string>;
+  /**
+   * The distributed rate limiter over that same kernel (migration 014, M6-RATE-P2), awaiting its key: called
+   * with RATE_LIMIT_KEY's bytes, it answers the limiter bound to that key's fingerprint. This root calls it
+   * with the key it parsed itself and nothing else. Absent, the limiter slot stays null and is named.
+   */
+  readonly rateLimiter?: (keySecret: Uint8Array) => DistributedRateLimiter;
 }
 
 /**
  * The adapter table for a composition handed the durable adapters: each boundary's slots are filled from them,
- * and a slot with no adapter stays null and is named as a blocker. Nothing here is a fallback. The limiter is
- * never among them. Exported so a disposable-database harness can compose exactly this table with a synthetic
- * identity verifier and a test limiter; it reads no configuration and builds nothing but these decisions.
+ * and a slot with no adapter stays null and is named as a blocker. Nothing here is a fallback. The limiter slot
+ * is filled only from the bundle's own binding AND a key — `keySecret`, the bytes the caller also composes as
+ * the limits' secret; with either absent it stays null. Exported so a disposable-database harness can compose
+ * exactly this table with a synthetic identity verifier; it reads no configuration and builds nothing but these
+ * decisions and the limiter the bundle's own binding makes from that key (which opens no connection).
  */
-export function durableSessionAdapters(durable: DurableSessionAdapters): Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> {
+export function durableSessionAdapters(
+  durable: DurableSessionAdapters,
+  keySecret: Uint8Array | undefined = undefined,
+): Pick<SessionParts, 'store' | 'admission' | 'authorizer' | 'limiter'> {
   const platform = durable.platformAdmission;
+  const bindLimiter = durable.rateLimiter;
+  if (bindLimiter !== undefined && typeof bindLimiter !== 'function') throw new TypeError('rate limiter binding invalid');
+  const limiter = bindLimiter === undefined || keySecret === undefined ? null : bindLimiter(keySecret);
   return Object.freeze({
     store: Object.freeze({ tenant: durable.store, admin: durable.store }),
     admission: Object.freeze({
@@ -172,7 +190,7 @@ export function durableSessionAdapters(durable: DurableSessionAdapters): Pick<Se
       tenant: createTenantRouteAuthorizer({ admission: durable.tenantAdmission, reads: durable.tenantReads }),
       admin: platform === undefined ? null : createAdmittedPlatformAuthorizer(),
     }),
-    limiter: null,
+    limiter,
   });
 }
 
@@ -267,8 +285,12 @@ export function composeProductionSessions(
   } catch (err) {
     if (!(err instanceof IdentityCompositionError)) throw err;
   }
-  const adapters = durable === undefined ? PRODUCTION_ADAPTERS : durableSessionAdapters(durable);
+  // One parse of RATE_LIMIT_KEY feeds both the limits' secret and the limiter's binding: never two keys.
+  const keySecret = rateLimitKey(env);
+  const adapters = durable === undefined
+    ? PRODUCTION_ADAPTERS
+    : durableSessionAdapters(durable, typeof keySecret === 'string' ? undefined : keySecret);
   return assembleSessions({
-    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret: rateLimitKey(env), ...adapters,
+    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret, ...adapters,
   });
 }

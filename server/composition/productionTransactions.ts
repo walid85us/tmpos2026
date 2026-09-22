@@ -24,9 +24,11 @@
 //     its own.
 // What crosses. The composition hands back the two ports, the key, the session boundaries' durable adapters (the session store,
 // the tenant admission and — M5-GIAM-D1-P4 — the platform admission the administrative boundary is admitted and authorized
-// through), the routes as served and `close` — never the kernel, a pool, the driver, a statement function, the URL or its
-// credential. createApp probes both ports, each the store's read-only probe routine under the established
-// readiness deadline and sharing, only because they are composed. `close` ends the kernel within its bounded grace
+// through), the distributed rate limiter's binding (M6-RATE-P2, migration 014: the limiter over this kernel, awaiting the
+// RATE_LIMIT_KEY the session root parses — this root never reads that key for the limiter), the routes as served and
+// `close` — never the kernel, a pool, the driver, a statement function, the URL or its credential. createApp probes both
+// ports, each the store's read-only probe routine under the established readiness deadline and sharing, only because they
+// are composed. `close` ends the kernel within its bounded grace
 // (RETIRED_POOL_GRACE_S); the entry that composes this runs it as a shutdown hook.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
@@ -34,6 +36,7 @@ import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platfor
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
+import { createPostgresRateLimiter } from '../persistence/postgresRateLimiter.js';
 import { revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
@@ -54,6 +57,7 @@ import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { defineRoutes } from '../runtime/routes.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import type { PlatformAdmissionPort, TenantAdmissionPort } from '../runtime/principals.js';
+import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
 import type { SessionStore } from '../runtime/sessions.js';
 
 export type TransactionCompositionBlocker =
@@ -119,6 +123,12 @@ export interface ProductionTransactions {
    */
   readonly tenantAdmission: TenantAdmissionPort;
   /**
+   * The distributed rate limiter over that same kernel (migration 014, M6-RATE-P2), awaiting its key: called with
+   * RATE_LIMIT_KEY's bytes, it answers the PostgreSQL limiter bound to that key's fingerprint. The session root calls it
+   * with the key it parsed itself, so the limits' secret and the store's fingerprint are one key. Calling it opens nothing.
+   */
+  readonly rateLimiter: (keySecret: Uint8Array) => DistributedRateLimiter;
+  /**
    * Every route the inventory serves, as served: its commands, and its read routes bound to the read ports this root
    * composed over that same kernel (M5-GIAM-D1-P3) — the list an entry hands createApp as `routes`.
    */
@@ -136,6 +146,8 @@ export interface TransactionFactories {
   readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
   /** The platform tenant directory's read over migration 012, for the inventory's read routes. */
   readonly tenantDirectory: (client: SupervisedPgClient) => TenantDirectoryPort;
+  /** The distributed rate limiter over migration 014, bound to a RATE_LIMIT_KEY. */
+  readonly rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => DistributedRateLimiter;
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
@@ -163,6 +175,7 @@ const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
+  rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
 });
 
 /**
@@ -240,6 +253,7 @@ export function assembleTransactions(
     platformAdmission: factories.platformAdmission(client),
     sessionStore: factories.sessionStore(client),
     tenantAdmission: factories.tenantAdmission(client),
+    rateLimiter: (limiterKey: Uint8Array) => factories.rateLimiter(client, limiterKey),
     routes: served,
     close: () => client.end(),
   });

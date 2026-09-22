@@ -7,7 +7,10 @@
 // APP_DATABASE_URL and a valid IDEMPOTENCY_KEY before anything is built, then gets the client, kernel and store each once and
 // both ports together, with no fallback; that a refused configuration makes no contact and the real client dials only the
 // classified endpoint; and that readiness probes the store only when composed, answers 503 for every failed probe while health
-// stays prompt, and shutdown is bounded.
+// stays prompt, and shutdown is bounded. M6-RATE-P2 adds the distributed rate limiter's binding: the boundary hands back a
+// function, not a limiter, that builds the PostgreSQL limiter (migration 014) over the SAME kernel only when called with
+// RATE_LIMIT_KEY's bytes — refusing a malformed key, opening nothing when called, failing closed through that kernel — and
+// readiness through the session root's limits is 503 whenever the store answers anything but 'ready' for that key.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import dns from 'node:dns';
@@ -15,6 +18,7 @@ import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -25,6 +29,7 @@ import {
 import type { ProductionTransactions, TransactionFactories, TransactionInventory } from './productionTransactions.js';
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
+import { createPostgresRateLimiter } from '../persistence/postgresRateLimiter.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
@@ -35,7 +40,8 @@ import type { DriverPool, SupervisedPgClient } from '../persistence/supervisedPg
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 
 /**
- * The two session-boundary adapters this root also builds over its one kernel (M5-GIAM-D1-P2-R1).
+ * The session-boundary adapters this root also builds over its one kernel (M5-GIAM-D1-P2-R1), and the
+ * rate limiter's production factory (M6-RATE-P2) — the one the binding calls with a key, never at composition.
  * Spread into a factories literal wherever the case under test is about the transaction ports and not
  * about these, so adding them changed no existing expectation.
  */
@@ -43,6 +49,7 @@ const SESSION_FACTORIES = Object.freeze({
   sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
+  rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
 });
 import { createLifecycle } from '../runtime/lifecycle.js';
 import { testRequestLimits } from '../runtime/rateLimiter.testkit.js';
@@ -51,7 +58,8 @@ import type { RouteDefinition } from '../runtime/routes.js';
 import { EnforcementSetupError } from '../runtime/routes.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { PlatformAdmissionPort } from '../runtime/principals.js';
-import { durableSessionAdapters } from './productionSessions.js';
+import type { DistributedRateLimiter, RateLimitRequest } from '../runtime/rateLimit.js';
+import { composeProductionSessions, durableSessionAdapters } from './productionSessions.js';
 import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
@@ -146,6 +154,7 @@ const NEVER: TransactionFactories = Object.freeze({
   sessionStore: () => assert.fail('no session store may be built'),
   tenantAdmission: () => assert.fail('no tenant admission may be built'),
   tenantDirectory: () => assert.fail('no tenant directory may be built'),
+  rateLimiter: () => assert.fail('no rate limiter may be built'),
 });
 
 function blockersOf(inventory: TransactionInventory, env: Record<string, string | undefined>, factories: TransactionFactories = NEVER): readonly string[] {
@@ -355,8 +364,8 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
     assert.deepEqual(Object.keys(boundary).sort(),
-      ['close', 'idempotency', 'platformAdmission', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
-      'the two ports, the three session-boundary adapters, the served routes, and close — nothing else');
+      ['close', 'idempotency', 'platformAdmission', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
+      'the two ports, the three session-boundary adapters, the limiter binding (M6-RATE-P2), the served routes, and close — nothing else');
     // M5-GIAM-D1-P4: the administrative boundary's admission crosses; the resolver and the authorizer over it no longer
     // do — the session root builds the authorizer that decides on the scope this admission selects.
     assert.deepEqual([typeof boundary.platformAdmission.admit, typeof boundary.platformAdmission.probe], ['function', 'function']);
@@ -400,14 +409,15 @@ test('a command route needs its mutator, a partial construction composes nothing
     sessionStore: NEVER.sessionStore,
     tenantAdmission: NEVER.tenantAdmission,
     tenantDirectory: NEVER.tenantDirectory,
+    rateLimiter: NEVER.rateLimiter,
   };
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, failing), /transactional store mutator invalid/);
   assert.equal(ended, 1);
   // The transport policy refuses: a bounded blocker, and no store is built.
-  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }),
+  assert.deepEqual(blockersOf(REQUIRED, CONFIGURED, { client: () => { throw new DatabaseTlsRefusal('refusing to open a database connection: x'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory, rateLimiter: NEVER.rateLimiter }),
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
-  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory }), RangeError);
+  assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory, rateLimiter: NEVER.rateLimiter }), RangeError);
   // The production root takes configuration only: no store, client or factory can be handed to it.
   assert.equal(composeProductionTransactions.length, 1);
   assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
@@ -609,6 +619,8 @@ test('a deployed route may require only a canonical platform permission, and sta
 test('the platform admission is composed with the store, once, over the same client, and never alone', () => {
   const built: string[] = [];
   let sharedClient: unknown = null;
+  const limiterKey = Buffer.alloc(32, 7);
+  const limiters: DistributedRateLimiter[] = [];
   // A stub client, not the real one: this proves WHO is handed the client, not how it is built (the
   // transport policy is proved above, and resolving it here would need a trust anchor this test has
   // no business installing).
@@ -620,12 +632,24 @@ test('the platform admission is composed with the store, once, over the same cli
     sessionStore: (client) => { built.push('sessionStore'); assert.equal(client, sharedClient, 'the session store takes the SAME client'); return createPostgresSessionStore({ client }); },
     tenantAdmission: (client) => { built.push('tenantAdmission'); assert.equal(client, sharedClient, 'tenant admission takes the SAME client'); return createPostgresTenantAdmission({ client }); },
     tenantDirectory: (client) => { built.push('tenantDirectory'); assert.equal(client, sharedClient, 'the tenant directory takes the SAME client'); return createPostgresTenantDirectory({ client }); },
+    rateLimiter: (client, keySecret) => {
+      built.push('rateLimiter');
+      assert.equal(client, sharedClient, 'the rate limiter takes the SAME client');
+      assert.equal(keySecret, limiterKey, 'and the exact key bytes the binding was called with: no copy, no re-parse');
+      limiters.push(createPostgresRateLimiter({ client, keySecret }));
+      return limiters[limiters.length - 1];
+    },
   });
   assert.ok(boundary !== null);
   assert.deepEqual(built, ['client', 'store', 'tenantDirectory', 'platformAdmission', 'sessionStore', 'tenantAdmission'],
     'one client, then every consumer of it, each once: the store, the tenant directory and the three session-boundary adapters');
   assert.equal(typeof boundary!.platformAdmission.admit, 'function');
   assert.equal(typeof boundary!.platformAdmission.probe, 'function');
+  // M6-RATE-P2: the limiter is not built at composition — it awaits RATE_LIMIT_KEY, which only the session root parses. Called,
+  // the binding builds it over that same client, once per call, and hands back exactly what the factory built.
+  const limiter = boundary!.rateLimiter(limiterKey);
+  assert.deepEqual(built.slice(6), ['rateLimiter'], 'the binding builds the limiter when called, and only then');
+  assert.equal(limiter, limiters[0], 'the binding answers the factory\'s limiter itself, never a wrapper');
 });
 
 test('the served routes are the inventory\'s commands plus its read routes, each served read route built over the composed ports', () => {
@@ -765,4 +789,153 @@ test('the store is composed with the platform revalidator: migration 009\'s exac
   assert.equal(await revalidate(stale, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000), false,
     'expired evidence denies whatever the authority routine would have said');
   await boundary.close();
+});
+
+// ---------------------------------------------------------------------------
+// M6-RATE-P2 — the distributed rate limiter's binding (migration 014)
+// ---------------------------------------------------------------------------
+// What is proved: the boundary hands back a binding, not a limiter; calling it opens no transaction and makes no contact;
+// the production factory is the PostgreSQL limiter over the sealed kernel, refusing a malformed key before any limiter
+// exists; the bound limiter answers the port through that kernel and fails closed whenever the kernel does; and readiness,
+// through the limits the session root composes from the binding, is 503 for anything but the store's exact 'ready'.
+// Substituted: the PostgreSQL driver (the in-test fake above, answering migration 014's routines by statement text) and the
+// identity provider (a freshly generated key, never contacted). The routines themselves are proved on a disposable database
+// by the adapter's own suite, not here.
+
+const LIMITER_KEY = Buffer.alloc(32, 7); // RATE_LIMIT_KEY's bytes: the canonical synthetic key
+const LIMITER_PROBE = /m6_rate_limit_probe\(/;
+const LIMITER_CONSUME = /m6_rate_limit_consume\(/;
+const CONSUME_REQUEST: RateLimitRequest = Object.freeze({
+  namespace: 'runtime', dimension: 'client', key: 'A'.repeat(43), limit: 10, windowMs: 60_000, cost: 1,
+});
+
+test('M6R-C01 the boundary hands back the limiter binding: nothing is built at composition, and calling it opens no transaction', async () => {
+  const { factories, built, fake } = counted();
+  const seen: Array<{ client: SupervisedPgClient; keySecret: Uint8Array }> = [];
+  const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
+    ...factories,
+    rateLimiter: (client, keySecret) => { seen.push({ client, keySecret }); return createPostgresRateLimiter({ client, keySecret }); },
+  });
+  assert.ok(boundary !== null);
+  try {
+    assert.equal(typeof boundary.rateLimiter, 'function', 'a binding awaiting its key');
+    assert.equal(seen.length, 0, 'composition builds no limiter: only the session root holds the key');
+    let limiter: DistributedRateLimiter | undefined;
+    const contacts = await contactsDuring(() => { limiter = boundary.rateLimiter(LIMITER_KEY); });
+    assert.deepEqual(contacts, { lookups: 0, tlsConnects: 0, connects: [] }, 'binding contacts nothing');
+    assert.deepEqual({ pools: fake.pools(), texts: fake.texts }, { pools: 0, texts: [] }, 'binding opens no pool and sends no statement');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].client, built.client, 'over the one kernel the store was built over');
+    assert.equal(seen[0].keySecret, LIMITER_KEY, 'with the exact bytes it was handed');
+    assert.deepEqual(Object.keys(limiter as object).sort(), ['consume', 'probe'], 'the port, and nothing else');
+    assert.ok(Object.isFrozen(limiter));
+    for (const key of ['transaction', 'reserve', 'begin', 'unsafe', 'client', 'sql', 'url', 'keySecret', 'fingerprint']) {
+      assert.ok(!(key in (limiter as object)), `no ${key} crosses`);
+    }
+  } finally {
+    await boundary.close();
+  }
+});
+
+test('M6R-C02 the production binding is the PostgreSQL limiter over the sealed kernel: a malformed key refuses, a valid one dials only the classified endpoint', async () => {
+  await withProcessEnv({ DATABASE_CA_CERT: CA, [DRIVER_TLS_ENV_VAR]: undefined, PGHOST: 'ambient.example', PGPORT: '6543', PGUSER: 'ambient', PGPASSWORD: 'ambient', PGDATABASE: 'ambient' }, async () => {
+    let boundary: ProductionTransactions | null = null;
+    const composing = await contactsDuring(() => { boundary = composeProductionTransactions(CONFIGURED); });
+    assert.deepEqual(composing, { lookups: 0, tlsConnects: 0, connects: [] }, 'composition connects nothing');
+    const composed = boundary as unknown as ProductionTransactions;
+    assert.ok(composed !== null);
+    try {
+      for (const bad of [Buffer.alloc(31, 7), Buffer.alloc(65, 7), new Uint8Array(0), LIMITER_KEY.toString('base64url'), null, undefined]) {
+        assert.throws(() => composed.rateLimiter(bad as never),
+          (err: unknown) => err instanceof EnforcementSetupError && err.code === 'rate_limit_key_invalid', `refused: ${String(bad)}`);
+      }
+      let limiter: DistributedRateLimiter | undefined;
+      const binding = await contactsDuring(() => { limiter = composed.rateLimiter(LIMITER_KEY); });
+      assert.deepEqual(binding, { lookups: 0, tlsConnects: 0, connects: [] }, 'binding a valid key contacts nothing');
+      const bound = limiter as DistributedRateLimiter;
+      const probing = await contactsDuring(async () => {
+        assert.equal(await bound.probe(AbortSignal.timeout(2_000)), false, 'the stopped connect is not ready');
+      });
+      assert.deepEqual(probing.connects, [[5432, `db.${REF}.supabase.co`]], 'the sealed endpoint, never an ambient PGHOST/PGPORT');
+      const consuming = await contactsDuring(async () => {
+        assert.deepEqual(await bound.consume(CONSUME_REQUEST, AbortSignal.timeout(2_000)), { outcome: 'unavailable' }, 'no store: no allowance');
+      });
+      assert.ok(consuming.connects.length >= 1 && consuming.connects.every(([port, host]) => port === 5432 && host === `db.${REF}.supabase.co`),
+        'a consume dials the same sealed endpoint');
+      assert.deepEqual({ lookups: probing.lookups + consuming.lookups, tlsConnects: probing.tlsConnects + consuming.tlsConnects }, { lookups: 0, tlsConnects: 0 });
+    } finally {
+      await composed.close();
+    }
+  });
+});
+
+test('M6R-C03 the bound limiter answers the port through the composed kernel, and every kernel failure answers unavailable', async () => {
+  // Positive control: a kernel whose consume routine answers an in-contract allowance is answered as one, so every
+  // `unavailable` below is the failure's, not a request the adapter refused to send.
+  const ok = counted(fakeDriver((text) => (LIMITER_CONSUME.test(text) ? { rows: [{ outcome: 'allowed', remaining: 9, retry_after_ms: null }] } : {})));
+  const allowing = assembleTransactions(REQUIRED, CONFIGURED, ok.factories) as ProductionTransactions;
+  assert.deepEqual(await allowing.rateLimiter(LIMITER_KEY).consume(CONSUME_REQUEST, new AbortController().signal), { outcome: 'allowed', remaining: 9 });
+  assert.ok(ok.fake.texts.some((t) => LIMITER_CONSUME.test(t)), 'the consume routine ran on the composed kernel');
+  await allowing.close();
+
+  const failures: Array<[string, (text: string) => Answer]> = [
+    ['key_mismatch', (text) => (LIMITER_CONSUME.test(text) ? { rows: [{ outcome: 'key_mismatch', remaining: null, retry_after_ms: null }] } : {})],
+    ['a statement error', (text) => (LIMITER_CONSUME.test(text) ? { error: Object.assign(new Error('M6-UNIT-CANARY'), { code: '42501', severity: 'ERROR' }) } : {})],
+    ['a lost connection', (text) => (LIMITER_CONSUME.test(text) ? { error: Object.assign(new Error('M6-UNIT-CANARY'), { code: 'CONNECTION_CLOSED' }) } : {})],
+    ['a serialization failure', (text) => (LIMITER_CONSUME.test(text) ? { error: Object.assign(new Error('M6-UNIT-CANARY'), { code: '40001', severity: 'ERROR' }) } : {})],
+    ['a consume that never answers', (text) => (LIMITER_CONSUME.test(text) ? { hang: true } : {})],
+  ];
+  for (const [label, answer] of failures) {
+    const { factories } = counted(fakeDriver(answer));
+    const boundary = assembleTransactions(REQUIRED, CONFIGURED, factories) as ProductionTransactions;
+    const outcome = await boundary.rateLimiter(LIMITER_KEY).consume(CONSUME_REQUEST, new AbortController().signal);
+    assert.deepEqual(outcome, { outcome: 'unavailable' }, label);
+    await boundary.close();
+  }
+  // A kernel whose transaction itself fails: the composed limiter answers unavailable and not ready, never an allowance.
+  const failing = assembleTransactions(REQUIRED, CONFIGURED, {
+    ...counted().factories,
+    client: () => ({ transaction: () => Promise.reject(new Error('M6-UNIT-CANARY')), end: async () => undefined }),
+  }) as ProductionTransactions;
+  const closed = failing.rateLimiter(LIMITER_KEY);
+  assert.deepEqual(await closed.consume(CONSUME_REQUEST, new AbortController().signal), { outcome: 'unavailable' });
+  assert.equal(await closed.probe(new AbortController().signal), false);
+});
+
+test('M6R-C04 readiness through the session root\'s limits is ready only when the store answers \'ready\' for this key, while health stays prompt', async () => {
+  // The deployed path: the transaction root's binding handed to the session root, which binds it to the RATE_LIMIT_KEY it
+  // parsed; createApp is composed with those limits alone, so the limiter's probe is readiness's only store probe.
+  const pem = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const sessionEnv = {
+    SESSION_TENANT_ORIGINS: 'https://pos.example.test', SESSION_ADMIN_ORIGINS: 'https://admin.example.test',
+    TRUSTED_PROXY_CIDRS: '203.0.113.0/24', RATE_LIMIT_KEY,
+    FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: JSON.stringify({ type: 'service_account', project_id: 'demo-synthetic', client_email: 'verifier@demo-synthetic.test', private_key: pem }),
+  };
+  const cases: Array<[string, (text: string) => Answer, number]> = [
+    ['the store answers ready', (text) => (LIMITER_PROBE.test(text) ? { rows: [{ outcome: 'ready' }] } : {}), 200],
+    ['the store answers key_mismatch', (text) => (LIMITER_PROBE.test(text) ? { rows: [{ outcome: 'key_mismatch' }] } : {}), 503],
+    ['the store answers consume_unavailable', (text) => (LIMITER_PROBE.test(text) ? { rows: [{ outcome: 'consume_unavailable' }] } : {}), 503],
+    ['no row', (text) => (LIMITER_PROBE.test(text) ? { rows: [] } : {}), 503],
+    ['a statement error', (text) => (LIMITER_PROBE.test(text) ? { error: Object.assign(new Error('M6-UNIT-CANARY'), { code: '42883', severity: 'ERROR' }) } : {}), 503],
+    ['a probe that never answers', (text) => (LIMITER_PROBE.test(text) ? { hang: true } : {}), 503],
+  ];
+  for (const [label, answer, expected] of cases) {
+    const { factories, fake } = counted(fakeDriver(answer));
+    const boundary = assembleTransactions(REQUIRED, CONFIGURED, factories) as ProductionTransactions;
+    const { limits } = composeProductionSessions(sessionEnv, {
+      store: boundary.sessionStore, tenantAdmission: boundary.tenantAdmission, platformAdmission: boundary.platformAdmission, rateLimiter: boundary.rateLimiter,
+    });
+    const readiness = createReadinessState();
+    readiness.setReady();
+    await serve(createApp({ readiness, log: { log: () => undefined }, limits }), async (get) => {
+      const [ready, health] = await Promise.all([get('/readiness'), get('/health')]);
+      assert.equal(ready.status, expected, label);
+      assert.equal(ready.body.includes('M6-UNIT-CANARY'), false, `${label}: no driver error reaches the response`);
+      assert.deepEqual({ status: health.status, body: health.body }, { status: 200, body: '{"status":"alive"}' }, label);
+      assert.ok(health.ms < 500, `${label}: health answered in ${health.ms} ms`);
+      assert.ok(fake.texts.some((t) => LIMITER_PROBE.test(t)), `${label}: the limiter's probe routine ran`);
+      assert.ok(!fake.texts.some((t) => LIMITER_CONSUME.test(t)), `${label}: no probe spends a bucket`);
+    });
+    await boundary.close();
+  }
 });

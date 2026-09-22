@@ -421,7 +421,7 @@ test('the transactional outbox has no bound production adapter and no worker, it
   assert.ok(table, 'the approved-adapter table exists');
   assert.deepEqual([...table[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), ['store', 'admission', 'authorizer', 'limiter'],
     'the approved-adapter table holds no idempotency, transaction or outbox adapter');
-  assert.match(table[1], /\blimiter:\s*null,\s*$/, 'and binds no limiter');
+  assert.match(table[1], /\blimiter:\s*null,\s*$/, 'and, with no durable bundle, binds no limiter: only the transaction root\'s binding fills that slot (M6-RATE-P2)');
   // Only the transaction root composes a transaction port, and it composes no outbox delivery store, event contract or worker (M8).
   const TRANSACTION_PORT = /commandTransaction|outbox|transactions\s*:|events\s*:/i;
   const OUTBOX = /outbox|events\s*:|\.delivery\b|\bdelivery\s*:|worker/i;
@@ -478,7 +478,7 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   const rel = (p) => p.slice(REPO.length + 1);
   const importers = production.filter((p) => !p.startsWith(PERSISTENCE) && importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('persistence/'))).map(rel).sort();
   assert.deepEqual(importers, ['server/composition/productionTransactions.ts', 'server/platform-identity/db.ts'],
-    'only the transaction root (the store) and the database-client boundary (the kernel) import the persistence layer');
+    'only the transaction root (the store, the session adapters and — M6-RATE-P2 — the rate limiter) and the database-client boundary (the kernel) import the persistence layer');
   // Who names each constructor outside its own module, read from the syntax tree so comments and prose never count: an
   // identifier anywhere (an import, aliased or not, a call, a value or member reference) or a string equal to the name (a
   // computed member such as m['name']) does.
@@ -504,6 +504,9 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   };
   assert.deepEqual(names('createPostgresTransactionalStore', 'store: createPostgresTransactionalStore'),
     ['server/composition/productionTransactions.ts', 'server/persistence/postgresTransactionalStore.ts'], 'the store is composed by the transaction root alone');
+  // M6-RATE-P2: the PostgreSQL rate limiter likewise, over that root's one kernel — the session root receives only its binding.
+  assert.deepEqual(names('createPostgresRateLimiter', 'rateLimiter: createPostgresRateLimiter'),
+    ['server/composition/productionTransactions.ts', 'server/persistence/postgresRateLimiter.ts'], 'the rate limiter is composed by the transaction root alone');
   assert.deepEqual(names('createSupervisedPgClient', 'createSupervisedPgClient(postgres, url, options)'),
     ['server/persistence/supervisedPgClient.ts', 'server/platform-identity/db.ts'], 'the kernel is built over the driver by the database-client boundary alone');
   assert.deepEqual(names('createRuntimeStoreClient', 'client: createRuntimeStoreClient'),

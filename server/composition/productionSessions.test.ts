@@ -6,9 +6,11 @@
 // that the origin topology is exact, https and host-distinct per boundary; that configuration alone
 // composes no adapter, while the transaction root's durable bundle fills the tenant slots, one store for
 // both boundaries and — only when it carries the platform admission (M5-GIAM-D1-P4) — the administrative
-// boundary's admission and authorizer together, leaving the rate limiter the one blocker; and that, with every adapter
-// present, assembly is all or nothing and yields boundaries the runtime serves end to end. Durable
-// idempotency is the transaction root's (productionTransactions.test.ts), never this one's.
+// boundary's admission and authorizer together; that the distributed rate limiter (M6-RATE-P2) fills its slot only
+// from the bundle's binding called once with the RATE_LIMIT_KEY bytes this root parsed — the same bytes the limits key
+// with — so a bundle carrying it composes, while a missing or malformed key never reaches it and names the limiter
+// too; and that, with every adapter present, assembly is all or nothing and yields boundaries the runtime serves end
+// to end. Durable idempotency is the transaction root's (productionTransactions.test.ts), never this one's.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -34,7 +36,8 @@ const TOPOLOGY = { SESSION_TENANT_ORIGINS: 'https://pos.example.test', SESSION_A
 const KEY = Buffer.alloc(32, 7).toString('base64url');
 const LIMITS_CONFIG = { TRUSTED_PROXY_CIDRS: '203.0.113.0/24', RATE_LIMIT_KEY: KEY };
 const CONFIGURED = { ...TOPOLOGY, ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA };
-// No distributed limiter adapter is approved: composition names it before the session adapters.
+// With no durable bundle (or none carrying the limiter's binding, or no valid key) the limiter slot is null, named
+// before the session adapters.
 const LIMITER = 'rate_limit_store_unavailable';
 const ADAPTER_BLOCKERS = [
   'tenant_session_store_unavailable', 'tenant_admission_unavailable', 'tenant_authorizer_unavailable',
@@ -52,7 +55,7 @@ function blockersOf(env: Record<string, string | undefined>): readonly string[] 
 }
 
 test('production composition refuses while any production adapter is missing, naming every one', () => {
-  assert.deepEqual(blockersOf(CONFIGURED), [LIMITER, ...ADAPTER_BLOCKERS], 'configured today: exactly the adapters that do not exist yet');
+  assert.deepEqual(blockersOf(CONFIGURED), [LIMITER, ...ADAPTER_BLOCKERS], 'configuration alone: exactly the adapters only the transaction root\'s bundle supplies');
   assert.deepEqual(blockersOf({}), [
     'session_origins_missing', 'identity_verifier_unconfigured', 'trusted_proxies_missing', 'rate_limit_key_missing', LIMITER, ...ADAPTER_BLOCKERS,
   ]);
@@ -154,14 +157,15 @@ test('the durable bundle fills the tenant slots and ONE store for both boundarie
       if (err instanceof ProductionCompositionError) return err.blockers;
       throw err;
     }
-    return assert.fail('production composition must still refuse: no distributed rate limiter is approved');
+    return assert.fail('production composition must still refuse: this bundle carries no limiter binding');
   };
   // Without the platform admission the bundle removes the three tenant blockers AND the admin store's: one store
   // serves both boundaries (DA-37). The admin boundary's admission and authorizer stay named, both of them.
   assert.deepEqual(blockersWith({ store, tenantAdmission }),
     [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
   // M5-GIAM-D1-P4: the platform admission the transaction root builds (migration 013) fills BOTH admin slots, and
-  // what remains is exactly the one slot no adapter can fill yet — the distributed limiter.
+  // what remains is exactly the limiter — this bundle carries no binding (M6-RATE-P2; the bundle that does composes,
+  // M6R-S01 below).
   assert.deepEqual(blockersWith({ store, tenantAdmission, platformAdmission: platformPort() }), [LIMITER]);
   // The removed P1 slot is no way in: an authorizer handed over on its own fills nothing, whatever it answers.
   assert.deepEqual(blockersWith({ store, tenantAdmission, adminAuthorizer: { authorize: () => true } } as never),
@@ -178,19 +182,19 @@ test('the durable bundle fills the tenant slots and ONE store for both boundarie
   }
 });
 
-test('durableSessionAdapters fills the admin admission and authorizer only together, from the platform admission, and never a limiter', async () => {
+test('durableSessionAdapters fills the admin admission and authorizer only together, from the platform admission, and no limiter without a binding and a key', async () => {
   const store = createMemorySessionStore();
   const tenantAdmission = { admit: () => ({ outcome: 'refused' }), probe: () => true };
   const without = durableSessionAdapters({ store, tenantAdmission });
   assert.deepEqual({ admission: without.admission.admin, authorizer: without.authorizer.admin, limiter: without.limiter },
-    { admission: null, authorizer: null, limiter: null }, 'no platform admission: neither admin slot, and no limiter');
+    { admission: null, authorizer: null, limiter: null }, 'no platform admission: neither admin slot, and no limiter binding: no limiter');
   const port = platformPort();
   const adapters = durableSessionAdapters({ store, tenantAdmission, platformAdmission: port });
   for (const table of [without, adapters]) {
     assert.equal(table.store.tenant, store, 'the one store ...');
     assert.equal(table.store.admin, store, '... serves both boundaries');
     assert.ok(table.admission.tenant !== null && table.authorizer.tenant !== null, 'the tenant slots, from the tenant admission');
-    assert.equal(table.limiter, null, 'the limiter is never among the durable adapters');
+    assert.equal(table.limiter, null, 'no binding and no key: no limiter (M6R-S03 binds one)');
     assert.ok(Object.isFrozen(table) && Object.isFrozen(table.store) && Object.isFrozen(table.admission) && Object.isFrozen(table.authorizer));
   }
   const admission = adapters.admission.admin;
@@ -321,5 +325,83 @@ test('with every adapter present, both boundaries are assembled through the runt
     }
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M6-RATE-P2 — the limiter binding, bound to the key this root parsed
+// ---------------------------------------------------------------------------
+// What is proved: the durable bundle's `rateLimiter` binding fills the last slot, called exactly once with the bytes of
+// RATE_LIMIT_KEY as this root parsed them — the very bytes composed as the limits' secret — and the limits hold exactly
+// what it returned; a missing or malformed key never reaches it and names both the key and the limiter; a binding that is
+// not a function refuses at composition. Substituted: the PostgreSQL limiter (an in-memory test limiter the binding
+// returns — the binding's own production factory is proved in productionTransactions.test.ts M6R-C01..C04).
+
+const TENANT_ADMISSION = Object.freeze({ admit: () => ({ outcome: 'refused' }), probe: () => true });
+
+/** A binding that records each key it is called with and answers one test limiter. */
+function limiterBinding(): { rateLimiter: (keySecret: Uint8Array) => ReturnType<typeof createMemoryRateLimiter>; calls: Uint8Array[]; limiter: ReturnType<typeof createMemoryRateLimiter> } {
+  const limiter = createMemoryRateLimiter();
+  const calls: Uint8Array[] = [];
+  return { limiter, calls, rateLimiter: (keySecret: Uint8Array) => { calls.push(keySecret); return limiter; } };
+}
+
+test('M6R-S01 a bundle carrying the limiter binding composes: the limits hold exactly its limiter, bound once to the parsed RATE_LIMIT_KEY', () => {
+  const store = createMemorySessionStore();
+  const { rateLimiter, calls, limiter } = limiterBinding();
+  const { sessions, limits } = composeProductionSessions(CONFIGURED, { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter });
+  assert.deepEqual(Object.keys(sessions).sort(), ['admin', 'tenant'], 'both boundaries: no blocker remains');
+  assert.equal(limits.limiter, limiter, 'exactly the limiter the binding returned: no wrapper, no fallback');
+  assert.equal(calls.length, 1, 'the binding is called exactly once');
+  assert.deepEqual([...calls[0]], [...Buffer.from(KEY, 'base64url')], 'with RATE_LIMIT_KEY\'s bytes');
+  assert.deepEqual([...calls[0]], [...Buffer.alloc(32, 7)]);
+  assert.equal(limits.keySecret, calls[0], 'the very bytes the limits key their pseudonyms with: one parse, one key');
+  assert.deepEqual(limits.trustedProxies, ['203.0.113.0/24']);
+});
+
+test('M6R-S02 a missing or malformed RATE_LIMIT_KEY never reaches the binding, and names both the key and the limiter', () => {
+  const store = createMemorySessionStore();
+  const blockersWith = (key: string | undefined, rateLimiter: unknown): readonly string[] => {
+    try {
+      composeProductionSessions({ ...CONFIGURED, RATE_LIMIT_KEY: key }, { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter: rateLimiter as never });
+    } catch (err) {
+      if (err instanceof ProductionCompositionError) return err.blockers;
+      throw err;
+    }
+    return assert.fail('composition must refuse');
+  };
+  for (const missing of [undefined, '']) {
+    const { rateLimiter, calls } = limiterBinding();
+    assert.deepEqual(blockersWith(missing, rateLimiter), ['rate_limit_key_missing', LIMITER], String(missing));
+    assert.equal(calls.length, 0, `${String(missing)}: the binding is never called`);
+  }
+  for (const bad of ['short', KEY.slice(0, 42), `${KEY}=`, `${KEY.slice(0, 42)}d`, Buffer.alloc(31, 7).toString('base64url'), Buffer.alloc(32, 7).toString('base64')]) {
+    const { rateLimiter, calls } = limiterBinding();
+    assert.deepEqual(blockersWith(bad, rateLimiter), ['rate_limit_key_invalid', LIMITER], bad);
+    assert.equal(calls.length, 0, `${bad}: the binding is never called`);
+  }
+  // A binding that is not a function refuses at composition, whatever the key — never hidden behind a key blocker.
+  for (const binding of [null, 'x', {}]) {
+    assert.throws(() => blockersWith(KEY, binding), TypeError, JSON.stringify(binding));
+    assert.throws(() => blockersWith(undefined, binding), TypeError, `${JSON.stringify(binding)}, no key`);
+  }
+  // With no bundle at all, the limiter stays named whatever the key.
+  assert.ok(blockersOf(CONFIGURED).includes(LIMITER), 'no bundle: no limiter');
+});
+
+test('M6R-S03 durableSessionAdapters binds the limiter only with both a binding and a key, and the key is defaulted', () => {
+  assert.equal(durableSessionAdapters.length, 1, 'the key is defaulted: the bundle alone is a complete call');
+  const store = createMemorySessionStore();
+  const key = Buffer.alloc(32, 7);
+  const { rateLimiter, calls, limiter } = limiterBinding();
+  assert.equal(durableSessionAdapters({ store, tenantAdmission: TENANT_ADMISSION, rateLimiter }).limiter, null, 'a binding without a key: no limiter');
+  assert.equal(calls.length, 0, 'and the binding is not called');
+  assert.equal(durableSessionAdapters({ store, tenantAdmission: TENANT_ADMISSION }, key).limiter, null, 'a key without a binding: no limiter');
+  const bound = durableSessionAdapters({ store, tenantAdmission: TENANT_ADMISSION, rateLimiter }, key);
+  assert.equal(bound.limiter, limiter, 'both: the binding\'s limiter itself');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], key, 'called with exactly the bytes handed in');
+  for (const binding of [null, 'x', {}]) {
+    assert.throws(() => durableSessionAdapters({ store, tenantAdmission: TENANT_ADMISSION, rateLimiter: binding as never }, key), TypeError, JSON.stringify(binding));
   }
 });

@@ -475,6 +475,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // 014's buckets, its key fingerprint or their privilege containment, and applies them through the SAME trusted
     // executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/rateLimiter.integration.test.mjs',
+    // M6-RATE-P2: the rate-limited runtime's end-to-end proof needs 001-014 applied before its composed server can
+    // enforce a limit over real sockets, and applies them through the SAME trusted executor. Same category (a tests/db/
+    // suite), same reasoning; the containment property above is untouched.
+    'tests/db/rateLimitRuntime.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

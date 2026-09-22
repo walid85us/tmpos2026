@@ -15,8 +15,11 @@
 //   * THE IDENTITY VERIFIER. A disposable cluster has no identity provider, so a bearer token maps to a synthetic
 //     provider reference, authenticated now with a TOTP second factor. Everything after that point — admission, the
 //     session record, revalidation, authorization and the command transaction — is the composed production path.
-//   * THE RATE LIMITER. No shared limiter store is approved, so the production composition refuses without one (M5E-00
-//     shows it refuses for that alone); the testkit's in-memory limiter stands in, fresh for every runtime below.
+//   * THE RATE LIMITER. The real PostgreSQL limiter (migration 014, M6-RATE-P2) is proved end to end against disposable
+//     PostgreSQL in tests/db/rateLimiter.integration.test.mjs and tests/db/rateLimitRuntime.integration.test.mjs; here
+//     the testkit's in-memory limiter stands in instead, fresh for every runtime below, only to keep this suite's own
+//     many logins over one loopback client unlimited (M5E-00 still shows the composition refuses when no limiter is
+//     bound at all).
 //
 // WHAT IS PROVED. An administrator is admitted on exactly one platform grant and bound to a 'p1:' witness; the
 // witness moves on every change to that grant, its role, the account, the identity anchor or 007's security version, and
@@ -45,6 +48,7 @@ import { createNodeFsPort } from '../../server/platform-identity/migrationEngine
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { MAX_POOLS, RETIRED_POOL_GRACE_S, createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import { createPostgresRateLimiter } from '../../server/persistence/postgresRateLimiter.ts';
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { createPostgresTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
 import { createPostgresTenantDirectory } from '../../server/persistence/postgresTenantDirectory.ts';
@@ -176,6 +180,7 @@ tx = assembleTransactions(PRODUCTION_INVENTORY, CONFIGURED_ENV, {
   sessionStore: (c) => createPostgresSessionStore({ client: c }),
   tenantAdmission: (c) => createPostgresTenantAdmission({ client: c }),
   tenantDirectory: (c) => createPostgresTenantDirectory({ client: c }),
+  rateLimiter: (c, keySecret) => createPostgresRateLimiter({ client: c, keySecret }),
 });
 
 /** Bearer token -> provider uid, for every synthetic actor this file creates. */
@@ -290,7 +295,8 @@ async function withRuntime(fn) {
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: limits.trustedProxies, keySecret: limits.keySecret,
     ...durable(),
-    // AFTER the spread: the production table carries no limiter, and it is the one slot a harness fills.
+    // AFTER the spread: durable() above wires no rateLimiter binding, so the limiter is the one slot a harness fills
+    // here — the real PostgreSQL limiter is proved separately, not substituted in this suite's own runtimes.
     limiter: limits.limiter,
   });
   const app = createApp({
@@ -363,7 +369,7 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-014 applied, the production roots compose over them, and only the limiter keeps them from composing alone', async () => {
+test('M5E-00: 001-014 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
@@ -373,12 +379,14 @@ test('M5E-00: 001-014 applied, the production roots compose over them, and only 
   // the two boundaries are served with — never the kernel, a pool or the URL.
   assert.ok(classifiedEndpoint !== null && typeof classifiedEndpoint === 'object', 'the endpoint was classified first');
   assert.deepEqual(Object.keys(tx).sort(),
-    ['close', 'idempotency', 'platformAdmission', 'routes', 'sessionStore', 'tenantAdmission', 'transactions']);
+    ['close', 'idempotency', 'platformAdmission', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions']);
   assert.deepEqual(tx.routes.map((r) => `${r.method} ${r.path}`).sort(),
     [`GET ${TENANT_DIRECTORY_PATH}`, `PATCH ${TENANT_DISPLAY_NAME_PATH}`, `PATCH ${TENANT_STATUS_PATH}`]);
 
-  // The session root over the durable adapters alone refuses for exactly one reason: no approved limiter. So the
-  // limiter is the only slot this suite fills beyond the verifier; both administrative slots came from 013's port.
+  // durable() below deliberately omits a rateLimiter binding, so the session root over it refuses for exactly one
+  // reason: no approved limiter — not because none exists (it is proved for real in tests/db/rateLimiter.integration.
+  // test.mjs and tests/db/rateLimitRuntime.integration.test.mjs), but because this suite never wires it in, the same
+  // way it never wires tx.rateLimiter into a runtime below. Both administrative slots still came from 013's port.
   const limits = testRequestLimits();
   assert.throws(
     () => assembleSessions({ origins: ORIGINS, verifier: VERIFIER, trustedProxies: [], keySecret: limits.keySecret, ...durable() }),
