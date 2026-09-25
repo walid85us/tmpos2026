@@ -233,7 +233,8 @@ function adminBoundary(rec: Recorder, authorize: (...args: unknown[]) => unknown
           : null;
       },
     },
-    admission: { admit: () => ({ admitted: true, securityVersion: 'v1' }) },
+    // The administrative login attributes its session to the scope admission names (M6-ADMIN-AUDIT-P1).
+    admission: { admit: () => ({ admitted: true, securityVersion: 'v1', context: SCOPE }) },
     authorizer: { authorize: (...args: unknown[]) => { rec.authorizations.push(args); return authorize(...args); } },
     store: createMemorySessionStore(),
   };

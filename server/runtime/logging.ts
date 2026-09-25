@@ -19,6 +19,8 @@ export interface LogFields {
   status?: number;
   durationMs?: number;
   reason?: string;
+  /** The id THIS server generated for an audited session operation (sessions.ts) — never a client's value. */
+  operationId?: string;
 }
 
 const MAX_VALUE_LEN = 200;
@@ -50,6 +52,7 @@ export function buildLogRecord(
   if (isFiniteNumber(fields.status)) rec.status = Math.trunc(fields.status);
   if (isFiniteNumber(fields.durationMs)) rec.durationMs = Math.max(0, Math.round(fields.durationMs));
   if (fields.reason !== undefined) rec.reason = sanitizeLogValue(String(fields.reason));
+  if (fields.operationId !== undefined) rec.operationId = sanitizeLogValue(String(fields.operationId));
   return rec;
 }
 

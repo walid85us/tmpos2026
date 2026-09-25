@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildLogRecord, sanitizeLogValue, emitLog } from './logging.js';
 
-const ALLOWED = ['timestamp', 'level', 'event', 'requestId', 'method', 'route', 'status', 'durationMs', 'reason'];
+const ALLOWED = ['timestamp', 'level', 'event', 'requestId', 'method', 'route', 'status', 'durationMs', 'reason', 'operationId'];
 // Any C0 control byte, DEL, or C1 control byte — matched from code points so this
 // source contains no literal control characters.
 const CONTROL = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f]');
@@ -66,6 +66,15 @@ test('a user string cannot forge a second log record', () => {
 test('long values are bounded', () => {
   const rec = buildLogRecord('info', { event: 'e', reason: 'r'.repeat(5000) });
   assert.ok(String(rec.reason).length <= 200);
+});
+
+test('an operation id is one more bounded, stripped field, present only when given', () => {
+  const id = '6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b';
+  assert.equal(buildLogRecord('info', { event: 'request', operationId: id }).operationId, id);
+  assert.ok(!('operationId' in buildLogRecord('info', { event: 'request' })), 'absent unless an operation ran');
+  const forged = buildLogRecord('info', { event: 'e', operationId: `x${NL}{"level":"error"}${'y'.repeat(5000)}` });
+  assert.equal(String(forged.operationId).includes(NL), false);
+  assert.ok(String(forged.operationId).length <= 200);
 });
 
 test('numeric fields accept only finite numbers', () => {

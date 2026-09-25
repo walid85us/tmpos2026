@@ -26,6 +26,9 @@ import {
   buildAuthorizationDecisionAuditEvent,
   AuditEventValidationError,
   AUDIT_WRITER_METADATA_ALLOWLIST,
+  ADMIN_SESSION_AUDIT_EVENTS,
+  buildAdminSessionAuditEvent,
+  SESSION_AUDIT_METADATA_KEYS,
   type AuditEventWriteInput,
 } from './auditEventWriter';
 import { AUDIT_CONTRACT_VERSION, SCOPE_TYPE_VALUES } from './authorizationConstants';
@@ -479,4 +482,79 @@ test('S3-W-18: a subject that is not a UUID is refused before any statement', as
     await assert.rejects(writeAuditEvent({ ...baseEvent(), subjectTenantId }, { executor: r.executor }), AuditEventValidationError, JSON.stringify(subjectTenantId));
     assert.equal(r.calls.length, 0, 'nothing sent');
   }
+});
+
+test('S3-W-19: the session metadata keys persist for the three administrative session events alone, and are all those events keep', async () => {
+  const ids = Object.values(ADMIN_SESSION_AUDIT_EVENTS).map((shape) => shape.actionId);
+  assert.deepEqual(ids, ['platform.admin.session.login', 'platform.admin.session.reauthenticate', 'platform.admin.session.logout']);
+  assert.deepEqual([...SESSION_AUDIT_METADATA_KEYS], ['sessionRef', 'replacedSessionRef', 'authenticatedAt']);
+  const session = { sessionRef: 'r'.repeat(43), replacedSessionRef: 'q'.repeat(43), authenticatedAt: 1_700_000_000_000 };
+  for (const action of ['login', 'reauthenticate'] as const) {
+    const event = buildAdminSessionAuditEvent(action, T1, ACTOR, session);
+    assert.deepEqual(sanitizeAuditMetadata({ ...session, phase: 'p' }, event.actionId), session, `${action}: kept, and a general key is not`);
+    const r = recorder();
+    await writeAuditEvent(event, { executor: r.executor });
+    assert.deepEqual(r.calls[0].values[19], { __json: session }, `${action}: persisted as given`);
+  }
+  // A general key on a session event is refused by validation, exactly as a session key is on any other action.
+  assert.throws(() => validateAuditEventInput({ ...buildAdminSessionAuditEvent('logout', T1, null, { sessionRef: session.sessionRef }),
+    metadata: { sessionRef: session.sessionRef, phase: 'p' } }), AuditEventValidationError, 'phase on a session event');
+  // Every other action treats them as it treats any key off the allow-list — exactly as before: stripped on write,
+  // refused by standalone validation — including an action that merely shares the prefix.
+  for (const actionId of ['s3.audit.unit', 'platform.tenant.status.change', 'platform.admin.session', 'platform.admin.session.login.x', undefined]) {
+    assert.deepEqual(sanitizeAuditMetadata({ ...session, phase: 'p' }, actionId), { phase: 'p' }, String(actionId));
+  }
+  for (const key of SESSION_AUDIT_METADATA_KEYS) {
+    assert.throws(() => validateAuditEventInput({ ...baseEvent(), metadata: { [key]: 'v' } as never }), AuditEventValidationError, key);
+    const r = recorder();
+    await writeAuditEvent({ ...baseEvent(), metadata: { [key]: 'v', phase: 'p' } as never }, { executor: r.executor });
+    assert.deepEqual(r.calls[0].values[19], { __json: { phase: 'p' } }, `${key}: stripped from another action's row`);
+  }
+  assert.ok(!AUDIT_WRITER_METADATA_ALLOWLIST.some((key) => SESSION_AUDIT_METADATA_KEYS.includes(key)), 'never on the general allow-list');
+});
+
+test('S3-W-20: a row under a session action id must match that event\'s fixed shape in every column, whoever builds it', async () => {
+  const ref = 'r'.repeat(43);
+  const login = buildAdminSessionAuditEvent('login', T1, ACTOR, { sessionRef: ref, authenticatedAt: 1 });
+  const logout = buildAdminSessionAuditEvent('logout', T1, null, { sessionRef: ref });
+  assert.deepEqual([login.decision, login.reasonCode, logout.decision, logout.reasonCode, logout.actorInternalUserId],
+    ['allow', 'admin_session_created', 'not_applicable', 'admin_session_ended', null]);
+  const drift: Array<[string, AuditEventWriteInput]> = [
+    ['a request id that is no server UUID', { ...login, requestId: 'client-chosen-request-id' }],
+    ['another decision', { ...login, decision: 'deny' }],
+    ['another reason code', { ...login, reasonCode: 'admin_session_reauthenticated' }],
+    ['another sentence', { ...login, humanReadableReason: 'Caller text.' }],
+    ['another result', { ...login, resultStatus: 'failed' }],
+    ['another source', { ...login, sourceOfTruth: 'server_authorization_resolver' }],
+    ['another evaluator', { ...login, evaluatedBy: 'durable_audit@v0-contract' }],
+    ['another permission', { ...login, requiredPermission: 'audit:write' }],
+    ['a trace id', { ...login, traceId: 'client-trace' }],
+    ['a provider', { ...login, actorAuthProvider: 'firebase' }],
+    ['an on-behalf actor', { ...login, onBehalfOfInternalUserId: BEHALF }],
+    ['a subject tenant', { ...login, subjectTenantId: T1 }],
+    ['another scope', { ...login, scopeType: 'none' }],
+    ['a tenant scope, itself consistent', { ...login, scopeType: 'tenant', tenantId: T1 }],
+    ['advisory evidence', { ...login, evidenceLevel: 'dev_sidecar_log_advisory' }],
+    ['a login naming no actor', { ...login, actorInternalUserId: null }],
+    ['a logout naming an actor', { ...logout, actorInternalUserId: ACTOR }],
+    ['no session reference', { ...login, metadata: { authenticatedAt: 1 } }],
+    ['a malformed session reference', { ...login, metadata: { sessionRef: 'short' } }],
+    ['a reference of the right length outside base64url', { ...login, metadata: { sessionRef: `${'r'.repeat(42)}=` } }],
+    ['a malformed replaced reference', { ...login, metadata: { sessionRef: ref, replacedSessionRef: 7 } }],
+    ['a malformed authentication time', { ...login, metadata: { sessionRef: ref, authenticatedAt: 1.5 } }],
+    ['a logout naming a replaced session', { ...logout, metadata: { sessionRef: ref, replacedSessionRef: ref } }],
+    ['a logout binding an authentication time', { ...logout, metadata: { sessionRef: ref, authenticatedAt: 1 } }],
+    ['a generic event borrowing the login id', { ...baseEvent(), scopeType: 'platform', tenantId: null, storeId: null, actionId: login.actionId, metadata: { sessionRef: ref } }],
+  ];
+  for (const [label, event] of drift) {
+    assert.throws(() => validateAuditEventInput(event), AuditEventValidationError, label);
+    const r = recorder();
+    await assert.rejects(writeAuditEvent(event, { executor: r.executor }), AuditEventValidationError, label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
+  // The builder refuses what validation refuses, before anything is sent: an actor that is no UUID, an unknown action.
+  assert.throws(() => buildAdminSessionAuditEvent('login', T1, 'uid-alpha', { sessionRef: ref }), AuditEventValidationError);
+  assert.throws(() => buildAdminSessionAuditEvent('constructor' as never, T1, ACTOR, { sessionRef: ref }), AuditEventValidationError);
+  // Other actions are untouched: the generic event still validates as before.
+  assert.doesNotThrow(() => validateAuditEventInput(baseEvent()));
 });

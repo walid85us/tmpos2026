@@ -54,6 +54,16 @@
 // Logout revokes the session and clears its cookie with
 // matching attributes; only the logout handler holds that capability, never a business handler.
 //
+// Audit (M6-ADMIN-AUDIT-P1). The administrative boundary records every session it issues and every
+// logout that ends one in the durable audit trail, in the SAME store transaction as the change
+// (SessionStore establish/end), attributed to the actor its admission selected at login — so an
+// administrative login requires admission to name that scope. A login or reauthentication whose
+// record cannot be written issues nothing and leaves the presented session exactly as it was. Logout
+// puts revocation first: when the audited ending fails for any reason, the plain revocation runs,
+// and a session ended that way answers 204 with its record unconfirmed — said in the request log and
+// warned. Each audited operation carries an id this server generates, which its record and its
+// request's log line share. The tenant boundary's session changes are not audited (stated open).
+//
 // Every port call is bounded by the port deadline and handed its AbortSignal (deadline.ts). A
 // denial is a 401; an unavailable or overrunning store or admission is a 503 — nothing is issued
 // or read; a logout whose revocation failed still clears the cookie (a shared terminal must not
@@ -68,13 +78,15 @@
 //
 // No identifier, digest, UID, CSRF token or port error is logged or echoed: refusals carry
 // bounded reason codes to the log only.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { asPrincipal } from './access.js';
 import type { AuthenticationEvidence, RequestAuthenticator, RouteAuthorizer } from './access.js';
 import { trustedScopeOf } from './principals.js';
 import type { TrustedScope } from './principals.js';
 import { outage, withDeadline } from './deadline.js';
+import { emitLog } from './logging.js';
+import type { LogSink } from './logging.js';
 import { parseTrustedOrigins } from './requestSecurity.js';
 import { EnforcementSetupError, sessionPaths } from './routes.js';
 import type { RouteContext, RouteDefinition, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
@@ -182,6 +194,39 @@ export interface SessionRecord {
 export type SessionUpdate = Readonly<{ lastSeenAt: number }> | Readonly<{ validatedAt: number }>;
 
 /**
+ * The audited session operations (M6-ADMIN-AUDIT-P1), in the runtime's own words: an ordinary login, a
+ * reauthentication — chosen only on the path whose every same-principal check passed, never by a header
+ * alone — and a logout. The store maps each onto its fixed audit record and chooses nothing else.
+ */
+/**
+ * What an audited session operation hands the store to record, beside the change it records. `operationId` is a
+ * random UUID this server generated for this one operation — never the client's X-Request-Id, which may be adopted
+ * as a correlator but is never persisted; the request's log line carries it too.
+ */
+export type SessionAuditEntry = SessionEstablishAudit | SessionEndAudit;
+
+/** A login or reauthentication: the actor the login's own admission selected, and the authentication time it bound. */
+export interface SessionEstablishAudit {
+  readonly action: 'login' | 'reauthenticate';
+  readonly operationId: string;
+  /** The internal user (UUID) the login's own admission selected. */
+  readonly actor: string;
+  /** The provider-verified authentication time bound into the new session, or null. */
+  readonly authenticatedAt: number | null;
+}
+
+/**
+ * A logout. It re-asks no admission, so it establishes no actor: its record names the session instead, and the
+ * login record that created that session names the actor.
+ */
+export interface SessionEndAudit {
+  readonly action: 'logout';
+  readonly operationId: string;
+  readonly actor: null;
+  readonly authenticatedAt: null;
+}
+
+/**
  * The replaceable storage boundary. Every operation is handed the port deadline's AbortSignal and
  * may return a Promise; a throw, a rejection or an overrun is "unavailable" and fails closed. A
  * production store must be durable and shared across instances (docs/phase-4/03 §2 #18), expire
@@ -189,6 +234,18 @@ export type SessionUpdate = Readonly<{ lastSeenAt: number }> | Readonly<{ valida
  * assertSessionStoreContract): `update` changes an existing record only — never recreating an
  * absent or revoked one — and `revokePrincipal` ends every session of one principal in one
  * audience and nothing else.
+ *
+ * THE AUDITED PAIR (M6-ADMIN-AUDIT-P1). The administrative boundary's store must also offer the two
+ * operations below — startup refuses one that does not — and the tenant boundary never calls them. Each
+ * is ONE atomic step: the session change and the audit record `audit` describes commit together, or
+ * neither does. Both refuse any record of an audience other than 'admin', and `create` refuses an
+ * administrative record, so `establish` is the only way one is written.
+ * - `establish` creates `record` under `key`, first ending the live session under `replaces` when one is
+ *   presented (rotation). A taken `key` is refused without touching `replaces`.
+ * - `end` ends the live session under `key` and answers 'ended'; when no live session is there to end —
+ *   another operation ended it first, or it reached its absolute expiry — it records nothing and answers
+ *   'absent'. A store that keeps expired records deletes any still under `key` in the same step, so no
+ *   instance whose clock runs behind can go on accepting it.
  */
 export interface SessionStore {
   create(key: string, record: SessionRecord, signal: AbortSignal): unknown;
@@ -196,6 +253,8 @@ export interface SessionStore {
   update(key: string, fields: SessionUpdate, signal: AbortSignal): unknown;
   revoke(key: string, signal: AbortSignal): unknown;
   revokePrincipal(audience: SessionAudience, principalKey: string, signal: AbortSignal): unknown;
+  establish?(key: string, record: SessionRecord, replaces: string | null, audit: SessionEstablishAudit, signal: AbortSignal): unknown;
+  end?(key: string, audit: SessionEndAudit, signal: AbortSignal): unknown;
 }
 
 /**
@@ -310,9 +369,16 @@ export interface SessionBoundary {
   refresh(session: ActiveSession): Promise<void>;
 }
 
+/** How the logout handler may end one live session: plainly, or with its audit record (administrative boundary). */
+interface Revoker {
+  readonly revoke: () => Promise<void>;
+  /** The store's answer, unread here: the logout handler judges it. */
+  readonly end: (audit: SessionEndAudit) => Promise<unknown>;
+}
+
 // The revocation of each live session context, reachable only by the logout handler below:
 // a business handler holding ctx.session cannot end the session.
-const REVOKERS = new WeakMap<SessionContext, () => Promise<void>>();
+const REVOKERS = new WeakMap<SessionContext, Revoker>();
 
 // 32 random bytes in base64url: the shape of every session identifier and CSRF token.
 const OPAQUE_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -398,6 +464,7 @@ function liveSession(raw: unknown, audience: SessionAudience, now: number): Live
 // A per-boundary limiter is no port: a stale composition that passes one is refused as unknown.
 const PORTS: readonly string[] = ['verifier', 'admission', 'authorizer', 'store', 'trustedOrigins'];
 const STORE_OPERATIONS = ['create', 'get', 'update', 'revoke', 'revokePrincipal'] as const;
+const AUDIT_OPERATIONS = ['establish', 'end'] as const;
 const NO_BODY = Object.freeze({ kind: 'none' } as const);
 
 const hasMethod = (v: unknown, name: string): boolean =>
@@ -423,18 +490,25 @@ type AdmissionDecision =
   | { readonly securityVersion: string; readonly context: TrustedScope | null }
   | 'admission_denied' | 'admission_unavailable' | 'admission_timeout';
 
-function createBoundary(audience: SessionAudience, raw: unknown, now: () => number, deadlineMs: number): SessionBoundary {
+function createBoundary(
+  audience: SessionAudience, raw: unknown, now: () => number, deadlineMs: number, log: LogSink | undefined,
+): SessionBoundary {
   if (!isPlainObject(raw) || !Object.keys(raw).every((key) => PORTS.includes(key))) {
     throw new EnforcementSetupError('session_boundary_invalid');
   }
   const { verifier, admission, authorizer, store, trustedOrigins } = raw;
+  // Fixed once, by audience alone (M6-ADMIN-AUDIT-P1): the administrative boundary issues and ends its sessions
+  // only through the store's audited pair, and the tenant boundary only through create and revoke, never the pair.
+  const audited = audience === 'admin';
   if (!hasMethod(verifier, 'verify')) throw new EnforcementSetupError('session_verifier_required');
   if (!hasMethod(admission, 'admit')) throw new EnforcementSetupError('session_admission_required');
   if (!STORE_OPERATIONS.every((op) => hasMethod(store, op))) throw new EnforcementSetupError('session_store_required');
+  if (audited && !AUDIT_OPERATIONS.every((op) => hasMethod(store, op))) throw new EnforcementSetupError('session_store_audit_required');
   if (!hasMethod(authorizer, 'authorize')) throw new EnforcementSetupError('session_authorizer_required');
   if (!Array.isArray(trustedOrigins) || trustedOrigins.length === 0) throw new EnforcementSetupError('trusted_origins_required');
   const origins = parseTrustedOrigins(trustedOrigins); // a non-canonical entry fails startup
-  const sessions = store as SessionStore;
+  // The pair is present whenever `audited` (checked above), and nothing below calls it otherwise.
+  const sessions = store as Required<SessionStore>;
   const admitter = admission as SessionAdmission;
   const policy = LOGIN_POLICIES[audience];
   const cookieName = SESSION_COOKIES[audience];
@@ -448,7 +522,10 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
 
   const contextOf = (id: string, key: string): SessionContext => {
     const context: SessionContext = Object.freeze({ audience, csrfToken: csrfTokenOf(id, audience) });
-    REVOKERS.set(context, async () => { await call((signal) => sessions.revoke(key, signal)); });
+    REVOKERS.set(context, Object.freeze({
+      revoke: async () => { await call((signal) => sessions.revoke(key, signal)); },
+      end: (audit: SessionEndAudit) => call((signal) => sessions.end(key, audit, signal)),
+    }));
     return context;
   };
 
@@ -553,6 +630,10 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       return challenged(res, ctx, (await revokeAllOf(principal)) ? 'login_admission_denied' : 'login_admission_denied_unrevoked');
     }
     if (typeof decision === 'string') return unavailable(res, ctx, decision);
+    // The administrative boundary attributes every session it issues to the actor its admission selected
+    // (M6-ADMIN-AUDIT-P1). An admission that admitted there but named no scope is a faulty adapter, not a verdict
+    // about the principal: an outage, before anything is read, created or revoked.
+    if (audited && decision.context === null) return unavailable(res, ctx, 'admission_unavailable');
     const mode = loginModeOf(req);
     if (mode === 'invalid') return challenged(res, ctx, 'login_reauth_header_invalid');
     if (mode === 'reauthenticate') {
@@ -585,12 +666,34 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       createdAt: t, lastSeenAt: t, validatedAt: t,
     });
     try {
-      // Rotation: a well-formed session presented at login never outlives it. A reauthentication shares both
-      // properties of an ordinary login here, unchanged: a create that fails after the revoke answers 503 and
-      // leaves no session at all, and two concurrent reauthentications presenting one cookie can both pass the
-      // same-principal check and create two sessions of that same principal (docs/phase-4/08 records both).
-      if (presentedKey !== null) await call((signal) => sessions.revoke(presentedKey, signal));
-      await call((signal) => sessions.create(digestOf(id), record, signal));
+      // Rotation: a well-formed session presented at a login that succeeds never outlives it, and a
+      // reauthentication rotates exactly as an ordinary login does. Two concurrent reauthentications presenting one
+      // cookie can both pass the same-principal check and create two sessions of that same principal
+      // (docs/phase-4/08). What a failure leaves depends on the boundary:
+      if (audited) {
+        // ADMINISTRATIVE (M6-ADMIN-AUDIT-P1): ONE store call ends the presented session, creates the new one and
+        // writes the audit record atomically, so a failure before its commit leaves the presented session exactly
+        // as it was and issues nothing. A commit whose answer was lost is a 503 too, although the session and its
+        // record may then exist: that session was never delivered, since nobody holds its identifier. The action
+        // is the path taken: 'reauthenticate' only once every same-principal check above has passed.
+        // A client already gone cannot receive a session: issuing one would only leave an undeliverable session and a
+        // record whose id the request's log line (written at the close, reason 'aborted') cannot carry. The close marks
+        // this response destroyed: the server dispatches a pipelined request only once its response owns the socket
+        // (app.ts onRequest). The write below reaches nobody; it only keeps a hypothetical false positive from hanging.
+        if (res.destroyed) return unavailable(res, ctx, 'session_unavailable');
+        const operationId = randomUUID();
+        (res.locals as Record<string, unknown>).operationId = operationId;
+        const audit: SessionEstablishAudit = Object.freeze({
+          action: mode === 'reauthenticate' ? 'reauthenticate' : 'login', operationId,
+          actor: (decision.context as TrustedScope).actor, authenticatedAt,
+        });
+        await call((signal) => sessions.establish(digestOf(id), record, presentedKey, audit, signal));
+      } else {
+        // TENANT (unaudited, stated open): two calls, so a create that fails after the revoke answers 503 and
+        // leaves no session at all.
+        if (presentedKey !== null) await call((signal) => sessions.revoke(presentedKey, signal));
+        await call((signal) => sessions.create(digestOf(id), record, signal));
+      }
     } catch (err) {
       return unavailable(res, ctx, outage('session', err));
     }
@@ -602,11 +705,48 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     active(res, (ctx.session as SessionContext).csrfToken);
   };
 
+  /**
+   * The administrative logout (M6-ADMIN-AUDIT-P1): the session ends together with its audit record, in one store
+   * call. Revocation outranks the record: when that call fails for ANY reason — the record refused, an outage, a
+   * lost answer, an answer that is neither word — the plain revocation runs, and a session ended that way answers
+   * 204 with the request log saying its record is unconfirmed (absent, or present if a commit's answer was lost),
+   * plus a warning, so a defect that turned every logout into the fallback cannot pass unnoticed. A throw here is
+   * the fallback revocation's own, which the handler answers as today.
+   */
+  const endAudited = async (revoker: Revoker, res: Response, ctx: RouteContext): Promise<void> => {
+    const operationId = randomUUID();
+    (res.locals as Record<string, unknown>).operationId = operationId;
+    // A client already gone still has its session ended — revocation never waits on a listener — but the request's log
+    // line was written at the close without this id, so one line joins the record to the request.
+    if (res.destroyed) emitLog('info', { event: 'session_logout_after_close', requestId: ctx.requestId, operationId }, log);
+    let answer: unknown;
+    let cause: string | null = null;
+    try {
+      answer = await revoker.end(Object.freeze({ action: 'logout', operationId, actor: null, authenticatedAt: null }));
+    } catch (err) {
+      cause = outage('session', err);
+    }
+    if (cause === null && answer === 'ended') return;
+    // Nothing live to end — another operation ended it first, or it expired since the chain read it: nothing is recorded.
+    if (cause === null && answer === 'absent') {
+      (res.locals as Record<string, unknown>).refusal = 'logout_session_absent';
+      return;
+    }
+    // Warned BEFORE the fallback runs, so the reason the audited end failed survives the fallback failing too.
+    emitLog('warn', {
+      event: 'session_logout_audit_unconfirmed', requestId: ctx.requestId, operationId, reason: cause ?? 'session_answer_invalid',
+    }, log);
+    await revoker.revoke();
+    (res.locals as Record<string, unknown>).refusal = 'logout_audit_unconfirmed';
+  };
+
   const logout = async (_req: Request, res: Response, ctx: RouteContext): Promise<void> => {
+    // The chain authenticated ctx.session, so its revoker exists; were it missing, the call below throws: a 503.
+    const revoker = REVOKERS.get(ctx.session as SessionContext) as Revoker;
     let failure: string | null = null;
     try {
-      // The chain authenticated ctx.session, so its revoker exists; were it missing, the call throws: a 503.
-      await (REVOKERS.get(ctx.session as SessionContext) as () => Promise<void>)();
+      if (audited) await endAudited(revoker, res, ctx);
+      else await revoker.revoke();
     } catch (err) {
       failure = outage('session', err);
     }
@@ -653,7 +793,7 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
 /** Validate and build every composed boundary; startup fails closed on anything malformed. */
 export function createSessionBoundaries(
   raw: unknown,
-  options: { now: () => number; deadlineMs: number },
+  options: { now: () => number; deadlineMs: number; log?: LogSink },
 ): Partial<Record<SessionAudience, SessionBoundary>> {
   if (raw === undefined) return {};
   if (!isPlainObject(raw) || !Object.keys(raw).every((key) => key === 'tenant' || key === 'admin')) {
@@ -662,7 +802,7 @@ export function createSessionBoundaries(
   const boundaries: Partial<Record<SessionAudience, SessionBoundary>> = {};
   for (const audience of ['tenant', 'admin'] as const) {
     const deps = raw[audience];
-    if (deps !== undefined) boundaries[audience] = createBoundary(audience, deps, options.now, options.deadlineMs);
+    if (deps !== undefined) boundaries[audience] = createBoundary(audience, deps, options.now, options.deadlineMs, options.log);
   }
   const { tenant, admin } = boundaries;
   if (tenant !== undefined && admin !== undefined && sharesHost(tenant.trustedOrigins, admin.trustedOrigins)) {

@@ -248,6 +248,13 @@ const ORIGINS: Record<SessionAudience, string> = { tenant: 'http://pos.trusted.t
 
 function parts(): SessionParts {
   const admitted = { admitted: true, securityVersion: 'v1' };
+  // The administrative login attributes its session to the scope admission names (M6-ADMIN-AUDIT-P1).
+  const platform = {
+    ...admitted, context: {
+      actor: PLATFORM_ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
+      membershipId: PLATFORM_GRANT, roleId: 'system_owner', limitation: 'none',
+    },
+  };
   return {
     origins: { tenant: [ORIGINS.tenant], admin: [ORIGINS.admin] },
     verifier: {
@@ -258,7 +265,7 @@ function parts(): SessionParts {
       },
     },
     store: { tenant: createMemorySessionStore(), admin: createMemorySessionStore() },
-    admission: { tenant: { admit: () => admitted }, admin: { admit: () => admitted } },
+    admission: { tenant: { admit: () => admitted }, admin: { admit: () => platform } },
     authorizer: { tenant: { authorize: () => true }, admin: { authorize: () => true } },
     ...testRequestLimits(),
   };

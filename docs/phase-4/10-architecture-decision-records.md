@@ -194,6 +194,45 @@ Concise ADRs for the major structural choices in this package. Each: **Context �
 
 **Consequences.** DA-34 is closed, and G-CPLOGIN is narrowed in its step-up part only; it stays OPEN (admin-host deployment and the real edge, DA-9; the login/logout audit record, G-AUDIT; the tenant boundary composition; the pre-operation security requirement). The reauthentication needs the prior session to be still valid: if it ended, the administrator signs in fully and nothing is resumed (DA-61). Recency rests on the provider's `auth_time` and the 5-minute login policy (DA-62). A reauthentication attempt spends the login client and account budgets like any login. As at an ordinary login, a store failure between revoking the presented session and creating the new one answers 503 and leaves no session, and two concurrent reauthentications presenting one cookie can both create a session (DA-61; accepted, not changed here). The tenant boundary shares the code, and no client or entry uses it there. Code-only; nothing is deployed.
 
+**Amended (M6-ADMIN-AUDIT-P1, [ADR-29](#adr-29--administrative-session-lifecycle-audit-in-the-session-transaction-decided--m6-admin-audit-p1)).** Two statements above are stale for the administrative boundary.
+- **Store failure during rotation.** Ending the presented session, creating the new one and writing the audit record are now one transaction (`establish`). A store failure before its commit answers 503, issues no cookie and keeps the presented session. Only a commit whose answer was lost can leave the browser with no usable session (DA-61(a)).
+- **The old record's stamp.** Before ending the old record, the transaction rewrites its `validatedAt` with the value it just read. This takes the row lock and changes nothing, so the old record still never carries new evidence, and the old cookie answers 401 once the transaction commits.
+
+The tenant boundary keeps revoke-then-create. The login/logout audit record is delivered for the administrative boundary only, and G-AUDIT stays OPEN.
+
+## ADR-29 — Administrative session lifecycle audit in the session transaction (DECIDED — M6-ADMIN-AUDIT-P1)
+
+**Context.** G-AUDIT and G-CPLOGIN both left the login/logout audit record open. The administrative boundary issued sessions with two separate store transactions (revoke, then create), ended them with a third, and recorded none of it. The runtime login already holds INSERT on `public.audit_event` through `tmpos_audit_writer` (migration 005). The supervised kernel runs any number of fixed statements in one transaction, and the command store already writes its audit row on its own transaction through the existing writer (ADR-17).
+
+**Decision.**
+1. **One transaction per audited operation, with the record last.** The session store gains two operations, which the administrative boundary alone uses and requires (`session_store_audit_required` at startup otherwise).
+   - `establish` (login and reauthentication) ends the live presented session, creates the new one and inserts the `audit_event` row.
+   - `end` (logout) ends the live session and inserts its row.
+   - The insert goes through the existing writer, and its result must be exactly one INSERTed row, or everything rolls back.
+2. **Frozen vocabulary.** The three actions are `platform.admin.session.login`, `.reauthenticate` and `.logout`. Their decisions are `allow`, `allow` and `not_applicable`, and their reason codes `admin_session_created`, `admin_session_reauthenticated` and `admin_session_ended`. The server picks the action from the path it took, never from a header alone ([03 §2b](./03-backend-control-plane-login-session-blueprint.md)). The writer owns each event's entire fixed row (`ADMIN_SESSION_AUDIT_EVENTS`, `buildAdminSessionAuditEvent`), and `validateAuditEventInput` refuses any row under these three ids that differs from it in any column.
+3. **Attribution.** A login row carries the actor its own admission selected. On this boundary, an admission that names no scope is a 503. A logout row carries no actor, because logout re-asks no admission, and carries the `sessionRef` the login row gave that session. The store derives both references; no database link enforces the match. Its entry type (`SessionEndAudit`) fixes the actor as null, and the store and the writer each refuse a logout entry that names one. A refusal before a trusted actor exists writes nothing.
+4. **Correlation and references.** `request_id` is a server-generated operation id, which the request's log line shares. The exception is a client that disconnected before the audited step, whose request line is written at the close without the id. A login then creates nothing. A logout still runs: a session still live is ended with its row, and an info-level `session_logout_after_close` line joins the two. `trace_id` is null. Sessions are named by a one-way, domain-separated digest of the store key, never the key or the id. The writer keeps those metadata keys for these three actions only, and those actions keep no other key (a logout row may carry `sessionRef` alone).
+5. **"Ended" means ended by this transaction.** A presented or ended session counts as ended here only after this transaction read it live and took its row lock. Otherwise it is not named, and a logout writes nothing and answers 204. A logout that reads nothing live still deletes any expired row under the key in the same transaction, so an instance whose clock runs behind cannot keep accepting it. Among rows written through this audited store path, at most one can claim to have ended or replaced a given session. A row inserted any other way is not covered (the runtime role holds INSERT).
+6. **At logout, revocation takes priority over the record.** If `end` fails for any reason, a warning is written and then the plain revocation runs, and the answer is 204 with the record unconfirmed and logged (DA-64). If both fail, the cookie is cleared and the answer is 503, and the warning written first is kept.
+7. **No migration, grant, routine or route.** Preflight's migration set and approved grants are unchanged. The PostgreSQL adapter's `create` refuses an administrative record, so `establish` is the only application path to one.
+
+**Alternatives rejected.**
+- (a) *An audit row in a separate transaction after the session commit.* A session could exist with no record, and a record could exist with no session.
+- (b) *A new audited definer routine (migration 015).* It would couple session and record in the database (DA-66), but it adds a migration and a managed-apply dependency (G-MIGRATE). This is deferred, not refused.
+- (c) *The client's `X-Request-Id` as `trace_id`.* A client value would be persisted forever in an append-only table ([05 §3](./05-canonical-data-ownership-and-api-db-contracts.md) requires server-generated correlation).
+- (d) *The store key as the session reference.* The key is the argument the session routines accept, so an audit reader holding the runtime role could read, extend or end a live session with it.
+- (e) *Failing the logout when its record cannot be written.* This would leave a session live because of an audit outage.
+
+**Consequences.** The administrative boundary's successful login, reauthentication and logout are recorded atomically with the session change. A failure before commit keeps the presented session, and a lost commit answer is an outcome unknown (DA-61(a)). G-CPLOGIN is narrowed in its audit part and G-AUDIT for these three events. Both stay OPEN. Still open:
+- the tenant boundary;
+- refused attempts and revocations no user asked for (DA-65);
+- the logout fallback (DA-64);
+- the absence of a database-level coupling (DA-66);
+- a possible lock-order deadlock (DA-67);
+- the shared deadline (DA-68).
+
+DA-35's CHECK is not triggered: the store writes only fixed sentences. The evidence is in-process plus disposable PostgreSQL (`tests/db/productionEntry.integration.test.mjs` M6AA-01–14 check the persisted rows together with the session results). Code-only; nothing is deployed, and no managed database was touched.
+
 ---
 
 **Reconciliation note:** the legacy Backend Control Plane numbering (phase-1.6 M21+ / phase-2.0 M24–M58) is **superseded** by the M0–M9 roadmap; the read-only CP is absorbed into M4+M8 and controlled write actions into M7 verticals ([09](./09-roadmap-m0-m9.md) §3).

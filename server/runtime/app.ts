@@ -193,9 +193,11 @@ export const HTTP_SERVER_LIMITS = {
   maxQueuedRequests: 16,
 } as const;
 
-// The longest chains make eight sequential bounded calls: a login presenting a session (the
-// request and login client limits, the verifier, the account limit, admission, revoke, create),
-// and an idempotency-required session route (the request limit, the session read, admission,
+// The longest chains make eight sequential bounded calls: a tenant reauthentication presenting its
+// session (the request and login client limits, the verifier, the account limit, admission, the
+// presented session's read, revoke, create — the administrative boundary makes that revoke and
+// create one audited store call, establish, so its reauthentication makes seven and its ordinary
+// login six), and an idempotency-required session route (the request limit, the session read, admission,
 // the session update, authorization, acquisition, the operation itself, completion — a command's
 // planner makes no call, and its one commit takes the completion's place). The
 // socket's inactivity timeout runs through all of them, so a port deadline is capped at one
@@ -445,6 +447,11 @@ function refusalOf(res: Response): string | undefined {
   return typeof reason === 'string' ? reason : undefined;
 }
 
+function operationIdOf(res: Response): string | undefined {
+  const id = (res.locals as Record<string, unknown>).operationId;
+  return typeof id === 'string' ? id : undefined;
+}
+
 /** A durable store's refusal: one still in progress 409, another request under the key 422, anything else a 503. */
 function idempotencyRefusal(req: Request, res: Response, reason: IdempotencyRefusal): void {
   if (reason === 'idempotency_in_progress') return refuse(req, res, 409, 'request_in_progress', reason);
@@ -638,7 +645,7 @@ export function createApp(deps: AppDeps): Express {
   const isProbe = (route: RouteDefinition): boolean =>
     route.idempotency === 'none' && (route.handler === health || route.handler === readinessHandler);
 
-  const boundaries = createSessionBoundaries(deps.sessions, { now, deadlineMs });
+  const boundaries = createSessionBoundaries(deps.sessions, { now, deadlineMs, log: deps.log });
   // Each composed boundary's durable admission is a dependency of every protected request on it (M5-GIAM-D1-P4), so
   // readiness asks it too — shared and reused exactly like the stores' probes, under the port deadline its calls get.
   for (const boundary of Object.values(boundaries)) {
@@ -710,6 +717,9 @@ export function createApp(deps: AppDeps): Express {
         status,
         durationMs: now() - start,
         reason,
+        // The audited session operation this request ran, when it ran one (sessions.ts): the server-generated
+        // request_id of its audit record, so the record and this line join on an id no client chose.
+        operationId: operationIdOf(res),
       }, deps.log);
     };
     // 'finish' = the response was fully flushed. 'close' without a finished write

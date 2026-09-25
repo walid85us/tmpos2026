@@ -261,6 +261,7 @@ export type EnforcementSetupCode =
   | 'session_verifier_required'
   | 'session_admission_required'
   | 'session_store_required'
+  | 'session_store_audit_required'
   | 'session_authorizer_required'
   | 'session_origins_shared'
   | 'port_deadline_invalid'

@@ -9,10 +9,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPostgresSessionStore, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS } from './postgresSessionStore.js';
+import { createHash } from 'node:crypto';
+
+import { createPostgresSessionStore, persistedAuditMetadata, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS } from './postgresSessionStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import { SESSION_TTL } from '../runtime/sessions.js';
-import type { SessionRecord } from '../runtime/sessions.js';
+import type { SessionEndAudit, SessionEstablishAudit, SessionRecord } from '../runtime/sessions.js';
 
 const KEY = 'a'.repeat(43);
 const PRINCIPAL_KEY = 'b'.repeat(43);
@@ -35,20 +37,28 @@ interface Fake extends SupervisedPgClient {
   readonly statements: string[];
   readonly values: unknown[][];
   readonly bounds: unknown[];
+  /** The template each statement was sent with, as the kernel receives it. */
+  readonly templates: TemplateStringsArray[];
 }
 
-/** A client answering every statement from `rows` (or throwing `fault`), recording what it was sent. */
+/**
+ * A client answering every statement from `rows` (or throwing `fault`), recording what it was sent. `rows` may be
+ * a function of the statement's text, for an operation that sends several; one answering an Error rejects.
+ */
 function fakeClient(rows: unknown, fault?: Error): Fake {
   const statements: string[] = [];
   const values: unknown[][] = [];
   const bounds: unknown[] = [];
-  const sql = ((strings: TemplateStringsArray, ...args: unknown[]) => {
+  const templates: TemplateStringsArray[] = [];
+  const sql = Object.assign((strings: TemplateStringsArray, ...args: unknown[]) => {
     statements.push(strings.join('?'));
     values.push(args);
-    return fault ? Promise.reject(fault) : Promise.resolve(rows as never);
-  }) as unknown as PgTransactionScope;
+    templates.push(strings);
+    const answer = typeof rows === 'function' ? (rows as (s: string) => unknown)(strings.join('?')) : rows;
+    return fault ? Promise.reject(fault) : answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer as never);
+  }, { json: (value: unknown) => ({ json: value }) }) as unknown as PgTransactionScope;
   return Object.freeze({
-    statements, values, bounds,
+    statements, values, bounds, templates,
     transaction: (<T>(signal: AbortSignal, b: unknown, work: (h: PgTransactionScope) => Promise<T>) => {
       bounds.push(b);
       void signal;
@@ -72,19 +82,24 @@ const store = (rows: unknown, fault?: Error, now?: () => number) => {
 // --- create -------------------------------------------------------------------------------------
 
 test("create sends the record as given and the expiry this store computes from the RECORD's own audience", async () => {
-  for (const audience of ['tenant', 'admin'] as const) {
-    const { client, store: s } = store([{ outcome: 'created' }]);
-    await s.create(KEY, { ...RECORD, audience }, live());
-    assert.equal(client.statements.length, 1, 'one statement, one round trip');
-    assert.deepEqual(client.values[0], [
-      KEY, audience, 'firebase', 'uid-alpha', PRINCIPAL_KEY, 't1:witness',
-      CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL[audience].absoluteMs,
-    ], `${audience}: every stamp the boundary set travels, and the expiry is its own lifetime`);
-    assert.equal(client.statements[0].includes('m5_session_create'), true);
-    // The reference travels as a BOUND VALUE. (Asserting it is absent from the statement text would
-    // be vacuous here: the fake joins the template's static strings, which can never hold a value.)
-    assert.equal(client.values[0].includes('uid-alpha'), true, 'the reference is a parameter');
-  }
+  // The administrative audience's expiry is proved through establish below: create refuses its records.
+  const { client, store: s } = store([{ outcome: 'created' }]);
+  await s.create(KEY, RECORD, live());
+  assert.equal(client.statements.length, 1, 'one statement, one round trip');
+  assert.deepEqual(client.values[0], [
+    KEY, 'tenant', 'firebase', 'uid-alpha', PRINCIPAL_KEY, 't1:witness',
+    CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL.tenant.absoluteMs,
+  ], 'every stamp the boundary set travels, and the expiry is its own lifetime');
+  assert.equal(client.statements[0].includes('m5_session_create'), true);
+  // The reference travels as a BOUND VALUE. (Asserting it is absent from the statement text would
+  // be vacuous here: the fake joins the template's static strings, which can never hold a value.)
+  assert.equal(client.values[0].includes('uid-alpha'), true, 'the reference is a parameter');
+});
+
+test('create refuses an administrative record before anything is sent: establish is the only way one is written', async () => {
+  const { client, store: s } = store([{ outcome: 'created' }]);
+  await assert.rejects(answered(s.create(KEY, { ...RECORD, audience: 'admin' }, live())), /session store unavailable: audit_required/);
+  assert.deepEqual(client.statements, []);
 });
 
 test('a login whose key is already taken fails the login rather than overwriting a live session', async () => {
@@ -240,4 +255,205 @@ test('every operation runs under the store\'s own bounds, below the port deadlin
   }
   assert.ok(Number(String(SESSION_STORE_BOUNDS.statement).replace('ms', '')) < SESSION_STORE_DEADLINE_MS,
     'the statement bound sits below the deadline, so PostgreSQL cancels before this process gives up');
+});
+
+// --- the audited pair (M6-ADMIN-AUDIT-P1) ---------------------------------------------------------
+
+const NEW_KEY = 'n'.repeat(43);
+const NOW = 1_700_000_000_123;
+const ACTOR = '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f';
+const OPERATION = '6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b';
+const ADMIN_RECORD: SessionRecord = Object.freeze({ ...RECORD, audience: 'admin' });
+const ADMIN_ROW = Object.freeze({ ...ROW, audience: 'admin' });
+const LOGIN: SessionEstablishAudit = Object.freeze({ action: 'login', operationId: OPERATION, actor: ACTOR, authenticatedAt: CREATED - 1_000 });
+const LOGOUT: SessionEndAudit = Object.freeze({ action: 'logout', operationId: OPERATION, actor: null, authenticatedAt: null });
+/** What the driver answers an INSERT with: no rows, the command, and the count it affected. */
+const inserted = (count: number, command = 'INSERT'): unknown => Object.assign([], { count, command });
+
+type Step = 'get' | 'touch' | 'revoke' | 'create' | 'insert' | 'other';
+const stepOf = (statement: string): Step => (
+  statement.includes('m5_session_get') ? 'get' : statement.includes('m5_session_touch') ? 'touch'
+    : statement.includes('m5_session_revoke(') ? 'revoke' : statement.includes('m5_session_create') ? 'create'
+      : statement.includes('insert into public.audit_event') ? 'insert' : 'other');
+const DEFAULTS: Record<Step, unknown> = {
+  get: [ADMIN_ROW], touch: [{ outcome: 'updated' }], revoke: [{ outcome: 'revoked' }], create: [{ outcome: 'created' }],
+  insert: inserted(1), other: new Error('a statement this store never sends'),
+};
+/** Answers each statement by the routine it calls, `over` replacing the default answer of a step. */
+const answers = (over: Partial<Record<Step, unknown>> = {}) => (statement: string): unknown => {
+  const step = stepOf(statement);
+  return step in over ? over[step] : DEFAULTS[step];
+};
+/** The reference an audit record names a session by, derived here independently of the store. */
+const refOf = (key: string): string => createHash('sha256').update(`tmpos-audit-session-ref:v1\n${key}`).digest('base64url');
+
+/** The audit record the store sent, column by column, read off the writer's own column list. */
+function recordSent(client: Fake): Record<string, unknown> {
+  const i = client.statements.findIndex((s) => stepOf(s) === 'insert');
+  assert.ok(i >= 0, 'an audit record was sent');
+  const text = client.statements[i];
+  const columns = text.slice(text.indexOf('(') + 1, text.indexOf(')')).split(',').map((c) => c.trim());
+  assert.equal(columns.length, client.values[i].length);
+  return Object.fromEntries(columns.map((c, j) => [c, client.values[i][j]]));
+}
+/** The fixed columns of every session record, with the event id and the sentence masked. */
+const masked = (row: Record<string, unknown>): Record<string, unknown> => ({ ...row, event_id: '-', human_readable_reason: '-' });
+const COMMON = {
+  event_id: '-', audit_version: 'audit.v1', request_id: OPERATION, trace_id: null, actor_auth_provider: null,
+  on_behalf_of_internal_user_id: null, scope_type: 'platform', tenant_id: null, store_id: null, required_permission: 'n_a',
+  human_readable_reason: '-', result_status: 'succeeded', source_of_truth: 'session_transaction',
+  evaluated_by: 'm6_postgres_session_store@v1', evidence_level: 'durable_compliance_event',
+};
+
+test('M6AA-S1 establish ends the presented session, creates the new one and writes its record in ONE transaction, the record last', async () => {
+  const { client, store: s } = store(answers(), undefined, () => NOW);
+  await s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, { ...LOGIN, action: 'reauthenticate' }, live());
+  assert.deepEqual(client.bounds, [SESSION_STORE_BOUNDS], 'one transaction, under the store\'s own bounds');
+  assert.deepEqual(client.statements.map(stepOf), ['get', 'touch', 'revoke', 'create', 'insert']);
+  assert.deepEqual(client.values[0], [KEY, NOW], 'the presented session, read live by this store\'s clock');
+  // The touch writes back the stamp it just read: an UPDATE that changes nothing but takes the row's lock.
+  assert.match(client.statements[1], /m5_session_touch\(\?::text, 'validatedAt', \?::bigint\)/);
+  assert.deepEqual(client.values[1], [KEY, CREATED]);
+  assert.deepEqual(client.values[2], [KEY]);
+  assert.deepEqual(client.values[3], [
+    NEW_KEY, 'admin', 'firebase', 'uid-alpha', PRINCIPAL_KEY, 't1:witness',
+    CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL.admin.absoluteMs,
+  ], 'the new record, expiring at the administrative lifetime');
+  assert.deepEqual(masked(recordSent(client)), {
+    ...COMMON, actor_internal_user_id: ACTOR, action_id: 'platform.admin.session.reauthenticate', decision: 'allow',
+    reason_code: 'admin_session_reauthenticated',
+    metadata: { json: { sessionRef: refOf(NEW_KEY), authenticatedAt: CREATED - 1_000, replacedSessionRef: refOf(KEY) } },
+  });
+  const sentence = recordSent(client).human_readable_reason;
+  assert.ok(typeof sentence === 'string' && sentence.length > 0 && !sentence.includes(ACTOR), 'a fixed sentence, carrying no input');
+  // The writer's own frozen template reached the kernel unchanged: the kernel refuses any other.
+  assert.ok(Object.isFrozen(client.templates[4]) && Object.isFrozen(client.templates[4].raw));
+});
+
+test('M6AA-S2 no presented session, one naming nothing live, one another transaction ended first, or one of another audience: created and recorded, never named as replaced', async () => {
+  const cases: Array<[string, string | null, Partial<Record<Step, unknown>>, Step[]]> = [
+    ['no presented session', null, {}, ['create', 'insert']],
+    ['a key naming no live session', KEY, { get: [] }, ['get', 'create', 'insert']],
+    ['a session another transaction ended first', KEY, { touch: [{ outcome: 'absent' }] }, ['get', 'touch', 'create', 'insert']],
+    ['a tenant record under the administrative cookie', KEY, { get: [ROW] }, ['get', 'touch', 'revoke', 'create', 'insert']],
+  ];
+  for (const [label, replaces, over, steps] of cases) {
+    const { client, store: s } = store(answers(over));
+    await s.establish?.(NEW_KEY, ADMIN_RECORD, replaces, LOGIN, live());
+    assert.deepEqual(client.statements.map(stepOf), steps, label);
+    assert.deepEqual(masked(recordSent(client)), {
+      ...COMMON, actor_internal_user_id: ACTOR, action_id: 'platform.admin.session.login', decision: 'allow', reason_code: 'admin_session_created',
+      metadata: { json: { sessionRef: refOf(NEW_KEY), authenticatedAt: CREATED - 1_000 } },
+    }, `${label}: no replacedSessionRef`);
+  }
+  // A record bound to no authentication time names none.
+  const { client, store: s } = store(answers());
+  await s.establish?.(NEW_KEY, { ...ADMIN_RECORD, authenticatedAt: null }, null, { ...LOGIN, authenticatedAt: null }, live());
+  assert.deepEqual((recordSent(client).metadata as { json: unknown }).json, { sessionRef: refOf(NEW_KEY) });
+});
+
+test('M6AA-S3 establish refuses before anything is sent: another audience, an entry that is no login, a client or malformed id, no actor, another authentication time, and anything the writer refuses', async () => {
+  const cases: Array<[string, SessionRecord, unknown, RegExp]> = [
+    ['a tenant record', RECORD, LOGIN, /audience_invalid/],
+    ['a logout entry', ADMIN_RECORD, { ...LOGIN, action: 'logout' }, /audit_invalid/],
+    ['an unknown action', ADMIN_RECORD, { ...LOGIN, action: 'refresh' }, /audit_invalid/],
+    ['a client-chosen request id', ADMIN_RECORD, { ...LOGIN, operationId: 'client-chosen-request-id' }, /audit_invalid/],
+    ['no actor', ADMIN_RECORD, { ...LOGIN, actor: null }, /audit_invalid/],
+    ['an authentication time the record does not bind', ADMIN_RECORD, { ...LOGIN, authenticatedAt: CREATED }, /audit_invalid/],
+    ['no entry', ADMIN_RECORD, null, /audit_invalid/],
+    // The writer's own validation decides the actor's form, and its refusal fails the operation here.
+    ['an actor that is a provider uid, which the writer refuses', ADMIN_RECORD, { ...LOGIN, actor: 'uid-alpha' }, /audit_invalid/],
+  ];
+  for (const [label, record, entry, reason] of cases) {
+    const { client, store: s } = store(answers());
+    await assert.rejects(answered(s.establish?.(NEW_KEY, record, KEY, entry as SessionEstablishAudit, live())), reason, label);
+    assert.deepEqual(client.statements, [], `${label}: nothing was sent`);
+  }
+});
+
+test('M6AA-S4 the record must be exactly one INSERTed row, and every other doubt throws inside the transaction, which the kernel rolls back', async () => {
+  const faults: Array<[string, Partial<Record<Step, unknown>>, RegExp, Step[]]> = [
+    ['no row inserted (a trigger answered NULL)', { insert: inserted(0) }, /audit_not_written/, ['get', 'touch', 'revoke', 'create', 'insert']],
+    ['two rows', { insert: inserted(2) }, /audit_not_written/, ['get', 'touch', 'revoke', 'create', 'insert']],
+    ['a command other than INSERT', { insert: inserted(1, 'UPDATE') }, /audit_not_written/, ['get', 'touch', 'revoke', 'create', 'insert']],
+    ['a result with no command', { insert: Object.assign([], { count: 1 }) }, /audit_not_written/, ['get', 'touch', 'revoke', 'create', 'insert']],
+    ['the insert refused by the database', { insert: new Error('new row violates row-level security policy') }, /store_failed/, ['get', 'touch', 'revoke', 'create', 'insert']],
+    ['a taken key', { create: [{ outcome: 'conflict' }] }, /not_created/, ['get', 'touch', 'revoke', 'create']],
+    ['a touch the routine calls invalid', { touch: [{ outcome: 'invalid' }] }, /not_updated/, ['get', 'touch']],
+    ['a revocation that is not the routine\'s word', { revoke: [{ outcome: 'absent' }] }, /not_revoked/, ['get', 'touch', 'revoke']],
+    ['two live rows under one key', { get: [ADMIN_ROW, ADMIN_ROW] }, /answer_shape_invalid/, ['get']],
+    ['a malformed presented record', { get: [{ ...ADMIN_ROW, extra: 1 }] }, /row_shape_invalid/, ['get']],
+  ];
+  for (const [label, over, reason, steps] of faults) {
+    const { client, store: s } = store(answers(over));
+    await assert.rejects(answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live())), reason, label);
+    assert.deepEqual(client.statements.map(stepOf), steps, `${label}: the audit record is last, so nothing after the fault is sent`);
+    assert.equal(client.bounds.length, 1, `${label}: all of it one transaction`);
+  }
+  // A fault never carries the driver's words.
+  await assert.rejects(answered(store(answers({ insert: new Error('db.example:5432 refused') })).store.establish?.(NEW_KEY, ADMIN_RECORD, null, LOGIN, live())),
+    (err: Error) => err.message === 'session store unavailable: store_failed');
+});
+
+test('M6AA-S5 end ends the live session with its record in ONE transaction; nothing live to end answers absent, records nothing and deletes any expired row', async () => {
+  const { client, store: s } = store(answers(), undefined, () => NOW);
+  assert.equal(await answered(s.end?.(KEY, LOGOUT, live())), 'ended');
+  assert.deepEqual(client.bounds, [SESSION_STORE_BOUNDS]);
+  assert.deepEqual(client.statements.map(stepOf), ['get', 'touch', 'revoke', 'insert']);
+  assert.deepEqual(client.values.slice(0, 3), [[KEY, NOW], [KEY, CREATED], [KEY]]);
+  assert.deepEqual(masked(recordSent(client)), {
+    ...COMMON, actor_internal_user_id: null, action_id: 'platform.admin.session.logout', decision: 'not_applicable',
+    reason_code: 'admin_session_ended', metadata: { json: { sessionRef: refOf(KEY) } },
+  }, 'no actor — logout re-asks no admission — and the same reference the login record gave this session');
+  for (const [label, over, steps] of [
+    // The read judges liveness at this instance's clock, so a row past its absolute expiry reads as nothing live; it is
+    // deleted here, so an instance whose clock runs behind cannot go on accepting it. Nothing is recorded either way.
+    ['no live session: any expired row under the key is deleted', { get: [] }, ['get', 'revoke']],
+    ['a session another transaction ended first', { touch: [{ outcome: 'absent' }] }, ['get', 'touch']],
+  ] as Array<[string, Partial<Record<Step, unknown>>, Step[]]>) {
+    const { client: c, store: absent } = store(answers(over));
+    assert.equal(await answered(absent.end?.(KEY, LOGOUT, live())), 'absent', label);
+    assert.deepEqual(c.statements.map(stepOf), steps, `${label}: nothing recorded`);
+    assert.equal(c.bounds.length, 1, `${label}: one transaction`);
+  }
+  await assert.rejects(answered(store(answers({ get: [], revoke: [{ outcome: 'absent' }] })).store.end?.(KEY, LOGOUT, live())),
+    /not_revoked/, 'the deletion must be the routine\'s own word');
+  const { client: tenant, store: refuses } = store(answers({ get: [ROW] }));
+  await assert.rejects(answered(refuses.end?.(KEY, LOGOUT, live())), /audience_invalid/, 'a tenant record is refused');
+  assert.deepEqual(tenant.statements.map(stepOf), ['get'], 'and nothing is ended');
+  // A logout names no actor: one handed an actor is refused like any other malformed entry.
+  for (const entry of [LOGIN, { ...LOGOUT, actor: ACTOR }, { ...LOGOUT, authenticatedAt: CREATED }, { ...LOGOUT, operationId: 'x' }]) {
+    const { client: c, store: e } = store(answers());
+    await assert.rejects(answered(e.end?.(KEY, entry as unknown as SessionEndAudit, live())), /audit_invalid/, JSON.stringify(entry));
+    assert.deepEqual(c.statements, []);
+  }
+  const { store: lost } = store(answers({ insert: inserted(0) }));
+  await assert.rejects(answered(lost.end?.(KEY, LOGOUT, live())), /audit_not_written/);
+});
+
+test('M6AA-S6 a record names sessions by a one-way, domain-separated reference: never a key, an identifier or a provider reference', async () => {
+  const { client, store: s } = store(answers());
+  await s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live());
+  const sent = JSON.stringify(recordSent(client));
+  for (const secret of [KEY, NEW_KEY, PRINCIPAL_KEY, 'uid-alpha', 'firebase', 't1:witness']) assert.ok(!sent.includes(secret), `the record carries ${secret}`);
+  const ref = refOf(KEY);
+  assert.match(ref, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(ref, createHash('sha256').update(KEY).digest('base64url'), 'domain-separated: not a bare digest of the key');
+  assert.notEqual(refOf(KEY), refOf(NEW_KEY));
+});
+
+test('M6AA-S7 metadata the writer would not persist as given — a key it drops for the action, a value it would cut — is refused, never quietly lost', () => {
+  const full = { sessionRef: refOf(KEY), replacedSessionRef: refOf(NEW_KEY), authenticatedAt: CREATED };
+  for (const action of ['login', 'reauthenticate', 'logout']) {
+    assert.deepEqual(persistedAuditMetadata(full, `platform.admin.session.${action}`), full, `${action}: kept exactly`);
+  }
+  const dropped: Array<[string, Record<string, string | number>, string]> = [
+    ['a session key on another action', { sessionRef: refOf(KEY) }, 'platform.tenant.status.change'],
+    ['a key no action keeps', { sessionId: 'x' }, 'platform.admin.session.login'],
+    ['a general key on a session action, which keeps its own keys alone', { sessionRef: refOf(KEY), phase: 'p' }, 'platform.admin.session.login'],
+    ['a value past the writer\'s bound', { sessionRef: 'r'.repeat(300) }, 'platform.admin.session.login'],
+  ];
+  for (const [label, metadata, actionId] of dropped) {
+    assert.throws(() => persistedAuditMetadata(metadata, actionId), /session store unavailable: audit_metadata_dropped/, label);
+  }
 });

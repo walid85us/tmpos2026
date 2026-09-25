@@ -44,6 +44,7 @@ import {
 } from './sessions.js';
 import type { SessionBoundaryDeps, SessionRecord, SessionStore } from './sessions.js';
 import { assertSessionStoreContract, createMemorySessionStore } from './memorySessionStore.testkit.js';
+import type { MemorySessionStore } from './memorySessionStore.testkit.js';
 import { devDiagnosticAuthAdapter, stubFirebaseAuthAdapter } from '../platform-identity/authAdapter.js';
 import { createRuntimeIdentityVerifier, IdentityCompositionError } from '../platform-identity/firebaseAdminAuthAdapter.js';
 import type { FirebaseIdTokenVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
@@ -181,6 +182,13 @@ const ADMITTED: Record<SessionAudience, ReadonlySet<string>> = {
   admin: new Set(['uid-owner', 'uid-peer']),
 };
 const ADMIT = Object.freeze({ admitted: true, securityVersion: 'v1' });
+/** A platform TrustedScope as the administrative admission selects it: the actor's one platform grant (synthetic ids). */
+const PLATFORM_SCOPE = Object.freeze({
+  actor: '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f', securityVersion: 'v7', scope: 'platform', tenant: null, store: null,
+  membershipId: '5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170', roleId: 'platform_admin', limitation: 'none',
+});
+// The administrative login requires its admission to name the scope it attributes the session to (M6-ADMIN-AUDIT-P1).
+const ADMIT_PLATFORM = Object.freeze({ admitted: true, securityVersion: 'v1', context: PLATFORM_SCOPE });
 const principal = (uid: string): VerifiedPrincipal => ({ authProvider: 'synthetic', authProviderUid: uid });
 
 interface Probe {
@@ -240,7 +248,8 @@ function boundary(
     admission: {
       admit(p: VerifiedPrincipal, a: SessionAudience, signal: AbortSignal): unknown {
         probe.admissions.push([p, a, signal]);
-        return ADMITTED[a].has(p.authProviderUid) ? ADMIT : { admitted: false };
+        if (!ADMITTED[a].has(p.authProviderUid)) return { admitted: false };
+        return a === 'admin' ? ADMIT_PLATFORM : ADMIT;
       },
     },
     authorizer: {
@@ -334,20 +343,25 @@ const unsafe = (audience: SessionAudience, s: Session, csrf: string | string[] =
 
 /**
  * An in-memory store that records each operation (`update:<fields>` for an update) and rejects
- * the one operation `failing` names.
+ * the operation, or each of the operations, `failing` names. Its audited operations' entries are
+ * the base store's (`audits`).
  */
-function instrumented(ops: string[], failing: { op?: string } = {}): SessionStore {
+function instrumented(ops: string[], failing: { op?: string | readonly string[] } = {}): MemorySessionStore {
   const base = createMemorySessionStore();
   const run = (op: string, act: () => unknown): Promise<unknown> => {
     ops.push(op);
-    return failing.op === op ? Promise.reject(new Error(`store-secret-detail-${op}`)) : Promise.resolve(act());
+    const fails = failing.op === op || (Array.isArray(failing.op) && failing.op.includes(op));
+    return fails ? Promise.reject(new Error(`store-secret-detail-${op}`)) : Promise.resolve(act());
   };
   return {
+    audits: base.audits,
     create: (key, record, signal) => run('create', () => base.create(key, record, signal)),
     get: (key, signal) => run('get', () => base.get(key, signal)),
     update: (key, fields, signal) => run(`update:${Object.keys(fields).join(',')}`, () => base.update(key, fields, signal)),
     revoke: (key, signal) => run('revoke', () => base.revoke(key, signal)),
     revokePrincipal: (audience, key, signal) => run('revokePrincipal', () => base.revokePrincipal(audience, key, signal)),
+    establish: (key, record, replaces, audit, signal) => run('establish', () => base.establish(key, record, replaces, audit, signal)),
+    end: (key, audit, signal) => run('end', () => base.end(key, audit, signal)),
   };
 }
 
@@ -633,6 +647,11 @@ test('a session boundary cannot start without every port, a distinct host or a b
     }, 'session_origins_shared'],
     ['sessions composed but no limits', { sessions: { tenant: full }, limits: undefined }, 'rate_limit_required'],
     ['a supplied store', { sessions: { tenant: { ...full, store: supplied } } }, undefined],
+    // M6-ADMIN-AUDIT-P1: the administrative boundary issues and ends sessions only through the audited pair.
+    ['an admin store without the audited pair', { sessions: { admin: admin({ store: supplied }) } }, 'session_store_audit_required'],
+    ['an admin store without end', { sessions: { admin: admin({ store: { ...supplied, establish: () => undefined } }) } }, 'session_store_audit_required'],
+    ['an admin store without establish', { sessions: { admin: admin({ store: { ...supplied, end: () => undefined } }) } }, 'session_store_audit_required'],
+    ['an admin store with the audited pair', { sessions: { admin: admin({ store: { ...supplied, establish: () => undefined, end: () => undefined } }) } }, undefined],
     ['both boundaries on distinct hosts', { sessions: { tenant: full, admin: admin() } }, undefined],
   ];
   for (const [label, deps, expected] of cases) assert.equal(code(deps), expected, label);
@@ -667,7 +686,7 @@ test('the existing Firebase adapter is the production authenticator, and it will
     },
   };
   const verifier = createRuntimeIdentityVerifier(SYNTHETIC_FIREBASE_ENV, { verifier: firebase });
-  const admission = { admit: (p: VerifiedPrincipal): unknown => (p.authProvider === 'firebase' && p.authProviderUid === 'fb-uid-owner' ? ADMIT : { admitted: false }) };
+  const admission = { admit: (p: VerifiedPrincipal): unknown => (p.authProvider === 'firebase' && p.authProviderUid === 'fb-uid-owner' ? ADMIT_PLATFORM : { admitted: false }) };
   await withSessions({ admin: { verifier, admission } }, async ({ port, logs }) => {
     const ok = await login(port, 'admin', 'fb.good.token');
     assert.equal(ok.status, 200, ok.body);
@@ -1207,7 +1226,7 @@ test('logout never waits on admission: an overdue revalidation cannot keep a ses
 
 test('tenant and admin revalidation are separate: an admin denial ends only the admin session', async () => {
   let adminDenied = false;
-  const adminAdmission = { admit: (): unknown => (adminDenied ? { admitted: false } : ADMIT) };
+  const adminAdmission = { admit: (): unknown => (adminDenied ? { admitted: false } : ADMIT_PLATFORM) };
   await withSessions({ admin: { admission: adminAdmission } }, async ({ port, clock }) => {
     const tenant = await signIn(port, 'tenant', 'tok-owner');
     const admin = await signIn(port, 'admin', 'tok-owner');
@@ -1222,12 +1241,6 @@ test('tenant and admin revalidation are separate: an admin denial ends only the 
 
 // --- the admitted scope and the admission probe (M5-GIAM-D1-P4) -------------------------------------
 
-/** A platform TrustedScope as the administrative admission selects it: the actor's one platform grant (synthetic ids). */
-const PLATFORM_SCOPE = Object.freeze({
-  actor: '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f', securityVersion: 'v7', scope: 'platform', tenant: null, store: null,
-  membershipId: '5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170', roleId: 'platform_admin', limitation: 'none',
-});
-const ADMIT_PLATFORM = Object.freeze({ admitted: true, securityVersion: 'v1', context: PLATFORM_SCOPE });
 /** What a readiness request answers, as a status alone. */
 const readinessOf = async (port: number): Promise<number> => (await send(port, 'GET', '/readiness')).status;
 /** app.ts PROBE_REUSE_MS: advancing the clock this far makes the next readiness request probe afresh. */
@@ -1679,7 +1692,7 @@ const reauth = (port: number, token: string, id: string | null, header: string |
 const recent = (port: number, id: string): Promise<Reply> => send(port, 'GET', RECENT_ROUTE, cookie('admin', id));
 const keyOf = (id: string): string => createHash('sha256').update(id).digest('base64url');
 /** The store operations that create or end a session: none may run when a reauthentication is refused. */
-const writes = (ops: string[]): string[] => ops.filter((op) => op === 'create' || op === 'revoke' || op === 'revokePrincipal');
+const writes = (ops: string[]): string[] => ops.filter((op) => ['create', 'revoke', 'revokePrincipal', 'establish', 'end'].includes(op));
 const recordOf = async (store: SessionStore, id: string): Promise<SessionRecord | undefined> =>
   (await store.get(keyOf(id), aSignal())) as SessionRecord | undefined;
 
@@ -1694,8 +1707,16 @@ test('reauthentication by the same administrator rotates the presented session a
     ops.length = 0;
     const r = await reauth(port, 'tok-owner-again', old.id);
     assert.equal(r.status, 200, r.body);
-    assert.deepEqual(ops, ['get', 'revoke', 'create'], 'read the presented session, revoke it, create the new one — no update of the old');
+    assert.deepEqual(ops, ['get', 'establish'], 'read the presented session, then end it and create the new one in ONE audited call — no update of the old');
     const renewed = setCookieOf(r);
+    // Its record: a reauthentication by the actor admission selected, binding the new sign-in, replacing the presented session.
+    const [recorded] = store.audits;
+    assert.equal(store.audits.length, 2, 'the first sign-in and the reauthentication');
+    assert.deepEqual({ ...store.audits[1], entry: { ...store.audits[1].entry, operationId: '-' } }, {
+      entry: { action: 'reauthenticate', operationId: '-', actor: PLATFORM_SCOPE.actor, authenticatedAt: clock.t - 60_000 },
+      key: keyOf(renewed.value), replaced: keyOf(old.id),
+    });
+    assert.equal(recorded.entry.action, 'login', 'the first sign-in was an ordinary login');
     assert.equal(renewed.name, SESSION_COOKIES.admin);
     assert.deepEqual(renewed.attributes, ['HttpOnly', 'Max-Age=3600', 'Path=/', 'SameSite=Strict', 'Secure']);
     assert.notEqual(renewed.value, old.id, 'a fresh identifier');
@@ -1809,7 +1830,7 @@ test('a reauthentication admission refuses ends every session of that administra
   const store = instrumented(ops);
   const gate = { admit: true };
   await withSessions({
-    admin: { store, admission: { admit: () => (gate.admit ? ADMIT : { admitted: false }) } },
+    admin: { store, admission: { admit: () => (gate.admit ? ADMIT_PLATFORM : { admitted: false }) } },
   }, async ({ port, logs }) => {
     const owner = await signIn(port, 'admin', 'tok-owner');
     gate.admit = false;
@@ -1889,7 +1910,7 @@ test('a same-principal reauthentication whose admission now reports a different 
   const store = instrumented(ops);
   const version = { current: 'v1' };
   await withSessions({
-    admin: { store, admission: { admit: (p: VerifiedPrincipal) => (ADMITTED.admin.has(p.authProviderUid) ? { admitted: true, securityVersion: version.current } : { admitted: false }) } },
+    admin: { store, admission: { admit: (p: VerifiedPrincipal) => (ADMITTED.admin.has(p.authProviderUid) ? { ...ADMIT_PLATFORM, securityVersion: version.current } : { admitted: false }) } },
   }, async ({ port, logs }) => {
     const owner = await signIn(port, 'admin', 'tok-owner');
     version.current = 'v2'; // a grant or role changed since the session was issued
@@ -1901,5 +1922,280 @@ test('a same-principal reauthentication whose admission now reports a different 
     assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'the next session request');
     assert.ok(await logged(logs, 'session_version_mismatch'), 'refused and revoked by the existing version check');
     assert.equal(await recordOf(store, owner.id), undefined);
+  });
+});
+
+// --- administrative session audit (M6-ADMIN-AUDIT-P1) ------------------------------------------
+
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** The request log lines for `path`, once at least `count` have been written (a line may trail its reply slightly). */
+async function linesOf(logs: string[], path: string, count: number): Promise<Array<Record<string, unknown>>> {
+  let lines: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 200; i++) {
+    lines = logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((r) => r.event === 'request' && r.route === path);
+    if (lines.length >= count) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return lines;
+}
+const warningsOf = (logs: string[]): Array<Record<string, unknown>> =>
+  logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((r) => r.event === 'session_logout_audit_unconfirmed');
+/** An audit record with its random operation id masked, for a whole-value comparison. */
+const masked = ({ entry, key, replaced }: MemorySessionStore['audits'][number]): unknown => ({ entry: { ...entry, operationId: '-' }, key, replaced });
+
+test('M6AA-01 an administrative login is ONE audited establish attributed to the admitted actor, and its log line carries the record\'s server id', async () => {
+  const ops: Record<SessionAudience, string[]> = { tenant: [], admin: [] };
+  const admin = instrumented(ops.admin);
+  const tenant = instrumented(ops.tenant);
+  await withSessions({ admin: { store: admin }, tenant: { store: tenant } }, async ({ port, logs, clock }) => {
+    const first = await signIn(port, 'admin', 'tok-owner');
+    const second = await signIn(port, 'admin', 'tok-owner-again', cookie('admin', first.id));
+    assert.deepEqual(ops.admin, ['establish', 'establish'], 'no create and no revoke: rotation is inside the one audited call');
+    assert.deepEqual(admin.audits.map(masked), [
+      { entry: { action: 'login', operationId: '-', actor: PLATFORM_SCOPE.actor, authenticatedAt: clock.t - 60_000 }, key: keyOf(first.id), replaced: null },
+      { entry: { action: 'login', operationId: '-', actor: PLATFORM_SCOPE.actor, authenticatedAt: clock.t - 60_000 }, key: keyOf(second.id), replaced: keyOf(first.id) },
+    ], 'a login presenting a session is still a login: only the verified reauthentication path records otherwise');
+    assertRefusal(await current(port, 'admin', first.id), 401, 'unauthenticated', 'the rotated-away session');
+    const ids = admin.audits.map(({ entry }) => entry.operationId);
+    assert.ok(ids.every((id) => UUID_V4.test(id)) && ids[0] !== ids[1], 'a fresh server UUID per operation');
+    assert.deepEqual((await linesOf(logs, ADMIN.login, 2)).map((line) => line.operationId), ids, "each login's log line carries its record's id");
+    // A client's request id is a correlator only: it is never the record's id, and the record's id is never in a reply.
+    const chosen = 'client-chosen-request-id';
+    const r = await login(port, 'admin', 'tok-owner', { 'x-request-id': chosen });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.headers['x-request-id'], chosen);
+    const third = admin.audits[2].entry.operationId;
+    assert.ok(UUID_V4.test(third) && third !== chosen);
+    assert.ok(!`${r.body}${JSON.stringify(r.headers)}`.includes(third), 'the operation id reaches the log alone');
+    // The tenant boundary never calls the audited pair, and its lines carry no operation id.
+    const t1 = await signIn(port, 'tenant', 'tok-member');
+    const t2 = await signIn(port, 'tenant', 'tok-member-again', cookie('tenant', t1.id));
+    assert.equal((await send(port, 'POST', TENANT.logout, unsafe('tenant', t2))).status, 204);
+    assert.deepEqual(ops.tenant.filter((op) => op !== 'get'), ['create', 'revoke', 'create', 'revoke']);
+    assert.equal(tenant.audits.length, 0);
+    const tenantLines = [...await linesOf(logs, TENANT.login, 2), ...await linesOf(logs, TENANT.logout, 1)];
+    assert.ok(tenantLines.length === 3 && tenantLines.every((line) => !('operationId' in line)));
+  });
+});
+
+test('M6AA-02 an administrative admission naming no scope is a 503 that reads, creates and revokes nothing; no refusal writes a record', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  let answer: unknown = ADMIT_PLATFORM;
+  await withSessions({ admin: { store, admission: { admit: () => answer } } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    ops.length = 0;
+    for (const [label, admitted] of [['absent', ADMIT], ['null', { ...ADMIT_PLATFORM, context: null }]] as const) {
+      answer = admitted;
+      for (const r of [await login(port, 'admin', 'tok-owner-again', cookie('admin', owner.id)), await reauth(port, 'tok-owner-again', owner.id)]) {
+        assertRefusal(r, 503, 'service_unavailable', `a context ${label}`);
+        assert.equal(r.headers['www-authenticate'], undefined, 'a faulty adapter is an outage, not a credential verdict');
+      }
+    }
+    assert.deepEqual(ops, [], 'nothing read, created or revoked');
+    assert.ok(await logged(logs, 'admission_unavailable'));
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'a session request is served on it as before: only a login attributes');
+    answer = ADMIT_PLATFORM;
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'the presented session was never touched');
+    // Refusals before a trusted actor exists record nothing: a different administrator's reauthentication, a denied admission.
+    assertRefusal(await reauth(port, 'tok-peer', owner.id), 401, 'unauthenticated', 'a different administrator');
+    answer = { admitted: false };
+    assertRefusal(await login(port, 'admin', 'tok-owner-again'), 401, 'unauthenticated', 'admission denied');
+    assert.equal(store.audits.length, 1, 'only the first sign-in was recorded');
+    const refused = (await linesOf(logs, ADMIN.login, 7)).filter((line) => line.status !== 200);
+    assert.ok(refused.length === 6 && refused.every((line) => !('operationId' in line)), 'no refused login ran an operation');
+  });
+});
+
+test('M6AA-03 an administrative login whose audited establish fails answers 503 with no cookie and keeps the presented session', async () => {
+  const ops: string[] = [];
+  const failing: { op?: string } = {};
+  const store = instrumented(ops, failing);
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    failing.op = 'establish';
+    for (const [label, r] of [['login', await login(port, 'admin', 'tok-owner-again', cookie('admin', owner.id))],
+      ['reauthentication', await reauth(port, 'tok-owner-again', owner.id)]] as const) {
+      assertRefusal(r, 503, 'service_unavailable', `${label}: establish fails`);
+    }
+    failing.op = undefined;
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'the presented session outlived both failures');
+    assert.equal(store.audits.length, 1, 'nothing recorded');
+    assert.ok(await logged(logs, 'session_unavailable'));
+    // The 503's line still carries the operation's id: a commit whose answer was lost may have left its record.
+    const failed = (await linesOf(logs, ADMIN.login, 3)).filter((line) => line.status === 503);
+    assert.ok(failed.length === 2 && failed.every((line) => typeof line.operationId === 'string' && UUID_V4.test(line.operationId)));
+    assert.ok(!logs.join('').includes('store-secret-detail'));
+  });
+});
+
+test('M6AA-04 an administrative logout ends the session and records it in one call, attributed to no actor, and answers 204', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const s = await signIn(port, 'admin', 'tok-owner');
+    ops.length = 0;
+    const out = await send(port, 'POST', ADMIN.logout, unsafe('admin', s));
+    assert.equal(out.status, 204);
+    assert.equal(setCookieOf(out).value, '');
+    assert.deepEqual(ops, ['get', 'end'], 'the session read, then one audited call — no plain revoke');
+    const ended = store.audits[1];
+    assert.deepEqual(masked(ended), { entry: { action: 'logout', operationId: '-', actor: null, authenticatedAt: null }, key: keyOf(s.id), replaced: null });
+    assert.equal(store.audits[0].key, ended.key, 'the logout names the session its login record created');
+    assertRefusal(await current(port, 'admin', s.id), 401, 'unauthenticated', 'logged out');
+    const [line] = await linesOf(logs, ADMIN.logout, 1);
+    assert.equal(line.operationId, ended.entry.operationId);
+    assert.equal(line.reason, undefined, 'a confirmed logout carries no reason');
+    assert.deepEqual(warningsOf(logs), []);
+  });
+});
+
+test('M6AA-05 a logout whose audited end fails falls back to the plain revocation: 204, the record unconfirmed in the log and warned; both failing is the existing 503, still warned', async () => {
+  const ops: string[] = [];
+  const failing: { op?: string | readonly string[] } = {};
+  const store = instrumented(ops, failing);
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const s = await signIn(port, 'admin', 'tok-owner');
+    failing.op = 'end';
+    ops.length = 0;
+    const out = await send(port, 'POST', ADMIN.logout, unsafe('admin', s));
+    assert.equal(out.status, 204, 'revocation outranks the record');
+    assert.equal(setCookieOf(out).value, '');
+    assert.deepEqual(ops, ['get', 'end', 'revoke']);
+    assertRefusal(await current(port, 'admin', s.id), 401, 'unauthenticated', 'the session is ended all the same');
+    assert.equal(store.audits.length, 1, 'no logout record');
+    const [line] = await linesOf(logs, ADMIN.logout, 1);
+    assert.equal(line.status, 204);
+    assert.equal(line.reason, 'logout_audit_unconfirmed');
+    const [warning, ...more] = warningsOf(logs);
+    assert.equal(more.length, 0);
+    assert.deepEqual([warning.level, warning.reason, warning.operationId, warning.requestId],
+      ['warn', 'session_unavailable', line.operationId, line.requestId], 'one warning, joined to the request by both ids');
+    // Both failing: nothing is known to be ended — the existing 503 and the cookie cleared all the same. The warning is
+    // written before the fallback runs, so why the audited end failed is not lost with it.
+    const t = await signIn(port, 'admin', 'tok-owner');
+    failing.op = ['end', 'revoke'];
+    const down = await send(port, 'POST', ADMIN.logout, unsafe('admin', t));
+    assert.equal(down.status, 503);
+    assert.equal((JSON.parse(down.body) as { error: string }).error, 'service_unavailable');
+    assert.equal(setCookieOf(down).value, '', 'a shared terminal keeps nothing');
+    failing.op = undefined;
+    assert.equal((await current(port, 'admin', t.id)).status, 200, 'nothing was ended');
+    const warnings = warningsOf(logs);
+    assert.equal(warnings.length, 2);
+    const [, lastLine] = await linesOf(logs, ADMIN.logout, 2);
+    assert.deepEqual([warnings[1].reason, warnings[1].operationId], ['session_unavailable', lastLine.operationId], 'the audited end\'s reason survives');
+    assert.ok(!logs.join('').includes('store-secret-detail'));
+  });
+});
+
+test('M6AA-06 end answering that nothing was live is a 204 that revokes and records nothing; an answer that is neither word takes the fallback', async () => {
+  const cases: Array<[unknown, string, boolean]> = [
+    ['absent', 'logout_session_absent', false], ['maybe', 'logout_audit_unconfirmed', true], [undefined, 'logout_audit_unconfirmed', true],
+  ];
+  for (const [answer, reason, fallback] of cases) {
+    const base = createMemorySessionStore();
+    const revokes: string[] = [];
+    const store: SessionStore = { ...base, end: () => answer, revoke: (key, signal) => { revokes.push(key); return base.revoke(key, signal); } };
+    await withSessions({ admin: { store } }, async ({ port, logs }) => {
+      const s = await signIn(port, 'admin', 'tok-owner');
+      const out = await send(port, 'POST', ADMIN.logout, unsafe('admin', s));
+      assert.equal(out.status, 204, String(answer));
+      assert.equal(setCookieOf(out).value, '');
+      assert.equal((await linesOf(logs, ADMIN.logout, 1))[0].reason, reason, String(answer));
+      assert.deepEqual(revokes, fallback ? [keyOf(s.id)] : [], `${String(answer)}: the plain revocation ran only as the fallback`);
+      assert.equal(warningsOf(logs).length, fallback ? 1 : 0);
+      if (fallback) assert.equal(warningsOf(logs)[0].reason, 'session_answer_invalid');
+    });
+  }
+});
+
+/** Start an unsafe request and hand back a way to drop its connection before any reply arrives. */
+function abandoned(port: number, path: string, headers: Record<string, string | string[]>): () => void {
+  const req = http.request({
+    host: '127.0.0.1', port, method: 'POST', path, agent: false, headers: { 'content-length': '0', ...headers } as http.OutgoingHttpHeaders,
+  });
+  req.on('error', () => undefined);
+  req.end();
+  return () => { req.destroy(); };
+}
+
+async function until(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(done(), 'the server reached the step under test');
+}
+
+test('M6AA-C1 a client gone before the audited step: a login issues nothing; a logout still ends the session, and one line joins its record to the request', async () => {
+  // Login: the client leaves while admission is still deciding.
+  let admit!: () => void;
+  const decided = new Promise<void>((resolve) => { admit = resolve; });
+  let asked = false;
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  const admission = { admit: async (): Promise<unknown> => { asked = true; await decided; return ADMIT_PLATFORM; } };
+  await withSessions({ admin: { store, admission } }, async ({ port, logs }) => {
+    const drop = abandoned(port, ADMIN.login, { ...pre('admin'), authorization: 'Bearer tok-owner' });
+    await until(() => asked);
+    drop();
+    assert.ok(await logged(logs, 'aborted'));
+    admit();
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(ops, [], 'no session nobody can receive, and no record');
+    assert.equal(store.audits.length, 0);
+  });
+  // Pipelined: a login queued behind another on one connection is dispatched only once its response owns the socket
+  // (app.ts), so one queued behind a dropped connection never reaches the handler; the first returns as above.
+  let admitBoth!: () => void;
+  const bothDecided = new Promise<void>((resolve) => { admitBoth = resolve; });
+  let waiting = 0;
+  const pipelinedOps: string[] = [];
+  const pipelinedStore = instrumented(pipelinedOps);
+  const slow = { admit: async (): Promise<unknown> => { waiting += 1; await bothDecided; return ADMIT_PLATFORM; } };
+  await withSessions({ admin: { store: pipelinedStore, admission: slow } }, async ({ port }) => {
+    const head = Object.entries({ host: `127.0.0.1:${port}`, ...pre('admin'), authorization: 'Bearer tok-owner', 'content-length': '0' })
+      .map(([name, value]) => `${name}: ${String(value)}\r\n`).join('');
+    const request = `POST ${ADMIN.login} HTTP/1.1\r\n${head}\r\n`;
+    const socket = net.connect(port, '127.0.0.1');
+    socket.on('error', () => undefined);
+    socket.write(request + request);
+    await until(() => waiting === 1);
+    socket.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    admitBoth();
+    for (let i = 0; i < 20; i++) await tick();
+    assert.equal(waiting, 1, 'the queued login was never dispatched');
+    assert.deepEqual(pipelinedOps, [], 'neither login issues a session');
+    assert.equal(pipelinedStore.audits.length, 0);
+  });
+  // Logout: the client leaves while the chain is reading its session.
+  const base = instrumented([]);
+  let gate: Promise<void> | null = null;
+  let release!: () => void;
+  let reading = false;
+  const gated: MemorySessionStore = {
+    ...base,
+    get: async (key, signal) => {
+      if (gate !== null) { reading = true; await gate; }
+      return base.get(key, signal);
+    },
+  };
+  await withSessions({ admin: { store: gated } }, async ({ port, logs }) => {
+    const s = await signIn(port, 'admin', 'tok-owner');
+    gate = new Promise<void>((resolve) => { release = resolve; });
+    const drop = abandoned(port, ADMIN.logout, unsafe('admin', s));
+    await until(() => reading);
+    drop();
+    assert.ok(await logged(logs, 'aborted'));
+    gate = null;
+    release();
+    assert.ok(await loggedWith(logs, 'event', 'session_logout_after_close'), 'revocation does not wait on a listener');
+    assert.equal(logs.filter((l) => (JSON.parse(l) as Record<string, unknown>).event === 'session_logout_after_close').length, 1, 'exactly one');
+    const [line] = await linesOf(logs, ADMIN.logout, 1);
+    const join = logs.map((l) => JSON.parse(l) as Record<string, unknown>).find((r) => r.event === 'session_logout_after_close');
+    const record = gated.audits.at(-1);
+    assert.equal(record?.entry.action, 'logout');
+    assert.equal(line.operationId, undefined, 'the request line was written at the close, before the id existed');
+    assert.deepEqual([join?.level, join?.requestId, join?.operationId], ['info', line.requestId, record?.entry.operationId], 'one line joins them');
+    assertRefusal(await current(port, 'admin', s.id), 401, 'unauthenticated', 'the session is ended all the same');
   });
 });

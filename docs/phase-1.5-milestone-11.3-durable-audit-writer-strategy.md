@@ -106,6 +106,8 @@ It requires **no DEV UID**. Optional `EXPECTED_DEV_PROJECT_REF` adds a boolean-o
 `AUDIT_WRITER_METADATA_ALLOWLIST = AUDIT_METADATA_ALLOWLIST ∪ { 'check', 'phase' }`
 ( `route`, `httpStatus`, `featureKey`, `planTier`, `entitlementChecked`, `statusChecked`, `errorSummary`, `check`, `phase` ).
 
+*Update (Phase 4.0 M6-ADMIN-AUDIT-P1):* the allow-list is now action-scoped. For the three administrative session actions (`ADMIN_SESSION_AUDIT_EVENTS`: `platform.admin.session.login`, `.reauthenticate`, `.logout`), `sanitizeAuditMetadata(input, actionId)` and `validateAuditEventInput` keep `sessionRef`, `replacedSessionRef` and `authenticatedAt` (`SESSION_AUDIT_METADATA_KEYS`) and none of the list above; `validateAuditEventInput` refuses a logout row carrying anything but `sessionRef`. It also refuses any row under those three ids that differs, in any column, from the fixed shape `ADMIN_SESSION_AUDIT_EVENTS` holds (built by `buildAdminSessionAuditEvent`), so no caller can write a session event of another shape. That stops drift, not forgery: a well-formed row can still be built by any writer caller. For every other action those keys are stripped or refused like any unknown key, so the list above is unchanged for them.
+
 `sanitizeAuditMetadata`:
 
 - drops any key not on the allow-list,

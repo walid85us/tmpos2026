@@ -1,5 +1,7 @@
 // Phase 4.0 M5 — the PostgreSQL session store: the production adapter for the SessionStore port
-// (server/runtime/sessions.ts), over migration 011's five fixed operations (M5-GIAM-D1-P2-R1; DA-32).
+// (server/runtime/sessions.ts), over migration 011's five fixed session routines (M5-GIAM-D1-P2-R1; DA-32),
+// and — for the administrative boundary's audited pair, establish and end (M6-ADMIN-AUDIT-P1) — the existing
+// audit writer's one INSERT into public.audit_event, in the same transaction as the routines it records.
 //
 // WHY IT EXISTS. The session boundary has always declared a durable, shared store as its contract
 // (docs/phase-4/03 §2 #18) and never had one: the only implementation was the in-memory test kit,
@@ -11,13 +13,27 @@
 // (supervisedPgClient.ts) the composition root already built; this file opens no connection, reads no
 // environment and keeps no state between calls. Importing it connects to nothing.
 //
-// IT CANNOT REACH THE TABLE. The runtime role holds NO privilege on tmpos_session.session — not
-// select, not insert, not update, not delete (migration 011 section 6 refuses to finish while any
-// such grant exists). Every operation below is one call to a fixed definer routine, so the
+// IT CANNOT REACH THE SESSION TABLE. The runtime role holds NO privilege on tmpos_session.session —
+// not select, not insert, not update, not delete (migration 011 section 6 refuses to finish while any
+// such grant exists). Every session change below is a call to a fixed definer routine, so the
 // invariants the port states — an update changes an existing record only, revocation is final,
 // revoking a principal touches exactly one audience — are enforced where this file cannot bypass
 // them. There is no statement here that could write a session row directly even if this file were
-// wrong.
+// wrong. The five plain operations are one routine call in one transaction each.
+//
+// THE AUDITED PAIR (M6-ADMIN-AUDIT-P1): ONE TRANSACTION EACH, AUDIT LAST. establish and end run their
+// routine calls and then the audit record in a single kernel transaction, so the session change and its
+// record commit together or neither does — no migration, no new grant: the runtime login already holds
+// INSERT on public.audit_event through tmpos_audit_writer (migration 005), exactly as the command store
+// writes its records (postgresTransactionalStore.ts). The insert's affected-row count must be exactly one,
+// since a trigger could otherwise drop the row silently. A presented or ended session counts as ended BY
+// THIS transaction only once it read the session live and took its row lock (a touch writing back the
+// stamp it read, which waits out any concurrent deleter) — so at most one record can ever claim to have
+// ended or replaced a given session. A record names a session only by a one-way reference to its key
+// (sessionRefOf), never the key itself: the key is what the session routines accept, and a reader of the
+// audit trail must not be handed a way to read, extend or end a live session. `create` refuses an
+// administrative record, so establish is this file's only way to write one; the DATABASE does not couple
+// them — the runtime login may still call m5_session_create directly (a routine migration would be needed).
 //
 // FAIL CLOSED, NEVER FAIL OPEN. A malformed row, an unexpected column set, a row count other than
 // the one expected, an out-of-range timestamp, an abort, a timeout, a lost connection and a driver
@@ -28,15 +44,23 @@
 // NOTHING IS LOGGED. Keys, provider references and driver errors are bound as parameters or
 // discarded; the caller learns that an operation failed and nothing else — no SQLSTATE, no
 // statement, no parameter, no connection string, no stack.
+import { createHash } from 'node:crypto';
 import { SESSION_TTL } from '../runtime/sessions.js';
-import type { SessionRecord, SessionStore, SessionUpdate } from '../runtime/sessions.js';
+import type { SessionEndAudit, SessionEstablishAudit, SessionRecord, SessionStore, SessionUpdate } from '../runtime/sessions.js';
 import type { SessionAudience } from '../runtime/routes.js';
+import {
+  ADMIN_SESSION_AUDIT_EVENTS, buildAdminSessionAuditEvent, sanitizeAuditMetadata, writeAuditEvent,
+} from '../platform-identity/auditEventWriter.js';
+import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter.js';
+import type { AuditMetadata } from '../platform-identity/auditEventContract.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
 /**
- * A session operation is one short statement. The bounds sit below the caller's port deadline, as the
- * principal resolver's do: a statement that overruns is cancelled by PostgreSQL itself rather than
- * held by this process.
+ * A plain session operation is one short statement; an audited one (establish, end) at most five. The
+ * bounds sit below the caller's port deadline, as the principal resolver's do: a statement that overruns
+ * is cancelled by PostgreSQL itself rather than held by this process. The audited pair shares ONE port
+ * deadline across its statements, so under contention it ends at the caller's deadline (a 503, fail
+ * closed) — and a deadline reached during COMMIT is an unknown outcome, never "nothing committed".
  */
 export const SESSION_STORE_DEADLINE_MS = 3_000;
 export const SESSION_STORE_BOUNDS: TransactionBounds = Object.freeze({
@@ -127,6 +151,119 @@ function only(rows: unknown, column: string): unknown {
   return (row as Record<string, unknown>)[column];
 }
 
+/** The absolute expiry of `record`, from its OWN audience's lifetime, or a throw. */
+function expiryOf(record: SessionRecord): number {
+  // An OWN property, not a prototype-reachable one: `SESSION_TTL['constructor']` is not undefined.
+  const lifetime = Object.hasOwn(SESSION_TTL, record.audience) ? SESSION_TTL[record.audience as SessionAudience] : undefined;
+  if (lifetime === undefined) throw new SessionStoreUnavailable('audience_invalid');
+  const expiresAt = record.createdAt + lifetime.absoluteMs;
+  // Number.isSafeInteger already bounds this by MAX_SAFE_INTEGER; a second comparison would be dead.
+  if (!Number.isSafeInteger(expiresAt)) throw new SessionStoreUnavailable('lifetime_invalid');
+  return expiresAt;
+}
+
+// --- the audited pair (M6-ADMIN-AUDIT-P1) ---------------------------------------------------------
+
+/**
+ * How an audit record names a session: a one-way, domain-separated digest of its store key — itself already
+ * the SHA-256 of the identifier (sessions.ts digestOf). Not the key: the key is the argument the session
+ * routines accept and the runtime role may execute them, so a reader of the trail holding that role could
+ * otherwise read, extend or end a live session. Stable, so a logout's record and the login record that
+ * created that session carry the same reference.
+ */
+const sessionRefOf = (key: string): string =>
+  createHash('sha256').update(`tmpos-audit-session-ref:v1\n${key}`).digest('base64url');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The runtime's entry as this store's record, checked BEFORE anything is sent — every field read once — and then
+ * built and validated by the writer, which fixes every other column of a session event (auditEventWriter.ts
+ * ADMIN_SESSION_AUDIT_EVENTS), so a refused record aborts nothing: nothing has begun. `establish` records a login or
+ * a reauthentication, always of the actor admission selected, and the authentication time bound into the record it
+ * creates; `end` records a logout, which names no actor and binds no authentication time.
+ */
+function auditRowOf(raw: unknown, operation: 'establish' | 'end', authenticated: number | null, metadata: AuditMetadata): AuditEventWriteInput {
+  if (typeof raw !== 'object' || raw === null) throw new SessionStoreUnavailable('audit_invalid');
+  const { action, operationId, actor, authenticatedAt } = raw as Record<string, unknown>;
+  const known = operation === 'establish'
+    ? (action === 'login' || action === 'reauthenticate' ? action : undefined)
+    : (action === 'logout' ? action : undefined);
+  // The operation id is the server's random UUID (sessions.ts), the record's request_id: never a client's value.
+  if (known === undefined || typeof operationId !== 'string' || !UUID_RE.test(operationId)
+    || (operation === 'establish' ? typeof actor !== 'string' : actor !== null) || authenticatedAt !== authenticated) {
+    throw new SessionStoreUnavailable('audit_invalid');
+  }
+  // Outside the refusal below: a dropped key is this store's defect, not a refused record, and keeps its own word.
+  persistedAuditMetadata(metadata, ADMIN_SESSION_AUDIT_EVENTS[known].actionId);
+  try {
+    return buildAdminSessionAuditEvent(known, operationId, actor as string | null, metadata);
+  } catch {
+    // The writer's label is safe but not this store's word; the caller learns only that the record was refused.
+    throw new SessionStoreUnavailable('audit_invalid');
+  }
+}
+
+/**
+ * `metadata` exactly as the writer will persist it for `actionId`, or a throw: the writer STRIPS a key it does not
+ * keep for an action (auditEventWriter.ts, action-scoped), and a session record that silently lost one — its
+ * session reference above all — would commit a record that says less than this store decided to record.
+ * Exported for its unit test; this file's audited pair is its only caller.
+ */
+export function persistedAuditMetadata(metadata: AuditMetadata, actionId: string): AuditMetadata {
+  const kept = sanitizeAuditMetadata(metadata, actionId);
+  const given = Object.keys(metadata);
+  if (Object.keys(kept).length !== given.length || !given.every((k) => Object.hasOwn(kept, k) && kept[k] === metadata[k])) {
+    throw new SessionStoreUnavailable('audit_metadata_dropped');
+  }
+  return kept;
+}
+
+/**
+ * The record, through the existing writer, on the caller's transaction — its LAST statement. The executor hands the
+ * writer's own frozen template and parameters to the kernel unchanged, and reads only the result's command and
+ * count: exactly one row INSERTed, or the transaction rolls back (a BEFORE INSERT trigger answering NULL would
+ * otherwise drop the record while the session change committed). The result itself is neither kept nor returned.
+ */
+async function writeSessionAudit(sql: PgTransactionScope, row: AuditEventWriteInput): Promise<void> {
+  persistedAuditMetadata(row.metadata ?? {}, row.actionId);
+  let inserted = false;
+  const executor: AuditSqlExecutor = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]): Promise<void> => {
+    const result = await sql(strings, ...values);
+    if (Reflect.get(result, 'command') !== 'INSERT' || result.count !== 1) {
+      throw new SessionStoreUnavailable('audit_not_written');
+    }
+    inserted = true;
+  }, { json: (value: unknown) => sql.json(value) });
+  await writeAuditEvent(row, { executor });
+  if (!inserted) throw new SessionStoreUnavailable('audit_not_written');
+}
+
+/** The live record under `key` as this transaction reads it, or undefined when it names none. */
+async function liveRecord(sql: PgTransactionScope, key: string, now: number): Promise<SessionRecord | undefined> {
+  const rows = await sql`select * from tmpos_session.m5_session_get(${key}::text, ${now}::bigint)`;
+  if (!Array.isArray(rows)) throw new SessionStoreUnavailable('answer_shape_invalid');
+  if (rows.length === 0) return undefined;
+  if (rows.length !== 1) throw new SessionStoreUnavailable('answer_shape_invalid');
+  return recordOf(rows[0]);
+}
+
+/**
+ * End `held`, the record just read live under `key`, if THIS transaction is the one that ends it: the touch writes
+ * back the stamp as read — an UPDATE that changes nothing but takes the row's lock, waiting out any concurrent
+ * deleter, after whose commit it answers 'absent' — and only then is the row deleted. True when this transaction
+ * ended it; false when another got there first, in which case nothing is changed.
+ */
+async function endHeld(sql: PgTransactionScope, key: string, held: SessionRecord): Promise<boolean> {
+  const touched = only(await sql`select tmpos_session.m5_session_touch(${key}::text, 'validatedAt', ${held.validatedAt}::bigint) as outcome`, 'outcome');
+  if (touched === 'absent') return false;
+  if (touched !== 'updated') throw new SessionStoreUnavailable('not_updated');
+  if (only(await sql`select tmpos_session.m5_session_revoke(${key}::text) as outcome`, 'outcome') !== 'revoked') {
+    throw new SessionStoreUnavailable('not_revoked');
+  }
+  return true;
+}
+
 export interface PostgresSessionStoreDeps {
   /** The kernel the composition root already built for this boundary — one client, one credential. */
   readonly client: SupervisedPgClient;
@@ -160,7 +297,8 @@ export interface PostgresSessionStoreDeps {
 /**
  * The production session store. `create` writes one record and refuses to overwrite one; `get`
  * answers the live record or nothing; `update` slides one stamp on a record that exists; `revoke` is
- * final; `revokePrincipal` ends one principal's sessions in this store's audience alone.
+ * final; `revokePrincipal` ends one principal's sessions in this store's audience alone. `establish`
+ * and `end` issue and end an administrative session with its audit record, one transaction each.
  */
 export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): SessionStore {
   const { client } = deps;
@@ -192,15 +330,12 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
 
   return Object.freeze({
     async create(key: string, record: SessionRecord, signal: AbortSignal): Promise<void> {
+      // An administrative session is written only by establish, with its audit record (M6-ADMIN-AUDIT-P1).
+      if (record.audience === 'admin') throw new SessionStoreUnavailable('audit_required');
       // The record is the boundary's own, but the absolute expiry is this store's to compute: the port
       // carries no expiry field. The lifetime is the RECORD's own audience's, read from the runtime's
       // one table of lifetimes, so a record never outlives the boundary that issued it.
-      // An OWN property, not a prototype-reachable one: `SESSION_TTL['constructor']` is not undefined.
-      const lifetime = Object.hasOwn(SESSION_TTL, record.audience) ? SESSION_TTL[record.audience as SessionAudience] : undefined;
-      if (lifetime === undefined) throw new SessionStoreUnavailable('audience_invalid');
-      const expiresAt = record.createdAt + lifetime.absoluteMs;
-      // Number.isSafeInteger already bounds this by MAX_SAFE_INTEGER; a second comparison would be dead.
-      if (!Number.isSafeInteger(expiresAt)) throw new SessionStoreUnavailable('lifetime_invalid');
+      const expiresAt = expiryOf(record);
       const outcome = await run(signal, async (sql) => only(await sql`
         select tmpos_session.m5_session_create(
           ${key}::text, ${record.audience}::text, ${record.authProvider}::text, ${record.authProviderUid}::text,
@@ -213,18 +348,11 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
     },
 
     async get(key: string, signal: AbortSignal): Promise<SessionRecord | undefined> {
-      return run(signal, async (sql) => {
-        const rows = await sql`select * from tmpos_session.m5_session_get(${key}::text, ${now()}::bigint)`;
-        if (!Array.isArray(rows)) throw new SessionStoreUnavailable('answer_shape_invalid');
-        // No row is the ONE answer that is not a fault: this key names no live session.
-        if (rows.length === 0) return undefined;
-        if (rows.length !== 1) throw new SessionStoreUnavailable('answer_shape_invalid');
-        // The record carries its own audience; judging it is the boundary's, which refuses one
-        // stamped with another (sessions.ts: session_wrong_audience). A store that filtered here
-        // would answer 'no such session' for a record that exists, which the port reserves for a
-        // key that names none.
-        return recordOf(rows[0]);
-      });
+      // No row is the ONE answer that is not a fault: this key names no live session. The record
+      // carries its own audience; judging it is the boundary's, which refuses one stamped with another
+      // (sessions.ts: session_wrong_audience). A store that filtered here would answer 'no such
+      // session' for a record that exists, which the port reserves for a key that names none.
+      return run(signal, (sql) => liveRecord(sql, key, now()));
     },
 
     async update(key: string, fields: SessionUpdate, signal: AbortSignal): Promise<void> {
@@ -261,6 +389,54 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
       // Zero is a valid answer — the principal held no session here — but a non-count is not.
       const count = typeof ended === 'number' ? ended : Number(typeof ended === 'string' ? ended : NaN);
       if (!Number.isSafeInteger(count) || count < 0) throw new SessionStoreUnavailable('not_revoked');
+    },
+
+    async establish(key: string, record: SessionRecord, replaces: string | null, audit: SessionEstablishAudit, signal: AbortSignal): Promise<void> {
+      if (record.audience !== 'admin') throw new SessionStoreUnavailable('audience_invalid');
+      const expiresAt = expiryOf(record);
+      const metadata: AuditMetadata = {
+        sessionRef: sessionRefOf(key), ...(record.authenticatedAt === null ? {} : { authenticatedAt: record.authenticatedAt }),
+      };
+      const row = auditRowOf(audit, 'establish', record.authenticatedAt, metadata);
+      await run(signal, async (sql) => {
+        // 1. The presented session, when one is: ended by THIS transaction only if it reads it live and holds its lock.
+        //    A record of another audience under the administrative cookie is still ended (rotation ends whatever it is
+        //    presented), but only an administrative one this transaction ended is named as replaced.
+        const held = replaces === null ? undefined : await liveRecord(sql, replaces, now());
+        const replaced = held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === 'admin';
+        // 2. The new session. A taken key fails the whole transaction, so the presented session is left as it was.
+        const outcome = only(await sql`
+          select tmpos_session.m5_session_create(
+            ${key}::text, ${record.audience}::text, ${record.authProvider}::text, ${record.authProviderUid}::text,
+            ${record.principalKey}::text, ${record.securityVersion}::text,
+            ${record.authenticatedAt}::bigint, ${record.createdAt}::bigint,
+            ${record.lastSeenAt}::bigint, ${record.validatedAt}::bigint, ${expiresAt}::bigint) as outcome`, 'outcome');
+        if (outcome !== 'created') throw new SessionStoreUnavailable('not_created');
+        // 3. Its record, last.
+        await writeSessionAudit(sql, replaced ? { ...row, metadata: { ...metadata, replacedSessionRef: sessionRefOf(replaces as string) } } : row);
+      });
+    },
+
+    async end(key: string, audit: SessionEndAudit, signal: AbortSignal): Promise<'ended' | 'absent'> {
+      const row = auditRowOf(audit, 'end', null, { sessionRef: sessionRefOf(key) });
+      return run(signal, async (sql) => {
+        const held = await liveRecord(sql, key, now());
+        // Nothing live to end — another operation ended it first, or it reached its absolute expiry since the request's
+        // own read: nothing is recorded, and an expired row still under the key is deleted, so an instance whose clock
+        // runs behind this one's cannot go on accepting it. A key that names no row deletes nothing. The delete is by key,
+        // after a read that found nothing live; a new live row can appear under this key in between only if another login
+        // drew the same 32 random bytes, a collision this store treats as a fault everywhere else, so it deletes an expired row or none.
+        if (held === undefined) {
+          if (only(await sql`select tmpos_session.m5_session_revoke(${key}::text) as outcome`, 'outcome') !== 'revoked') {
+            throw new SessionStoreUnavailable('not_revoked');
+          }
+          return 'absent';
+        }
+        if (held.audience !== 'admin') throw new SessionStoreUnavailable('audience_invalid');
+        if (!(await endHeld(sql, key, held))) return 'absent';
+        await writeSessionAudit(sql, row);
+        return 'ended';
+      });
     },
   });
 }

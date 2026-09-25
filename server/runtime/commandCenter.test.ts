@@ -231,7 +231,15 @@ function adminBoundary(rec: Recorder, authorize: (...args: unknown[]) => unknown
           : null;
       },
     },
-    admission: { admit: () => ({ admitted: true, securityVersion: 'v1' }) },
+    // The administrative login attributes its session to the scope admission names (M6-ADMIN-AUDIT-P1); synthetic ids.
+    admission: {
+      admit: () => ({
+        admitted: true, securityVersion: 'v1', context: {
+          actor: '7d3e2f1a-0b9c-4d8e-a7f6-e5d4c3b2a190', securityVersion: 'v1', scope: 'platform', tenant: null, store: null,
+          membershipId: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', roleId: 'support_admin', limitation: 'none',
+        },
+      }),
+    },
     authorizer: { authorize: (...args: unknown[]) => { rec.authorizations.push(args); return authorize(...args); } },
     store: createMemorySessionStore(),
   };

@@ -105,6 +105,87 @@ export const AUDIT_WRITER_METADATA_ALLOWLIST: readonly string[] = [
   'phase',
 ] as const;
 
+/**
+ * The administrative session events (M6-ADMIN-AUDIT-P1), written by the PostgreSQL session store in the
+ * same transaction as the session change each records. Every column but the request id, the actor and the
+ * metadata values is fixed HERE, and validateAuditEventInput refuses a row under one of these action ids
+ * that differs from its fixed shape in any column — so no caller of this writer can write a session event of
+ * another shape, and the store cannot drift from what these rows are documented to say. It stops drift, not a
+ * caller that builds a well-formed row: the runtime role may insert into the table directly in any case. `actor`
+ * says whether the row names the admitted actor (a login or reauthentication) or no actor (a logout).
+ */
+export const ADMIN_SESSION_AUDIT_EVENTS = Object.freeze({
+  login: Object.freeze({
+    actionId: 'platform.admin.session.login', decision: 'allow', reasonCode: 'admin_session_created',
+    humanReadableReason: 'An administrative session was created after a verified sign-in and platform admission.',
+    actor: true,
+  }),
+  reauthenticate: Object.freeze({
+    actionId: 'platform.admin.session.reauthenticate', decision: 'allow', reasonCode: 'admin_session_reauthenticated',
+    humanReadableReason: 'An administrative session was created by a recent sign-in of the administrator whose live session was presented.',
+    actor: true,
+  }),
+  logout: Object.freeze({
+    actionId: 'platform.admin.session.logout', decision: 'not_applicable', reasonCode: 'admin_session_ended',
+    humanReadableReason: 'An administrative session was ended by its logout.',
+    actor: false,
+  }),
+} as const);
+
+export type AdminSessionAuditAction = keyof typeof ADMIN_SESSION_AUDIT_EVENTS;
+type AdminSessionAuditShape = (typeof ADMIN_SESSION_AUDIT_EVENTS)[AdminSessionAuditAction];
+
+/**
+ * The metadata keys those three events persist, and the only ones they may: `sessionRef` and
+ * `replacedSessionRef` — one-way references to the session created or ended and to the one a login replaced,
+ * never an identifier, a cookie or a store key — and `authenticatedAt`, the provider-verified sign-in time
+ * bound into a new session. A logout carries `sessionRef` alone.
+ *
+ * ACTION-SCOPED BY THE SAME RULE AS EVERY OTHER KEY. For any other action they are simply not allow-listed:
+ * sanitizeAuditMetadata strips them and validateAuditEventInput refuses them, exactly as either treats any
+ * unknown key today — so every existing caller's rows and refusals are byte-identical, and no other writer
+ * can borrow a session reference. Refusing them in sanitize instead would make one key family throw where
+ * every other unknown key is stripped, a new failure mode for callers that never asked for it.
+ */
+export const SESSION_AUDIT_METADATA_KEYS: readonly string[] = Object.freeze(['sessionRef', 'replacedSessionRef', 'authenticatedAt']);
+
+const SESSION_AUDIT_SOURCE_OF_TRUTH = 'session_transaction';
+const SESSION_AUDIT_EVALUATED_BY = 'm6_postgres_session_store@v1';
+/** A session reference: the base64url SHA-256 the store derives (postgresSessionStore.ts sessionRefOf). */
+const SESSION_REF_RE = /^[A-Za-z0-9_-]{43}$/;
+const SESSION_EVENTS_BY_ACTION_ID: ReadonlyMap<string, AdminSessionAuditShape> =
+  new Map(Object.values(ADMIN_SESSION_AUDIT_EVENTS).map((shape) => [shape.actionId, shape]));
+
+/** The keys an event of `actionId` may persist. */
+function metadataAllowlistFor(actionId: unknown): readonly string[] {
+  return typeof actionId === 'string' && SESSION_EVENTS_BY_ACTION_ID.has(actionId)
+    ? SESSION_AUDIT_METADATA_KEYS
+    : AUDIT_WRITER_METADATA_ALLOWLIST;
+}
+
+/**
+ * `event`, already checked against the general rules and allow-listed for its session action, exactly as
+ * ADMIN_SESSION_AUDIT_EVENTS fixes it — or a throw naming the action id alone, never a value.
+ */
+function assertAdminSessionShape(event: AuditEventWriteInput, shape: AdminSessionAuditShape): void {
+  const m: AuditMetadata = event.metadata ?? {};
+  // A key other than sessionRef is only ever a login's or a reauthentication's, and must be well-formed.
+  const optional = (key: string, ok: (v: unknown) => boolean): boolean => !Object.hasOwn(m, key) || (shape.actor && ok(m[key]));
+  // The request id is the server's random operation id (sessions.ts), never a client's value.
+  const matches = UUID_RE.test(event.requestId) && (event.traceId ?? null) === null && event.actorAuthProvider === null
+    && (event.onBehalfOfInternalUserId ?? null) === null && (event.subjectTenantId ?? null) === null
+    && event.scopeType === 'platform' && event.tenantId === null && event.storeId === null
+    && event.requiredPermission === 'n_a' && event.decision === shape.decision && event.reasonCode === shape.reasonCode
+    && event.humanReadableReason === shape.humanReadableReason && event.resultStatus === 'succeeded'
+    && event.sourceOfTruth === SESSION_AUDIT_SOURCE_OF_TRUTH && event.evaluatedBy === SESSION_AUDIT_EVALUATED_BY
+    && event.evidenceLevel === 'durable_compliance_event'
+    && (shape.actor ? event.actorInternalUserId !== null : event.actorInternalUserId === null)
+    && typeof m.sessionRef === 'string' && SESSION_REF_RE.test(m.sessionRef)
+    && optional('replacedSessionRef', (v) => typeof v === 'string' && SESSION_REF_RE.test(v))
+    && optional('authenticatedAt', (v) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0);
+  if (!matches) throw new AuditEventValidationError(`audit event does not match the fixed shape of '${shape.actionId}'`);
+}
+
 /** Max persisted length for any string metadata value (truncate, never reject). */
 const METADATA_STRING_MAX = 256;
 
@@ -114,7 +195,8 @@ function isScalar(v: unknown): v is string | number | boolean | null {
 
 /**
  * Redact arbitrary input into allow-listed, scalar-only metadata:
- *   - drops any key not on AUDIT_WRITER_METADATA_ALLOWLIST,
+ *   - drops any key not allow-listed for `actionId` (AUDIT_WRITER_METADATA_ALLOWLIST, plus
+ *     SESSION_AUDIT_METADATA_KEYS for the administrative session events alone),
  *   - drops any key on AUDIT_FORBIDDEN_FIELDS (defense-in-depth — never allow-listed),
  *   - drops any non-scalar value (objects/arrays/functions/undefined),
  *   - truncates long strings.
@@ -122,12 +204,14 @@ function isScalar(v: unknown): v is string | number | boolean | null {
  */
 export function sanitizeAuditMetadata(
   input: Record<string, unknown> | null | undefined,
+  actionId?: string,
 ): AuditMetadata {
   const out: AuditMetadata = {};
   if (!input || typeof input !== 'object') return out;
+  const allowlist = metadataAllowlistFor(actionId);
   for (const key of Object.keys(input)) {
     if ((AUDIT_FORBIDDEN_FIELDS as readonly string[]).includes(key)) continue;
-    if (!AUDIT_WRITER_METADATA_ALLOWLIST.includes(key)) continue;
+    if (!allowlist.includes(key)) continue;
     const value = (input as Record<string, unknown>)[key];
     if (!isScalar(value)) continue;
     out[key] =
@@ -283,20 +367,47 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
     );
   }
 
-  // Metadata must be allow-listed, scalar-only, and free of any forbidden key.
+  // Metadata must be allow-listed for this action, scalar-only, and free of any forbidden key.
   const metadata = event.metadata ?? {};
+  const allowlist = metadataAllowlistFor(event.actionId);
   for (const key of Object.keys(metadata)) {
     if ((AUDIT_FORBIDDEN_FIELDS as readonly string[]).includes(key)) {
       throw new AuditEventValidationError('audit event metadata contains a forbidden key');
     }
-    if (!AUDIT_WRITER_METADATA_ALLOWLIST.includes(key)) {
+    if (!allowlist.includes(key)) {
       throw new AuditEventValidationError('audit event metadata contains a non-allow-listed key');
     }
     if (!isScalar((metadata as AuditMetadata)[key])) {
       throw new AuditEventValidationError('audit event metadata contains a non-scalar value');
     }
   }
+  const sessionShape = SESSION_EVENTS_BY_ACTION_ID.get(event.actionId);
+  if (sessionShape !== undefined) assertAdminSessionShape(event, sessionShape);
   return event;
+}
+
+/**
+ * The row of one administrative session event: its fixed shape (ADMIN_SESSION_AUDIT_EVENTS) and the three values
+ * the session store supplies — the server's operation id, the actor (a UUID for a login or reauthentication, null
+ * for a logout) and the session metadata. Validated before it is returned, so a refused row throws before anything
+ * is sent.
+ */
+export function buildAdminSessionAuditEvent(
+  action: AdminSessionAuditAction, requestId: string, actor: string | null, metadata: AuditMetadata,
+): AuditEventWriteInput {
+  if (!Object.hasOwn(ADMIN_SESSION_AUDIT_EVENTS, action)) {
+    throw new AuditEventValidationError('audit event session action is not an allowed value');
+  }
+  const shape = ADMIN_SESSION_AUDIT_EVENTS[action];
+  return validateAuditEventInput({
+    requestId, traceId: null,
+    actorInternalUserId: actor, actorAuthProvider: null, onBehalfOfInternalUserId: null,
+    scopeType: 'platform', tenantId: null, storeId: null, subjectTenantId: null,
+    actionId: shape.actionId, requiredPermission: 'n_a', decision: shape.decision,
+    reasonCode: shape.reasonCode, humanReadableReason: shape.humanReadableReason, resultStatus: 'succeeded',
+    sourceOfTruth: SESSION_AUDIT_SOURCE_OF_TRUTH, evaluatedBy: SESSION_AUDIT_EVALUATED_BY,
+    evidenceLevel: 'durable_compliance_event', metadata,
+  });
 }
 
 // =============================================================================
@@ -381,7 +492,7 @@ export function buildAuthorizationDecisionAuditEvent(
     sourceOfTruth: 'server_authorization_resolver',
     evaluatedBy: AUDIT_EVENT_EVALUATED_BY,
     evidenceLevel: 'durable_compliance_event',
-    metadata: sanitizeAuditMetadata(input.metadata),
+    metadata: sanitizeAuditMetadata(input.metadata, input.actionId),
   };
 }
 
@@ -435,7 +546,7 @@ export async function writeAuditEvent(
   }
 
   // Redact first, then assert — the persisted metadata is always the sanitized form.
-  const metadata = sanitizeAuditMetadata(event.metadata);
+  const metadata = sanitizeAuditMetadata(event.metadata, event.actionId);
   const validated = validateAuditEventInput({ ...event, metadata });
 
   // Generated BEFORE the statement is sent, so the receipt never depends on reading a row

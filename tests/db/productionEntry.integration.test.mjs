@@ -14,7 +14,8 @@
 // Everything else — configuration validation, composition, the startup preflight (connect, the
 // runtime login's standing, the migration ledger, the limiter key), the route table, the session and
 // authorization chain, the command transaction, readiness and shutdown — is production's own code,
-// unmodified.
+// unmodified. The administrative session audit section (M6AA, M6-ADMIN-AUDIT-P1) adds only faults
+// made outside it: on the audit table in PostgreSQL, and once a COMMIT's answer dropped on the relay.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this
 // file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs.
@@ -61,6 +62,8 @@ const ADMIN_ORIGIN = `https://${ADMIN_HOST}`;
 const REASON = 'Synthetic proof for the M6-ENTRY-P1 production entry suite.';
 /** app.ts PROBE_REUSE_MS (1 s, not exported) and a margin: a readiness probe is reused for that long. */
 const PROBE_REUSE_WAIT_MS = 1_100;
+/** Where M6AA's audit-store trigger faults live, each only for its own test (withAuditFault). */
+const AUDIT_FAULT_SCHEMA = 'm6aa_fault';
 
 // ---------------------------------------------------------------------------
 // cluster lifecycle (mirrors tests/db/rateLimitRuntime.integration.test.mjs)
@@ -129,6 +132,8 @@ async function teardown() {
   const failures = [];
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
+    // An M6AA audit-store trigger fault, should a test have stopped before its own finally removed it.
+    await step(() => owner.unsafe(`drop schema if exists ${AUDIT_FAULT_SCHEMA} cascade`));
     await step(() => owner.unsafe(DROP_RUNTIME_LOGIN));
     // The one registered rate-limit key fingerprint: restored to exactly its snapshot, or removed if there was none — in
     // one transaction, so a failed insert never leaves the table empty — and proven exact, every column. registered_at
@@ -175,14 +180,16 @@ function startRelay() {
     : { host: u.hostname, port: Number(u.port || 5432) };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6ep-relay-'));
   const pairs = new Set();
-  const state = { closes: 0, pairs };
+  const state = { closes: 0, pairs, trap: null };
   const server = net.createServer((client) => {
     client.on('error', () => {});
     const db = net.connect(upstream);
-    const pair = { cut: () => { pairs.delete(pair); client.destroy(); db.destroy(); } };
+    const pair = { cut: () => { pairs.delete(pair); client.destroy(); db.destroy(); }, audited: false, silenced: false };
     pairs.add(pair);
-    client.on('data', (chunk) => db.write(chunk));
-    db.on('data', (chunk) => client.write(chunk));
+    // A trap (M6AA-10 loseCommitAnswer) may read what the client sends and silence the server's side; otherwise every
+    // byte passes untouched.
+    client.on('data', (chunk) => { if (state.trap !== null) state.trap(pair, chunk); db.write(chunk); });
+    db.on('data', (chunk) => { if (!pair.silenced) client.write(chunk); });
     for (const socket of [client, db]) {
       socket.on('error', pair.cut);
       socket.on('close', pair.cut);
@@ -296,7 +303,11 @@ const VERIFIER = Object.freeze({
       throw err;
     }
     // authAgeSec stands for a token the provider REFRESHED: a fresh token whose auth_time is still the old sign-in's.
-    return { uid: rec.uid, authTime: Math.floor(Date.now() / 1000) - (rec.authAgeSec ?? 0), secondFactor: 'totp' };
+    // secondFactor, when given, stands for the provider's own second-factor claim: absent (null) or a factor other than TOTP.
+    return {
+      uid: rec.uid, authTime: Math.floor(Date.now() / 1000) - (rec.authAgeSec ?? 0),
+      secondFactor: rec.secondFactor === undefined ? 'totp' : rec.secondFactor,
+    };
   },
 });
 
@@ -1059,6 +1070,543 @@ test('M6EP-23: no new evidence without a new sign-in — a refreshed token is re
       'the stale session after the refreshed-token attempt');
     assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep23-${SUFFIX}`, status: 'active', row_version: '1' }, 'the tenant is unchanged');
   });
+});
+
+// ---------------------------------------------------------------------------
+// administrative session audit (M6-ADMIN-AUDIT-P1): M6AA-01..14
+// ---------------------------------------------------------------------------
+//
+// Every case reads the persisted audit_event rows through the owner — the runtime login cannot read them (M6AA-14) —
+// and judges them together with what the session boundary answered. The audit-store faults are made at the PostgreSQL
+// level only: a trigger on public.audit_event, run by the inserting role itself, or a revoked INSERT. Each is undone
+// in its own test's finally, the grants proven exact, because CI runs every database suite on one shared database.
+
+const SESSION_AUDIT = Object.freeze({
+  login: 'platform.admin.session.login',
+  reauthenticate: 'platform.admin.session.reauthenticate',
+  logout: 'platform.admin.session.logout',
+});
+const RECORD_WORDS = Object.freeze({
+  login: ['allow', 'admin_session_created'],
+  reauthenticate: ['allow', 'admin_session_reauthenticated'],
+  logout: ['not_applicable', 'admin_session_ended'],
+});
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CLEARED_COOKIE = `${SESSION_COOKIES.admin}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict`;
+
+/** How a record names a session (postgresSessionStore.ts sessionRefOf), derived here independently: never the store key. */
+const sessionRefOf = (key) => createHash('sha256').update(`tmpos-audit-session-ref:v1\n${key}`).digest('base64url');
+const idOf = (session) => session.cookie.slice(session.cookie.indexOf('=') + 1);
+const principalOf = (act) => principalKeyOf({ authProvider: 'firebase', authProviderUid: act.uid });
+
+/** Every value this section handed the entry, or was handed by it, that no audit record may carry (M6AA-13). */
+const M6AA_SECRETS = new Set();
+/** The database clock when this section began: M6AA-13 reads every session record written since. */
+let m6aaSince = null;
+
+/**
+ * Client-chosen header values, sent with every login and logout here: a well-formed X-Request-Id — the entry adopts it
+ * as the request's correlator, so it reaches the reply and the log line — and a synthetic TOTP code and password the
+ * entry never reads. None may be persisted.
+ */
+function clientSent() {
+  const headers = {
+    'x-request-id': `m6aa-rid-${randomBytes(12).toString('base64url')}`,
+    'x-m6aa-totp-code': `m6aa-totp-${randomBytes(6).toString('base64url')}`,
+    'x-m6aa-password': `m6aa-pw-${randomBytes(12).toString('base64url')}`,
+  };
+  for (const value of Object.values(headers)) M6AA_SECRETS.add(value);
+  return headers;
+}
+
+async function auditedActor(label, memberships = [{ scope: 'platform', role: 'system_owner' }]) {
+  const act = await actor(label, memberships);
+  M6AA_SECRETS.add(act.token).add(act.uid);
+  return act;
+}
+
+const m6aaLogin = (ctx, token, extra = {}) => ctx.login(token, { ...clientSent(), ...extra });
+const m6aaReauth = (ctx, token, session) => m6aaLogin(ctx, token, { cookie: session.cookie, [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE });
+const m6aaLogout = (ctx, session) => ctx.req('POST', sessionPaths('admin').logout, {
+  ...clientSent(), origin: ADMIN_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE,
+  [SESSION_CSRF_HEADER]: session.csrf, cookie: session.cookie,
+});
+const currentOf = (ctx, session) => ctx.req('GET', sessionPaths('admin').current, { cookie: session.cookie });
+
+/** The session a 200 login issued; its identifier, store key and CSRF token are remembered for M6AA-13. */
+function issued(reply) {
+  assert.equal(reply.status, 200, reply.body);
+  const session = { cookie: reply.headers['set-cookie'][0].split('; ')[0], csrf: JSON.parse(reply.body).csrfToken };
+  M6AA_SECRETS.add(idOf(session)).add(sessionKeyOf(session)).add(session.csrf);
+  return session;
+}
+const m6aaSignIn = async (ctx, act) => issued(await m6aaLogin(ctx, act.token));
+
+const auditTotal = async () => (await owner`select count(*)::int as n from public.audit_event`)[0].n;
+const sessionKeysOf = async (act) =>
+  (await owner`select session_key from tmpos_session.session where principal_key = ${principalOf(act)} order by session_key`).map((r) => r.session_key);
+const sessionExists = async (key) => (await owner`select 1 from tmpos_session.session where session_key = ${key}`).length === 1;
+const recordsOf = (action, actorId) =>
+  owner`select * from public.audit_event where action_id = ${SESSION_AUDIT[action]} and actor_internal_user_id = ${actorId}`;
+const recordsNaming = (action, ref) =>
+  owner`select * from public.audit_event where action_id = ${SESSION_AUDIT[action]} and metadata->>'sessionRef' = ${ref}`;
+
+const logRecords = (ctx) => ctx.lines.flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+/** The request log line of `reply`, by its correlator, once written: 'finish' can trail the reply the client read. */
+async function requestLine(ctx, reply) {
+  const id = reply.headers['x-request-id'];
+  let line;
+  await waitFor(() => (line = logRecords(ctx).find((r) => r.event === 'request' && r.requestId === id)) !== undefined);
+  return line;
+}
+
+/** The columns every session record carries (the row contract), with its operation's own decision and reason. */
+function assertSessionRecord(row, action, actorId) {
+  assert.match(row.request_id, UUID_RE, 'request_id is a server-generated UUID');
+  const [decision, reasonCode] = RECORD_WORDS[action];
+  const expected = {
+    action_id: SESSION_AUDIT[action], audit_version: 'audit.v1', trace_id: null, actor_internal_user_id: actorId,
+    actor_auth_provider: null, on_behalf_of_internal_user_id: null,
+    scope_type: 'platform', tenant_id: null, store_id: null, subject_tenant_id: null,
+    required_permission: 'n_a', decision, reason_code: reasonCode, result_status: 'succeeded',
+    source_of_truth: 'session_transaction', evaluated_by: 'm6_postgres_session_store@v1', evidence_level: 'durable_compliance_event',
+  };
+  assert.deepEqual(Object.fromEntries(Object.keys(expected).map((k) => [k, row[k]])), expected);
+}
+
+/** A direct connection as the runtime login — no kernel, no relay — for what the login itself may do; always ended. */
+async function asRuntimeLogin(fn) {
+  const sql = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
+  try {
+    return await fn(sql);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/** What an audit INSERT by the runtime login answers right now — its row count, or its SQLSTATE — rolled back either way. */
+function probeAuditInsert() {
+  return asRuntimeLogin(async (sql) => {
+    const undo = new Error('m6aa probe: rolled back');
+    try {
+      await sql.begin(async (tx) => {
+        const result = await tx`insert into public.audit_event (request_id, scope_type, action_id, required_permission, decision,
+            reason_code, human_readable_reason, result_status, source_of_truth, evaluated_by, evidence_level)
+          values (${randomUUID()}, 'platform', 'm6aa.probe', 'n_a', 'not_applicable', 'm6aa_probe', 'A rolled-back probe.', 'n_a',
+            'm6aa_probe', 'm6aa_probe', 'durable_compliance_event')`;
+        undo.count = result.count;
+        throw undo;
+      });
+    } catch (err) {
+      return err === undo ? { count: undo.count } : { code: err.code };
+    }
+    throw new Error('the probe did not roll back');
+  });
+}
+
+/** The trigger faults. Each runs as the inserting role (no definer), so the runtime login meets it in its own transaction. */
+const AUDIT_TRIGGER_FAULTS = Object.freeze({
+  raise: "begin raise exception 'M6AA injected audit fault' using errcode = 'M6AA0'; end",
+  // Past the 3 s port deadline, and the store's own 2.7 s statement bound, which cancels it first.
+  sleep: 'begin perform pg_catalog.pg_sleep(4); return new; end',
+  // The row silently not inserted: INSERT 0 0, which only the affected-row count can see.
+  discard: 'begin return null; end',
+});
+const AUDIT_FAULTS = [...Object.keys(AUDIT_TRIGGER_FAULTS), 'revoked'];
+/** How the runtime login's own audit INSERT answers under each fault: proof the fault is in place ('sleep' is timed instead). */
+const FAULT_ANSWERS = Object.freeze({ raise: { code: 'M6AA0' }, discard: { count: 0 }, revoked: { code: '42501' } });
+
+/** The audit table's grants, table and column, as sorted text: compared exactly before and after a revocation. */
+async function auditGrants() {
+  const [row] = await owner`select
+      array(select a::text from pg_catalog.unnest(c.relacl) a order by 1) as rel,
+      array(select at.attname || '=' || at.attacl::text from pg_catalog.pg_attribute at
+        where at.attrelid = c.oid and at.attacl is not null order by 1) as cols
+    from pg_catalog.pg_class c where c.oid = 'public.audit_event'::regclass`;
+  return { rel: row.rel, cols: row.cols };
+}
+
+/** Run `fn` with `fault` in place on the audit store, proven in place, then undo it and prove the store exactly restored. */
+async function withAuditFault(fault, fn) {
+  const grants = await auditGrants();
+  try {
+    if (fault === 'revoked') {
+      await owner.unsafe('revoke insert on table public.audit_event from tmpos_audit_writer');
+    } else {
+      await owner.unsafe(`create schema ${AUDIT_FAULT_SCHEMA};
+        create function ${AUDIT_FAULT_SCHEMA}.inject() returns trigger language plpgsql as $$ ${AUDIT_TRIGGER_FAULTS[fault]} $$;
+        create trigger m6aa_audit_fault before insert on public.audit_event for each row execute function ${AUDIT_FAULT_SCHEMA}.inject();`);
+    }
+    if (fault !== 'sleep') assert.deepEqual(await probeAuditInsert(), FAULT_ANSWERS[fault], `${fault}: the fault is in place`);
+    return await fn();
+  } finally {
+    await owner.unsafe(`drop schema if exists ${AUDIT_FAULT_SCHEMA} cascade`);
+    if (fault === 'revoked') await owner.unsafe('grant insert on table public.audit_event to tmpos_audit_writer');
+    assert.deepEqual(await auditGrants(), grants, `${fault}: the audit table's grants are exactly as they were`);
+    assert.deepEqual(await probeAuditInsert(), { count: 1 }, `${fault}: the runtime login's audit INSERT works again`);
+  }
+}
+
+const AUDIT_INSERT_TEXT = Buffer.from('insert into public.audit_event');
+const COMMIT_PARSE = Buffer.from('\0commit\0'); // the kernel's own `commit`, as an unnamed Parse message carries it
+
+/**
+ * Arm `relay`: on the first connection that sends the audit INSERT, the next COMMIT is forwarded — so the server commits —
+ * and every byte of the server's answer after it is dropped. The lost answer (supervisedPgClient outcomeUnknown), made on
+ * the wire. release() disarms the trap and cuts the silenced connection, which the kernel then sees close.
+ */
+function loseCommitAnswer(relay) {
+  const silenced = [];
+  relay.state.trap = (pair, chunk) => {
+    if (chunk.includes(AUDIT_INSERT_TEXT)) {
+      pair.audited = true;
+    } else if (pair.audited && chunk.includes(COMMIT_PARSE)) {
+      pair.silenced = true;
+      silenced.push(pair);
+      relay.state.trap = null;
+    }
+  };
+  return { silenced, release: () => { relay.state.trap = null; for (const pair of silenced) pair.cut(); } };
+}
+
+test('M6AA-01: an ordinary login writes exactly one login record — the admitted actor, a server-generated request_id its log line carries, a platform scope, a one-way session reference — and the cookie works', async () => {
+  m6aaSince = (await owner`select pg_catalog.clock_timestamp()::text as at`)[0].at;
+  await withEntry({}, async (ctx) => {
+    const admin = await auditedActor('m6aa01');
+    const reply = await m6aaLogin(ctx, admin.token);
+    const session = issued(reply);
+    const rows = await recordsOf('login', admin.id);
+    assert.equal(rows.length, 1, 'exactly one login record');
+    assertSessionRecord(rows[0], 'login', admin.id);
+    assert.deepEqual(rows[0].metadata, {
+      sessionRef: sessionRefOf(sessionKeyOf(session)), authenticatedAt: Number(await authenticatedAtOf(session)),
+    }, 'the session it created, by reference, and the sign-in time bound into it');
+    const line = await requestLine(ctx, reply);
+    assert.equal(line.status, 200);
+    assert.equal(line.operationId, rows[0].request_id, 'the record and its request\'s log line share the id this server generated');
+    assert.notEqual(rows[0].request_id, reply.headers['x-request-id'], 'never the client\'s correlator');
+    assert.equal((await currentOf(ctx, session)).status, 200, 'the cookie works');
+  });
+});
+
+test('M6AA-02: a recent sign-in issues a new session and one reauthenticate record naming the session it replaced; the old cookie is refused', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await auditedActor('m6aa02');
+    const old = await m6aaSignIn(ctx, admin);
+    const reply = await m6aaReauth(ctx, admin.token, old);
+    const renewed = issued(reply);
+    const rows = await recordsOf('reauthenticate', admin.id);
+    assert.equal(rows.length, 1, 'exactly one reauthenticate record');
+    assertSessionRecord(rows[0], 'reauthenticate', admin.id);
+    assert.deepEqual(rows[0].metadata, {
+      sessionRef: sessionRefOf(sessionKeyOf(renewed)), replacedSessionRef: sessionRefOf(sessionKeyOf(old)),
+      authenticatedAt: Number(await authenticatedAtOf(renewed)),
+    });
+    assert.equal((await requestLine(ctx, reply)).operationId, rows[0].request_id);
+    assert.equal((await recordsOf('login', admin.id)).length, 1, 'the first sign-in\'s record alone: a reauthentication is not a login record');
+    assert.equal(await sessionExists(sessionKeyOf(old)), false, 'the replaced record is gone');
+    assert.equal((await currentOf(ctx, old)).status, 401, 'the old cookie is no session');
+    assert.equal((await currentOf(ctx, renewed)).status, 200);
+  });
+});
+
+test('M6AA-03: logout ends the presented session and clears its cookie (204), writing one logout record with no actor that names the session its login record created', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await auditedActor('m6aa03');
+    const session = await m6aaSignIn(ctx, admin);
+    const [login] = await recordsOf('login', admin.id);
+    const reply = await m6aaLogout(ctx, session);
+    assert.equal(reply.status, 204, reply.body);
+    assert.equal(reply.headers['set-cookie']?.[0], CLEARED_COOKIE, 'the cookie is cleared');
+    assert.equal(await sessionExists(sessionKeyOf(session)), false, 'the record is gone');
+    assert.equal((await currentOf(ctx, session)).status, 401, 'the cookie is no session');
+    const rows = await recordsNaming('logout', login.metadata.sessionRef);
+    assert.equal(rows.length, 1, 'exactly one logout record, naming the session the login record created');
+    assertSessionRecord(rows[0], 'logout', null);
+    assert.deepEqual(rows[0].metadata, { sessionRef: sessionRefOf(sessionKeyOf(session)) });
+    const line = await requestLine(ctx, reply);
+    assert.equal(line.operationId, rows[0].request_id);
+    assert.equal(line.reason, undefined, 'the audited ending, not the fallback');
+  });
+});
+
+test('M6AA-04: an unknown credential and a principal admission refuses are each a 401 that writes no record at all', async () => {
+  await withEntry({}, async (ctx) => {
+    const noGrant = await auditedActor('m6aa04-none', []);
+    const unknownToken = `tok-m6aa04-unknown-${SUFFIX}`;
+    M6AA_SECRETS.add(unknownToken);
+    const total = await auditTotal();
+    const unknown = await m6aaLogin(ctx, unknownToken);
+    assert.equal(unknown.status, 401, unknown.body);
+    assert.equal(unknown.headers['set-cookie'], undefined);
+    const denied = await m6aaLogin(ctx, noGrant.token);
+    assert.equal(denied.status, 401, denied.body);
+    assert.equal(denied.headers['set-cookie'], undefined);
+    assert.equal((await requestLine(ctx, denied)).reason, 'login_admission_denied');
+    assert.equal(await auditTotal(), total, 'no record: none with an actor, none without');
+    assert.equal((await recordsOf('login', noGrant.id)).length, 0, 'no login record');
+    assert.deepEqual(await sessionKeysOf(noGrant), [], 'and no session');
+  });
+});
+
+test('M6AA-05: a missing or non-TOTP second factor is a 401 with no session and no record', async () => {
+  await withEntry({}, async (ctx) => {
+    const total = await auditTotal();
+    for (const [label, secondFactor, reason] of [['missing', null, 'login_mfa_missing'], ['phone', 'phone', 'login_mfa_unsupported']]) {
+      const act = await auditedActor(`m6aa05-${label}`);
+      TOKENS.set(act.token, { uid: act.uid, secondFactor });
+      const reply = await m6aaLogin(ctx, act.token);
+      assert.equal(reply.status, 401, `${label}: ${reply.body}`);
+      assert.equal(reply.headers['set-cookie'], undefined, label);
+      assert.equal((await requestLine(ctx, reply)).reason, reason, label);
+      assert.deepEqual(await sessionKeysOf(act), [], `${label}: no session`);
+    }
+    assert.equal(await auditTotal(), total, 'no record');
+  });
+});
+
+test('M6AA-06: a different administrator\'s reauthentication is a 401 that writes no record; the first session still works', async () => {
+  await withEntry({}, async (ctx) => {
+    const first = await auditedActor('m6aa06-first');
+    const second = await auditedActor('m6aa06-second');
+    const session = await m6aaSignIn(ctx, first);
+    const total = await auditTotal();
+    const reply = await m6aaReauth(ctx, second.token, session);
+    assert.equal(reply.status, 401, reply.body);
+    assert.equal(reply.headers['set-cookie'], undefined);
+    assert.equal((await requestLine(ctx, reply)).reason, 'login_reauth_mismatch');
+    assert.equal(await auditTotal(), total, 'no record');
+    for (const act of [first, second]) assert.equal((await recordsOf('reauthenticate', act.id)).length, 0, 'no reauthenticate record');
+    assert.equal((await currentOf(ctx, session)).status, 200, 'the first session still works');
+    assert.deepEqual(await sessionKeysOf(second), [], 'the second administrator holds no session');
+  });
+});
+
+test('M6AA-07: a reauthentication presenting a stale-version, a revoked or an absent session is a 401 that writes no record', async () => {
+  await withEntry({}, async (ctx) => {
+    const stale = await auditedActor('m6aa07-stale');
+    const staleSession = await m6aaSignIn(ctx, stale);
+    // The principal's standing moved after the session was issued: its bound version is no longer the one admission gives.
+    const moved = await owner`update tmpos_session.session set security_version = 'm6aa-superseded-version'
+      where session_key = ${sessionKeyOf(staleSession)} returning session_key`;
+    assert.equal(moved.length, 1);
+    const revoked = await auditedActor('m6aa07-revoked');
+    const revokedSession = await m6aaSignIn(ctx, revoked);
+    assert.equal((await m6aaLogout(ctx, revokedSession)).status, 204);
+    const absent = await auditedActor('m6aa07-absent');
+    const neverIssued = { cookie: `${SESSION_COOKIES.admin}=${randomBytes(32).toString('base64url')}` };
+    M6AA_SECRETS.add(idOf(neverIssued)).add(sessionKeyOf(neverIssued));
+
+    const total = await auditTotal();
+    for (const [act, session, reason, keys] of [
+      [stale, staleSession, 'login_reauth_stale_version', [sessionKeyOf(staleSession)]],
+      [revoked, revokedSession, 'login_reauth_no_session', []],
+      [absent, neverIssued, 'login_reauth_no_session', []],
+    ]) {
+      const reply = await m6aaReauth(ctx, act.token, session);
+      assert.equal(reply.status, 401, `${reason}: ${reply.body}`);
+      assert.equal(reply.headers['set-cookie'], undefined, reason);
+      assert.equal((await requestLine(ctx, reply)).reason, reason);
+      assert.equal((await recordsOf('reauthenticate', act.id)).length, 0, `${reason}: no reauthenticate record`);
+      assert.deepEqual(await sessionKeysOf(act), keys, `${reason}: no session created or ended`);
+    }
+    assert.equal(await auditTotal(), total, 'no record of any kind');
+  });
+});
+
+test('M6AA-08: an audit record that cannot be written — a raising trigger, a trigger past the deadline, a trigger discarding the row, a revoked INSERT — fails the login closed: 503, no cookie, no new session, the presented session untouched, no record', async () => {
+  await withEntry({}, async (ctx) => {
+    for (const fault of AUDIT_FAULTS) {
+      const admin = await auditedActor(`m6aa08-${fault}`);
+      const presented = await m6aaSignIn(ctx, admin);
+      const keys = await sessionKeysOf(admin);
+      const total = await auditTotal();
+      let elapsed;
+      const reply = await withAuditFault(fault, async () => {
+        const started = Date.now();
+        try {
+          return await m6aaLogin(ctx, admin.token, { cookie: presented.cookie });
+        } finally {
+          elapsed = Date.now() - started;
+        }
+      });
+      assert.equal(reply.status, 503, `${fault}: ${reply.body}`);
+      assert.equal(reply.headers['set-cookie'], undefined, `${fault}: no cookie`);
+      assert.equal(await auditTotal(), total, `${fault}: no record`);
+      assert.deepEqual(await sessionKeysOf(admin), keys, `${fault}: no new session, and the presented one is still stored`);
+      assert.equal((await currentOf(ctx, presented)).status, 200, `${fault}: the presented session still works`);
+      assert.match((await requestLine(ctx, reply)).reason, /^session_(unavailable|timeout)$/, fault);
+      if (fault === 'sleep') assert.ok(elapsed >= 2_500, `the trigger held the INSERT to the store's statement bound: ${elapsed} ms`);
+    }
+  });
+});
+
+test('M6AA-08/12: under the same four faults a logout still ends the session — 204, cookie cleared, durably revoked — writes no record, and logs the record unconfirmed', async () => {
+  await withEntry({}, async (ctx) => {
+    for (const fault of AUDIT_FAULTS) {
+      const admin = await auditedActor(`m6aa12-${fault}`);
+      const session = await m6aaSignIn(ctx, admin);
+      const total = await auditTotal();
+      const reply = await withAuditFault(fault, () => m6aaLogout(ctx, session));
+      // M6AA-12: the response, the cookie, the revocation and the absent record, each judged on its own.
+      assert.equal(reply.status, 204, `${fault} (response): ${reply.body}`);
+      assert.equal(reply.headers['set-cookie']?.[0], CLEARED_COOKIE, `${fault} (cookie): cleared`);
+      assert.equal(await sessionExists(sessionKeyOf(session)), false, `${fault} (revocation): the record is gone`);
+      assert.equal((await currentOf(ctx, session)).status, 401, `${fault} (revocation): the cookie is no session`);
+      assert.equal(await auditTotal(), total, `${fault} (record): none written`);
+      assert.equal((await recordsNaming('logout', sessionRefOf(sessionKeyOf(session)))).length, 0, `${fault} (record): no logout record`);
+      const line = await requestLine(ctx, reply);
+      assert.equal(line.reason, 'logout_audit_unconfirmed', `${fault} (log)`);
+      const warned = logRecords(ctx).filter((r) => r.event === 'session_logout_audit_unconfirmed' && r.requestId === line.requestId);
+      assert.equal(warned.length, 1, `${fault} (log): one warning`);
+      assert.equal(warned[0].level, 'warn');
+      assert.equal(warned[0].operationId, line.operationId);
+    }
+  });
+});
+
+// The whole database is down, so the limiter answers first (M6EP-18): what this proves is that nothing commits. A failure
+// of the session store's own transaction before its commit is M6AA-08's.
+test('M6AA-09: with the store down a login and a logout each answer 503 and commit nothing; restored, the session is exactly as it was', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await auditedActor('m6aa09');
+    const session = await m6aaSignIn(ctx, admin);
+    const keys = await sessionKeysOf(admin);
+    const total = await auditTotal();
+    await storeDown(ctx.relay);
+    const login = await m6aaLogin(ctx, admin.token, { cookie: session.cookie });
+    assert.equal(login.status, 503, login.body);
+    assert.equal(login.headers['set-cookie'], undefined);
+    assert.equal((await m6aaLogout(ctx, session)).status, 503);
+    await ctx.relay.restore();
+    assert.ok(await waitReady(ctx), 'the store is back');
+    assert.equal(await auditTotal(), total, 'no record committed');
+    assert.deepEqual(await sessionKeysOf(admin), keys, 'no session created or ended');
+    assert.equal((await currentOf(ctx, session)).status, 200, 'the session still works: nothing was revoked');
+  });
+});
+
+test('M6AA-10: a reauthentication whose COMMIT answer is lost is a 503 with no cookie, and the records describe exactly what committed', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await auditedActor('m6aa10');
+    const old = await m6aaSignIn(ctx, admin);
+    const trap = loseCommitAnswer(ctx.relay);
+    let reply;
+    try {
+      reply = await m6aaReauth(ctx, admin.token, old);
+    } finally {
+      trap.release();
+    }
+    assert.equal(trap.silenced.length, 1, 'one COMMIT reached the server, and its answer was dropped');
+    assert.equal(reply.status, 503, reply.body);
+    assert.equal(reply.headers['set-cookie'], undefined, 'no cookie: nobody holds the new session\'s identifier');
+    const line = await requestLine(ctx, reply);
+    assert.equal(line.reason, 'session_timeout', 'the outcome was unknown at the port deadline');
+
+    // The COMMIT reached the server before its answer was dropped: what it committed becomes visible.
+    let rows = [];
+    for (const until = Date.now() + 5_000; rows.length === 0 && Date.now() < until; await delay(50)) rows = await recordsOf('reauthenticate', admin.id);
+    assert.equal(rows.length, 1, 'the committed reauthentication\'s record');
+    assert.equal(rows[0].request_id, line.operationId, 'joined to the 503 by the id this server generated');
+    const live = await sessionKeysOf(admin);
+    assert.equal(live.length, 1, 'one session: the undelivered new one');
+    assert.notEqual(live[0], sessionKeyOf(old));
+    const [{ authenticated_at: bound }] = await owner`select authenticated_at from tmpos_session.session where session_key = ${live[0]}`;
+    assert.deepEqual(rows[0].metadata, {
+      sessionRef: sessionRefOf(live[0]), replacedSessionRef: sessionRefOf(sessionKeyOf(old)), authenticatedAt: Number(bound),
+    }, 'the record names exactly the session that exists and the one that ended');
+    assert.equal((await currentOf(ctx, old)).status, 401, 'the presented session ended with the commit: the administrator signs in again');
+  });
+});
+
+test('M6AA-11: repeated logins each record their own session; concurrent reauthentications on one cookie record exactly the sessions they created, and exactly one claims the replaced one', async () => {
+  await withEntry({}, async (ctx) => {
+    const repeat = await auditedActor('m6aa11-repeat');
+    const sessions = [];
+    for (let i = 0; i < 3; i += 1) sessions.push(await m6aaSignIn(ctx, repeat));
+    const refs = sessions.map((s) => sessionRefOf(sessionKeyOf(s))).sort();
+    const logins = await recordsOf('login', repeat.id);
+    assert.deepEqual(logins.map((r) => r.metadata.sessionRef).sort(), refs, 'one login record per session, each naming its own');
+    assert.equal(new Set(logins.map((r) => r.request_id)).size, 3, 'each under its own operation id');
+    assert.deepEqual((await sessionKeysOf(repeat)).map(sessionRefOf).sort(), refs, 'every one of them live');
+
+    // DA-61: concurrent reauthentications may each create a session; no exactly-once claim is made on sessions.
+    const racer = await auditedActor('m6aa11-race');
+    const old = await m6aaSignIn(ctx, racer);
+    const oldRef = sessionRefOf(sessionKeyOf(old));
+    const replies = await Promise.all([1, 2, 3].map(() => m6aaReauth(ctx, racer.token, old)));
+    for (const reply of replies) assert.ok([200, 401, 503].includes(reply.status), `${reply.status}: ${reply.body}`);
+    const delivered = replies.filter((r) => r.status === 200).map(issued);
+    assert.ok(delivered.length >= 1, 'at least one reauthentication succeeded');
+    const live = await sessionKeysOf(racer);
+    assert.ok(!live.includes(sessionKeyOf(old)), 'the presented session is gone');
+    for (const s of delivered) assert.ok(live.includes(sessionKeyOf(s)), 'every delivered session is stored');
+    const reauths = await recordsOf('reauthenticate', racer.id);
+    assert.deepEqual(reauths.map((r) => r.metadata.sessionRef).sort(), live.map(sessionRefOf).sort(),
+      'as many reauthenticate records as new sessions, matched one to one by reference');
+    // At most one record may ever claim a session; here it is gone, so the one transaction that ended it says so.
+    const claims = await owner`select 1 from public.audit_event
+      where action_id = ${SESSION_AUDIT.reauthenticate} and metadata->>'replacedSessionRef' = ${oldRef}`;
+    assert.equal(claims.length, 1, 'exactly one record claims to have replaced the presented session');
+  });
+});
+
+test('M6AA-13: no persisted session record carries a cookie, session id, store key, CSRF token, ID token, provider uid or any client-sent value', async () => {
+  assert.ok(m6aaSince !== null, 'M6AA-01 ran first and marked the section\'s start');
+  const rows = await owner`select * from public.audit_event
+    where action_id in ${owner(Object.values(SESSION_AUDIT))} and occurred_at >= ${m6aaSince}::timestamptz`;
+  assert.deepEqual([...new Set(rows.map((r) => r.action_id))].sort(), Object.values(SESSION_AUDIT).sort(), 'every kind of record was read');
+  const needles = [...M6AA_SECRETS];
+  assert.ok(needles.length > 50, `the values to look for were collected: ${needles.length}`);
+  for (const row of rows) {
+    assert.match(row.request_id, UUID_RE, 'request_id is always the server\'s own');
+    assert.equal(row.trace_id, null, 'and no client correlator is kept beside it');
+    const text = JSON.stringify(row); // every column, the metadata included
+    for (const needle of needles) assert.ok(!text.includes(needle), `${row.action_id} carries a value it must not: ${needle.slice(0, 12)}...`);
+  }
+});
+
+test('M6AA-14: the runtime login may only INSERT into audit_event, through tmpos_audit_writer; it owns nothing there or in tmpos_session, and reading or rewriting the trail is refused', async () => {
+  const privileges = await owner`select p.name, pg_catalog.has_table_privilege(${RUNTIME_LOGIN}, 'public.audit_event', p.name) as held
+    from pg_catalog.unnest(array['INSERT', 'SELECT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) as p(name)`;
+  assert.deepEqual(Object.fromEntries(privileges.map((r) => [r.name, r.held])), {
+    INSERT: true, SELECT: false, UPDATE: false, DELETE: false, TRUNCATE: false, REFERENCES: false, TRIGGER: false,
+  });
+  const [via] = await owner`select
+      array(select m.roleid::regrole::text from pg_catalog.pg_auth_members m
+        where m.member = ${RUNTIME_LOGIN}::regrole order by 1) as roles,
+      pg_catalog.has_table_privilege('tmpos_audit_writer', 'public.audit_event', 'INSERT') as writer,
+      pg_catalog.has_table_privilege('tmpos_app', 'public.audit_event', 'INSERT') as app,
+      pg_catalog.has_table_privilege('public', 'public.audit_event', 'INSERT') as everyone,
+      exists (select 1 from pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) a
+        where c.oid = 'public.audit_event'::regclass and a.grantee = ${RUNTIME_LOGIN}::regrole) as direct`;
+  assert.deepEqual({ ...via }, { roles: ['tmpos_app', 'tmpos_audit_writer'], writer: true, app: false, everyone: false, direct: false },
+    'the INSERT is tmpos_audit_writer\'s: not tmpos_app\'s, not PUBLIC\'s, never a direct grant');
+  const owned = await owner`select o.kind, o.name from (
+      select 'schema' as kind, n.nspname::text as name, n.nspowner as owner from pg_catalog.pg_namespace n
+        where n.nspname in ('public', 'tmpos_session')
+      union all select 'relation', c.oid::regclass::text, c.relowner from pg_catalog.pg_class c
+        where c.relnamespace in ('public'::regnamespace, 'tmpos_session'::regnamespace)
+      union all select 'routine', p.oid::regprocedure::text, p.proowner from pg_catalog.pg_proc p
+        where p.pronamespace in ('public'::regnamespace, 'tmpos_session'::regnamespace)
+      union all select 'type', t.oid::regtype::text, t.typowner from pg_catalog.pg_type t
+        where t.typnamespace in ('public'::regnamespace, 'tmpos_session'::regnamespace)
+    ) o where pg_catalog.pg_has_role(${RUNTIME_LOGIN}, o.owner, 'MEMBER')`;
+  assert.deepEqual(owned.map((r) => `${r.kind} ${r.name}`), [], 'nothing in public or tmpos_session is owned by the login or a role it belongs to');
+
+  assert.deepEqual(await probeAuditInsert(), { count: 1 }, 'its INSERT works (rolled back)');
+  const refused = await asRuntimeLogin(async (sql) => {
+    const codes = {};
+    for (const [name, attempt] of [
+      ['SELECT', () => sql`select count(*) from public.audit_event`],
+      ['UPDATE', () => sql`update public.audit_event set reason_code = reason_code where false`],
+      ['DELETE', () => sql`delete from public.audit_event where false`],
+    ]) {
+      codes[name] = await attempt().then(() => 'allowed', (err) => err.code);
+    }
+    return codes;
+  });
+  assert.deepEqual(refused, { SELECT: '42501', UPDATE: '42501', DELETE: '42501' }, 'each refused: insufficient privilege');
 });
 
 test('M6EP-FORCED: a hung client.end() forces shutdown at the deadline, never before it, exactly once', async () => {

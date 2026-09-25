@@ -186,6 +186,18 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
         `${f}: the artifact carries no per-process transaction port or outbox`);
     }
     assert.deepEqual(bare.sort(), ARTIFACT_BARE_IMPORTS, 'the artifact imports exactly these packages, each from exactly one module');
+
+    // M6-ADMIN-AUDIT-P1 (M6AA-15): the built session store writes its records through the built audit writer, and the built
+    // administrative boundary issues and ends a session only through the store's audited pair, refusing at startup a store
+    // without it. The exact ARTIFACT list and the checks above already keep every testkit and migration module out of it.
+    const built = (m) => readFileSync(join(out, m), 'utf8');
+    const store = built('server/persistence/postgresSessionStore.js');
+    assert.ok(importSpecifiers(store).includes('../platform-identity/auditEventWriter.js'), 'the built session store imports the audit writer');
+    assert.match(store, /\bwriteAuditEvent\(/, 'and writes its records through it');
+    const boundary = built('server/runtime/sessions.js');
+    for (const [pattern, part] of [[/\bsessions\.establish\(/, 'establish'], [/\bsessions\.end\(/, 'end'], [/'session_store_audit_required'/, 'the setup refusal']]) {
+      assert.match(boundary, pattern, `the built administrative boundary's audited path: ${part}`);
+    }
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
