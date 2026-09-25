@@ -61,24 +61,24 @@ import {
   PLATFORM_ORDERING as PLATFORM_FAMILY_ORDERING,
   meetsFamilyLevel,
   permissionLevelRank,
-} from '../../src/authorization/permissionFamilies';
+} from '../../src/authorization/permissionFamilies.js';
 import {
   PLATFORM_MONEY_PARENT_MINIMUM,
   builtInMoneyGrants,
   hasExplicitMoneyGrant,
   isPlatformMoneyCapability,
   isTenantMoneyCapability,
-} from '../../src/authorization/moneyCapabilities';
+} from '../../src/authorization/moneyCapabilities.js';
 import type {
   PermissionLevelValue,
   PlatformRoleId,
   TenantRoleId,
-} from './authorizationConstants';
+} from './authorizationConstants.js';
 import type {
   EffectivePermissions,
   EffectiveSubPermissions,
   FeatureEntitlements,
-} from './authorizationContract';
+} from './authorizationContract.js';
 
 type Level = PermissionLevelValue;
 

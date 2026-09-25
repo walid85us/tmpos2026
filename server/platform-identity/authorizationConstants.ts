@@ -131,7 +131,7 @@ export type PermissionLevelValue = (typeof PERMISSION_LEVEL_VALUES)[number];
 export {
   TENANT_STORE_ORDERING as TENANT_PERMISSION_ORDERING,
   PLATFORM_ORDERING as PLATFORM_PERMISSION_ORDERING,
-} from '../../src/authorization/permissionFamilies';
+} from '../../src/authorization/permissionFamilies.js';
 
 // =============================================================================
 // Role ids (mirror; duplicated, NOT imported from the client engine)

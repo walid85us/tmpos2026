@@ -36,8 +36,8 @@ import type {
   DecisionValue,
   ResultStatusValue,
   EvidenceLevel,
-} from './authorizationConstants';
-import { AUDIT_CONTRACT_VERSION, AUDIT_EVALUATED_BY } from './authorizationConstants';
+} from './authorizationConstants.js';
+import { AUDIT_CONTRACT_VERSION, AUDIT_EVALUATED_BY } from './authorizationConstants.js';
 
 // =============================================================================
 // Metadata (allow-listed, redacted)

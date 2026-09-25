@@ -1,12 +1,12 @@
 {
-  "//": "Phase 4.0 M3 - emitting build for the secure Node API runtime skeleton ONLY. Compiles server/runtime/** (excluding tests) to runnable ESM under dist-server/. Standalone (not extended from the noEmit frontend config) so the artifact carries no DOM/JSX libs and no legacy sidecar.",
+  "//": "Phase 4.0 M6-ENTRY-P1 - emitting the production executable. Compiles server/entry/main.ts and its transitive closure (following imports) to runnable ESM under dist-server/server/entry/main.js. Standalone (not extended from the noEmit frontend config) so the artifact carries no DOM/JSX libs and no legacy sidecar.",
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
     "types": ["node"],
-    "rootDir": "server/runtime",
+    "rootDir": ".",
     "outDir": "dist-server",
     "strict": true,
     "noImplicitAny": true,
@@ -18,6 +18,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["server/runtime/**/*.ts"],
-  "exclude": ["server/runtime/**/*.test.ts", "server/runtime/**/*.testkit.ts"]
+  "files": ["server/entry/main.ts"],
+  "exclude": []
 }

@@ -52,15 +52,15 @@ import {
   TENANT_SUB_PERMISSIONS,
   isPermissionLevel,
   meetsPlatformPermissionLevel,
-} from './permissionCatalog';
-import { PLATFORM_ROLE_IDS } from './authorizationConstants';
-import type { PermissionLevelValue } from './authorizationConstants';
+} from './permissionCatalog.js';
+import { PLATFORM_ROLE_IDS } from './authorizationConstants.js';
+import type { PermissionLevelValue } from './authorizationConstants.js';
 import {
   PLATFORM_MONEY_PARENT_MINIMUM,
   builtInMoneyGrants,
   hasExplicitMoneyGrant,
   isPlatformMoneyCapability,
-} from '../../src/authorization/moneyCapabilities';
+} from '../../src/authorization/moneyCapabilities.js';
 
 /** The scope a permission is evaluated at — identical to routes.ts AuthorizationScope. */
 export type CanonicalPermissionScope = 'platform' | 'tenant' | 'store';

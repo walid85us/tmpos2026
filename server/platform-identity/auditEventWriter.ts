@@ -51,7 +51,7 @@ import {
   AUDIT_EVENT_EVALUATED_BY,
   AUDIT_WRITE_FAILURE_STRATEGY,
   AUDIT_TABLE_INTENT,
-} from './auditEventContract';
+} from './auditEventContract.js';
 import {
   AUDIT_CONTRACT_VERSION,
   SCOPE_TYPE_VALUES,
@@ -64,7 +64,7 @@ import {
   type DecisionValue,
   type ResultStatusValue,
   type EvidenceLevel,
-} from './authorizationConstants';
+} from './authorizationConstants.js';
 /**
  * The executor seam, stated STRUCTURALLY: a parameterised tagged template plus the driver's
  * `json` helper, which is all this writer uses.

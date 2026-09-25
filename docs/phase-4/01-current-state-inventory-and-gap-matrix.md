@@ -14,7 +14,7 @@
 
 | Invariant | Finding |
 |---|---|
-| **Production topology** | `build = vite build` → static SPA bundle. **No backend is deployed.** `src/` imports nothing from `server/`. Every Express route is a DEV-only `tsx` sidecar, unreachable in the production artifact. |
+| **Production topology** | `build = vite build` → static SPA bundle. **A deployable backend entry exists in code (M6-ENTRY-P1) but is not deployed.** `src/` imports nothing from `server/`. The production entry (`server/entry/productionEntry.ts`) serves the administrative boundary only; the tenant/store API is not in scope for M6-ENTRY-P1. Every DEV-only route is in the Express sidecars, unreachable in the production artifact. |
 | **Authentication** | Firebase Auth (real). `onAuthStateChanged` → `getDoc(users/{uid})` → `role` (`src/context/AccessContext.tsx:132–183`). |
 | **Authorization (live app)** | **100% client-side.** `role` → `isPlatformRole` → `userType` → shell; gated by `AccessGuard` (`<Navigate>` redirects) + `canAccess`/`checkPermission`/`checkSubPermission`. No server re-check exists at runtime. |
 | **Tenant identity** | **Hardcoded.** Every non-platform user gets mock `{ id:'tenant-1', plan:'growth', status:'active' }` (`AccessContext.tsx:153–159`). No real multi-tenancy; `SEED_*` are global constants with no `tenantId` filtering. |
@@ -23,7 +23,7 @@
 | **Platform permissions** | `platformPermissionsConfig.ts` is "single source of truth" but self-describes *"does NOT introduce server-side RBAC… all gating is UI-enforced"*; overrides persist to `sessionStorage('platform_permissions_v1')`. |
 | **Business persistence** | `src/context/StoreLocalState.tsx` = `useState` seeded from `SEED_*`. **Every business write is lost on reload.** No DB/API/localStorage write-back for domain data. |
 | **Audit (business + platform)** | "Audit" = human-readable notes appended into the same in-memory/`sessionStorage` record arrays. Not append-only, not server-side. The owner "Audit & Security" log is user-writable `sessionStorage` — **zero integrity**. |
-| **Durable backend** | Postgres schema (`server/platform-identity/migrations/001–007`) is **identity/authz/audit/store only** — 10 tables (8 in `public` from 001–004, plus the two `tmpos_internal` store tables from 006), no business tables. 005 adds the runtime roles and RLS, 007 adds three identity-resolution routines and no table. Reachable only via the DEV-only `:5002` sidecar. See [05](./05-canonical-data-ownership-and-api-db-contracts.md). |
+| **Durable backend** | Postgres schema (`server/platform-identity/migrations/001–007`) is **identity/authz/audit/store only** — 10 tables (8 in `public` from 001–004, plus the two `tmpos_internal` store tables from 006), no business tables. 005 adds the runtime roles and RLS, 007 adds three identity-resolution routines and no table. Reachable only via the DEV-only `:5002` sidecar *(until M6-ENTRY-P1; since then the production entry, code-only and not deployed, also reaches PostgreSQL, through `APP_DATABASE_URL`'s runtime login only)*. See [05](./05-canonical-data-ownership-and-api-db-contracts.md). |
 | **Test coverage** | `src/components/**` and `src/owner/**`: **0** tests. `src/backend-control-plane/**`: 8 client-classifier tests. `server/bcp-pilot/**` + `server/platform-identity/**`: substantial (the BCP corpus + platform-identity suites). Business/UI: unverified. |
 
 ---
@@ -112,7 +112,9 @@ All owner data originates in `src/owner/mockData.ts` (SEED) with a **`sessionSto
 
 ---
 
-## E. Server / API surfaces (all DEV-only sidecars, none in production build)
+## E. Server / API surfaces (all DEV-only sidecars, none in production build; since M6-ENTRY-P1 the production build also holds the production entry)
+
+*Since M6-ENTRY-P1 the production entry (`server/entry/productionEntry.ts`) is a code-only, undeployed server serving the 8 routes of [02 §2.1](./02-target-production-architecture.md); the sidecars below stay DEV-only and outside that build.*
 
 ### Shipping API — `server/index.ts` (:5001) — **ELIMINATED in Phase 4.0 M3**
 **Status: REMOVED.** The sidecar and its whole cluster (`server/index.ts`, `credential-store.ts`,

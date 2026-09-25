@@ -34,8 +34,8 @@ import type {
   PermissionLevelValue,
   PlatformRoleId,
   TenantRoleId,
-} from './authorizationConstants';
-import { AUTHORIZATION_CONTRACT_VERSION, AUTHORIZATION_EVALUATED_BY } from './authorizationConstants';
+} from './authorizationConstants.js';
+import { AUTHORIZATION_CONTRACT_VERSION, AUTHORIZATION_EVALUATED_BY } from './authorizationConstants.js';
 
 // =============================================================================
 // Structured sub-shapes

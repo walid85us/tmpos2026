@@ -6,7 +6,7 @@
 
 ## What this package establishes
 
-TM POS2026 is today a **client-authoritative React SPA** whose production artifact is a **static `vite build` bundle with no backend deployed**. Live authorization is 100% in the browser, business data is in-memory mock state lost on reload, and the only durable backend (Postgres identity/authz/audit) plus every Express server are **DEV-only sidecars unreachable in production**. This blueprint defines how the platform moves to a **deployable, server-authoritative, multi-tenant SaaS** with a **separate Backend Control Plane login**, canonical IAM, durable business persistence, and a complete production-gate roadmap.
+TM POS2026 is today a **client-authoritative React SPA** whose production artifact is a **static `vite build` bundle**; **M6-ENTRY-P1 adds a deployable backend entry in code (serving the administrative boundary only), not yet deployed**. Live authorization is 100% in the browser, business data is in-memory mock state lost on reload, and the legacy Express servers are **DEV-only sidecars unreachable in production**; the production entry (`server/entry/productionEntry.ts`) is not one of them — it is a deployable server over the durable Postgres backend, code-only and not deployed. This blueprint defines how the platform moves to a **deployable, server-authoritative, multi-tenant SaaS** with a **separate Backend Control Plane login**, canonical IAM, durable business persistence, and a complete production-gate roadmap.
 
 ## Documents
 

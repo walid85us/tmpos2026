@@ -12,7 +12,7 @@
 // reads only the role's runtime configuration — never this table by role name.
 //
 // PURE: no runtime imports, no DOM, no storage — safe to import from the server.
-import type { PermissionFamily } from './permissionFamilies';
+import type { PermissionFamily } from './permissionFamilies.js';
 
 export type TenantMoneyCapability = 'approve_refunds' | 'approve_return';
 export type PlatformMoneyCapability = 'approve_billing_actions';

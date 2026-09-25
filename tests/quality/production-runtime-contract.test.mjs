@@ -2,19 +2,22 @@
 //
 // Proves the secure deployable skeleton's PRODUCTION contract without a network
 // or provider: (1) a compiled Node start contract (node against emitted JS, no
-// tsx/vite/watch); (2) an emitting server tsconfig that excludes tests; (3) the
-// runtime source imports no legacy sidecar / provider / business module; (4) the
-// compiled artifact emits runnable JS, no test files, and no forbidden import;
+// tsx/vite/watch); (2) an emitting server tsconfig that compiles the executable
+// (server/entry/main.ts) and its import closure only; (3) the runtime source imports
+// no legacy sidecar / provider / business module; (4) the compiled artifact is exactly
+// the executable's closure, emits no test files, imports exactly five bare packages
+// (each from one module) and carries no forbidden name;
 // (5) generated output is gitignored so it can never be staged; (6) routes reach
 // the runtime only through the central route table and the shared enforcement
 // chain, and that chain ships in the artifact; (7) request bodies reach handlers
 // only through the per-route body policy (no body parser, no parsed-body property);
-// (8) the production entry composes no session boundary, store or DEV adapter, and a
-// session identifier is read from the Cookie header only; (9) the in-memory session
-// store is test support that never ships in the artifact and is unreachable from the
-// provider-aware production composition root; (10) the M6 PostgreSQL store is composed by the
-// transaction root alone, for a route that requires idempotency (none yet), over a kernel only
-// the database-client boundary builds, with no migration authority and nothing in the artifact.
+// (8) the production entry composes the administrative session boundary alone and no
+// in-memory store or DEV adapter, and a session identifier is read from the Cookie header
+// only; (9) the in-memory session store is test support that never ships in the artifact
+// and is unreachable from the provider-aware production composition root; (10) the M6
+// PostgreSQL store is composed by the transaction root alone, over a kernel only the
+// database-client boundary builds; the entry reaches both only through that root, imports
+// the persistence layer type-only, and its import graph holds no migration authority.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -36,11 +39,43 @@ const REPO = resolve(HERE, '..', '..');
 const RUNTIME_DIR = join(REPO, 'server', 'runtime');
 
 // Legacy sidecars, providers, and business modules that must NEVER reach the
-// compiled production runtime.
-const FORBIDDEN = [
-  'credential-store', 'event-processor', 'safe-log', 'platform-identity',
-  'bcp-pilot', 'firebase-admin', 'firebase', 'postgres', '@supabase', 'supabase',
-  '/index',
+// compiled production artifact: no emitted file may even name one.
+const ARTIFACT_FORBIDDEN = [
+  'credential-store', 'event-processor', 'safe-log',
+  'platform-identity/server', 'identityLink', 'supabaseAuthAdapter',
+  'bcp-pilot', '@supabase',
+  '/index', 'migrationEngine', 'migrationExecutor', 'authorizationRepository',
+  // The Firebase client SDK (firebase/*, @firebase/*) and any loader that could reach a package
+  // outside the static census below (createRequire, getBuiltinModule).
+  'firebase/', 'createRequire', 'getBuiltinModule',
+];
+// The runtime tree (server/runtime) stays provider-free: beyond the above it imports no
+// identity or database module at all. The entry reaches the driver and the identity
+// provider only through server/platform-identity, pinned exactly by ARTIFACT_BARE_IMPORTS.
+const FORBIDDEN = [...ARTIFACT_FORBIDDEN, 'platform-identity', 'firebase-admin', 'firebase', 'postgres', 'supabase'];
+
+// M6-ENTRY-P1: the compiled artifact, exactly — the executable and its import closure, nothing more.
+const ARTIFACT = [
+  ...['platformAuthorization', 'productionSessions', 'productionTransactions', 'tenantAuthorization'].map((m) => `server/composition/${m}.js`),
+  ...['main', 'productionEntry'].map((m) => `server/entry/${m}.js`),
+  ...['postgresPlatformAdmission', 'postgresPrincipalResolver', 'postgresRateLimiter', 'postgresSessionStore', 'postgresStartupPreflight',
+    'postgresTenantAdmission', 'postgresTenantDirectory', 'postgresTransactionalStore', 'supervisedPgClient', 'tenantDisplayNameMutator',
+    'tenantStatusMutator'].map((m) => `server/persistence/${m}.js`),
+  ...['auditEventContract', 'auditEventWriter', 'authorizationConstants', 'authorizationContract', 'config', 'databaseEndpoint', 'db',
+    'firebaseAdminAuthAdapter', 'm5CanonicalPermissions', 'permissionCatalog'].map((m) => `server/platform-identity/${m}.js`),
+  ...['access', 'app', 'clientAddress', 'commandTransaction', 'config', 'correlation', 'deadline', 'idempotency', 'keyMaterial', 'lifecycle',
+    'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'routes', 'securityHeaders', 'sessions', 'tenantDirectory',
+    'tenantDisplayName', 'tenantState', 'tenantStatus'].map((m) => `server/runtime/${m}.js`),
+  'src/authorization/moneyCapabilities.js', 'src/authorization/permissionFamilies.js', 'src/types.js',
+].sort();
+// Its only bare (package) imports, each from exactly one module: the web framework, the database driver, the identity
+// provider's admin SDK and one built-in. Any other — the Firebase client SDK, @supabase, pg — fails.
+const ARTIFACT_BARE_IMPORTS = [
+  'crypto <= server/platform-identity/auditEventWriter.js',
+  'express <= server/runtime/app.js',
+  'firebase-admin/app <= server/platform-identity/firebaseAdminAuthAdapter.js',
+  'firebase-admin/auth <= server/platform-identity/firebaseAdminAuthAdapter.js',
+  'postgres <= server/platform-identity/db.js',
 ];
 
 function runtimeSourceFiles() {
@@ -77,13 +112,15 @@ test('package.json defines a compiled production build + node start contract', (
   assert.doesNotMatch(start, /\b(tsx|ts-node|vite|vitest|nodemon)\b|--watch/, 'start must not use a dev runner/watcher');
 });
 
-test('tsconfig.server.json emits JS, excludes tests, targets the runtime only', () => {
+test('tsconfig.server.json emits JS for the executable and its import closure only', () => {
   const cfg = JSON.parse(readFileSync(join(REPO, 'tsconfig.server.json'), 'utf8'));
   const co = cfg.compilerOptions || {};
   assert.notEqual(co.noEmit, true, 'server config must emit');
   assert.ok(co.outDir, 'server config must set an outDir');
-  assert.ok((cfg.include || []).some((p) => p.includes('server/runtime')), 'must include server/runtime');
-  assert.ok((cfg.exclude || []).some((p) => /test/.test(p)), 'tests must be excluded from the artifact');
+  // A test is emitted only if the executable imports one, which the exact artifact check below refuses.
+  assert.deepEqual(cfg.files, ['server/entry/main.ts'], 'the build compiles the executable alone, following its imports');
+  assert.equal(cfg.include, undefined, 'no include glob can add a module outside that closure');
+  assert.equal(co.rootDir, '.', 'the closure spans server/ and src/, so paths are kept from the repository root');
 });
 
 test('runtime source imports no legacy sidecar, provider, or business module', () => {
@@ -122,18 +159,23 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
       }
     })(out);
 
+    assert.deepEqual(emitted.map((f) => f.slice(out.length + 1)).sort(), ARTIFACT, 'the artifact is exactly the executable\'s import closure');
     const js = emitted.filter((f) => f.endsWith('.js'));
     assert.ok(js.length > 0, 'server build must emit JavaScript');
-    assert.ok(js.some((f) => /(^|\/)server\.js$/.test(f)), 'the production entry server.js must be emitted');
+    assert.ok(js.some((f) => /entry\/main\.js$/.test(f)), 'the production entry server/entry/main.js must be emitted');
     for (const mod of ['app.js', 'routes.js', 'access.js', 'requestSecurity.js', 'rateLimit.js', 'clientAddress.js', 'securityHeaders.js', 'sessions.js', 'deadline.js', 'idempotency.js', 'keyMaterial.js', 'commandTransaction.js', 'outbox.js']) {
       assert.ok(js.some((f) => f.endsWith(`/${mod}`)), `the shared enforcement chain must ship in the artifact: ${mod}`);
     }
     assert.ok(!emitted.some((f) => /\.test\.js$/.test(f)), 'test files must not be compiled into the artifact');
     assert.ok(!emitted.some((f) => /\.testkit\.js$/.test(f)), 'test support (the in-memory session store and rate limiter) must not be compiled into the artifact');
 
+    const bare = [];
     for (const f of js) {
       const src = readFileSync(f, 'utf8');
-      for (const bad of FORBIDDEN) assert.ok(!src.includes(bad), `${f}: emitted artifact references forbidden ${bad}`);
+      // A computed specifier (anything but one complete string literal) would hide a package from the census below.
+      assert.doesNotMatch(src, /\b(?:import|require)\s*\((?!\s*(['"])[^'"]*\1\s*\))/, `${f}: a computed import in the artifact`);
+      for (const spec of importSpecifiers(src)) if (!spec.startsWith('.') && !spec.startsWith('node:')) bare.push(`${spec} <= ${f.slice(out.length + 1)}`);
+      for (const bad of ARTIFACT_FORBIDDEN) assert.ok(!src.includes(bad), `${f}: emitted artifact references forbidden ${bad}`);
       assert.ok(!src.includes('createMemorySessionStore'), `${f}: the artifact carries no in-memory session store`);
       for (const harnessOnly of [WITNESS_PATH, STORE_WITNESS_PATH, 'tenantAdmissionWitness']) {
         assert.ok(!src.includes(harnessOnly), `${f}: the artifact carries the harness-only admission witness ${harnessOnly}`);
@@ -143,27 +185,27 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
       assert.ok(!/createMemoryCommandTransaction|createMemoryOutboxDeliveryStore|assertCommandTransactionContract|assertOutboxDeliveryContract/.test(src),
         `${f}: the artifact carries no per-process transaction port or outbox`);
     }
+    assert.deepEqual(bare.sort(), ARTIFACT_BARE_IMPORTS, 'the artifact imports exactly these packages, each from exactly one module');
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
 });
 
 test('the compiled entry actually runs under node and fails closed on missing config', () => {
-  // Build to the in-repo outDir so the emitted ESM can resolve `express` from
-  // node_modules, then execute it under plain node (not tsx) with NO classification:
-  // it must fail closed (exit 1) and emit the sanitized config-invalid event.
+  // Build to the in-repo outDir so the emitted ESM can resolve its packages from
+  // node_modules, then execute it under plain node (not tsx) with an empty configuration
+  // (PATH only, never the parent environment): it must refuse before composing anything
+  // (exit 1) and emit the sanitized startup_refused event for invalid configuration.
   const build = spawnSync('node_modules/.bin/tsc', ['-p', 'tsconfig.server.json'], { cwd: REPO, encoding: 'utf8', timeout: 120000 });
   try {
     assert.equal(build.status, 0, `server build must succeed:\n${(build.stdout || '') + (build.stderr || '')}`);
-    const entry = join(REPO, 'dist-server', 'server.js');
-    assert.ok(existsSync(entry), 'dist-server/server.js must exist');
-    const env = { ...process.env };
-    delete env.NODE_ENV;
-    delete env.PORT;
-    const run = spawnSync('node', [entry], { cwd: REPO, encoding: 'utf8', timeout: 20000, env });
+    const entry = join(REPO, 'dist-server', 'server', 'entry', 'main.js');
+    assert.ok(existsSync(entry), 'dist-server/server/entry/main.js must exist');
+    const run = spawnSync('node', [entry], { cwd: REPO, encoding: 'utf8', timeout: 20000, env: { PATH: process.env.PATH ?? '' } });
     assert.equal(run.status, 1, `missing-config start must exit 1:\n${run.stdout}\n${run.stderr}`);
     const out = (run.stdout || '') + (run.stderr || '');
-    assert.match(out, /startup_config_invalid/, 'must emit the sanitized config-invalid event');
+    assert.match(out, /startup_refused/, 'must emit the sanitized startup_refused event');
+    assert.match(out, /config_invalid/, 'and refuse on the configuration, before any database or provider is composed');
     assert.doesNotMatch(out, /at Object|node_modules\/|SyntaxError/, 'must not leak a stack trace');
   } finally {
     rmSync(join(REPO, 'dist-server'), { recursive: true, force: true });
@@ -197,12 +239,67 @@ test('request bodies reach handlers only through the per-route body policy', () 
   assert.match(readFileSync(join(RUNTIME_DIR, 'app.ts'), 'utf8'), /\breadBoundedBody\(/, 'app.ts must read bodies through the bounded reader');
 });
 
-test('the production entry composes no session boundary, store or DEV adapter', () => {
-  // The provider-free entry serves the operational routes only; the provider-aware composition
-  // root (server/composition) is the one production path to a session boundary (next test).
-  const entry = readFileSync(join(RUNTIME_DIR, 'server.ts'), 'utf8');
-  assert.doesNotMatch(entry, /\bsessions\s*:|createMemorySessionStore|DevDiagnostic|devActor|stubFirebase/,
-    'server.ts must compose no session boundary, session store or DEV adapter');
+test('the production entry composes the administrative session boundary alone, and no in-memory store or DEV adapter', () => {
+  // M6-ENTRY-P1: the executable composes the admin boundary over the durable stores the transaction root builds; the
+  // tenant boundary stays uncomposed (its origins are never read), and no test double or DEV adapter is named.
+  for (const f of ['main.ts', 'productionEntry.ts']) {
+    assert.doesNotMatch(readFileSync(join(REPO, 'server', 'entry', f), 'utf8'), /createMemory\w+|DevDiagnostic|devDiagnostic|devActor|stubFirebase/,
+      `server/entry/${f} must compose no in-memory store, test double or DEV adapter`);
+  }
+  const entry = readFileSync(join(REPO, 'server', 'entry', 'productionEntry.ts'), 'utf8');
+  assert.deepEqual([...entry.matchAll(/\baudiences:\s*(\[[^\]]*\])/g)].map((m) => m[1]), ["['admin']"], 'the entry composes the administrative boundary alone');
+  assert.doesNotMatch(entry, /SESSION_TENANT_ORIGINS/, 'and never reads the tenant boundary\'s configuration');
+  // The census behind that literal, from the syntax tree of every entry source: exactly one call of the session root,
+  // its options an object literal whose `audiences` is the literal ['admin'] — no spread and no variable in that position,
+  // no alias of the root — and no other session-boundary constructor named at all. A second boundary built through a
+  // variable (`{ audiences: both }`, `const opts = …`, a second call) passes the text check above but not this one. A
+  // namespace import or a dynamic import() would let a string-keyed member (`root['composeProductionSessions'](…)`) slip
+  // past an identifier census, so neither form is allowed and a string equal to a constructor name counts as naming it.
+  // A re-export (`export * as m from …`, `export { … } from …`) would hand the same namespace to a sibling, so none is allowed.
+  const ROOT = 'composeProductionSessions';
+  const OTHER_CONSTRUCTORS = /^(?:(?:compose|assemble|create)\w*Session\w*|createBoundary|durableSessionAdapters)$/;
+  const census = (f, source) => {
+    const found = [];
+    const visit = (n) => {
+      if (ts.isNamespaceImport(n)) assert.fail(`server/entry/${f} imports a module namespace: ${n.parent.parent.getText()}`);
+      if (ts.isExportDeclaration(n) && n.moduleSpecifier !== undefined) assert.fail(`server/entry/${f} re-exports from another module: ${n.getText()}`);
+      if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) assert.fail(`server/entry/${f} imports a module dynamically: ${n.getText()}`);
+      if (ts.isIdentifier(n) || ts.isStringLiteralLike(n)) {
+        if (n.text !== ROOT) {
+          assert.doesNotMatch(n.text, OTHER_CONSTRUCTORS, `server/entry/${f} names another session-boundary constructor: ${n.text}`);
+        } else {
+          const p = n.parent;
+          const imported = ts.isIdentifier(n) && ts.isImportSpecifier(p) && p.propertyName === undefined;
+          const called = ts.isIdentifier(n) && ts.isCallExpression(p) && p.expression === n;
+          assert.ok(imported || called, `server/entry/${f}: ${ROOT} is imported under its own name and called directly, never aliased, passed or string-keyed`);
+          if (called) found.push([f, p]);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(ts.createSourceFile(f, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
+    return found;
+  };
+  for (const bypass of [
+    `import * as root from '../composition/productionSessions.js';\nroot['${ROOT}'](env, deps, { audiences: ['admin', 'tenant'] });`,
+    `const root = await import('../composition/productionSessions.js');\nroot.${ROOT}(env, deps, opts);`,
+    `import { ${ROOT} as build } from '../composition/productionSessions.js';`,
+    `declare const m: Record<string, Function>;\nm['assembleSessions'](inventory);`,
+    `export * as sessionModule from '../composition/productionSessions.js';`,
+    `export { ${ROOT} } from '../composition/productionSessions.js';`,
+  ]) assert.throws(() => census('sample.ts', bypass), assert.AssertionError, `the census must catch: ${bypass}`);
+  const entrySources = readdirSync(join(REPO, 'server', 'entry')).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).sort();
+  assert.ok(entrySources.includes('main.ts') && entrySources.includes('productionEntry.ts'), `the census reads the real entry (${entrySources})`);
+  const calls = entrySources.flatMap((f) => census(f, readFileSync(join(REPO, 'server', 'entry', f), 'utf8')));
+  assert.deepEqual(calls.map(([f]) => f), ['productionEntry.ts'], `exactly one ${ROOT} call, in the production entry`);
+  const options = calls[0][1].arguments[2];
+  assert.ok(options !== undefined && ts.isObjectLiteralExpression(options), 'the options argument is an object literal, not a variable');
+  assert.ok(options.properties.every((p) => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name)), 'no spread, shorthand or computed key in the options');
+  const audiences = options.properties.filter((p) => p.name.text === 'audiences');
+  assert.equal(audiences.length, 1, 'the options name the composed boundaries exactly once');
+  const list = audiences[0].initializer;
+  assert.ok(ts.isArrayLiteralExpression(list) && list.elements.length === 1 && ts.isStringLiteral(list.elements[0]) && list.elements[0].text === 'admin',
+    `audiences is the literal ['admin'], not ${list.getText()}`);
   // A session identifier is read from the Cookie header only — never a URL, parameter or body.
   const sessions = readFileSync(join(RUNTIME_DIR, 'sessions.ts'), 'utf8');
   assert.doesNotMatch(sessions, /\breq(?:uest)?\s*\.\s*(?:query|params|url|originalUrl|body)\b/, 'sessions.ts must read identifiers from the Cookie header only');
@@ -363,9 +460,29 @@ test('durable idempotency is composed only by the transaction root, for a route 
   const port = readFileSync(join(RUNTIME_DIR, 'idempotency.ts'), 'utf8');
   assert.deepEqual(importSpecifiers(port).filter((s) => !s.startsWith('node:')).sort(), ['./deadline.js', './keyMaterial.js', './routes.js', './routes.js'],
     'the idempotency port imports node built-ins and the runtime only: no database, migration or provider adapter');
-  const entry = readFileSync(join(RUNTIME_DIR, 'server.ts'), 'utf8');
-  assert.doesNotMatch(entry, /\bidempotency\b|\btransactions\b|\bevents\s*:|\broutes\s*:/,
-    'the production entry composes no idempotency, transaction port, event contract or further route: the probes and the bounded fallback only');
+  // M6-ENTRY-P1: the deployable entry composes idempotency and the transaction port through the transaction root alone: it
+  // imports neither port module (nor the outbox), and hands the runtime exactly what composeProductionTransactions returned.
+  for (const f of ['main.ts', 'productionEntry.ts']) {
+    for (const spec of importSpecifiers(readFileSync(join(REPO, 'server', 'entry', f), 'utf8'))) {
+      assert.doesNotMatch(spec, /\/(?:idempotency|commandTransaction|outbox)\.js$/, `server/entry/${f} imports a port module directly: ${spec}`);
+    }
+  }
+  const entry = readFileSync(join(REPO, 'server', 'entry', 'productionEntry.ts'), 'utf8');
+  assert.deepEqual([...entry.matchAll(/\bcomposeProductionTransactions\([^)]*\)/g)].map((m) => m[0]), ['composeProductionTransactions(env, construction.databaseClient)'],
+    'the entry composes the transaction root once, over its configuration and its database client');
+  const appOptions = [...entry.matchAll(/\bcreateApp\(\{([^}]*)\}\)/g)].map((m) => m[1]);
+  assert.equal(appOptions.length, 1, 'the entry builds the runtime once');
+  for (const field of ['routes', 'idempotency', 'transactions']) {
+    assert.match(appOptions[0], new RegExp(`\\b${field}: tx\\.${field},`), `the runtime's ${field} is the transaction root's`);
+  }
+  assert.match(entry, /\bconst tx = transactions;/, 'tx is the transaction root\'s result');
+  assert.deepEqual([...entry.matchAll(/^.*\btransactions\s*(?::[^=\n]*)?=(?!=).*$/gm)].map((m) => m[0].trim()),
+    ['let transactions: ProductionTransactions | null = null;', 'transactions = composeProductionTransactions(env, construction.databaseClient);'],
+    'transactions is assigned only its null initialiser and the transaction root\'s return value');
+  assert.doesNotMatch(entry, /\b(?:transactions|tx)\b(?:\??\.\w+|\[[^\]]*\])+\s*(?:[-+*/%&|^]|\?\?|\|\||&&)?=(?!=)/,
+    'the entry never rewrites a member of the transaction root\'s result');
+  assert.doesNotMatch(entry, /\bObject\.(?:assign|defineProperty|defineProperties|setPrototypeOf)\(\s*(?:transactions|tx)\b/,
+    'the entry never rewrites a member of the transaction root\'s result');
 });
 
 test('the transactional outbox has no bound production adapter and no worker, its contracts hold no database, network client or SQL, and the adapter table stays closed', () => {
@@ -436,14 +553,15 @@ test('the transactional outbox has no bound production adapter and no worker, it
   }
 });
 
-test('the PostgreSQL transactional store is composed by the transaction root alone: outside the artifact, unreachable from the deployable entry, with no migration authority, and it builds no client', () => {
+test('the PostgreSQL transactional store is composed by the transaction root alone, over a kernel only the database boundary builds: the entry reaches both through that root, with no migration authority in its graph, and the store builds no client', () => {
   // M6-PG-P4 built the adapter for the three M6 ports; M6-PG-P7-R1 makes it composition-ready. Exactly one production module
   // composes the store (server/composition/productionTransactions.ts), exactly one builds the kernel under it over the driver
-  // (server/platform-identity/db.ts), the deployable entry reaches neither, and the emitted artifact carries neither.
+  // (server/platform-identity/db.ts). M6-ENTRY-P1: the deployable executable (server/entry/main.ts) ships both, reaching them
+  // only through the transaction root; its import graph is exactly the compiled artifact and holds no migration authority.
   const PERSISTENCE = join(REPO, 'server', 'persistence');
+  const rel = (p) => p.slice(REPO.length + 1);
   const cfg = JSON.parse(readFileSync(join(REPO, 'tsconfig.server.json'), 'utf8'));
-  assert.ok(!(cfg.include || []).some((p) => p.includes('persistence') || p.includes('composition') || p.includes('platform-identity')),
-    'the emitted server artifact contains neither the store, the composition nor the database-client boundary');
+  assert.deepEqual(cfg.files, ['server/entry/main.ts'], 'the emitted server artifact is the executable\'s import closure');
   const graphOf = (roots) => {
     const reached = new Set();
     const pending = [...roots];
@@ -460,9 +578,20 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     }
     return reached;
   };
-  const entry = graphOf([join(RUNTIME_DIR, 'server.ts')]);
+  const ENTRY_SOURCES = [join(REPO, 'server', 'entry', 'main.ts'), join(REPO, 'server', 'entry', 'productionEntry.ts')];
+  const entry = graphOf([ENTRY_SOURCES[0]]);
   assert.ok(entry.has(join(RUNTIME_DIR, 'app.ts')), 'the walk reaches the runtime it guards');
-  assert.ok([...entry].every((f) => f.startsWith(RUNTIME_DIR)), 'the deployable entry reaches the runtime only: no store, kernel, composition or database client');
+  assert.deepEqual([...entry].map((f) => rel(f).replace(/\.ts$/, '.js')).sort(), ARTIFACT,
+    'the executable\'s static import graph is exactly the compiled artifact: no store, kernel, client or module beyond what ships');
+  for (const f of entry) {
+    assert.doesNotMatch(rel(f), /migrationExecutor|migrationEngine|^scripts\/|\.testkit\.|\.test\./, `${rel(f)}: migration authority, an operator script or test code in the entry's graph`);
+  }
+  // The entry's one edge into the persistence layer is type-only (the kernel's type, for its construction seam): erased at
+  // compile time, so every store, kernel and preflight it runs is the transaction root's.
+  assert.deepEqual(ENTRY_SOURCES.flatMap((f) => importSpecifiers(readFileSync(f, 'utf8')).filter((spec) => spec.includes('persistence/'))),
+    ['../persistence/supervisedPgClient.js'], 'the entry has one edge into the persistence layer');
+  assert.match(readFileSync(ENTRY_SOURCES[1], 'utf8'), /^import type \{ SupervisedPgClient \} from '\.\.\/persistence\/supervisedPgClient\.js';$/m,
+    'and that edge is `import type`');
   // Production sources — tests and testkits aside — that import the persistence layer, each for one reason. Every root that
   // can ship or run against a real endpoint (db-client-containment PRODUCTION_ROOTS), so an operator script is read too.
   const production = [];
@@ -475,10 +604,9 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   };
   for (const root of ['server', 'scripts', 'src']) walk(join(REPO, root));
   assert.ok(production.includes(join(REPO, 'scripts', 'run-tests.mjs')) && production.includes(join(REPO, 'src', 'main.tsx')), 'the walk reads scripts and src');
-  const rel = (p) => p.slice(REPO.length + 1);
   const importers = production.filter((p) => !p.startsWith(PERSISTENCE) && importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('persistence/'))).map(rel).sort();
   assert.deepEqual(importers, ['server/composition/productionTransactions.ts', 'server/entry/productionEntry.ts', 'server/platform-identity/db.ts'],
-    'only the transaction root (the store, the session adapters, the rate limiter and — M6-ENTRY-P1 — the startup preflight), the entry (type-only: the kernel\'s type, for its construction seam) and the database-client boundary (the kernel) import the persistence layer');
+    'the transaction root (the store adapters, the rate limiter and the startup preflight), the entry (type-only: the kernel\'s type) and the database-client boundary (the kernel) import the persistence layer');
   // Who names each constructor outside its own module, read from the syntax tree so comments and prose never count: an
   // identifier anywhere (an import, aliased or not, a call, a value or member reference) or a string equal to the name (a
   // computed member such as m['name']) does.
@@ -511,7 +639,7 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     ['server/persistence/supervisedPgClient.ts', 'server/platform-identity/db.ts'], 'the kernel is built over the driver by the database-client boundary alone');
   assert.deepEqual(names('createRuntimeStoreClient', 'client: createRuntimeStoreClient'),
     ['server/composition/productionTransactions.ts', 'server/entry/productionEntry.ts', 'server/platform-identity/db.ts'],
-    'the store client is defined by the database-client boundary and named as the production construction by the entry (M6-ENTRY-P1) and, as its default, by the transaction root');
+    'the store client is defined by the database-client boundary and named as the production construction by the entry and, as its default, by the transaction root');
   assert.deepEqual(names('sealedRuntimeTarget', 'sealedRuntimeTarget(endpoint)'),
     ['server/platform-identity/databaseEndpoint.ts', 'server/platform-identity/db.ts'], 'the sealed endpoint is read by the database-client boundary alone');
   assert.deepEqual(names('assembleTransactions', 'assembleTransactions(inventory, env, factories)'),
@@ -551,6 +679,32 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   for (const [file, expected] of Object.entries(surfaces)) {
     assert.deepEqual(surfaceOf(trees.get(join(REPO, file))), [...expected].sort(), `${file}: exact value export surface`);
   }
+  // M6-ENTRY-P1: the entry names no store, kernel or port constructor — every create* the persistence layer and the three
+  // command ports export, read from their syntax trees so a new one is covered — nor the transaction assembler.
+  const constructors = [...production.filter((p) => p.startsWith(PERSISTENCE)), ...['idempotency.ts', 'commandTransaction.ts', 'outbox.ts'].map((f) => join(RUNTIME_DIR, f))]
+    .flatMap((p) => surfaceOf(trees.get(p))).filter((n) => /^create[A-Z]/.test(n));
+  for (const name of ['createPostgresTransactionalStore', 'createSupervisedPgClient', 'createIdempotency', 'createCommandTransactions', 'createOutboxDelivery']) {
+    assert.ok(constructors.includes(name), `the constructor census reads ${name}`);
+  }
+  for (const f of ENTRY_SOURCES) {
+    for (const name of [...constructors, 'assembleTransactions']) assert.ok(!mentions(trees.get(f), name), `${rel(f)} names ${name}: only the transaction root composes it`);
+  }
+  // db.ts still ships its DEV-only owner and runtime client factories, uncalled by anything that ships: no module of the
+  // executable's import graph but db.ts itself names either one (an identifier or a string; a comment does not count), and
+  // none takes db.ts as a namespace (`import * as`, `export * from`, `import()`), through which a computed key would reach either.
+  const DB_BOUNDARY = join(REPO, 'server', 'platform-identity', 'db.ts');
+  assert.ok(entry.has(DB_BOUNDARY), 'the walk reaches the database-client boundary');
+  for (const f of entry) {
+    if (f === DB_BOUNDARY) continue;
+    for (const name of ['getDb', 'getRuntimeDb']) assert.ok(!mentions(trees.get(f), name), `${rel(f)} names ${name}: the DEV-only client factories stay uncalled in the shipped artifact`);
+    const wholeModule = (n) => ((ts.isImportDeclaration(n) && ts.isNamespaceImport(n.importClause?.namedBindings ?? n))
+      || (ts.isExportDeclaration(n) && (n.exportClause === undefined || ts.isNamespaceExport(n.exportClause))))
+      && n.moduleSpecifier !== undefined && ts.isStringLiteral(n.moduleSpecifier) && /(?:^|\/)db\.js$/.test(n.moduleSpecifier.text);
+    assert.ok(!trees.get(f).statements.some(wholeModule), `${rel(f)} takes db.ts as a whole namespace`);
+    const dynamicDb = (n) => (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword
+      && !(n.arguments.length === 1 && ts.isStringLiteralLike(n.arguments[0]) && !/(?:^|\/)db\.js$/.test(n.arguments[0].text))) || (ts.forEachChild(n, dynamicDb) ?? false);
+    assert.ok(!dynamicDb(trees.get(f)), `${rel(f)} imports db.ts (or an unnamed module) dynamically`);
+  }
   // Runtime composition never reaches migration authority: no executor, engine, applier CLI or managed launcher in its graph.
   const MIGRATION_AUTHORITY = /migrationExecutor|migrationEngine|supabase-migrate|managed-.*launcher/;
   assert.match('server/platform-identity/migrationExecutor.ts', MIGRATION_AUTHORITY, 'the scan must catch the executor');
@@ -572,7 +726,7 @@ test('the production entry and composition root compose no Command Center route 
   // store compare-and-set that closes the admission-revalidation race): only tests build it.
   // Every relative import is followed, so a transitive import fails too; a computed specifier
   // would hide from the walk, so the production graph may hold none.
-  const roots = [join(RUNTIME_DIR, 'server.ts')];
+  const roots = [join(REPO, 'server', 'entry', 'main.ts')];
   (function walk(d) {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const p = join(d, e.name);
@@ -582,7 +736,7 @@ test('the production entry and composition root compose no Command Center route 
   })(join(REPO, 'server', 'composition'));
   assert.ok(roots.length >= 2, 'the production entry and the composition root exist');
   const COMMAND_CENTER = /command[-_]?center/i;
-  const COMPUTED = /\b(?:import|require)\s*\(\s*[^'"\s)]/;
+  const COMPUTED = /\b(?:import|require)\s*\((?!\s*(['"])[^'"]*\1\s*\))/;
   const reached = new Set();
   const pending = [...roots];
   while (pending.length > 0) {

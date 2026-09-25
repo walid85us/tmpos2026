@@ -52,7 +52,7 @@
 // COMMIT is handed to the driver, a server ERROR at COMMIT — is 'unavailable'. COMMIT handed over and never acknowledged
 // may have committed or not, and the call rejects with one fixed message, which the runtime treats as indeterminate. No
 // driver message, statement, parameter, identifier or stack is kept, logged or returned.
-import { writeAuditEvent } from '../platform-identity/auditEventWriter';
+import { writeAuditEvent } from '../platform-identity/auditEventWriter.js';
 import { isTrustedScope } from '../runtime/principals.js';
 // A frozen copy of a trusted scope's eight scalar fields, or undefined when the value is not one.
 // Every field is read exactly once, so the context validated is the context committed under, and a
@@ -66,7 +66,7 @@ const trustedScopeOf = (raw: unknown): TrustedScope | undefined => {
 import type { TrustedScope } from '../runtime/principals.js';
 import { TransactionFailure } from './supervisedPgClient.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
-import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter';
+import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter.js';
 import { COMMAND_TRANSACTION_DEADLINE_MS } from '../runtime/commandTransaction.js';
 import type { CommandTransactionPort, TransactionMutation } from '../runtime/commandTransaction.js';
 import { IDEMPOTENCY_DEADLINE_MS, MAX_SEALED_LENGTH } from '../runtime/idempotency.js';

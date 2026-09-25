@@ -33,9 +33,9 @@ import {
   SUPABASE_DATABASE_URL_VAR,
   APP_DATABASE_URL_VAR,
   DATABASE_CA_CERT_VAR,
-} from './config';
-import { sealedRuntimeTarget } from './databaseEndpoint';
-import type { RuntimeDatabaseEndpoint } from './databaseEndpoint';
+} from './config.js';
+import { sealedRuntimeTarget } from './databaseEndpoint.js';
+import type { RuntimeDatabaseEndpoint } from './databaseEndpoint.js';
 
 type Sql = ReturnType<typeof postgres>;
 

@@ -7,7 +7,7 @@
 // stay out of every request path. Nothing that decides an authorization may import them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -238,15 +238,33 @@ test('the observational modules never import a production decision entry point',
 });
 
 test('the compiled deployable server cannot contain the observational modules', () => {
-  // The mechanism, not a scan of an artifact that CI has not built yet when this suite runs: the
-  // server build's rootDir is server/runtime, so tsc refuses to emit anything outside it, and the
-  // include globs name nothing else. production-runtime-contract separately forbids server/runtime
-  // from importing platform-identity at all.
+  // M6-ENTRY-P1: the server build compiles the executable (server/entry/main.ts) and its import closure, which now
+  // ships part of server/platform-identity — the directory the observational modules live in. So the proof is the
+  // artifact itself: this suite builds it to a scratch directory and reads every emitted file.
   const cfg = JSON.parse(readFileSync(join(REPO, 'tsconfig.server.json'), 'utf8'));
-  assert.equal(cfg.compilerOptions.rootDir, 'server/runtime');
-  assert.ok(Array.isArray(cfg.include) && cfg.include.length > 0);
-  for (const glob of cfg.include) assert.ok(glob.startsWith('server/runtime/'), `include ${glob} stays in server/runtime`);
-  for (const f of OBSERVATIONAL_MODULES) assert.ok(!f.startsWith('server/runtime/'), `${f} lives outside the build root`);
+  assert.deepEqual(cfg.files, ['server/entry/main.ts'], 'the build compiles the executable and its import closure only');
+  assert.equal(cfg.include, undefined, 'no include glob can add a module outside that closure');
+  const out = mkdtempSync(join(tmpdir(), 'tmpos-gap11-build-'));
+  try {
+    execFileSync(join(REPO, 'node_modules', '.bin', 'tsc'), ['-p', 'tsconfig.server.json', '--outDir', out], { cwd: REPO, stdio: 'pipe', timeout: 120000 });
+    const emitted = readdirSync(out, { recursive: true }).filter((f) => f.endsWith('.js')).sort();
+    assert.ok(emitted.includes('server/entry/main.js') && emitted.includes('server/platform-identity/permissionCatalog.js'),
+      `the build emitted the executable and the catalog beside the observational modules (${emitted.length} files)`);
+    // Structural, not by name: each server-side observational module's own emitted file is absent, so a future one
+    // whose path lacks 'gap11' (and whose text names nothing OBSERVATIONAL_NAMES knows) still cannot ship.
+    const serverModules = OBSERVATIONAL_MODULES.filter((m) => m.startsWith('server/') && m.endsWith('.ts'));
+    assert.equal(serverModules.length, OBSERVATIONAL_MODULES.length, 'every observational module is a server-side .ts module the build could emit');
+    for (const m of serverModules) {
+      const js = m.replace(/\.ts$/, '.js');
+      assert.ok(!emitted.includes(js) && !existsSync(join(out, js)), `${js}: an observational module was emitted`);
+    }
+    for (const f of emitted) {
+      assert.ok(!/gap11/i.test(f), `${f}: an observational module was emitted`);
+      assert.ok(!OBSERVATIONAL_NAMES.test(readFileSync(join(out, f), 'utf8')), `${f}: the artifact names a candidate-only module, table or evaluator`);
+    }
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });
 
 /**

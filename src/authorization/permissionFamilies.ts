@@ -18,7 +18,7 @@
 // across families is refused, never coerced into either ordering.
 //
 // PURE: no imports at runtime, no DOM, no storage, no side effects — safe to import from the server.
-import type { PermissionLevel } from '../types';
+import type { PermissionLevel } from '../types.js';
 
 export type PermissionFamily = 'tenant_store' | 'platform';
 

@@ -14,6 +14,7 @@ const FORBIDDEN = [
   /^agency-agents\//,
   /^goose-.*\.tar\.bz2$/,
   /^dist\//,
+  /^dist-server\//,
   /(^|\/)firebase-debug\.log$/,
   /(^|\/)firestore-debug\.log$/,
   /(^|\/)ui-debug\.log$/,
