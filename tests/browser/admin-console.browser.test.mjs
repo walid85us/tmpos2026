@@ -46,6 +46,7 @@ const WEB = { authDomain: AUTH_DOMAIN, https: true };
 const API_POLICY = apiPathRefusal({ https: true }); // the runtime API header policy (HSTS over https)
 
 const UID = 'uid-synthetic-7f3a';
+const OTHER_UID = 'uid-synthetic-other-c41d'; // a second synthetic administrator, for the recent sign-in that must not resume
 const EMAIL = 'operator@tmpos.test';
 const PASSWORD = 'synthetic-password-1';
 const TOTP = '123456';
@@ -101,11 +102,11 @@ const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((d) => (
 const line = (r) => `${r.method} ${r.host}${r.path}`;
 const lower = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
 
-/** A synthetic, unsigned Firebase-shaped ID token: the SDK parses it, nothing here verifies it. */
-function idToken({ mfa }) {
+/** A synthetic, unsigned Firebase-shaped ID token for `uid`: the SDK parses it, nothing here verifies it. */
+function idToken({ mfa, uid = UID }) {
   const now = Math.floor(Date.now() / 1000);
   const firebase = { identities: { email: [EMAIL] }, sign_in_provider: 'password', ...(mfa ? { sign_in_second_factor: 'totp', second_factor_identifier: MFA_INFO.mfaEnrollmentId } : {}) };
-  const payload = { iss: 'https://securetoken.google.com/synthetic-project', aud: 'synthetic-project', auth_time: now, iat: now, exp: now + 3600, sub: UID, user_id: UID, email: EMAIL, email_verified: true, firebase };
+  const payload = { iss: 'https://securetoken.google.com/synthetic-project', aud: 'synthetic-project', auth_time: now, iat: now, exp: now + 3600, sub: uid, user_id: uid, email: EMAIL, email_verified: true, firebase };
   return `${b64u({ alg: 'RS256', kid: 'synthetic', typ: 'JWT' })}.${b64u(payload)}.${randomBytes(64).toString('base64url')}`;
 }
 
@@ -149,15 +150,20 @@ const DIRECTORY_PAGE = 3;
 //            or (request) => one of those. Default: a full view whenever the session would be 200.
 //   actions: the `actions` hint every GET /admin/v1/tenants page carries. Default: both allowed.
 //   login / logout: status for those POSTs. provider: 'mfa' | 'password' | 'invalid'.
+//   recentAuth: when true, PATCH /admin/v1/tenants/status answers 403 step_up_required unless the presented session
+//            was created by a sign-in in this scenario (a seeded cookie never was), as the runtime's recent-auth rule.
+//            A login sent with X-TMPOS-Reauthenticate: 1 rotates the session only when the presented cookie is the live
+//            one and the bearer's subject is that session's administrator; otherwise 401 and the session is untouched.
 //   cspIssues: the exact CSP reports ('directive|type|blockedURL') the scenario provokes on purpose,
 //            each allowed once; cspLog: a RegExp for the console lines those same reports print.
 //   allowBlocked: the exact refused requests ('METHOD url') the scenario makes on purpose.
-function scenarioState({ session, cc, actions = { editDisplayName: true, changeStatus: true }, login = 200, logout = 204, provider = 'mfa', cspIssues = [], cspLog = null, allowBlocked = [] } = {}) {
+function scenarioState({ session, cc, actions = { editDisplayName: true, changeStatus: true }, login = 200, logout = 204, provider = 'mfa', recentAuth = false, cspIssues = [], cspLog = null, allowBlocked = [] } = {}) {
   return {
     session: session ?? ((r) => (hasAdminCookie(r) ? 200 : 401)),
     cc: cc ?? ((r) => (statusFrom(st.session, r) === 200 ? ccView() : 401)),
     tenants: DIRECTORY.map((t) => ({ ...t })), actions,
-    login, logout, provider, cspIssues, cspLog, allowBlocked,
+    login, logout, provider, recentAuth, cspIssues, cspLog, allowBlocked,
+    uid: UID, sessionUid: null, fresh: false, revoked: [], // who the provider signs in as; whose session the cookie is
     requests: [], idp: [], statics: [], served: [], blocked: [], csp: [], fontFiles: [], holds: new Map(), releases: [],
     ccHold: null, ccCount: 0, misroute: null, allowNav: new Set(),
     csrfToken: token43(), cookieValue: null, loginCsrf: null, idToken: null, finalizeIdToken: null, mfaPending: null, totpCode: null,
@@ -208,8 +214,17 @@ async function route(ev) {
 function apiRecord(ev, u) {
   const { request } = ev;
   const rec = { method: request.method, host: u.host, path: u.pathname, type: ev.resourceType, headers: lower(request.headers), hasPostData: Boolean(request.hasPostData || request.postData), status: null };
+  // Judged as the request arrived: a later recent sign-in rotates the cookie and the token.
+  rec.cookieOk = hasAdminCookie(rec);
+  rec.csrfOk = rec.headers['x-tmpos-session-csrf'] === st.csrfToken;
   st.requests.push(rec);
   return rec;
+}
+
+/** The subject of a synthetic bearer (the scripted runtime's stand-in for the verified token's uid), or null. */
+function bearerUid(rec) {
+  const m = /^Bearer [^.]+\.([^.]+)\./.exec(rec.headers.authorization ?? '');
+  try { return m ? JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8')).sub ?? null : null; } catch { return null; }
 }
 
 /**
@@ -281,8 +296,17 @@ function sessionApi(rec) {
     case `POST ${LOGIN}`: {
       const status = statusFrom(st.login, rec);
       if (status !== 200) return refusal(status);
+      const uid = bearerUid(rec);
+      if (rec.headers['x-tmpos-reauthenticate'] !== undefined) {
+        // Re-authentication: only the live session's own administrator, presenting that session, is rotated.
+        rec.reauth = true;
+        if (rec.headers['x-tmpos-reauthenticate'] !== '1' || !hasAdminCookie(rec) || uid === null || uid !== st.sessionUid) return refusal(401);
+        st.revoked.push(st.cookieValue);
+      }
       st.cookieValue = token43();
       st.csrfToken = st.loginCsrf = token43();
+      st.sessionUid = uid;
+      st.fresh = true;
       return active([['set-cookie', `${COOKIE}=${st.cookieValue}; Path=/; Secure; HttpOnly; SameSite=Strict`]]);
     }
     case `POST ${LOGOUT}`: {
@@ -327,6 +351,8 @@ async function tenantApi(s, rec, u, request) {
     res = status === 200 ? { status, headers: JSON_HEADERS, body: JSON.stringify({ tenants: rows, nextCursor, actions: s.actions }) } : refusal(status);
   } else if (session !== 200) {
     res = refusal(session);
+  } else if (rec.path === LIFECYCLE && s.recentAuth && !s.fresh) {
+    res = { status: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'step_up_required', requestId: 'r1' }) };
   } else {
     const body = JSON.parse(rec.body);
     const field = rec.path === RENAME ? 'displayName' : 'status';
@@ -359,22 +385,22 @@ async function identityToolkit(request, u) {
       if (st.provider === 'invalid') return fail('INVALID_LOGIN_CREDENTIALS');
       if (st.provider === 'mfa') {
         st.mfaPending = token43();
-        return reply(200, { kind: 'identitytoolkit#VerifyPasswordResponse', localId: UID, email: EMAIL, displayName: '', registered: true, mfaPendingCredential: st.mfaPending, mfaInfo: [MFA_INFO] });
+        return reply(200, { kind: 'identitytoolkit#VerifyPasswordResponse', localId: st.uid, email: EMAIL, displayName: '', registered: true, mfaPendingCredential: st.mfaPending, mfaInfo: [MFA_INFO] });
       }
-      st.idToken = idToken({ mfa: false });
-      return reply(200, { kind: 'identitytoolkit#VerifyPasswordResponse', localId: UID, email: EMAIL, displayName: '', registered: true, idToken: st.idToken, refreshToken: token43(), expiresIn: '3600' });
+      st.idToken = idToken({ mfa: false, uid: st.uid });
+      return reply(200, { kind: 'identitytoolkit#VerifyPasswordResponse', localId: st.uid, email: EMAIL, displayName: '', registered: true, idToken: st.idToken, refreshToken: token43(), expiresIn: '3600' });
     case 'POST /v2/accounts/mfaSignIn:finalize':
       st.totpCode = body.totpVerificationInfo?.verificationCode ?? null;
       if (body.mfaPendingCredential !== st.mfaPending || body.mfaEnrollmentId !== MFA_INFO.mfaEnrollmentId || !/^\d{6}$/.test(st.totpCode ?? '')) {
         return fail('INVALID_MFA_PENDING_CREDENTIAL');
       }
-      st.idToken = st.finalizeIdToken = idToken({ mfa: true });
+      st.idToken = st.finalizeIdToken = idToken({ mfa: true, uid: st.uid });
       return reply(200, { idToken: st.idToken, refreshToken: token43() });
     case 'POST /v1/accounts:lookup':
       return reply(200, {
         kind: 'identitytoolkit#GetAccountInfoResponse',
         users: [{
-          localId: UID, email: EMAIL, emailVerified: true, passwordHash: 'UkVEQUNURUQ=', passwordUpdatedAt: 1767225600000, validSince: '1767225600',
+          localId: st.uid, email: EMAIL, emailVerified: true, passwordHash: 'UkVEQUNURUQ=', passwordUpdatedAt: 1767225600000, validSince: '1767225600',
           providerUserInfo: [{ providerId: 'password', federatedId: EMAIL, email: EMAIL, rawId: EMAIL }],
           createdAt: '1767225600000', lastLoginAt: String(Date.now()), lastRefreshAt: new Date().toISOString(),
           ...(st.provider === 'mfa' ? { mfaInfo: [MFA_INFO] } : {}),
@@ -591,6 +617,7 @@ async function signInWithMfa(page) {
 /** A browser that already holds an admin session cookie: the scripted session answers 200 for it. */
 async function seedCookie(page) {
   st.cookieValue = token43();
+  st.sessionUid = UID; // the synthetic administrator's session, signed in before this scenario (no recent sign-in)
   await page.send('Network.setCookie', { name: COOKIE, value: st.cookieValue, url: `${ADMIN}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Strict' });
 }
 
@@ -608,7 +635,7 @@ async function assertNoLeak(page) {
   // The Firebase client keeps auth in memory only; a page that never loaded it has no IndexedDB at all.
   if (st.statics.some((p) => /firebase/i.test(p))) assert.ok(!seen.idb.includes('firebaseLocalStorageDb'), 'no persisted Firebase auth database');
   else assert.deepEqual(seen.idb, [], 'IndexedDB is empty');
-  for (const [label, secret] of [['the session cookie value', st.cookieValue], ['the csrfToken', st.csrfToken], ['the login csrfToken', st.loginCsrf], ['the uid', UID]]) {
+  for (const [label, secret] of [['the session cookie value', st.cookieValue], ['the csrfToken', st.csrfToken], ['the login csrfToken', st.loginCsrf], ['the uid', UID], ['the other uid', OTHER_UID], ['the idToken', st.finalizeIdToken]]) {
     if (secret) assert.ok(!seen.html.includes(secret), `${label} appears in the page markup`);
   }
 }
@@ -636,7 +663,7 @@ async function afterScenario(page, errorsBefore) {
 
   // Every Command Center read rides the session cookie: no bearer, no CSRF header, no body.
   for (const r of ccReads()) {
-    assert.ok(hasAdminCookie(r), 'a Command Center read carries the admin session cookie');
+    assert.ok(r.cookieOk, 'a Command Center read carries the admin session cookie');
     assert.equal(r.headers.authorization, undefined, 'a Command Center read carries no Authorization');
     assert.equal(r.headers['x-tmpos-csrf'], undefined, 'a Command Center read carries no CSRF header');
     assert.equal(r.headers['x-tmpos-session-csrf'], undefined, 'a Command Center read carries no session CSRF header');
@@ -647,17 +674,17 @@ async function afterScenario(page, errorsBefore) {
   // the intent header, this session's CSRF token and a JSON body under a UUID v4 Idempotency-Key — a new
   // key each time, since every scripted command answers definitively (a retry would reuse its key).
   for (const r of tenantReads()) {
-    assert.ok(hasAdminCookie(r), 'a tenant directory read carries the admin session cookie');
+    assert.ok(r.cookieOk, 'a tenant directory read carries the admin session cookie');
     assert.equal(r.headers.authorization, undefined, 'a tenant directory read carries no Authorization');
     assert.equal(r.headers['x-tmpos-csrf'], undefined, 'a tenant directory read carries no CSRF header');
     assert.equal(r.headers['x-tmpos-session-csrf'], undefined, 'a tenant directory read carries no session CSRF header');
     assert.equal(r.hasPostData, false, 'a tenant directory read has no body');
   }
   for (const r of commands()) {
-    assert.ok(hasAdminCookie(r), `${r.path} carries the admin session cookie`);
+    assert.ok(r.cookieOk, `${r.path} carries the admin session cookie`);
     assert.equal(r.headers.authorization, undefined, `${r.path} carries no Authorization`);
     assert.equal(r.headers['x-tmpos-csrf'], '1', `${r.path} carries the intent header`);
-    assert.ok(r.headers['x-tmpos-session-csrf'] === st.csrfToken, `${r.path} carries the session's csrfToken as X-TMPOS-Session-CSRF`);
+    assert.ok(r.csrfOk, `${r.path} carries the session's csrfToken as X-TMPOS-Session-CSRF`);
     assert.match(r.headers['idempotency-key'] ?? '', UUID_V4, `${r.path} carries a UUID v4 Idempotency-Key`);
     assert.match(r.headers['content-type'] ?? '', /^application\/json\s*(?:;|$)/i, `${r.path} sends JSON`);
   }
@@ -1526,6 +1553,187 @@ scenario('tm-view-only', 'Tenant Management: a View-only page (actions false/fal
   assert.equal(await detailsStatus(page), 'Trial');
   assert.deepEqual(await page.evaluate(controls), none, 'no rename form and no lifecycle button on the second page');
   assert.equal(commands().length, 0, 'no command was sent');
+});
+
+// M5-ADMIN-STEPUP-P1 — Suspend answered 403 step_up_required: a recent-sign-in dialog, the provider's own sign-in
+// (password, then TOTP) inside it, the login in its re-authentication mode, a re-read, then a NEW confirmation.
+const STEPUP_TITLE = 'Sign in again to suspend Harbor Lane Repairs';
+const STEPUP = `${DIALOG}[aria-labelledby=stepup-title]`;
+const STEPUP_REASON = 'Synthetic check: chargeback review before step-up';
+const SIGNED_IN = 'Sign-in completed. Harbor Lane Repairs has not been changed.';
+const RESUME_NOTE = `${SIGNED_IN} Choose “Suspend tenant” to confirm it again with a new reason.`;
+const noteText = (page) => page.evaluate(`document.getElementById('tenant-resume')?.textContent.trim() ?? null`);
+const stepUpText = (page) => page.evaluate(`document.querySelector(${JSON.stringify(STEPUP)})?.innerText ?? null`);
+
+/** From the Harbor details: Suspend with a reason, answered step_up_required; the recent-sign-in dialog is open. */
+async function suspendToStepUp(page) {
+  await openTenants(page);
+  await page.click(detailsButton('Harbor Lane Repairs'));
+  await waitDetailsFocus(page, 'Harbor Lane Repairs');
+  assert.ok(await tabTo(page, 'Suspend tenant'), 'Tab reaches "Suspend tenant"');
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'focus lands on the reason field');
+  await page.type(STEPUP_REASON);
+  await page.press('Tab');
+  await page.press('Tab');
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'stepup-title'`, 5000, 'focus lands on the recent-sign-in heading');
+  const [refused] = commands(LIFECYCLE);
+  assert.equal(refused.status, 403, 'the first attempt was refused for want of a recent sign-in');
+  assert.equal(await page.evaluate(`document.querySelectorAll('${DIALOG}').length`), 1, 'the confirmation dialog closed; only the recent-sign-in dialog is open');
+  assert.equal(await page.isVisible(el('dialog', STEPUP_TITLE)), true, 'the dialog names the tenant and the action');
+  assert.match(await stepUpText(page), /Nothing has been changed: Harbor Lane Repairs is still active\./, 'it says nothing was changed');
+  assert.equal(await detailsStatus(page), 'Active');
+  return refused;
+}
+
+/** Keyboard only, from the focused recent-sign-in heading: "Sign in again", email, password, then the TOTP code. */
+async function reauthenticateByKeyboard(page, { beforeCode } = {}) {
+  assert.ok(await tabTo(page, 'Sign in again', 4), 'Tab reaches "Sign in again" inside the dialog');
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'stepup-title' && !!document.getElementById('reauth-email')`, 5000, 'the sign-in form opens and focus returns to the heading');
+  await page.press('Tab');
+  assert.equal(await page.evaluate('document.activeElement?.id'), 'reauth-email', 'Tab reaches the email field');
+  await page.type(EMAIL);
+  await page.press('Tab');
+  await page.type(PASSWORD);
+  await page.press('Enter');
+  await page.waitFor(`!!document.getElementById('reauth-code') && document.activeElement?.id === 'stepup-title'`, 10_000, 'the second factor is asked for');
+  await page.press('Tab');
+  assert.equal(await page.evaluate('document.activeElement?.id'), 'reauth-code', 'Tab reaches the verification code');
+  await page.type(TOTP);
+  await beforeCode?.();
+  await page.press('Enter');
+}
+
+scenario('tm-step-up', 'Tenant Management: step_up_required opens a recent-sign-in dialog; keyboard-only sign-in again (password + TOTP) rotates the session, the tenant is re-read, and only a NEW confirmation with a new reason and key changes it', { recentAuth: true }, async (page) => {
+  const refused = await suspendToStepUp(page);
+  await page.screenshot(join(EVIDENCE, 'tm-step-up-dialog-desktop.png'));
+  // Visible focus on the dialog's controls, and the reason typed for the refused attempt is gone.
+  const stops = [];
+  for (let i = 0; i < 2; i += 1) {
+    await page.press('Tab');
+    stops.push(await page.evaluate(FOCUS_STOP));
+  }
+  assert.deepEqual(stops.map((x) => x.label).sort(), ['Cancel', 'Sign in again'], 'Tab cycles Cancel and "Sign in again" inside the dialog');
+  assert.deepEqual(stops.filter((x) => !x.indicator || !x.inView).map((x) => x.label), [], 'each dialog control shows a visible focus ring, in view');
+  assert.equal((await page.evaluate(`document.body.innerText`)).includes(STEPUP_REASON), false, 'the refused attempt\'s reason is not kept');
+  const priorCookie = st.cookieValue;
+  const priorCsrf = st.csrfToken;
+  const reads = tenantReads().length;
+
+  // Someone else changes the tenant (not its status) while the administrator signs in: the next intent must carry the re-read version.
+  assert.equal(await focusedIn(page, STEPUP), true, 'focus is still inside the dialog');
+  let releaseRead = () => {};
+  await reauthenticateByKeyboard(page, { beforeCode: () => { st.tenants[0].version += 1; releaseRead = hold(TENANTS); } });
+  // Until the re-read answers, no lifecycle control is offered and focus waits on the tenant's heading.
+  await page.waitFor(`!document.querySelector('${DIALOG}') && document.activeElement?.id === 'tenant-details-title'`, 10_000, 'the dialog closed; focus on the tenant heading');
+  assert.equal(await page.evaluate(`!!document.getElementById('tenant-lifecycle-trigger')`), false, 'no lifecycle control before the re-read answers');
+  releaseRead();
+  await page.waitFor(async () => (await noteText(page)) === RESUME_NOTE, 10_000, 'the resume note after the re-read');
+  // Said once, by the page's live region (emptied, then filled); the note itself is not a second live region.
+  await page.waitFor(`document.getElementById('tenant-announcement').textContent.trim() === ${JSON.stringify(RESUME_NOTE)}`, 5000, 'the live region says the sign-in completed');
+  assert.equal(await page.evaluate(`document.getElementById('tenant-resume').hasAttribute('role')`), false, 'the resume note carries no live role');
+  await page.waitFor(`document.activeElement?.id === 'tenant-lifecycle-trigger'`, 5000, 'focus returns to "Suspend tenant"');
+
+  const [login] = logins();
+  assert.equal(logins().length, 1, 'exactly one login');
+  assert.equal(login.reauth, true, 'the login was sent in re-authentication mode');
+  assert.equal(login.headers['x-tmpos-reauthenticate'], '1');
+  assert.equal(login.headers['x-tmpos-csrf'], '1');
+  assert.ok(login.headers.authorization === `Bearer ${st.finalizeIdToken}`, 'the bearer is the new provider token');
+  assert.equal(login.cookieOk, true, 'it presented the prior session');
+  assert.equal(login.hasPostData, false, 'the login is bodiless');
+  assert.equal(login.status, 200);
+  assert.notEqual(st.cookieValue, priorCookie, 'the session rotated');
+  assert.notEqual(st.csrfToken, priorCsrf, 'a new session CSRF token');
+  assert.deepEqual(st.revoked, [priorCookie], 'the prior session was revoked');
+  assert.equal(st.totpCode, TOTP, 'the typed code reached the provider');
+  const after = st.requests.slice(st.requests.indexOf(login) + 1);
+  assert.ok(after.some((r) => r.method === 'GET' && r.path === SESSION && r.status === 200 && r.cookieOk), 'a session read on the new cookie confirmed it');
+  assert.ok(tenantReads().length > reads, 'the directory was read again');
+  assert.equal(commands(LIFECYCLE).length, 1, 'nothing was replayed or queued');
+  assert.equal(await detailsStatus(page), 'Active', 'the tenant is unchanged');
+  assert.equal(await page.evaluate(noticeShown('Tenant suspended. Every tenant and store session is refused from its next request.')), false, 'the sign-in is not shown as the action');
+  await page.screenshot(join(EVIDENCE, 'tm-step-up-resumed-desktop.png'));
+
+  // The action again: a new confirmation with an empty reason, typed anew, under a new key at the re-read version.
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement?.id === 'lifecycle-reason'`, 5000, 'a new confirmation dialog');
+  assert.equal(await page.evaluate(`document.getElementById('lifecycle-reason').value`), '', 'the reason starts empty');
+  await page.type('Synthetic check: confirmed after a recent sign-in');
+  await page.press('Tab');
+  await page.press('Tab');
+  await page.press('Enter');
+  await waitNotice(page, 'Tenant suspended. Every tenant and store session is refused from its next request.');
+  await page.waitFor(async () => (await detailsStatus(page)) === 'Suspended', 5000, 'the re-read shows the tenant suspended');
+  const [, fresh] = commands(LIFECYCLE);
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body, JSON.stringify({ tenantId: HARBOR.tenantId, status: 'suspended', reason: 'Synthetic check: confirmed after a recent sign-in', expectedVersion: HARBOR.version + 1 }), 'a new intent: the new reason at the re-read version');
+  assert.notEqual(fresh.headers['idempotency-key'], refused.headers['idempotency-key'], 'a new Idempotency-Key');
+  assert.ok(fresh.cookieOk && fresh.csrfOk, 'sent on the rotated session with its CSRF token');
+});
+
+scenario('tm-step-up-other-admin', 'Tenant Management: a different synthetic administrator signing in cannot resume — 401, the prior session kept, nothing re-read or sent', { recentAuth: true }, async (page) => {
+  await suspendToStepUp(page);
+  const priorCookie = st.cookieValue;
+  const reads = tenantReads().length;
+  st.uid = OTHER_UID; // the provider now signs in someone else
+  await reauthenticateByKeyboard(page);
+  const refusedText = 'Sign-in was not accepted for the administrator who started this action. Harbor Lane Repairs was not changed.';
+  await waitNotice(page, refusedText);
+  await page.waitFor(`document.activeElement?.id === 'stepup-title'`, 5000, 'focus returns to the dialog heading');
+  const [login] = logins();
+  assert.equal(login.status, 401, 'the server refused the other administrator');
+  assert.ok(login.cookieOk && bearerUid(login) === OTHER_UID, 'the other administrator\'s token was presented beside the prior session');
+  assert.equal(st.cookieValue, priorCookie, 'the prior session was left as it was');
+  assert.deepEqual(st.revoked, [], 'nothing was revoked');
+  assert.equal(tenantReads().length, reads, 'nothing was re-read');
+  assert.equal(commands(LIFECYCLE).length, 1, 'nothing was sent');
+  assert.equal(await page.isVisible(el('button', 'Try again')), true, 'the dialog offers "Try again"');
+  await page.screenshot(join(EVIDENCE, 'tm-step-up-other-admin-desktop.png'));
+  await page.press('Escape');
+  await page.waitFor(`!document.querySelector('${DIALOG}')`, 5000, 'Escape cancels');
+  await page.waitFor(`document.activeElement?.id === 'tenant-lifecycle-trigger'`, 5000, 'focus returns to "Suspend tenant"');
+  assert.equal(await noteText(page), null, 'no resume note');
+  assert.equal(await detailsStatus(page), 'Active');
+});
+
+scenario('tm-step-up-cancel', 'Tenant Management: a refused credential and a Cancel in the recent-sign-in dialog leave the tenant unchanged, say so, and return focus', { recentAuth: true, provider: 'invalid' }, async (page) => {
+  await suspendToStepUp(page);
+  assert.ok(await tabTo(page, 'Sign in again', 4));
+  await page.press('Enter');
+  await page.waitFor(`!!document.getElementById('reauth-email')`, 5000, 'the sign-in form');
+  await page.fill(el('textbox', 'Email'), EMAIL);
+  await page.fill(el('textbox', 'Password'), PASSWORD);
+  await page.click(el('button', 'Sign in'));
+  await waitNotice(page, 'Sign-in failed. Check your details and try again. Harbor Lane Repairs was not changed.');
+  assert.equal(logins().length, 0, 'no token, so no login');
+  await page.click(el('button', 'Cancel'));
+  await page.waitFor(`!document.querySelector('${DIALOG}')`, 5000, 'Cancel closes the dialog');
+  await page.waitFor(`document.activeElement?.id === 'tenant-lifecycle-trigger'`, 5000, 'focus returns to "Suspend tenant"');
+  await waitNotice(page, 'Harbor Lane Repairs was not changed.');
+  assert.equal(commands(LIFECYCLE).length, 1, 'nothing more was sent');
+  assert.equal(await detailsStatus(page), 'Active');
+  assert.equal(await rowStatus(page, 'Harbor Lane Repairs'), 'Active');
+});
+
+scenario('tm-step-up-reflow-320', 'Tenant Management at 400% zoom (320 CSS px): the recent-sign-in dialog and its sign-in form reflow without horizontal page overflow, every control reachable and visible', { recentAuth: true }, async (page) => {
+  const reachable = async (targets, where) => {
+    for (const t of targets) assert.equal(await page.call(t, REACHABLE), true, `${typeof t === 'string' ? t : `${t.role} "${t.name}"`} is reachable and visible ${where}`);
+  };
+  await page.setViewport(...ZOOM_400);
+  await suspendToStepUp(page);
+  await assertNoOverflow(page, 'with the recent-sign-in dialog open at 320px');
+  await reachable(['#stepup-title', el('button', 'Sign in again'), el('button', 'Cancel')], 'in the dialog at 320px');
+  await page.screenshot(join(EVIDENCE, 'tm-step-up-320.png'));
+  await page.click(el('button', 'Sign in again'));
+  await page.waitFor(`!!document.getElementById('reauth-email')`, 5000, 'the sign-in form');
+  await assertNoOverflow(page, 'with the sign-in form open at 320px');
+  await reachable(['#reauth-email', '#reauth-password', el('button', 'Sign in'), el('button', 'Continue with Google'), el('button', 'Cancel')], 'in the sign-in form at 320px');
+  await page.screenshot(join(EVIDENCE, 'tm-step-up-form-320.png'));
+  await page.press('Escape');
+  await page.waitFor(`!document.querySelector('${DIALOG}')`, 5000, 'Escape closes the dialog');
 });
 
 test('l. no emitted .js/.css/.html file contains the development-build badge', (t) => {

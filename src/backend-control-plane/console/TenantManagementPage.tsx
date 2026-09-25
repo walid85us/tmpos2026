@@ -14,12 +14,20 @@
 // the same change under it, so a change can never be applied twice; a definitive answer releases it, and the next
 // attempt, even of the same change, is a new intent. A submission is ignored while another is pending.
 //
+// A RECENT SIGN-IN IS NOT THE ACTION (M5-ADMIN-STEPUP-P1). When the server refuses a lifecycle action with
+// step_up_required, that attempt is over: its reason and key are discarded, and a dedicated dialog asks the same
+// administrator to sign in again through the provider (ProviderSignIn.tsx), which the server verifies and binds to a
+// rotated session (adminSessionClient.ts `reauthenticate`). A completed sign-in changes nothing: the directory is read
+// again and the person is returned to the tenant, where the action — if the re-read still offers it — is a NEW intent
+// with the re-read version, a newly typed reason and a new key. Nothing is queued, replayed or kept in storage.
+//
 // NO STORE LIFECYCLE CONTROLS (doc 08 DA-41), and nothing here reaches a legacy mock or an owner-side mutation path.
 
 import React from 'react';
 import { cx } from '../ui';
 import { useConsole } from './consoleContext';
-import { BUTTON_SECONDARY, FOCUS_RING, Spinner } from './ConsolePages';
+import { BUTTON_PRIMARY, BUTTON_SECONDARY, FOCUS_RING, Spinner } from './ConsolePages';
+import { FirstFactorForm, PROVIDER_NOTICE_TEXT, SecondFactorForm, useProviderSignIn } from './ProviderSignIn';
 import {
   DISPLAY_NAME_MAX, REASON_MAX, REASON_MIN, checkDisplayName, checkReason, createIntentKeys, isDefinitive,
 } from './tenantManagementClient';
@@ -108,6 +116,31 @@ function Message({ feedback, onRetry, onSignIn, busy }: { feedback: Feedback; on
 // the confirmation dialog: focus contained, Escape closes, focus returns to its trigger
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** A modal dialog's keys: Escape calls `onEscape`; Tab and Shift+Tab wrap around the dialog's enabled controls. */
+function containFocus(event: React.KeyboardEvent<HTMLDivElement>, dialog: HTMLDivElement | null, onEscape: () => void): void {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    onEscape();
+    return;
+  }
+  if (event.key !== 'Tab' || dialog === null) return;
+  // A radio group is one stop: its checked radio, or its first when none is checked.
+  const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled])')].filter((node) => {
+    if (!(node instanceof HTMLInputElement) || node.type !== 'radio') return true;
+    const group = [...dialog.querySelectorAll<HTMLInputElement>('input[type=radio]:not([disabled])')].filter((radio) => radio.name === node.name);
+    return node === (group.find((radio) => radio.checked) ?? group[0]);
+  });
+  if (focusable.length === 0) { event.preventDefault(); return; }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  // From anything not in the Tab order (the focused heading), Tab and Shift+Tab still land inside the dialog.
+  if (!focusable.includes(document.activeElement as HTMLElement)) { event.preventDefault(); (event.shiftKey ? last : first).focus(); }
+  else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+const LIFECYCLE_TRIGGER = 'tenant-lifecycle-trigger';
+
 type StatusRequest = Parameters<ReturnType<typeof useConsole>['tenants']['changeStatus']>[0];
 
 function LifecycleDialog({ tenant, target, initialReason, onClose, onDone }: {
@@ -165,18 +198,7 @@ function LifecycleDialog({ tenant, target, initialReason, onClose, onDone }: {
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      if (!busy.current) onClose();
-      return;
-    }
-    if (event.key !== 'Tab' || dialog.current === null) return;
-    const focusable = [...dialog.current.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled])')];
-    if (focusable.length === 0) { event.preventDefault(); return; }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    containFocus(event, dialog.current, () => { if (!busy.current) onClose(); });
   }
 
   const errorId = 'lifecycle-reason-error';
@@ -242,16 +264,153 @@ function LifecycleDialog({ tenant, target, initialReason, onClose, onDone }: {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// the recent-sign-in dialog: what a step_up_required answer asks for, and never the action itself
+// ---------------------------------------------------------------------------------------------------------------------
+
+type Target = 'suspended' | 'active';
+/** The one lifecycle transition a server-reported status offers, or none. */
+const targetOf = (status: TenantStatus): Target | null => (status === 'active' ? 'suspended' : status === 'suspended' ? 'active' : null);
+const ACTION_LABEL: Readonly<Record<Target, string>> = { suspended: 'Suspend tenant', active: 'Reactivate tenant' };
+const ACTION_VERB: Readonly<Record<Target, string>> = { suspended: 'suspend', active: 'reactivate' };
+
+/** The attempt the server refused for want of a recent sign-in: which tenant (as loaded then) and which transition. */
+interface StepUp {
+  readonly tenant: TenantEntry;
+  readonly target: Target;
+}
+
+const NOT_RENEWED: Readonly<Record<'refused' | 'rate-limited' | 'unavailable', string>> = {
+  refused: 'Sign-in was not accepted for the administrator who started this action.',
+  'rate-limited': PROVIDER_NOTICE_TEXT['rate-limited'],
+  unavailable: 'The sign-in could not be confirmed.',
+};
+
+function StepUpDialog({ stepUp, onCancel, onRenewed }: { stepUp: StepUp; onCancel: () => void; onRenewed: () => void }) {
+  const { client } = useConsole();
+  const { tenant, target } = stepUp;
+  const [phase, setPhase] = React.useState<'offer' | 'sign-in'>('offer');
+  const [refusal, setRefusal] = React.useState<keyof typeof NOT_RENEWED | null>(null);
+  const [renewing, setRenewing] = React.useState(false);
+  const alive = React.useRef(true);
+  const dialog = React.useRef<HTMLDivElement>(null);
+  const heading = React.useRef<HTMLHeadingElement>(null);
+  // The provider steps, shared with the console sign-in; the token goes to the re-authentication and nowhere else.
+  const flow = useProviderSignIn({
+    busy: renewing,
+    onToken: async (idToken) => {
+      setRenewing(true);
+      const outcome = await client.reauthenticate(idToken);
+      if (!alive.current) return;
+      setRenewing(false);
+      if (outcome === 'renewed') return onRenewed();
+      // No session remains: the console returns to sign-in with the expiry notice, and nothing resumes.
+      if (outcome === 'ended') return;
+      setRefusal(outcome);
+      setPhase('offer');
+    },
+  });
+
+  React.useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  // The heading takes focus when the dialog opens and whenever its content is replaced, so what it now asks is read out.
+  React.useEffect(() => { heading.current?.focus(); }, [phase, flow.step, flow.notice, refusal]);
+  // While the provider or the server is answering, the form's controls are disabled; focus waits on the heading (in the
+  // commit that disables them), so it never falls out of the dialog to the page behind.
+  React.useLayoutEffect(() => { if (flow.busy) heading.current?.focus(); }, [flow.busy]);
+
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    containFocus(event, dialog.current, () => { if (!renewing) onCancel(); });
+  }
+
+  const busy = flow.busy;
+  const notice = phase === 'sign-in' ? flow.notice : null;
+  const progress = renewing ? 'Confirming the sign-in…' : flow.working && flow.step === 'second' ? 'Verifying…' : 'Signing in…';
+  return (
+    <div
+      onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-slate-950/80 p-4 sm:items-center"
+    >
+      <div
+        ref={dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="stepup-title"
+        aria-describedby="stepup-explanation"
+        onKeyDown={onKeyDown}
+        className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-xl"
+      >
+        <h2 id="stepup-title" ref={heading} tabIndex={-1} className={cx('rounded text-lg font-semibold text-white', FOCUS_RING)}>
+          Sign in again to {ACTION_VERB[target]} <Name tenant={tenant} />
+        </h2>
+        <p id="stepup-explanation" className="mt-2 text-sm leading-relaxed text-slate-300">
+          This action needs a recent sign-in by the administrator who started it. Nothing has been changed: <Name tenant={tenant} /> is
+          still {STATUS_LABEL[tenant.status].toLowerCase()}. After you sign in, confirm the action again with a new reason.
+        </p>
+        {refusal !== null && phase === 'offer' ? (
+          <div role="alert" className="mt-3 rounded-lg border border-rose-800 bg-rose-950 px-3 py-2 text-sm text-rose-100">
+            <p>{NOT_RENEWED[refusal]} <Name tenant={tenant} /> was not changed.</p>
+          </div>
+        ) : null}
+        {notice !== null ? (
+          <div
+            role={notice === 'cancelled' ? 'status' : 'alert'}
+            className="mt-3 rounded-lg border border-rose-800 bg-rose-950 px-3 py-2 text-sm text-rose-100"
+          >
+            <p>{PROVIDER_NOTICE_TEXT[notice]} <Name tenant={tenant} /> was not changed.</p>
+          </div>
+        ) : null}
+        {phase === 'offer' ? null : flow.step === 'first' ? (
+          // Keyed so the two steps never share DOM nodes: a reused uncontrolled field would carry the email into the code field.
+          <React.Fragment key="first-factor">
+            <FirstFactorForm flow={flow} prefix="reauth" />
+          </React.Fragment>
+        ) : (
+          <React.Fragment key="second-factor">
+            <p className="mt-4 text-sm font-semibold text-slate-100">Two-step verification</p>
+            <p className="mt-1 text-sm text-slate-400">Enter the 6-digit code from your authenticator app.</p>
+            <SecondFactorForm flow={flow} prefix="reauth" />
+          </React.Fragment>
+        )}
+        {/* A live region present from the start, so its progress text is announced when it appears. */}
+        <p role="status" className={cx('mt-4 items-center gap-2 text-sm text-slate-300', busy ? 'flex' : 'sr-only')}>
+          {busy ? <><Spinner /> {progress}</> : null}
+        </p>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onCancel} disabled={renewing} className={cx(BUTTON_SECONDARY, 'sm:w-auto')}>Cancel</button>
+          {phase === 'offer' ? (
+            <button
+              type="button"
+              onClick={() => { setRefusal(null); setPhase('sign-in'); }}
+              className={cx(BUTTON_PRIMARY, 'sm:w-auto')}
+            >
+              {refusal === null ? 'Sign in again' : 'Try again'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // a tenant's details: the rename form and the lifecycle action
 // ---------------------------------------------------------------------------------------------------------------------
 
 type RenameRequest = Parameters<ReturnType<typeof useConsole>['tenants']['rename']>[0];
 
-function TenantDetails({ tenant, actions, onChanged }: {
+function TenantDetails({ tenant, actions, held, onChanged, onStepUp, onAction }: {
   tenant: TenantEntry;
   actions: TenantPage['actions'];
+  /** After a recent sign-in, until the re-read has shown the action still applies: no lifecycle control is offered. */
+  held: boolean;
   /** Re-read the directory after a definitive answer; `note` is announced with the result. */
   onChanged: (note?: string) => void;
+  /** The server refused a lifecycle action for want of a recent sign-in: the page asks for one. */
+  onStepUp: (target: Target) => void;
+  /** A lifecycle dialog is being opened. */
+  onAction: () => void;
 }) {
   const { client, tenants } = useConsole();
   const [draft, setDraft] = React.useState(tenant.displayName ?? '');
@@ -315,6 +474,15 @@ function TenantDetails({ tenant, actions, onChanged }: {
 
   function lifecycleDone(outcome: CommandOutcome, reason: string) {
     if (outcome.kind === 'expired') { client.expire(); return; }
+    if (outcome.kind === 'step-up' && dialog !== null) {
+      // A refused attempt, settled: its reason and its key end with the dialog and are never offered again. The recent
+      // sign-in is the page's (StepUpDialog), and whatever follows it is a new intent.
+      setKept(null);
+      setLifecycle(null);
+      setDialog(null);
+      onStepUp(dialog);
+      return;
+    }
     const success = outcome.kind === 'applied' && outcome.tenant.status === 'suspended'
       ? 'Tenant suspended. Every tenant and store session is refused from its next request.'
       : 'Tenant reactivated. Its users can sign in again; sessions that ended during the suspension are not restored.';
@@ -325,7 +493,7 @@ function TenantDetails({ tenant, actions, onChanged }: {
     onChanged(shown?.text);
   }
 
-  const target: 'suspended' | 'active' | null = tenant.status === 'active' ? 'suspended' : tenant.status === 'suspended' ? 'active' : null;
+  const target = targetOf(tenant.status);
   const errorId = 'display-name-error';
   return (
     <section aria-labelledby="tenant-details-title" className="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-6">
@@ -376,22 +544,25 @@ function TenantDetails({ tenant, actions, onChanged }: {
       {actions.changeStatus ? (
         <div className="mt-6 border-t border-slate-800 pt-5">
           <h3 className="text-sm font-semibold text-slate-100">Lifecycle</h3>
-          {target === null ? (
+          {held ? (
+            <p className="mt-2 text-sm text-slate-300">Status changes wait until the recent sign-in has been checked against the current details.</p>
+          ) : target === null ? (
             <p className="mt-2 text-sm text-slate-300">
               Status changes here are available only for active or suspended tenants. This tenant is {STATUS_LABEL[tenant.status].toLowerCase()}.
             </p>
           ) : (
             <button
               ref={trigger}
+              id={LIFECYCLE_TRIGGER}
               type="button"
-              onClick={() => { setLifecycle(null); setDialog(target); }}
+              onClick={() => { setLifecycle(null); onAction(); setDialog(target); }}
               className={cx(
                 'mt-3 inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold',
                 target === 'suspended' ? 'border border-rose-500 text-rose-100 hover:bg-rose-950' : 'border border-emerald-500 text-emerald-100 hover:bg-emerald-950',
                 FOCUS_RING,
               )}
             >
-              {target === 'suspended' ? 'Suspend tenant' : 'Reactivate tenant'}
+              {ACTION_LABEL[target]}
             </button>
           )}
           <Message feedback={lifecycle} onSignIn={() => void client.logout()} />
@@ -420,13 +591,66 @@ type Load =
   | { readonly phase: 'ready'; readonly page: TenantPage }
   | { readonly phase: 'problem'; readonly problem: 'forbidden' | 'rate-limited' | 'unavailable' };
 
+/**
+ * After a completed recent sign-in: the tenant and transition it was for, held at PAGE level so it survives the
+ * directory re-read, and — once that re-read answers — why the action no longer applies (`blocked`), or null when the
+ * re-read still offers it. It holds no reason, no key and no request: the next attempt is a new intent.
+ */
+type Resume =
+  | { readonly phase: 'reading'; readonly tenant: TenantEntry; readonly target: Target }
+  | { readonly phase: 'read'; readonly tenant: TenantEntry; readonly target: Target; readonly blocked: 'status' | 'permission' | 'absent' | 'unread' | null };
+
+type Checked = Extract<Resume, { phase: 'read' }>;
+
+/** What comes after "Sign-in completed. <Tenant> has not been changed.": the next step, or why there is none. */
+function nextStepOf({ tenant, target, blocked }: Checked): string {
+  switch (blocked) {
+    case null: return `Choose “${ACTION_LABEL[target]}” to confirm it again with a new reason.`;
+    case 'status': return `Its status is now ${STATUS_LABEL[tenant.status].toLowerCase()}, so it can no longer be ${target === 'suspended' ? 'suspended' : 'reactivated'} here.`;
+    case 'permission': return 'You no longer have permission to change tenant status, so the action cannot continue.';
+    case 'absent': return 'It is no longer on this page, so the action cannot continue here.';
+    default: return 'The tenant list could not be read again, so the action cannot continue yet.';
+  }
+}
+const resumeText = (resume: Checked): string => `Sign-in completed. ${nameOf(resume.tenant)} has not been changed. ${nextStepOf(resume)}`;
+
+/** Shown, not announced: the page's live region says it once (resumeText); focus lands here when the action is blocked. */
+function ResumeNote({ resume }: { resume: Checked }) {
+  const { tenant, blocked } = resume;
+  return (
+    <div
+      id="tenant-resume"
+      tabIndex={-1}
+      className={cx(
+        'mb-6 rounded-lg border px-3 py-2 text-sm',
+        blocked === null ? 'border-sky-800 bg-sky-950 text-sky-100' : 'border-amber-800 bg-amber-950 text-amber-100',
+        FOCUS_RING,
+      )}
+    >
+      <p>Sign-in completed. <Name tenant={tenant} /> has not been changed. {nextStepOf(resume)}</p>
+    </div>
+  );
+}
+
 export default function TenantManagementPage() {
   const { client, tenants } = useConsole();
   const [cursors, setCursors] = React.useState<readonly (string | null)[]>([null]);
   const [load, setLoad] = React.useState<Load>({ phase: 'loading' });
   const [last, setLast] = React.useState<TenantPage | null>(null);
   const [selected, setSelected] = React.useState<string | null>(null);
-  const [announcement, setAnnouncement] = React.useState('');
+  // What the always-present live region should say. Each message is set anew (`n`), and the region is emptied first and
+  // filled on the next tick, so the same message said twice — even twice in one render — is announced each time.
+  const [announcement, setAnnouncementState] = React.useState({ text: '', n: 0 });
+  const setAnnouncement = React.useCallback((text: string) => setAnnouncementState((a) => ({ text, n: a.n + 1 })), []);
+  const [spoken, setSpoken] = React.useState('');
+  React.useEffect(() => {
+    setSpoken('');
+    if (announcement.text === '') return undefined;
+    const timer = setTimeout(() => setSpoken(announcement.text), 50);
+    return () => clearTimeout(timer);
+  }, [announcement]);
+  const [stepUp, setStepUp] = React.useState<StepUp | null>(null);
+  const [resume, setResume] = React.useState<Resume | null>(null);
   const inflight = React.useRef<AbortController | null>(null);
   const sequence = React.useRef(0);
   const alive = React.useRef(true);
@@ -440,6 +664,8 @@ export default function TenantManagementPage() {
     const controller = new AbortController();
     inflight.current = controller;
     const mine = ++sequence.current;
+    // A resume check that already ran belongs to the read it was made against: any later read drops its note.
+    setResume((r) => (r?.phase === 'read' ? null : r));
     setLoad({ phase: 'loading' });
     setAnnouncement(note ?? 'Loading tenants…');
     void tenants.list(at, controller.signal)
@@ -460,7 +686,7 @@ export default function TenantManagementPage() {
         setLoad({ phase: 'problem', problem });
         setAnnouncement(problem === 'forbidden' ? 'Tenant Management is not available to you.' : 'Tenants could not be loaded.');
       });
-  }, [client, tenants]);
+  }, [client, tenants, setAnnouncement]);
 
   React.useEffect(() => {
     alive.current = true;
@@ -484,15 +710,63 @@ export default function TenantManagementPage() {
     if (chosen > 0) document.getElementById('tenant-details-title')?.focus();
   }, [chosen]);
   function choose(tenant: TenantEntry) {
+    setResume(null);
     setSelected(tenant.tenantId);
     setChosen((n) => n + 1);
   }
+
+  // Focus goes back to the lifecycle trigger (or the tenant's heading) in the commit that closes the recent-sign-in
+  // dialog, and to the resume note when the re-read has said whether the action still applies.
+  // While the re-read runs no lifecycle control is offered, so focus waits on the tenant's heading.
+  const [returned, setReturned] = React.useState<{ readonly to: 'trigger' | 'heading' | 'note'; readonly n: number }>({ to: 'trigger', n: 0 });
+  React.useLayoutEffect(() => {
+    if (returned.n === 0) return;
+    const heading = document.getElementById('tenant-details-title') ?? document.getElementById('tenant-management-unavailable');
+    const trigger = document.getElementById(LIFECYCLE_TRIGGER) ?? heading;
+    const target = returned.to === 'note' ? document.getElementById('tenant-resume') ?? heading : returned.to === 'heading' ? heading : trigger;
+    target?.focus();
+  }, [returned]);
+  const returnFocus = (to: 'trigger' | 'heading' | 'note') => setReturned((r) => ({ to, n: r.n + 1 }));
+
+  function stepUpCancelled(step: StepUp) {
+    setStepUp(null);
+    setAnnouncement(`${nameOf(step.tenant)} was not changed.`);
+    returnFocus('trigger');
+  }
+
+  function stepUpRenewed(step: StepUp) {
+    // The sign-in is done; the action is not. Read the directory again, then say whether the action still applies.
+    setStepUp(null);
+    setResume({ phase: 'reading', tenant: step.tenant, target: step.target });
+    returnFocus('heading');
+    refresh(); // the resume note, once the re-read answers, is what says the sign-in completed
+
+  }
+
+  // The re-read after a recent sign-in has answered: the action continues only if the tenant is still on the page, its
+  // status still offers the same transition and the server still offers status changes to this session.
+  React.useEffect(() => {
+    if (resume === null || resume.phase !== 'reading' || load.phase === 'loading') return;
+    const { tenant, target } = resume;
+    let now: TenantEntry = tenant;
+    let blocked: Extract<Resume, { phase: 'read' }>['blocked'];
+    if (load.phase === 'problem') blocked = load.problem === 'forbidden' ? 'permission' : 'unread';
+    else {
+      const entry = load.page.tenants.find((t) => t.tenantId === tenant.tenantId);
+      if (entry !== undefined) now = entry;
+      blocked = entry === undefined ? 'absent' : !load.page.actions.changeStatus ? 'permission' : targetOf(entry.status) !== target ? 'status' : null;
+    }
+    const checked: Checked = { phase: 'read', tenant: now, target, blocked };
+    setResume(checked);
+    setAnnouncement(resumeText(checked)); // said once, here, in place of the re-read's own "loaded" message
+    returnFocus(blocked === null ? 'trigger' : 'note');
+  }, [load, resume, setAnnouncement]);
 
   let body: React.ReactNode;
   if (load.phase === 'problem' && load.problem === 'forbidden') {
     body = (
       <div role="alert" className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-200">
-        <h2 className="text-base font-semibold text-white">Not available</h2>
+        <h2 id="tenant-management-unavailable" tabIndex={-1} className="text-base font-semibold text-white focus:outline-none">Not available</h2>
         <p className="mt-2">Your account does not have access to Tenant Management.</p>
       </div>
     );
@@ -580,7 +854,15 @@ export default function TenantManagementPage() {
               {selected === null ? 'Choose a tenant to see its details.' : 'That tenant is not on this page.'}
             </p>
           ) : (
-            <TenantDetails key={current.tenantId} tenant={current} actions={page.actions} onChanged={refresh} />
+            <TenantDetails
+              key={current.tenantId}
+              tenant={current}
+              actions={page.actions}
+              held={resume !== null && resume.tenant.tenantId === current.tenantId && (resume.phase === 'reading' || resume.blocked !== null)}
+              onChanged={refresh}
+              onStepUp={(target) => { setResume(null); setStepUp({ tenant: current, target }); }}
+              onAction={() => setResume(null)}
+            />
           )}
         </div>
       </div>
@@ -589,8 +871,12 @@ export default function TenantManagementPage() {
 
   return (
     <div>
-      <p role="status" aria-live="polite" className="sr-only">{announcement}</p>
+      <p id="tenant-announcement" role="status" aria-live="polite" className="sr-only">{spoken}</p>
+      {resume?.phase === 'read' ? <ResumeNote resume={resume} /> : null}
       {body}
+      {stepUp !== null ? (
+        <StepUpDialog stepUp={stepUp} onCancel={() => stepUpCancelled(stepUp)} onRenewed={() => stepUpRenewed(stepUp)} />
+      ) : null}
     </div>
   );
 }

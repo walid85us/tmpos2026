@@ -39,7 +39,8 @@ import { CSRF_HEADER, CSRF_HEADER_VALUE } from './requestSecurity.js';
 import { EnforcementSetupError, sessionPaths } from './routes.js';
 import type { AuthorizationRequirement, RouteContext, RouteDefinition, SessionAudience, VerifiedPrincipal } from './routes.js';
 import {
-  ADMISSION_REVALIDATE_MS, LOGIN_POLICIES, SESSION_COOKIES, SESSION_CSRF_HEADER, SESSION_TTL, principalKeyOf,
+  ADMISSION_REVALIDATE_MS, LOGIN_POLICIES, RECENT_AUTH_MAX_AGE_MS, REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES,
+  SESSION_CSRF_HEADER, SESSION_TTL, principalKeyOf,
 } from './sessions.js';
 import type { SessionBoundaryDeps, SessionRecord, SessionStore } from './sessions.js';
 import { assertSessionStoreContract, createMemorySessionStore } from './memorySessionStore.testkit.js';
@@ -62,6 +63,8 @@ const NONE = { kind: 'none' } as const;
 const T0 = 1_700_000_000_000;
 /** The authorized read route behind each boundary: a successful request there is real activity. */
 const READ_ROUTE: Record<SessionAudience, string> = { tenant: '/api/v1/probe', admin: '/admin/v1/probe' };
+/** An admin route that requires a recent authentication (routes.ts `recentAuth`). */
+const RECENT_ROUTE = '/admin/v1/probe/recent';
 const aSignal = (): AbortSignal => new AbortController().signal;
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
@@ -155,6 +158,9 @@ const IDENTITIES: Record<string, Identity> = {
   'tok-owner': { uid: 'uid-owner', secondFactor: 'totp' },
   'tok-owner-again': { uid: 'uid-owner', secondFactor: 'totp' },
   'tok-stranger': { uid: 'uid-stranger', secondFactor: 'totp' },
+  // A second administrator, and the first one's token refreshed without a new sign-in (its auth_time stays old).
+  'tok-peer': { uid: 'uid-peer', secondFactor: 'totp' },
+  'tok-owner-refreshed': { uid: 'uid-owner', secondFactor: 'totp', authAgeMs: 6 * 60_000 },
   'tok-unverified': { uid: 'uid-member', verified: false },
 };
 
@@ -172,7 +178,7 @@ function verifiedIdentity(identity: Identity, t: number): unknown {
 // Admission is explicit per boundary: a cryptographically valid identity alone admits nowhere.
 const ADMITTED: Record<SessionAudience, ReadonlySet<string>> = {
   tenant: new Set(['uid-member', 'uid-owner']),
-  admin: new Set(['uid-owner']),
+  admin: new Set(['uid-owner', 'uid-peer']),
 };
 const ADMIT = Object.freeze({ admitted: true, securityVersion: 'v1' });
 const principal = (uid: string): VerifiedPrincipal => ({ authProvider: 'synthetic', authProviderUid: uid });
@@ -264,6 +270,8 @@ function probeRoutes(probe: Probe): RouteDefinition[] {
     { method: 'GET', path: '/api/v1/probe/fail', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: () => { throw new Error('handler-secret-detail'); }, policy: tenant('probe.read') },
     { method: 'POST', path: '/admin/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('adminWrite'), policy: admin('probe.admin') },
     { method: 'GET', path: '/admin/v1/probe', body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'none', handler: handle('adminRead'), policy: admin('probe.admin') },
+    // The step-up gate the chain applies to any route that declares it, the tenant status command included.
+    { method: 'GET', path: RECENT_ROUTE, body: NONE, idempotency: 'none', trustedContext: 'none', recentAuth: 'required', handler: handle('adminRecent'), policy: admin('probe.admin') },
   ];
 }
 
@@ -1658,5 +1666,240 @@ test('session endpoints keep the chain order: body and pre-session checks run be
     for (const [method, path] of [['HEAD', TENANT.current], ['GET', `${TENANT.current}/`], ['GET', TENANT.login], ['PUT', TENANT.logout], ['GET', '/api/v1/session/Login']]) {
       assert.equal((await send(port, method, path, cookie('tenant', s.id))).status, 404, `${method} ${path}`);
     }
+  });
+});
+
+// --- reauthentication (M5-ADMIN-STEPUP-P1) ------------------------------------------------
+
+/** A reauthentication login: the ordinary admin login, presenting `id`, with the opt-in header. */
+const reauth = (port: number, token: string, id: string | null, header: string | string[] = REAUTHENTICATE_VALUE): Promise<Reply> =>
+  send(port, 'POST', ADMIN.login, {
+    ...pre('admin'), authorization: `Bearer ${token}`, ...(id === null ? {} : cookie('admin', id)), [REAUTHENTICATE_HEADER]: header,
+  });
+const recent = (port: number, id: string): Promise<Reply> => send(port, 'GET', RECENT_ROUTE, cookie('admin', id));
+const keyOf = (id: string): string => createHash('sha256').update(id).digest('base64url');
+/** The store operations that create or end a session: none may run when a reauthentication is refused. */
+const writes = (ops: string[]): string[] => ops.filter((op) => op === 'create' || op === 'revoke' || op === 'revokePrincipal');
+const recordOf = async (store: SessionStore, id: string): Promise<SessionRecord | undefined> =>
+  (await store.get(keyOf(id), aSignal())) as SessionRecord | undefined;
+
+test('reauthentication by the same administrator rotates the presented session and binds the NEW provider authentication; the old cookie is refused', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, clock }) => {
+    const old = await signIn(port, 'admin', 'tok-owner');
+    const firstAuth = T0 - 60_000;
+    clock.t += RECENT_AUTH_MAX_AGE_MS; // the provider authentication is now eleven minutes old
+    assertRefusal(await recent(port, old.id), 403, 'step_up_required', 'the stale session before reauthentication');
+    ops.length = 0;
+    const r = await reauth(port, 'tok-owner-again', old.id);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(ops, ['get', 'revoke', 'create'], 'read the presented session, revoke it, create the new one — no update of the old');
+    const renewed = setCookieOf(r);
+    assert.equal(renewed.name, SESSION_COOKIES.admin);
+    assert.deepEqual(renewed.attributes, ['HttpOnly', 'Max-Age=3600', 'Path=/', 'SameSite=Strict', 'Secure']);
+    assert.notEqual(renewed.value, old.id, 'a fresh identifier');
+    const body = JSON.parse(r.body) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(body).sort(), ['csrfToken', 'status'], 'the answer is an ordinary login answer');
+    assert.notEqual(body.csrfToken, old.csrf, 'the CSRF token rotates with the session');
+    const record = await recordOf(store, renewed.value);
+    assert.equal(record?.authenticatedAt, clock.t - 60_000, 'the new record carries the new sign-in\'s verified time');
+    assert.notEqual(record?.authenticatedAt, firstAuth);
+    assert.equal(await recordOf(store, old.id), undefined, 'the superseded record is revoked, never updated');
+    assertRefusal(await current(port, 'admin', old.id), 401, 'unauthenticated', 'the old cookie');
+    assertRefusal(await recent(port, old.id), 401, 'unauthenticated', 'the old cookie cannot borrow the new evidence');
+    assert.equal((await recent(port, renewed.value)).status, 200, 'the renewed session passes the step-up gate');
+  });
+});
+
+test('reauthentication by a DIFFERENT administrator is a generic 401 that creates and revokes nothing', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, clock, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    clock.t += RECENT_AUTH_MAX_AGE_MS;
+    const before = await recordOf(store, owner.id);
+    ops.length = 0;
+    const r = await reauth(port, 'tok-peer', owner.id);
+    assertRefusal(r, 401, 'unauthenticated', 'a different administrator');
+    assert.equal(r.headers['www-authenticate'], 'Bearer', 'exactly a bad credential\'s answer');
+    assert.deepEqual(writes(ops), [], 'nothing created, nothing revoked');
+    assert.ok(await logged(logs, 'login_reauth_mismatch'));
+    assert.deepEqual(await recordOf(store, owner.id), before, 'the prior administrator\'s record is exactly as it was');
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'and still active');
+    assertRefusal(await recent(port, owner.id), 403, 'step_up_required', 'and still stale for step-up');
+    // The ordinary login (no header) is unchanged: it rotates whatever it is presented, which is why the console must opt in.
+    const plain = await login(port, 'admin', 'tok-peer', cookie('admin', owner.id));
+    assert.equal(plain.status, 200, plain.body);
+    assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'an ordinary login still rotates the presented session');
+  });
+});
+
+test('reauthentication without a live presented session is a generic 401 that creates and revokes nothing', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, clock, logs }) => {
+    const ended = await signIn(port, 'admin', 'tok-owner');
+    assert.equal((await send(port, 'POST', ADMIN.logout, unsafe('admin', ended))).status, 204);
+    const idle = await signIn(port, 'admin', 'tok-owner');
+    const tenantSession = await signIn(port, 'tenant', 'tok-owner');
+    clock.t += SESSION_TTL.admin.idleMs; // `idle` has now lapsed; every token below still verifies as a fresh sign-in
+    const unknown = 'A'.repeat(43);
+    const cases: Array<[string, Record<string, string>]> = [
+      ['no cookie', {}],
+      ['a malformed cookie', { cookie: `${SESSION_COOKIES.admin}=not-an-id` }],
+      ['an unknown identifier', cookie('admin', unknown)],
+      ['a duplicated cookie', { cookie: `${SESSION_COOKIES.admin}=${unknown}; ${SESSION_COOKIES.admin}=${unknown}` }],
+      ['a logged-out session', cookie('admin', ended.id)],
+      ['an idle-expired session', cookie('admin', idle.id)],
+      ['the tenant boundary\'s session', cookie('admin', tenantSession.id)],
+      ['only the tenant cookie', cookie('tenant', tenantSession.id)],
+    ];
+    for (const [label, presented] of cases) {
+      ops.length = 0;
+      const r = await send(port, 'POST', ADMIN.login, {
+        ...pre('admin'), authorization: 'Bearer tok-owner', ...presented, [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE,
+      });
+      assertRefusal(r, 401, 'unauthenticated', label);
+      assert.deepEqual(writes(ops), [], `${label}: nothing created, nothing revoked (not even the unknown identifier)`);
+    }
+    assert.ok(await logged(logs, 'login_reauth_no_session'));
+    assert.equal((await current(port, 'tenant', tenantSession.id)).status, 200, 'the tenant session was not touched');
+  });
+});
+
+test('a reauthentication header with any value but exactly "1", or on two lines, fails closed and is never an ordinary login', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    for (const header of ['0', 'true', 'yes', '11', '1, 1', '', ['1', '1'], ['1', '0']] as Array<string | string[]>) {
+      const label = JSON.stringify(header);
+      ops.length = 0;
+      // The same administrator, a fresh sign-in and a live presented session: only the header is wrong.
+      assertRefusal(await reauth(port, 'tok-owner-again', owner.id, header), 401, 'unauthenticated', label);
+      assert.deepEqual(writes(ops), [], `${label}: nothing created, nothing revoked`);
+    }
+    assert.ok(await logged(logs, 'login_reauth_header_invalid'));
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'the presented session is untouched');
+  });
+});
+
+test('a session store that cannot read the presented session answers 503 and issues nothing', async () => {
+  const ops: string[] = [];
+  const failing: { op?: string } = {};
+  const store = instrumented(ops, failing);
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    failing.op = 'get';
+    ops.length = 0;
+    const r = await reauth(port, 'tok-owner-again', owner.id);
+    assertRefusal(r, 503, 'service_unavailable', 'the presented session cannot be read');
+    assert.equal(r.headers['www-authenticate'], undefined, 'an outage is no credential challenge');
+    assert.deepEqual(writes(ops), [], 'nothing created, nothing revoked');
+    assert.ok(await logged(logs, 'session_unavailable'));
+    assert.ok(!logs.join('').includes('store-secret-detail'));
+    failing.op = undefined;
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'the session outlived the outage');
+  });
+});
+
+test('a reauthentication admission refuses ends every session of that administrator, exactly as a login admission denial does', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  const gate = { admit: true };
+  await withSessions({
+    admin: { store, admission: { admit: () => (gate.admit ? ADMIT : { admitted: false }) } },
+  }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    gate.admit = false;
+    ops.length = 0;
+    assertRefusal(await reauth(port, 'tok-owner-again', owner.id), 401, 'unauthenticated', 'admission refused');
+    assert.deepEqual(ops, ['revokePrincipal'],
+      'admission decides before the presented session is even read: the principal\'s sessions end, nothing is read or created');
+    assert.ok(await logged(logs, 'login_admission_denied'));
+    gate.admit = true;
+    assert.equal(await recordOf(store, owner.id), undefined, 'the prior session is gone');
+    assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'even once admission would admit again');
+  });
+});
+
+// This proves the login auth-age policy (LOGIN_POLICIES.admin, applied by the chain before any login handler runs),
+// not the reauthentication guard: there is no new evidence without a new sign-in, whatever header the login carries.
+test('no new evidence without a new sign-in: a refreshed token is refused by the login auth-age policy, and the stale session stays unable to pass the step-up gate', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  await withSessions({ admin: { store } }, async ({ port, clock, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    clock.t += RECENT_AUTH_MAX_AGE_MS;
+    const before = await recordOf(store, owner.id);
+    ops.length = 0;
+    // A refresh keeps the provider's auth_time: here it is six minutes old, past the admin login policy's five.
+    assertRefusal(await reauth(port, 'tok-owner-refreshed', owner.id), 401, 'unauthenticated', 'a refreshed token');
+    assert.deepEqual(ops, [], 'refused by the evidence policy before any session is read, created or revoked');
+    assert.ok(await logged(logs, 'login_auth_stale'));
+    assert.deepEqual(await recordOf(store, owner.id), before, 'no evidence was carried into the session');
+    assertRefusal(await recent(port, owner.id), 403, 'step_up_required', 'the stale session after the refused attempt');
+  });
+});
+
+test('the reauthentication header name is case-insensitive: a mixed-case spelling is a reauthentication, with its same-principal check', async () => {
+  await withSessions({}, async ({ port }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    const mixed = (token: string): Promise<Reply> => send(port, 'POST', ADMIN.login, {
+      ...pre('admin'), authorization: `Bearer ${token}`, ...cookie('admin', owner.id), 'X-TMPOS-Reauthenticate': REAUTHENTICATE_VALUE,
+    });
+    assertRefusal(await mixed('tok-peer'), 401, 'unauthenticated', 'a different administrator, mixed-case header');
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'so the presented session was not rotated away');
+    const renewed = await mixed('tok-owner-again');
+    assert.equal(renewed.status, 200, renewed.body);
+    assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'the same administrator rotated it');
+  });
+});
+
+test('the tenant boundary shares the code: a same-principal reauthentication rotates, a different principal is refused with nothing written, and a login without the header is unchanged', async () => {
+  const ops: string[] = [];
+  await withSessions({ tenant: { store: instrumented(ops) } }, async ({ port, logs }) => {
+    const tenantReauth = (token: string, id: string): Promise<Reply> =>
+      login(port, 'tenant', token, { ...cookie('tenant', id), [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE });
+    const member = await signIn(port, 'tenant', 'tok-member');
+    ops.length = 0;
+    assertRefusal(await tenantReauth('tok-owner', member.id), 401, 'unauthenticated', 'a different tenant principal');
+    assert.deepEqual(writes(ops), [], 'nothing created, nothing revoked');
+    assert.ok(await logged(logs, 'login_reauth_mismatch'));
+    assert.equal((await current(port, 'tenant', member.id)).status, 200, 'the member\'s session is untouched');
+    ops.length = 0;
+    const renewed = await tenantReauth('tok-member-again', member.id);
+    assert.equal(renewed.status, 200, renewed.body);
+    assert.deepEqual(ops, ['get', 'revoke', 'create']);
+    assertRefusal(await current(port, 'tenant', member.id), 401, 'unauthenticated', 'the rotated tenant session');
+    const next = setCookieOf(renewed).value;
+    assert.equal((await current(port, 'tenant', next)).status, 200);
+    // Without the header the tenant login is exactly today's: it rotates whatever it is presented.
+    ops.length = 0;
+    const plain = await login(port, 'tenant', 'tok-owner', cookie('tenant', next));
+    assert.equal(plain.status, 200, plain.body);
+    assert.deepEqual(ops, ['revoke', 'create'], 'no presented-session read, no principal check');
+    assertRefusal(await current(port, 'tenant', next), 401, 'unauthenticated', 'an ordinary tenant login rotated the presented session');
+  });
+});
+
+test('a same-principal reauthentication whose admission now reports a different security version is refused, writes nothing, and the old session then ends as today', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  const version = { current: 'v1' };
+  await withSessions({
+    admin: { store, admission: { admit: (p: VerifiedPrincipal) => (ADMITTED.admin.has(p.authProviderUid) ? { admitted: true, securityVersion: version.current } : { admitted: false }) } },
+  }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    version.current = 'v2'; // a grant or role changed since the session was issued
+    ops.length = 0;
+    assertRefusal(await reauth(port, 'tok-owner-again', owner.id), 401, 'unauthenticated', 'a stale-version session');
+    assert.deepEqual(writes(ops), [], 'nothing created, nothing revoked');
+    assert.ok(await logged(logs, 'login_reauth_stale_version'));
+    assert.notEqual(await recordOf(store, owner.id), undefined, 'the record is left for the ordinary path');
+    assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'the next session request');
+    assert.ok(await logged(logs, 'session_version_mismatch'), 'refused and revoked by the existing version check');
+    assert.equal(await recordOf(store, owner.id), undefined);
   });
 });

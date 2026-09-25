@@ -416,3 +416,121 @@ test('a stale read that answers after expire() cannot resurrect the session', as
   assert.deepEqual(client.getState(), signedOut('expired'));
   assert.equal(net.sent.length, 2);
 });
+
+// M5-ADMIN-STEPUP-P1 — a recent sign-in: the login route in its re-authentication mode, beside the session cookie.
+const STATUS_COMMAND = { path: '/admin/v1/tenants/status', body: { tenantId: 't' }, idempotencyKey: '0f0e0d0c-0b0a-4908-8706-050403020100' };
+
+test('a recent sign-in sends the Bearer, the intent header and the re-authentication header, keeps the session active, and adopts the renewed CSRF token', async () => {
+  const net = scripted([active(), active(FRESH_CSRF), active(FRESH_CSRF), noContent()]);
+  const client = createAdminSessionClient({ fetch: net.fetch });
+  await client.bootstrap();
+  const heard: unknown[] = [];
+  client.subscribe(() => heard.push(client.getState()));
+  const renewing = client.reauthenticate(ID_TOKEN);
+  assert.deepEqual(client.getState(), ACTIVE); // the shell stays mounted: never signing-in
+  assert.equal(await renewing, 'renewed');
+  assert.deepEqual(client.getState(), ACTIVE);
+  assert.deepEqual(heard, []); // nothing was published: no signing-in, no signed-out
+  const [, login, confirm] = net.sent;
+  assert.equal(`${login.method} ${login.url}`, 'POST /admin/v1/session/login');
+  assert.equal(login.headers.get('authorization'), `Bearer ${ID_TOKEN}`);
+  assert.equal(login.headers.get('x-tmpos-csrf'), '1');
+  assert.equal(login.headers.get('x-tmpos-reauthenticate'), '1');
+  assert.equal(login.headers.get('x-tmpos-session-csrf'), null);
+  assert.equal(login.init.body, undefined);
+  assert.equal(login.init.credentials, 'include');
+  assert.equal(`${confirm.method} ${confirm.url}`, 'GET /admin/v1/session');
+  assert.equal(confirm.headers.get('authorization'), null);
+  await client.logout();
+  assert.equal(net.sent[3].headers.get('x-tmpos-session-csrf'), FRESH_CSRF);
+  assert.ok(!JSON.stringify(client.getState()).includes(ID_TOKEN));
+  assertAdminBoundaryOnly(net.sent);
+});
+
+for (const status of [401, 403]) {
+  test(`a recent sign-in the server refuses (${status}) leaves the prior session active and resumes nothing`, async () => {
+    const net = scripted([active(), refused(status), active(), noContent()]);
+    const client = createAdminSessionClient({ fetch: net.fetch });
+    await client.bootstrap();
+    assert.equal(await client.reauthenticate(ID_TOKEN), 'refused');
+    assert.deepEqual(client.getState(), ACTIVE);
+    assert.deepEqual(net.sent.map((request) => `${request.method} ${request.url}`), ['GET /admin/v1/session', 'POST /admin/v1/session/login', 'GET /admin/v1/session']);
+    await client.logout();
+    assert.equal(net.sent[3].headers.get('x-tmpos-session-csrf'), CSRF); // still the prior session's token
+  });
+}
+
+const REAUTH_ENDINGS: ReadonlyArray<[string, () => Reply[], string, unknown]> = [
+  ['a refusal after which no session remains ends it with the expiry notice', () => [refused(401), refused(401)], 'ended', signedOut('expired')],
+  ['a renewal whose confirming read finds no session ends it with the expiry notice', () => [active(FRESH_CSRF), refused(401)], 'ended', signedOut('expired')],
+  ['a rate limit changes nothing and reads nothing', () => [refused(429)], 'rate-limited', ACTIVE],
+  ['a lost answer confirmed by a read keeps the session, but claims no renewal', () => [new TypeError('network'), active()], 'unavailable', ACTIVE],
+  ['an outage the read cannot confirm keeps the session hidden', () => [refused(503), refused(503)], 'unavailable', { phase: 'active', interrupted: true, signOutFailed: false }],
+];
+for (const [name, replies, outcome, expected] of REAUTH_ENDINGS) {
+  test(`recent sign-in: ${name}`, async () => {
+    const client = createAdminSessionClient({ fetch: scripted([active(), ...replies()]).fetch });
+    await client.bootstrap();
+    assert.equal(await client.reauthenticate(ID_TOKEN), outcome);
+    assert.deepEqual(client.getState(), expected);
+  });
+}
+
+test('a second recent sign-in while one is in flight sends nothing and shares its outcome', async () => {
+  const slow = held();
+  const net = scripted([active(), slow.reply, active(FRESH_CSRF)]);
+  const client = createAdminSessionClient({ fetch: net.fetch });
+  await client.bootstrap();
+  const first = client.reauthenticate(ID_TOKEN);
+  const second = client.reauthenticate(`${ID_TOKEN}x`);
+  assert.equal(second, first);
+  const exchanged = client.exchange(ID_TOKEN); // nor may a login exchange or a logout start meanwhile: each waits on it
+  const leaving = client.logout();
+  assert.equal(net.sent.length, 2);
+  slow.answer(active(FRESH_CSRF));
+  assert.equal(await first, 'renewed');
+  await Promise.all([exchanged, leaving]);
+  assert.deepEqual(net.sent.map((request) => request.method), ['GET', 'POST', 'GET']);
+  assert.deepEqual(client.getState(), ACTIVE);
+});
+
+test('a recent sign-in sends nothing for a malformed token or without an active session, and ends nothing', async () => {
+  const net = scripted([active()]);
+  const client = createAdminSessionClient({ fetch: net.fetch });
+  assert.equal(await client.reauthenticate(ID_TOKEN), 'ended'); // still checking: no session to renew
+  await client.bootstrap();
+  assert.equal(await client.reauthenticate('not a token\r\nX-Injected: 1'), 'refused');
+  assert.equal(await client.reauthenticate('a'.repeat(4097)), 'refused');
+  assert.equal(net.sent.length, 1);
+  assert.deepEqual(client.getState(), ACTIVE);
+});
+
+test("an old session's command that answers after a recent sign-in is reported as failed, never as the new session's answer", async () => {
+  const late = held();
+  const net = scripted([active(), late.reply, active(FRESH_CSRF), active(FRESH_CSRF)], { honourAbort: false });
+  const client = createAdminSessionClient({ fetch: net.fetch });
+  await client.bootstrap();
+  const pending = client.command(STATUS_COMMAND);
+  await until(() => net.sent.length === 2);
+  assert.equal(await client.reauthenticate(ID_TOKEN), 'renewed');
+  assert.equal(net.sent[1].init.signal?.aborted, true); // superseded, not merely ignored
+  late.answer(json(200, { tenantId: 't', status: 'suspended', version: 2 }));
+  assert.deepEqual(await pending, { kind: 'failed' });
+  assert.deepEqual(client.getState(), ACTIVE);
+});
+
+test('no command is sent while a recent sign-in is deciding which session stands; afterwards it rides the renewed token', async () => {
+  const login = held();
+  const net = scripted([active(), login.reply, active(FRESH_CSRF), json(200, { tenantId: 't', status: 'suspended', version: 2 })]);
+  const client = createAdminSessionClient({ fetch: net.fetch });
+  await client.bootstrap();
+  const renewing = client.reauthenticate(ID_TOKEN);
+  await until(() => net.sent.length === 2); // the login request has started
+  assert.deepEqual(await client.command(STATUS_COMMAND), { kind: 'no-session' });
+  assert.equal(net.sent.length, 2); // nothing was sent
+  login.answer(active(FRESH_CSRF));
+  assert.equal(await renewing, 'renewed');
+  const after = await client.command(STATUS_COMMAND);
+  assert.equal(after.kind, 'response');
+  assert.equal(net.sent[3].headers.get('x-tmpos-session-csrf'), FRESH_CSRF);
+});

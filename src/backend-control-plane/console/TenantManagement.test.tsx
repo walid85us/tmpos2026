@@ -17,8 +17,10 @@ import {
 import type { CommandOutcome, TenantManagementClient } from './tenantManagementClient';
 
 const CSRF = 'q'.repeat(43);
+const FRESH_CSRF = 'freshCsrfSynthetic-0123456789_ROTATEDsessio'; // the session a recent sign-in rotated to (43 characters)
 const COOKIE = 'synthetic-admin-cookie-5e71';
-const SENSITIVE = [CSRF, COOKIE];
+const ID_TOKEN = 'synthetic.step-up.id-token-0123456789';
+const SENSITIVE = [CSRF, FRESH_CSRF, COOKIE, ID_TOKEN];
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CURSOR = 'nextCursorSynthetic0001';
 const LIST_URL = `${TENANTS_PATH}?limit=${PAGE_SIZE}`;
@@ -75,13 +77,14 @@ interface Sent {
   readonly init: RequestInit;
 }
 
-type Script = Partial<Record<'session' | 'logout' | 'list' | 'rename' | 'status', readonly Reply[]>>;
+type Script = Partial<Record<'session' | 'login' | 'logout' | 'list' | 'rename' | 'status', readonly Reply[]>>;
 
 /** One scripted server for the session, the directory and both commands; each route answers from its queue and repeats its last answer. */
 function scriptedServer(script: Script) {
   const sent: Sent[] = [];
   const queues: Record<string, Reply[]> = {
     session: [...(script.session ?? [ok({ status: 'active', csrfToken: CSRF })])],
+    login: [...(script.login ?? [])],
     logout: [...(script.logout ?? [() => new Response(null, { status: 204 })])],
     list: [...(script.list ?? [])],
     rename: [...(script.rename ?? [])],
@@ -89,6 +92,7 @@ function scriptedServer(script: Script) {
   };
   const route = (method: string, url: string): string | null => {
     if (method === 'GET' && url === '/admin/v1/session') return 'session';
+    if (method === 'POST' && url === '/admin/v1/session/login') return 'login';
     if (method === 'POST' && url === '/admin/v1/session/logout') return 'logout';
     if (method === 'GET' && url.startsWith(`${TENANTS_PATH}?`)) return 'list';
     if (method === 'PATCH' && url === DISPLAY_NAME_PATH) return 'rename';
@@ -116,15 +120,16 @@ function scriptedServer(script: Script) {
     renames: () => of('PATCH', (url) => url === DISPLAY_NAME_PATH),
     statuses: () => of('PATCH', (url) => url === STATUS_PATH),
     logouts: () => of('POST', (url) => url === '/admin/v1/session/logout'),
+    logins: () => of('POST', (url) => url === '/admin/v1/session/login'),
   };
 }
 
-function renderPage(script: Script) {
+function renderPage(script: Script, signIn?: AdminIdentityProvider['signIn']) {
   const server = scriptedServer(script);
   const client = createAdminSessionClient({ fetch: server.fetch as unknown as typeof fetch });
   const tenants: TenantManagementClient = createTenantManagementClient({ session: client, fetch: server.fetch as unknown as typeof fetch });
   const ccFetch = vi.fn(async () => json(503, { error: 'unavailable' }));
-  const identity: AdminIdentityProvider = { signIn: vi.fn<AdminIdentityProvider['signIn']>(async () => ({ kind: 'failed', failure: 'unavailable' })) };
+  const identity: AdminIdentityProvider = { signIn: vi.fn<AdminIdentityProvider['signIn']>(signIn ?? (async () => ({ kind: 'failed', failure: 'unavailable' }))) };
   const view = render(
     <ConsoleProvider client={client} identity={identity} commandCenter={createCommandCenterClient({ fetch: ccFetch as unknown as typeof fetch })} tenants={tenants}>
       <MemoryRouter initialEntries={['/admin/tenant-management']}>
@@ -132,7 +137,7 @@ function renderPage(script: Script) {
       </MemoryRouter>
     </ConsoleProvider>,
   );
-  return { ...view, server, client, tenants, ccFetch, user: userEvent.setup() };
+  return { ...view, server, client, tenants, ccFetch, identity, user: userEvent.setup() };
 }
 
 const main = () => screen.getByRole('main');
@@ -219,13 +224,14 @@ describe('Tenant Management: the directory', () => {
     await reply.settle(json(200, pageOf([acme()])));
     expect(await within(main()).findByRole('table')).toBeInTheDocument();
     expect(within(main()).queryByText('Loading tenants…')).toBeNull();
-    expect(within(main()).getByText('1 tenant loaded.')).toBeInTheDocument();
+    expect(await within(main()).findByText('1 tenant loaded.')).toBeInTheDocument(); // announced once the region refills
     expect(server.lists().map((request) => request.url)).toEqual([LIST_URL]);
   });
 
   it('says so when there are no tenants, with no table', async () => {
     renderPage({ list: [ok(pageOf([]))] });
-    expect(await within(await shown()).findAllByText('No tenants to show.')).toHaveLength(2); // the note and its announcement
+    await shown();
+    await waitFor(() => expect(within(main()).getAllByText('No tenants to show.')).toHaveLength(2)); // the note and its announcement
     expect(within(main()).queryByRole('table')).toBeNull();
     expect(within(main()).getByText('Choose a tenant to see its details.')).toBeInTheDocument();
   });
@@ -665,28 +671,20 @@ describe('Tenant Management: suspend and reactivate', () => {
     expect(server.statuses()).toHaveLength(1);
   });
 
-  it('asks for a fresh sign-in on step_up_required, synthesizes no evidence, and signs out on request', async () => {
+  it('keeps the display-name step-up as before: a fresh sign-in is asked for, no evidence is synthesized, and it signs out on request', async () => {
     const { user, server } = renderPage({
       list: [ok(pageOf([acme()]))],
-      status: [answer(403, { error: 'step_up_required', requestId: 'r1' })],
+      rename: [answer(403, { error: 'step_up_required', requestId: 'r1' })],
     });
     await open(user, 'Acme Retail');
-    await lifecycle(user, 'Suspend tenant', 'Chargeback fraud under review');
+    await rename(user, 'Acme Holdings');
     const alert = await within(details()).findByRole('alert');
     expect(alert).toHaveTextContent(STEP_UP);
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(within(details()).getAllByText('Active').length).toBeGreaterThan(0);
-    // Exactly the command: no Authorization, no token, no extra field.
-    expect(server.statuses()).toHaveLength(1);
-    const [sent] = server.statuses();
-    expect([...sent.headers.keys()].sort()).toEqual(['accept', 'content-type', 'idempotency-key', 'x-tmpos-csrf', 'x-tmpos-session-csrf']);
-    expect(Object.keys(sent.body).sort()).toEqual(['expectedVersion', 'reason', 'status', 'tenantId']);
     await user.click(within(alert).getByRole('button', { name: 'Sign in again' }));
     expect(await screen.findByText('You have signed out.')).toBeInTheDocument();
     expect(server.logouts()).toHaveLength(1);
-    expect(server.statuses()).toHaveLength(1);
+    expect(server.logins()).toHaveLength(0);
   });
-
   it('keeps focus in the dialog however late a frame from choosing the tenant runs', async () => {
     // Hold every animation frame, open the dialog, then run them: no deferred focus may take the reason field's focus.
     const frames: FrameRequestCallback[] = [];
@@ -747,6 +745,336 @@ describe('Tenant Management: suspend and reactivate', () => {
     expect(await within(details()).findByRole('alert')).toHaveTextContent(INVALID_STATE);
     await waitFor(() => expect(server.lists()).toHaveLength(2));
     await waitFor(() => expect([...details().querySelectorAll('dd')].map((value) => value.textContent)).toEqual(['Suspended', T1, '4']));
+  });
+});
+
+// M5-ADMIN-STEPUP-P1 — a definitive step_up_required on Suspend/Reactivate opens a recent-sign-in dialog. The sign-in is
+// the provider's (scripted here) verified by the server (the scripted login in its re-authentication mode); a completed
+// sign-in changes nothing, and the action is then a new intent: re-read version, newly typed reason, new key.
+describe('Tenant Management: a recent sign-in for a lifecycle action', { timeout: 15_000 }, () => {
+  const STEP_UP_ANSWER = answer(403, { error: 'step_up_required', requestId: 'r1' });
+  const REAUTH_TITLE = 'Sign in again to suspend Acme Retail';
+  const NOT_CHANGED = 'Acme Retail was not changed.';
+  const SIGNED_IN = 'Sign-in completed. Acme Retail has not been changed.';
+  const RESUME = `${SIGNED_IN} Choose “Suspend tenant” to confirm it again with a new reason.`;
+  const REFUSED = `Sign-in was not accepted for the administrator who started this action. ${NOT_CHANGED}`;
+  /** The one paragraph whose whole text is `text` (a stored name inside it is isolated in its own element). */
+  const live = () => document.getElementById('tenant-announcement')?.textContent?.trim();
+  /** Every text the page's live region holds from now on, in order (it is emptied before each message). */
+  function hearLive(): string[] {
+    const region = document.getElementById('tenant-announcement')!;
+    const heard: string[] = [];
+    new MutationObserver(() => heard.push(region.textContent ?? '')).observe(region, { childList: true, characterData: true, subtree: true });
+    return heard;
+  }
+  const paragraph = (text: string) => (_content: string, node: Element | null) => node?.tagName === 'P' && node.textContent === text;
+
+  /** The session and login the server answers: the login rotates the session to FRESH_CSRF when `renew` allows it. */
+  function sessionScript(renew: () => boolean = () => true, answered: () => unknown = () => undefined): Pick<Script, 'session' | 'login'> {
+    let csrf = CSRF;
+    return {
+      session: [() => json(200, { status: 'active', csrfToken: csrf })],
+      login: [async () => {
+        await answered();
+        if (!renew()) return json(401, { error: 'unauthenticated', requestId: 'r1' });
+        csrf = FRESH_CSRF;
+        return json(200, { status: 'active', csrfToken: FRESH_CSRF });
+      }],
+    };
+  }
+  /** A provider that asks for an authenticator code after the password, then produces the one token. */
+  const withTotp: AdminIdentityProvider['signIn'] = async () => ({
+    kind: 'second-factor',
+    challenge: { factors: ['totp'], verify: vi.fn(async () => ({ kind: 'token' as const, idToken: ID_TOKEN })), cancel: vi.fn(async () => undefined) },
+  });
+
+  async function stepUpFor(user: ReturnType<typeof userEvent.setup>, reason = 'Chargeback fraud under review') {
+    await open(user, 'Acme Retail');
+    await lifecycle(user, 'Suspend tenant', reason);
+    return screen.findByRole('dialog', { name: REAUTH_TITLE });
+  }
+
+  async function signInAgain(user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement, totp = true) {
+    await user.click(within(dialog).getByRole('button', { name: /^(Sign in again|Try again)$/ }));
+    await user.type(within(dialog).getByLabelText('Email'), 'operator@tmpos.test');
+    await user.type(within(dialog).getByLabelText('Password'), 'synthetic-password');
+    await user.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+    if (!totp) return;
+    await user.type(await within(dialog).findByLabelText('Verification code'), '123456');
+    await user.click(within(dialog).getByRole('button', { name: 'Verify' }));
+  }
+
+  it('names the tenant and the action, says nothing changed, focuses its heading, and holds the refused attempt nowhere', async () => {
+    const { user, server } = renderPage({ list: [ok(pageOf([acme()]))], status: [STEP_UP_ANSWER] });
+    const dialog = await stepUpFor(user);
+    expect(screen.getAllByRole('dialog')).toEqual([dialog]); // the confirmation dialog closed
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAccessibleDescription(/Nothing has been changed: Acme Retail is still active\. After you sign in, confirm the action again with a new reason\./);
+    await waitFor(() => expect(within(dialog).getByRole('heading', { name: REAUTH_TITLE })).toHaveFocus());
+    expect(within(dialog).getByRole('button', { name: 'Sign in again' })).toBeInTheDocument();
+    expect(within(details()).getAllByText('Active').length).toBeGreaterThan(0);
+    // Exactly the command: no Authorization, no token, no extra field; nothing else was sent or read.
+    const [sent] = server.statuses();
+    expect([...sent.headers.keys()].sort()).toEqual(['accept', 'content-type', 'idempotency-key', 'x-tmpos-csrf', 'x-tmpos-session-csrf']);
+    expect(Object.keys(sent.body).sort()).toEqual(['expectedVersion', 'reason', 'status', 'tenantId']);
+    expect(server.statuses()).toHaveLength(1);
+    expect(server.lists()).toHaveLength(1);
+    expect(server.logins()).toHaveLength(0);
+    expect(server.logouts()).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('Chargeback fraud under review'); // the reason went with the attempt
+  });
+
+  it('cancels with Cancel or Escape: nothing is sent, focus returns to the trigger, and the unchanged tenant is announced', async () => {
+    const { user, server } = renderPage({ list: [ok(pageOf([acme()]))], status: [STEP_UP_ANSWER] });
+    let dialog = await stepUpFor(user);
+    // Focus stays inside: Tab wraps from the last control to the first and back.
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const signIn = within(dialog).getByRole('button', { name: 'Sign in again' });
+    // From the focused heading (outside the Tab order), Tab and Shift+Tab land on a control inside, never out of the dialog.
+    const title = within(dialog).getByRole('heading', { name: REAUTH_TITLE });
+    await waitFor(() => expect(title).toHaveFocus());
+    await user.tab();
+    expect(cancel).toHaveFocus();
+    title.focus();
+    await user.tab({ shift: true });
+    expect(signIn).toHaveFocus();
+    cancel.focus();
+    await user.tab();
+    expect(signIn).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(signIn).toHaveFocus();
+    await user.click(cancel);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const trigger = within(details()).getByRole('button', { name: 'Suspend tenant' });
+    expect(trigger).toHaveFocus();
+    expect(document.getElementById('tenant-announcement')).toHaveAttribute('role', 'status');
+    await waitFor(() => expect(live()).toBe(NOT_CHANGED));
+
+    // Reopened: a new confirmation with an empty reason, refused again, then Escape from inside the sign-in form.
+    await user.click(trigger);
+    expect(within(screen.getByRole('dialog')).getByLabelText('Reason')).toHaveValue('');
+    await user.type(within(screen.getByRole('dialog')).getByLabelText('Reason'), 'Chargeback fraud under review');
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Suspend tenant' }));
+    dialog = await screen.findByRole('dialog', { name: REAUTH_TITLE });
+    await user.click(within(dialog).getByRole('button', { name: 'Sign in again' }));
+    await user.click(within(dialog).getByLabelText('Email'));
+    const heard = hearLive();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(within(details()).getByRole('button', { name: 'Suspend tenant' })).toHaveFocus();
+    // Said again: the region is emptied, then filled with the same message, so the second Cancel is announced too.
+    await waitFor(() => expect(heard).toEqual(['', NOT_CHANGED]));
+    expect(server.statuses()).toHaveLength(2);
+    expect(server.logins()).toHaveLength(0);
+    expect(server.lists()).toHaveLength(1);
+  });
+
+  it.each<[string, 'rejected' | 'cancelled' | 'unavailable', string]>([
+    ['a refused credential', 'rejected', 'Sign-in failed. Check your details and try again.'],
+    ['a cancelled provider sign-in', 'cancelled', 'Sign-in was cancelled.'],
+    ['a provider outage', 'unavailable', 'Sign-in is temporarily unavailable.'],
+  ])('leaves the tenant unchanged after %s, says so in the dialog, and keeps the way back', async (_case, failure, text) => {
+    const { user, server } = renderPage(
+      { list: [ok(pageOf([acme()]))], status: [STEP_UP_ANSWER], ...sessionScript() },
+      async () => ({ kind: 'failed', failure }),
+    );
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog, false);
+    expect(await within(dialog).findByText(paragraph(`${text} ${NOT_CHANGED}`))).toBeInTheDocument();
+    expect(server.logins()).toHaveLength(0); // no token, so nothing reached the server
+    expect(server.statuses()).toHaveLength(1);
+    expect(server.lists()).toHaveLength(1);
+    expect(within(details()).getAllByText('Active').length).toBeGreaterThan(0);
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(within(details()).getByRole('button', { name: 'Suspend tenant' })).toHaveFocus();
+  });
+
+  it('resumes nothing when the server refuses the sign-in (a different administrator): the prior session stays and the dialog says so', async () => {
+    const { user, server, client } = renderPage({ list: [ok(pageOf([acme()]))], status: [STEP_UP_ANSWER], ...sessionScript(() => false) }, withTotp);
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog);
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(REFUSED);
+    await waitFor(() => expect(within(dialog).getByRole('heading', { name: REAUTH_TITLE })).toHaveFocus());
+    const [login] = server.logins();
+    expect(login.headers.get('authorization')).toBe(`Bearer ${ID_TOKEN}`);
+    expect(login.headers.get('x-tmpos-reauthenticate')).toBe('1');
+    expect(login.headers.get('x-tmpos-csrf')).toBe('1');
+    expect(login.body).toBeUndefined();
+    expect(client.getState()).toEqual({ phase: 'active', interrupted: false, signOutFailed: false });
+    expect(within(dialog).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(server.lists()).toHaveLength(1); // no re-read, no resume
+    expect(server.statuses()).toHaveLength(1);
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText(SIGNED_IN, { exact: false })).toBeNull();
+    expect(within(details()).getByRole('button', { name: 'Suspend tenant' })).toHaveFocus();
+  });
+
+  it('returns to the sign-in page when no session remains after the refusal, and resumes nothing', async () => {
+    const { user, server } = renderPage({
+      list: [ok(pageOf([acme()]))],
+      status: [STEP_UP_ANSWER],
+      session: [ok({ status: 'active', csrfToken: CSRF }), answer(401)],
+      login: [answer(401)],
+    }, withTotp);
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog);
+    expect(await screen.findByText(EXPIRED)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(server.statuses()).toHaveLength(1);
+  });
+
+  it('after a renewed sign-in re-reads the tenant, focuses its action, and sends a NEW intent: re-read version, new reason, new key — while an uncertain answer kept its key', async () => {
+    const renew = held();
+    const reread = held();
+    const { user, server } = renderPage({
+      list: [ok(pageOf([acme()])), reread.reply, ok(pageOf([acme({ status: 'suspended', version: 6 })]))],
+      // Lost first: the retry is the same change under the same key; its definitive answer is step_up_required.
+      status: [lost, STEP_UP_ANSWER, ok({ tenantId: T1, status: 'suspended', version: 6 })],
+      ...sessionScript(() => true, renew.reply),
+    }, withTotp);
+    await open(user, 'Acme Retail');
+    const confirmation = await lifecycle(user, 'Suspend tenant', 'Chargeback fraud under review');
+    await user.click(within(await within(confirmation).findByRole('alert')).getByRole('button', { name: 'Try again' }));
+    const dialog = await screen.findByRole('dialog', { name: REAUTH_TITLE });
+    const [lostAttempt, refusedAttempt] = server.statuses();
+    expect(refusedAttempt.headers.get('idempotency-key')).toBe(lostAttempt.headers.get('idempotency-key'));
+    expect(refusedAttempt.body).toStrictEqual(lostAttempt.body);
+
+    // One sign-in however often it is submitted; nothing is shown as done while the server has not answered.
+    await signInAgain(user, dialog);
+    await waitFor(() => expect(server.logins()).toHaveLength(1));
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    // The form's controls are disabled while the server answers; focus waits on the dialog's heading, inside the trap.
+    expect(within(dialog).getByRole('heading', { name: REAUTH_TITLE })).toHaveFocus();
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(document.body);
+    within(dialog).getByRole('heading', { name: REAUTH_TITLE }).focus();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('dialog')).toBe(dialog);
+    expect(screen.queryByText(SIGNED_IN, { exact: false })).toBeNull();
+    const heardAfterSignIn = hearLive();
+    await renew.settle(new Response(null, { status: 204 })); // lets the scripted login answer
+    expect(server.logins()).toHaveLength(1);
+
+    // Until the re-read answers, no lifecycle control is offered and focus waits on the tenant's heading.
+    await waitFor(() => expect(server.lists()).toHaveLength(2));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(within(details()).queryByRole('button', { name: 'Suspend tenant' })).toBeNull();
+    await waitFor(() => expect(within(details()).getByRole('heading', { name: 'Acme Retail' })).toHaveFocus());
+    expect(screen.queryByText(SIGNED_IN, { exact: false })).toBeNull();
+    await reread.settle(json(200, pageOf([acme({ version: 5 })])));
+
+    // Signed in again: the tenant is re-read and shown; the note — said once — is about the sign-in, not the action.
+    const note = await screen.findByText(paragraph(RESUME));
+    expect(document.getElementById('tenant-resume')).not.toHaveAttribute('role'); // shown, not a second live region
+    expect(server.lists()).toHaveLength(2);
+    await waitFor(() => expect(heardAfterSignIn).toContain(RESUME));
+    expect(heardAfterSignIn.filter((text) => text !== '')).toEqual([RESUME]); // said once, and nothing else in its place
+    await waitFor(() => expect([...details().querySelectorAll('dd')].map((value) => value.textContent)).toEqual(['Active', T1, '5']));
+    const trigger = within(details()).getByRole('button', { name: 'Suspend tenant' });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByText(SUSPENDED)).toBeNull();
+    expect(server.statuses()).toHaveLength(2); // nothing was replayed or queued
+
+    // The next attempt is a new intent: an empty reason that must be typed again, the re-read version, a new key.
+    const again = await lifecycle(user, 'Suspend tenant');
+    expect(within(again).getByLabelText('Reason')).toHaveValue('');
+    await user.click(within(again).getByRole('button', { name: 'Suspend tenant' }));
+    expect(within(again).getByText('Enter a reason of at least 10 characters.')).toBeInTheDocument();
+    expect(server.statuses()).toHaveLength(2);
+    await user.type(within(again).getByLabelText('Reason'), 'Confirmed after a recent sign-in');
+    await user.click(within(again).getByRole('button', { name: 'Suspend tenant' }));
+    expect(await within(details()).findByRole('status')).toHaveTextContent(SUSPENDED);
+    const fresh = server.statuses()[2];
+    expect(fresh.body).toStrictEqual({ tenantId: T1, status: 'suspended', reason: 'Confirmed after a recent sign-in', expectedVersion: 5 });
+    expect(fresh.headers.get('idempotency-key')).toMatch(KEY_RE);
+    expect(fresh.headers.get('idempotency-key')).not.toBe(refusedAttempt.headers.get('idempotency-key'));
+    expect(fresh.headers.get('x-tmpos-session-csrf')).toBe(FRESH_CSRF); // the rotated session's token
+    await waitFor(() => expect([...details().querySelectorAll('dd')].map((value) => value.textContent)).toEqual(['Suspended', T1, '6']));
+  });
+
+  it.each<[string, Json, RegExp]>([
+    ['its status changed', pageOf([acme({ status: 'suspended', version: 4 })]), /Its status is now suspended, so it can no longer be suspended here\./],
+    ['the server no longer offers status changes', pageOf([acme({ version: 4 })], EDIT), /You no longer have permission to change tenant status/],
+    ['it is no longer on the page', pageOf([beta()]), /It is no longer on this page, so the action cannot continue here\./],
+    ['the re-read is refused', 403, /You no longer have permission to change tenant status/],
+    ['the re-read fails', 503, /The tenant list could not be read again, so the action cannot continue yet\./],
+  ])('offers no command after a renewed sign-in when %s, and says why', async (_case, reread, why) => {
+    const second: Reply = typeof reread === 'number' ? answer(reread) : ok(reread);
+    const { user, server } = renderPage({ list: [ok(pageOf([acme()])), second], status: [STEP_UP_ANSWER], ...sessionScript() }, withTotp);
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog);
+    const note = await waitFor(() => {
+      const found = document.getElementById('tenant-resume');
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(note).not.toHaveAttribute('role');
+    expect(note).toHaveTextContent(SIGNED_IN);
+    expect(note).toHaveTextContent(why);
+    await waitFor(() => expect(live()).toBe(note.textContent)); // said once, by the page's live region
+    expect(note).toHaveTextContent(why);
+    await waitFor(() => expect(note).toHaveFocus());
+    expect(screen.queryByRole('button', { name: 'Suspend tenant' })).toBeNull();
+    expect(server.statuses()).toHaveLength(1);
+    expect(server.lists()).toHaveLength(2);
+  });
+
+  it.each<[string, Reply, string]>([
+    ['permission was removed', answer(403, { error: 'forbidden', requestId: 'r1' }), "You don't have permission to make this change. Nothing was changed."],
+    ['the session is gone', answer(401), EXPIRED],
+  ])('shows no success when, after a resumed sign-in, %s before the new confirmation', async (_case, refusal, text) => {
+    const { user, server } = renderPage({ list: [ok(pageOf([acme()])), ok(pageOf([acme({ version: 4 })]))], status: [STEP_UP_ANSWER, refusal], ...sessionScript() }, withTotp);
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog);
+    await screen.findByText(paragraph(RESUME));
+    // A later read of the directory drops the note: it described that re-read, not this one.
+    await user.click(within(main()).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(document.getElementById('tenant-resume')).toBeNull());
+    await waitFor(() => expect(server.lists()).toHaveLength(3));
+    await lifecycle(user, 'Suspend tenant', 'Confirmed after a recent sign-in');
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText(SUSPENDED)).toBeNull();
+    expect(server.statuses()).toHaveLength(2);
+    expect(server.statuses()[1].body.expectedVersion).toBe(4);
+  });
+
+  it('treats a choice of verification method as one stop when Tab wraps from the heading: the chosen one', async () => {
+    const twoFactors: AdminIdentityProvider['signIn'] = async () => ({
+      kind: 'second-factor',
+      challenge: { factors: ['totp', 'totp'], verify: vi.fn(async () => ({ kind: 'token' as const, idToken: ID_TOKEN })), cancel: vi.fn(async () => undefined) },
+    });
+    const { user } = renderPage({ list: [ok(pageOf([acme()]))], status: [STEP_UP_ANSWER], ...sessionScript() }, twoFactors);
+    const dialog = await stepUpFor(user);
+    await signInAgain(user, dialog, false);
+    const radios = await within(dialog).findAllByRole('radio');
+    const title = within(dialog).getByRole('heading', { name: REAUTH_TITLE });
+    await waitFor(() => expect(title).toHaveFocus());
+    await user.tab();
+    expect(radios[0]).toHaveFocus(); // the checked one, the first
+    await user.click(radios[1]);
+    title.focus();
+    await user.tab();
+    expect(radios[1]).toHaveFocus(); // now the chosen one; the unselected radio is never a stop
+    within(dialog).getByRole('button', { name: 'Cancel' }).focus();
+    await user.tab();
+    expect(radios[1]).toHaveFocus(); // wrapping from the last control lands on the chosen radio too
+  });
+
+  it("cannot apply a command answer that arrives after the session changed: it is reported as unconfirmed, never as the new session's", async () => {
+    const late = held();
+    const { client, tenants, server } = renderPage({ list: [ok(pageOf([acme()]))], status: [late.reply], ...sessionScript() });
+    await shown();
+    const pending = tenants.changeStatus({ tenantId: T1, status: 'suspended', reason: 'Chargeback fraud under review', expectedVersion: 3 }, crypto.randomUUID());
+    await waitFor(() => expect(server.statuses()).toHaveLength(1));
+    await act(async () => { expect(await client.reauthenticate(ID_TOKEN)).toBe('renewed'); });
+    expect(server.statuses()[0].init.signal?.aborted).toBe(true);
+    await late.settle(json(200, { tenantId: T1, status: 'suspended', version: 4 }));
+    expect(await pending).toEqual({ kind: 'uncertain' });
   });
 });
 

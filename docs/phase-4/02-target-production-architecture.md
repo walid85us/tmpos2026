@@ -33,7 +33,7 @@ Authority moves from the browser to the server. Today the browser holds the role
 **Shipping routes (8 routes + bounded 404):**
 - `GET /health` — public operational probe (untimed)
 - `GET /readiness` — public readiness probe (503 if any dependency it probes is unavailable — see Health and readiness below; does not terminate the process)
-- `POST /admin/v1/session/login` — exchange Firebase ID token for admin session cookie
+- `POST /admin/v1/session/login` — exchange Firebase ID token for admin session cookie. *M5-ADMIN-STEPUP-P1:* sent with `X-TMPOS-Reauthenticate: 1` it is a reauthentication, which after every ordinary login step rotates the session only if the presented cookie authenticates as a valid (unexpired, unrevoked) session of the same principal whose security version equals this login's admission version, and otherwise answers the generic 401 — those checks run after the ordinary login steps and create and revoke nothing, while an admission denial at the ordinary step still ends every session of that principal ([03 §2a](./03-backend-control-plane-login-session-blueprint.md), [ADR-28](./10-architecture-decision-records.md)); the route inventory is unchanged
 - `GET /admin/v1/session` — current admin session (no tenant session reaches this)
 - `POST /admin/v1/session/logout` — invalidate admin session
 - `GET /admin/v1/tenants` — read admin directory under `view_tenants` permission

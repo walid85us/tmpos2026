@@ -39,7 +39,9 @@ import { createSupervisedPgClient, MAX_POOLS } from '../../server/persistence/su
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
 import { startProductionEntry, SHIPPING_ROUTES, STARTUP_STEP_DEADLINE_MS } from '../../server/entry/productionEntry.ts';
-import { principalKeyOf, SESSION_COOKIES, SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
+import {
+  principalKeyOf, RECENT_AUTH_MAX_AGE_MS, REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES, SESSION_CSRF_HEADER,
+} from '../../server/runtime/sessions.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { sessionPaths } from '../../server/runtime/routes.ts';
 import { SECURITY_HEADERS, HSTS_HEADER } from '../../server/runtime/securityHeaders.ts';
@@ -284,7 +286,7 @@ await setupStep(async () => {
 // the synthetic identity provider and configuration every entry starts from
 // ---------------------------------------------------------------------------
 
-const TOKENS = new Map(); // bearer token -> { uid }
+const TOKENS = new Map(); // bearer token -> { uid, authAgeSec? }
 const VERIFIER = Object.freeze({
   async verify(token) {
     const rec = TOKENS.get(token);
@@ -293,7 +295,8 @@ const VERIFIER = Object.freeze({
       err.code = 'auth/invalid-id-token'; // maps to a credential refusal, never an outage
       throw err;
     }
-    return { uid: rec.uid, authTime: Math.floor(Date.now() / 1000), secondFactor: 'totp' };
+    // authAgeSec stands for a token the provider REFRESHED: a fresh token whose auth_time is still the old sign-in's.
+    return { uid: rec.uid, authTime: Math.floor(Date.now() / 1000) - (rec.authAgeSec ?? 0), secondFactor: 'totp' };
   },
 });
 
@@ -587,7 +590,7 @@ async function waitReady(ctx, timeoutMs = 15_000) {
 }
 
 // ===========================================================================
-// M6EP-01..12, 16, 18..20, FORCED SHUTDOWN, TLS, SECRETS
+// M6EP-01..12, 16, 18..23, FORCED SHUTDOWN, TLS, SECRETS
 // ===========================================================================
 
 test('M6EP-01: valid complete configuration starts exactly one listener', async () => {
@@ -947,6 +950,115 @@ test('M6EP-20: a signal during preflight exits without ever binding', async () =
     await new Promise((resolve) => stallServer.close(resolve));
     rmSync(stallDir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// step-up and reauthentication (M5-ADMIN-STEPUP-P1)
+// ---------------------------------------------------------------------------
+
+/** The durable record's key: the SHA-256 of the cookie's identifier (sessions.ts digestOf), never the identifier. */
+const sessionKeyOf = (session) =>
+  createHash('sha256').update(session.cookie.slice(session.cookie.indexOf('=') + 1)).digest('base64url');
+const authenticatedAtOf = async (session) =>
+  (await owner`select authenticated_at from tmpos_session.session where session_key = ${sessionKeyOf(session)}`)[0]?.authenticated_at ?? null;
+
+/**
+ * Stand in for time passing since the administrator signed in: the session's bound provider authentication is set
+ * `ageMs` into the past, through the owner. The real clock runs on, so the chain and the transaction judge it as is.
+ */
+async function ageAuthentication(session, ageMs) {
+  const rows = await owner`update tmpos_session.session set authenticated_at = ${Date.now() - ageMs}
+    where session_key = ${sessionKeyOf(session)} returning session_key`;
+  assert.equal(rows.length, 1, 'exactly the one session aged');
+}
+
+/** A reauthentication: the ordinary admin login presenting `session`'s cookie, with the opt-in header. */
+const reauthenticate = (ctx, token, session) =>
+  ctx.login(token, { cookie: session.cookie, [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE });
+
+function assertStepUp(reply, label) {
+  assert.equal(reply.status, 403, `${label}: ${reply.body}`);
+  assert.equal(JSON.parse(reply.body).error, 'step_up_required', label);
+}
+
+test('M6EP-21: a stale session is refused step_up_required; a same-administrator reauthentication lets a NEW command succeed and the old cookie cannot', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await actor('m6ep21', [{ scope: 'platform', role: 'system_owner' }]);
+    const tenant = await newTenant('m6ep21');
+    const old = await signIn(ctx, admin);
+    await ageAuthentication(old, RECENT_AUTH_MAX_AGE_MS + 60_000);
+    const records = await idempotencyRecordCount();
+    const refused = await surface(ctx, old).status({ tenantId: tenant, status: 'suspended', reason: REASON, expectedVersion: 1 });
+    assertStepUp(refused, 'the stale session');
+    assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep21-${SUFFIX}`, status: 'active', row_version: '1' }, 'the tenant is unchanged');
+    assert.equal(await idempotencyRecordCount(), records, 'the refusal reserved no idempotency record');
+
+    const renewedReply = await reauthenticate(ctx, admin.token, old);
+    assert.equal(renewedReply.status, 200, renewedReply.body);
+    const renewed = {
+      cookie: renewedReply.headers['set-cookie'][0].split('; ')[0], csrf: JSON.parse(renewedReply.body).csrfToken,
+    };
+    assert.notEqual(renewed.cookie, old.cookie, 'a fresh session identifier');
+    assert.notEqual(renewed.csrf, old.csrf, 'and its own CSRF token');
+    assert.ok(Date.now() - Number(await authenticatedAtOf(renewed)) < 60_000, 'the new record carries the new sign-in\'s time');
+    assert.equal(await authenticatedAtOf(old), null, 'the superseded record is gone, never updated');
+
+    // The old cookie cannot borrow the new evidence: it is no session at all.
+    assert.equal((await ctx.req('GET', sessionPaths('admin').current, { cookie: old.cookie })).status, 401);
+    const oldAttempt = await surface(ctx, old).status({ tenantId: tenant, status: 'suspended', reason: REASON, expectedVersion: 1 });
+    assert.equal(oldAttempt.status, 401, oldAttempt.body);
+    assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep21-${SUFFIX}`, status: 'active', row_version: '1' }, 'still unchanged');
+
+    // A newly sent command — a new Idempotency-Key, the version just read, a newly entered reason — succeeds.
+    const current = await listed(ctx, renewed, tenant);
+    const suspended = await surface(ctx, renewed).status({
+      tenantId: tenant, status: 'suspended', reason: 'Confirmed again after a recent sign-in.', expectedVersion: current.version,
+    });
+    assert.equal(suspended.status, 200, suspended.body);
+    assert.deepEqual(JSON.parse(suspended.body), { tenantId: tenant, status: 'suspended', version: 2 });
+    assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep21-${SUFFIX}`, status: 'suspended', row_version: '2' });
+  });
+});
+
+test('M6EP-22: a DIFFERENT administrator\'s reauthentication is a 401 that changes nothing; the first session stays stale', async () => {
+  await withEntry({}, async (ctx) => {
+    const first = await actor('m6ep22-first', [{ scope: 'platform', role: 'system_owner' }]);
+    const second = await actor('m6ep22-second', [{ scope: 'platform', role: 'system_owner' }]);
+    const tenant = await newTenant('m6ep22');
+    const session = await signIn(ctx, first);
+    await ageAuthentication(session, RECENT_AUTH_MAX_AGE_MS + 60_000);
+    const aged = await authenticatedAtOf(session);
+    const reply = await reauthenticate(ctx, second.token, session);
+    assert.equal(reply.status, 401, reply.body);
+    assert.equal(JSON.parse(reply.body).error, 'unauthenticated');
+    assert.equal(reply.headers['set-cookie'], undefined, 'no session is issued to the second administrator');
+    assert.equal(await authenticatedAtOf(session), aged, 'the first administrator\'s record is exactly as it was');
+    assert.equal((await ctx.req('GET', sessionPaths('admin').current, { cookie: session.cookie })).status, 200, 'and still active');
+    assertStepUp(await surface(ctx, session).status({ tenantId: tenant, status: 'suspended', reason: REASON, expectedVersion: 1 }),
+      'the first session after the refused reauthentication');
+    assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep22-${SUFFIX}`, status: 'active', row_version: '1' }, 'the tenant is unchanged');
+  });
+});
+
+// This proves the admin login auth-age policy (applied by the chain before the login handler), not the reauthentication
+// guard: there is no new evidence without a new sign-in, whatever header the login carries.
+test('M6EP-23: no new evidence without a new sign-in — a refreshed token is refused by the login auth-age policy; the stale session still cannot change the tenant', async () => {
+  await withEntry({}, async (ctx) => {
+    const admin = await actor('m6ep23', [{ scope: 'platform', role: 'system_owner' }]);
+    const tenant = await newTenant('m6ep23');
+    const session = await signIn(ctx, admin);
+    await ageAuthentication(session, RECENT_AUTH_MAX_AGE_MS + 60_000);
+    const aged = await authenticatedAtOf(session);
+    const refreshed = `${admin.token}-refreshed`;
+    TOKENS.set(refreshed, { uid: admin.uid, authAgeSec: 6 * 60 }); // auth_time six minutes old: past the admin login's five
+    const reply = await reauthenticate(ctx, refreshed, session);
+    assert.equal(reply.status, 401, reply.body);
+    assert.equal(reply.headers['set-cookie'], undefined);
+    assert.equal(await authenticatedAtOf(session), aged, 'no evidence was carried into the session');
+    assertStepUp(await surface(ctx, session).status({ tenantId: tenant, status: 'suspended', reason: REASON, expectedVersion: 1 }),
+      'the stale session after the refreshed-token attempt');
+    assert.deepEqual(await tenantRow(tenant), { display_name: `m6ep-m6ep23-${SUFFIX}`, status: 'active', row_version: '1' }, 'the tenant is unchanged');
+  });
 });
 
 test('M6EP-FORCED: a hung client.end() forces shutdown at the deadline, never before it, exactly once', async () => {

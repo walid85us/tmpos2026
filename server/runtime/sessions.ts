@@ -45,7 +45,13 @@
 // credential the policy refuses spends no account budget and cannot lock the account's owner out.
 // The login handler then asks admission and issues the session. Login never adopts a presented identifier: it
 // always issues a fresh one, and revokes a well-formed session presented to it (rotation, so
-// fixation cannot plant a session). Logout revokes the session and clears its cookie with
+// fixation cannot plant a session). A login that sends REAUTHENTICATE_HEADER (M5-ADMIN-STEPUP-P1) is a
+// reauthentication: after every step above it also requires the presented session to authenticate as a
+// live session of the SAME principal, admitted at the security version this login's admission just
+// reported, and only then rotates exactly as a login does — so a fresh
+// sign-in can renew the recent-authentication evidence of the administrator who started an action,
+// never hand another identity's session to that browser. Any refusal there creates and revokes nothing.
+// Logout revokes the session and clears its cookie with
 // matching attributes; only the logout handler holds that capability, never a business handler.
 //
 // Every port call is bounded by the port deadline and handed its AbortSignal (deadline.ts). A
@@ -123,6 +129,15 @@ export const LOGIN_POLICIES: Readonly<Record<SessionAudience, LoginPolicy>> = Ob
 
 /** The header carrying the session-bound CSRF token on an unsafe session request. */
 export const SESSION_CSRF_HEADER = 'x-tmpos-session-csrf';
+
+/**
+ * The header that makes a login a reauthentication of the session it presents (M5-ADMIN-STEPUP-P1), and
+ * its one accepted value. Absent, the login is exactly an ordinary login. Present with any other value, or
+ * on more than one line, it is refused like a bad credential: a request that asked for the same-principal
+ * check is never quietly served without it.
+ */
+export const REAUTHENTICATE_HEADER = 'x-tmpos-reauthenticate';
+export const REAUTHENTICATE_VALUE = '1';
 
 /**
  * How recent a TRUSTED authentication must be for a route that declares `recentAuth: 'required'`
@@ -247,6 +262,16 @@ export type LoginEvidenceRefusal =
   | 'login_auth_time_future'
   | 'login_auth_stale';
 
+type LoginMode = 'login' | 'reauthenticate' | 'invalid';
+
+/** Whether this login is an ordinary one, a reauthentication, or asked for one in a form that is refused. */
+function loginModeOf(req: Request): LoginMode {
+  let lines = 0;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === REAUTHENTICATE_HEADER) lines++;
+  if (lines === 0) return 'login';
+  return lines === 1 && req.headers[REAUTHENTICATE_HEADER] === REAUTHENTICATE_VALUE ? 'reauthenticate' : 'invalid';
+}
+
 export interface ActiveSession {
   readonly principal: VerifiedPrincipal;
   readonly context: SessionContext;
@@ -255,6 +280,8 @@ export interface ActiveSession {
   readonly lastSeenAt: number;
   /** The provider-verified authentication time bound to this session at login, or null when it carried none. */
   readonly authenticatedAt: number | null;
+  /** The security version this session was admitted at (its record's), which a reauthentication compares. */
+  readonly securityVersion: string;
   /**
    * The trusted scope THIS request's admission selected — asked on this request, witness unchanged — or null when
    * admission was not asked (logout) or names no scope. The chain hands it to the route authorizer.
@@ -505,7 +532,7 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
     }
     return Object.freeze({
       principal: live.principal, context: contextOf(read.id, key), key, lastSeenAt: live.lastSeenAt, authenticatedAt: live.authenticatedAt,
-      admitted,
+      securityVersion: live.securityVersion, admitted,
     });
   }
 
@@ -526,6 +553,22 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       return challenged(res, ctx, (await revokeAllOf(principal)) ? 'login_admission_denied' : 'login_admission_denied_unrevoked');
     }
     if (typeof decision === 'string') return unavailable(res, ctx, decision);
+    const mode = loginModeOf(req);
+    if (mode === 'invalid') return challenged(res, ctx, 'login_reauth_header_invalid');
+    if (mode === 'reauthenticate') {
+      // The presented session must be live under exactly the rules any session request meets — no admission
+      // re-ask: this login's own admission just ran for the principal it must equal — and belong to that
+      // same principal. Every refusal here reads as a bad credential and creates and revokes nothing, so
+      // another identity signing in leaves the prior administrator's session exactly as it was.
+      const prior = await authenticate(req.headers.cookie, false);
+      if (prior === 'session_unavailable' || prior === 'session_timeout') return unavailable(res, ctx, prior);
+      if (typeof prior === 'string') return challenged(res, ctx, 'login_reauth_no_session');
+      if (principalKeyOf(prior.principal) !== principalKeyOf(principal)) return challenged(res, ctx, 'login_reauth_mismatch');
+      // authenticate() without revalidation skips the version check a session request makes, so it is made here:
+      // a session issued before the principal's standing changed is not renewed. It is left for the next
+      // ordinary session request, which revokes it exactly as today.
+      if (prior.securityVersion !== decision.securityVersion) return challenged(res, ctx, 'login_reauth_stale_version');
+    }
     const presented = readSessionCookie(req.headers.cookie, cookieName);
     const presentedKey = typeof presented === 'string' ? null : digestOf(presented.id);
     const id = randomBytes(32).toString('base64url');
@@ -542,7 +585,10 @@ function createBoundary(audience: SessionAudience, raw: unknown, now: () => numb
       createdAt: t, lastSeenAt: t, validatedAt: t,
     });
     try {
-      // Rotation: a well-formed session presented at login never outlives it.
+      // Rotation: a well-formed session presented at login never outlives it. A reauthentication shares both
+      // properties of an ordinary login here, unchanged: a create that fails after the revoke answers 503 and
+      // leaves no session at all, and two concurrent reauthentications presenting one cookie can both pass the
+      // same-principal check and create two sessions of that same principal (docs/phase-4/08 records both).
       if (presentedKey !== null) await call((signal) => sessions.revoke(presentedKey, signal));
       await call((signal) => sessions.create(digestOf(id), record, signal));
     } catch (err) {
