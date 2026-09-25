@@ -363,9 +363,11 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.ok(boundary !== null);
     assert.deepEqual({ client: calls.client, store: calls.store, family: calls.family }, { client: 1, store: 1, family }, url);
     assert.equal(fake.pools(), 0, 'nothing connects at composition: the kernel opens a pool only when a transaction runs');
+    // M6-ENTRY-P1: `preflight` joined this shape; stale before that, this list named only the M6-RATE-P2 keys.
     assert.deepEqual(Object.keys(boundary).sort(),
-      ['close', 'idempotency', 'platformAdmission', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
-      'the two ports, the three session-boundary adapters, the limiter binding (M6-RATE-P2), the served routes, and close — nothing else');
+      ['close', 'idempotency', 'platformAdmission', 'preflight', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions'],
+      'the two ports, the three session-boundary adapters, the limiter binding (M6-RATE-P2), the served routes, the startup preflight (M6-ENTRY-P1, null: this harness builds none), and close — nothing else');
+    assert.equal(boundary.preflight, null, 'a harness factories object without `preflight` yields preflight null');
     // M5-GIAM-D1-P4: the administrative boundary's admission crosses; the resolver and the authorizer over it no longer
     // do — the session root builds the authorizer that decides on the scope this admission selects.
     assert.deepEqual([typeof boundary.platformAdmission.admit, typeof boundary.platformAdmission.probe], ['function', 'function']);
@@ -382,6 +384,39 @@ test('a supported endpoint builds the client, kernel and store once each, and ha
     assert.ok(!JSON.stringify(boundary).includes('synthetic-pw') && !JSON.stringify(boundary).includes(REF), 'no URL or credential crosses');
     await boundary.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// M6-ENTRY-P1 — composeProductionTransactions(env, client): the deployable entry's construction boundary
+// ---------------------------------------------------------------------------
+
+test('M6E-T01 composeProductionTransactions(env, client) builds its kernel with the handed constructor, once, over the classified endpoint, and a refused configuration never calls it', async () => {
+  const fake = fakeDriver();
+  let calls = 0;
+  let seenEndpoint: unknown;
+  const client = (endpoint: unknown): SupervisedPgClient => { calls++; seenEndpoint = endpoint; return createSupervisedPgClient(fake.driver, '', { max: 2 }); };
+  const boundary = composeProductionTransactions(CONFIGURED, client);
+  assert.ok(boundary !== null);
+  assert.equal(calls, 1, 'the handed constructor is called exactly once');
+  assert.equal((seenEndpoint as { family: string }).family, 'direct', 'over the classified endpoint');
+  await boundary!.close();
+
+  calls = 0;
+  assert.throws(() => composeProductionTransactions({ ...CONFIGURED, IDEMPOTENCY_KEY: undefined }, client), TransactionCompositionError);
+  assert.equal(calls, 0, 'a refused configuration is never handed to the kernel constructor');
+});
+
+test('M6E-T02 the production factories build a non-null preflight exposing connect/runtimeLogin/migrationLedger/rateLimitKey', async () => {
+  const fake = fakeDriver();
+  const client = (): SupervisedPgClient => createSupervisedPgClient(fake.driver, '', { max: 2 });
+  const boundary = composeProductionTransactions(CONFIGURED, client);
+  assert.ok(boundary !== null && boundary.preflight !== null, 'the production factories always build it');
+  const preflight = boundary!.preflight as unknown as Record<string, unknown>;
+  assert.deepEqual(
+    ['connect', 'runtimeLogin', 'migrationLedger', 'rateLimitKey'].map((k) => typeof preflight[k]),
+    ['function', 'function', 'function', 'function'],
+  );
+  await boundary!.close();
 });
 
 test('a command route needs its mutator, a partial construction composes nothing, and no fallback stands in', async () => {
@@ -418,11 +453,14 @@ test('a command route needs its mutator, a partial construction composes nothing
     ['database_tls_invalid']);
   // Anything else the client factory throws is a defect, never a composition answer.
   assert.throws(() => assembleTransactions(REQUIRED, CONFIGURED, { client: () => { throw new RangeError('defect'); }, store: NEVER.store, platformAdmission: NEVER.platformAdmission, sessionStore: NEVER.sessionStore, tenantAdmission: NEVER.tenantAdmission, tenantDirectory: NEVER.tenantDirectory, rateLimiter: NEVER.rateLimiter }), RangeError);
-  // The production root takes configuration only: no store, client or factory can be handed to it.
+  // M6-ENTRY-P1: the production root takes configuration plus the kernel constructor only — no store,
+  // factory or inventory can be handed to it (`client` is defaulted, so configuration alone is still a
+  // complete call: `.length` stays 1).
   assert.equal(composeProductionTransactions.length, 1);
   assert.throws(() => composeProductionTransactions({ idempotencyStore: 'memory', store: 'memory' }),
     (err: unknown) => err instanceof TransactionCompositionError && JSON.stringify(err.blockers) === JSON.stringify(['app_database_url_missing', 'idempotency_key_missing']),
     'extra configuration selects nothing: no in-memory store, no fallback');
+  assert.throws(() => composeProductionTransactions(CONFIGURED, 'not a function' as never), TypeError, 'a non-function client refuses before anything is built');
 });
 
 test('a refused configuration makes no contact, and the real client dials only the classified endpoint once a transaction runs', async () => {

@@ -142,6 +142,25 @@ function outcomeOf(rows: unknown, request: Consume): RateLimitOutcome | null {
   return null; // key_mismatch, or a routine this file was not written against
 }
 
+/** What m6_rate_limit_probe answered for a key, as the deployable entry's boot check reads it (M6-ENTRY-P1). */
+export type RateLimitKeyStatus = 'ready' | 'key_mismatch' | 'store_read_only' | 'consume_unavailable' | 'malformed';
+const PROBE_OUTCOMES: ReadonlySet<unknown> = new Set(['ready', 'key_mismatch', 'store_read_only', 'consume_unavailable']);
+
+/**
+ * The boot check before a listener opens (server/entry/productionEntry.ts): the probe routine's own answer for this key,
+ * where the readiness probe collapses every answer but 'ready' to false. Migration 014 registers the fingerprint when
+ * none is, atomically, and never replaces one, so this is also the one first registration no external request can race.
+ * Bounded by `signal` alone — a startup step's deadline, not the per-request LIMITER_DEADLINE_MS — under the consume's
+ * own server-side bounds. A transaction that cannot answer throws; an answer outside the routine's contract is 'malformed'.
+ */
+export async function probeRateLimitKey(client: SupervisedPgClient, keySecret: Uint8Array, signal: AbortSignal): Promise<RateLimitKeyStatus> {
+  const fingerprint = rateLimitKeyFingerprint(keySecret);
+  const rows = await client.transaction(signal, RATE_LIMIT_STORE_BOUNDS,
+    (sql) => sql`select outcome from tmpos_rate_limit.m6_rate_limit_probe(${fingerprint}::bytea)`);
+  const row = onlyRow(rows, ['outcome']);
+  return row !== null && PROBE_OUTCOMES.has(row.outcome) ? row.outcome as RateLimitKeyStatus : 'malformed';
+}
+
 /**
  * The production limiter over the M6 runtime kernel. `client` is the kernel the transaction root built — one client,
  * one credential, one governed endpoint; `keySecret` is RATE_LIMIT_KEY as the session root parsed it (32–64 bytes;

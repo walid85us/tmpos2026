@@ -20,6 +20,7 @@ import { ProductionCompositionError, assembleSessions, composeProductionSessions
 import type { SessionParts } from './productionSessions.js';
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 import type { BearerTokenView } from '../runtime/access.js';
+import type { FirebaseIdTokenVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
 import { createMemorySessionStore } from '../runtime/memorySessionStore.testkit.js';
 import { createMemoryRateLimiter, testRequestLimits } from '../runtime/rateLimiter.testkit.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../runtime/requestSecurity.js';
@@ -404,4 +405,103 @@ test('M6R-S03 durableSessionAdapters binds the limiter only with both a binding 
   for (const binding of [null, 'x', {}]) {
     assert.throws(() => durableSessionAdapters({ store, tenantAdmission: TENANT_ADMISSION, rateLimiter: binding as never }, key), TypeError, JSON.stringify(binding));
   }
+});
+
+// ---------------------------------------------------------------------------
+// M6-ENTRY-P1 — options.audiences and options.tokenVerifier: the deployable entry composes the
+// administrative boundary alone, and substitutes the identity provider's own verification.
+// ---------------------------------------------------------------------------
+
+/** An environment that records every key actually read from it (positive control: `.has('*')` proves nothing was skipped by accident). */
+function recordingEnv(values: Record<string, string | undefined>): { env: Record<string, string | undefined>; read: Set<string> } {
+  const read = new Set<string>();
+  const env = new Proxy(values, { get: (target, key) => { if (typeof key === 'string') read.add(key); return Reflect.get(target, key); } });
+  return { env, read };
+}
+
+const ADMIN_ONLY_TOPOLOGY = { SESSION_ADMIN_ORIGINS: TOPOLOGY.SESSION_ADMIN_ORIGINS };
+
+test('M6E-S01 options.audiences: [\'admin\'] composes the admin boundary alone, and neither reads nor requires SESSION_TENANT_ORIGINS', () => {
+  for (const tenantOrigins of [undefined, '', 'not an origin at all', 'http://insecure.example.test']) {
+    const { env, read } = recordingEnv({ ...ADMIN_ONLY_TOPOLOGY, ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA, SESSION_TENANT_ORIGINS: tenantOrigins });
+    let blockers: readonly string[] = [];
+    try {
+      composeProductionSessions(env, undefined, { audiences: ['admin'] });
+      assert.fail('must still refuse: no durable bundle');
+    } catch (err) {
+      assert.ok(err instanceof ProductionCompositionError);
+      blockers = err.blockers;
+    }
+    assert.deepEqual(blockers, [LIMITER, 'admin_session_store_unavailable', 'admin_admission_unavailable', 'admin_authorizer_unavailable'],
+      `${String(tenantOrigins)}: the tenant boundary's blockers never appear`);
+    assert.ok(!read.has('SESSION_TENANT_ORIGINS'), `${String(tenantOrigins)}: SESSION_TENANT_ORIGINS is never read`);
+    assert.ok(read.has('SESSION_ADMIN_ORIGINS'), 'the scan observes reads (positive control)');
+  }
+  // With a durable bundle, the admin boundary composes and sessions.tenant is never registered.
+  const store = createMemorySessionStore();
+  const { rateLimiter } = limiterBinding();
+  const { sessions } = composeProductionSessions(
+    { ...ADMIN_ONLY_TOPOLOGY, ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA },
+    { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter },
+    { audiences: ['admin'] },
+  );
+  assert.deepEqual(Object.keys(sessions), ['admin']);
+});
+
+test('M6E-S02 options.audiences with both boundaries named keeps the existing behaviour: a shared host is still ambiguous', () => {
+  const env = { SESSION_TENANT_ORIGINS: 'https://shared.example.test', SESSION_ADMIN_ORIGINS: 'https://shared.example.test', ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA };
+  const without = blockersOf(env);
+  let withBoth: readonly string[] = [];
+  try {
+    composeProductionSessions(env, undefined, { audiences: ['tenant', 'admin'] });
+    assert.fail('must refuse');
+  } catch (err) {
+    assert.ok(err instanceof ProductionCompositionError);
+    withBoth = err.blockers;
+  }
+  assert.deepEqual(withBoth, without, 'explicitly naming both audiences is exactly the default');
+  assert.equal(without[0], 'session_origins_ambiguous');
+});
+
+test('M6E-S03 an invalid options.audiences throws a TypeError, never a composition refusal', () => {
+  for (const audiences of [[], ['tenant', 'tenant'], ['x'], 'admin']) {
+    assert.throws(() => composeProductionSessions(CONFIGURED, undefined, { audiences: audiences as never }), TypeError, JSON.stringify(audiences));
+  }
+});
+
+test('M6E-S04 options.tokenVerifier is the one the composed verifier calls, and an invalid one refuses with a TypeError', async () => {
+  const store = createMemorySessionStore();
+  const { rateLimiter } = limiterBinding();
+  const calls: string[] = [];
+  const tokenVerifier: FirebaseIdTokenVerifier = {
+    async verify(idToken: string) {
+      calls.push(idToken);
+      return { uid: 'uid-verifier-owner', authTime: Math.floor(T0 / 1000) - 30, secondFactor: 'totp' };
+    },
+  };
+  const { sessions } = composeProductionSessions(
+    { ...ADMIN_ONLY_TOPOLOGY, ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA },
+    { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter },
+    { audiences: ['admin'], tokenVerifier },
+  );
+  const boundary = sessions.admin;
+  assert.ok(boundary !== undefined);
+  const identity = await boundary.verifier.verify(Object.freeze({ bearerToken: 'synthetic-id-token' }), new AbortController().signal);
+  assert.deepEqual(calls, ['synthetic-id-token'], 'the composed verifier calls exactly the tokenVerifier this root was handed');
+  assert.equal((identity as { authProviderUid: string } | null)?.authProviderUid, 'uid-verifier-owner');
+
+  for (const bad of [null, 'x', {}, { verify: 'nope' }]) {
+    assert.throws(() => composeProductionSessions(CONFIGURED, undefined, { tokenVerifier: bad as never }), TypeError, JSON.stringify(bad));
+  }
+});
+
+test('M6E-S05 assembleSessions(parts, [\'admin\']) composes the admin boundary alone, and still names a missing admin origin', () => {
+  const full = parts();
+  const { sessions } = assembleSessions(full, ['admin']);
+  assert.deepEqual(Object.keys(sessions), ['admin']);
+  assert.equal(sessions.tenant, undefined, 'the tenant boundary is never composed');
+  const tenantOnlyOrigins = { tenant: (full.origins as Record<string, readonly string[]>).tenant } as SessionParts['origins'];
+  assert.throws(() => assembleSessions({ ...full, origins: tenantOnlyOrigins }, ['admin']),
+    (err: unknown) => err instanceof ProductionCompositionError && err.blockers.includes('session_origins_missing'),
+    'a missing admin origin is still named when only the admin boundary is composed');
 });

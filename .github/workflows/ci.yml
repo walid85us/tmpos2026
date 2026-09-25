@@ -167,6 +167,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/rateLimitRuntime.integration.test.mjs
+      # Phase 4.0 M6-ENTRY-P1 — production entry startup preflight (config validation,
+      # database connection, migration ledger verification, login privilege check, rate
+      # limiter probe) against a disposable PostgreSQL cluster over the least-privilege runtime
+      # principal (001–014 migrations applied).
+      - name: Production entry startup preflight against disposable PostgreSQL (M6-ENTRY-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/productionEntryPreflight.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

@@ -25,18 +25,27 @@
 // What crosses. The composition hands back the two ports, the key, the session boundaries' durable adapters (the session store,
 // the tenant admission and — M5-GIAM-D1-P4 — the platform admission the administrative boundary is admitted and authorized
 // through), the distributed rate limiter's binding (M6-RATE-P2, migration 014: the limiter over this kernel, awaiting the
-// RATE_LIMIT_KEY the session root parses — this root never reads that key for the limiter), the routes as served and
-// `close` — never the kernel, a pool, the driver, a statement function, the URL or its credential. createApp probes both
-// ports, each the store's read-only probe routine under the established readiness deadline and sharing, only because they
-// are composed. `close` ends the kernel within its bounded grace
-// (RETIRED_POOL_GRACE_S); the entry that composes this runs it as a shutdown hook.
+// RATE_LIMIT_KEY the session root parses — this root never reads that key for the limiter), the routes as served, the
+// deployable entry's read-only startup preflight over the same kernel (M6-ENTRY-P1: connect, the runtime login's standing,
+// the migration ledger and the limiter key's boot check — postgresStartupPreflight.ts) and `close` — never the kernel, a
+// pool, the driver, a statement function, the URL or its credential. createApp probes both ports, each the store's
+// read-only probe routine under the established readiness deadline and sharing, only because they are composed. `close`
+// ends the kernel within its bounded grace (RETIRED_POOL_GRACE_S); the deployable entry (server/entry/productionEntry.ts)
+// runs it as a shutdown hook.
+// The kernel's constructor. Configuration is this root's one required input; the one other it takes is how the kernel is
+// constructed over the classified endpoint — the deployable entry's construction boundary, defaulted to the production
+// client (createRuntimeStoreClient: verified TLS, the sealed target). A disposable-database harness hands a client over its
+// own cluster; nothing else — no store, adapter, factory or inventory — can be handed to it.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
-import { createPostgresRateLimiter } from '../persistence/postgresRateLimiter.js';
+import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/postgresRateLimiter.js';
+import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
+import { createPostgresStartupPreflight } from '../persistence/postgresStartupPreflight.js';
+import type { StartupPreflight } from '../persistence/postgresStartupPreflight.js';
 import { revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
@@ -133,8 +142,19 @@ export interface ProductionTransactions {
    * composed over that same kernel (M5-GIAM-D1-P3) — the list an entry hands createApp as `routes`.
    */
   readonly routes: readonly RouteDefinition[];
+  /**
+   * The deployable entry's read-only startup questions over that same kernel (M6-ENTRY-P1), asked before any listener opens.
+   * null only when the factories built none — a harness that composes no entry; the production factories always build it.
+   */
+  readonly preflight: TransactionPreflight | null;
   /** Ends the store's kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
+}
+
+/** The startup preflight over the kernel, with the limiter key's boot check over the same kernel (postgresRateLimiter.ts). */
+export interface TransactionPreflight extends StartupPreflight {
+  /** m6_rate_limit_probe's answer for `keySecret` — registering its fingerprint when none is registered. */
+  rateLimitKey(keySecret: Uint8Array, signal: AbortSignal): Promise<RateLimitKeyStatus>;
 }
 
 /** How the boundary is built: the client over a classified endpoint, then the store over that client. */
@@ -148,6 +168,8 @@ export interface TransactionFactories {
   readonly tenantDirectory: (client: SupervisedPgClient) => TenantDirectoryPort;
   /** The distributed rate limiter over migration 014, bound to a RATE_LIMIT_KEY. */
   readonly rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => DistributedRateLimiter;
+  /** The deployable entry's startup preflight over the kernel; a harness composing no entry may leave it out. */
+  readonly preflight?: (client: SupervisedPgClient) => TransactionPreflight;
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
@@ -176,6 +198,10 @@ const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
   rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
+  preflight: (client: SupervisedPgClient): TransactionPreflight => Object.freeze({
+    ...createPostgresStartupPreflight({ client }),
+    rateLimitKey: (keySecret: Uint8Array, signal: AbortSignal) => probeRateLimitKey(client, keySecret, signal),
+  }),
 });
 
 /**
@@ -255,18 +281,26 @@ export function assembleTransactions(
     tenantAdmission: factories.tenantAdmission(client),
     rateLimiter: (limiterKey: Uint8Array) => factories.rateLimiter(client, limiterKey),
     routes: served,
+    preflight: factories.preflight === undefined ? null : factories.preflight(client),
     close: () => client.end(),
   });
 }
 
 /**
  * The production transaction boundary for the production inventory: configuration in, both ports or null out — or a refusal
- * naming every missing or refused part. Configuration is the only input; no store, client or factory can be handed to it.
+ * naming every missing or refused part. Configuration is the one required input. `client` is the kernel's constructor over the
+ * classified endpoint, defaulted to the production client (verified TLS over the sealed target); it is the deployable entry's
+ * construction boundary (server/entry/productionEntry.ts), and no store, adapter, factory or inventory can be handed in.
  */
-export function composeProductionTransactions(env: Readonly<Record<string, string | undefined>>): ProductionTransactions | null {
+export function composeProductionTransactions(
+  env: Readonly<Record<string, string | undefined>>,
+  // Defaulted, not merely optional, so the configuration stays this root's one required argument (its arity is asserted).
+  client: TransactionFactories['client'] = PRODUCTION_FACTORIES.client,
+): ProductionTransactions | null {
+  if (typeof client !== 'function') throw new TypeError('database client constructor invalid');
   const uncatalogued = uncataloguedRoutePermissions(productionRouteDeclarations());
   if (uncatalogued.length > 0) throw new TransactionCompositionError(uncatalogued);
-  return assembleTransactions(PRODUCTION_INVENTORY, env, PRODUCTION_FACTORIES);
+  return assembleTransactions(PRODUCTION_INVENTORY, env, { ...PRODUCTION_FACTORIES, client });
 }
 
 /**

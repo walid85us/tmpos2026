@@ -36,10 +36,17 @@
 // M6 PostgreSQL store — are not this root's: the transaction root (productionTransactions.ts) is
 // their one production authority, and composes them only for a route that requires them.
 // Composition is all or nothing: a refusal names every blocker (bounded codes, never
-// configuration content), and nothing is composed while any blocker remains. The deployable
-// runtime entry (server/runtime/server.ts) serves the operational routes only; making this root
-// the deployed entry is gated on the same blockers and on an owner-approved build of it.
+// configuration content), and nothing is composed while any blocker remains.
+// Which boundaries (M6-ENTRY-P1). Both, unless the caller names fewer: the deployable entry
+// (server/entry/productionEntry.ts) composes the administrative boundary alone — it serves no
+// tenant or store route — so SESSION_TENANT_ORIGINS is then neither read nor required, and the
+// tenant boundary's routes are never registered. The two hosts must still differ whenever both
+// are composed. The entry is also this root's construction boundary for the provider: it may hand
+// the Firebase adapter the token verifier a disposable-database harness substitutes for the
+// identity provider (tokenVerifier); production hands none, and the adapter verifies through the
+// Firebase Admin SDK. Nothing in the configuration can select either.
 import { IdentityCompositionError, createRuntimeIdentityVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
+import type { FirebaseIdTokenVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
 import type { RequestAuthenticator, RouteAuthorizer } from '../runtime/access.js';
 import { parseTrustedProxies } from '../runtime/clientAddress.js';
 import { parseRateLimitKey } from '../runtime/rateLimit.js';
@@ -80,7 +87,8 @@ export class ProductionCompositionError extends Error {
 
 /** The parts one composition binds to the runtime's ports; a null or refused part is a blocker. */
 export interface SessionParts {
-  readonly origins: Readonly<Record<SessionAudience, readonly string[]>> | CompositionBlocker;
+  /** Each composed boundary's exact origins; a boundary not composed needs none. */
+  readonly origins: Readonly<Partial<Record<SessionAudience, readonly string[]>>> | CompositionBlocker;
   readonly verifier: RequestAuthenticator | null;
   /**
    * The store each boundary is bound to. The two boundaries keep distinct cookies, origins and
@@ -194,17 +202,26 @@ export function durableSessionAdapters(
   });
 }
 
-/** Each boundary's exact https origins, or why the configuration is refused. */
-function sessionOrigins(env: Readonly<Record<string, string | undefined>>): SessionParts['origins'] {
-  const tenant = env.SESSION_TENANT_ORIGINS;
-  const admin = env.SESSION_ADMIN_ORIGINS;
-  if (typeof tenant !== 'string' || tenant === '' || typeof admin !== 'string' || admin === '') return 'session_origins_missing';
-  const origins = { tenant: tenant.split(','), admin: admin.split(',') };
-  const all = [...origins.tenant, ...origins.admin];
+/** The configuration variable each boundary's origins are read from. */
+const ORIGIN_VARIABLES: Readonly<Record<SessionAudience, string>> = Object.freeze({
+  tenant: 'SESSION_TENANT_ORIGINS',
+  admin: 'SESSION_ADMIN_ORIGINS',
+});
+
+/** Each composed boundary's exact https origins, or why the configuration is refused. A boundary not composed is not read. */
+function sessionOrigins(env: Readonly<Record<string, string | undefined>>, audiences: readonly SessionAudience[]): SessionParts['origins'] {
+  const raw = audiences.map((audience) => env[ORIGIN_VARIABLES[audience]]);
+  if (raw.some((value) => typeof value !== 'string' || value === '')) return 'session_origins_missing';
+  const origins: Partial<Record<SessionAudience, string[]>> = {};
+  audiences.forEach((audience, i) => { origins[audience] = (raw[i] as string).split(','); });
+  const all = audiences.flatMap((audience) => origins[audience] as string[]);
   // Exact canonical https origins only: the session cookies are Secure, so http cannot carry them.
   if (all.some((origin) => normalizeOrigin(origin) !== origin || !origin.startsWith('https://'))) return 'session_origins_invalid';
-  if (new Set(all).size !== all.length || sharesHost(origins.tenant, origins.admin)) return 'session_origins_ambiguous';
-  return Object.freeze({ tenant: Object.freeze(origins.tenant), admin: Object.freeze(origins.admin) });
+  if (new Set(all).size !== all.length) return 'session_origins_ambiguous';
+  if (origins.tenant !== undefined && origins.admin !== undefined && sharesHost(origins.tenant, origins.admin)) return 'session_origins_ambiguous';
+  const frozen: Partial<Record<SessionAudience, readonly string[]>> = {};
+  for (const audience of audiences) frozen[audience] = Object.freeze(origins[audience] as string[]);
+  return Object.freeze(frozen);
 }
 
 /** The trusted proxies' exact CIDRs, or why the configuration is refused; `none` is a non-production direct deployment. */
@@ -230,28 +247,38 @@ function rateLimitKey(env: Readonly<Record<string, string | undefined>>): Sessio
   return parseRateLimitKey(raw) ?? 'rate_limit_key_invalid';
 }
 
+/** The boundaries to compose: a non-empty list of distinct audiences, or the call is a defect. */
+function audiencesOf(audiences: unknown): readonly SessionAudience[] {
+  if (!Array.isArray(audiences) || audiences.length === 0 || new Set(audiences).size !== audiences.length
+    || audiences.some((audience) => !AUDIENCES.includes(audience))) throw new TypeError('session audiences invalid');
+  return Object.freeze([...audiences] as SessionAudience[]);
+}
+
 /**
- * Bind `parts` to both boundaries and their limits, all or nothing: every missing or refused part
- * is named, and nothing is composed while any remains.
+ * Bind `parts` to the named boundaries (both unless fewer are named) and their limits, all or nothing:
+ * every missing or refused part is named, and nothing is composed while any remains.
  */
-export function assembleSessions(parts: SessionParts): ProductionSessions {
+export function assembleSessions(parts: SessionParts, audiences: readonly SessionAudience[] = AUDIENCES): ProductionSessions {
+  const composed = audiencesOf(audiences);
   const { origins, verifier, store, admission, authorizer, trustedProxies: proxies, keySecret, limiter } = parts;
   const blockers: CompositionBlocker[] = [];
   if (typeof origins === 'string') blockers.push(origins);
+  else if (composed.some((audience) => origins[audience] === undefined)) blockers.push('session_origins_missing');
   if (verifier === null) blockers.push('identity_verifier_unconfigured');
   if (typeof proxies === 'string') blockers.push(proxies);
   if (typeof keySecret === 'string') blockers.push(keySecret);
   if (limiter === null) blockers.push('rate_limit_store_unavailable');
   const boundaries: { [A in SessionAudience]?: SessionBoundaryDeps } = {};
-  for (const audience of AUDIENCES) {
+  for (const audience of composed) {
     const sessions = store[audience];
     const admit = admission[audience];
     const authorize = authorizer[audience];
+    const trustedOrigins = typeof origins === 'string' ? undefined : origins[audience];
     if (sessions === null) blockers.push(`${audience}_session_store_unavailable`);
     if (admit === null) blockers.push(`${audience}_admission_unavailable`);
     if (authorize === null) blockers.push(`${audience}_authorizer_unavailable`);
-    if (typeof origins !== 'string' && verifier !== null && sessions !== null && admit !== null && authorize !== null) {
-      boundaries[audience] = { verifier, admission: admit, authorizer: authorize, store: sessions, trustedOrigins: origins[audience] };
+    if (trustedOrigins !== undefined && verifier !== null && sessions !== null && admit !== null && authorize !== null) {
+      boundaries[audience] = { verifier, admission: admit, authorizer: authorize, store: sessions, trustedOrigins };
     }
   }
   if (blockers.length > 0) throw new ProductionCompositionError(blockers);
@@ -273,15 +300,32 @@ export function assembleSessions(parts: SessionParts): ProductionSessions {
  * this root a different bundle — which is why the composition that would pass it is the transaction
  * root alone, and why an adapter smuggled in through the configuration composes nothing.
  */
+/**
+ * How one composition is built beyond its configuration (M6-ENTRY-P1): which boundaries, and — for a disposable-database
+ * harness only — the identity provider's token verifier the Firebase adapter verifies through. Production names the
+ * boundaries it serves and hands no verifier.
+ */
+export interface SessionCompositionOptions {
+  /** The boundaries composed; both unless named. One left out is neither configured nor required, and serves no route. */
+  readonly audiences?: readonly SessionAudience[];
+  /** The provider-side token verification the Firebase adapter delegates to; the Firebase Admin SDK's when absent. */
+  readonly tokenVerifier?: FirebaseIdTokenVerifier;
+}
+
 export function composeProductionSessions(
   env: Readonly<Record<string, string | undefined>>,
   // Defaulted, not merely optional, so the CONFIGURATION remains this root's one required argument —
   // the guarantee productionSessions.test.ts asserts on this function's arity.
   durable: DurableSessionAdapters | undefined = undefined,
+  options: SessionCompositionOptions = {},
 ): ProductionSessions {
+  const audiences = audiencesOf(options.audiences ?? AUDIENCES);
+  const { tokenVerifier } = options;
+  if (tokenVerifier !== undefined && typeof tokenVerifier?.verify !== 'function') throw new TypeError('token verifier invalid');
   let verifier: RequestAuthenticator | null = null;
   try {
-    verifier = createRuntimeIdentityVerifier(env);
+    // The adapter's own configuration check and verification path either way; only the provider call is substituted.
+    verifier = createRuntimeIdentityVerifier(env, tokenVerifier === undefined ? {} : { verifier: tokenVerifier });
   } catch (err) {
     if (!(err instanceof IdentityCompositionError)) throw err;
   }
@@ -291,6 +335,6 @@ export function composeProductionSessions(
     ? PRODUCTION_ADAPTERS
     : durableSessionAdapters(durable, typeof keySecret === 'string' ? undefined : keySecret);
   return assembleSessions({
-    origins: sessionOrigins(env), verifier, trustedProxies: trustedProxies(env), keySecret, ...adapters,
-  });
+    origins: sessionOrigins(env, audiences), verifier, trustedProxies: trustedProxies(env), keySecret, ...adapters,
+  }, audiences);
 }

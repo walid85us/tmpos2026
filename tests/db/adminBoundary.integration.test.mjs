@@ -379,7 +379,9 @@ test('M5E-00: 001-014 applied, the production roots compose over them, and this 
   // the two boundaries are served with — never the kernel, a pool or the URL.
   assert.ok(classifiedEndpoint !== null && typeof classifiedEndpoint === 'object', 'the endpoint was classified first');
   assert.deepEqual(Object.keys(tx).sort(),
-    ['close', 'idempotency', 'platformAdmission', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions']);
+    ['close', 'idempotency', 'platformAdmission', 'preflight', 'rateLimiter', 'routes', 'sessionStore', 'tenantAdmission', 'transactions']);
+  // M6-ENTRY-P1: the startup preflight is built only for the deployable entry; this suite passes no preflight factory.
+  assert.equal(tx.preflight, null, 'a harness composing no entry gets no startup preflight');
   assert.deepEqual(tx.routes.map((r) => `${r.method} ${r.path}`).sort(),
     [`GET ${TENANT_DIRECTORY_PATH}`, `PATCH ${TENANT_DISPLAY_NAME_PATH}`, `PATCH ${TENANT_STATUS_PATH}`]);
 

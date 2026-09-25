@@ -147,9 +147,10 @@ const PEM_END = '-----END CERTIFICATE-----';
  *
  * Offline parseability is ALL this proves. Chain trust, certificate validity at connection time
  * and hostname matching are decided by the TLS handshake against the live endpoint; nothing here
- * claims them.
+ * claims them. Exported for the deployable entry's configuration check (M6-ENTRY-P1), which judges
+ * the value it was handed before any client exists; resolveDatabaseTls still runs it again below.
  */
-function assertCaCertificates(ca: string): void {
+export function assertCaCertificates(ca: string): void {
   let from = 0;
   let blocks = 0;
   for (;;) {

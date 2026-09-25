@@ -276,6 +276,7 @@ export type EnforcementSetupCode =
   | 'command_transaction_invalid'
   | 'command_registry_invalid'
   | 'outbox_registry_invalid'
+  | 'host_invalid'
   | 'outbox_delivery_invalid';
 
 /** Startup refusal. Carries a bounded code only — never the rejected input. */

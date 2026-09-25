@@ -5,7 +5,13 @@
 //             policy (locked at writeHead, so refusals, 404s, 500s and handlers all
 //             carry it and no handler can drop it), and the header-count guard (431).
 //             HSTS joins that policy only when built with `hsts` (server.ts: production).
-//   enforce — 1. client and rate limit: every request but the two operational probes
+//   enforce — 0. host, when built with `hosts` (M6-ENTRY-P1: the deployable entry serves the
+//                administrative host alone): every request but the two operational probes must
+//                carry exactly one Host header naming a served authority -> otherwise the same
+//                bounded 404 an unknown route gets, before the limiter or anything else is asked,
+//                so a foreign host learns nothing of which paths exist. X-Forwarded-Host is never
+//                read: the edge must route the served host here and pass or validate its Host;
+//             1. client and rate limit: every request but the two operational probes
 //                (GET /health, GET /readiness, which never touch the limiter). The client is
 //                resolved by the one trusted-proxy contract (clientAddress.ts) -> 400 when a
 //                trusted proxy's chain is missing or malformed; then its namespace's request
@@ -242,7 +248,10 @@ export function createBoundedServer(handler: RequestListener, options: { hsts?: 
     if (!res.socket.writable) return;
     dispatch(req, res);
   };
-  const server = http.createServer({ maxHeaderSize: HTTP_SERVER_LIMITS.maxHeaderSizeBytes }, onRequest);
+  // The strict parser, pinned: left unset, Node takes the process-wide --insecure-http-parser
+  // (NODE_OPTIONS can carry it), which accepts ambiguous framing such as Transfer-Encoding
+  // together with Content-Length. Pinned false, every such request is Node's bounded 400.
+  const server = http.createServer({ maxHeaderSize: HTTP_SERVER_LIMITS.maxHeaderSizeBytes, insecureHTTPParser: false }, onRequest);
   // Expect requests take the same path into the chain, which refuses every expectation
   // with a bounded 417. Without these listeners Node itself would answer `100 Continue`
   // (inviting the body before any check) or a 417 without the header policy.
@@ -520,8 +529,34 @@ export interface AppDeps {
   sessions?: SessionDeps;
   /** The bound on every port call in ms (deadline.ts): a whole number up to MAX_PORT_DEADLINE_MS. */
   portDeadlineMs?: number;
-  /** Send HSTS on every response; only at the TLS production boundary (server.ts). */
+  /** Send HSTS on every response; only at the TLS production boundary (server/entry/productionEntry.ts). */
   hsts?: boolean;
+  /**
+   * The exact authorities (`host` or `host:port`, lowercase, no user-info) this runtime serves, as the Host header names them
+   * after the proxy boundary. Absent, every host is served; set, a request naming any other — or none, or two — gets the
+   * bounded 404 before anything else is asked, the two operational probes excepted (an orchestrator reaches those by address).
+   */
+  hosts?: readonly string[];
+}
+
+// One DNS name of lowercase labels, then an optional explicit port: no user-info, wildcard, IP literal (bracketed, or a
+// dotted quad — the last label must carry a letter, as a top-level label always does), trailing dot or whitespace, so
+// an exact comparison has nothing to normalize.
+const AUTHORITY_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*(?=[0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?::([1-9][0-9]{0,4}))?$/;
+
+/** The served-authority allowlist; one malformed, duplicated or out-of-range entry, or an empty list, fails startup closed. */
+export function parseServedHosts(list: readonly unknown[] | undefined): ReadonlySet<string> | null {
+  if (list === undefined) return null;
+  if (!Array.isArray(list) || list.length === 0) throw new EnforcementSetupError('host_invalid');
+  const hosts = new Set<string>();
+  for (const entry of list) {
+    const match = typeof entry === 'string' && entry.length <= 259 ? AUTHORITY_RE.exec(entry) : null;
+    if (match === null || (match[1] !== undefined && Number(match[1]) > 65535) || hosts.has(entry as string)) {
+      throw new EnforcementSetupError('host_invalid');
+    }
+    hosts.add(entry as string);
+  }
+  return hosts;
 }
 
 const PUBLIC = { access: 'public' } as const;
@@ -539,7 +574,8 @@ export function createApp(deps: AppDeps): Express {
     res.status(200).json({ status: 'alive' });
   };
 
-  // Validated first: a malformed limiter, secret, proxy list or idempotency store refuses startup.
+  // Validated first: a malformed host list, limiter, secret, proxy list or idempotency store refuses startup.
+  const hosts = parseServedHosts(deps.hosts);
   const limits = deps.limits === undefined ? null : createRequestLimits(deps.limits);
   const idempotency = deps.idempotency === undefined ? null : createIdempotency(deps.idempotency);
   const transactions = deps.transactions === undefined ? null : createCommandTransactions(deps.transactions);
@@ -728,6 +764,12 @@ export function createApp(deps: AppDeps): Express {
     };
     try {
       const route = table.lookup(req.method, req.path); // a map lookup: nothing is read or parsed
+      // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
+      // a served authority exactly (DNS names compare case-insensitively). The probes answer on any host.
+      if (hosts !== null && (route === undefined || !isProbe(route))) {
+        const named = headerLines(req, 'host') === 1 ? req.headers.host : undefined;
+        if (typeof named !== 'string' || !hosts.has(named.toLowerCase())) return refuse(req, res, 404, 'not_found', 'host_not_served');
+      }
       // The client's limiter subject. The probes never resolve one and never touch the limiter.
       let client = '';
       if (limits !== null && (route === undefined || !isProbe(route))) {

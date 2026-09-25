@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 
 import {
-  createPostgresRateLimiter, rateLimitKeyFingerprint,
+  createPostgresRateLimiter, probeRateLimitKey, rateLimitKeyFingerprint,
   RATE_LIMIT_STORE_BOUNDS, RATE_LIMIT_RECLAIM_BOUNDS, RATE_LIMIT_KEY_FINGERPRINT_CONTEXT, RATE_LIMIT_LANE_DEPTH,
 } from './postgresRateLimiter.js';
 import { TransactionFailure } from './supervisedPgClient.js';
@@ -1010,4 +1010,38 @@ test('M6R-16 a signal whose removeEventListener throws never leaves its bucket\'
       assert.deepEqual(await later, answer, `${label}: the later consume's own answer`);
     }
   }
+});
+
+// --- probeRateLimitKey (M6-ENTRY-P1: the deployable entry's rate-limit-key boot check) -----------------------
+
+test('M6R-17 probeRateLimitKey returns each of the routine\'s four outcomes as-is, sends the fingerprint under RATE_LIMIT_STORE_BOUNDS, and a rejecting transaction rejects', async () => {
+  for (const outcome of ['ready', 'key_mismatch', 'store_read_only', 'consume_unavailable'] as const) {
+    const client = fakeClient([{ outcome }]);
+    assert.equal(await probeRateLimitKey(client, KEY32, live()), outcome, outcome);
+    assert.equal(client.statements.length, 1, outcome);
+    assert.equal(text(client.statements[0]), PROBE_TEXT, outcome);
+    assert.deepEqual(client.values, [[FINGERPRINT]], outcome);
+    assert.equal(client.bounds.length, 1, outcome);
+    assert.equal(client.bounds[0], RATE_LIMIT_STORE_BOUNDS, `${outcome}: the exported bounds themselves`);
+  }
+
+  const malformed: [string, unknown][] = [
+    ['zero rows', []],
+    ['two rows', [{ outcome: 'ready' }, { outcome: 'ready' }]],
+    ['an extra column', [{ outcome: 'ready', extra: 1 }]],
+    ['an unknown outcome', [{ outcome: 'not_a_real_outcome' }]],
+    ['an outcome in another case', [{ outcome: 'READY' }]],
+    ['no outcome', [{ outcome: undefined }]],
+    ['rows not an array', { outcome: 'ready' }],
+    ['a row that is null', [null]],
+  ];
+  for (const [label, rows] of malformed) {
+    assert.equal(await probeRateLimitKey(fakeClient(rows), KEY32, live()), 'malformed', label);
+  }
+
+  const rejecting = fakeClient(undefined, new Error('down'));
+  await assert.rejects(probeRateLimitKey(rejecting, KEY32, live()), /down/, 'a rejecting transaction rejects, never answering malformed for a kernel fault');
+
+  const openFails = fakeClient(undefined, undefined, () => Promise.reject(new Error('kernel down')));
+  await assert.rejects(probeRateLimitKey(openFails, KEY32, live()), /kernel down/, 'a kernel that fails before any statement runs also rejects');
 });

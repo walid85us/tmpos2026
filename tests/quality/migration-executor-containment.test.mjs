@@ -479,6 +479,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // enforce a limit over real sockets, and applies them through the SAME trusted executor. Same category (a tests/db/
     // suite), same reasoning; the containment property above is untouched.
     'tests/db/rateLimitRuntime.integration.test.mjs',
+    // M6-ENTRY-P1: the proof of the deployable entry's startup preflight (login standing, migration ledger, limiter boot)
+    // needs 001-014 applied to its disposable database, and this suite applies them through the SAME trusted executor. Same
+    // category (a tests/db/ suite), same reasoning; the containment property above is untouched.
+    'tests/db/productionEntryPreflight.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

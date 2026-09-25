@@ -477,8 +477,8 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   assert.ok(production.includes(join(REPO, 'scripts', 'run-tests.mjs')) && production.includes(join(REPO, 'src', 'main.tsx')), 'the walk reads scripts and src');
   const rel = (p) => p.slice(REPO.length + 1);
   const importers = production.filter((p) => !p.startsWith(PERSISTENCE) && importSpecifiers(readFileSync(p, 'utf8')).some((s) => s.includes('persistence/'))).map(rel).sort();
-  assert.deepEqual(importers, ['server/composition/productionTransactions.ts', 'server/platform-identity/db.ts'],
-    'only the transaction root (the store, the session adapters and — M6-RATE-P2 — the rate limiter) and the database-client boundary (the kernel) import the persistence layer');
+  assert.deepEqual(importers, ['server/composition/productionTransactions.ts', 'server/entry/productionEntry.ts', 'server/platform-identity/db.ts'],
+    'only the transaction root (the store, the session adapters, the rate limiter and — M6-ENTRY-P1 — the startup preflight), the entry (type-only: the kernel\'s type, for its construction seam) and the database-client boundary (the kernel) import the persistence layer');
   // Who names each constructor outside its own module, read from the syntax tree so comments and prose never count: an
   // identifier anywhere (an import, aliased or not, a call, a value or member reference) or a string equal to the name (a
   // computed member such as m['name']) does.
@@ -510,7 +510,8 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   assert.deepEqual(names('createSupervisedPgClient', 'createSupervisedPgClient(postgres, url, options)'),
     ['server/persistence/supervisedPgClient.ts', 'server/platform-identity/db.ts'], 'the kernel is built over the driver by the database-client boundary alone');
   assert.deepEqual(names('createRuntimeStoreClient', 'client: createRuntimeStoreClient'),
-    ['server/composition/productionTransactions.ts', 'server/platform-identity/db.ts'], 'the store client is asked for by the transaction root alone');
+    ['server/composition/productionTransactions.ts', 'server/entry/productionEntry.ts', 'server/platform-identity/db.ts'],
+    'the store client is defined by the database-client boundary and named as the production construction by the entry (M6-ENTRY-P1) and, as its default, by the transaction root');
   assert.deepEqual(names('sealedRuntimeTarget', 'sealedRuntimeTarget(endpoint)'),
     ['server/platform-identity/databaseEndpoint.ts', 'server/platform-identity/db.ts'], 'the sealed endpoint is read by the database-client boundary alone');
   assert.deepEqual(names('assembleTransactions', 'assembleTransactions(inventory, env, factories)'),
@@ -541,7 +542,7 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     ['export function f(): void;\nexport function f(x?: number): void {}\nexport interface I {}\nexport type T = 1;', ['f']],
   ]) assert.deepEqual(surfaceOf(syntax(sample)), expected, `the surface scan must read: ${sample}`);
   const surfaces = {
-    'server/platform-identity/db.ts': ['CONTEXT_SETTINGS', 'DB_SESSION_BOUNDS', 'DRIVER_TLS_ENV_VAR', 'DatabaseTlsRefusal', 'assertTenantContext', 'closeDb', 'closeRuntimeDb',
+    'server/platform-identity/db.ts': ['CONTEXT_SETTINGS', 'DB_SESSION_BOUNDS', 'DRIVER_TLS_ENV_VAR', 'DatabaseTlsRefusal', 'assertCaCertificates', 'assertTenantContext', 'closeDb', 'closeRuntimeDb',
       'createRuntimeStoreClient', 'discardNotice', 'getDb', 'getRuntimeDb', 'readTenantContext', 'resolveDatabaseTls', 'runtimeClientOptions', 'withTenantContext'],
     'server/platform-identity/databaseEndpoint.ts': ['ENDPOINT_GRAMMAR', 'classifyRuntimeDatabaseUrl', 'sealedRuntimeTarget'],
     'server/composition/productionTransactions.ts': ['PRODUCTION_INVENTORY', 'TransactionCompositionError', 'assembleTransactions', 'composeProductionTransactions',
