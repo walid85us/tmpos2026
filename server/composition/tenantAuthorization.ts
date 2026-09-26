@@ -35,20 +35,21 @@
 //      or misspelled key is a denial, never a weaker permission;
 //   6. a read-only actor may reach only a route EXPLICITLY classified as a read. The classification is
 //      supplied, never inferred from the method: a GET that changes state would otherwise be treated
-//      as safe because of its verb.
+//      as safe because of its verb;
+//   7. where the catalog decides the permission, the selected grant's role must hold it (below).
 //
-// WHAT THIS FILE DELIBERATELY DOES NOT DECIDE, AND WHY NOTHING SHIPS ON IT. It does not compare the
-// actor's ROLE against the route's permission. The canonical catalog answers 'undecidable' for every
-// tenant- and store-scope key until owner decision D1 defines the tenant plane's authoritative product
-// rules (m5CanonicalPermissions.ts GAP_11_TENANT_ORDERING_UNRESOLVED, GAP-11), and deciding it here
-// would be exactly the comparison-of-unsettled-meaning that gate exists to prevent. The consequence is
-// stated rather than worked around: the production route inventory REFUSES to start while any route in
-// it DECLARES an authorization requirement at tenant or store scope — `uncataloguedRoutePermissions`
-// (productionTransactions.ts) answers `route_permission_undecidable` for a catalogued one and
-// `route_permission_uncatalogued` for a key the catalog does not define, and a route whose requirement
-// is null is skipped. So no deployment serves a route decided this way. What this
-// authorizer therefore proves — over real sockets and a real database — is MEMBERSHIP AND LIFECYCLE
-// enforcement, which is what this stage exists to prove; the role-to-permission half waits for D1.
+// THE ROLE DECISION, AND WHERE IT IS NOT MADE. For a key the canonical catalog DECIDES — the tenant
+// route permissions owner decision D1 fixed, today view_customers for GET /api/v1/customers
+// (M7A-CUSTOMERS-P1) — the selected grant's role must hold it (step 7 below), by the catalog's own rule.
+// Every other tenant- and store-scope key is 'undecidable' until D1 defines its route and authoritative
+// product rules (m5CanonicalPermissions.ts GAP_11_TENANT_ORDERING_UNRESOLVED, GAP-11), and deciding it
+// here would be exactly the comparison-of-unsettled-meaning that gate exists to prevent. For those the
+// consequence is stated rather than worked around: the production route inventory REFUSES to start
+// while any route in it DECLARES such a requirement — `uncataloguedRoutePermissions`
+// (productionTransactions.ts) answers `route_permission_undecidable` for a catalogued key it cannot
+// decide and `route_permission_uncatalogued` for a key the catalog does not define, and a route whose
+// requirement is null is skipped. So no deployment serves a route decided on membership and lifecycle
+// alone; the witness harnesses that prove that enforcement over real sockets use such keys.
 //
 // EVERY DENIAL IS ONE VALUE, `false` — the chain's generic 403 — whatever failed: no actor, no grant,
 // an ambiguous grant, a suspended tenant, a stale witness, an uncatalogued permission, a read-only
@@ -60,7 +61,7 @@ import { isTrustedPrincipal, selectScope } from '../runtime/principals.js';
 import type { TenantAdmissionPort, TrustedPrincipal } from '../runtime/principals.js';
 import type { AuthorizationRequirement, AuthorizationScope, SessionAudience, VerifiedPrincipal } from '../runtime/routes.js';
 import type { SessionAdmission, SessionRecord } from '../runtime/sessions.js';
-import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
+import { canonicalPermission, evaluateCanonicalPermission, isDecidablePermission } from '../platform-identity/m5CanonicalPermissions.js';
 
 /** The one outage message: an admission that could not answer, and nothing about why. */
 const UNAVAILABLE = 'tenant admission unavailable';
@@ -237,10 +238,14 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       const { scope } = selection;
 
       // The permission must NAME something: a key the catalog does not define is a typo or an
-      // invention, never a weaker permission. Whether the actor's ROLE holds it is not decided here
-      // (see the header: GAP-11 leaves the tenant plane undecidable, and the production inventory
-      // refuses such a route at startup).
+      // invention, never a weaker permission. Where the catalog DECIDES the key — the tenant route
+      // permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1) — the selected grant's
+      // ROLE must hold it, on the scope's limitation. Any other catalogued key stays undecidable and is
+      // not decided here (see the header: the production inventory refuses such a route at startup).
       if (canonicalPermission(requirement.scope, requirement.permission) === null) return false;
+      if (isDecidablePermission(requirement.scope, requirement.permission) && evaluateCanonicalPermission({
+        scope: requirement.scope, roleId: scope.roleId, permission: requirement.permission, limitation: scope.limitation,
+      }) !== 'granted') return false;
 
       // A read-only actor — read-only account, read-only tenant, or an overdue one — may reach only a
       // route classified as a read. The classification is the table's, supplied by the composition,

@@ -40,7 +40,7 @@ import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
-import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
+import { canonicalPermission, isDecidablePermission } from '../platform-identity/m5CanonicalPermissions.js';
 import { createPostgresPlatformAdmission, readPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
 import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/postgresRateLimiter.js';
 import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
@@ -347,8 +347,10 @@ export function productionRouteDeclarations(): readonly RouteDefinition[] {
  * The blockers a route inventory earns for the permissions it declares (M5-ID-P1; docs/phase-4/04
  * §2-§3, 03 §6). Every permission a DEPLOYED route requires must be one canonical catalog entry,
  * matched exactly and case-sensitively: a key the catalog does not define is a typo or an invented
- * permission, and a tenant- or store-scope key is undecidable until owner decision D1 defines a specific
- * route and its authoritative product rules (M5-GAP11-P5). Either way the deployment refuses to start rather than denying at run time
+ * permission, and a catalogued key the catalog cannot DECIDE — every tenant- or store-scope key except the tenant route
+ * permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; m5CanonicalPermissions.ts isDecidablePermission)
+ * — is undecidable until D1 defines a specific route and its authoritative product rules (M5-GAP11-P5). Either way the
+ * deployment refuses to start rather than denying at run time
  * — or, worse, allowing on a comparison whose meaning has not been settled.
  *
  * It is exported, and applied to the PRODUCTION inventory rather than inside assembleTransactions, so
@@ -362,7 +364,7 @@ export function uncataloguedRoutePermissions(routes: readonly RouteDefinition[])
       ? route.policy.authorization : null;
     if (requirement === null) continue;
     if (canonicalPermission(requirement.scope, requirement.permission) === null) blockers.push('route_permission_uncatalogued');
-    else if (requirement.scope !== 'platform') blockers.push('route_permission_undecidable');
+    else if (!isDecidablePermission(requirement.scope, requirement.permission)) blockers.push('route_permission_undecidable');
   }
   return blockers;
 }

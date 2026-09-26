@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the sixteen committed migration pairs through the engine's Node fs port (node:fs
+// Reads the seventeen committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -174,19 +174,31 @@ const PINNED = {
   // exact-[005] gate is unchanged and still refuses.
   '016_m5_tenant_session_ordering.up.sql': 'e5633336da5376a747d05aabac21b73ca9ebcf4743a9436081c58322ac07e9be',
   '016_m5_tenant_session_ordering.down.sql': 'acf8a95610c97c8dca496da6fad4a3618a49a7268a9a82237ecb5849040728a6',
+  // Phase 4.0 M7A-CUSTOMERS-P1 — the tenant customer directory, in its OWN schema tmpos_customer: the minimal durable
+  // customer identity (id, owning tenant, name) and the one bounded keyset read a tenant session lists it through
+  // (docs/phase-4/05, docs/phase-4/10 ADR-32). The routine re-checks the caller's named authority in the same
+  // snapshot as the rows it returns — account not denied, security version equal, exactly one active tenant-scope
+  // grant and it the named membership, role and tenant, tenant status admitting access — and decides no permission
+  // itself. tmpos_app holds USAGE on the schema and EXECUTE on the routine and nothing else; row level security is
+  // enabled on the table with no policy, so no runtime grant could read it regardless. Nothing an earlier migration
+  // created changes: migrations 001-016 are untouched, byte for byte. Proved against disposable PostgreSQL only;
+  // applied to no managed, persistent or application database. D4 now names the contiguous chain through 017; the
+  // exact-[005] gate is unchanged and still refuses.
+  '017_m7a_customer_directory.up.sql': '1fea57a1c4bdba7efdb5da0f34893879a6b8aa741c1f117b2dcf63259f85d66d',
+  '017_m7a_customer_directory.down.sql': '8e6b095959670d2c53d139be3a3c00f4c06544b72c264d6febf4373ef67eb440',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the thirty-two expected files', () => {
+test('the migrations directory holds exactly the thirty-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

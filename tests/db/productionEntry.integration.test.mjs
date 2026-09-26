@@ -237,11 +237,11 @@ function databaseClientOver(relay) {
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-016 and a real non-owner least-privilege runtime login
+// setup: real migrations 001-017 and a real non-owner least-privilege runtime login
 // ---------------------------------------------------------------------------
 
 // The roles the migrations name, PUBLIC's CREATE and TEMPORARY on the database revoked (the startup preflight refuses a
-// login holding either) and migrations 001-016: the approved production state, which every earlier database suite also
+// login holding either) and migrations 001-017: the approved production state, which every earlier database suite also
 // establishes, so it stays in place on a shared database. It is re-established here, not inherited.
 await setupStep(async () => {
   await owner.unsafe(`do $$ begin

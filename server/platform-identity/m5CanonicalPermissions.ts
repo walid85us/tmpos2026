@@ -45,13 +45,22 @@
 // PURE AND INERT: no database, no environment, no network, no I/O, no logging, no side effect. It
 // imports only the inert catalog, the constants and the pure money-capability contract
 // (src/authorization/moneyCapabilities.ts, which itself imports nothing at runtime).
+//
+// M7A-CUSTOMERS-P1 UPDATE. Owner decision D1 named the first tenant route — GET /api/v1/customers — and its
+// authoritative rule: the canonical Customers domain at View or above. That ONE tenant route permission,
+// view_customers, is decidable here; every other tenant and store key stays 'undecidable'. It is decided by the
+// catalog's own tenant materializer (materializeTenantPermissions — the role defaults, the entitlement gate and the
+// read-only cap the client engines mirror), compared on the tenant family ordering: no second evaluator, no role id
+// read as a shortcut, and no default widened.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
   PLATFORM_SUB_PERMISSIONS,
   TENANT_SUB_PERMISSIONS,
   isPermissionLevel,
+  materializeTenantPermissions,
   meetsPlatformPermissionLevel,
+  meetsTenantPermissionLevel,
 } from './permissionCatalog.js';
 import { PLATFORM_ROLE_IDS } from './authorizationConstants.js';
 import type { PermissionLevelValue } from './authorizationConstants.js';
@@ -107,6 +116,24 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
   ] as const)),
 );
 
+/**
+ * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1): each names exactly one tenant DOMAIN and the level a role
+ * must hold on it, as owner decision D1 fixed it for one route. They are the only tenant keys this module decides, and
+ * only at TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route
+ * permission never shares a key with a sub-permission, and every one is a non-sensitive View read — the module refuses
+ * to load otherwise. A read_only limitation caps every domain at View (the materializer's own cap), so it grants
+ * exactly these; a route permission above View, or a sensitive one, needs its own read_only rule before it is added.
+ *   * view_customers — GET /api/v1/customers: the Customers domain at View or above.
+ */
+export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map([
+  ['view_customers', Object.freeze({ key: 'view_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'view' as const })],
+] as const));
+
+for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
+  if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
+  if (entry.threshold !== 'view' || entry.sensitive) throw new Error('tenant route permission is not a non-sensitive View read');
+}
+
 /** The one message a refusal to evaluate the tenant plane carries, so every caller says the same thing. */
 export const GAP_11_TENANT_ORDERING_UNRESOLVED =
   'tenant and store permissions are undecidable until owner decision D1 defines a specific route and its authoritative product rules (docs/phase-4/04 section 3, M5-GAP11-P5)';
@@ -121,8 +148,21 @@ export const GAP_11_TENANT_ORDERING_UNRESOLVED =
 export function canonicalPermission(scope: CanonicalPermissionScope, key: unknown): CanonicalPermission | null {
   if (typeof key !== 'string' || key.length === 0) return null;
   if (scope === 'platform') return CANONICAL_PLATFORM_PERMISSIONS.get(key) ?? null;
-  if (scope === 'tenant' || scope === 'store') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? null;
+  if (scope === 'tenant') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? TENANT_ROUTE_PERMISSIONS.get(key) ?? null;
+  if (scope === 'store') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? null;
   return null;
+}
+
+/**
+ * Whether (scope, key) is a permission this module DECIDES — answers 'granted' or 'denied' for, never 'undecidable':
+ * every platform key, and the tenant route permissions at tenant scope. A deployment serves only routes whose
+ * permission this answers true for (productionTransactions.ts uncataloguedRoutePermissions).
+ */
+export function isDecidablePermission(scope: CanonicalPermissionScope, key: unknown): boolean {
+  if (typeof key !== 'string') return false;
+  if (scope === 'platform') return CANONICAL_PLATFORM_PERMISSIONS.has(key);
+  if (scope === 'tenant') return TENANT_ROUTE_PERMISSIONS.has(key);
+  return false;
 }
 
 /**
@@ -205,6 +245,13 @@ function platformSubGranted(role: PlatformRoleDefinition, key: string, visiting:
  * level on the parent feature, the explicit grant for a money capability, every prerequisite, and the
  * read-only cap that leaves only non-sensitive view-threshold grants standing. No role id is special:
  * System Owner is granted because its definition is Full everywhere, through this same rule.
+ *
+ * A tenant ROUTE permission (M7A-CUSTOMERS-P1) is decided by the catalog's tenant materializer: the role's level on the
+ * permission's domain — its default, removed if the domain's plan gate is not entitled (the empty entitlement set here,
+ * so a plan-gated domain materializes 'none' and denies; Customers is a core domain and never gated), capped to View
+ * for a read-only limitation — must meet the threshold on the tenant family ordering. A role the materializer does not
+ * know (a platform role, a custom or misspelled id) materializes nothing and is denied. Every other tenant or store
+ * key remains 'undecidable'.
  */
 export function evaluateCanonicalPermission(input: {
   readonly scope: CanonicalPermissionScope;
@@ -217,6 +264,15 @@ export function evaluateCanonicalPermission(input: {
   const entry = canonicalPermission(scope, permission);
   if (entry === null) return 'denied';
   if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
+  if (scope === 'tenant' && TENANT_ROUTE_PERMISSIONS.get(entry.key) === entry) {
+    if (typeof roleId !== 'string') return 'denied';
+    // The load-time check already refuses such an entry; this holds if one is added to the (surface-frozen) map later.
+    if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
+    const levels = materializeTenantPermissions(roleId, {}, limitation === 'read_only');
+    const level = hasOwn(levels, entry.parent) ? levels[entry.parent] : 'none';
+    if (!isPermissionLevel(level) || entry.threshold === null || !meetsTenantPermissionLevel(level, entry.threshold)) return 'denied';
+    return 'granted';
+  }
   if (scope !== 'platform') return 'undecidable';
   const definitions = roles ?? BUILT_IN_PLATFORM_ROLES;
   const role = typeof roleId === 'string' && definitions instanceof Map ? definitions.get(roleId) : undefined;

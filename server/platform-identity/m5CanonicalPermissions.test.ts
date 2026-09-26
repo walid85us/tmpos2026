@@ -7,11 +7,16 @@ import {
   CANONICAL_PLATFORM_PERMISSIONS,
   CANONICAL_TENANT_PERMISSIONS,
   BUILT_IN_PLATFORM_ROLES,
+  TENANT_ROUTE_PERMISSIONS,
   canonicalPermission,
   evaluateCanonicalPermission,
+  isDecidablePermission,
 } from './m5CanonicalPermissions';
 import type { PlatformRoleDefinition } from './m5CanonicalPermissions';
-import { PLATFORM_SUB_PERMISSIONS, TENANT_SUB_PERMISSIONS, materializePlatformSubPermissions } from './permissionCatalog';
+import {
+  PLATFORM_SUB_PERMISSIONS, TENANT_DOMAIN_ENTITLEMENT, TENANT_PERMISSION_DOMAINS, TENANT_SUB_PERMISSIONS,
+  materializePlatformSubPermissions, materializeTenantPermissions, meetsTenantPermissionLevel,
+} from './permissionCatalog';
 import { PLATFORM_ROLE_IDS, TENANT_ROLE_IDS } from './authorizationConstants';
 
 test('the catalog is the existing one, not a second copy of it', () => {
@@ -215,4 +220,97 @@ test('D1: unknown or malformed vocabulary denies — a role, a level, a grant or
     assert.equal(decide('system_owner', BUILT_IN_PLATFORM_ROLES, key), 'denied', key);
   }
   assert.equal(evaluateCanonicalPermission({ scope: 'platform', roleId: 'system_owner', permission: 'edit_tenant_profile', limitation: 'limited' as never }), 'denied');
+});
+
+// --- M7A-CUSTOMERS-P1: the first decided tenant route permission, view_customers ------------------------------------
+
+test('view_customers is the Customers domain at View, decided by the catalog\'s own tenant materializer for every built-in role', () => {
+  const decide = (roleId: unknown, limitation: unknown = 'none', scope: unknown = 'tenant') =>
+    evaluateCanonicalPermission({ scope: scope as never, roleId: roleId as never, permission: 'view_customers', limitation: limitation as never });
+  let checked = 0;
+  for (const roleId of TENANT_ROLE_IDS) for (const limitation of ['none', 'read_only'] as const) {
+    const level = materializeTenantPermissions(roleId, {}, limitation === 'read_only').customers;
+    const expected = meetsTenantPermissionLevel(level, 'view') ? 'granted' : 'denied';
+    assert.equal(decide(roleId, limitation), expected, `${roleId} ${limitation}: the materializer's answer`);
+    checked += 1;
+  }
+  assert.equal(checked, TENANT_ROLE_IDS.length * 2);
+  // Today every durable tenant role holds Customers at View or above (full/full/view/create), read-only or not.
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r), decide(r, 'read_only')]), [
+    ['store_owner', 'granted', 'granted'], ['manager', 'granted', 'granted'], ['technician', 'granted', 'granted'], ['sales_staff', 'granted', 'granted'],
+  ]);
+  // The empty entitlement map removes only plan-gated domains; Customers is core, so it is never the reason for a denial.
+  assert.equal(materializeTenantPermissions('manager', {}, false).repairs, 'none', 'a plan-gated domain materializes none (control)');
+  assert.equal(materializeTenantPermissions('manager', {}, false).customers, 'full');
+  // Fail-closed: a platform role, an unknown, custom or misspelled id, a non-string id, an unrecognised limitation.
+  for (const roleId of PLATFORM_ROLE_IDS) assert.equal(decide(roleId), 'denied', `platform role ${roleId} at tenant scope`);
+  for (const roleId of ['cashier', 'Manager', '', 'store_owner ', ' manager', 'STORE_OWNER', 'constructor', '__proto__', 'toString', 'custom_role']) {
+    assert.equal(decide(roleId), 'denied', JSON.stringify(roleId));
+  }
+  for (const roleId of [null, undefined, 1, {}, ['manager'], { toString: () => 'manager' }]) assert.equal(decide(roleId), 'denied', String(roleId));
+  for (const limitation of ['READ_ONLY', 'readonly', 'None', '', undefined, null, true, 0]) {
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId: 'store_owner', permission: 'view_customers', limitation: limitation as never }),
+      'denied', `limitation ${JSON.stringify(limitation)}`);
+  }
+  // Recognised at TENANT scope only: a store or platform scope names nothing by this key.
+  assert.notEqual(canonicalPermission('tenant', 'view_customers'), null);
+  for (const scope of ['store', 'platform'] as const) {
+    assert.equal(canonicalPermission(scope, 'view_customers'), null, scope);
+    for (const roleId of [...TENANT_ROLE_IDS, 'system_owner']) assert.equal(decide(roleId, 'none', scope), 'denied', `${scope}/${roleId}`);
+  }
+  // Exact and case-sensitive, like every other key.
+  for (const key of ['View_Customers', 'view_customers ', 'view_customer', 'customers', 'view_customers_all']) {
+    assert.equal(canonicalPermission('tenant', key), null, key);
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId: 'store_owner', permission: key, limitation: 'none' }), 'denied', key);
+  }
+});
+
+test('isDecidablePermission: every platform key and view_customers at tenant scope — nothing else', () => {
+  for (const sub of PLATFORM_SUB_PERMISSIONS) assert.equal(isDecidablePermission('platform', sub.id), true, sub.id);
+  assert.equal(isDecidablePermission('tenant', 'view_customers'), true);
+  for (const scope of ['store', 'platform'] as const) assert.equal(isDecidablePermission(scope, 'view_customers'), false, scope);
+  for (const sub of TENANT_SUB_PERMISSIONS) {
+    for (const scope of ['tenant', 'store', 'platform'] as const) assert.equal(isDecidablePermission(scope, sub.id), false, `${scope}/${sub.id}`);
+  }
+  for (const key of ['no_such_permission', '', 'View_Customers', 'view_customers ']) {
+    for (const scope of ['tenant', 'store', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${JSON.stringify(key)}`);
+  }
+  assert.equal(isDecidablePermission('tenant', 'view_command_center'), false, 'a platform key at tenant scope');
+  for (const key of [null, undefined, 42, {}, [], ['view_customers']]) {
+    for (const scope of ['tenant', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${String(key)}`);
+  }
+  for (const scope of ['bogus', 'TENANT', '', undefined, null]) {
+    assert.equal(isDecidablePermission(scope as never, 'view_customers'), false, `scope ${String(scope)}`);
+    assert.equal(isDecidablePermission(scope as never, 'view_command_center'), false, `scope ${String(scope)}`);
+  }
+});
+
+test('every tenant route permission names a core domain at View, is not sensitive, and never shadows a sub-permission', () => {
+  assert.deepEqual([...TENANT_ROUTE_PERMISSIONS.keys()], ['view_customers'], 'exactly the one route owner decision D1 fixed');
+  const subIds = new Set(TENANT_SUB_PERMISSIONS.map((s) => s.id));
+  for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
+    assert.deepEqual(entry, { key, plane: 'tenant', parent: 'customers', sensitive: false, threshold: 'view' });
+    assert.ok(Object.isFrozen(entry), key);
+    assert.ok(TENANT_PERMISSION_DOMAINS.includes(entry.parent), `${key}: its parent is a tenant domain`);
+    assert.ok(Object.prototype.hasOwnProperty.call(TENANT_DOMAIN_ENTITLEMENT, entry.parent), `${key}: its parent has an entitlement entry`);
+    assert.equal(TENANT_DOMAIN_ENTITLEMENT[entry.parent], null, `${key}: its parent is a core domain, never plan-gated`);
+    assert.equal(subIds.has(key), false, `${key}: no sub-permission shares the key`);
+    assert.equal(CANONICAL_TENANT_PERMISSIONS.has(key), false, key);
+    assert.equal(canonicalPermission('tenant', key), entry, `${key}: the lookup answers this very entry`);
+  }
+  // A sensitive entry added to the map after load (it is frozen only at its surface) is still denied under read_only.
+  const late = Object.freeze({ key: 'late_sensitive_view', plane: 'tenant' as const, parent: 'customers', sensitive: true, threshold: 'view' as const });
+  (TENANT_ROUTE_PERMISSIONS as Map<string, typeof late>).set(late.key, late);
+  try {
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId: 'store_owner', permission: late.key, limitation: 'none' }), 'granted');
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId: 'store_owner', permission: late.key, limitation: 'read_only' }), 'denied');
+  } finally {
+    (TENANT_ROUTE_PERMISSIONS as Map<string, typeof late>).delete(late.key);
+  }
+  // Every other tenant/store key is still undecidable, for every built-in tenant role and both limitations.
+  for (const sub of TENANT_SUB_PERMISSIONS) for (const scope of ['tenant', 'store'] as const) {
+    for (const roleId of TENANT_ROLE_IDS) for (const limitation of ['none', 'read_only'] as const) {
+      assert.equal(evaluateCanonicalPermission({ scope, roleId, permission: sub.id, limitation }), 'undecidable', `${scope}/${roleId}/${sub.id}/${limitation}`);
+    }
+  }
 });

@@ -8,14 +8,14 @@
 //                      never falls back to plaintext when handed verified-TLS options, so a certificate it cannot verify, a
 //                      server that refuses TLS, a refused credential and an unreachable endpoint all fail this question;
 //   runtime login    — the connected login's standing, judged against the approved runtime boundary below;
-//   migration ledger — public.schema_migrations exactly at REQUIRED_MIGRATIONS: 001–016, every row finished and clean, every
+//   migration ledger — public.schema_migrations exactly at REQUIRED_MIGRATIONS: 001–017, every row finished and clean, every
 //                      checksum the one pinned here, nothing missing, nothing else;
 //   rate-limit key   — postgresRateLimiter.ts probeRateLimitKey: migration 014 registers the key fingerprint when none is,
 //                      and compares it otherwise. It never replaces one.
 // Each answer is a list of bounded codes — never a role name, an object name, a ledger value or a driver message — and an
 // empty list means the answer is safe. A question the database cannot answer throws; the entry reads that as unavailable.
 //
-// THE APPROVED RUNTIME BOUNDARY (the source of truth is migrations 005–016; docs/phase-4/08 G-DBROLE):
+// THE APPROVED RUNTIME BOUNDARY (the source of truth is migrations 005–017; docs/phase-4/08 G-DBROLE):
 //   - the login: LOGIN, NOSUPERUSER, NOCREATEROLE, NOCREATEDB, NOREPLICATION, NOBYPASSRLS; its session runs as itself (no role
 //     switch, however a role default might ask for one); it owns nothing; its one direct privilege is SELECT on
 //     public.schema_migrations, without grant option — the read the ledger question needs. No migration grants it: G-DBROLE
@@ -26,7 +26,7 @@
 //     reaches a role's privileges through SET ROLE, which the has_*_privilege functions do not report (doc 08 G-DBROLE), so
 //     an unexpected one is refused however it is granted;
 //   - those two roles: NOLOGIN and without any attribute above, each carrying migration 005's exact ownership marker, owning
-//     nothing, and holding exactly the privileges and policy targets migrations 005–016 give them (APPROVED_ROLE_GRANTS), no
+//     nothing, and holding exactly the privileges and policy targets migrations 005–017 give them (APPROVED_ROLE_GRANTS), no
 //     more and no fewer — a grant added beside the migrations is a privilege the runtime was never approved for. A policy
 //     line carries its command, whether it is permissive, and whether its table still enforces row security, so a disabled
 //     table or a widened command no longer matches;
@@ -40,7 +40,7 @@
 // PostgreSQL 16's per-grant inherit option, where the member's own INHERIT attribute decides. The kernel runs every
 // transaction with search_path pg_catalog, pg_temp, and every catalog name below is qualified besides.
 // NOT RE-READ HERE: a policy's predicate, and PUBLIC's standing outside the application's schemas. The predicates are the
-// ones migrations 005–016 created, proven at apply by the ledger checksums; a later change to one in place is schema drift
+// ones migrations 005–017 created, proven at apply by the ledger checksums; a later change to one in place is schema drift
 // this startup does not detect (docs/phase-4/08 G-DBROLE).
 //
 // PINNED, DELIBERATELY. REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS change only with a new migration, in the same change;
@@ -69,6 +69,7 @@ export const REQUIRED_MIGRATIONS: readonly { readonly version: string; readonly 
   { version: '014', checksum: '48ff3e4bc2b3d4c6ee3cc2c54e4111d8647669d349d1449b249303a9dcc4cf62' },
   { version: '015', checksum: 'a3b1514ee65703d29b3becf78ef338e8966eb0ee12550ecd5e1f19d357154f4e' },
   { version: '016', checksum: 'e5633336da5376a747d05aabac21b73ca9ebcf4743a9436081c58322ac07e9be' },
+  { version: '017', checksum: '1fea57a1c4bdba7efdb5da0f34893879a6b8aa741c1f117b2dcf63259f85d66d' },
 ].map((m) => Object.freeze(m)));
 
 /** The privilege roles migration 005 creates, each with the exact ownership marker it comments the role with. */
@@ -81,7 +82,7 @@ export const RUNTIME_PRIVILEGE_ROLES: Readonly<Record<string, string>> = Object.
 export const LEDGER_READ_GRANT = 'a|table|public.schema_migrations|SELECT';
 
 /**
- * Every object whose ACL or policy names a privilege role after migrations 001–016, as `role|kind|type|identity|privileges`:
+ * Every object whose ACL or policy names a privilege role after migrations 001–017, as `role|kind|type|identity|privileges`:
  * kind `a` is an ACL entry (the privileges it holds there, `+grant` marking a grant option), kind `r` a policy naming it
  * (its command, PERMISSIVE or RESTRICTIVE, and ROW SECURITY while its table enforces it).
  */
@@ -90,6 +91,7 @@ export const APPROVED_ROLE_GRANTS: readonly string[] = Object.freeze([
   'tmpos_app|a|function|tmpos_command.m5_revalidate_platform_authority(pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.text)|EXECUTE',
   'tmpos_app|a|function|tmpos_command.m5_tenant_display_name_update_v2(pg_catalog.uuid,bigint,pg_catalog.text)|EXECUTE',
   'tmpos_app|a|function|tmpos_command.m5_tenant_status_change(pg_catalog.uuid,bigint,pg_catalog.text,pg_catalog.text)|EXECUTE',
+  'tmpos_app|a|function|tmpos_customer.m7a_customer_page(pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid,integer)|EXECUTE',
   'tmpos_app|a|function|tmpos_directory.m5_tenant_directory_page(pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,integer)|EXECUTE',
   'tmpos_app|a|function|tmpos_identity.m5_resolve_principal(pg_catalog.text,pg_catalog.text)|EXECUTE',
   'tmpos_app|a|function|tmpos_identity.m5_revalidate_principal_context(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid)|EXECUTE',
@@ -116,6 +118,7 @@ export const APPROVED_ROLE_GRANTS: readonly string[] = Object.freeze([
   'tmpos_app|a|schema|public|USAGE',
   'tmpos_app|a|schema|tmpos_admission|USAGE',
   'tmpos_app|a|schema|tmpos_command|USAGE',
+  'tmpos_app|a|schema|tmpos_customer|USAGE',
   'tmpos_app|a|schema|tmpos_directory|USAGE',
   'tmpos_app|a|schema|tmpos_identity|USAGE',
   'tmpos_app|a|schema|tmpos_internal|USAGE',

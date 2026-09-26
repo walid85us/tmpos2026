@@ -18,6 +18,7 @@ import type { SessionRecord } from '../runtime/sessions.js';
 import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
+import { TENANT_ROLE_IDS } from '../platform-identity/authorizationConstants.js';
 
 const ACTOR = '11111111-1111-4111-8111-111111111111';
 const TENANT = '22222222-2222-4222-8222-222222222222';
@@ -226,6 +227,60 @@ test('a read-only actor reaches only a route the composition CLASSIFIED as a rea
 test('the read classification is the exact method and path the table registered', () => {
   assert.equal(readKey('GET', '/api/v1/probe'), 'GET /api/v1/probe');
   assert.notEqual(readKey('GET', '/api/v1/probe'), readKey('POST', '/api/v1/probe'));
+});
+
+// --- the role decision where the catalog makes one (M7A-CUSTOMERS-P1) -------------------------------
+
+const CUSTOMERS_ROUTE: RouteView = Object.freeze({ method: 'GET', path: '/api/v1/customers', audience: 'tenant' });
+const VIEW_CUSTOMERS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'view_customers' });
+const customers = (port: TenantAdmissionPort, requirement = VIEW_CUSTOMERS, reads?: ReadonlySet<string>): Promise<unknown> =>
+  answered(createTenantRouteAuthorizer({ admission: port, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, CUSTOMERS_ROUTE, live(), null));
+
+test('view_customers: one tenant grant under every built-in tenant role is granted, carrying the selected scope', async () => {
+  for (const roleId of TENANT_ROLE_IDS) {
+    const port = stub(admitted([grant({ roleId })]));
+    assert.deepEqual(await customers(port), {
+      granted: true,
+      context: { actor: ACTOR, securityVersion: 'sv1', scope: 'tenant', tenant: TENANT, store: null, membershipId: MEMBERSHIP, roleId, limitation: 'none' },
+    }, roleId);
+    assert.equal(port.calls, 1, `${roleId}: one admission read`);
+  }
+});
+
+test('view_customers: the grant\'s ROLE decides — a role the catalog does not hold as a tenant role is denied where an undecidable key is not', async () => {
+  // The principal guard admits any role word, so a tenant grant can carry a platform role, a retired or a misspelled id.
+  for (const roleId of ['system_owner', 'support_admin', 'cashier', 'owner', 'store_owners', 'constructor']) {
+    const port = stub(admitted([grant({ roleId })]));
+    assert.equal(await customers(port), false, roleId);
+    // Control: the SAME grant on a catalogued key the catalog cannot decide is judged on membership and lifecycle alone,
+    // so the denial above is the role decision and nothing else.
+    assert.equal(((await authorize(stub(admitted([grant({ roleId })])))) as { granted: boolean }).granted, true, `${roleId}: undecidable key (control)`);
+  }
+});
+
+test('view_customers: a read-only actor is granted only on the classified read; a store grant, two tenant grants and a store requirement deny', async () => {
+  const classified = new Set([readKey(CUSTOMERS_ROUTE.method, CUSTOMERS_ROUTE.path)]);
+  for (const [label, answer] of [['a read-only tenant', admitted([grant({ tenantStatus: 'read_only' })])], ['a read-only account', admitted([grant({ roleId: 'technician' })], 'read_only')]] as const) {
+    const granted = await customers(stub(answer), VIEW_CUSTOMERS, classified);
+    assert.equal((granted as { granted: boolean }).granted, true, `${label}: classified`);
+    assert.equal((granted as { context: { limitation: string } }).context.limitation, 'read_only', `${label}: and it stays narrowed`);
+    assert.equal(await customers(stub(answer)), false, `${label}: unclassified`);
+    assert.equal(await customers(stub(answer), VIEW_CUSTOMERS, new Set([readKey('GET', '/api/v1/probe')])), false, `${label}: another route classified`);
+  }
+  // A read-only actor whose role is not a tenant role is denied even on the classified read.
+  assert.equal(await customers(stub(admitted([grant({ roleId: 'system_owner', tenantStatus: 'read_only' })])), VIEW_CUSTOMERS, classified), false);
+  const storeGrant = grant({ scopeType: 'store', store: STORE, storeStatus: 'active' });
+  const second = grant({ membershipId: '66666666-6666-4666-8666-666666666666', tenant: OTHER_TENANT });
+  const cases: [string, readonly TrustedMembership[], AuthorizationRequirement][] = [
+    ['a store-only actor', [storeGrant], VIEW_CUSTOMERS],
+    ['two tenant grants', [grant(), second], VIEW_CUSTOMERS],
+    ['a platform-only actor', [grant({ scopeType: 'platform', tenant: null, tenantStatus: null, roleId: 'system_owner' })], VIEW_CUSTOMERS],
+    ['a suspended tenant', [grant({ tenantStatus: 'suspended' })], VIEW_CUSTOMERS],
+    // view_customers names nothing at store scope, even for a store grant that would otherwise select.
+    ['a store requirement naming view_customers', [storeGrant], { scope: 'store', permission: 'view_customers' }],
+  ];
+  for (const [label, memberships, requirement] of cases) assert.equal(await customers(stub(admitted(memberships)), requirement), false, label);
+  assert.equal(((await customers(stub(admitted([storeGrant])), STORE_REQUIREMENT)) as { granted: boolean }).granted, true, 'the same store grant selects on a store key (control)');
 });
 
 // --- the tenant login's standing check (M5-TENANT-SESSION-P1) -------------------------------------

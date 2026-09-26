@@ -58,6 +58,8 @@ import { TEST_CREATE } from '../runtime/transactionalOutbox.testkit.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import { EnforcementSetupError } from '../runtime/routes.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
+import { createCustomerDirectoryRoute } from '../runtime/customerDirectory.js';
+import { TENANT_SUB_PERMISSIONS } from '../platform-identity/permissionCatalog.js';
 import type { PlatformAdmissionPort } from '../runtime/principals.js';
 import type { DistributedRateLimiter, RateLimitRequest } from '../runtime/rateLimit.js';
 import { composeProductionSessions, durableSessionAdapters } from './productionSessions.js';
@@ -653,6 +655,34 @@ test('a deployed route may require only a canonical platform permission, and sta
   })]), []);
   // Today's production inventory declares no route at all, so it clears the gate.
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
+});
+
+test('M7A-CUSTOMERS-P1 view_customers is the one decidable tenant key: its route clears the gate, every other tenant key and any store use does not', () => {
+  const customerRoute = createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } });
+  assert.deepEqual(uncataloguedRoutePermissions([customerRoute]), [], 'the customer directory\'s requirement is catalogued and decidable');
+  const route = (permission: string, scope: 'platform' | 'tenant' | 'store', path = '/api/v1/unit') => Object.freeze({
+    method: 'GET' as const, path,
+    policy: Object.freeze({ access: 'session' as const, audience: 'tenant' as const, authorization: Object.freeze({ scope, permission }) }),
+    body: Object.freeze({ kind: 'none' as const }), idempotency: 'none' as const, trustedContext: 'required' as const, recentAuth: 'none' as const,
+    handler: () => undefined,
+  });
+  assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'tenant')]), [], 'the same key on a synthetic tenant route (control)');
+  // Every existing tenant sub-permission is still undecidable, at either tenant-plane scope.
+  for (const sub of TENANT_SUB_PERMISSIONS) {
+    for (const scope of ['tenant', 'store'] as const) {
+      assert.deepEqual(uncataloguedRoutePermissions([route(sub.id, scope)]), ['route_permission_undecidable'], `${scope}/${sub.id}`);
+    }
+  }
+  // view_customers names nothing outside tenant scope.
+  assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'store')]), ['route_permission_uncatalogued'], 'store scope');
+  assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'platform')]), ['route_permission_uncatalogued'], 'platform scope');
+  // One blocker per offending route, in order, beside a clean one.
+  assert.deepEqual(uncataloguedRoutePermissions([customerRoute, route('process_refunds', 'tenant', '/api/v1/a'), route('view_customers', 'store', '/api/v1/b')]),
+    ['route_permission_undecidable', 'route_permission_uncatalogued']);
+  // The deployable entry serves the administrative inventory only: no tenant business route is declared or composed.
+  const declared = productionRouteDeclarations();
+  assert.deepEqual(declared.filter((r) => r.path.startsWith('/api/v1')).map((r) => r.path), [], 'no /api/v1 route is declared');
+  assert.ok(declared.every((r) => r.policy.access === 'session' && r.policy.audience === 'admin'), 'every declared route is on the admin boundary');
 });
 
 test('the platform admission is composed with the store, once, over the same client, and never alone', () => {

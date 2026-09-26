@@ -212,7 +212,7 @@ async function storeDown() {
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-016 and a real non-owner runtime login
+// setup: real migrations 001-017 and a real non-owner runtime login
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -456,11 +456,12 @@ const bucketsOpenedSince = async (sinceMs) => (await owner`select count(*)::int 
 // M6RS-00: the composition binds the PostgreSQL limiter
 // ---------------------------------------------------------------------------
 
-test('M6RS-00: 001-016 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
+test('M6RS-00: 001-017 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.ok(ledger.some((r) => r.version === '014' && r.dirty === false), '014 applied and clean');
   assert.ok(ledger.some((r) => r.version === '015' && r.dirty === false), '015 applied and clean');
   assert.ok(ledger.some((r) => r.version === '016' && r.dirty === false), '016 applied and clean');
+  assert.ok(ledger.some((r) => r.version === '017' && r.dirty === false), '017 applied and clean');
   assert.equal(typeof A.tx.rateLimiter, 'function');
   assert.notEqual(A.tx, B.tx, 'two separately composed roots, each over its own kernel');
 
