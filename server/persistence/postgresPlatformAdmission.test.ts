@@ -171,7 +171,7 @@ test('M5PA-04 the adapter decides nothing: no grant, several grants, version zer
     ['two platform grants', [row([grant(), grant({ membershipId: SECOND, roleId: 'support_agent' })])], [MEMBERSHIP, SECOND], '7'],
     // coalesce(version, 0): an actor whose grants never moved is at zero, a legitimate answer.
     ['a version never moved', [row([grant()], { authority_version: '0' })], [MEMBERSHIP], '0'],
-    ['the widest version the grammar admits', [row([grant()], { authority_version: '9'.repeat(19) })], [MEMBERSHIP], '9'.repeat(19)],
+    ['the widest version 013 stores', [row([grant()], { authority_version: '9007199254740991' })], [MEMBERSHIP], '9007199254740991'],
     ['a read-only account', [row([grant()], { account_status: 'read_only', limitation: 'read_only' })], [MEMBERSHIP], '7'],
   ];
   for (const [label, rows, ids, version] of cases) {
@@ -286,6 +286,20 @@ test('M5PA-08 an authority version that is not the routine\'s decimal text is an
   ];
   for (const [label, version] of faults) {
     assert.deepEqual(await admit([row([grant()], { authority_version: version })]), { outcome: 'unavailable' }, label);
+  }
+});
+
+test('M5PA-08b the authority version is exactly what 013 can answer: canonical decimal in 0..2^53-1, through admit() and readPlatformAdmission alike', async () => {
+  // coalesce(version, 0)::text over a bigint 013's CHECK bounds to 1..2^53-1: no leading zero, nothing past the bound.
+  const handle = (rows: unknown): PgTransactionScope => (() => Promise.resolve(rows as never)) as unknown as PgTransactionScope;
+  for (const version of ['01', '00', '007', '9007199254740992', '9'.repeat(16), '9'.repeat(19), '1'.repeat(17)]) {
+    const rows = [row([grant()], { authority_version: version })];
+    assert.deepEqual(await admit(rows), { outcome: 'unavailable' }, version);
+    assert.deepEqual(await readPlatformAdmission(handle(rows), PRINCIPAL), { outcome: 'unavailable' }, version);
+  }
+  for (const version of ['0', '1', '10', '9007199254740991']) {
+    const answer = await admit([row([grant()], { authority_version: version })]) as { outcome: string; authorityVersion: string };
+    assert.deepEqual([answer.outcome, answer.authorityVersion], ['resolved', version], version);
   }
 });
 

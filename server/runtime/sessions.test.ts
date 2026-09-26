@@ -181,7 +181,9 @@ const ADMITTED: Record<SessionAudience, ReadonlySet<string>> = {
   tenant: new Set(['uid-member', 'uid-owner']),
   admin: new Set(['uid-owner', 'uid-peer']),
 };
-const ADMIT = Object.freeze({ admitted: true, securityVersion: 'v1' });
+/** The internal user the tenant admission resolves (synthetic): its audited login records it (M5-TENANT-SESSION-P1). */
+const TENANT_ACTOR = '7c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5';
+const ADMIT = Object.freeze({ admitted: true, securityVersion: 'v1', actor: TENANT_ACTOR });
 /** A platform TrustedScope as the administrative admission selects it: the actor's one platform grant (synthetic ids). */
 const PLATFORM_SCOPE = Object.freeze({
   actor: '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f', securityVersion: 'v7', scope: 'platform', tenant: null, store: null,
@@ -420,13 +422,22 @@ test('a valid identity without boundary admission gets exactly the refusal a bad
     assert.ok(await logged(logs, 'login_admission_denied'), 'the log alone tells them apart');
     assert.ok(await logged(logs, 'authn_rejected'));
   });
-  // Only an exact { admitted: true, securityVersion } admits; every other value is a denial.
-  const denials: Array<() => unknown> = [
-    () => true, () => 'true', () => ({ admitted: 'true', securityVersion: 'v1' }), () => ({ admitted: true }),
+  // Only an exact { admitted: true, securityVersion } admits, and only false or { admitted: false } denies: a denial
+  // ends every session the principal holds, so any other answer is the adapter's fault — an outage, never a verdict.
+  const malformed: Array<() => unknown> = [
+    () => true, () => 'true', () => null, () => undefined, () => 0, () => ({ admitted: 'true', securityVersion: 'v1' }), () => ({ admitted: true }),
+    () => ({ admitted: true, securityVersion: 1 }),
     () => ({ admitted: true, securityVersion: '' }), () => ({ admitted: true, securityVersion: 'x'.repeat(129) }),
-    () => ({ admitted: true, securityVersion: 'has space' }), () => Promise.resolve({ admitted: false }),
+    () => ({ admitted: true, securityVersion: 'has space' }),
   ];
-  for (const decide of denials) {
+  for (const decide of malformed) {
+    await withSessions({ tenant: { admission: { admit: decide } } }, async ({ port, logs }) => {
+      assertRefusal(await login(port, 'tenant', 'tok-member'), 503, 'service_unavailable', String(decide));
+      assert.ok(await logged(logs, 'admission_unavailable'), `${String(decide)} is an outage`);
+      assert.ok(!logs.some((line) => line.includes('"login_admission_denied"')), `${String(decide)} is no denial`);
+    });
+  }
+  for (const decide of [() => false, () => ({ admitted: false }), () => Promise.resolve({ admitted: false })]) {
     await withSessions({ tenant: { admission: { admit: decide } } }, async ({ port, logs }) => {
       assertRefusal(await login(port, 'tenant', 'tok-member'), 401, 'unauthenticated', String(decide));
       assert.ok(await logged(logs, 'login_admission_denied'), `${String(decide)} is a denial`);
@@ -646,7 +657,10 @@ test('a session boundary cannot start without every port, a distinct host or a b
       sessions: { tenant: full, admin: admin({ trustedOrigins: ['http://pos.trusted.test.'] }) },
     }, 'session_origins_shared'],
     ['sessions composed but no limits', { sessions: { tenant: full }, limits: undefined }, 'rate_limit_required'],
-    ['a supplied store', { sessions: { tenant: { ...full, store: supplied } } }, undefined],
+    // M5-TENANT-SESSION-P1: the tenant boundary too issues and ends its sessions only through the audited pair.
+    ['a tenant store without the audited pair', { sessions: { tenant: { ...full, store: supplied } } }, 'session_store_audit_required'],
+    ['a tenant store without end', { sessions: { tenant: { ...full, store: { ...supplied, establish: () => undefined } } } }, 'session_store_audit_required'],
+    ['a supplied store with the audited pair', { sessions: { tenant: { ...full, store: { ...supplied, establish: () => undefined, end: () => undefined } } } }, undefined],
     // M6-ADMIN-AUDIT-P1: the administrative boundary issues and ends sessions only through the audited pair.
     ['an admin store without the audited pair', { sessions: { admin: admin({ store: supplied }) } }, 'session_store_audit_required'],
     ['an admin store without end', { sessions: { admin: admin({ store: { ...supplied, establish: () => undefined } }) } }, 'session_store_audit_required'],
@@ -944,10 +958,10 @@ test('login and current-session disclose only a status and the CSRF token, no id
 
 test('an unavailable session store fails closed: nothing is issued, read or half-revoked', async () => {
   const ops: string[] = [];
-  const failing: { op?: string } = {};
+  const failing: { op?: string | readonly string[] } = {};
   await withSessions({ tenant: { store: instrumented(ops, failing) } }, async ({ port, logs, clock }) => {
-    failing.op = 'create';
-    assertRefusal(await login(port, 'tenant', 'tok-member'), 503, 'service_unavailable', 'create fails');
+    failing.op = 'establish';
+    assertRefusal(await login(port, 'tenant', 'tok-member'), 503, 'service_unavailable', 'establish fails');
     failing.op = undefined;
     const s = await signIn(port, 'tenant', 'tok-member');
     failing.op = 'get';
@@ -972,21 +986,19 @@ test('an unavailable session store fails closed: nothing is issued, read or half
     failing.op = 'update:lastSeenAt';
     assert.equal((await send(port, 'POST', '/api/v1/probe', unsafe('tenant', s))).status, 200);
     assert.ok(await loggedWith(logs, 'event', 'session_refresh_failed'));
-    failing.op = 'revoke';
-    // A logout whose revocation failed answers 503, yet still clears the cookie: a shared terminal keeps nothing.
+    failing.op = ['end', 'revoke'];
+    // A logout whose audited end AND fallback revocation failed answers 503, yet still clears the cookie: a shared
+    // terminal keeps nothing.
     const failedLogout = await send(port, 'POST', TENANT.logout, unsafe('tenant', s));
     assert.equal(failedLogout.status, 503);
     assert.equal((JSON.parse(failedLogout.body) as { error: string }).error, 'service_unavailable');
     assert.equal(setCookieOf(failedLogout).value, '', 'the cookie is cleared although the revocation failed');
-    assertRefusal(await login(port, 'tenant', 'tok-member', cookie('tenant', s.id)), 503, 'service_unavailable', 'revoke fails at rotation');
+    // A rotation is ONE audited step (M5-TENANT-SESSION-P1): one that fails leaves the presented session as it was,
+    // and no cookie is issued for the lost one.
+    failing.op = 'establish';
+    assertRefusal(await login(port, 'tenant', 'tok-member', cookie('tenant', s.id)), 503, 'service_unavailable', 'establish fails at rotation');
     failing.op = undefined;
     assert.equal((await current(port, 'tenant', s.id)).status, 200, 'a failed logout or rotation left the session exactly as it was');
-    // A rotation whose new session cannot be stored leaves none: the presented session is revoked
-    // first, so it never outlives a rotation attempt, and no cookie is issued for the lost one.
-    failing.op = 'create';
-    assertRefusal(await login(port, 'tenant', 'tok-member', cookie('tenant', s.id)), 503, 'service_unavailable', 'create fails at rotation');
-    failing.op = undefined;
-    assertRefusal(await current(port, 'tenant', s.id), 401, 'unauthenticated', 'the presented session after a failed rotation');
     assert.ok(await logged(logs, 'session_unavailable'));
     assert.ok(!logs.join('').includes('store-secret-detail'));
   });
@@ -994,15 +1006,13 @@ test('an unavailable session store fails closed: nothing is issued, read or half
 
 test('a hanging verifier, admission, store, authorizer or limiter is cut off at the deadline and told to cancel', async () => {
   const signals: AbortSignal[] = [];
-  const hanging = { verifier: false, admission: false, create: false, get: false, authorizer: false, limiter: false };
+  const hanging = { verifier: false, admission: false, establish: false, get: false, authorizer: false, limiter: false };
   const hang = (signal: AbortSignal): Promise<never> => { signals.push(signal); return new Promise(() => {}); };
   const base = createMemorySessionStore();
   const store: SessionStore = {
-    create: (key, record, signal) => (hanging.create ? hang(signal) : base.create(key, record, signal)),
+    ...base,
+    establish: (key, record, replaces, audit, signal) => (hanging.establish ? hang(signal) : base.establish(key, record, replaces, audit, signal)),
     get: (key, signal) => (hanging.get ? hang(signal) : base.get(key, signal)),
-    update: (key, fields, signal) => base.update(key, fields, signal),
-    revoke: (key, signal) => base.revoke(key, signal),
-    revokePrincipal: (audience, key, signal) => base.revokePrincipal(audience, key, signal),
   };
   const limiter = createMemoryRateLimiter();
   await withSessions({
@@ -1026,7 +1036,7 @@ test('a hanging verifier, admission, store, authorizer or limiter is cut off at 
       ['limiter', () => login(port, 'tenant', 'tok-member'), 'rate_limit_timeout'],
       ['verifier', () => login(port, 'tenant', 'tok-member'), 'authn_timeout'],
       ['admission', () => login(port, 'tenant', 'tok-member'), 'admission_timeout'],
-      ['create', () => login(port, 'tenant', 'tok-member'), 'session_timeout'],
+      ['establish', () => login(port, 'tenant', 'tok-member'), 'session_timeout'],
       ['get', () => current(port, 'tenant', s.id), 'session_timeout'],
       ['authorizer', () => send(port, 'POST', '/api/v1/probe', unsafe('tenant', s)), 'authz_timeout'],
     ];
@@ -1121,7 +1131,7 @@ test('a refusal whose revocation fails still refuses, and its reason says so', a
   const failing: { op?: string } = {};
   let version = 'v1';
   let denied = false;
-  const admission = { admit: (): unknown => (denied ? { admitted: false } : { admitted: true, securityVersion: version }) };
+  const admission = { admit: (): unknown => (denied ? { admitted: false } : { ...ADMIT, securityVersion: version }) };
   await withSessions({ tenant: { store: instrumented(ops, failing), admission } }, async ({ port, clock, logs }) => {
     const a = await signIn(port, 'tenant', 'tok-member');
     const b = await signIn(port, 'tenant', 'tok-owner');
@@ -1158,7 +1168,7 @@ test('an idle refresh never moves a session backwards when the clock steps back'
 
 test('a changed security version revokes the session at revalidation; a fresh login carries the new version', async () => {
   let version = 'v1';
-  const admission = { admit: (): unknown => ({ admitted: true, securityVersion: version }) };
+  const admission = { admit: (): unknown => ({ ...ADMIT, securityVersion: version }) };
   await withSessions({ tenant: { admission } }, async ({ port, clock, logs }) => {
     const s = await signIn(port, 'tenant', 'tok-member');
     version = 'v2';
@@ -1532,6 +1542,7 @@ test('a malformed, inconsistent or future-dated store record is refused, never t
   let served: unknown;
   const store: SessionStore = {
     create: () => undefined, get: () => served, update: () => undefined, revoke: () => undefined, revokePrincipal: () => undefined,
+    establish: () => undefined, end: () => undefined,
   };
   const id = 'E'.repeat(43);
   await withSessions({ tenant: { store } }, async ({ port, logs }) => {
@@ -1892,7 +1903,7 @@ test('the tenant boundary shares the code: a same-principal reauthentication rot
     ops.length = 0;
     const renewed = await tenantReauth('tok-member-again', member.id);
     assert.equal(renewed.status, 200, renewed.body);
-    assert.deepEqual(ops, ['get', 'revoke', 'create']);
+    assert.deepEqual(ops, ['get', 'establish'], 'the presented session read, then ONE audited step (M5-TENANT-SESSION-P1)');
     assertRefusal(await current(port, 'tenant', member.id), 401, 'unauthenticated', 'the rotated tenant session');
     const next = setCookieOf(renewed).value;
     assert.equal((await current(port, 'tenant', next)).status, 200);
@@ -1900,7 +1911,7 @@ test('the tenant boundary shares the code: a same-principal reauthentication rot
     ops.length = 0;
     const plain = await login(port, 'tenant', 'tok-owner', cookie('tenant', next));
     assert.equal(plain.status, 200, plain.body);
-    assert.deepEqual(ops, ['revoke', 'create'], 'no presented-session read, no principal check');
+    assert.deepEqual(ops, ['establish'], 'no presented-session read, no principal check');
     assertRefusal(await current(port, 'tenant', next), 401, 'unauthenticated', 'an ordinary tenant login rotated the presented session');
   });
 });
@@ -1967,14 +1978,18 @@ test('M6AA-01 an administrative login is ONE audited establish attributed to the
     const third = admin.audits[2].entry.operationId;
     assert.ok(UUID_V4.test(third) && third !== chosen);
     assert.ok(!`${r.body}${JSON.stringify(r.headers)}`.includes(third), 'the operation id reaches the log alone');
-    // The tenant boundary never calls the audited pair, and its lines carry no operation id.
+    // M5-TENANT-SESSION-P1: the tenant boundary goes through the same pair, attributed to its admission's actor.
     const t1 = await signIn(port, 'tenant', 'tok-member');
     const t2 = await signIn(port, 'tenant', 'tok-member-again', cookie('tenant', t1.id));
     assert.equal((await send(port, 'POST', TENANT.logout, unsafe('tenant', t2))).status, 204);
-    assert.deepEqual(ops.tenant.filter((op) => op !== 'get'), ['create', 'revoke', 'create', 'revoke']);
-    assert.equal(tenant.audits.length, 0);
+    assert.deepEqual(ops.tenant.filter((op) => op !== 'get'), ['establish', 'establish', 'end']);
+    assert.deepEqual(tenant.audits.map(masked), [
+      { entry: { action: 'login', operationId: '-', actor: TENANT_ACTOR, authenticatedAt: clock.t - 60_000 }, key: keyOf(t1.id), replaced: null },
+      { entry: { action: 'login', operationId: '-', actor: TENANT_ACTOR, authenticatedAt: clock.t - 60_000 }, key: keyOf(t2.id), replaced: keyOf(t1.id) },
+      { entry: { action: 'logout', operationId: '-', actor: null, authenticatedAt: null }, key: keyOf(t2.id), replaced: null },
+    ]);
     const tenantLines = [...await linesOf(logs, TENANT.login, 2), ...await linesOf(logs, TENANT.logout, 1)];
-    assert.ok(tenantLines.length === 3 && tenantLines.every((line) => !('operationId' in line)));
+    assert.deepEqual(tenantLines.map((line) => line.operationId), tenant.audits.map(({ entry }) => entry.operationId), 'each line carries its record\'s id');
   });
 });
 
@@ -2269,5 +2284,138 @@ test('M6AA-C1 a client gone before the audited step: a login issues nothing; a l
     assert.equal(line.operationId, undefined, 'the request line was written at the close, before the id existed');
     assert.deepEqual([join?.level, join?.requestId, join?.operationId], ['info', line.requestId, record?.entry.operationId], 'one line joins them');
     assertRefusal(await current(port, 'admin', s.id), 401, 'unauthenticated', 'the session is ended all the same');
+  });
+});
+
+// --- the tenant session, ordered and audited (M5-TENANT-SESSION-P1) ---------------------------------
+
+const tenantReauth = (port: number, token: string, id: string): Promise<Reply> =>
+  login(port, 'tenant', token, { ...cookie('tenant', id), [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE });
+
+test('M5T-L1 a tenant login records the actor its admission names: none, or one that is not a lowercase UUID, is a 503 before anything is read or written', async () => {
+  const ops: string[] = [];
+  const store = instrumented(ops);
+  let answer: unknown = ADMIT;
+  await withSessions({ tenant: { store, admission: { admit: () => answer } } }, async ({ port, logs }) => {
+    const member = await signIn(port, 'tenant', 'tok-member');
+    assert.equal(store.audits[0].entry.actor, TENANT_ACTOR, 'the control: the named actor is recorded');
+    ops.length = 0;
+    const invalid: Array<[string, unknown]> = [
+      ['an uppercase UUID', TENANT_ACTOR.toUpperCase()], ['a provider uid', 'uid-member'], ['a number', 7], ['an object', { actor: TENANT_ACTOR }],
+    ];
+    for (const [label, actor] of [['absent', undefined], ['null', null], ...invalid] as Array<[string, unknown]>) {
+      answer = { admitted: true, securityVersion: 'v1', ...(actor === undefined ? {} : { actor }) };
+      for (const r of [await login(port, 'tenant', 'tok-member-again', cookie('tenant', member.id)), await tenantReauth(port, 'tok-member-again', member.id)]) {
+        assertRefusal(r, 503, 'service_unavailable', `an actor ${label}`);
+        assert.equal(r.headers['www-authenticate'], undefined, `${label}: a faulty adapter is an outage, not a credential verdict`);
+      }
+    }
+    assert.deepEqual(ops, [], 'nothing read, created, ended or revoked');
+    assert.equal(store.audits.length, 1, 'nothing recorded');
+    assert.ok(await logged(logs, 'admission_unavailable'));
+    // Only a login attributes: a session request is served on an admission naming no actor, but one naming a malformed
+    // actor is a faulty adapter there too — a 503 that revokes nothing.
+    answer = { admitted: true, securityVersion: 'v1' };
+    assert.equal((await current(port, 'tenant', member.id)).status, 200, 'no actor named');
+    for (const [label, actor] of invalid) {
+      answer = { ...ADMIT, actor };
+      assertRefusal(await current(port, 'tenant', member.id), 503, 'service_unavailable', `a session request, an actor ${label}`);
+    }
+    assert.ok(!ops.some((op) => op === 'revoke' || op === 'revokePrincipal'), 'nothing revoked');
+    answer = ADMIT;
+    assert.equal((await current(port, 'tenant', member.id)).status, 200, 'the presented session was never touched');
+  });
+});
+
+test('M5T-L2 a tenant login is judged where it writes: session_ended and standing_changed are a generic 401 writing nothing; any other answer a 503', async () => {
+  const ops: string[] = [];
+  const base = instrumented(ops);
+  const scripted: { answer?: unknown; on: boolean } = { on: false };
+  const store: MemorySessionStore = {
+    ...base,
+    establish: (key, record, replaces, audit, signal) => {
+      if (!scripted.on) return base.establish(key, record, replaces, audit, signal);
+      ops.push('establish');
+      return Promise.resolve(scripted.answer);
+    },
+  };
+  await withSessions({ tenant: { store } }, async ({ port, logs }) => {
+    const member = await signIn(port, 'tenant', 'tok-member');
+    const before = await recordOf(store, member.id);
+    scripted.on = true;
+    const cases: Array<[string, unknown, () => Promise<Reply>, number, string]> = [
+      ['a recent sign-in whose presented session was ended first', 'session_ended', () => tenantReauth(port, 'tok-member-again', member.id), 401, 'login_reauth_no_session'],
+      ['a login whose standing moved', 'standing_changed', () => login(port, 'tenant', 'tok-member-again', cookie('tenant', member.id)), 401, 'login_standing_changed'],
+      ['a recent sign-in whose standing moved', 'standing_changed', () => tenantReauth(port, 'tok-member-again', member.id), 401, 'login_standing_changed'],
+      ['an ordinary login answered session_ended', 'session_ended', () => login(port, 'tenant', 'tok-member-again'), 503, 'session_unavailable'],
+      ['an unknown word', 'ESTABLISHED', () => login(port, 'tenant', 'tok-member-again'), 503, 'session_unavailable'],
+    ];
+    for (const [label, answer, attempt, status, reason] of cases) {
+      scripted.answer = answer;
+      ops.length = 0;
+      const r = await attempt();
+      assertRefusal(r, status, status === 401 ? 'unauthenticated' : 'service_unavailable', label);
+      assert.equal(r.headers['www-authenticate'], status === 401 ? 'Bearer' : undefined, label);
+      assert.deepEqual(writes(ops), ['establish'], `${label}: the one store step, and no revocation of the principal`);
+      assert.ok(await logged(logs, reason), `${label}: ${reason}`);
+    }
+    scripted.on = false;
+    assert.equal(store.audits.length, 1, 'nothing recorded beyond the first sign-in');
+    assert.deepEqual(await recordOf(store, member.id), before, 'the presented session is exactly as it was');
+  });
+  // A logout that takes effect between the handler's read of the presented session and the store's step: the recent
+  // sign-in creates nothing (F1/K3), because the store must end what it presents.
+  const memory = createMemorySessionStore();
+  const race = { on: false };
+  const racing: MemorySessionStore = {
+    ...memory,
+    establish: (key, record, replaces, audit, signal) => {
+      if (race.on && replaces !== null) memory.revoke(replaces, signal);
+      return memory.establish(key, record, replaces, audit, signal);
+    },
+  };
+  await withSessions({ tenant: { store: racing } }, async ({ port, logs }) => {
+    const member = await signIn(port, 'tenant', 'tok-member');
+    race.on = true;
+    const r = await tenantReauth(port, 'tok-member-again', member.id);
+    assertRefusal(r, 401, 'unauthenticated', 'the presented session ended first');
+    assert.ok(await logged(logs, 'login_reauth_no_session'));
+    assert.equal(memory.audits.length, 1, 'no recent sign-in recorded');
+  });
+});
+
+test('M5T-L3 a tenant logout ends the session with its record; nothing live is logout_session_absent; a failed record takes the plain revocation', async () => {
+  const ops: string[] = [];
+  const failing: { op?: string | readonly string[] } = {};
+  const store = instrumented(ops, failing);
+  await withSessions({ tenant: { store } }, async ({ port, logs }) => {
+    const s = await signIn(port, 'tenant', 'tok-member');
+    ops.length = 0;
+    const out = await send(port, 'POST', TENANT.logout, unsafe('tenant', s));
+    assert.equal(out.status, 204);
+    assert.deepEqual(ops, ['get', 'end'], 'one audited call — no plain revoke');
+    assert.deepEqual(masked(store.audits[1]), { entry: { action: 'logout', operationId: '-', actor: null, authenticatedAt: null }, key: keyOf(s.id), replaced: null });
+    // The audited end fails: revocation outranks the record, and the log says so.
+    const t = await signIn(port, 'tenant', 'tok-member');
+    failing.op = 'end';
+    ops.length = 0;
+    const fallback = await send(port, 'POST', TENANT.logout, unsafe('tenant', t));
+    assert.equal(fallback.status, 204);
+    assert.equal(setCookieOf(fallback).value, '');
+    assert.deepEqual(ops, ['get', 'end', 'revoke']);
+    failing.op = undefined;
+    assertRefusal(await current(port, 'tenant', t.id), 401, 'unauthenticated', 'ended all the same');
+    const lines = await linesOf(logs, TENANT.logout, 2);
+    assert.equal(lines[1].reason, 'logout_audit_unconfirmed');
+    assert.equal(warningsOf(logs).length, 1);
+    assert.equal(store.audits.length, 3, 'two logins and one logout recorded');
+  });
+  // Nothing live to end (another logout or a revocation got there first): 204, recorded nothing (F2/K4).
+  const base = createMemorySessionStore();
+  await withSessions({ tenant: { store: { ...base, end: () => 'absent' } } }, async ({ port, logs }) => {
+    const s = await signIn(port, 'tenant', 'tok-member');
+    assert.equal((await send(port, 'POST', TENANT.logout, unsafe('tenant', s))).status, 204);
+    assert.equal((await linesOf(logs, TENANT.logout, 1))[0].reason, 'logout_session_absent');
+    assert.equal(base.audits.length, 1);
   });
 });

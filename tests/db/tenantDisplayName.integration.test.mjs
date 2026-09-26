@@ -74,6 +74,8 @@ const DOWN_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.down.sq
 // M5-GIAM-D1-P2: 010 now sits above 009, and the chain rolls back NEWEST FIRST — so every proof below that
 // replays 008's or 009's own verify, or rolls one of them back, takes 010 off first.
 const DOWN_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.down.sql`, 'utf8');
+// M5-TENANT-SESSION-P1: 016's access-version trigger fires on every tenant UPDATE, so it comes off before 010's.
+const DOWN_016 = readFileSync(`${MIG_DIR}/016_m5_tenant_session_ordering.down.sql`, 'utf8');
 /**
  * The production revalidator, composed exactly as productionTransactions.ts composes it: 009's exact-authority routine,
  * the presenting administrative session held, 013's read of that session's standing (M5-ADMIN-REVOKE-P1), then the
@@ -310,10 +312,10 @@ const commit = (command) => store.transactions.commit(command, signal());
 // migration 008 as applied
 // ---------------------------------------------------------------------------
 
-test('M5D-01: 001-015 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
+test('M5D-01: 001-016 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk
@@ -761,7 +763,11 @@ test('M5D-12: rollback runs newest first — 009 refuses over audit subjects, 00
   const ROLLBACK = new Error('m5d: roll the proof back');
   const outcome = await owner.begin(async (tx) => {
     const code = refusalIn(tx);
-    await tx.unsafe(DOWN_010).simple(); // newest first: 010 comes off before 009 can be asked
+    // Newest first: 016 (its rollback refuses while a tenant session exists; those rows go only inside this transaction),
+    // then 010, before 009 can be asked.
+    await tx.unsafe(`delete from tmpos_session.session where audience = 'tenant'`);
+    await tx.unsafe(DOWN_016).simple();
+    await tx.unsafe(DOWN_010).simple();
     // This suite has committed commands, so audit records name their subject: 009's rollback refuses and drops nothing.
     assert.ok((await tx`select count(*)::int as n from public.audit_event where subject_tenant_id is not null`)[0].n > 0);
     assert.equal(await code((sp) => sp.unsafe(DOWN_009).simple()), '55006', 'an audit subject refuses 009\'s rollback');

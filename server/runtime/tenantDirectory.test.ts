@@ -378,7 +378,9 @@ test('the port\'s refusals and faults are bounded: denied is the generic 403, a 
     await withRoute({ answer, deadlineMs: 50 }, async (h) => {
       const r = await h.get();
       assertRefusal(r, status, error, label);
-      assert.ok(!/secret|db-|password|SELECT|tenant_directory/.test(r.body), `${label}: nothing about the port crosses the boundary`);
+      // The random request id is taken out first: a UUID can itself contain "db-" (e.g. "…0adb-…").
+      const bodyText = r.body.replace(String(JSON.parse(r.body).requestId), '');
+      assert.ok(!/secret|db-|password|SELECT|tenant_directory/.test(bodyText), `${label}: nothing about the port crosses the boundary`);
       assert.deepEqual(reasonsOf(h.logs).at(-1), reason, `${label}: the bounded reason goes to the request log alone`);
     });
   }

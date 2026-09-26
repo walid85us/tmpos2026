@@ -10,7 +10,7 @@
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
-// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-015 and left tenants of
+// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-016 and left tenants of
 // their own: every directory assertion is made against the owner's own ordered read of the whole table, never a count this
 // suite assumes. Every rollback and refusal proof runs inside one transaction that is rolled back.
 import test from 'node:test';
@@ -54,6 +54,7 @@ const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/
 const UP_012 = readFileSync(`${MIG_DIR}/012_m5_platform_tenant_directory.up.sql`, 'utf8');
 const DOWN_012 = readFileSync(`${MIG_DIR}/012_m5_platform_tenant_directory.down.sql`, 'utf8');
 const DOWN_011 = readFileSync(`${MIG_DIR}/011_m5_tenant_admission.down.sql`, 'utf8');
+const DOWN_016 = readFileSync(`${MIG_DIR}/016_m5_tenant_session_ordering.down.sql`, 'utf8');
 /** 012's section 4 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_012 = UP_012.slice(UP_012.lastIndexOf('do $$'));
 const ROUTINE = 'tmpos_directory.m5_tenant_directory_page(uuid, text, uuid, text, uuid, integer)';
@@ -216,11 +217,11 @@ const routine = (sql, s, after = null, limit = 51) => sql`select o_outcome, o_te
 // migration 012 as applied
 // ---------------------------------------------------------------------------
 
-test('M5T-01: 001-015 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
+test('M5T-01: 001-016 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016'].map((v) => [v, false]));
   const routines = await owner`select p.proname, p.prosecdef, p.provolatile, p.proconfig
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_directory'::regnamespace`;
   assert.deepEqual(routines.map((r) => ({ ...r })), [{
@@ -359,6 +360,8 @@ test('M5T-05: 012 refuses to apply without 011 or over forced row security, and 
     // 011's rollback refuses while any session row remains; earlier suites on the shared service may have left some. They go
     // only inside this transaction, which is rolled back.
     await tx.unsafe('delete from tmpos_session.session');
+    // 016 lives in 011's schema, whose rollback drops it WITHOUT CASCADE: 016 comes off first, newest first (D4).
+    await tx.unsafe(DOWN_016).simple();
     await tx.unsafe(DOWN_011).simple();
     assert.equal(await code((sp) => sp.unsafe(UP_012).simple()), '55000', 'without 011 it refuses before creating anything');
   });

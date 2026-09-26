@@ -54,22 +54,24 @@
 // reported, and only then rotates exactly as a login does — so a fresh
 // sign-in can renew the recent-authentication evidence of the administrator who started an action,
 // never hand another identity's session to that browser. Any refusal there creates and revokes nothing.
-// Those reads are the handler's; the administrative store decides again where it writes (M5-ADMIN-REVOKE-P1):
-// the standing is re-read in establish's own transaction, and a reauthentication must end the very session it
-// presents there, so a logout, a revocation or an authority change that committed after the handler's reads
-// refuses the login (401) and nothing is created, ended or recorded.
+// Those reads are the handler's; the store decides again where it writes (M5-ADMIN-REVOKE-P1; the tenant boundary
+// since M5-TENANT-SESSION-P1, ADR-31): the standing is re-read in establish's own transaction with the actor's standing
+// held until its COMMIT, and a reauthentication must end the very session of its audience it presents there, so a
+// logout, a revocation or a standing change that committed after the handler's reads refuses the login (401) and
+// nothing is created, ended or recorded.
 // Logout revokes the session and clears its cookie with
 // matching attributes; only the logout handler holds that capability, never a business handler.
 //
-// Audit (M6-ADMIN-AUDIT-P1). The administrative boundary records every session it issues and every
-// logout that ends one in the durable audit trail, in the SAME store transaction as the change
-// (SessionStore establish/end), attributed to the actor its admission selected at login — so an
-// administrative login requires admission to name that scope. A login or reauthentication whose
-// record cannot be written issues nothing and leaves the presented session exactly as it was. Logout
-// puts revocation first: when the audited ending fails for any reason, the plain revocation runs,
-// and a session ended that way answers 204 with its record unconfirmed — said in the request log and
-// warned. Each audited operation carries an id this server generates, which its record and its
-// request's log line share. The tenant boundary's session changes are not audited (stated open).
+// Audit (M6-ADMIN-AUDIT-P1; the tenant boundary since M5-TENANT-SESSION-P1, DA-65). Both boundaries record
+// every session they issue and every logout that ends one in the durable audit trail, in the SAME store
+// transaction as the change (SessionStore establish/end), attributed to the actor their admission named at
+// login — the administrative admission's selected scope's, the tenant admission's resolved actor — so a login
+// whose admission names no actor issues nothing (503). A login or reauthentication whose record cannot be
+// written issues nothing and leaves the presented session exactly as it was. Logout puts revocation first:
+// when the audited ending fails for any reason, the plain revocation runs, and a session ended that way
+// answers 204 with its record unconfirmed — said in the request log and warned. Each audited operation
+// carries an id this server generates, which its record and its request's log line share. A revocation on a
+// denial or a changed version, and an expiry, are not recorded.
 //
 // Every port call is bounded by the port deadline and handed its AbortSignal (deadline.ts). A
 // denial is a 401; an unavailable or overrunning store or admission is a 503 — nothing is issued
@@ -115,9 +117,10 @@ export const SESSION_TTL: Readonly<Record<SessionAudience, { readonly absoluteMs
  * The TENANT boundary asks on EVERY protected request (M5-GIAM-D1-P2; GAP-13). A tenant that is suspended
  * must lose access on its people's next server request, with no grace period at all — an interval of any
  * length is exactly such a grace period, and the five minutes this boundary once allowed was one. Its
- * admission MUST report a version incorporating the tenant's access version (see SessionAdmission below,
- * and migration 010) — no such adapter exists yet, so today this buys the freshest admission decision a
- * composed adapter could give, and nothing more. The cost is one admission call per protected request; the
+ * admission MUST report a version incorporating the tenant's access version (see SessionAdmission below):
+ * the composed adapter (postgresTenantAdmission.ts, migration 016) derives it from the account, its links,
+ * every grant, the access version of every tenant and store a grant names, and the actor's authority and
+ * grant versions. The cost is one admission call per protected request; the
  * validatedAt stamp is not written at all here, since nothing reads it to skip a re-check. Logout never
  * revalidates, so it still works while suspended, and the operational probes carry no session at all.
  *
@@ -242,18 +245,20 @@ export interface SessionEndAudit {
  * absent or revoked one — and `revokePrincipal` ends every session of one principal in one
  * audience and nothing else.
  *
- * THE AUDITED PAIR (M6-ADMIN-AUDIT-P1). The administrative boundary's store must also offer the two
- * operations below — startup refuses one that does not — and the tenant boundary never calls them. Each
- * is ONE atomic step: the session change and the audit record `audit` describes commit together, or
- * neither does. Both refuse any record of an audience other than 'admin', and `create` refuses an
- * administrative record, so `establish` is the only way one is written.
+ * THE AUDITED PAIR (M6-ADMIN-AUDIT-P1). Every boundary's store must also offer the two operations below —
+ * startup refuses one that does not — and both boundaries issue and end their sessions through them alone
+ * (the tenant boundary since M5-TENANT-SESSION-P1), never through `create`. Each is ONE atomic step: the
+ * session change and the audit record `audit` describes, of the record's own audience's family, commit
+ * together, or neither does. `create` refuses an administrative record, so `establish` is the only way one is
+ * written.
  * - `establish` creates `record` under `key`, first ending the live session under `replaces` when one is
  *   presented (rotation), and answers 'established'. A taken `key` is refused without touching `replaces`.
  *   ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1), in the same atomic step and answering with no change at
  *   all: 'standing_changed' when the standing `record` was admitted at no longer holds where the store writes
- *   (a durable store re-reads it first, with the actor's authority locked until it commits); and, for a
+ *   (a durable store re-reads it first, with the actor's standing held until it commits — for a tenant record,
+ *   its account, links, every grant and every tenant and store a grant names; migration 016); and, for a
  *   reauthentication (`audit.action` 'reauthenticate'), 'session_ended' unless `replaces` names a live
- *   administrative session of `record`'s own principal that THIS step ends — a logout, a revocation or another
+ *   session of `record`'s own audience and principal that THIS step ends — a logout, a revocation or another
  *   reauthentication that took effect first leaves it nothing to end. An ordinary login still ends whatever live
  *   session it presents, of any audience, and still establishes when `replaces` names none.
  * - `end` ends the live session under `key` and answers 'ended'; when no live session is there to end —
@@ -290,6 +295,11 @@ export interface SessionStore {
  * the boundary hands a checked, frozen copy of that context to the SAME request's route authorizer
  * (ActiveSession.admitted), so the request is authorized on the snapshot it was admitted on. A context that is
  * not a TrustedScope is an outage, never a denial. `probe`, when present, is its readiness check.
+ *
+ * THE ACTOR (M5-TENANT-SESSION-P1). A login's audit record names the internal user admission resolved: the
+ * administrative boundary's is its context's `actor`; the tenant boundary's admission, which selects no scope,
+ * answers `{ admitted: true, securityVersion, actor }`. An actor that is not a lowercase UUID is an outage, and a
+ * login whose admission names none issues nothing (503).
  */
 export interface SessionAdmission {
   admit(principal: VerifiedPrincipal, audience: SessionAudience, signal: AbortSignal): unknown;
@@ -386,7 +396,7 @@ export interface SessionBoundary {
   refresh(session: ActiveSession): Promise<void>;
 }
 
-/** How the logout handler may end one live session: plainly, or with its audit record (administrative boundary). */
+/** How the logout handler may end one live session: with its audit record, or plainly as that one's fallback. */
 interface Revoker {
   readonly revoke: () => Promise<void>;
   /** The store's answer, unread here: the logout handler judges it. */
@@ -504,8 +514,11 @@ function challenged(res: Response, ctx: RouteContext, reason: string): void {
 }
 
 type AdmissionDecision =
-  | { readonly securityVersion: string; readonly context: TrustedScope | null }
+  | { readonly securityVersion: string; readonly context: TrustedScope | null; readonly actor: string | null }
   | 'admission_denied' | 'admission_unavailable' | 'admission_timeout';
+
+/** An actor as the audit trail records it: the internal user's UUID, lowercase as the database renders it. */
+const ACTOR_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function createBoundary(
   audience: SessionAudience, raw: unknown, now: () => number, deadlineMs: number, log: LogSink | undefined,
@@ -514,17 +527,16 @@ function createBoundary(
     throw new EnforcementSetupError('session_boundary_invalid');
   }
   const { verifier, admission, authorizer, store, trustedOrigins } = raw;
-  // Fixed once, by audience alone (M6-ADMIN-AUDIT-P1): the administrative boundary issues and ends its sessions
-  // only through the store's audited pair, and the tenant boundary only through create and revoke, never the pair.
-  const audited = audience === 'admin';
   if (!hasMethod(verifier, 'verify')) throw new EnforcementSetupError('session_verifier_required');
   if (!hasMethod(admission, 'admit')) throw new EnforcementSetupError('session_admission_required');
   if (!STORE_OPERATIONS.every((op) => hasMethod(store, op))) throw new EnforcementSetupError('session_store_required');
-  if (audited && !AUDIT_OPERATIONS.every((op) => hasMethod(store, op))) throw new EnforcementSetupError('session_store_audit_required');
+  // Both boundaries issue and end their sessions only through the store's audited pair (M6-ADMIN-AUDIT-P1; the tenant
+  // boundary since M5-TENANT-SESSION-P1).
+  if (!AUDIT_OPERATIONS.every((op) => hasMethod(store, op))) throw new EnforcementSetupError('session_store_audit_required');
   if (!hasMethod(authorizer, 'authorize')) throw new EnforcementSetupError('session_authorizer_required');
   if (!Array.isArray(trustedOrigins) || trustedOrigins.length === 0) throw new EnforcementSetupError('trusted_origins_required');
   const origins = parseTrustedOrigins(trustedOrigins); // a non-canonical entry fails startup
-  // The pair is present whenever `audited` (checked above), and nothing below calls it otherwise.
+  // The pair is present (checked above).
   const sessions = store as Required<SessionStore>;
   const admitter = admission as SessionAdmission;
   const policy = LOGIN_POLICIES[audience];
@@ -554,16 +566,24 @@ function createBoundary(
     } catch (err) {
       return outage('admission', err);
     }
-    if (typeof decision !== 'object' || decision === null) return 'admission_denied';
+    // A denial ends every session the principal holds, so only the denial shapes are one — `false`, as the composed
+    // adapters answer, or `{ admitted: false }`: anything else the adapter answers — another non-object, an
+    // `admitted` that is not a boolean, an admission with no usable version — is a fault, an outage that revokes nothing.
+    if (decision === false) return 'admission_denied';
+    if (typeof decision !== 'object' || decision === null) return 'admission_unavailable';
     try {
       // Read once each, as with a store record.
-      const { admitted, securityVersion, context } = decision as Record<string, unknown>;
-      if (admitted !== true || typeof securityVersion !== 'string' || !VERSION_RE.test(securityVersion)) return 'admission_denied';
-      if (context === undefined || context === null) return Object.freeze({ securityVersion, context: null });
-      // An admission that ADMITTED but named a scope that is not one is a faulty adapter, not a verdict about
-      // the principal: an outage, which revokes nothing.
-      const scope = trustedScopeOf(context);
-      return scope === null ? 'admission_unavailable' : Object.freeze({ securityVersion, context: scope });
+      const { admitted, securityVersion, context, actor } = decision as Record<string, unknown>;
+      if (admitted === false) return 'admission_denied';
+      if (admitted !== true || typeof securityVersion !== 'string' || !VERSION_RE.test(securityVersion)) return 'admission_unavailable';
+      // An admission that ADMITTED but named a scope or an actor that is not one is a faulty adapter, not a verdict
+      // about the principal: an outage, which revokes nothing.
+      const scope = context === undefined || context === null ? null : trustedScopeOf(context);
+      if (scope === null && context !== undefined && context !== null) return 'admission_unavailable';
+      // The actor a login records: the administrative boundary's selected scope's; the tenant boundary's, as named.
+      if (audience === 'admin') return Object.freeze({ securityVersion, context: scope, actor: scope?.actor ?? null });
+      if (actor !== undefined && actor !== null && (typeof actor !== 'string' || !ACTOR_RE.test(actor))) return 'admission_unavailable';
+      return Object.freeze({ securityVersion, context: scope, actor: (actor ?? null) as string | null });
     } catch {
       return 'admission_unavailable'; // a throwing getter on the answer
     }
@@ -647,10 +667,10 @@ function createBoundary(
       return challenged(res, ctx, (await revokeAllOf(principal)) ? 'login_admission_denied' : 'login_admission_denied_unrevoked');
     }
     if (typeof decision === 'string') return unavailable(res, ctx, decision);
-    // The administrative boundary attributes every session it issues to the actor its admission selected
-    // (M6-ADMIN-AUDIT-P1). An admission that admitted there but named no scope is a faulty adapter, not a verdict
-    // about the principal: an outage, before anything is read, created or revoked.
-    if (audited && decision.context === null) return unavailable(res, ctx, 'admission_unavailable');
+    // Every session is attributed to the actor its login's admission named (M6-ADMIN-AUDIT-P1; the tenant boundary
+    // since M5-TENANT-SESSION-P1). An admission that admitted but named none is a faulty adapter, not a verdict about
+    // the principal: an outage, before anything is read, created or revoked.
+    if (decision.actor === null) return unavailable(res, ctx, 'admission_unavailable');
     const mode = loginModeOf(req);
     if (mode === 'invalid') return challenged(res, ctx, 'login_reauth_header_invalid');
     if (mode === 'reauthenticate') {
@@ -687,39 +707,30 @@ function createBoundary(
       // reauthentication rotates exactly as an ordinary login does. Two concurrent reauthentications presenting one
       // cookie can both pass the same-principal check above, but at most one of them succeeds: the store's step
       // ends the presented session or refuses, so the other answers 'session_ended' (DA-61; M5-ADMIN-REVOKE-P1).
-      // What a failure leaves depends on the boundary:
-      if (audited) {
-        // ADMINISTRATIVE (M6-ADMIN-AUDIT-P1): ONE store call ends the presented session, creates the new one and
-        // writes the audit record atomically, so a failure before its commit leaves the presented session exactly
-        // as it was and issues nothing. A commit whose answer was lost is a 503 too, although the session and its
-        // record may then exist: that session was never delivered, since nobody holds its identifier. The action
-        // is the path taken: 'reauthenticate' only once every same-principal check above has passed.
-        // A client already gone cannot receive a session: issuing one would only leave an undeliverable session and a
-        // record whose id the request's log line (written at the close, reason 'aborted') cannot carry. The close marks
-        // this response destroyed: the server dispatches a pipelined request only once its response owns the socket
-        // (app.ts onRequest). The write below reaches nobody; it only keeps a hypothetical false positive from hanging.
-        if (res.destroyed) return unavailable(res, ctx, 'session_unavailable');
-        const operationId = randomUUID();
-        (res.locals as Record<string, unknown>).operationId = operationId;
-        const audit: SessionEstablishAudit = Object.freeze({
-          action: mode === 'reauthenticate' ? 'reauthenticate' : 'login', operationId,
-          actor: (decision.context as TrustedScope).actor, authenticatedAt,
-        });
-        // The store decides where it writes (M5-ADMIN-REVOKE-P1): the presented session was ended first — by a logout,
-        // a revocation or another reauthentication — or the standing moved since this login's admission read it. Either
-        // reads as a bad credential and ended, created and recorded nothing; the next request is judged afresh. An
-        // answer that is none of the three words is a broken store: a 503 — and so is 'session_ended' at an ordinary
-        // login, which the port never answers there (only a reauthentication must end what it presents).
-        const established = await call((signal) => sessions.establish(digestOf(id), record, presentedKey, audit, signal));
-        if (established === 'session_ended' && mode === 'reauthenticate') return challenged(res, ctx, 'login_reauth_no_session');
-        if (established === 'standing_changed') return challenged(res, ctx, 'login_standing_changed');
-        if (established !== 'established') return unavailable(res, ctx, 'session_unavailable');
-      } else {
-        // TENANT (unaudited, stated open): two calls, so a create that fails after the revoke answers 503 and
-        // leaves no session at all.
-        if (presentedKey !== null) await call((signal) => sessions.revoke(presentedKey, signal));
-        await call((signal) => sessions.create(digestOf(id), record, signal));
-      }
+      // ONE store call ends the presented session, creates the new one and writes the audit record atomically
+      // (M6-ADMIN-AUDIT-P1; the tenant boundary since M5-TENANT-SESSION-P1), so a failure before its commit leaves the
+      // presented session exactly as it was and issues nothing. A commit whose answer was lost is a 503 too, although
+      // the session and its record may then exist: that session was never delivered, since nobody holds its
+      // identifier. The action is the path taken: 'reauthenticate' only once every same-principal check above has passed.
+      // A client already gone cannot receive a session: issuing one would only leave an undeliverable session and a
+      // record whose id the request's log line (written at the close, reason 'aborted') cannot carry. The close marks
+      // this response destroyed: the server dispatches a pipelined request only once its response owns the socket
+      // (app.ts onRequest). The write below reaches nobody; it only keeps a hypothetical false positive from hanging.
+      if (res.destroyed) return unavailable(res, ctx, 'session_unavailable');
+      const operationId = randomUUID();
+      (res.locals as Record<string, unknown>).operationId = operationId;
+      const audit: SessionEstablishAudit = Object.freeze({
+        action: mode === 'reauthenticate' ? 'reauthenticate' : 'login', operationId, actor: decision.actor, authenticatedAt,
+      });
+      // The store decides where it writes (M5-ADMIN-REVOKE-P1): the presented session was ended first — by a logout,
+      // a revocation or another reauthentication — or the standing moved since this login's admission read it. Either
+      // reads as a bad credential and ended, created and recorded nothing; the next request is judged afresh. An
+      // answer that is none of the three words is a broken store: a 503 — and so is 'session_ended' at an ordinary
+      // login, which the port never answers there (only a reauthentication must end what it presents).
+      const established = await call((signal) => sessions.establish(digestOf(id), record, presentedKey, audit, signal));
+      if (established === 'session_ended' && mode === 'reauthenticate') return challenged(res, ctx, 'login_reauth_no_session');
+      if (established === 'standing_changed') return challenged(res, ctx, 'login_standing_changed');
+      if (established !== 'established') return unavailable(res, ctx, 'session_unavailable');
     } catch (err) {
       return unavailable(res, ctx, outage('session', err));
     }
@@ -732,12 +743,12 @@ function createBoundary(
   };
 
   /**
-   * The administrative logout (M6-ADMIN-AUDIT-P1): the session ends together with its audit record, in one store
-   * call. Revocation outranks the record: when that call fails for ANY reason — the record refused, an outage, a
-   * lost answer, an answer that is neither word — the plain revocation runs, and a session ended that way answers
-   * 204 with the request log saying its record is unconfirmed (absent, or present if a commit's answer was lost),
-   * plus a warning, so a defect that turned every logout into the fallback cannot pass unnoticed. A throw here is
-   * the fallback revocation's own, which the handler answers as today.
+   * The logout of either boundary (M6-ADMIN-AUDIT-P1; the tenant boundary since M5-TENANT-SESSION-P1): the session
+   * ends together with its audit record, in one store call. Revocation outranks the record: when that call fails for
+   * ANY reason — the record refused, an outage, a lost answer, an answer that is neither word — the plain revocation
+   * runs, and a session ended that way answers 204 with the request log saying its record is unconfirmed (absent,
+   * or present if a commit's answer was lost), plus a warning, so a defect that turned every logout into the fallback
+   * cannot pass unnoticed. A throw here is the fallback revocation's own, which the handler answers as today.
    */
   const endAudited = async (revoker: Revoker, res: Response, ctx: RouteContext): Promise<void> => {
     const operationId = randomUUID();
@@ -771,8 +782,7 @@ function createBoundary(
     const revoker = REVOKERS.get(ctx.session as SessionContext) as Revoker;
     let failure: string | null = null;
     try {
-      if (audited) await endAudited(revoker, res, ctx);
-      else await revoker.revoke();
+      await endAudited(revoker, res, ctx);
     } catch (err) {
       failure = outage('session', err);
     }

@@ -49,7 +49,7 @@ import type { StartupPreflight } from '../persistence/postgresStartupPreflight.j
 import { lockPlatformAuthority, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
 import { createPostgresSessionStore, holdAdministrativeSession } from '../persistence/postgresSessionStore.js';
 import type { SessionStandingCheck } from '../persistence/postgresSessionStore.js';
-import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
+import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
@@ -59,6 +59,7 @@ import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { TenantDirectoryPort, TenantDirectoryPorts } from '../runtime/tenantDirectory.js';
 import { createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformPermits } from './platformAuthorization.js';
+import { createTenantEstablishCheck } from './tenantAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -164,8 +165,9 @@ export interface TransactionFactories {
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
   readonly platformAdmission: (client: SupervisedPgClient) => PlatformAdmissionPort;
   /**
-   * The session store over the kernel, with the administrative login's standing check (M5-ADMIN-REVOKE-P1), which this
-   * root builds once and a factory must forward: a store built without it establishes no administrative session.
+   * The session store over the kernel, with the login's standing check (M5-ADMIN-REVOKE-P1, M5-TENANT-SESSION-P1) — one
+   * check for both audiences, dispatching on the record's — which this root builds once and a factory must forward: a
+   * store built without it establishes no session.
    */
   readonly sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => SessionStore;
   readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
@@ -262,10 +264,18 @@ export function assembleTransactions(
   // once over the persistence layer's plain functions on the caller's own handle: the command revalidator — 009's
   // freshness and locks, the presenting session held, then 013's read of that session's standing — and the login's
   // standing check — 013's read, 009's locks through the lock that THROWS on a fault (never the catch-all above it, which
-  // would turn a fault into a 401), then 013 again.
+  // would turn a fault into a 401), then 013 again. The ONE session store serves both audiences, so its standing check
+  // dispatches on the record's (M5-TENANT-SESSION-P1): a tenant login holds its actor's standing (016's hold, which
+  // throws on a fault) and re-reads 016's admission there; any other audience is a wiring fault, a throw.
   const hold = (sql: PgTransactionScope, key: string) => holdAdministrativeSession(sql, key, Date.now());
   const revalidate = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority, session: hold, read: readPlatformAdmission });
-  const standing = createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority });
+  const adminStanding = createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority });
+  const tenantStanding = createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission });
+  const standing: SessionStandingCheck = async (sql, record) => {
+    if (record.audience === 'admin') return adminStanding(sql, record);
+    if (record.audience === 'tenant') return tenantStanding(sql, record);
+    throw new Error('session standing unavailable');
+  };
   let store: TransactionalStore;
   try {
     // The revalidator the store runs inside each command transaction, over the same client and the

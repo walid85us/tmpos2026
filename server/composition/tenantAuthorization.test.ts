@@ -13,7 +13,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createTenantRouteAuthorizer, createTenantSessionAdmission, readKey } from './tenantAuthorization.js';
+import { createTenantEstablishCheck, createTenantRouteAuthorizer, createTenantSessionAdmission, readKey } from './tenantAuthorization.js';
+import type { SessionRecord } from '../runtime/sessions.js';
 import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
@@ -69,10 +70,11 @@ const authorize = (port: TenantAdmissionPort, requirement = TENANT_REQUIREMENT, 
 
 // --- admission ----------------------------------------------------------------------------------
 
-test('the boundary admits at the witness the database derived, and a refusal is a plain false', async () => {
+test('the boundary admits at the witness the database derived, as the resolved actor, and a refusal is a plain false', async () => {
   const port = stub(admitted([grant()]));
   const admission = createTenantSessionAdmission({ admission: port });
-  assert.deepEqual(await admission.admit(PRINCIPAL, 'tenant', live()), { admitted: true, securityVersion: WITNESS });
+  // M5-TENANT-SESSION-P1: the actor is the internal user the login's audit record names.
+  assert.deepEqual(await admission.admit(PRINCIPAL, 'tenant', live()), { admitted: true, securityVersion: WITNESS, actor: ACTOR });
   assert.equal(port.calls, 1, 'one read per admission: the boundary asks on every protected request');
   assert.equal(await createTenantSessionAdmission({ admission: stub({ outcome: 'refused' }) }).admit(PRINCIPAL, 'tenant', live()), false);
 });
@@ -224,4 +226,54 @@ test('a read-only actor reaches only a route the composition CLASSIFIED as a rea
 test('the read classification is the exact method and path the table registered', () => {
   assert.equal(readKey('GET', '/api/v1/probe'), 'GET /api/v1/probe');
   assert.notEqual(readKey('GET', '/api/v1/probe'), readKey('POST', '/api/v1/probe'));
+});
+
+// --- the tenant login's standing check (M5-TENANT-SESSION-P1) -------------------------------------
+
+const RECORD: SessionRecord = Object.freeze({
+  audience: 'tenant', authProvider: 'firebase', authProviderUid: 'uid-alpha', principalKey: 'p'.repeat(43),
+  securityVersion: WITNESS, authenticatedAt: null, createdAt: 1_700_000_000_000, lastSeenAt: 1_700_000_000_000, validatedAt: 1_700_000_000_000,
+});
+
+/** A check over a hold and a read answering as given, recording each step with the handle and reference it was handed. */
+function establishCheck(held: unknown, read: unknown) {
+  const steps: Array<[string, unknown, unknown]> = [];
+  const check = createTenantEstablishCheck<string>({
+    hold: async (sql, principal) => { steps.push(['hold', sql, principal]); if (held instanceof Error) throw held; return held as boolean; },
+    read: async (sql, principal) => { steps.push(['read', sql, principal]); if (read instanceof Error) throw read; return read; },
+  });
+  return { check, steps };
+}
+
+test('M5T-TE1 the establish check holds the record\'s actor, THEN re-reads admission on the same handle, and admits only at the record\'s witness', async () => {
+  const { check, steps } = establishCheck(true, admitted([grant()]));
+  assert.equal(await check('tx', RECORD), true);
+  assert.deepEqual(steps.map(([step]) => step), ['hold', 'read'], 'hold first, then the re-read');
+  assert.ok(steps.every(([, sql]) => sql === 'tx'), 'both on establish\'s own handle');
+  assert.ok(steps.every(([, , principal]) => JSON.stringify(principal) === JSON.stringify(PRINCIPAL)), 'the record\'s own provider reference');
+  // A standing that moved since the login's admission, or no longer admits: false, nothing written.
+  assert.equal(await establishCheck(true, { ...admitted([grant()]), securityVersion: 't2:other' }).check('tx', RECORD), false, 'another witness');
+  assert.equal(await establishCheck(true, { outcome: 'refused' }).check('tx', RECORD), false, 'refused');
+});
+
+test('M5T-TE2 a hold that answers false (no account) is a changed standing, and the admission is never read', async () => {
+  const { check, steps } = establishCheck(false, admitted([grant()]));
+  assert.equal(await check('tx', RECORD), false);
+  assert.deepEqual(steps.map(([step]) => step), ['hold'], 'no read after a failed hold');
+});
+
+test('M5T-TE3 a fault, a malformed answer or a record of another audience is an outage: a throw, never false', async () => {
+  const fault = new Error('lock timeout');
+  await assert.rejects(establishCheck(fault, admitted([grant()])).check('tx', RECORD), (err: unknown) => err === fault, 'a hold fault');
+  await assert.rejects(establishCheck(true, fault).check('tx', RECORD), (err: unknown) => err === fault, 'a read fault');
+  await assert.rejects(establishCheck('held', admitted([grant()])).check('tx', RECORD), /tenant admission unavailable/, 'a hold answering no boolean');
+  for (const answer of [{ outcome: 'unavailable' }, { outcome: 'admitted', securityVersion: WITNESS }, null, 'admitted']) {
+    await assert.rejects(establishCheck(true, answer).check('tx', RECORD), /tenant admission unavailable/, JSON.stringify(answer));
+  }
+  const other = establishCheck(true, admitted([grant()]));
+  await assert.rejects(other.check('tx', { ...RECORD, audience: 'admin' }), /tenant admission unavailable/, 'an administrative record');
+  assert.deepEqual(other.steps, [], 'refused before anything is held');
+  for (const deps of [undefined, {}, { hold: async () => true }, { read: async () => null }, { hold: 'x', read: async () => null }]) {
+    assert.throws(() => createTenantEstablishCheck(deps as never), TypeError);
+  }
 });

@@ -193,13 +193,13 @@ export const HTTP_SERVER_LIMITS = {
   maxQueuedRequests: 16,
 } as const;
 
-// The longest chains make eight sequential bounded calls: a tenant reauthentication presenting its
-// session (the request and login client limits, the verifier, the account limit, admission, the
-// presented session's read, revoke, create — the administrative boundary makes that revoke and
-// create one audited store call, establish, so its reauthentication makes seven and its ordinary
-// login six), and an idempotency-required session route (the request limit, the session read, admission,
-// the session update, authorization, acquisition, the operation itself, completion — a command's
-// planner makes no call, and its one commit takes the completion's place). The
+// The longest chain makes eight sequential bounded calls: an idempotency-required session route (the
+// request limit, the session read, admission, the session update, authorization, acquisition, the
+// operation itself, completion — a command's planner makes no call, and its one commit takes the
+// completion's place). A reauthentication presenting its session makes seven (the request and login
+// client limits, the verifier, the account limit, admission, the presented session's read, and one
+// audited store call, establish — for either boundary since M5-TENANT-SESSION-P1) and an ordinary
+// login six. The
 // socket's inactivity timeout runs through all of them, so a port deadline is capped at one
 // eighth of that timeout: however slow every port is, the request ends in a bounded 503, never a reset.
 const MAX_SEQUENTIAL_PORT_CALLS = 8;

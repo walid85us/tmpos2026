@@ -66,8 +66,16 @@ const ROW_COLUMNS: readonly string[] = [
 ];
 /** The fields each membership carries: 007's seven. */
 const MEMBERSHIP_FIELDS: readonly string[] = ['membershipId', 'scopeType', 'tenantId', 'storeId', 'roleId', 'tenantStatus', 'storeStatus'];
-/** The platform authority version as the routine renders it: decimal text, bounded well inside bigint. */
-const AUTHORITY_VERSION_RE = /^[0-9]{1,19}$/;
+/** The platform authority version as the routine renders it: canonical decimal text — no sign, no space, no leading zero. */
+const AUTHORITY_VERSION_RE = /^(0|[1-9][0-9]{0,15})$/;
+
+/**
+ * `value` as a version 013 can answer: 0 for an actor with no counter row (its coalesce), else 1..2^53-1 (its CHECK).
+ * Past the bound, Number rounds to 2^53 or above, which is never a safe integer, so the check stays exact.
+ */
+function isAuthorityVersion(value: unknown): value is string {
+  return typeof value === 'string' && AUTHORITY_VERSION_RE.test(value) && Number.isSafeInteger(Number(value));
+}
 
 type Row = Readonly<Record<string, unknown>>;
 
@@ -116,7 +124,7 @@ function admissionOf(row: Row): PlatformAdmissionResult | null {
     return [actor, accountStatus, limitation, securityVersion, memberships, authorityVersion].every((v) => v === null) ? REFUSED : null;
   }
   if (outcome !== 'resolved') return null;
-  if (typeof authorityVersion !== 'string' || !AUTHORITY_VERSION_RE.test(authorityVersion)) return null;
+  if (!isAuthorityVersion(authorityVersion)) return null;
   const grants = platformGrantsOf(memberships);
   if (grants === null) return null;
   const principal = Object.freeze({ actor, accountStatus, limitation, securityVersion, memberships: Object.freeze(grants) });

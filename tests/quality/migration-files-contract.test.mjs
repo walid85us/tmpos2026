@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the fifteen committed migration pairs through the engine's Node fs port (node:fs
+// Reads the sixteen committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -159,19 +159,34 @@ const PINNED = {
   // and still refuses.
   '015_m5_admin_standing_serialization.up.sql': 'a3b1514ee65703d29b3becf78ef338e8966eb0ee12550ecd5e1f19d357154f4e',
   '015_m5_admin_standing_serialization.down.sql': 'c065b4129bf5499b762d76288b89bd9358845dd274f2eda6484d367b98822e3c',
+  // Phase 4.0 M5-TENANT-SESSION-P1 — tenant session ordering, in 011's schema tmpos_session: public.store.access_version
+  // (010's column, for a store); a BEFORE ROW trigger, ENABLE ALWAYS, on public.tenant (UPDATE) and public.store (INSERT or
+  // UPDATE) that starts a new store at one, moves the access version by exactly one on every status change or store
+  // re-parenting, whoever writes it, and refuses any other change of it and any change of a key; a per-actor tenant grant
+  // version with no foreign key, row security on and no grant, moved by AFTER ROW triggers, ENABLE ALWAYS, on every write
+  // to a tenant- or store-scope grant (cascades included) and on every delete of a tenant or store a grant names (as a
+  // replica too); the v2 admission read (011's answer plus each grant's store access version, the platform authority
+  // version and the grant version); and the hold a tenant login takes first (the account FOR UPDATE; links, every grant,
+  // and every tenant and store they name FOR SHARE). EXECUTE on the two routines to tmpos_app alone; the up and the
+  // rollback each refuse while a tenant session exists. Nothing an earlier migration created changes but that column and
+  // those five triggers: migrations 001-015 are untouched, byte for byte. Proved against disposable PostgreSQL only;
+  // applied to no managed, persistent or application database. D4 now names the contiguous chain through 016; the
+  // exact-[005] gate is unchanged and still refuses.
+  '016_m5_tenant_session_ordering.up.sql': 'e5633336da5376a747d05aabac21b73ca9ebcf4743a9436081c58322ac07e9be',
+  '016_m5_tenant_session_ordering.down.sql': 'acf8a95610c97c8dca496da6fad4a3618a49a7268a9a82237ecb5849040728a6',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the thirty expected files', () => {
+test('the migrations directory holds exactly the thirty-two expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

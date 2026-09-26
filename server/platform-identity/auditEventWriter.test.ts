@@ -27,7 +27,9 @@ import {
   AuditEventValidationError,
   AUDIT_WRITER_METADATA_ALLOWLIST,
   ADMIN_SESSION_AUDIT_EVENTS,
+  TENANT_SESSION_AUDIT_EVENTS,
   buildAdminSessionAuditEvent,
+  buildSessionAuditEvent,
   SESSION_AUDIT_METADATA_KEYS,
   type AuditEventWriteInput,
 } from './auditEventWriter';
@@ -557,4 +559,47 @@ test('S3-W-20: a row under a session action id must match that event\'s fixed sh
   assert.throws(() => buildAdminSessionAuditEvent('constructor' as never, T1, ACTOR, { sessionRef: ref }), AuditEventValidationError);
   // Other actions are untouched: the generic event still validates as before.
   assert.doesNotThrow(() => validateAuditEventInput(baseEvent()));
+});
+
+test('S3-W-21: the tenant session events are the administrative ones at scope none: their own ids and reasons, the actor rule and the same metadata keys', async () => {
+  // M5-TENANT-SESSION-P1 (DA-65): a tenant session selects no tenant or store at login, so its record names neither.
+  const ref = 'r'.repeat(43);
+  assert.deepEqual(Object.values(TENANT_SESSION_AUDIT_EVENTS).map((shape) => [shape.actionId, shape.decision, shape.reasonCode, shape.actor]), [
+    ['tenant.session.login', 'allow', 'tenant_session_created', true],
+    ['tenant.session.reauthenticate', 'allow', 'tenant_session_reauthenticated', true],
+    ['tenant.session.logout', 'not_applicable', 'tenant_session_ended', false],
+  ]);
+  const login = buildSessionAuditEvent('tenant', 'login', T1, ACTOR, { sessionRef: ref, authenticatedAt: 1 });
+  const logout = buildSessionAuditEvent('tenant', 'logout', T1, null, { sessionRef: ref });
+  const fixed = (e: AuditEventWriteInput) => [e.scopeType, e.tenantId, e.storeId, e.requiredPermission, e.resultStatus, e.sourceOfTruth, e.evaluatedBy, e.evidenceLevel];
+  assert.deepEqual(fixed(login), ['none', null, null, 'n_a', 'succeeded', 'session_transaction', 'm6_postgres_session_store@v1', 'durable_compliance_event']);
+  assert.deepEqual(fixed(logout), fixed(login));
+  assert.deepEqual([login.actorInternalUserId, logout.actorInternalUserId], [ACTOR, null]);
+  const session = { sessionRef: ref, replacedSessionRef: 'q'.repeat(43), authenticatedAt: 1_700_000_000_000 };
+  for (const action of ['login', 'reauthenticate'] as const) {
+    const event = buildSessionAuditEvent('tenant', action, T1, ACTOR, session);
+    assert.deepEqual(sanitizeAuditMetadata({ ...session, phase: 'p' }, event.actionId), session, `${action}: the session keys are kept, a general one is not`);
+  }
+  // Each family keeps its own scope: a tenant row at platform scope, an administrative one at none, or either naming a
+  // tenant is refused before anything is sent; so is a tenant login with no actor or a logout naming one.
+  const drift: Array<[string, AuditEventWriteInput]> = [
+    ['a tenant login at platform scope', { ...login, scopeType: 'platform' }],
+    ['a tenant login naming its tenant', { ...login, scopeType: 'tenant', tenantId: T1 }],
+    ['an administrative login at scope none', { ...buildAdminSessionAuditEvent('login', T1, ACTOR, { sessionRef: ref }), scopeType: 'none' }],
+    ['a tenant login naming no actor', { ...login, actorInternalUserId: null }],
+    ['a tenant logout naming an actor', { ...logout, actorInternalUserId: ACTOR }],
+    ['a tenant logout binding an authentication time', { ...logout, metadata: { sessionRef: ref, authenticatedAt: 1 } }],
+    ['another reason code', { ...login, reasonCode: 'admin_session_created' }],
+    ['a generic event borrowing the tenant login id', { ...baseEvent(), scopeType: 'none', tenantId: null, storeId: null, actionId: login.actionId, metadata: { sessionRef: ref } }],
+  ];
+  for (const [label, event] of drift) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent(event, { executor: r.executor }), AuditEventValidationError, label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
+  assert.throws(() => buildSessionAuditEvent('support' as never, 'login', T1, ACTOR, { sessionRef: ref }), AuditEventValidationError, 'an unknown family');
+  assert.throws(() => buildSessionAuditEvent('tenant', 'constructor' as never, T1, ACTOR, { sessionRef: ref }), AuditEventValidationError, 'an unknown action');
+  const r = recorder();
+  await writeAuditEvent(login, { executor: r.executor });
+  assert.equal(r.calls.length, 1, 'a well-formed tenant row is written');
 });

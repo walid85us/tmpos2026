@@ -212,7 +212,7 @@ async function storeDown() {
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-015 and a real non-owner runtime login
+// setup: real migrations 001-016 and a real non-owner runtime login
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -456,10 +456,11 @@ const bucketsOpenedSince = async (sinceMs) => (await owner`select count(*)::int 
 // M6RS-00: the composition binds the PostgreSQL limiter
 // ---------------------------------------------------------------------------
 
-test('M6RS-00: 001-015 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
+test('M6RS-00: 001-016 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.ok(ledger.some((r) => r.version === '014' && r.dirty === false), '014 applied and clean');
   assert.ok(ledger.some((r) => r.version === '015' && r.dirty === false), '015 applied and clean');
+  assert.ok(ledger.some((r) => r.version === '016' && r.dirty === false), '016 applied and clean');
   assert.equal(typeof A.tx.rateLimiter, 'function');
   assert.notEqual(A.tx, B.tx, 'two separately composed roots, each over its own kernel');
 
@@ -516,8 +517,10 @@ test('M6RS-03: concurrent traffic split across both runtimes is admitted exactly
   const client = await proxied();
   const replies = await Promise.all(Array.from({ length: 24 }, (_, i) => login(alternate(i), 'tenant', client)));
   const statuses = replies.map((r) => r.status);
-  assert.equal(statuses.filter((s) => s === 401).length, LOGIN_CLIENT.limit, statuses.join());
-  assert.equal(statuses.filter((s) => s === 429).length, 24 - LOGIN_CLIENT.limit, statuses.join());
+  // Each reply with the reason its instance logged, so an unexpected status names its cause.
+  const seen = replies.map((r) => `${r.status}:${reasonOf(r) ?? '-'}`).join();
+  assert.equal(statuses.filter((s) => s === 401).length, LOGIN_CLIENT.limit, seen);
+  assert.equal(statuses.filter((s) => s === 429).length, 24 - LOGIN_CLIENT.limit, seen);
   for (const r of replies.filter((reply) => reply.status === 429)) limitedReply(r, 'login_client_limited', LOGIN_CLIENT);
   assert.equal((await loginBucket(client)).consumed, LOGIN_CLIENT.limit, 'the store counted exactly the allowances');
 });

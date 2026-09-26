@@ -503,6 +503,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // admit anyone, and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning;
     // the containment property above is untouched.
     'tests/db/adminRevocation.integration.test.mjs',
+    // M5-TENANT-SESSION-P1: the tenant session ordering proof, over two production roots, applies every migration on disk
+    // through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the containment property above is
+    // untouched.
+    'tests/db/tenantSessionOrdering.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

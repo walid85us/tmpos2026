@@ -181,7 +181,7 @@ test('M5PS-05 anything admission cannot read as a standing is an outage — a th
     ['a tenant grant beside the platform one', resolved(principalWith([grant(), grant({ scopeType: 'tenant', tenant: TENANT, roleId: 'store_owner', tenantStatus: 'active' })]))],
     ['only a store grant', resolved(principalWith([grant({ scopeType: 'store', tenant: TENANT, store: STORE, roleId: 'manager', tenantStatus: 'active', storeStatus: 'active' })]))],
   ];
-  // The authority version the port renders is decimal text of at most 19 digits: anything else is not the port's.
+  // The authority version the port renders is canonical decimal text in 0..2^53-1: anything else is not the port's.
   for (const authorityVersion of ['', '-1', '1.5', '0x1', ' 1', '1 ', '1\n', '\u0661', '1'.repeat(20), 7, 7n, null, undefined]) {
     outages.push([`authority version ${JSON.stringify(String(authorityVersion))} (${typeof authorityVersion})`,
       { outcome: 'resolved', principal: owner, authorityVersion }]);
@@ -195,6 +195,16 @@ test('M5PS-05 anything admission cannot read as a standing is an outage — a th
   for (const [label, answer] of [['throws', () => { throw fault; }], ['rejects', () => Promise.reject(fault)]] as const) {
     await assert.rejects(admitAnswer(answer), (err: unknown) => err === fault, `a port that ${label}`);
   }
+});
+
+test('M5PS-05b an authority version 013 cannot answer is an outage — canonical decimal in 0..2^53-1 alone reaches a witness', async () => {
+  const owner = platformRole('system_owner');
+  for (const authorityVersion of ['01', '00', '007', '9007199254740992', '9'.repeat(16), '9'.repeat(19)]) {
+    await assert.rejects(admitStanding(owner, authorityVersion), /^Error: platform admission unavailable$/, authorityVersion);
+    assert.throws(() => platformStandingOf(resolved(owner, authorityVersion), BUILT_IN_PLATFORM_ROLES), /^Error: platform admission unavailable$/, authorityVersion);
+  }
+  // 013 answers 0 for an actor with no counter row; 2^53-1 is the widest its CHECK stores.
+  for (const authorityVersion of ['0', '9007199254740991']) assert.match(await witnessOf(owner, authorityVersion), /^p1:/, authorityVersion);
 });
 
 test('M5PS-06 being asked about any boundary but the administrative one is a wiring fault: a throw, and the port is never asked', async () => {

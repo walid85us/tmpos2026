@@ -132,11 +132,45 @@ export const ADMIN_SESSION_AUDIT_EVENTS = Object.freeze({
   }),
 } as const);
 
+/**
+ * The tenant session events (M5-TENANT-SESSION-P1; doc 08 DA-65), written by the same store in the same transaction as
+ * the tenant session change each records — every column fixed as its administrative counterpart's EXCEPT the scope: a
+ * tenant session selects no tenant or store at login (the route selects one per request, from the actor's own grants,
+ * tenantAuthorization.ts), so its record is scope 'none', naming neither.
+ */
+export const TENANT_SESSION_AUDIT_EVENTS = Object.freeze({
+  login: Object.freeze({
+    actionId: 'tenant.session.login', decision: 'allow', reasonCode: 'tenant_session_created',
+    humanReadableReason: 'A tenant session was created after a verified sign-in and tenant admission.',
+    actor: true,
+  }),
+  reauthenticate: Object.freeze({
+    actionId: 'tenant.session.reauthenticate', decision: 'allow', reasonCode: 'tenant_session_reauthenticated',
+    humanReadableReason: 'A tenant session was created by a recent sign-in of the user whose live session was presented.',
+    actor: true,
+  }),
+  logout: Object.freeze({
+    actionId: 'tenant.session.logout', decision: 'not_applicable', reasonCode: 'tenant_session_ended',
+    humanReadableReason: 'A tenant session was ended by its logout.',
+    actor: false,
+  }),
+} as const);
+
 export type AdminSessionAuditAction = keyof typeof ADMIN_SESSION_AUDIT_EVENTS;
-type AdminSessionAuditShape = (typeof ADMIN_SESSION_AUDIT_EVENTS)[AdminSessionAuditAction];
+/** Both families name the same three actions; a record's family is the session's audience. */
+export type SessionAuditAction = AdminSessionAuditAction;
+export type SessionAuditFamily = 'admin' | 'tenant';
+type SessionAuditShape = (typeof ADMIN_SESSION_AUDIT_EVENTS | typeof TENANT_SESSION_AUDIT_EVENTS)[SessionAuditAction];
+
+/** Each family's fixed events and the one scope its records carry. */
+export const SESSION_AUDIT_EVENTS = Object.freeze({
+  admin: ADMIN_SESSION_AUDIT_EVENTS,
+  tenant: TENANT_SESSION_AUDIT_EVENTS,
+} as const);
+const SESSION_AUDIT_SCOPE: Readonly<Record<SessionAuditFamily, 'platform' | 'none'>> = Object.freeze({ admin: 'platform', tenant: 'none' });
 
 /**
- * The metadata keys those three events persist, and the only ones they may: `sessionRef` and
+ * The metadata keys those six events persist, and the only ones they may: `sessionRef` and
  * `replacedSessionRef` — one-way references to the session created or ended and to the one a login replaced,
  * never an identifier, a cookie or a store key — and `authenticatedAt`, the provider-verified sign-in time
  * bound into a new session. A logout carries `sessionRef` alone.
@@ -153,8 +187,9 @@ const SESSION_AUDIT_SOURCE_OF_TRUTH = 'session_transaction';
 const SESSION_AUDIT_EVALUATED_BY = 'm6_postgres_session_store@v1';
 /** A session reference: the base64url SHA-256 the store derives (postgresSessionStore.ts sessionRefOf). */
 const SESSION_REF_RE = /^[A-Za-z0-9_-]{43}$/;
-const SESSION_EVENTS_BY_ACTION_ID: ReadonlyMap<string, AdminSessionAuditShape> =
-  new Map(Object.values(ADMIN_SESSION_AUDIT_EVENTS).map((shape) => [shape.actionId, shape]));
+const SESSION_EVENTS_BY_ACTION_ID: ReadonlyMap<string, { readonly shape: SessionAuditShape; readonly scopeType: 'platform' | 'none' }> =
+  new Map((Object.keys(SESSION_AUDIT_EVENTS) as SessionAuditFamily[]).flatMap((family) =>
+    Object.values(SESSION_AUDIT_EVENTS[family]).map((shape) => [shape.actionId, { shape, scopeType: SESSION_AUDIT_SCOPE[family] }] as const)));
 
 /** The keys an event of `actionId` may persist. */
 function metadataAllowlistFor(actionId: unknown): readonly string[] {
@@ -164,17 +199,17 @@ function metadataAllowlistFor(actionId: unknown): readonly string[] {
 }
 
 /**
- * `event`, already checked against the general rules and allow-listed for its session action, exactly as
- * ADMIN_SESSION_AUDIT_EVENTS fixes it — or a throw naming the action id alone, never a value.
+ * `event`, already checked against the general rules and allow-listed for its session action, exactly as its family
+ * (SESSION_AUDIT_EVENTS) fixes it — or a throw naming the action id alone, never a value.
  */
-function assertAdminSessionShape(event: AuditEventWriteInput, shape: AdminSessionAuditShape): void {
+function assertSessionShape(event: AuditEventWriteInput, shape: SessionAuditShape, scopeType: 'platform' | 'none'): void {
   const m: AuditMetadata = event.metadata ?? {};
   // A key other than sessionRef is only ever a login's or a reauthentication's, and must be well-formed.
   const optional = (key: string, ok: (v: unknown) => boolean): boolean => !Object.hasOwn(m, key) || (shape.actor && ok(m[key]));
   // The request id is the server's random operation id (sessions.ts), never a client's value.
   const matches = UUID_RE.test(event.requestId) && (event.traceId ?? null) === null && event.actorAuthProvider === null
     && (event.onBehalfOfInternalUserId ?? null) === null && (event.subjectTenantId ?? null) === null
-    && event.scopeType === 'platform' && event.tenantId === null && event.storeId === null
+    && event.scopeType === scopeType && event.tenantId === null && event.storeId === null
     && event.requiredPermission === 'n_a' && event.decision === shape.decision && event.reasonCode === shape.reasonCode
     && event.humanReadableReason === shape.humanReadableReason && event.resultStatus === 'succeeded'
     && event.sourceOfTruth === SESSION_AUDIT_SOURCE_OF_TRUTH && event.evaluatedBy === SESSION_AUDIT_EVALUATED_BY
@@ -196,7 +231,7 @@ function isScalar(v: unknown): v is string | number | boolean | null {
 /**
  * Redact arbitrary input into allow-listed, scalar-only metadata:
  *   - drops any key not allow-listed for `actionId` (AUDIT_WRITER_METADATA_ALLOWLIST, plus
- *     SESSION_AUDIT_METADATA_KEYS for the administrative session events alone),
+ *     SESSION_AUDIT_METADATA_KEYS for the session events alone),
  *   - drops any key on AUDIT_FORBIDDEN_FIELDS (defense-in-depth — never allow-listed),
  *   - drops any non-scalar value (objects/arrays/functions/undefined),
  *   - truncates long strings.
@@ -381,33 +416,40 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
       throw new AuditEventValidationError('audit event metadata contains a non-scalar value');
     }
   }
-  const sessionShape = SESSION_EVENTS_BY_ACTION_ID.get(event.actionId);
-  if (sessionShape !== undefined) assertAdminSessionShape(event, sessionShape);
+  const session = SESSION_EVENTS_BY_ACTION_ID.get(event.actionId);
+  if (session !== undefined) assertSessionShape(event, session.shape, session.scopeType);
   return event;
 }
 
 /**
- * The row of one administrative session event: its fixed shape (ADMIN_SESSION_AUDIT_EVENTS) and the three values
- * the session store supplies — the server's operation id, the actor (a UUID for a login or reauthentication, null
- * for a logout) and the session metadata. Validated before it is returned, so a refused row throws before anything
- * is sent.
+ * The row of one session event of `family` — the session's audience: its fixed shape (SESSION_AUDIT_EVENTS) and the
+ * three values the session store supplies — the server's operation id, the actor (a UUID for a login or
+ * reauthentication, null for a logout) and the session metadata. Validated before it is returned, so a refused row
+ * throws before anything is sent.
  */
-export function buildAdminSessionAuditEvent(
-  action: AdminSessionAuditAction, requestId: string, actor: string | null, metadata: AuditMetadata,
+export function buildSessionAuditEvent(
+  family: SessionAuditFamily, action: SessionAuditAction, requestId: string, actor: string | null, metadata: AuditMetadata,
 ): AuditEventWriteInput {
-  if (!Object.hasOwn(ADMIN_SESSION_AUDIT_EVENTS, action)) {
+  if (!Object.hasOwn(SESSION_AUDIT_EVENTS, family) || !Object.hasOwn(SESSION_AUDIT_EVENTS[family], action)) {
     throw new AuditEventValidationError('audit event session action is not an allowed value');
   }
-  const shape = ADMIN_SESSION_AUDIT_EVENTS[action];
+  const shape = SESSION_AUDIT_EVENTS[family][action];
   return validateAuditEventInput({
     requestId, traceId: null,
     actorInternalUserId: actor, actorAuthProvider: null, onBehalfOfInternalUserId: null,
-    scopeType: 'platform', tenantId: null, storeId: null, subjectTenantId: null,
+    scopeType: SESSION_AUDIT_SCOPE[family], tenantId: null, storeId: null, subjectTenantId: null,
     actionId: shape.actionId, requiredPermission: 'n_a', decision: shape.decision,
     reasonCode: shape.reasonCode, humanReadableReason: shape.humanReadableReason, resultStatus: 'succeeded',
     sourceOfTruth: SESSION_AUDIT_SOURCE_OF_TRUTH, evaluatedBy: SESSION_AUDIT_EVALUATED_BY,
     evidenceLevel: 'durable_compliance_event', metadata,
   });
+}
+
+/** The administrative family's row (M6-ADMIN-AUDIT-P1): buildSessionAuditEvent('admin', ...). */
+export function buildAdminSessionAuditEvent(
+  action: AdminSessionAuditAction, requestId: string, actor: string | null, metadata: AuditMetadata,
+): AuditEventWriteInput {
+  return buildSessionAuditEvent('admin', action, requestId, actor, metadata);
 }
 
 // =============================================================================

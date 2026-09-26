@@ -161,6 +161,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/adminRevocation.integration.test.mjs
+      # Phase 4.0 M5-TENANT-SESSION-P1 — migration 016 and tenant session ordering: tenant logins, recent sign-ins and
+      # logouts raced against account, grant, anchor, tenant and store changes across two separately composed production
+      # roots over real local sockets, with the tenant session audit rows, against the SAME disposable service. Witness
+      # routes are test-only. Same binding, no new service, no secret, no permission change.
+      - name: Tenant session ordering against disposable PostgreSQL (M5-TENANT-SESSION-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/tenantSessionOrdering.integration.test.mjs
       # Phase 4.0 M6-RATE-P2 — migration 014 and the distributed rate limiter: the bucket store, the key fingerprint,
       # the consume and probe routines and their privilege containment, against the SAME disposable service after
       # 001-014 are applied to it. Same binding, no new service, no secret, no permission change.
@@ -178,7 +186,7 @@ jobs:
       # Phase 4.0 M6-ENTRY-P1 — production entry startup preflight (config validation,
       # database connection, migration ledger verification, login privilege check, rate
       # limiter probe) against a disposable PostgreSQL cluster over the least-privilege runtime
-      # principal (001–014 migrations applied).
+      # principal (001–016 migrations applied).
       - name: Production entry startup preflight against disposable PostgreSQL (M6-ENTRY-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci

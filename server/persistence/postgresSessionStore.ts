@@ -1,7 +1,8 @@
 // Phase 4.0 M5 — the PostgreSQL session store: the production adapter for the SessionStore port
 // (server/runtime/sessions.ts), over migration 011's five fixed session routines (M5-GIAM-D1-P2-R1; DA-32),
-// and — for the administrative boundary's audited pair, establish and end (M6-ADMIN-AUDIT-P1) — the existing
-// audit writer's one INSERT into public.audit_event, in the same transaction as the routines it records.
+// and — for the audited pair, establish and end, through which BOTH boundaries issue and end their sessions
+// (M6-ADMIN-AUDIT-P1; the tenant boundary since M5-TENANT-SESSION-P1) — the existing audit writer's one INSERT
+// into public.audit_event, in the same transaction as the routines it records.
 //
 // WHY IT EXISTS. The session boundary has always declared a durable, shared store as its contract
 // (docs/phase-4/03 §2 #18) and never had one: the only implementation was the in-memory test kit,
@@ -31,16 +32,19 @@
 // stamp it read, which waits out any concurrent deleter) — so at most one record can ever claim to have
 // ended or replaced a given session. A record names a session only by a one-way reference to its key
 // (sessionRefOf), never the key itself: the key is what the session routines accept, and a reader of the
-// audit trail must not be handed a way to read, extend or end a live session. `create` refuses an
+// audit trail must not be handed a way to read, extend or end a live session. A record's FAMILY is the
+// session's audience (auditEventWriter.ts SESSION_AUDIT_EVENTS): the administrative events at platform scope,
+// the tenant events at scope 'none' — a tenant session selects no tenant or store at login. `create` refuses an
 // administrative record, so establish is this file's only way to write one; the DATABASE does not couple
 // them — the runtime login may still call m5_session_create directly (a routine migration would be needed).
 //
-// ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1). establish first re-reads the standing the login was admitted
-// at, on its own transaction and with the actor's authority locked until COMMIT (the standing check the
-// transaction root hands it), and refuses — writing nothing — when it moved. A reauthentication must then END
-// the live administrative session of the same principal it presents, or it ends, creates and records nothing:
-// a logout or a revocation that committed first leaves it nothing to end. And holdAdministrativeSession lets the
-// command transaction hold the very session that presented a command, so that command commits only while it is live.
+// ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1; the tenant login since M5-TENANT-SESSION-P1, ADR-31). establish
+// first re-reads the standing the login was admitted at, on its own transaction and with the actor's standing locked
+// until COMMIT (the standing check the transaction root hands it: 009's locks for an administrative record, 016's hold
+// for a tenant one), and refuses — writing nothing — when it moved. A reauthentication must then END the live session
+// of its own audience and principal that it presents, or it ends, creates and records nothing: a logout or a
+// revocation that committed first leaves it nothing to end. And holdAdministrativeSession lets the command
+// transaction hold the very session that presented a command, so that command commits only while it is live.
 //
 // FAIL CLOSED, NEVER FAIL OPEN. A malformed row, an unexpected column set, a row count other than
 // the one expected, an out-of-range timestamp, an abort, a timeout, a lost connection and a driver
@@ -56,7 +60,7 @@ import { SESSION_TTL } from '../runtime/sessions.js';
 import type { SessionEndAudit, SessionEstablishAudit, SessionRecord, SessionStore, SessionUpdate } from '../runtime/sessions.js';
 import type { SessionAudience } from '../runtime/routes.js';
 import {
-  ADMIN_SESSION_AUDIT_EVENTS, buildAdminSessionAuditEvent, sanitizeAuditMetadata, writeAuditEvent,
+  SESSION_AUDIT_EVENTS, buildSessionAuditEvent, sanitizeAuditMetadata, writeAuditEvent,
 } from '../platform-identity/auditEventWriter.js';
 import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter.js';
 import type { AuditMetadata } from '../platform-identity/auditEventContract.js';
@@ -186,13 +190,15 @@ const sessionRefOf = (key: string): string =>
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * The runtime's entry as this store's record, checked BEFORE anything is sent — every field read once — and then
- * built and validated by the writer, which fixes every other column of a session event (auditEventWriter.ts
- * ADMIN_SESSION_AUDIT_EVENTS), so a refused record aborts nothing: nothing has begun. `establish` records a login or
- * a reauthentication, always of the actor admission selected, and the authentication time bound into the record it
- * creates; `end` records a logout, which names no actor and binds no authentication time.
+ * The runtime's entry as this store's record of `family` — the session's audience — checked BEFORE anything is sent,
+ * every field read once, and then built and validated by the writer, which fixes every other column of a session event
+ * (auditEventWriter.ts SESSION_AUDIT_EVENTS), so a refused record aborts nothing: nothing has begun. `establish` records
+ * a login or a reauthentication, always of the actor admission selected, and the authentication time bound into the
+ * record it creates; `end` records a logout, which names no actor and binds no authentication time.
  */
-function auditRowOf(raw: unknown, operation: 'establish' | 'end', authenticated: number | null, metadata: AuditMetadata): AuditEventWriteInput {
+function auditRowOf(
+  raw: unknown, operation: 'establish' | 'end', family: SessionAudience, authenticated: number | null, metadata: AuditMetadata,
+): AuditEventWriteInput {
   if (typeof raw !== 'object' || raw === null) throw new SessionStoreUnavailable('audit_invalid');
   const { action, operationId, actor, authenticatedAt } = raw as Record<string, unknown>;
   const known = operation === 'establish'
@@ -204,9 +210,9 @@ function auditRowOf(raw: unknown, operation: 'establish' | 'end', authenticated:
     throw new SessionStoreUnavailable('audit_invalid');
   }
   // Outside the refusal below: a dropped key is this store's defect, not a refused record, and keeps its own word.
-  persistedAuditMetadata(metadata, ADMIN_SESSION_AUDIT_EVENTS[known].actionId);
+  persistedAuditMetadata(metadata, SESSION_AUDIT_EVENTS[family][known].actionId);
   try {
-    return buildAdminSessionAuditEvent(known, operationId, actor as string | null, metadata);
+    return buildSessionAuditEvent(family, known, operationId, actor as string | null, metadata);
   } catch {
     // The writer's label is safe but not this store's word; the caller learns only that the record was refused.
     throw new SessionStoreUnavailable('audit_invalid');
@@ -300,9 +306,10 @@ export async function holdAdministrativeSession(sql: PgTransactionScope, key: st
 }
 
 /**
- * The administrative login's standing check, on establish's OWN transaction (M5-ADMIN-REVOKE-P1): true only while the
- * standing `record` was admitted at still holds, with the actor's authority locked until COMMIT. The transaction root
- * builds it (platformAuthorization.ts createPlatformEstablishCheck); this store only calls it, first. It throws for an
+ * The login's standing check, on establish's OWN transaction (M5-ADMIN-REVOKE-P1, M5-TENANT-SESSION-P1): true only while
+ * the standing `record` was admitted at still holds, with the actor's standing locked until COMMIT. The transaction root
+ * builds it for both audiences (platformAuthorization.ts createPlatformEstablishCheck for an administrative record,
+ * tenantAuthorization.ts createTenantEstablishCheck for a tenant one); this store only calls it, first. It throws for an
  * outage — never answering false for one — and the kernel rolls back.
  */
 export type SessionStandingCheck = (sql: PgTransactionScope, record: SessionRecord) => Promise<boolean>;
@@ -317,9 +324,9 @@ export interface PostgresSessionStoreDeps {
    */
   readonly now?: () => number;
   /**
-   * The standing check `establish` runs first (M5-ADMIN-REVOKE-P1). Optional only because the tenant boundary's
-   * operations need none: `establish` without one THROWS ('standing_check_missing') and issues nothing, so no
-   * administrative session is ever established on a standing this transaction did not re-read.
+   * The standing check `establish` runs first (M5-ADMIN-REVOKE-P1, M5-TENANT-SESSION-P1). Optional only because the plain
+   * operations need none: `establish` without one THROWS ('standing_check_missing') and issues nothing, so no session of
+   * either audience is ever established on a standing this transaction did not re-read.
    */
   readonly standing?: SessionStandingCheck;
 }
@@ -347,7 +354,7 @@ export interface PostgresSessionStoreDeps {
  * The production session store. `create` writes one record and refuses to overwrite one; `get`
  * answers the live record or nothing; `update` slides one stamp on a record that exists; `revoke` is
  * final; `revokePrincipal` ends one principal's sessions in this store's audience alone. `establish`
- * and `end` issue and end an administrative session with its audit record, one transaction each.
+ * and `end` issue and end a session of either audience with its audit record, one transaction each.
  */
 export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): SessionStore {
   const { client, standing } = deps;
@@ -379,7 +386,8 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
 
   return Object.freeze({
     async create(key: string, record: SessionRecord, signal: AbortSignal): Promise<void> {
-      // An administrative session is written only by establish, with its audit record (M6-ADMIN-AUDIT-P1).
+      // An administrative session is written only by establish, with its audit record (M6-ADMIN-AUDIT-P1). The boundary
+      // calls create for neither audience any more (M5-TENANT-SESSION-P1); the port keeps it, and a tenant record still writes.
       if (record.audience === 'admin') throw new SessionStoreUnavailable('audit_required');
       // The record is the boundary's own, but the absolute expiry is this store's to compute: the port
       // carries no expiry field. The lifetime is the RECORD's own audience's, read from the runtime's
@@ -443,16 +451,17 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
     async establish(
       key: string, record: SessionRecord, replaces: string | null, audit: SessionEstablishAudit, signal: AbortSignal,
     ): Promise<'established' | 'session_ended' | 'standing_changed'> {
-      // Fail closed: an administrative session is never established on a standing this transaction did not re-read.
+      // Fail closed: no session is ever established on a standing this transaction did not re-read.
       if (standing === undefined) throw new SessionStoreUnavailable('standing_check_missing');
-      if (record.audience !== 'admin') throw new SessionStoreUnavailable('audience_invalid');
+      // An audience with no lifetime here refuses (audience_invalid); past it, the record's audience is its family.
       const expiresAt = expiryOf(record);
+      const family = record.audience;
       const metadata: AuditMetadata = {
         sessionRef: sessionRefOf(key), ...(record.authenticatedAt === null ? {} : { authenticatedAt: record.authenticatedAt }),
       };
-      const row = auditRowOf(audit, 'establish', record.authenticatedAt, metadata);
+      const row = auditRowOf(audit, 'establish', family, record.authenticatedAt, metadata);
       // Keyed on the action the runtime chose, which it chooses only on the path whose every same-principal check passed.
-      const reauthenticating = row.actionId === ADMIN_SESSION_AUDIT_EVENTS.reauthenticate.actionId;
+      const reauthenticating = row.actionId === SESSION_AUDIT_EVENTS[family].reauthenticate.actionId;
       return run(signal, async (sql) => {
         // 0. The standing, FIRST, on this very transaction (M5-ADMIN-REVOKE-P1): the admission the login read is read
         //    again with the actor's authority locked until COMMIT, so a change committed before this point refuses the
@@ -463,16 +472,16 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
         if (standingHolds === false) return 'standing_changed';
         if (standingHolds !== true) throw new SessionStoreUnavailable('standing_invalid');
         // 1. The presented session, when one is: ended by THIS transaction only if it reads it live and holds its lock.
-        //    A reauthentication must END it, and it must be, in this order, live, administrative and the same
-        //    principal's: anything else — a logout, a revocation or another reauthentication that committed first
-        //    included — ends, creates and records nothing ('session_ended'); the checks precede the end, so a refusal
-        //    deletes nothing. An ordinary login rotates as it always has: a record of another audience under the
-        //    administrative cookie is still ended (rotation ends whatever it is presented), a key naming nothing live
-        //    still establishes, and only an administrative one this transaction ended is named as replaced.
+        //    A reauthentication must END it, and it must be, in this order, live, of the new record's own audience and
+        //    the same principal's: anything else — a logout, a revocation or another reauthentication that committed
+        //    first included — ends, creates and records nothing ('session_ended'); the checks precede the end, so a
+        //    refusal deletes nothing. An ordinary login rotates as it always has: a record of another audience under the
+        //    boundary's cookie is still ended (rotation ends whatever it is presented), a key naming nothing live still
+        //    establishes, and only one of the new record's audience this transaction ended is named as replaced.
         const held = replaces === null ? undefined : await liveRecord(sql, replaces, now());
-        if (reauthenticating && (held === undefined || held.audience !== 'admin' || held.principalKey !== record.principalKey
+        if (reauthenticating && (held === undefined || held.audience !== family || held.principalKey !== record.principalKey
           || !(await endHeld(sql, replaces as string, held)))) return 'session_ended';
-        const replaced = reauthenticating || (held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === 'admin');
+        const replaced = reauthenticating || (held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === family);
         // 2. The new session. A taken key fails the whole transaction, so the presented session is left as it was.
         const outcome = only(await sql`
           select tmpos_session.m5_session_create(
@@ -488,7 +497,12 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
     },
 
     async end(key: string, audit: SessionEndAudit, signal: AbortSignal): Promise<'ended' | 'absent'> {
-      const row = auditRowOf(audit, 'end', null, { sessionRef: sessionRefOf(key) });
+      // The record's family is the ended session's audience, known only once it is read: both candidates are built and
+      // checked first, so a refused entry aborts nothing — nothing has begun.
+      const rows: Readonly<Record<SessionAudience, AuditEventWriteInput>> = {
+        admin: auditRowOf(audit, 'end', 'admin', null, { sessionRef: sessionRefOf(key) }),
+        tenant: auditRowOf(audit, 'end', 'tenant', null, { sessionRef: sessionRefOf(key) }),
+      };
       return run(signal, async (sql) => {
         const held = await liveRecord(sql, key, now());
         // Nothing live to end — another operation ended it first, or it reached its absolute expiry since the request's
@@ -502,9 +516,8 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
           }
           return 'absent';
         }
-        if (held.audience !== 'admin') throw new SessionStoreUnavailable('audience_invalid');
         if (!(await endHeld(sql, key, held))) return 'absent';
-        await writeSessionAudit(sql, row);
+        await writeSessionAudit(sql, rows[held.audience]);
         return 'ended';
       });
     },

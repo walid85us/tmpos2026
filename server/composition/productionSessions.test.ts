@@ -265,7 +265,8 @@ function parts(): SessionParts {
       },
     },
     store: { tenant: createMemorySessionStore(), admin: createMemorySessionStore() },
-    admission: { tenant: { admit: () => admitted }, admin: { admit: () => platform } },
+    // The tenant login attributes its session to the actor its admission resolves (M5-TENANT-SESSION-P1).
+    admission: { tenant: { admit: () => ({ ...admitted, actor: PLATFORM_ACTOR }) }, admin: { admit: () => platform } },
     authorizer: { tenant: { authorize: () => true }, admin: { authorize: () => true } },
     ...testRequestLimits(),
   };

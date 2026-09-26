@@ -357,9 +357,10 @@ test('M6AA-S2 no presented session, one naming nothing live, one another transac
   assert.deepEqual((recordSent(client).metadata as { json: unknown }).json, { sessionRef: refOf(NEW_KEY) });
 });
 
-test('M6AA-S3 establish refuses before anything is sent: another audience, an entry that is no login, a client or malformed id, no actor, another authentication time, and anything the writer refuses', async () => {
+test('M6AA-S3 establish refuses before anything is sent: an unknown audience, an entry that is no login, a client or malformed id, no actor, another authentication time, and anything the writer refuses', async () => {
   const cases: Array<[string, SessionRecord, unknown, RegExp]> = [
-    ['a tenant record', RECORD, LOGIN, /audience_invalid/],
+    // A tenant record is established too since M5-TENANT-SESSION-P1 (M5T-S1); an audience with no lifetime is not.
+    ['an audience the runtime does not know', { ...RECORD, audience: 'support' as never }, LOGIN, /audience_invalid/],
     ['a logout entry', ADMIN_RECORD, { ...LOGIN, action: 'logout' }, /audit_invalid/],
     ['an unknown action', ADMIN_RECORD, { ...LOGIN, action: 'refresh' }, /audit_invalid/],
     ['a client-chosen request id', ADMIN_RECORD, { ...LOGIN, operationId: 'client-chosen-request-id' }, /audit_invalid/],
@@ -423,9 +424,6 @@ test('M6AA-S5 end ends the live session with its record in ONE transaction; noth
   }
   await assert.rejects(answered(store(answers({ get: [], revoke: [{ outcome: 'absent' }] })).store.end?.(KEY, LOGOUT, live())),
     /not_revoked/, 'the deletion must be the routine\'s own word');
-  const { client: tenant, store: refuses } = store(answers({ get: [ROW] }));
-  await assert.rejects(answered(refuses.end?.(KEY, LOGOUT, live())), /audience_invalid/, 'a tenant record is refused');
-  assert.deepEqual(tenant.statements.map(stepOf), ['get'], 'and nothing is ended');
   // A logout names no actor: one handed an actor is refused like any other malformed entry.
   for (const entry of [LOGIN, { ...LOGOUT, actor: ACTOR }, { ...LOGOUT, authenticatedAt: CREATED }, { ...LOGOUT, operationId: 'x' }]) {
     const { client: c, store: e } = store(answers());
@@ -524,7 +522,7 @@ test('M5AR-S4 a store built without a standing check establishes nothing: a thro
   await assert.rejects(answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live())), /session store unavailable: standing_check_missing/);
   assert.deepEqual(client.statements, []);
   assert.equal(client.bounds.length, 0, 'no transaction opens');
-  // Its other operations are unaffected: the tenant boundary's store needs no check.
+  // Its plain operations are unaffected: they need no check.
   const { store: tenant } = store([ROW], undefined, () => NOW, null);
   assert.deepEqual(await tenant.get(KEY, live()), RECORD);
 });
@@ -584,4 +582,57 @@ test('M5AR-S6 holdAdministrativeSession holds the live administrative session un
     await assert.rejects(client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => holdAdministrativeSession(sql, KEY, now)), /clock_invalid/, String(now));
     assert.deepEqual(client.statements, [], `${now}: nothing sent`);
   }
+});
+
+// --- M5-TENANT-SESSION-P1: the tenant session through the same audited pair ----------------------------
+
+const TENANT_LOGIN: SessionEstablishAudit = LOGIN;
+const TENANT_COMMON = { ...COMMON, scope_type: 'none' };
+
+test('M5T-S1 a tenant login is ONE transaction: the standing FIRST, then rotation, the new session and its tenant record at scope none, last', async () => {
+  for (const action of ['login', 'reauthenticate'] as const) {
+    const { client, store: s, seen } = withStanding(true, { get: [ROW] });
+    assert.equal(await answered(s.establish?.(NEW_KEY, RECORD, KEY, { ...TENANT_LOGIN, action }, live())), 'established', action);
+    assert.deepEqual(stepsOf(client), ['standing', 'get', 'touch', 'revoke', 'create', 'insert'], `${action}: the admin order, unchanged`);
+    assert.equal(seen[0].record, RECORD, `${action}: the check judges the very tenant record`);
+    assert.equal(client.bounds.length, 1, `${action}: one transaction`);
+    assert.equal(client.values[4][1], 'tenant');
+    assert.equal(client.values[4][10], CREATED + SESSION_TTL.tenant.absoluteMs, `${action}: the tenant lifetime`);
+    assert.deepEqual(masked(recordSent(client)), {
+      ...TENANT_COMMON, actor_internal_user_id: ACTOR, action_id: `tenant.session.${action}`, decision: 'allow',
+      reason_code: action === 'login' ? 'tenant_session_created' : 'tenant_session_reauthenticated',
+      metadata: { json: { sessionRef: refOf(NEW_KEY), authenticatedAt: CREATED - 1_000, replacedSessionRef: refOf(KEY) } },
+    }, `${action}: the tenant family, naming no tenant or store`);
+  }
+  // A standing that moved writes nothing, exactly as for an administrative record.
+  const { client, store: s } = withStanding(false, { get: [ROW] });
+  assert.equal(await answered(s.establish?.(NEW_KEY, RECORD, KEY, TENANT_LOGIN, live())), 'standing_changed');
+  assert.deepEqual(stepsOf(client), ['standing']);
+});
+
+test('M5T-S2 a record of the other audience under the cookie: a tenant reauthentication ends nothing, and a tenant login ends it without naming it replaced', async () => {
+  // The same principal's ADMINISTRATIVE session presented at a tenant recent sign-in: the audience must match.
+  const reauth = store(answers({ get: [ADMIN_ROW] }), undefined, () => NOW);
+  assert.equal(await answered(reauth.store.establish?.(NEW_KEY, RECORD, KEY, { ...TENANT_LOGIN, action: 'reauthenticate' }, live())), 'session_ended');
+  assert.deepEqual(reauth.client.statements.map(stepOf), ['get'], 'nothing held, revoked, created or recorded');
+  const login = store(answers({ get: [ADMIN_ROW] }), undefined, () => NOW);
+  assert.equal(await answered(login.store.establish?.(NEW_KEY, RECORD, KEY, TENANT_LOGIN, live())), 'established');
+  assert.deepEqual(login.client.statements.map(stepOf), ['get', 'touch', 'revoke', 'create', 'insert'], 'rotation ends whatever it is presented');
+  assert.deepEqual((recordSent(login.client).metadata as { json: unknown }).json, { sessionRef: refOf(NEW_KEY), authenticatedAt: CREATED - 1_000 },
+    'no replacedSessionRef: the ended record is not a tenant session');
+});
+
+test('M5T-S3 a tenant logout ends the session with its tenant record in one transaction, attributed to no actor', async () => {
+  const { client, store: s } = store(answers({ get: [ROW] }), undefined, () => NOW);
+  assert.equal(await answered(s.end?.(KEY, LOGOUT, live())), 'ended');
+  assert.deepEqual(client.statements.map(stepOf), ['get', 'touch', 'revoke', 'insert']);
+  assert.equal(client.bounds.length, 1);
+  assert.deepEqual(masked(recordSent(client)), {
+    ...TENANT_COMMON, actor_internal_user_id: null, action_id: 'tenant.session.logout', decision: 'not_applicable',
+    reason_code: 'tenant_session_ended', metadata: { json: { sessionRef: refOf(KEY) } },
+  });
+  // Both families' records are checked before anything is sent: a malformed logout entry sends nothing, whatever is live.
+  const refused = store(answers({ get: [ROW] }));
+  await assert.rejects(answered(refused.store.end?.(KEY, { ...LOGOUT, actor: ACTOR } as never, live())), /audit_invalid/);
+  assert.deepEqual(refused.client.statements, []);
 });

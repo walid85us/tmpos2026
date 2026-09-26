@@ -7,11 +7,15 @@
 // resolver already hides a suspended tenant's grant, so the answer after a suspend-and-reactivate
 // would be byte-identical to the answer before it — and an idle session would be revived. The tenant's
 // access version, which never returns to a value it has held, is what closes that, and the test below
-// pins exactly that difference.
+// pins exactly that difference. M5-TENANT-SESSION-P1 (migration 016) adds the store's access version and
+// the actor's two grant counters, for the same reason, and the two reads a tenant login runs on its own
+// store transaction (readTenantAdmission, holdTenantStanding).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPostgresTenantAdmission, TENANT_ADMISSION_BOUNDS, TENANT_ADMISSION_DEADLINE_MS } from './postgresTenantAdmission.js';
+import {
+  createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission, TENANT_ADMISSION_BOUNDS, TENANT_ADMISSION_DEADLINE_MS,
+} from './postgresTenantAdmission.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { VerifiedPrincipal } from '../runtime/routes.js';
 
@@ -22,19 +26,23 @@ const MEMBERSHIP = '55555555-5555-4555-8555-555555555555';
 const VERSION = 'a'.repeat(64);
 const PRINCIPAL: VerifiedPrincipal = Object.freeze({ authProvider: 'firebase', authProviderUid: 'uid-alpha' });
 
-/** One grant as the routine renders it: 007's seven fields plus the tenant's access version. */
+/** One grant as the routine renders it: 007's seven fields plus the tenant's and the store's access versions. */
 const membership = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   membershipId: MEMBERSHIP, scopeType: 'tenant', tenantId: TENANT, storeId: null, roleId: 'store_owner',
-  tenantStatus: 'active', storeStatus: null, tenantAccessVersion: '1', ...over,
+  tenantStatus: 'active', storeStatus: null, tenantAccessVersion: '1', storeAccessVersion: null, ...over,
 });
+/** A store grant under TENANT: the store's access version rides beside the tenant's. */
+const storeGrant = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+  membership({ scopeType: 'store', storeId: STORE, storeStatus: 'active', storeAccessVersion: '1', ...over });
 
 const row = (memberships: unknown, over: Record<string, unknown> = {}): Record<string, unknown> => ({
   outcome: 'resolved', actor_id: ACTOR, account_status: 'active', limitation: 'none',
-  security_version: VERSION, memberships, ...over,
+  security_version: VERSION, memberships, authority_version: '0', grant_version: '1', ...over,
 });
 
 const REFUSED_ROW = Object.freeze({
   outcome: 'refused', actor_id: null, account_status: null, limitation: null, security_version: null, memberships: null,
+  authority_version: null, grant_version: null,
 });
 
 interface Fake extends SupervisedPgClient {
@@ -96,7 +104,7 @@ test('a resolved actor with a tenant grant is admitted, and no provider referenc
 
 test('the witness is bounded printable ASCII, so the session boundary can carry it as a version', async () => {
   const witness = await witnessOf([row([membership()])]);
-  assert.match(witness, /^t1:[A-Za-z0-9_-]+$/, 'prefixed, so a later derivation is never mistaken for this one');
+  assert.match(witness, /^t2:[A-Za-z0-9_-]{43}$/, 'prefixed, so an earlier or later derivation is never mistaken for this one');
   assert.ok(witness.length >= 1 && witness.length <= 128, `length ${witness.length} is within the boundary's bound`);
   assert.match(witness, /^[\x21-\x7e]{1,128}$/, 'the same shape sessions.ts VERSION_RE admits');
 });
@@ -131,7 +139,7 @@ test('every field of the standing moves the witness, and no two of these standin
     ['a different role', [row([membership({ roleId: 'technician' })])]],
     ['a read-only tenant', [row([membership({ tenantStatus: 'read_only' })])]],
     ['a second grant', [row([membership(), membership({ membershipId: '66666666-6666-4666-8666-666666666666', tenantId: '77777777-7777-4777-8777-777777777777' })])]],
-    ['the same grant at store scope', [row([membership({ scopeType: 'store', storeId: STORE, storeStatus: 'active' })])]],
+    ['the same grant at store scope', [row([storeGrant()])]],
     // Each of the four below moves EXACTLY ONE field, so dropping that field from the digest would be
     // caught here. Without them, a digest that omitted the tenant id would still pass every row above
     // — and a grant moved from one tenant to another at the same access version would digest
@@ -139,8 +147,13 @@ test('every field of the standing moves the witness, and no two of these standin
     ['a different membership id alone', [row([membership({ membershipId: '88888888-8888-4888-8888-888888888888' })])]],
     ['a different tenant alone', [row([membership({ tenantId: '99999999-9999-4999-8999-999999999999' })])]],
     // Differs from the store-scope row above in its STORE alone.
-    ['a different store alone', [row([membership({ scopeType: 'store', storeId: '12345678-1234-4123-8123-123456789abc', storeStatus: 'active' })])]],
-    ['a different store status alone', [row([membership({ scopeType: 'store', storeId: STORE, storeStatus: 'read_only' })])]],
+    ['a different store alone', [row([storeGrant({ storeId: '12345678-1234-4123-8123-123456789abc' })])]],
+    ['a different store status alone', [row([storeGrant({ storeStatus: 'read_only' })])]],
+    // M5-TENANT-SESSION-P1 (016; doc 08 DA-41): each of these moves exactly one field too, and each only increases, so
+    // a store reactivated, a grant removed and restored, or an anchor moved and moved back never digests as before.
+    ['a moved store access version alone', [row([storeGrant({ storeAccessVersion: '3' })])]],
+    ['a moved grant version alone', [row([membership()], { grant_version: '2' })]],
+    ['a moved platform authority version alone', [row([membership()], { authority_version: '1' })]],
   ];
   const seen = new Set([base]);
   for (const [label, rows] of moved) {
@@ -156,6 +169,8 @@ test('a refusal is the routine\'s own, and an actor with no tenant or store gran
   assert.deepEqual(await admit([REFUSED_ROW]), { outcome: 'refused' }, 'the routine refused');
   assert.deepEqual(await admit([row([])]), { outcome: 'refused' }, 'no grant at all');
   const platformOnly = membership({ scopeType: 'platform', tenantId: null, storeId: null, tenantStatus: null, roleId: 'system_owner', tenantAccessVersion: null });
+  // The refusal row is one fixed row: a counter on it is not the routine's answer, and an outage.
+  assert.deepEqual(await admit([{ ...REFUSED_ROW, grant_version: '1' }]), { outcome: 'unavailable' }, 'a refusal carrying a counter');
   assert.deepEqual(await admit([row([platformOnly])]), { outcome: 'refused' }, 'a platform grant is not a tenant session');
 });
 
@@ -211,10 +226,134 @@ test('a tenant grant with no access version is an outage: a grant no version cou
     ['a version past bigint width', [row([membership({ tenantAccessVersion: '1'.repeat(20) })])]],
     ['a number rather than the routine\'s text', [row([membership({ tenantAccessVersion: 1 })])]],
     ['a version on a grant that names no tenant', [row([membership({ scopeType: 'platform', tenantId: null, tenantStatus: null, roleId: 'system_owner' })])]],
+    // The same rule for a store grant and its store (016).
+    ['a store grant with no store access version', [row([storeGrant({ storeAccessVersion: null })])]],
+    ['a store access version that is not decimal text', [row([storeGrant({ storeAccessVersion: '1e3' })])]],
+    ['a store access version past bigint width', [row([storeGrant({ storeAccessVersion: '1'.repeat(20) })])]],
+    ['a store access version on a grant that names no store', [row([membership({ storeAccessVersion: '1' })])]],
+    ['a grant with no store access version key at all', [row([{ ...membership(), storeAccessVersion: undefined }])]],
   ];
   for (const [label, rows] of missing) {
     assert.deepEqual(await admit(rows), { outcome: 'unavailable' }, label);
   }
+});
+
+test('M5T-TA1 v2\'s two counters are decimal text on a resolved row, and anything else there is an outage', async () => {
+  const bad: [string, unknown][] = [
+    ['no grant version', [row([membership()], { grant_version: null })]],
+    ['no authority version', [row([membership()], { authority_version: null })]],
+    ['a counter that is a number', [row([membership()], { grant_version: 1 })]],
+    ['a counter that is not decimal text', [row([membership()], { authority_version: '-1' })]],
+    ['a counter past bigint width', [row([membership()], { grant_version: '1'.repeat(20) })]],
+    ['a row without the counters (011\'s shape)', [{ outcome: 'resolved', actor_id: ACTOR, account_status: 'active', limitation: 'none', security_version: VERSION, memberships: [membership()] }]],
+  ];
+  for (const [label, rows] of bad) assert.deepEqual(await admit(rows), { outcome: 'unavailable' }, label);
+  // Zero is a counter: an actor no trigger has moved yet (016 answers 0 for one with no row).
+  assert.equal((await admit([row([membership()], { authority_version: '0', grant_version: '0' })]) as { outcome: string }).outcome, 'admitted');
+  // The read is 016's v2, with both counters named.
+  const { client } = admissionOver([row([membership()])]);
+  await createPostgresTenantAdmission({ client }).admit(PRINCIPAL, live());
+  assert.match(client.statements[0], /tmpos_session\.m5_admit_tenant_session_v2\(/);
+  assert.match(client.statements[0], /authority_version, grant_version/);
+});
+
+test('M5T-TA4 a refusal row carrying any value is an outage: the boundary answers a refusal by ending every session', async () => {
+  const values: Record<string, unknown> = {
+    actor_id: ACTOR, account_status: 'active', limitation: 'none', security_version: VERSION, memberships: [],
+    authority_version: '0', grant_version: '1',
+  };
+  for (const [column, value] of Object.entries(values)) {
+    assert.deepEqual(await admit([{ ...REFUSED_ROW, [column]: value }]), { outcome: 'unavailable' }, `a refusal carrying ${column}`);
+    await assert.rejects(readTenantAdmission(handle([{ ...REFUSED_ROW, [column]: value }]).sql, PRINCIPAL),
+      /^Error: tenant admission unavailable$/, `readTenantAdmission: a refusal carrying ${column}`);
+  }
+});
+
+test('M5T-TA5 every version is canonical decimal inside its CHECK bound, and anything else is an outage', async () => {
+  // 010's and 016's CHECKs bound an access version to 1..2^53-1; 013's and 016's bound a stored counter the same way,
+  // and 016 answers 0 for an actor with no counter row. No text the routine renders has a sign, a space or a leading zero.
+  const noncanonical = ['01', '9007199254740992', '9223372036854775807', '', ' 1', '1 ', '+1', '00'];
+  const bad: [string, unknown][] = [];
+  for (const v of ['0', ...noncanonical]) {
+    bad.push([`tenant access version ${JSON.stringify(v)}`, [row([membership({ tenantAccessVersion: v })])]]);
+    bad.push([`store access version ${JSON.stringify(v)}`, [row([storeGrant({ storeAccessVersion: v })])]]);
+  }
+  for (const v of noncanonical) {
+    bad.push([`authority version ${JSON.stringify(v)}`, [row([membership()], { authority_version: v })]]);
+    bad.push([`grant version ${JSON.stringify(v)}`, [row([membership()], { grant_version: v })]]);
+  }
+  for (const [label, rows] of bad) assert.deepEqual(await admit(rows), { outcome: 'unavailable' }, label);
+  // The bounds themselves are the routine's answers, and admitted.
+  const good: [string, unknown][] = [];
+  for (const v of ['1', '9007199254740991']) {
+    good.push([`tenant access version ${v}`, [row([membership({ tenantAccessVersion: v })])]]);
+    good.push([`store access version ${v}`, [row([storeGrant({ storeAccessVersion: v })])]]);
+  }
+  for (const v of ['0', '9007199254740991']) {
+    good.push([`authority version ${v}`, [row([membership()], { authority_version: v })]]);
+    good.push([`grant version ${v}`, [row([membership()], { grant_version: v })]]);
+  }
+  for (const [label, rows] of good) assert.equal((await admit(rows) as { outcome: string }).outcome, 'admitted', label);
+});
+
+/** A caller's transaction handle answering `answer` (or rejecting with `fault`), recording what it was sent. */
+function handle(answer: unknown, fault?: Error) {
+  const statements: string[] = [];
+  const values: unknown[][] = [];
+  const sql = ((strings: TemplateStringsArray, ...args: unknown[]) => {
+    statements.push(strings.join('?'));
+    values.push(args);
+    return fault ? Promise.reject(fault) : Promise.resolve(answer as never);
+  }) as unknown as PgTransactionScope;
+  return { sql, statements, values };
+}
+
+test('M5T-TA2 readTenantAdmission is admit\'s decision on the CALLER\'s transaction: faults and malformed answers throw, never answer', async () => {
+  const admitted = handle([row([membership()])]);
+  const answer = await readTenantAdmission(admitted.sql, PRINCIPAL) as { outcome: string; securityVersion: string; principal: { actor: string } };
+  assert.equal(answer.outcome, 'admitted');
+  assert.equal(answer.principal.actor, ACTOR, 'the admitted answer exposes the actor');
+  assert.equal(answer.securityVersion, await witnessOf([row([membership()])]), 'exactly the witness admit derives');
+  assert.deepEqual(admitted.values, [['firebase', 'uid-alpha']], 'the reference, bound');
+  assert.match(admitted.statements[0], /m5_admit_tenant_session_v2\(/);
+  assert.deepEqual(await readTenantAdmission(handle([REFUSED_ROW]).sql, PRINCIPAL), { outcome: 'refused' });
+  assert.deepEqual(await readTenantAdmission(handle([row([])]).sql, PRINCIPAL), { outcome: 'refused' }, 'no tenant or store grant');
+  const unsent = handle([row([membership()])]);
+  assert.deepEqual(await readTenantAdmission(unsent.sql, { authProvider: 'okta', authProviderUid: 'uid-alpha' }), { outcome: 'refused' });
+  assert.deepEqual(unsent.statements, [], 'a reference this adapter cannot admit is refused before a statement');
+  for (const [label, rows] of [['no row', []], ['a malformed grant', [row(['x'])]], ['an unknown outcome', [row([membership()], { outcome: 'pending' })]],
+    ['a counter missing', [row([membership()], { grant_version: null })]]] as Array<[string, unknown]>) {
+    await assert.rejects(readTenantAdmission(handle(rows).sql, PRINCIPAL), /^Error: tenant admission unavailable$/, label);
+  }
+  const fault = new Error('lock timeout on db.example:5432');
+  await assert.rejects(readTenantAdmission(handle(null, fault).sql, PRINCIPAL), (err: unknown) => err === fault, 'a driver error propagates as it is');
+});
+
+test('M5T-TA3 holdTenantStanding: held is true, absent is false, and any other answer or a fault throws', async () => {
+  const held = handle([{ outcome: 'held' }]);
+  assert.equal(await holdTenantStanding(held.sql, PRINCIPAL), true);
+  assert.match(held.statements[0], /tmpos_session\.m5_hold_tenant_standing\(\?::text, \?::text\) as outcome/);
+  assert.deepEqual(held.values, [['firebase', 'uid-alpha']], 'the reference, bound');
+  assert.equal(await holdTenantStanding(handle([{ outcome: 'absent' }]).sql, PRINCIPAL), false);
+  for (const rows of [[], [{ outcome: 'HELD' }], [{ outcome: null }], [{ outcome: 'held' }, { outcome: 'held' }], [{ outcome: 'held', extra: 1 }], 'held']) {
+    await assert.rejects(holdTenantStanding(handle(rows).sql, PRINCIPAL), /tenant standing unavailable/, JSON.stringify(rows));
+  }
+  const fault = new Error('deadlock detected');
+  await assert.rejects(holdTenantStanding(handle(null, fault).sql, PRINCIPAL), (err: unknown) => err === fault);
+});
+
+test('M5T-TA3b holdTenantStanding refuses a reference admit and readTenantAdmission refuse, as false and before a statement', async () => {
+  // false, as those two refuse it: the establish check then refuses the login, and nothing is written.
+  for (const principal of [null, 'firebase', { authProvider: 'okta', authProviderUid: 'uid-alpha' }, { authProvider: 'firebase', authProviderUid: '' },
+    { authProvider: 'firebase', authProviderUid: 'u'.repeat(256) }, { authProvider: 'firebase', authProviderUid: 7 }]) {
+    const unsent = handle([{ outcome: 'held' }]);
+    assert.equal(await holdTenantStanding(unsent.sql, principal as never), false, JSON.stringify(principal));
+    assert.deepEqual(await readTenantAdmission(unsent.sql, principal as never), { outcome: 'refused' }, JSON.stringify(principal));
+    assert.deepEqual(unsent.statements, [], 'nothing sent');
+  }
+  const widest = handle([{ outcome: 'held' }]);
+  assert.equal(await holdTenantStanding(widest.sql, { authProvider: 'supabase', authProviderUid: 'u'.repeat(255) }), true);
+  assert.deepEqual(widest.values, [['supabase', 'u'.repeat(255)]], 'the widest reference is still sent, bound');
 });
 
 test('a driver fault, an abort and an overrun are outages that disclose nothing', async () => {
@@ -233,7 +372,7 @@ test('readiness runs the real admission read and reports ready only on one of it
   const { client, admission } = admissionOver([{ outcome: 'refused' }]);
   assert.equal(await admission.probe?.(live()), true);
   assert.equal(client.statements.length, 1);
-  assert.equal(client.statements[0].includes('m5_admit_tenant_session'), true, 'the real read, not a ping');
+  assert.equal(client.statements[0].includes('m5_admit_tenant_session_v2('), true, 'the real read the adapter makes, not a ping');
   // The probe's provider is a literal in the statement; only its reference is bound.
   assert.equal(client.statements[0].includes("'firebase'"), true);
   const [uid] = client.values[0] as [string];

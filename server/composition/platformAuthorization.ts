@@ -90,8 +90,13 @@ const UNAVAILABLE = 'platform authorization unavailable';
  * exclusion, so a status a later migration adds admits nothing until it is classified here.
  */
 const ELIGIBLE_ACCOUNT: ReadonlySet<string> = new Set(['active', 'trialing']);
-/** The platform authority version as the port renders it (postgresPlatformAdmission.ts). */
-const AUTHORITY_VERSION_RE = /^[0-9]{1,19}$/;
+/** The platform authority version as the port renders it (postgresPlatformAdmission.ts): canonical decimal text. */
+const AUTHORITY_VERSION_RE = /^(0|[1-9][0-9]{0,15})$/;
+
+/** `value` as a version 013 can answer: canonical decimal in 0..2^53-1 (0 for an actor with no counter row). */
+function isAuthorityVersion(value: unknown): value is string {
+  return typeof value === 'string' && AUTHORITY_VERSION_RE.test(value) && Number.isSafeInteger(Number(value));
+}
 /** The witness's prefix: it names the derivation, so a later one is never mistaken for this one. */
 const WITNESS_PREFIX = 'p1';
 
@@ -124,7 +129,7 @@ export function platformStandingOf(
   if (outcome !== 'resolved') throw new Error(ADMISSION_UNAVAILABLE);
   // A malformed standing is the adapter's fault, not a fact about the principal: an outage, never a denial,
   // because a denial would end every session the principal holds.
-  if (!isTrustedPrincipal(resolved) || typeof authorityVersion !== 'string' || !AUTHORITY_VERSION_RE.test(authorityVersion)
+  if (!isTrustedPrincipal(resolved) || !isAuthorityVersion(authorityVersion)
     || !resolved.memberships.every((m) => m.scopeType === 'platform')) {
     throw new Error(ADMISSION_UNAVAILABLE);
   }

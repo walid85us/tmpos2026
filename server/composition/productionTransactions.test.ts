@@ -807,7 +807,17 @@ const sessionRow = (witness: string) => ({
   audience: 'admin', authProvider: 'firebase', authProviderUid: 'uid-operator', principalKey: 'p'.repeat(43), securityVersion: witness,
   authenticatedAt: '1700000000000', createdAt: '1700000000000', lastSeenAt: '1700000000000', validatedAt: '1700000000001',
 });
-function revalHandle(over: { fresh?: boolean; authority?: unknown; session?: unknown[]; touch?: string; admission?: unknown[] } = {}) {
+/** Migration 016's v2 row for a tenant actor holding one tenant grant, and its t2 witness recomputed here independently. */
+const REVAL_TENANT = '8b9c0d1e-2f3a-4b4c-9d5e-6f7a8b9c0d1e';
+const tenantAdmissionRow = (grantVersion = '1') => ({
+  outcome: 'resolved', actor_id: REVAL_ACTOR, account_status: 'active', limitation: 'none', security_version: 'sv-1',
+  memberships: [{ membershipId: REVAL_MEMBERSHIP, scopeType: 'tenant', tenantId: REVAL_TENANT, storeId: null, roleId: 'store_owner',
+    tenantStatus: 'active', storeStatus: null, tenantAccessVersion: '1', storeAccessVersion: null }],
+  authority_version: '0', grant_version: grantVersion,
+});
+const tenantWitness = `t2:${createHash('sha256').update(['t2', REVAL_ACTOR, 'active', 'none', 'sv-1', '0', '1', '1',
+  REVAL_MEMBERSHIP, 'tenant', REVAL_TENANT, '', 'store_owner', 'active', '', '1', ''].join('\n')).digest('base64url')}`;
+function revalHandle(over: { fresh?: boolean; authority?: unknown; session?: unknown[]; touch?: string; admission?: unknown[]; hold?: unknown; tenant?: unknown[] } = {}) {
   const texts: string[] = [];
   const bound: unknown[][] = [];
   const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -818,10 +828,13 @@ function revalHandle(over: { fresh?: boolean; authority?: unknown; session?: unk
     if (text.includes('m5_session_get')) return Promise.resolve(over.session ?? [sessionRow(revalWitness('support_admin'))]);
     if (text.includes('m5_session_touch')) return Promise.resolve([{ outcome: over.touch ?? 'updated' }]);
     if (text.includes('m5_admit_platform_session')) return Promise.resolve(over.admission ?? [admissionRow('support_admin')]);
+    if (text.includes('m5_hold_tenant_standing')) return Promise.resolve([{ outcome: over.hold ?? 'held' }]);
+    if (text.includes('m5_admit_tenant_session_v2')) return Promise.resolve(over.tenant ?? [tenantAdmissionRow()]);
     return Promise.reject(new Error(`a statement the composed checks never send: ${text}`));
   }) as never;
   const step = (text: string): string => (text.includes('clock_timestamp') ? 'freshness' : text.includes('m5_revalidate_platform_authority') ? '009'
-    : text.includes('m5_session_get') ? 'session get' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_platform_session') ? '013' : 'other');
+    : text.includes('m5_session_get') ? 'session get' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_platform_session') ? '013'
+      : text.includes('m5_hold_tenant_standing') ? '016 hold' : text.includes('m5_admit_tenant_session_v2') ? '016 v2' : 'other');
   return { sql, texts, bound, steps: () => texts.map(step) };
 }
 
@@ -915,6 +928,42 @@ test('the session store is composed with the administrative login\'s standing ch
   // A fault is an outage — never false.
   await assert.rejects(standing(revalHandle({ authority: 'maybe' }).sql, record), /platform authority unavailable/, 'a malformed 009 answer throws');
   await assert.rejects(standing(revalHandle({ admission: [{ outcome: 'resolved' }] }).sql, record), /platform admission unavailable/, 'a malformed 013 answer throws');
+  await boundary.close();
+});
+
+test('M5T-PT1 the ONE session store\'s standing check dispatches on the record: admin to 013/009, tenant to 016\'s hold then v2, anything else throws', async () => {
+  // M5-TENANT-SESSION-P1: one store serves both audiences, so the check it is handed decides by the record's audience.
+  let standing: SessionStandingCheck | undefined;
+  const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
+  const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
+    client: () => stub as never,
+    store: createPostgresTransactionalStore,
+    platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
+    ...SESSION_FACTORIES,
+    sessionStore: (client, check) => { standing = check; return createPostgresSessionStore({ client, standing: check }); },
+  });
+  assert.ok(boundary !== null && standing !== undefined);
+  const base = {
+    authProvider: 'firebase', authProviderUid: 'uid-operator', principalKey: 'p'.repeat(43), authenticatedAt: null,
+    createdAt: 1_700_000_000_000, lastSeenAt: 1_700_000_000_000, validatedAt: 1_700_000_000_000,
+  };
+  const admin = revalHandle();
+  assert.equal(await standing(admin.sql, { ...base, audience: 'admin', securityVersion: revalWitness('support_admin') }), true);
+  assert.deepEqual(admin.steps(), ['013', '009', '013'], 'an administrative record: the platform check, unchanged');
+  const tenantRecord = { ...base, audience: 'tenant' as const, securityVersion: tenantWitness };
+  const tenant = revalHandle();
+  assert.equal(await standing(tenant.sql, tenantRecord), true);
+  assert.deepEqual(tenant.steps(), ['016 hold', '016 v2'], 'a tenant record: the hold, then the re-read on the same handle');
+  assert.deepEqual(tenant.bound, [['firebase', 'uid-operator'], ['firebase', 'uid-operator']], 'the record\'s own provider reference, twice');
+  const moved = revalHandle({ tenant: [tenantAdmissionRow('2')] });
+  assert.equal(await standing(moved.sql, tenantRecord), false, 'a grant version that moved since the login\'s admission');
+  const absent = revalHandle({ hold: 'absent' });
+  assert.equal(await standing(absent.sql, tenantRecord), false, 'no account to hold');
+  assert.deepEqual(absent.steps(), ['016 hold'], 'and no re-read after it');
+  await assert.rejects(standing(revalHandle({ hold: 'maybe' }).sql, tenantRecord), /tenant standing unavailable/, 'a malformed hold answer throws');
+  const other = revalHandle();
+  await assert.rejects(standing(other.sql, { ...tenantRecord, audience: 'support' as never }), /session standing unavailable/, 'an audience with no check');
+  assert.deepEqual(other.steps(), [], 'refused before any statement');
   await boundary.close();
 });
 

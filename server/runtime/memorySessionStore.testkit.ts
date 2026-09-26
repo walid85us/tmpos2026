@@ -15,7 +15,7 @@ export interface MemorySessionAudit {
   readonly entry: SessionAuditEntry;
   /** The key the operation created (establish) or ended (end). */
   readonly key: string;
-  /** The presented key establish ended, when it held an administrative record; otherwise null. */
+  /** The presented key establish ended, when it held a record of the new one's audience; otherwise null. */
   readonly replaced: string | null;
 }
 
@@ -47,28 +47,27 @@ export function createMemorySessionStore(): MemorySessionStore {
         if (record.audience === audience && record.principalKey === principalKey) records.delete(key);
       }
     },
-    // One synchronous step each, so all of it takes effect or none does — the durable store's one transaction. This
-    // store holds no standing to re-read, so it never answers 'standing_changed'; its reauthentication rule is the
-    // durable store's (M5-ADMIN-REVOKE-P1).
+    // One synchronous step each, so all of it takes effect or none does — the durable store's one transaction. Both
+    // audiences (M5-TENANT-SESSION-P1). This store holds no standing to re-read, so it never answers 'standing_changed';
+    // its reauthentication rule is the durable store's (M5-ADMIN-REVOKE-P1).
     establish: (key, record, replaces, audit) => {
-      if (record.audience !== 'admin') refuse('audience_invalid');
+      if (record.audience !== 'admin' && record.audience !== 'tenant') refuse('audience_invalid');
       const held = replaces === null ? undefined : records.get(replaces);
-      // A reauthentication must end the live administrative session of the same principal it presents; anything
+      // A reauthentication must end the live session of its own audience and principal that it presents; anything
       // else ends, creates and records nothing. Checked first, as the durable store checks it before it creates.
-      if (audit.action === 'reauthenticate' && (held === undefined || held.audience !== 'admin' || held.principalKey !== record.principalKey)) {
+      if (audit.action === 'reauthenticate' && (held === undefined || held.audience !== record.audience || held.principalKey !== record.principalKey)) {
         return 'session_ended';
       }
       // A taken key is refused BEFORE the presented session is touched.
       if (records.has(key)) refuse('not_created');
       if (replaces !== null) records.delete(replaces);
       records.set(key, Object.freeze({ ...record }));
-      audits.push(Object.freeze({ entry: Object.freeze({ ...audit }), key, replaced: held?.audience === 'admin' ? replaces : null }));
+      audits.push(Object.freeze({ entry: Object.freeze({ ...audit }), key, replaced: held?.audience === record.audience ? replaces : null }));
       return 'established';
     },
     end: (key, audit) => {
       const held = records.get(key);
       if (held === undefined) return 'absent';
-      if (held.audience !== 'admin') refuse('audience_invalid');
       records.delete(key);
       audits.push(Object.freeze({ entry: Object.freeze({ ...audit }), key, replaced: null }));
       return 'ended';
@@ -96,13 +95,14 @@ const CONTRACT_ACTOR = '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f';
  * The behaviour the runtime relies on, run against any store: a record reads back as written;
  * an update changes only the fields it names and never recreates an absent or revoked record;
  * revocation is final; and revoking a principal ends every one of its sessions in that audience
- * and nothing else. An administrative session is never created, only established — ending the
- * presented session it replaces, and refusing a taken key without touching that session — and it
- * is ended by `end`, which answers 'absent' once there is nothing live to end. A reauthentication
- * establishes only by ending the live administrative session of its own principal that it presents;
- * otherwise it answers 'session_ended' and changes nothing (M5-ADMIN-REVOKE-P1). What a durable store
- * records for them is not observable through the port; its own suite proves the records. A durable
- * store under this contract must be built with a standing check that admits (its standing is proved
+ * and nothing else. An administrative session is never created, only established; a session of
+ * either audience is established — ending the presented session it replaces, and refusing a taken
+ * key without touching that session — and ended by `end`, which answers 'absent' once there is
+ * nothing live to end (M5-TENANT-SESSION-P1: both audiences). A reauthentication establishes only
+ * by ending the live session of its own audience and principal that it presents; otherwise it
+ * answers 'session_ended' and changes nothing (M5-ADMIN-REVOKE-P1). What a durable store records
+ * for them is not observable through the port; its own suite proves the records. A durable store
+ * under this contract must be built with a standing check that admits (its standing is proved
  * against the real admission elsewhere).
  */
 export async function assertSessionStoreContract(store: SessionStore): Promise<void> {
@@ -146,7 +146,7 @@ export async function assertSessionStoreContract(store: SessionStore): Promise<v
   // The audited pair (M6-ADMIN-AUDIT-P1).
   await assert.rejects(async () => put('k-f', record('admin', 'p-4', t)), 'an administrative record is never created');
   assert.equal(await get('k-f'), undefined, 'and the refused create wrote nothing');
-  await assert.rejects(async () => admit('k-f', record('tenant', 'p-4', t)), 'establish refuses a record of another audience');
+  await assert.rejects(async () => admit('k-f', record('support' as SessionAudience, 'p-4', t)), 'establish refuses an audience the runtime does not know');
   assert.equal(await get('k-f'), undefined);
   assert.equal(await admit('k-f', record('admin', 'p-4', t)), 'established', 'an establishment answers established');
   assert.deepEqual(await get('k-f'), record('admin', 'p-4', t), 'an established record reads back as written');
@@ -176,7 +176,16 @@ export async function assertSessionStoreContract(store: SessionStore): Promise<v
   assert.equal(await audited.end('k-g', logout(), signal), 'ended', 'end ends a live session');
   assert.equal(await get('k-g'), undefined);
   assert.equal(await audited.end('k-g', logout(), signal), 'absent', 'nothing live to end: absent');
-  await put('k-k', record('tenant', 'p-7', t));
-  await assert.rejects(async () => audited.end('k-k', logout(), signal), 'end refuses a record of another audience');
-  assert.notEqual(await get('k-k'), undefined, 'and leaves it');
+  // The tenant boundary issues and ends its sessions through the same pair (M5-TENANT-SESSION-P1).
+  assert.equal(await admit('k-k', record('tenant', 'p-7', t)), 'established', 'a tenant session is established');
+  assert.deepEqual(await get('k-k'), record('tenant', 'p-7', t));
+  await admit('k-m', record('admin', 'p-7', t));
+  assert.equal(await reauthenticate('k-l', record('tenant', 'p-7', t), 'k-m'), 'session_ended', 'a tenant reauthentication presenting its principal\'s administrative session');
+  assert.equal(await get('k-l'), undefined, 'creates nothing');
+  assert.notEqual(await get('k-m'), undefined, 'and leaves the presented session');
+  assert.equal(await reauthenticate('k-l', record('tenant', 'p-7', t), 'k-k'), 'established', 'a tenant reauthentication ending its own session');
+  assert.equal(await get('k-k'), undefined);
+  assert.equal(await audited.end('k-l', logout(), signal), 'ended', 'end ends a live tenant session');
+  assert.equal(await get('k-l'), undefined);
+  assert.equal(await audited.end('k-l', logout(), signal), 'absent');
 }

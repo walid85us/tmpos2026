@@ -54,6 +54,8 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.up.sql`, 'utf8');
 const DOWN_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.down.sql`, 'utf8');
+// M5-TENANT-SESSION-P1: 016's trigger now owns every write of access_version, and the chain rolls back NEWEST FIRST.
+const DOWN_016 = readFileSync(`${MIG_DIR}/016_m5_tenant_session_ordering.down.sql`, 'utf8');
 /**
  * The production revalidator, composed exactly as productionTransactions.ts composes it: 009's exact-authority routine,
  * the presenting administrative session held, 013's read of that session's standing (M5-ADMIN-REVOKE-P1), then the
@@ -305,11 +307,11 @@ async function transition(who, tenant, status, expectedVersion, over = {}) {
 // migration 010 as applied
 // ---------------------------------------------------------------------------
 
-test('M5S-01: 001-015 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
+test('M5S-01: 001-016 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null,
       pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
@@ -635,6 +637,10 @@ test('M5S-10: two concurrent transitions of one tenant have exactly one winner',
 
 test('M5S-11: 010 rolls back to the 009 state, refuses once a tenant has been suspended, and re-applies over it', async () => {
   await owner.begin(async (tx) => {
+    // Newest first: 016 comes off before 010's column can be reset or dropped. Its rollback refuses while a tenant session
+    // exists; earlier suites on the shared service may have left some, and they go only inside this transaction.
+    await tx.unsafe(`delete from tmpos_session.session where audience = 'tenant'`);
+    await tx.unsafe(DOWN_016).simple();
     // A database where nothing was ever suspended rolls back freely.
     await tx.unsafe(`update public.tenant set access_version = 1 where access_version <> 1`);
     await tx.unsafe(`update public.tenant set status = 'active' where status = 'suspended'`);

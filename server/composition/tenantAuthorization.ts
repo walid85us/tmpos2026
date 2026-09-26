@@ -6,11 +6,18 @@
 //
 // ADMISSION (sessions.ts SessionAdmission) answers the question the boundary asks at login and again
 // on EVERY protected request, because the tenant boundary keeps no revalidation window: may this
-// verified reference hold a tenant session, and at what version? The version is the database-derived
-// witness that moves whenever a tenant the actor holds is suspended or reactivated, so a session
-// admitted before such a transition is refused after it and the boundary revokes it. A denial ends
-// every session that principal holds on this boundary; an outage is a throw, which the boundary turns
-// into a bounded 503 and never into a verdict.
+// verified reference hold a tenant session, at what version, and as which actor? The version is the
+// database-derived witness that moves whenever a tenant the actor holds is suspended or reactivated, so a
+// session admitted before such a transition is refused after it and the boundary revokes it; the actor is
+// the internal user the session's audit records name (M5-TENANT-SESSION-P1). A denial ends every session
+// that principal holds on this boundary; an outage is a throw, which the boundary turns into a bounded 503
+// and never into a verdict.
+//
+// THE LOGIN'S STANDING CHECK (createTenantEstablishCheck, M5-TENANT-SESSION-P1) is that same admission asked
+// once more where a tenant login writes: first on establish's own transaction the actor's standing rows are
+// held until its COMMIT (016's hold), then the admission is re-read there and must still answer the witness
+// the new session carries. A change committed before the re-read refuses the login; one not yet committed
+// waits for its COMMIT, and the next protected request judges it.
 //
 // ROUTE AUTHORIZATION (access.ts RouteAuthorizer) decides one request against the actor's trusted
 // standing. It re-reads admission rather than trusting the session, so the decision is made on what
@@ -52,7 +59,7 @@ import type { RouteAuthorizer, RouteView } from '../runtime/access.js';
 import { isTrustedPrincipal, selectScope } from '../runtime/principals.js';
 import type { TenantAdmissionPort, TrustedPrincipal } from '../runtime/principals.js';
 import type { AuthorizationRequirement, AuthorizationScope, SessionAudience, VerifiedPrincipal } from '../runtime/routes.js';
-import type { SessionAdmission } from '../runtime/sessions.js';
+import type { SessionAdmission, SessionRecord } from '../runtime/sessions.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 
 /** The one outage message: an admission that could not answer, and nothing about why. */
@@ -89,12 +96,11 @@ function checked(deps: TenantAdmissionDeps | undefined): TenantAdmissionPort {
 }
 
 /**
- * The port's answer, read once. A shape this file does not recognise is an OUTAGE, never a denial: a
+ * An admission answer, read once. A shape this file does not recognise is an OUTAGE, never a denial: a
  * denial would revoke every session the principal holds, and an adapter answering nonsense is not
  * evidence that anyone's access was withdrawn.
  */
-async function admitted(admission: TenantAdmissionPort, principal: VerifiedPrincipal, signal: AbortSignal): Promise<Admitted> {
-  const answer: unknown = await admission.admit(principal, signal);
+function admittedOf(answer: unknown): Admitted {
   if (typeof answer !== 'object' || answer === null) throw new Error(UNAVAILABLE);
   const { outcome, principal: resolved, securityVersion } = answer as Record<string, unknown>;
   if (outcome === 'refused') return DENIED;
@@ -103,7 +109,7 @@ async function admitted(admission: TenantAdmissionPort, principal: VerifiedPrinc
   // VERSION_RE (sessions.ts), and maps anything else to a DENIAL — which revokes every session that
   // principal holds. So an adapter answering a version the boundary cannot carry would cause a
   // silent, continuous mass logout rather than the outage this file promises. Refusing it here keeps
-  // that promise: the one witness this repository's adapter derives is `t1:` plus 43 base64url
+  // that promise: the one witness this repository's adapter derives is `t2:` plus 43 base64url
   // characters, well inside the bound, and a replaceable adapter that strays outside it is an outage.
   if (typeof securityVersion !== 'string' || !VERSION_RE.test(securityVersion)) throw new Error(UNAVAILABLE);
   // Checked HERE, not merely upstream. The adapter validates the same shape, but a replaceable adapter
@@ -114,9 +120,14 @@ async function admitted(admission: TenantAdmissionPort, principal: VerifiedPrinc
   return Object.freeze({ admitted: true, principal: resolved, securityVersion });
 }
 
+async function admitted(admission: TenantAdmissionPort, principal: VerifiedPrincipal, signal: AbortSignal): Promise<Admitted> {
+  return admittedOf(await admission.admit(principal, signal));
+}
+
 /**
- * The tenant boundary's SessionAdmission. `{ admitted: true, securityVersion }` admits; anything else
- * denies; a throw is an outage the boundary fails closed on.
+ * The tenant boundary's SessionAdmission. `{ admitted: true, securityVersion, actor }` admits — `actor` the
+ * resolved internal user, which the boundary's audited login records; anything else denies; a throw is an
+ * outage the boundary fails closed on.
  */
 export function createTenantSessionAdmission(deps: TenantAdmissionDeps): SessionAdmission {
   const admission = checked(deps);
@@ -132,9 +143,48 @@ export function createTenantSessionAdmission(deps: TenantAdmissionDeps): Session
       if (audience !== 'tenant') throw new Error(UNAVAILABLE);
       const answer = await admitted(admission, principal, signal);
       if (!answer.admitted) return false;
-      return Object.freeze({ admitted: true, securityVersion: answer.securityVersion });
+      return Object.freeze({ admitted: true, securityVersion: answer.securityVersion, actor: answer.principal.actor });
     },
   });
+}
+
+/**
+ * Migration 016's hold on the caller's own handle (in production postgresTenantAdmission.ts holdTenantStanding): true
+ * once the actor's standing rows are locked until that transaction ends, false when the reference names no account; a
+ * THROW for anything else.
+ */
+export type TenantStandingHold<Handle> = (sql: Handle, principal: VerifiedPrincipal) => Promise<boolean>;
+
+/** The tenant admission on the caller's own handle (in production postgresTenantAdmission.ts readTenantAdmission). A fault throws. */
+export type TenantStandingRead<Handle> = (sql: Handle, principal: VerifiedPrincipal) => Promise<unknown>;
+
+export interface TenantEstablishCheckDeps<Handle> {
+  readonly hold: TenantStandingHold<Handle>;
+  readonly read: TenantStandingRead<Handle>;
+}
+
+/**
+ * The tenant login's standing check (M5-TENANT-SESSION-P1; ADR-31), which the session store runs FIRST on establish's
+ * own transaction: true only when the standing `record` was admitted at still holds there. It holds the record's actor
+ * (016's hold), then re-reads the admission on that transaction and requires it to admit at exactly the record's
+ * witness. False when the reference names no account any more, or the standing moved or no longer admits (the login
+ * is refused, nothing written). A record of another audience, a fault or an answer this file does not recognise
+ * THROWS and is never caught here: an outage (a 503 that ends and records nothing), never a changed standing.
+ */
+export function createTenantEstablishCheck<Handle>(deps: TenantEstablishCheckDeps<Handle>): (sql: Handle, record: SessionRecord) => Promise<boolean> {
+  const hold = deps?.hold;
+  const read = deps?.read;
+  if (typeof hold !== 'function' || typeof read !== 'function') throw new TypeError('tenant establish check dependencies invalid');
+  return async (sql: Handle, record: SessionRecord): Promise<boolean> => {
+    // A wiring fault, never a verdict: the administrative record has its own check (platformAuthorization.ts).
+    if (record.audience !== 'tenant') throw new Error(UNAVAILABLE);
+    const principal: VerifiedPrincipal = Object.freeze({ authProvider: record.authProvider, authProviderUid: record.authProviderUid });
+    const held = await hold(sql, principal);
+    if (held === false) return false;
+    if (held !== true) throw new Error(UNAVAILABLE);
+    const answer = admittedOf(await read(sql, principal));
+    return answer.admitted && answer.securityVersion === record.securityVersion;
+  };
 }
 
 export interface TenantAuthorizerDeps extends TenantAdmissionDeps {
