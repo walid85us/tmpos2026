@@ -327,6 +327,7 @@ function conformanceKit(h: TransactionalOutboxHarness) {
       scope: attempt.operation.scope, lease: held, newAggregateId, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
       context: null,
       authNotAfter: null,
+      sessionKey: null,
       seal: (envelope) => keyring.seal(envelope, attempt.operation),
     });
     assert.ok(result !== null, 'the conformance plans are in contract');

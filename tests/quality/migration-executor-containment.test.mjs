@@ -484,20 +484,25 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // admit anyone, and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning;
     // the containment property above is untouched.
     'tests/db/adminBoundary.integration.test.mjs',
-    // M6-RATE-P2: the distributed rate limiter's proof needs 001-014 applied before it can say anything about migration
+    // M6-RATE-P2: the distributed rate limiter's proof needs 001-015 applied before it can say anything about migration
     // 014's buckets, its key fingerprint or their privilege containment, and applies them through the SAME trusted
     // executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/rateLimiter.integration.test.mjs',
-    // M6-RATE-P2: the rate-limited runtime's end-to-end proof needs 001-014 applied before its composed server can
+    // M6-RATE-P2: the rate-limited runtime's end-to-end proof needs 001-015 applied before its composed server can
     // enforce a limit over real sockets, and applies them through the SAME trusted executor. Same category (a tests/db/
     // suite), same reasoning; the containment property above is untouched.
     'tests/db/rateLimitRuntime.integration.test.mjs',
     // M6-ENTRY-P1: the proofs of the deployable entry's startup preflight (login standing, migration ledger, limiter boot)
-    // and of the entry end to end over real loopback HTTP need 001-014 applied to their disposable database, and these suites
+    // and of the entry end to end over real loopback HTTP need 001-015 applied to their disposable database, and these suites
     // apply them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the containment
     // property above is untouched.
     'tests/db/productionEntryPreflight.integration.test.mjs',
     'tests/db/productionEntry.integration.test.mjs',
+    // M5-ADMIN-REVOKE-P1: the proof of the administrative revocation ordering rule, over two production roots composed
+    // over real loopback sockets, needs every migration on disk applied to its disposable database before either root can
+    // admit anyone, and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning;
+    // the containment property above is untouched.
+    'tests/db/adminRevocation.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

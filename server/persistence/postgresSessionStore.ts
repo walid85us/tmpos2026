@@ -35,6 +35,13 @@
 // administrative record, so establish is this file's only way to write one; the DATABASE does not couple
 // them — the runtime login may still call m5_session_create directly (a routine migration would be needed).
 //
+// ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1). establish first re-reads the standing the login was admitted
+// at, on its own transaction and with the actor's authority locked until COMMIT (the standing check the
+// transaction root hands it), and refuses — writing nothing — when it moved. A reauthentication must then END
+// the live administrative session of the same principal it presents, or it ends, creates and records nothing:
+// a logout or a revocation that committed first leaves it nothing to end. And holdAdministrativeSession lets the
+// command transaction hold the very session that presented a command, so that command commits only while it is live.
+//
 // FAIL CLOSED, NEVER FAIL OPEN. A malformed row, an unexpected column set, a row count other than
 // the one expected, an out-of-range timestamp, an abort, a timeout, a lost connection and a driver
 // error all THROW. The boundary reads a throw as 'unavailable' and refuses the request
@@ -56,7 +63,9 @@ import type { AuditMetadata } from '../platform-identity/auditEventContract.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
 /**
- * A plain session operation is one short statement; an audited one (establish, end) at most five. The
+ * A plain session operation is one short statement; `end` at most four, and `establish` at most eight — the
+ * standing check's three (013's read, 009's lock, 013 again; M5-ADMIN-REVOKE-P1), whose lock may wait up to the
+ * lock bound on a command of the same actor, then at most five of its own. The
  * bounds sit below the caller's port deadline, as the principal resolver's do: a statement that overruns
  * is cancelled by PostgreSQL itself rather than held by this process. The audited pair shares ONE port
  * deadline across its statements, so under contention it ends at the caller's deadline (a 503, fail
@@ -249,20 +258,54 @@ async function liveRecord(sql: PgTransactionScope, key: string, now: number): Pr
 }
 
 /**
- * End `held`, the record just read live under `key`, if THIS transaction is the one that ends it: the touch writes
- * back the stamp as read — an UPDATE that changes nothing but takes the row's lock, waiting out any concurrent
- * deleter, after whose commit it answers 'absent' — and only then is the row deleted. True when this transaction
- * ended it; false when another got there first, in which case nothing is changed.
+ * Hold `held`, the record just read live under `key`, for the rest of this transaction: the touch writes back the
+ * stamp as read — an UPDATE that changes nothing but takes the row's lock, waiting out any concurrent deleter, after
+ * whose commit it answers 'absent'. True once this transaction holds it; false when another ended it first, in which
+ * case nothing is changed.
  */
-async function endHeld(sql: PgTransactionScope, key: string, held: SessionRecord): Promise<boolean> {
+async function hold(sql: PgTransactionScope, key: string, held: SessionRecord): Promise<boolean> {
   const touched = only(await sql`select tmpos_session.m5_session_touch(${key}::text, 'validatedAt', ${held.validatedAt}::bigint) as outcome`, 'outcome');
   if (touched === 'absent') return false;
   if (touched !== 'updated') throw new SessionStoreUnavailable('not_updated');
+  return true;
+}
+
+/**
+ * End `held`, the record just read live under `key`, if THIS transaction is the one that ends it: held first (above),
+ * and only then is the row deleted. True when this transaction ended it; false when another got there first, in which
+ * case nothing is changed.
+ */
+async function endHeld(sql: PgTransactionScope, key: string, held: SessionRecord): Promise<boolean> {
+  if (!(await hold(sql, key, held))) return false;
   if (only(await sql`select tmpos_session.m5_session_revoke(${key}::text) as outcome`, 'outcome') !== 'revoked') {
     throw new SessionStoreUnavailable('not_revoked');
   }
   return true;
 }
+
+/**
+ * The live ADMINISTRATIVE session under `key`, held by the caller's transaction until it ends, or undefined when there
+ * is none (M5-ADMIN-REVOKE-P1). The command transaction calls it — through the revalidator the transaction root builds —
+ * so a command commits only while the very session that presented it is live: a logout, a revocation or a rotation that
+ * committed first leaves nothing to hold (undefined), and one that comes later waits on the row lock taken here until the
+ * command's COMMIT. Undefined, before anything is written, for a key naming no live record or a record of another
+ * audience; the touch answering 'absent' (ended since the read) is undefined too. Any other doubt THROWS, and the
+ * caller's kernel rolls back. `key` is a SQL parameter and nothing else: it is never returned, logged or recorded.
+ */
+export async function holdAdministrativeSession(sql: PgTransactionScope, key: string, now: number): Promise<SessionRecord | undefined> {
+  if (typeof now !== 'number' || !Number.isSafeInteger(now) || now < 1) throw new SessionStoreUnavailable('clock_invalid');
+  const held = await liveRecord(sql, key, now);
+  if (held === undefined || held.audience !== 'admin') return undefined;
+  return (await hold(sql, key, held)) ? held : undefined;
+}
+
+/**
+ * The administrative login's standing check, on establish's OWN transaction (M5-ADMIN-REVOKE-P1): true only while the
+ * standing `record` was admitted at still holds, with the actor's authority locked until COMMIT. The transaction root
+ * builds it (platformAuthorization.ts createPlatformEstablishCheck); this store only calls it, first. It throws for an
+ * outage — never answering false for one — and the kernel rolls back.
+ */
+export type SessionStandingCheck = (sql: PgTransactionScope, record: SessionRecord) => Promise<boolean>;
 
 export interface PostgresSessionStoreDeps {
   /** The kernel the composition root already built for this boundary — one client, one credential. */
@@ -273,6 +316,12 @@ export interface PostgresSessionStoreDeps {
    * (memorySessionStore.testkit.ts SESSION_CONTRACT_EPOCH) — can be run against this store unchanged.
    */
   readonly now?: () => number;
+  /**
+   * The standing check `establish` runs first (M5-ADMIN-REVOKE-P1). Optional only because the tenant boundary's
+   * operations need none: `establish` without one THROWS ('standing_check_missing') and issues nothing, so no
+   * administrative session is ever established on a standing this transaction did not re-read.
+   */
+  readonly standing?: SessionStandingCheck;
 }
 
 // WHY THIS STORE IS NOT BOUND TO ONE AUDIENCE, AND WHAT THAT LEAVES OPEN (doc 08 DA-37).
@@ -301,7 +350,7 @@ export interface PostgresSessionStoreDeps {
  * and `end` issue and end an administrative session with its audit record, one transaction each.
  */
 export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): SessionStore {
-  const { client } = deps;
+  const { client, standing } = deps;
   const clock = deps.now ?? Date.now;
   /**
    * The instant liveness is judged at, checked before it is used. An unusable clock — NaN, a fraction,
@@ -391,19 +440,39 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
       if (!Number.isSafeInteger(count) || count < 0) throw new SessionStoreUnavailable('not_revoked');
     },
 
-    async establish(key: string, record: SessionRecord, replaces: string | null, audit: SessionEstablishAudit, signal: AbortSignal): Promise<void> {
+    async establish(
+      key: string, record: SessionRecord, replaces: string | null, audit: SessionEstablishAudit, signal: AbortSignal,
+    ): Promise<'established' | 'session_ended' | 'standing_changed'> {
+      // Fail closed: an administrative session is never established on a standing this transaction did not re-read.
+      if (standing === undefined) throw new SessionStoreUnavailable('standing_check_missing');
       if (record.audience !== 'admin') throw new SessionStoreUnavailable('audience_invalid');
       const expiresAt = expiryOf(record);
       const metadata: AuditMetadata = {
         sessionRef: sessionRefOf(key), ...(record.authenticatedAt === null ? {} : { authenticatedAt: record.authenticatedAt }),
       };
       const row = auditRowOf(audit, 'establish', record.authenticatedAt, metadata);
-      await run(signal, async (sql) => {
+      // Keyed on the action the runtime chose, which it chooses only on the path whose every same-principal check passed.
+      const reauthenticating = row.actionId === ADMIN_SESSION_AUDIT_EVENTS.reauthenticate.actionId;
+      return run(signal, async (sql) => {
+        // 0. The standing, FIRST, on this very transaction (M5-ADMIN-REVOKE-P1): the admission the login read is read
+        //    again with the actor's authority locked until COMMIT, so a change committed before this point refuses the
+        //    login and one committed after it waits for this COMMIT. Refused: nothing written — nothing ended, created or
+        //    recorded. A fault throws and the kernel rolls back (a 503); so does an answer that is neither boolean, which
+        //    is a broken check, never a verdict about the standing.
+        const standingHolds = await standing(sql, record);
+        if (standingHolds === false) return 'standing_changed';
+        if (standingHolds !== true) throw new SessionStoreUnavailable('standing_invalid');
         // 1. The presented session, when one is: ended by THIS transaction only if it reads it live and holds its lock.
-        //    A record of another audience under the administrative cookie is still ended (rotation ends whatever it is
-        //    presented), but only an administrative one this transaction ended is named as replaced.
+        //    A reauthentication must END it, and it must be, in this order, live, administrative and the same
+        //    principal's: anything else — a logout, a revocation or another reauthentication that committed first
+        //    included — ends, creates and records nothing ('session_ended'); the checks precede the end, so a refusal
+        //    deletes nothing. An ordinary login rotates as it always has: a record of another audience under the
+        //    administrative cookie is still ended (rotation ends whatever it is presented), a key naming nothing live
+        //    still establishes, and only an administrative one this transaction ended is named as replaced.
         const held = replaces === null ? undefined : await liveRecord(sql, replaces, now());
-        const replaced = held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === 'admin';
+        if (reauthenticating && (held === undefined || held.audience !== 'admin' || held.principalKey !== record.principalKey
+          || !(await endHeld(sql, replaces as string, held)))) return 'session_ended';
+        const replaced = reauthenticating || (held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === 'admin');
         // 2. The new session. A taken key fails the whole transaction, so the presented session is left as it was.
         const outcome = only(await sql`
           select tmpos_session.m5_session_create(
@@ -414,6 +483,7 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
         if (outcome !== 'created') throw new SessionStoreUnavailable('not_created');
         // 3. Its record, last.
         await writeSessionAudit(sql, replaced ? { ...row, metadata: { ...metadata, replacedSessionRef: sessionRefOf(replaces as string) } } : row);
+        return 'established';
       });
     },
 

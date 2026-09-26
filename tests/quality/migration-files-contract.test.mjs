@@ -1,6 +1,6 @@
 // Phase 4.0 M3 S1/S1.1 — static contract over the real migration files. DATABASE-FREE.
 //
-// Reads the fourteen committed migration pairs through the engine's Node fs port (node:fs
+// Reads the fifteen committed migration pairs through the engine's Node fs port (node:fs
 // only — never a database) and asserts inventory, pairing, ordering, byte-fingerprint
 // immutability, default transaction mode, and the absence of any credential / provider
 // identifier / generated artifact. This is the ratchet that a historical migration was
@@ -146,19 +146,32 @@ const PINNED = {
   // unchanged and still refuses.
   '014_m6_distributed_rate_limit.up.sql': '48ff3e4bc2b3d4c6ee3cc2c54e4111d8647669d349d1449b249303a9dcc4cf62',
   '014_m6_distributed_rate_limit.down.sql': '72aab6e28ff512e2c8061cfae510e073466f4f5d5bb9ca9d27e3a5e333a63846',
+  // Phase 4.0 M5-ADMIN-REVOKE-P1 — changer-side standing serialization: one SECURITY DEFINER trigger function in 013's
+  // schema tmpos_admission, granted to nobody, fired BEFORE ROW and ENABLE ALWAYS by three triggers — UPDATE or DELETE on
+  // public.platform_identity (when the anchor moves or goes), and INSERT or UPDATE on public.identity_link and on
+  // public.user_membership (a link or grant inserted for, or re-pointed to, an actor) — that takes FOR KEY SHARE on the
+  // account row of each actor the write moves, so the write waits for a command or login holding that account FOR UPDATE
+  // (009), in replica mode too, where no foreign-key check or cascade runs. Its postcondition also refuses FORCE ROW LEVEL
+  // SECURITY on public.app_user. No table, no grant, no role, no data change, and nothing an earlier migration created
+  // changes but those three triggers: migrations 001-014 are untouched, byte for byte.
+  // Proved by tests/db/platformAdmission.integration.test.mjs against disposable PostgreSQL only; applied to no managed,
+  // persistent or application database. D4 now names the contiguous chain through 015; the exact-[005] gate is unchanged
+  // and still refuses.
+  '015_m5_admin_standing_serialization.up.sql': 'a3b1514ee65703d29b3becf78ef338e8966eb0ee12550ecd5e1f19d357154f4e',
+  '015_m5_admin_standing_serialization.down.sql': 'c065b4129bf5499b762d76288b89bd9358845dd274f2eda6484d367b98822e3c',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the twenty-eight expected files', () => {
+test('the migrations directory holds exactly the thirty expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

@@ -811,6 +811,10 @@ export function createApp(deps: AppDeps): Express {
       // The provider-verified authentication time bound to this request's session, when it has one: read
       // from the session record alone (sessions.ts), never from the request.
       let authenticatedAt: number | null = null;
+      // The store key of the session that presented this request (a digest, never the cookie), for a session route:
+      // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1).
+      // It goes nowhere else — no log line, no handler, no context.
+      let sessionKey: string | null = null;
       const { policy } = route;
       if (policy.access === 'authenticated') {
         // Both ports are proven present at startup for any authenticated route.
@@ -874,6 +878,7 @@ export function createApp(deps: AppDeps): Express {
         principal = active.principal;
         session = active.context;
         authenticatedAt = active.authenticatedAt;
+        sessionKey = active.key;
       }
       // The declared trusted-authorization context (routes.ts, M5-GIAM-D1-P2; docs/phase-4/08 DA-31). Every
       // route that requires idempotency declares it — startup refuses one that does not — so no `perform`
@@ -951,6 +956,10 @@ export function createApp(deps: AppDeps): Express {
             // request was in flight commits nothing (M5-GIAM-D1-P2). null when the route required none.
             authNotAfter: route.recentAuth === 'required' && authenticatedAt !== null
               ? authenticatedAt + RECENT_AUTH_MAX_AGE_MS : null,
+            // The presenting session, when a session presented this request (M5-ADMIN-REVOKE-P1): the transaction
+            // holds its row and re-reads the standing it is bound to, so a logout or a revocation that committed
+            // first commits nothing here. null for any other route.
+            sessionKey,
             seal: (envelope) => store.keyring.seal(envelope, operation),
           });
           if (prepared === null) return refuse(req, res, 500, 'internal_error', 'command_plan_invalid');

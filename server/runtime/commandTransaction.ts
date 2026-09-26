@@ -19,7 +19,9 @@
 //   - zero or more outbox events, stamped with the transaction's own timestamp.
 // Only values cross the port: a registered command kind, canonical UUIDs, a version, typed bounded
 // changes and events, the lease and a sealed response — never SQL, a relation, column or schema name, a
-// raw request, key, credential, cookie or body. The adapter owns every statement: a closed set of kinds,
+// raw request, key, credential, cookie or body. The one exception is the presenting administrative session's
+// store key (M5-ADMIN-REVOKE-P1), a digest the chain derived, never the cookie: it is bound as a parameter of
+// the session hold and nothing else — never audited, logged, evented or returned. The adapter owns every statement: a closed set of kinds,
 // each mapped to static statements and columns; every value a command carries is bound as data, and no
 // kind, type or field name is ever interpolated into SQL. The planner's context holds no header, cookie,
 // key, credential or principal, so none reaches a command through it; the parsed body can — a schema
@@ -101,6 +103,8 @@ export const COMMAND_TRANSACTION_DEADLINE_MS = 2_000;
 export const COMMAND_RESPONSE_STATUSES: ReadonlySet<number> = new Set([200, 201]);
 
 const MAX_EXPECTED_VERSION = Number.MAX_SAFE_INTEGER - 1;
+/** A session store key: the SHA-256 of the identifier in base64url (sessions.ts digestOf), 43 characters. */
+const SESSION_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 const PARTS: readonly string[] = ['port'];
 const PORT_METHODS: readonly string[] = ['commit', 'probe'];
 const PLAN_FIELDS: readonly string[] = ['aggregateId', 'expectedVersion', 'changes', 'events', 'response'];
@@ -235,6 +239,15 @@ export interface TransactionCommand {
    * commits nothing. null when the route required none, and then no freshness is claimed or checked.
    */
   readonly authNotAfter: number | null;
+  /**
+   * The store key of the administrative session that presented this command (M5-ADMIN-REVOKE-P1) — the SHA-256
+   * digest of its identifier, never the identifier or the cookie — or null for a command no session presented. The
+   * committing transaction holds that session's row and re-reads the standing it is bound to, so the command commits
+   * only while that session is live; a logout or revocation that committed first refuses it. It is a SQL parameter
+   * and nothing else: never audited, logged, evented, returned or put on a trusted scope or a route context — the key
+   * is what the session routines accept, so a reader holding it could read, extend or end the session.
+   */
+  readonly sessionKey: string | null;
 }
 
 /** The port. Each call is handed its deadline's AbortSignal and may return a Promise. */
@@ -264,6 +277,8 @@ export interface CommandBinding {
   readonly context: TrustedScope | null;
   /** When this attempt's recent-authentication evidence goes stale, or null when the route required none. */
   readonly authNotAfter: number | null;
+  /** The presenting session's store key (M5-ADMIN-REVOKE-P1), or null when no session presented this attempt. */
+  readonly sessionKey: string | null;
   readonly seal: (envelope: ReplayEnvelope) => string;
 }
 
@@ -420,6 +435,10 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     if (ctx === undefined) return null; // a context that is not a trusted scope is not a context
     const authNotAfter = binding.authNotAfter;
     if (authNotAfter !== null && !(typeof authNotAfter === 'number' && Number.isSafeInteger(authNotAfter) && authNotAfter > 0)) return null;
+    // The presenting session's key, read once: a digest's shape, and only beside a context — a key with no actor
+    // to revalidate names nothing this command could be ordered against (M5-ADMIN-REVOKE-P1).
+    const sessionKey = binding.sessionKey;
+    if (sessionKey !== null && !(typeof sessionKey === 'string' && SESSION_KEY_RE.test(sessionKey) && ctx !== null)) return null;
     const drafts: OutboxEventDraft[] = [];
     // inv: drafts holds a valid draft for each item below i, their types distinct and allowed by the contract; term: i rises to count.
     for (let i = 0; i < count; i++) {
@@ -471,6 +490,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
       events: Object.freeze(drafts),
       context: ctx,
       authNotAfter,
+      sessionKey,
     });
     return Object.freeze({ command, response: envelope, unchanged, rejected });
   } catch {

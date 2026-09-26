@@ -153,6 +153,14 @@ jobs:
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
         run: node_modules/.bin/tsx --test tests/db/adminBoundary.integration.test.mjs
+      # Phase 4.0 M5-ADMIN-REVOKE-P1 — administrative revocation under concurrency: logouts, revocations, grant changes,
+      # identity changes, recent sign-ins and tenant commands raced across two separately composed production roots over
+      # real local sockets, against the SAME disposable service. Commit order is asserted through lock waits here (the
+      # service keeps track_commit_timestamp off). Same binding, no new service, no secret, no permission change.
+      - name: Administrative revocation ordering against disposable PostgreSQL (M5-ADMIN-REVOKE-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: node_modules/.bin/tsx --test tests/db/adminRevocation.integration.test.mjs
       # Phase 4.0 M6-RATE-P2 — migration 014 and the distributed rate limiter: the bucket store, the key fingerprint,
       # the consume and probe routines and their privilege containment, against the SAME disposable service after
       # 001-014 are applied to it. Same binding, no new service, no secret, no permission change.

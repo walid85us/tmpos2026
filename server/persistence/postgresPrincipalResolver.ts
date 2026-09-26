@@ -21,7 +21,9 @@
 //
 // NOTHING IS LOGGED. The provider reference is bound as a parameter and never appears in a message,
 // an error or a return value. A driver error is caught and discarded: the caller learns 'unavailable'
-// and nothing else — no SQLSTATE, no statement, no parameter, no connection string, no stack.
+// and nothing else — no SQLSTATE, no statement, no parameter, no connection string, no stack. The one
+// exception is lockPlatformAuthority, which runs on a caller's transaction and leaves a driver error to
+// that caller's kernel, whose own boundary discards it (M5-ADMIN-REVOKE-P1).
 //
 // FAIL CLOSED, NEVER FAIL OPEN. A malformed row, an extra column, a row count other than one, an
 // abort, a timeout, a lost connection and a driver error all answer 'unavailable' — never 'resolved',
@@ -117,6 +119,30 @@ function principalOf(row: Row): PrincipalResolution | null {
   return Object.freeze({ outcome: 'resolved', principal: candidate });
 }
 
+/** The one fault lockPlatformAuthority raises: bounded, carrying nothing the driver said. */
+const AUTHORITY_UNAVAILABLE = 'platform authority unavailable';
+
+/**
+ * Migration 009's routine on the caller's own handle, answering only what the routine DEFINITELY said
+ * (M5-ADMIN-REVOKE-P1): true for 'valid', false for 'invalid' — its one value for every failure of the
+ * standing — and a THROW for anything else: a malformed answer, a scope that is not a platform trusted
+ * scope, a statement or driver error, a lock timeout. It takes 009's locks (the account FOR UPDATE, its
+ * links and grants FOR SHARE) until the caller's transaction ends.
+ *
+ * The administrative login's establish check binds THIS function, never revalidatePlatformAuthority
+ * below: that one folds every fault into false, which there would read as "the standing changed" and
+ * answer a 401, where a fault must be a 503 that ends and records nothing (platformAuthorization.ts).
+ */
+export async function lockPlatformAuthority(sql: PgTransactionScope, scope: TrustedScope): Promise<boolean> {
+  if (!isTrustedScope(scope) || scope.scope !== 'platform') throw new Error(AUTHORITY_UNAVAILABLE);
+  const rows = await sql`select outcome from tmpos_command.m5_revalidate_platform_authority(
+    ${scope.actor}::uuid, ${scope.securityVersion}::text, ${scope.membershipId}::uuid, ${scope.roleId}::text)`;
+  const row = onlyRow(rows, ['outcome']);
+  if (row !== null && row.outcome === 'valid') return true;
+  if (row !== null && row.outcome === 'invalid') return false;
+  throw new Error(AUTHORITY_UNAVAILABLE);
+}
+
 /**
  * Re-read a platform actor's authority INSIDE the caller's transaction, on the caller's own statement
  * handle (M5-GIAM-D1-P1-R1), through migration 009's m5_revalidate_platform_authority.
@@ -154,10 +180,7 @@ export async function revalidatePlatformAuthority(
         pg_catalog.to_timestamp(${String(authNotAfter)}::bigint / 1000.0)) as fresh`, ['fresh']);
       if (fresh === null || fresh.fresh !== true) return false;
     }
-    const rows = await sql`select outcome from tmpos_command.m5_revalidate_platform_authority(
-      ${scope.actor}::uuid, ${scope.securityVersion}::text, ${scope.membershipId}::uuid, ${scope.roleId}::text)`;
-    const row = onlyRow(rows, ['outcome']);
-    return row !== null && row.outcome === 'valid';
+    return await lockPlatformAuthority(sql, scope);
   } catch {
     // A statement or connection error carries a SQLSTATE, a hint, a schema and a host:port. None of
     // that crosses this boundary: the caller learns the one value every other failure gives it. The

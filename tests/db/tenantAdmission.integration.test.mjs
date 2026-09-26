@@ -130,7 +130,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-014, a real non-owner runtime login, real adapters
+// setup: real migrations 001-015, a real non-owner runtime login, real adapters
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -189,6 +189,54 @@ function counted(port) {
   return relay;
 }
 
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+};
+
+/**
+ * The counting relay's recording sibling: it delegates every call, notes who each answer was for and
+ * its outcome, and adds nothing. Setting `hold` to `{ entered, release }` (two deferreds) makes the
+ * NEXT read signal `entered` and wait for `release` before it reaches the database — an in-process gate
+ * that orders a request's read after a commit without a sleep.
+ */
+function recorded(port) {
+  const relay = {
+    answers: [],
+    hold: null,
+    async admit(principal, sig) {
+      const hold = relay.hold;
+      if (hold !== null) { relay.hold = null; hold.entered.resolve(); await hold.release.promise; }
+      const answer = await port.admit(principal, sig);
+      relay.answers.push({ uid: principal.authProviderUid, outcome: answer?.outcome });
+      return answer;
+    },
+    probe(sig) { return port.probe(sig); },
+  };
+  return relay;
+}
+
+/**
+ * A relay over the REAL session store that records every stamp write (`update`) and delegates everything.
+ * Bind `logs` to the runtime's log lines and each write also records the line logged just before it.
+ */
+function stampsRecorded(store) {
+  const relay = {
+    updates: [],
+    logs: null,
+    create: (key, record, sig) => store.create(key, record, sig),
+    get: (key, sig) => store.get(key, sig),
+    update(key, fields, sig) {
+      relay.updates.push({ fields: Object.keys(fields), after: relay.logs?.at(-1) ?? null });
+      return store.update(key, fields, sig);
+    },
+    revoke: (key, sig) => store.revoke(key, sig),
+    revokePrincipal: (audience, principalKey, sig) => store.revokePrincipal(audience, principalKey, sig),
+  };
+  return relay;
+}
+
 // ---------------------------------------------------------------------------
 // fixtures
 // ---------------------------------------------------------------------------
@@ -217,6 +265,11 @@ const STORE_ACTOR = await actor('store-actor', { scope: 'store', tenant: TENANT_
 const PLATFORM_ACTOR = await actor('platform-actor', { scope: 'platform', role: 'system_owner' });
 
 const tenantRow = async (id) => (await owner`select display_name, status, row_version, access_version from tenant where tenant_id = ${id}`)[0];
+/** Every audit record and outbox event naming this tenant (or, for audit, this actor): what a request acting on them would leave. */
+const tracesOf = async (tenant, who) => ({ ...(await owner`select
+    (select count(*)::int from public.audit_event
+      where tenant_id = ${tenant} or subject_tenant_id = ${tenant} or actor_internal_user_id = ${who.id}) as audits,
+    (select count(*)::int from tmpos_internal.outbox_event where aggregate_id = ${tenant}) as events`)[0] });
 /** 010's fixed status operation, called as the runtime calls it — the only sanctioned path. */
 const setStatus = async (tenant, from, to) => {
   const { row_version: version } = await tenantRow(tenant);
@@ -249,6 +302,21 @@ const reasonsIn = (logs) => logs
   .map((line) => { try { return JSON.parse(line); } catch { return {}; } })
   .filter((r) => r.event === 'request' && typeof r.reason === 'string')
   .map((r) => r.reason);
+/** The refusal code logged for ONE reply, joined on the request id its response header carries. */
+const reasonOf = (logs, reply) => {
+  const lines = logs
+    .map((line) => { try { return JSON.parse(line); } catch { return {}; } })
+    .filter((r) => r.event === 'request' && r.requestId === reply.headers['x-request-id']);
+  assert.equal(lines.length, 1, 'exactly one log line for the request');
+  return lines[0].reason;
+};
+/** A refusal's body is the fixed `{ error, requestId }` and nothing else: no scope, no reason, no tenant. */
+const assertRefusalBody = (reply, error) => {
+  const body = JSON.parse(reply.body);
+  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], reply.body);
+  assert.equal(body.error, error);
+  assert.equal(body.requestId, reply.headers['x-request-id']);
+};
 
 // ---------------------------------------------------------------------------
 // the real runtime, over a real local socket
@@ -300,7 +368,7 @@ async function withRuntime(fn, over = {}) {
         verifier,
         admission: createTenantSessionAdmission({ admission }),
         authorizer: createTenantRouteAuthorizer({ admission: authorizerAdmission, reads: over.reads ?? WITNESS_READS }),
-        store: sessionStore,
+        store: over.store ?? sessionStore,
       },
       admin: {
         trustedOrigins: [ADMIN_ORIGIN],
@@ -347,13 +415,13 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-014 applied, and the runtime role reaches the session table only through 011\'s routines', async () => {
+test('M5A-01: migrations 001-015 applied, and the runtime role reaches the session table only through 011\'s routines', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-014, so this run applies nothing and its report lists no version.
+  // 001-015, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.
   for (const statement of ['select count(*) from tmpos_session.session',
@@ -381,7 +449,12 @@ test('M5A-02: the production session store satisfies the port\'s own conformance
   const clearFixtures = () => owner`delete from tmpos_session.session where auth_provider = 'synthetic'`;
   await clearFixtures();
   try {
-    await assertSessionStoreContract(createPostgresSessionStore({ client, now: () => SESSION_CONTRACT_EPOCH }));
+    // `standing` is the establish-time standing check the production composition binds; the store
+    // refuses to establish without one. A stub that always answers true, because the contract judges
+    // the PORT (create, get, update, revoke, establish, end), not admission.
+    await assertSessionStoreContract(createPostgresSessionStore({
+      client, now: () => SESSION_CONTRACT_EPOCH, standing: async () => true,
+    }));
   } finally {
     await clearFixtures();
   }
@@ -718,31 +791,177 @@ test('M5A-08: there is NO grace window — the SESSION boundary and the authoriz
   }, { admission: atBoundary, authorizerAdmission: atAuthorizer });
 });
 
-test('M5A-09: a suspension racing live requests leaves every answer either served or refused, and the session ended', async () => {
-  await withRuntime(async ({ login, witness }) => {
+// How one protected tenant request can end when a suspension commits while it is in flight. It makes
+// three reads in turn — its session (T1), the boundary's admission (T2) and the authorizer's own
+// admission re-read (T3, doc 08 DA-38) — and the commit can land between any two:
+//   200 — T2 and T3 both preceded the commit: decided before it, served in full;
+//   403 authz_denied — T2 admitted before the commit, T3 came after it (DA-63): refused in full by the
+//         authorizer, with no handler run, nothing written, nothing revoked and no idle stamp slid;
+//   401 session_admission_denied — T2 came after the commit: the boundary ends every session held;
+//   401 session_unknown — T1 came after another request's revocation.
+// Nothing else is correct: a 5xx, a *_unrevoked reason, a body naming a scope, or a 403 no refused read explains.
+const RACE_REFUSALS_401 = ['session_admission_denied', 'session_unknown'];
+
+test('M5A-09: a suspension racing live requests — each answer served or refused in full, each 403 proven, nothing half-applied, the session ended', async (t) => {
+  // The authorizer's port is recorded apart from the boundary's, so a 403 is traced to the read that
+  // refused it; the store is recorded, so a stamp written by a refused request would be seen.
+  const atAuthorizer = recorded(tenantAdmission);
+  const stamps = stampsRecorded(sessionStore);
+  await withRuntime(async ({ login, witness, logs }) => {
+    stamps.logs = logs;
     const session = await login(TENANT_ACTOR);
     assert.equal(session.status, 200);
-    // Eight requests in flight while the suspension commits underneath them.
-    // Kept below the kernel's pool so a queued transaction cannot overrun its deadline and answer
-    // 503 — which would be a resource verdict, not the concurrency property under test.
+    const before = await tenantRow(TENANT_A);
+    const tracesBefore = await tracesOf(TENANT_A, TENANT_ACTOR);
+    assert.equal(before.status, 'active');
+    assert.equal((await tenantAdmission.admit(TENANT_ACTOR.principal, signal())).outcome, 'admitted',
+      'before the suspension, the read the authorizer makes admits this actor');
+    // Four requests in flight while the suspension commits underneath them, with no gate and no sleep:
+    // where each one's reads fall against the commit is the interleaving under test. Kept below the
+    // kernel's pool so a queued transaction cannot overrun its deadline and answer 503 — which would be
+    // a resource verdict, not the concurrency property under test.
     const inflight = Array.from({ length: 4 }, () => witness(session));
     await suspend(TENANT_A);
     const answers = await Promise.all(inflight);
+    let reactivated = false;
     try {
-      for (const reply of answers) {
-        // 200 or 401 and NOTHING ELSE: no 5xx, no half-applied answer, no partial state. A request
-        // that was decided before the suspension committed is served in full; one decided after is
-        // refused in full.
-        assert.ok([200, 401].includes(reply.status), `served or refused, never anything else: ${reply.status} ${reply.body}`);
-        if (reply.status === 200) assert.equal(bodyOf(reply).tenant, TENANT_A);
+      const served = answers.filter((r) => r.status === 200);
+      const forbidden = answers.filter((r) => r.status === 403);
+      const refused = answers.filter((r) => r.status === 401);
+      t.diagnostic(`answers: 200x${served.length} 401x${refused.length} 403x${forbidden.length}`);
+      assert.equal(served.length + forbidden.length + refused.length, answers.length,
+        `served or refused, never anything else: ${answers.map((r) => `${r.status} ${r.body}`).join(' | ')}`);
+
+      // Served in full: the scope the authorizer decided, and nothing else.
+      for (const reply of served) {
+        const { securityVersion, ...scope } = bodyOf(reply);
+        assert.deepEqual(scope, { actor: TENANT_ACTOR.id, tenant: TENANT_A, store: null, roleId: 'store_owner', limitation: 'none' });
+        assert.equal(typeof securityVersion, 'string');
       }
-      // Whatever the interleaving, the settled state is one: the session is gone and stays gone.
-      assert.equal((await witness(session)).status, 401);
-      assert.equal(await sessionsOf(TENANT_ACTOR), 0);
-    } finally {
+      // Refused in full: the fixed body, naming no scope.
+      for (const reply of forbidden) assertRefusalBody(reply, 'forbidden');
+      for (const reply of refused) assertRefusalBody(reply, 'unauthenticated');
+
+      // EVERY 403 IS PROVEN, not merely tolerated. The authorizer answers the chain's 403 when its own read
+      // does not admit, and for this actor a refusing read can only be one that saw the suspension: the
+      // same read admitted just before it, and the suspension is the one write this test makes (the tenant
+      // row, below, moved exactly once). So a 403 with no refused authorizer read behind it fails here.
+      for (const read of atAuthorizer.answers) assert.equal(read.uid, TENANT_ACTOR.uid, 'only this actor reached the authorizer');
+      const refusedReads = atAuthorizer.answers.filter((read) => read.outcome !== 'admitted');
+      assert.ok(forbidden.length <= refusedReads.length,
+        `${forbidden.length} 403(s) but only ${refusedReads.length} authorizer read(s) that did not admit`);
+      assert.equal((await tenantAdmission.admit(TENANT_ACTOR.principal, signal())).outcome, 'refused',
+        'and after the suspension the same read refuses');
+
+      // Whatever the interleaving, the settled state is one: the next request is refused and the session is gone.
+      const next = await witness(session);
+      assert.equal(next.status, 401);
+      assertRefusalBody(next, 'unauthenticated');
+      assert.equal(await sessionsOf(TENANT_ACTOR), 0, 'no session survives');
+
+      // Each refusal for the reason its reads give — joined on the request id, not on log order — and
+      // never an *_unrevoked one, which would mean a revocation failed and a row was left behind.
+      for (const reply of forbidden) assert.equal(reasonOf(logs, reply), 'authz_denied');
+      for (const reply of [...refused, next]) {
+        const reason = reasonOf(logs, reply);
+        assert.ok(RACE_REFUSALS_401.includes(reason), `401 for ${reason}`);
+      }
+
+      // No state change after a denial: the tenant row moved exactly once — the suspension — and is still suspended.
+      const after = await tenantRow(TENANT_A);
+      assert.deepEqual(
+        [after.status, Number(after.access_version), Number(after.row_version), after.display_name],
+        ['suspended', Number(before.access_version) + 1, Number(before.row_version) + 1, before.display_name],
+        'one suspension, and nothing any request did');
+      // Nor did any request of the race leave an audit record or an event (010's status routine writes neither).
+      assert.deepEqual(await tracesOf(TENANT_A, TENANT_ACTOR), tracesBefore, 'no audit record, no outbox event');
+
+      // No revival: once the tenant is active again, the cookie from before the race is still refused.
       await reactivate(TENANT_A);
+      reactivated = true;
+      const revived = await witness(session);
+      assert.equal(revived.status, 401, 'a reactivation revives no session the suspension ended');
+      assert.equal(await sessionsOf(TENANT_ACTOR), 0);
+      assert.equal(reasonOf(logs, revived), 'session_unknown', 'the row is gone, not merely refused');
+
+      // No refused request slid the idle stamp. The row cannot be compared (the settled request deleted
+      // it), so each write is attributed at the store instead. The only store write a witness request
+      // makes is its idle refresh, issued SYNCHRONOUSLY from its response's 'finish' — whose earlier
+      // listener, the request log line, has just been written (app.ts registers that one first, and
+      // withDeadline calls the port in its executor). So the line logged immediately before a write names
+      // the response it followed: every write must follow a distinct SERVED response, and only the idle
+      // stamp is ever written. A write after a 401 or 403 line, or a second write for one response, fails.
+      const writes = stamps.updates.map(({ fields, after }) => ({ fields, line: JSON.parse(after) }));
+      for (const { fields, line } of writes) {
+        assert.deepEqual(fields, ['lastSeenAt'], 'only the idle stamp, never the validation stamp');
+        assert.deepEqual([line.event, line.status], ['request', 200], `a write after ${JSON.stringify(line)}`);
+        assert.ok(served.some((reply) => reply.headers['x-request-id'] === line.requestId), 'after a served race answer');
+      }
+      const refreshed = writes.map(({ line }) => line.requestId);
+      assert.equal(new Set(refreshed).size, refreshed.length, 'at most one write per served answer');
+    } finally {
+      if (!reactivated) await reactivate(TENANT_A);
     }
-  });
+  }, { authorizerAdmission: atAuthorizer, store: stamps });
+});
+
+test('M5A-09b: the 403 ordering forced — boundary admits, the suspension commits, the authorizer\'s read refuses — and nothing changes', async () => {
+  // The interleaving M5A-09 reaches only sometimes, made deterministic by an in-process gate on the
+  // AUTHORIZER's port alone: the request's boundary read runs freely, its authorizer read waits until
+  // the suspension has committed. Its own tenant and actor, so the session row survives the 403 and can
+  // be read back — which is the direct evidence M5A-09 cannot have.
+  const tenant = await newTenant('gated-tenant');
+  const gated = await actor('gated-actor', { scope: 'tenant', tenant, role: 'store_owner' });
+  const atAuthorizer = recorded(tenantAdmission);
+  const stamps = stampsRecorded(sessionStore);
+  const rowOf = async () => (await owner`select session_key, last_seen_at, validated_at, security_version
+    from tmpos_session.session where auth_provider_uid = ${gated.uid}`).map((row) => ({ ...row }));
+  await withRuntime(async ({ login, witness, logs }) => {
+    const session = await login(gated);
+    assert.equal(session.status, 200);
+    const tenantBefore = await tenantRow(tenant);
+    const rowsBefore = await rowOf();
+    assert.equal(rowsBefore.length, 1);
+
+    const hold = { entered: deferred(), release: deferred() };
+    atAuthorizer.hold = hold;
+    const pending = witness(session);
+    // The authorizer is reached only once the boundary has admitted the request, so T2 is behind us.
+    await hold.entered.promise;
+    await setStatus(tenant, 'active', 'suspended'); // committed before the held read reaches the database
+    const tracesBefore = await tracesOf(tenant, gated);
+    hold.release.resolve();
+    const reply = await pending;
+
+    assert.equal(reply.status, 403, reply.body);
+    assertRefusalBody(reply, 'forbidden');
+    assert.deepEqual(atAuthorizer.answers, [{ uid: gated.uid, outcome: 'refused' }], 'the held read, and it refused');
+    // The mechanism is read after a DB round trip, so the request's log line is certainly written.
+    const tenantAfter = await tenantRow(tenant);
+    assert.equal(reasonOf(logs, reply), 'authz_denied');
+
+    // Nothing changed: the tenant moved once (the suspension), the session is neither ended nor slid.
+    assert.deepEqual(
+      [tenantAfter.status, Number(tenantAfter.access_version), Number(tenantAfter.row_version), tenantAfter.display_name],
+      ['suspended', Number(tenantBefore.access_version) + 1, Number(tenantBefore.row_version) + 1, tenantBefore.display_name]);
+    assert.deepEqual(await rowOf(), rowsBefore, 'the 403 revoked nothing and slid no stamp: the row is exactly as it was');
+    assert.deepEqual(stamps.updates, [], 'and the store was asked to write nothing');
+    assert.deepEqual(await tracesOf(tenant, gated), tracesBefore, 'and no audit record or outbox event was left');
+
+    // The next request is where the session ends: the boundary's own read now refuses.
+    const next = await witness(session);
+    assert.equal(next.status, 401);
+    assertRefusalBody(next, 'unauthenticated');
+    assert.equal(await sessionsOf(gated), 0);
+    assert.equal(reasonOf(logs, next), 'session_admission_denied');
+
+    // And a reactivation revives nothing.
+    await setStatus(tenant, 'suspended', 'active');
+    const revived = await witness(session);
+    assert.equal(revived.status, 401);
+    assert.equal(await sessionsOf(gated), 0);
+    assert.equal(reasonOf(logs, revived), 'session_unknown');
+  }, { actors: [gated], authorizerAdmission: atAuthorizer, store: stamps });
 });
 
 // ---------------------------------------------------------------------------

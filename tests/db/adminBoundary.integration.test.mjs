@@ -138,7 +138,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-014, a real non-owner runtime login, the production composition
+// setup: real migrations 001-015, a real non-owner runtime login, the production composition
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -177,7 +177,9 @@ tx = assembleTransactions(PRODUCTION_INVENTORY, CONFIGURED_ENV, {
   },
   store: createPostgresTransactionalStore,
   platformAdmission: (c) => createPostgresPlatformAdmission({ client: c }),
-  sessionStore: (c) => createPostgresSessionStore({ client: c }),
+  // The standing check the root builds (M5-ADMIN-REVOKE-P1) is forwarded exactly as PRODUCTION_FACTORIES forward it:
+  // dropping it here would leave this suite's administrative logins establishing nothing.
+  sessionStore: (c, standing) => createPostgresSessionStore({ client: c, standing }),
   tenantAdmission: (c) => createPostgresTenantAdmission({ client: c }),
   tenantDirectory: (c) => createPostgresTenantDirectory({ client: c }),
   rateLimiter: (c, keySecret) => createPostgresRateLimiter({ client: c, keySecret }),
@@ -369,11 +371,11 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-014 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
+test('M5E-00: 001-015 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   // The transaction root classified the configured endpoint before building its one client, and hands back the ports
   // the two boundaries are served with — never the kernel, a pool or the URL.

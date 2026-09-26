@@ -3,7 +3,7 @@
 // routines) observed from the owner and from the runtime's own non-owner LOGIN, and the production adapter
 // createPostgresRateLimiter over the same supervised transaction kernel the composition root builds.
 //
-// WHAT IS PROVED HERE. 001-014 apply through the trusted engine; 014 is exactly the objects it declares — four routines as
+// WHAT IS PROVED HERE. 001-015 apply through the trusted engine; 014 is exactly the objects it declares — four routines as
 // declared, two RLS tables whose only free-text column is CHECKed to the 43-character base64url shape of the HMAC pseudonym
 // (an address or a raw identifier in its usual form is refused) beside a policy and a window, and privileges no
 // wider than tmpos_app's USAGE and EXECUTE on the consume, the probe and the reclaim — and it creates no role. The UNCHANGED
@@ -264,7 +264,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: the real chain 001-014, a non-owner LOGIN holding only tmpos_app, two kernels, the real adapter
+// setup: the real chain 001-015, a non-owner LOGIN holding only tmpos_app, two kernels, the real adapter
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -530,12 +530,12 @@ async function assertLoginContained(label) {
 // migration 014 as applied
 // ---------------------------------------------------------------------------
 
-test('M6R-01: 001-014 apply clean; 014 is exactly its declared objects and privileges, holds no identifying column, and creates no role', async () => {
+test('M6R-01: 001-015 apply clean; 014 is exactly its declared objects and privileges, holds no identifying column, and creates no role', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite may already have applied the chain.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   await assertDeclared(owner, 'as applied');
   await assertLoginContained('as applied');
@@ -1116,7 +1116,7 @@ test('M6R-11: migrations 005-013 are byte-identical to their pins, and the ledge
   for (const [name, digest] of Object.entries(PINNED)) assert.equal(sha256(name), digest, name);
   const files = readdirSync(MIG_DIR);
   const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-  assert.equal(ledger.length, 14);
+  assert.equal(ledger.length, 15);
   for (const { version, checksum } of ledger) {
     const up = files.filter((f) => f.startsWith(`${version}_`) && f.endsWith('.up.sql'));
     assert.equal(up.length, 1, version);

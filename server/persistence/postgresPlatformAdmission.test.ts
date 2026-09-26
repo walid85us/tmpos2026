@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  createPostgresPlatformAdmission, PLATFORM_ADMISSION_BOUNDS, PLATFORM_ADMISSION_DEADLINE_MS,
+  createPostgresPlatformAdmission, PLATFORM_ADMISSION_BOUNDS, PLATFORM_ADMISSION_DEADLINE_MS, readPlatformAdmission,
 } from './postgresPlatformAdmission.js';
 import { TransactionFailure } from './supervisedPgClient.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
@@ -191,6 +191,19 @@ test('M5PA-05 a refusal is the routine\'s own, answered only in the routine\'s f
   // A refusal missing a column is not the routine's answer: an outage, which revokes nothing.
   assert.deepEqual(await admit([without(REFUSED_ROW, 'authority_version')]), { outcome: 'unavailable' });
   assert.deepEqual(await admit([{ outcome: 'refused' }]), { outcome: 'unavailable' });
+});
+
+test('M5PA-05b a refusal carrying any payload column is not the routine\'s: unavailable, through admit() and readPlatformAdmission alike', async () => {
+  // 013 answers a refusal with its six payload columns all null. One that names anything is not that answer, and read as a
+  // refusal it would end every administrative session the principal holds: a fault must never revoke.
+  const onHandle = (rows: unknown): PgTransactionScope => (() => Promise.resolve(rows as never)) as unknown as PgTransactionScope;
+  for (const [column, value] of [['actor_id', ACTOR], ['account_status', 'active'], ['limitation', 'none'], ['security_version', VERSION],
+    ['memberships', [grant()]], ['authority_version', '7']] as Array<[string, unknown]>) {
+    const rows = [{ ...REFUSED_ROW, [column]: value }];
+    assert.deepEqual(await admit(rows), { outcome: 'unavailable' }, `admit(): ${column} non-null`);
+    assert.deepEqual(await readPlatformAdmission(onHandle(rows), PRINCIPAL), { outcome: 'unavailable' }, `readPlatformAdmission: ${column} non-null`);
+  }
+  assert.deepEqual(await readPlatformAdmission(onHandle([REFUSED_ROW]), PRINCIPAL), { outcome: 'refused' }, 'the all-null refusal stays a refusal');
 });
 
 test('M5PA-06 a reference this boundary cannot read is refused before any transaction or statement', async () => {
@@ -496,4 +509,35 @@ test('M5PA-18 nothing is logged: not a resolution, a refusal, an outage, a fault
   for (const [name, spy] of spies) {
     assert.equal(spy.mock.callCount(), 0, `console.${name}`);
   }
+});
+
+// --- M5-ADMIN-REVOKE-P1: the same read on a caller's own transaction -------------------------------------------------
+
+test('M5AR-A1 readPlatformAdmission is admit()\'s one statement on the caller\'s handle: the same answers, and a fault left to the caller\'s kernel', async () => {
+  // The same statement and the same bound reference as admit(), and the same answer for the same row.
+  const seen: Array<[string, unknown[]]> = [];
+  const handle = (rows: unknown, fault?: unknown): PgTransactionScope =>
+    ((strings: TemplateStringsArray, ...args: unknown[]) => {
+      seen.push([strings.join('?'), args]);
+      return fault !== undefined ? Promise.reject(fault) : Promise.resolve(rows as never);
+    }) as unknown as PgTransactionScope;
+  for (const rows of [[row([grant()])], [REFUSED_ROW], [row([grant()]), row([grant()])], [without(row([grant()]), 'authority_version')]]) {
+    seen.length = 0;
+    assert.deepEqual(await readPlatformAdmission(handle(rows), PRINCIPAL), await admit(rows), JSON.stringify(rows).slice(0, 80));
+    assert.equal(seen.length, 1);
+    assert.equal(text(seen[0][0]), ADMIT_TEXT, 'the very statement admit() sends');
+    assert.deepEqual(seen[0][1], ['firebase', 'uid-alpha'], 'the reference, bound');
+  }
+  // A malformed reference is refused before any statement, exactly as admit() refuses it.
+  seen.length = 0;
+  for (const principal of [null, { authProvider: 'github', authProviderUid: 'u' }, { authProvider: 'firebase', authProviderUid: '' },
+    { authProvider: 'firebase', authProviderUid: 'u'.repeat(256) }]) {
+    assert.deepEqual(await readPlatformAdmission(handle([row([grant()])]), principal as never), { outcome: 'refused' }, JSON.stringify(principal));
+  }
+  assert.equal(seen.length, 0, 'nothing sent');
+  // Unlike admit(), a statement or driver error is NOT caught: the caller's transaction is aborted by it, and its kernel
+  // rolls back — an outage there, never an answer made up here.
+  const fault = new Error('FATAL: M5-UNIT-CANARY statement timeout');
+  await assert.rejects(readPlatformAdmission(handle([], fault), PRINCIPAL), (err: unknown) => err === fault);
+  assert.deepEqual(await admit([], fault), { outcome: 'unavailable' }, 'admit() in its own transaction still answers unavailable');
 });

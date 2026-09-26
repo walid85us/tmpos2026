@@ -23,7 +23,8 @@
 // this port admits nobody.
 //
 // NOTHING IS LOGGED. The provider reference is bound as a parameter and never appears in a message, an error or a
-// return value; a driver error is caught and discarded.
+// return value; a driver error is caught and discarded — except by readPlatformAdmission, which runs on a caller's
+// transaction and leaves the error to that caller's kernel, whose own boundary discards it.
 import { isTrustedPrincipal } from '../runtime/principals.js';
 import type { PlatformAdmissionPort, PlatformAdmissionResult, TrustedMembership } from '../runtime/principals.js';
 import type { VerifiedPrincipal } from '../runtime/routes.js';
@@ -110,7 +111,10 @@ function admissionOf(row: Row): PlatformAdmissionResult | null {
     outcome, actor_id: actor, account_status: accountStatus, limitation, security_version: securityVersion, memberships,
     authority_version: authorityVersion,
   } = row;
-  if (outcome === 'refused') return REFUSED;
+  // A refusal is 013's only when every payload column is null: one naming anything is a fault, never a denial that revokes.
+  if (outcome === 'refused') {
+    return [actor, accountStatus, limitation, securityVersion, memberships, authorityVersion].every((v) => v === null) ? REFUSED : null;
+  }
   if (outcome !== 'resolved') return null;
   if (typeof authorityVersion !== 'string' || !AUTHORITY_VERSION_RE.test(authorityVersion)) return null;
   const grants = platformGrantsOf(memberships);
@@ -118,6 +122,32 @@ function admissionOf(row: Row): PlatformAdmissionResult | null {
   const principal = Object.freeze({ actor, accountStatus, limitation, securityVersion, memberships: Object.freeze(grants) });
   if (!isTrustedPrincipal(principal)) return null;
   return Object.freeze({ outcome: 'resolved', principal, authorityVersion });
+}
+
+/** The reference, each field read once and checked, or null — which every caller answers 'refused' without a statement. */
+function referenceOf(principal: unknown): VerifiedPrincipal | null {
+  if (typeof principal !== 'object' || principal === null) return null;
+  const { authProvider, authProviderUid } = principal as Record<string, unknown>;
+  if (typeof authProvider !== 'string' || !PROVIDERS.has(authProvider)) return null;
+  if (typeof authProviderUid !== 'string' || authProviderUid.length === 0 || authProviderUid.length > MAX_UID_LENGTH) return null;
+  return Object.freeze({ authProvider, authProviderUid });
+}
+
+/**
+ * Migration 013's read on the CALLER's own transaction handle (M5-ADMIN-REVOKE-P1): the same one statement admit() runs
+ * in a transaction of its own, for the two callers that must read the standing where they write — the administrative
+ * login's establish transaction and the command transaction (platformAuthorization.ts). It answers exactly what admit()
+ * would, save that a statement or driver error is NOT caught: it propagates, the caller's transaction is aborted by it,
+ * and the kernel rolls back — an outage there, never a verdict. 'unavailable' still marks a malformed answer.
+ */
+export async function readPlatformAdmission(sql: PgTransactionScope, principal: VerifiedPrincipal): Promise<PlatformAdmissionResult> {
+  const reference = referenceOf(principal);
+  if (reference === null) return REFUSED;
+  const rows = await sql`select outcome, actor_id, account_status, limitation, security_version, memberships, authority_version
+    from tmpos_admission.m5_admit_platform_session(${reference.authProvider}::text, ${reference.authProviderUid}::text)`;
+  const row = onlyRow(rows, ROW_COLUMNS);
+  if (row === null) return UNAVAILABLE;
+  return admissionOf(row) ?? UNAVAILABLE;
 }
 
 /**
@@ -139,18 +169,9 @@ export function createPostgresPlatformAdmission(deps: { readonly client: Supervi
   return Object.freeze({
     async admit(principal: VerifiedPrincipal, signal: AbortSignal): Promise<PlatformAdmissionResult> {
       // Refused before a statement runs, so a malformed reference costs the database nothing.
-      if (typeof principal !== 'object' || principal === null) return REFUSED;
-      const { authProvider, authProviderUid } = principal as unknown as Record<string, unknown>;
-      if (typeof authProvider !== 'string' || !PROVIDERS.has(authProvider)) return REFUSED;
-      if (typeof authProviderUid !== 'string' || authProviderUid.length === 0 || authProviderUid.length > MAX_UID_LENGTH) return REFUSED;
-
-      return run(signal, async (sql) => {
-        const rows = await sql`select outcome, actor_id, account_status, limitation, security_version, memberships, authority_version
-          from tmpos_admission.m5_admit_platform_session(${authProvider}::text, ${authProviderUid}::text)`;
-        const row = onlyRow(rows, ROW_COLUMNS);
-        if (row === null) return UNAVAILABLE;
-        return admissionOf(row) ?? UNAVAILABLE;
-      }, UNAVAILABLE);
+      const reference = referenceOf(principal);
+      if (reference === null) return REFUSED;
+      return run(signal, (sql) => readPlatformAdmission(sql, reference), UNAVAILABLE);
     },
 
     /** Readiness: 013's read runs for a valid reference and answers one of its two closed outcomes. */

@@ -123,7 +123,7 @@ export const REQUIRED_SENTINELS = [
   'server/persistence/postgresTenantDirectory.test.ts',       // the one fixed call into migration 012 and every row shape it refuses to read as a page (M5-GIAM-D1-P3)
   'server/persistence/postgresPlatformAdmission.test.ts',     // the one fixed call into migration 013: platform grants only, 007's seven keys, a decimal version, every row or driver fault an outage (M5-GIAM-D1-P4)
   'server/persistence/postgresRateLimiter.test.ts',            // the one fixed call into migration 014: the fingerprint, the request's own bounds, the two trusted row shapes, the deadline and abort cleanup (M6-RATE-P2)
-  'server/persistence/postgresStartupPreflight.test.ts',       // the runtime-login boundary and the exact 001-014 ledger, judged purely; checksums bound to the migration files (M6-ENTRY-P1)
+  'server/persistence/postgresStartupPreflight.test.ts',       // the runtime-login boundary and the exact 001-015 ledger, judged purely; checksums bound to the migration files (M6-ENTRY-P1)
   'server/entry/productionEntry.test.ts',                     // the entry's configuration contract, refusal categories and startup order (M6-ENTRY-P1)
   'server/entry/main.test.ts',                                // the executable starts only when run, and refuses without a listener (M6-ENTRY-P1)
   'server/runtime/hostBoundary.test.ts',                      // the exact administrative Host allowlist, probes exempt (M6-ENTRY-P1)

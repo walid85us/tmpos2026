@@ -11,7 +11,10 @@ import assert from 'node:assert/strict';
 
 import { createHash } from 'node:crypto';
 
-import { createPostgresSessionStore, persistedAuditMetadata, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS } from './postgresSessionStore.js';
+import {
+  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS,
+} from './postgresSessionStore.js';
+import type { SessionStandingCheck } from './postgresSessionStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import { SESSION_TTL } from '../runtime/sessions.js';
 import type { SessionEndAudit, SessionEstablishAudit, SessionRecord } from '../runtime/sessions.js';
@@ -74,9 +77,11 @@ const live = (): AbortSignal => new AbortController().signal;
  * is adapted once, here, rather than cast at each assertion.
  */
 const answered = (value: unknown): Promise<unknown> => Promise.resolve(value);
-const store = (rows: unknown, fault?: Error, now?: () => number) => {
+/** A standing check that admits: the establish tests below prove the store's own steps; the check is proved on its own. */
+const ADMITS: SessionStandingCheck = async () => true;
+const store = (rows: unknown, fault?: Error, now?: () => number, standing: SessionStandingCheck | null = ADMITS) => {
   const client = fakeClient(rows, fault);
-  return { client, store: createPostgresSessionStore({ client, ...(now === undefined ? {} : { now }) }) };
+  return { client, store: createPostgresSessionStore({ client, ...(now === undefined ? {} : { now }), ...(standing === null ? {} : { standing }) }) };
 };
 
 // --- create -------------------------------------------------------------------------------------
@@ -307,7 +312,7 @@ const COMMON = {
 
 test('M6AA-S1 establish ends the presented session, creates the new one and writes its record in ONE transaction, the record last', async () => {
   const { client, store: s } = store(answers(), undefined, () => NOW);
-  await s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, { ...LOGIN, action: 'reauthenticate' }, live());
+  assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, { ...LOGIN, action: 'reauthenticate' }, live())), 'established');
   assert.deepEqual(client.bounds, [SESSION_STORE_BOUNDS], 'one transaction, under the store\'s own bounds');
   assert.deepEqual(client.statements.map(stepOf), ['get', 'touch', 'revoke', 'create', 'insert']);
   assert.deepEqual(client.values[0], [KEY, NOW], 'the presented session, read live by this store\'s clock');
@@ -339,7 +344,7 @@ test('M6AA-S2 no presented session, one naming nothing live, one another transac
   ];
   for (const [label, replaces, over, steps] of cases) {
     const { client, store: s } = store(answers(over));
-    await s.establish?.(NEW_KEY, ADMIN_RECORD, replaces, LOGIN, live());
+    assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, replaces, LOGIN, live())), 'established', label);
     assert.deepEqual(client.statements.map(stepOf), steps, label);
     assert.deepEqual(masked(recordSent(client)), {
       ...COMMON, actor_internal_user_id: ACTOR, action_id: 'platform.admin.session.login', decision: 'allow', reason_code: 'admin_session_created',
@@ -455,5 +460,128 @@ test('M6AA-S7 metadata the writer would not persist as given — a key it drops 
   ];
   for (const [label, metadata, actionId] of dropped) {
     assert.throws(() => persistedAuditMetadata(metadata, actionId), /session store unavailable: audit_metadata_dropped/, label);
+  }
+});
+
+// --- M5-ADMIN-REVOKE-P1: ordered against revocation --------------------------------------------------
+
+/** A standing check that answers `answer` and records the handle it ran on and what it was sent before it, if anything. */
+function standingCheck(answer: boolean | Error, client: () => Fake) {
+  const seen: Array<{ handle: unknown; record: SessionRecord; sentBefore: number }> = [];
+  const check: SessionStandingCheck = async (sql, record) => {
+    seen.push({ handle: sql, record, sentBefore: client().statements.length });
+    // The check runs its own statements on the handle it was given: one here, so its place in the order is visible.
+    await sql`select 'standing' as probe`;
+    if (answer instanceof Error) throw answer;
+    return answer;
+  };
+  return { check, seen };
+}
+const withStanding = (answer: boolean | Error, over: Partial<Record<Step, unknown>> = {}) => {
+  let client: Fake | undefined;
+  const standing = standingCheck(answer, () => client as Fake);
+  const built = store((statement: string) => (statement.includes("'standing'") ? [{ probe: 'standing' }] : answers(over)(statement)), undefined, () => NOW, standing.check);
+  client = built.client;
+  return { ...built, seen: standing.seen };
+};
+const stepsOf = (client: Fake): string[] => client.statements.map((t) => (t.includes("'standing'") ? 'standing' : stepOf(t)));
+
+test('M5AR-S1 establish runs the standing check FIRST, on its own transaction\'s handle, before the presented session is read', async () => {
+  for (const action of ['login', 'reauthenticate'] as const) {
+    const { client, store: s, seen } = withStanding(true);
+    assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, { ...LOGIN, action }, live())), 'established', action);
+    assert.deepEqual(stepsOf(client), ['standing', 'get', 'touch', 'revoke', 'create', 'insert'], `${action}: the standing, then today's steps`);
+    assert.equal(seen.length, 1, `${action}: once`);
+    assert.equal(seen[0].sentBefore, 0, `${action}: before any statement of the store's own`);
+    assert.equal(seen[0].record, ADMIN_RECORD, `${action}: judged against the very record being established`);
+    assert.equal(client.bounds.length, 1, `${action}: all of it one transaction`);
+  }
+});
+
+test('M5AR-S2 a standing that moved answers standing_changed and writes nothing: nothing ended, created or recorded', async () => {
+  for (const action of ['login', 'reauthenticate'] as const) {
+    const { client, store: s } = withStanding(false);
+    assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, { ...LOGIN, action }, live())), 'standing_changed', action);
+    assert.deepEqual(stepsOf(client), ['standing'], `${action}: nothing after the check`);
+  }
+});
+
+test('M5AR-S3 a standing check that faults is an outage: a throw in the store\'s own word, nothing after it', async () => {
+  const { client, store: s } = withStanding(new Error('db.example:5432 lock timeout'));
+  await assert.rejects(answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live())), (err: Error) => err.message === 'session store unavailable: store_failed');
+  assert.deepEqual(stepsOf(client), ['standing']);
+  // A check answering anything but a boolean is a broken check: an outage too — never an admission, and never read as
+  // a changed standing (a 401).
+  for (const answer of ['true', 'false', 1, 0, undefined, null] as unknown[]) {
+    const { client: c, store: odd } = store(answers(), undefined, () => NOW, async () => answer as boolean);
+    await assert.rejects(answered(odd.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live())), /session store unavailable: standing_invalid/, String(answer));
+    assert.deepEqual(c.statements, [], `${String(answer)}: nothing after the check`);
+  }
+});
+
+test('M5AR-S4 a store built without a standing check establishes nothing: a throw before anything is sent', async () => {
+  const { client, store: s } = store(answers(), undefined, () => NOW, null);
+  await assert.rejects(answered(s.establish?.(NEW_KEY, ADMIN_RECORD, KEY, LOGIN, live())), /session store unavailable: standing_check_missing/);
+  assert.deepEqual(client.statements, []);
+  assert.equal(client.bounds.length, 0, 'no transaction opens');
+  // Its other operations are unaffected: the tenant boundary's store needs no check.
+  const { store: tenant } = store([ROW], undefined, () => NOW, null);
+  assert.deepEqual(await tenant.get(KEY, live()), RECORD);
+});
+
+test('M5AR-S5 a reauthentication must end a live administrative session of its own principal: otherwise session_ended, and nothing is written', async () => {
+  const REAUTH: SessionEstablishAudit = { ...LOGIN, action: 'reauthenticate' };
+  const cases: Array<[string, string | null, Partial<Record<Step, unknown>>, Step[]]> = [
+    ['no presented session', null, {}, []],
+    ['a key naming no live session (a logout or revocation committed first)', KEY, { get: [] }, ['get']],
+    ['a tenant record under the administrative cookie', KEY, { get: [ROW] }, ['get']],
+    ['another principal\'s administrative session', KEY, { get: [{ ...ADMIN_ROW, principalKey: 'c'.repeat(43) }] }, ['get']],
+    ['a session another transaction ended first (a racing logout or reauthentication)', KEY, { touch: [{ outcome: 'absent' }] }, ['get', 'touch']],
+  ];
+  for (const [label, replaces, over, steps] of cases) {
+    const { client, store: s } = store(answers(over), undefined, () => NOW);
+    assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, replaces, REAUTH, live())), 'session_ended', label);
+    assert.deepEqual(client.statements.map(stepOf), steps, `${label}: the checks precede the end — nothing revoked, created or recorded`);
+    assert.equal(client.bounds.length, 1, `${label}: one transaction, which changed nothing`);
+  }
+  // The same presented states at an ORDINARY login keep today's rotation (contract C7; M6AA-S2): it still establishes.
+  for (const [label, replaces, over] of cases) {
+    const { store: s } = store(answers(over), undefined, () => NOW);
+    assert.equal(await answered(s.establish?.(NEW_KEY, ADMIN_RECORD, replaces, LOGIN, live())), 'established', `a login presenting ${label}`);
+  }
+});
+
+test('M5AR-S6 holdAdministrativeSession holds the live administrative session under a key, or answers undefined before writing anything', async () => {
+  const run = async (over: Partial<Record<Step, unknown>>): Promise<{ client: Fake; held: SessionRecord | undefined }> => {
+    const client = fakeClient(answers(over));
+    const held = await client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => holdAdministrativeSession(sql, KEY, NOW));
+    return { client, held };
+  };
+  const live1 = await run({});
+  assert.deepEqual(live1.held, ADMIN_RECORD, 'the record, as read');
+  assert.deepEqual(live1.client.statements.map(stepOf), ['get', 'touch']);
+  assert.deepEqual(live1.client.values, [[KEY, NOW], [KEY, CREATED]], 'read live at the given instant, then held by writing back the stamp it read');
+  assert.match(live1.client.statements[1], /m5_session_touch\(\?::text, 'validatedAt', \?::bigint\)/);
+  for (const [label, over, steps] of [
+    ['no live session', { get: [] }, ['get']],
+    ['a record of another audience', { get: [ROW] }, ['get']],
+    ['a session another transaction ended since the read', { touch: [{ outcome: 'absent' }] }, ['get', 'touch']],
+  ] as Array<[string, Partial<Record<Step, unknown>>, Step[]]>) {
+    const { client, held } = await run(over);
+    assert.equal(held, undefined, label);
+    assert.deepEqual(client.statements.map(stepOf), steps, `${label}: nothing written`);
+  }
+  // Every other doubt throws, and the caller's kernel rolls back.
+  for (const [label, over, reason] of [
+    ['a touch the routine calls invalid', { touch: [{ outcome: 'invalid' }] }, /not_updated/],
+    ['two live rows', { get: [ADMIN_ROW, ADMIN_ROW] }, /answer_shape_invalid/],
+    ['a malformed record', { get: [{ ...ADMIN_ROW, extra: 1 }] }, /row_shape_invalid/],
+  ] as Array<[string, Partial<Record<Step, unknown>>, RegExp]>) {
+    await assert.rejects(run(over), reason, label);
+  }
+  for (const now of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    const client = fakeClient(answers());
+    await assert.rejects(client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => holdAdministrativeSession(sql, KEY, now)), /clock_invalid/, String(now));
+    assert.deepEqual(client.statements, [], `${now}: nothing sent`);
   }
 });

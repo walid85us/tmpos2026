@@ -16,6 +16,16 @@
 // rollback and a re-application each refuse while any administrative session exists — the only place a witness lives —
 // and otherwise the rollback removes exactly what 013 created, after which a re-apply starts every counter again at zero.
 //
+// MIGRATION 015 (M5-ADMIN-REVOKE-P1) places one more trigger function in the same schema, fired BEFORE ROW from
+// public.platform_identity (UPDATE, DELETE), public.identity_link and public.user_membership (INSERT, UPDATE), that takes
+// FOR KEY SHARE on the account of each actor an anchor change or delete, or a link or grant insert or re-point, moves.
+// Proved here against a transaction holding the account FOR UPDATE, as 009's command lock does: an anchor repoint, a link
+// or a grant inserted for the actor or re-pointed to it, and the anchor's DELETE each WAIT for that transaction — as a
+// replica too, where no foreign-key check or cascade runs — and then land; a profile update, the identity sync's upsert
+// and a link re-pointed AWAY do not wait; an anchor DELETE of another actor does not, and nothing deadlocks. Every wait
+// is observed through pg_blocking_pids, never assumed from elapsed time. 015's own postcondition refuses each widening it names, its rollback
+// removes exactly its objects, and 013's postcondition and rollback, which predate it, are run with 015 rolled back first.
+//
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
 // named, so the suite re-runs on the shared CI service, where earlier suites already applied the chain and left rows of
@@ -25,6 +35,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import postgres from 'postgres';
 
 import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
@@ -40,8 +51,13 @@ const UP_013 = readFileSync(`${MIG_DIR}/013_m5_platform_admission.up.sql`, 'utf8
 const DOWN_013 = readFileSync(`${MIG_DIR}/013_m5_platform_admission.down.sql`, 'utf8');
 /** 013's section 6 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_013 = UP_013.slice(UP_013.lastIndexOf('do $$'));
+const UP_015 = readFileSync(`${MIG_DIR}/015_m5_admin_standing_serialization.up.sql`, 'utf8');
+const DOWN_015 = readFileSync(`${MIG_DIR}/015_m5_admin_standing_serialization.down.sql`, 'utf8');
+/** 015's section 4 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
+const POSTCONDITION_015 = UP_015.slice(UP_015.lastIndexOf('do $$'));
 const READ = 'tmpos_admission.m5_admit_platform_session(text, text)';
 const MOVED = 'tmpos_admission.m5_platform_authority_moved()';
+const SERIALIZE = 'tmpos_admission.m5_platform_standing_serialize()';
 const TABLE = 'tmpos_admission.platform_authority_version';
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm5p-migrator', runtimeRef: 'm5p-runtime' };
 const LOCK_KEY = 528_513;
@@ -105,7 +121,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: the real chain 001-014, a real non-owner runtime login, the real adapter
+// setup: the real chain 001-015, a real non-owner runtime login, the real adapter
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -190,6 +206,81 @@ const versionTriggers = async (sql = owner) => (await sql`select g.tgname::text 
   join pg_catalog.pg_class c on c.oid = g.tgrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
   where g.tgfoid = ${MOVED}::regprocedure order by g.tgname`).map((r) => ({ ...r }));
+/** The three triggers 015 section 3 declares, in name order: BEFORE ROW INSERT or UPDATE on the link and on the grant
+ *  (tgtype 23), BEFORE ROW UPDATE or DELETE on the anchor (27), each enabled ALWAYS, with no column list, no WHEN, not
+ *  internal. */
+const DECLARED_015 = Object.freeze([
+  ['trg_identity_link_standing_serialize', 'public.identity_link', 23],
+  ['trg_platform_identity_standing_serialize', 'public.platform_identity', 27],
+  ['trg_user_membership_standing_serialize', 'public.user_membership', 23],
+].map(([name, relation, tgtype]) => Object.freeze({ name, relation, tgtype, enabled: 'A', columns: '', no_when: true, internal: false })));
+/** Every trigger that calls 015's function, wherever it is, as the catalog records it, in name order. */
+const serializeTriggers = async (sql = owner) => (await sql`select g.tgname::text as name,
+    n.nspname::text || '.' || c.relname::text as relation, g.tgtype, g.tgenabled::text as enabled,
+    g.tgattr::text as columns, g.tgqual is null as no_when, g.tgisinternal as internal
+  from pg_catalog.pg_trigger g
+  join pg_catalog.pg_class c on c.oid = g.tgrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  where g.tgfoid = to_regprocedure(${SERIALIZE}) order by g.tgname`).map((r) => ({ ...r }));
+
+// --- concurrency: a transaction on a connection of its own, and a wait observed in the catalog -----------------------
+
+const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+/** Runs `body` in one owner transaction on a connection of its own, and answers at once. `pid` resolves to its backend
+ *  once known — before `body` runs; `outcome` to `{ ok, value }` or `{ ok: false, code, message }` once it has ended;
+ *  `settled()` says whether it has. Every lock wait is bounded by `lockTimeout`, so a wait that should not happen FAILS
+ *  (55P03) instead of hanging the suite. `replica` runs it with session_replication_role = replica. */
+function inTransaction(body, { lockTimeout = '10s', replica = false } = {}) {
+  const sql = connect(undefined, 1);
+  const pid = deferred();
+  let settled = false;
+  const outcome = sql.begin(async (tx) => {
+    await tx`select pg_catalog.set_config('lock_timeout', ${lockTimeout}, true)`;
+    if (replica) {
+      await tx`set local session_replication_role = replica`.catch((err) => {
+        throw new Error(`M5P needs an owner that may set session_replication_role, and this one may not: ${err.message}`);
+      });
+    }
+    pid.resolve((await tx`select pg_catalog.pg_backend_pid() as pid`)[0].pid);
+    return body(tx);
+  }).then((value) => ({ ok: true, value }), (err) => ({ ok: false, code: err.code ?? null, message: String(err.message) }))
+    .then(async (result) => { settled = true; await sql.end({ timeout: 5 }); return result; });
+  return { pid: pid.promise, outcome, settled: () => settled };
+}
+/** Takes `lock(tx)`'s row locks in a transaction of its own and holds them, open, until `release()` commits it. Answers
+ *  once the locks are taken, with the lock statement's answer; a holder that fails first fails the test. */
+async function holding(lock) {
+  const taken = deferred();
+  const release = deferred();
+  const run = inTransaction(async (tx) => { taken.resolve(await lock(tx)); await release.promise; });
+  const first = await Promise.race([taken.promise.then((answer) => ({ answer })), run.outcome.then((failed) => ({ failed }))]);
+  if ('failed' in first) throw new Error(`M5P: the holder ended before its locks were taken: ${JSON.stringify(first.failed)}`);
+  return {
+    pid: await run.pid, answer: first.answer, settled: run.settled,
+    release: () => { release.resolve(); return run.outcome; },
+  };
+}
+/** 009's account lock and nothing more — the stand-in for a command or login holding the actor's account. */
+const holdAccount = (who) => holding((tx) => tx`select 1 from public.app_user where internal_user_id = ${who.id} for update`);
+/** Whether backend `waiter` is blocked by backend `holder` — that one — polled until it is, until `ended()`, or for `ms`. */
+async function blockedBy(waiter, holder, ended, ms = 10_000) {
+  const until = performance.now() + ms;
+  while (performance.now() < until && !ended()) {
+    const [{ blocked }] = await owner`select ${holder}::int = any (pg_catalog.pg_blocking_pids(${waiter}::int)) as blocked`;
+    if (blocked) return true;
+    await sleep(5);
+  }
+  return false;
+}
+/** A supabase anchor, the other side every link must name. */
+const supabaseAnchor = async (label) => {
+  const uid = `m5p-${label}-sb-${SUFFIX}`;
+  await owner`insert into public.platform_identity (auth_provider, auth_provider_uid) values ('supabase', ${uid})`;
+  return uid;
+};
+/** One active link of `who`, from its own firebase reference to a new supabase anchor; answers the link id. */
+const linkOf = async (who, label) => (await owner`insert into public.identity_link (internal_user_id, firebase_auth_provider_uid,
+  supabase_auth_provider_uid) values (${who.id}, ${who.uid}, ${await supabaseAnchor(label)}) returning link_id`)[0].link_id;
 
 /** The statement's refusal, caught inside a savepoint so the surrounding transaction survives: {code, message}, or null. */
 const refusalIn = (tx) => async (fn) => {
@@ -205,13 +296,13 @@ async function rolledBack(fn) {
 // migration 013 as applied
 // ---------------------------------------------------------------------------
 
-test('M5P-01: 001-014 apply clean; tmpos_admission is two definer routines and one RLS table, and the triggers are exactly the four declared', async () => {
+test('M5P-01: 001-015 apply clean; tmpos_admission is three definer routines and one RLS table, and the triggers are exactly the four 013 declares and the three 015 declares', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied the chain, so this
   // run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   const routines = await owner`select p.proname::text as name, p.prosecdef, p.provolatile::text as volatility, p.proconfig,
       p.prorettype::regtype::text as returns, p.proowner = n.nspowner as schema_owner
@@ -220,6 +311,8 @@ test('M5P-01: 001-014 apply clean; tmpos_admission is two definer routines and o
   assert.deepEqual(routines.map((r) => ({ ...r })), [
     { name: 'm5_admit_platform_session', prosecdef: true, volatility: 's', proconfig: ['search_path=pg_catalog, pg_temp'], returns: 'record', schema_owner: true },
     { name: 'm5_platform_authority_moved', prosecdef: true, volatility: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], returns: 'trigger', schema_owner: true },
+    // 015's serialization trigger function: volatile, because it takes row locks.
+    { name: 'm5_platform_standing_serialize', prosecdef: true, volatility: 'v', proconfig: ['search_path=pg_catalog, pg_temp'], returns: 'trigger', schema_owner: true },
   ]);
   // One table (and its primary-key index), nothing else: no view, no sequence, no second table.
   const relations = await owner`select c.relname::text as name, c.relkind::text as kind
@@ -238,6 +331,9 @@ test('M5P-01: 001-014 apply clean; tmpos_admission is two definer routines and o
   // on INSERT, UPDATE and DELETE (29), enabled ALWAYS, with no column list and no WHEN condition — and no fifth, on any
   // table, calls it.
   assert.deepEqual(await versionTriggers(), DECLARED);
+  // And exactly three call 015's function: BEFORE ROW UPDATE or DELETE on the anchor, BEFORE ROW INSERT or UPDATE on the
+  // link and on the grant — none on public.app_user — each enabled ALWAYS, with no column list and no WHEN.
+  assert.deepEqual(await serializeTriggers(), DECLARED_015);
 
   // The range bound refuses a value outside 1..2^53-1 rather than storing one the runtime could not round-trip.
   await rolledBack(async (tx) => {
@@ -265,6 +361,16 @@ test('M5P-02: from the runtime login the table and the trigger function are unre
   // cannot invoke it outside a trigger — it can be reached by writing one of the four tables it watches and in no other way.
   assert.equal(await runtime.unsafe(`select ${MOVED}`).then(() => null, (err) => err.code), '42501');
   assert.equal(await owner.unsafe('select tmpos_admission.m5_platform_authority_moved()').then(() => null, (err) => err.code), '0A000');
+  // 015's function likewise: refused to the runtime, uncallable outside a trigger even by the owner, and its ACL holds the
+  // owner's own entry and nothing else — no PUBLIC, no runtime role.
+  assert.equal(await runtime.unsafe(`select ${SERIALIZE}`).then(() => null, (err) => err.code), '42501');
+  assert.equal(await owner.unsafe(`select ${SERIALIZE}`).then(() => null, (err) => err.code), '0A000');
+  const acl = await owner`select g.grantee = p.proowner as is_owner, g.privilege_type
+    from pg_catalog.pg_proc p, pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) g
+    where p.oid = ${SERIALIZE}::regprocedure`;
+  assert.deepEqual(acl.map((r) => ({ ...r })), [{ is_owner: true, privilege_type: 'EXECUTE' }], 'EXECUTE for the owner alone');
+  const [{ public_execute: publicExecute }] = await owner`select pg_catalog.has_function_privilege('public', ${SERIALIZE}::regprocedure, 'EXECUTE') as public_execute`;
+  assert.equal(publicExecute, false, 'PUBLIC cannot execute it');
   // The one thing the runtime may call.
   assert.deepEqual(await readAs(runtime, 'firebase', `m5p-nobody-${SUFFIX}`), [REFUSED_ROW]);
 
@@ -273,13 +379,14 @@ test('M5P-02: from the runtime login the table and the trigger function are unre
       pg_catalog.has_table_privilege(r.oid, ${TABLE}::regclass, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') as on_table,
       pg_catalog.has_any_column_privilege(r.oid, ${TABLE}::regclass, 'SELECT, INSERT, UPDATE, REFERENCES') as on_column,
       pg_catalog.has_function_privilege(r.oid, ${MOVED}::regprocedure, 'EXECUTE') as on_trigger_fn,
+      pg_catalog.has_function_privilege(r.oid, ${SERIALIZE}::regprocedure, 'EXECUTE') as on_serialize_fn,
       pg_catalog.has_function_privilege(r.oid, ${READ}::regprocedure, 'EXECUTE') as on_read,
       pg_catalog.has_schema_privilege(r.oid, 'tmpos_admission', 'USAGE') as usage,
       pg_catalog.has_schema_privilege(r.oid, 'tmpos_admission', 'CREATE') as create_in
     from pg_catalog.pg_roles r where r.rolname = any (${roles}::name[]) order by r.rolname`;
   const runtimeSide = (role) => role === 'tmpos_app' || role === RUNTIME_LOGIN;
   assert.deepEqual(privileges.map((r) => ({ ...r })), [...roles].sort().map((role) => ({
-    role, on_table: false, on_column: false, on_trigger_fn: false, on_read: runtimeSide(role), usage: runtimeSide(role), create_in: false,
+    role, on_table: false, on_column: false, on_trigger_fn: false, on_serialize_fn: false, on_read: runtimeSide(role), usage: runtimeSide(role), create_in: false,
   })));
   // Membership of an owner would hand a role everything the owner holds, a direct write of every version included.
   const members = await owner`select distinct r.rolname::text as role
@@ -294,6 +401,8 @@ test('M5P-02: from the runtime login the table and the trigger function are unre
 });
 
 test('M5P-03: 013\'s own postcondition refuses every widening it names, each proved in its own rolled-back transaction', async () => {
+  // 013's postcondition is a snapshot of the schema as 013 left it — two routines — so each proof first rolls 015 back
+  // through 015's own rollback, inside the same rolled-back transaction, and judges 013's state alone.
   const NOT_THE_FOUR = /the version triggers are not exactly the four section 4 declares/;
   /** DECLARED with one trigger's catalog row changed — what a widening that alters exactly that property leaves. */
   const but = (name, change) => DECLARED.map((t) => (t.name === name ? { ...t, ...change } : t));
@@ -333,6 +442,7 @@ test('M5P-03: 013\'s own postcondition refuses every widening it names, each pro
       NOT_THE_FOUR, but('trg_app_user_platform_authority', { columns: STATUS })],
   ]) {
     await rolledBack(async (tx) => {
+      await tx.unsafe(DOWN_015).simple();
       await tx.unsafe(widen).simple();
       assert.deepEqual(await versionTriggers(tx), leaves, `${label}: the widening changes that one property and nothing else`);
       const refused = await refusalIn(tx)((sp) => sp.unsafe(POSTCONDITION_013).simple());
@@ -341,7 +451,10 @@ test('M5P-03: 013\'s own postcondition refuses every widening it names, each pro
     });
   }
   // Control: over the state 013 left, its postcondition holds.
-  await rolledBack(async (tx) => { assert.equal(await refusalIn(tx)((sp) => sp.unsafe(POSTCONDITION_013).simple()), null); });
+  await rolledBack(async (tx) => {
+    await tx.unsafe(DOWN_015).simple();
+    assert.equal(await refusalIn(tx)((sp) => sp.unsafe(POSTCONDITION_013).simple()), null);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -618,7 +731,7 @@ test('M5P-06: the adapter reports what the read says, decides nothing, and answe
 // rollback and re-application — inside transactions that are rolled back
 // ---------------------------------------------------------------------------
 
-test('M5P-07: neither 013\'s rollback nor its re-application proceeds while an administrative session exists; the rollback removes exactly what 013 created, and a re-apply starts from zero', async () => {
+test('M5P-07: neither 013\'s rollback nor its re-application proceeds while an administrative session exists; beneath 015 the rollback refuses; otherwise it removes exactly what 013 created, and a re-apply starts from zero', async () => {
   const who = await actor('rollback', [{ scope: 'platform', role: 'operations_admin' }]);
   await owner`update user_membership set status = 'suspended' where internal_user_id = ${who.id}`;
   await owner`update user_membership set status = 'active' where internal_user_id = ${who.id}`;
@@ -655,6 +768,13 @@ test('M5P-07: neither 013\'s rollback nor its re-application proceeds while an a
     // TENANT session carries no platform witness and blocks neither the rollback nor the re-application below.
     await tx`delete from tmpos_session.session where audience = 'admin'`;
     assert.equal((await session(tx, 'tenant'))[0].created, 'created');
+    // 015's function lives in 013's schema, which 013's rollback drops WITHOUT CASCADE: beneath 015 it refuses
+    // (dependent_objects_still_exist) and changes nothing, so 015 is rolled back first, through its own rollback.
+    const beneath = await refusalIn(tx)((sp) => sp.unsafe(DOWN_013).simple());
+    assert.equal(beneath?.code, '2BP01', `013's rollback refuses beneath 015: ${beneath?.message}`);
+    assert.deepEqual(await present(tx), APPLIED, 'nothing was dropped');
+    assert.deepEqual(await serializeTriggers(tx), DECLARED_015, 'nor any of 015\'s triggers');
+    await tx.unsafe(DOWN_015).simple();
     await tx.unsafe(DOWN_013).simple();
     // DOWN pinned this transaction's search_path to pg_catalog: every name below is qualified.
     assert.deepEqual(await present(tx), { schema: false, read: false, version_table: false, triggers: 0 },
@@ -705,10 +825,14 @@ test('M5P-07: neither 013\'s rollback nor its re-application proceeds while an a
       `the actor was at ${held}; the re-applied read says 0 until it is written again — which is why the rollback refuses while any witness exists`);
     await tx`update public.user_membership set status = 'suspended' where internal_user_id = ${who.id}`;
     assert.equal(await versionRow(who, tx), '1', 'and the re-applied trigger moves it again, from the start');
+    // 015 re-applies over the re-applied 013, its postcondition satisfied.
+    await tx.unsafe(UP_015).simple();
+    assert.deepEqual(await serializeTriggers(tx), DECLARED_015, '015 re-applied over it');
   });
 
   assert.deepEqual(await present(owner), APPLIED, 'the shared state is untouched');
   assert.deepEqual(await versionTriggers(), DECLARED);
+  assert.deepEqual(await serializeTriggers(), DECLARED_015);
   assert.equal(await versionRow(who), held, 'and so is the version');
 });
 
@@ -734,4 +858,240 @@ test('M5P-08: migrations 005-012 are byte-identical to what this stage found', (
   for (const [name, digest] of Object.entries(PINNED)) {
     assert.equal(createHash('sha256').update(readFileSync(`${MIG_DIR}/${name}`)).digest('hex'), digest, name);
   }
+});
+
+// ---------------------------------------------------------------------------
+// migration 015: what waits for a held account, and what does not
+// ---------------------------------------------------------------------------
+
+test('M5P-09: an anchor repoint or delete, and a link or grant inserted for the actor or re-pointed to it, each WAIT for a transaction holding the actor\'s account FOR UPDATE — as a replica too — and land once it commits', async () => {
+  /** Each case prepares its own fixture around the held actor A: the write that must wait, what it leaves once it has
+   *  landed, how far it moves A's version (013), and any clean-up of what a replica-mode write leaves behind. */
+  const cases = [
+    ['the anchor repointed to another uid', async (A) => {
+      const moved = `${A.uid}-moved`;
+      return {
+        write: (tx) => tx`update public.platform_identity set auth_provider_uid = ${moved} where internal_user_id = ${A.id}`,
+        landed: async () => (await owner`select auth_provider_uid as v from public.platform_identity where internal_user_id = ${A.id}`)[0].v === moved,
+      };
+    }],
+    ['a link inserted for the actor', async (A, tag) => {
+      const supabaseUid = await supabaseAnchor(`insert-${tag}`);
+      return {
+        write: (tx) => tx`insert into public.identity_link (internal_user_id, firebase_auth_provider_uid, supabase_auth_provider_uid)
+          values (${A.id}, ${A.uid}, ${supabaseUid})`,
+        landed: async () => (await owner`select pg_catalog.count(*)::int as n from public.identity_link where internal_user_id = ${A.id}`)[0].n === 1,
+      };
+    }],
+    ['another actor\'s link re-pointed to the actor', async (A, tag) => {
+      const B = await actor(`repoint-from-${tag}`, []);
+      const link = await linkOf(B, `repoint-${tag}`);
+      return {
+        write: (tx) => tx`update public.identity_link set internal_user_id = ${A.id} where link_id = ${link}`,
+        landed: async () => (await owner`select internal_user_id as v from public.identity_link where link_id = ${link}`)[0].v === A.id,
+      };
+    }],
+    // A grant's own foreign key already waits in an ordinary session; as a replica no foreign-key check runs, and only
+    // 015's trigger on user_membership makes it wait.
+    ['a platform grant inserted for the actor', async (A) => ({
+      write: (tx) => tx`insert into public.user_membership (internal_user_id, scope_type, role_id, status)
+        values (${A.id}, 'platform', 'system_owner', 'active')`,
+      landed: async () => (await owner`select pg_catalog.count(*)::int as n from public.user_membership where internal_user_id = ${A.id}`)[0].n === 1,
+    })],
+    ['another actor\'s platform grant re-pointed to the actor', async (A, tag) => {
+      const B = await actor(`grant-from-${tag}`, [{ scope: 'platform', role: 'system_owner' }]);
+      const [{ membership_id: m }] = await owner`select membership_id from public.user_membership where internal_user_id = ${B.id}`;
+      return {
+        write: (tx) => tx`update public.user_membership set internal_user_id = ${A.id} where membership_id = ${m}`,
+        landed: async () => (await owner`select internal_user_id as v from public.user_membership where membership_id = ${m}`)[0].v === A.id,
+      };
+    }],
+    // The DELETE must REMOVE the anchor once it lands (a BEFORE DELETE trigger that returned no row would skip it). In an
+    // ordinary session the cascade takes the account with it (+2: the anchor, then the account); as a replica no
+    // cascade runs, the account is left behind (+1), and the test deletes it afterwards.
+    ['the anchor deleted', async (A, tag, replica) => {
+      const rows = async () => (await owner`select
+        (select pg_catalog.count(*)::int from public.platform_identity where internal_user_id = ${A.id}) as anchors,
+        (select pg_catalog.count(*)::int from public.app_user where internal_user_id = ${A.id}) as accounts`)[0];
+      return {
+        write: (tx) => tx`delete from public.platform_identity where internal_user_id = ${A.id}`,
+        landed: async () => { const r = await rows(); return r.anchors === 0 && r.accounts === (replica ? 1 : 0); },
+        moves: replica ? 1 : 2,
+        cleanUp: replica ? () => owner`delete from public.app_user where internal_user_id = ${A.id}` : undefined,
+      };
+    }],
+  ];
+  for (const replica of [false, true]) {
+    for (const [i, [label, prepare]] of cases.entries()) {
+      const tag = `${replica ? 'r' : 'o'}${i}`;
+      const what = `${label}${replica ? ', as a replica' : ''}`;
+      const A = await actor(`held-${tag}`, []);
+      const { write, landed, moves = 1, cleanUp } = await prepare(A, tag, replica);
+      const before = Number((await versionRow(A)) ?? '0');
+      const hold = await holdAccount(A);
+      const change = inTransaction(write, { replica });
+      let released = false;
+      try {
+        assert.equal(await blockedBy(await change.pid, hold.pid, change.settled), true, `${what}: blocked by the holder itself`);
+        assert.equal(change.settled(), false, `${what}: still waiting`);
+        assert.equal(await landed(), false, `${what}: nothing has landed while the account is held`);
+        released = true;
+        assert.deepEqual(await hold.release(), { ok: true, value: undefined }, `${what}: the holder commits`);
+      } finally {
+        if (!released) await hold.release();
+      }
+      const done = await change.outcome;
+      assert.equal(done.ok, true, `${what}: it lands once the holder has committed: ${JSON.stringify(done)}`);
+      assert.equal(await landed(), true, `${what}: landed`);
+      assert.equal(Number(await versionRow(A)) - before, moves, `${what}: and 013 moved the actor's version, after the wait`);
+      if (cleanUp) await cleanUp();
+    }
+  }
+});
+
+test('M5P-10: a profile update, the identity sync\'s upsert and a link re-pointed AWAY from the held actor do not wait; under 009\'s whole lock set an anchor DELETE of another actor does not, of the held actor waits and then removes it with its cascade, and nothing deadlocks', async () => {
+  // Held by the account lock alone: none of these writes moves an anchor or brings a link to the held actor, so none
+  // waits. The link re-point proves the actor a link LEAVES is not locked (015 locks the new actor only).
+  const A = await actor('nowait', []);
+  const B = await actor('nowait-to', []);
+  const link = await linkOf(A, 'nowait');
+  const hold = await holdAccount(A);
+  try {
+    for (const [label, write] of [
+      ['the email and display name', (tx) => tx`update public.platform_identity set email = ${`m5p-nowait-${SUFFIX}@example.test`},
+        display_name = 'M5P nowait' where internal_user_id = ${A.id}`],
+      // The identity sync's own statement (identityRepository.ts upsertIdentity), on the held actor's reference: its
+      // conflict turns it into an UPDATE of the profile columns, which moves no anchor and waits for nothing.
+      ['the identity sync\'s upsert', (tx) => tx`insert into public.platform_identity (auth_provider, auth_provider_uid, email, display_name)
+        values ('firebase', ${A.uid}, ${`m5p-sync-${SUFFIX}@example.test`}, 'M5P sync')
+        on conflict (auth_provider, auth_provider_uid)
+        do update set email = excluded.email, display_name = excluded.display_name, updated_at = now()`],
+      ['the actor\'s link re-pointed to another actor', (tx) => tx`update public.identity_link set internal_user_id = ${B.id} where link_id = ${link}`],
+    ]) {
+      const done = await inTransaction(write, { lockTimeout: '2s' }).outcome;
+      assert.equal(done.ok, true, `${label}: completes while the account is held: ${JSON.stringify(done)}`);
+    }
+    assert.equal(hold.settled(), false, 'each completed while the holder was still open');
+  } finally {
+    assert.deepEqual(await hold.release(), { ok: true, value: undefined });
+  }
+  assert.equal((await owner`select internal_user_id as v from public.identity_link where link_id = ${link}`)[0].v, B.id);
+
+  // Held by 009 itself — the account FOR UPDATE, then its link and its grant FOR SHARE — as a command holds them.
+  const D = await actor('delete', [{ scope: 'platform', role: 'system_owner' }]);
+  await linkOf(D, 'delete');
+  const C = await actor('delete-other', [{ scope: 'platform', role: 'system_owner' }]);
+  await linkOf(C, 'delete-other');
+  const [{ membership_id: membershipId }] = await owner`select membership_id from public.user_membership where internal_user_id = ${D.id}`;
+  const { security_version: securityVersion } = await resolveAs(owner, D.uid);
+  const command = await holding(async (tx) => (await tx`select outcome from tmpos_command.m5_revalidate_platform_authority(
+    ${D.id}::uuid, ${securityVersion}::text, ${membershipId}::uuid, 'system_owner'::text)`)[0].outcome);
+  assert.equal(command.answer, 'valid', '009 answered, holding its whole lock set');
+  let released = false;
+  let own;
+  try {
+    const other = await inTransaction((tx) => tx`delete from public.platform_identity where internal_user_id = ${C.id}`, { lockTimeout: '2s' }).outcome;
+    assert.equal(other.ok, true, `another actor's anchor, account and link are deleted without waiting: ${JSON.stringify(other)}`);
+    own = inTransaction((tx) => tx`delete from public.platform_identity where internal_user_id = ${D.id}`);
+    assert.equal(await blockedBy(await own.pid, command.pid, own.settled), true, 'the held actor\'s anchor DELETE waits on the holder');
+    assert.equal(own.settled(), false);
+    released = true;
+    assert.deepEqual(await command.release(), { ok: true, value: undefined }, 'the holder commits: it was no deadlock victim (40P01)');
+  } finally {
+    if (!released) await command.release();
+  }
+  const deleted = await own.outcome;
+  assert.equal(deleted.ok, true, `the delete lands after the holder's commit, no deadlock: ${JSON.stringify(deleted)}`);
+  const [{ anchors, accounts, links, grants }] = await owner`select
+    (select pg_catalog.count(*)::int from public.platform_identity where internal_user_id = any (${[C.id, D.id]}::uuid[])) as anchors,
+    (select pg_catalog.count(*)::int from public.app_user where internal_user_id = any (${[C.id, D.id]}::uuid[])) as accounts,
+    (select pg_catalog.count(*)::int from public.identity_link where internal_user_id = any (${[C.id, D.id]}::uuid[])) as links,
+    (select pg_catalog.count(*)::int from public.user_membership where internal_user_id = any (${[C.id, D.id]}::uuid[])) as grants`;
+  assert.deepEqual({ anchors, accounts, links, grants }, { anchors: 0, accounts: 0, links: 0, grants: 0 },
+    'both anchors are gone, and both cascades took the account, the link and the grant');
+});
+
+test('M5P-11: 015\'s own postcondition refuses every widening or narrowing it names, forced row security on the account table included; its rollback removes exactly its function and three triggers, it re-applies cleanly, and a member of the schema owner is refused before anything is created — all rolled back', async () => {
+  const NOT_THE_THREE = /the serialization triggers are not exactly the three section 3 declares/;
+  const NOT_DECLARED = /m5_platform_standing_serialize does not match its declaration/;
+  const but = (name, change) => DECLARED_015.map((t) => (t.name === name ? { ...t, ...change } : t));
+  for (const [label, widen, refusal, leaves] of [
+    ['EXECUTE to tmpos_app', `grant execute on function ${SERIALIZE} to tmpos_app`,
+      /unexpected direct grant remains on m5_platform_standing_serialize \(tmpos_app:EXECUTE\)/, DECLARED_015],
+    ['EXECUTE to PUBLIC', `grant execute on function ${SERIALIZE} to public`,
+      /unexpected direct grant remains on m5_platform_standing_serialize \(-:EXECUTE\)/, DECLARED_015],
+    ['SECURITY INVOKER', `alter function ${SERIALIZE} security invoker`, NOT_DECLARED, DECLARED_015],
+    ['its search path unpinned', `alter function ${SERIALIZE} reset search_path`, NOT_DECLARED, DECLARED_015],
+    ['a fourth routine in the schema', 'create function tmpos_admission.m5p_extra() returns integer language sql as \'select 1\'',
+      /schema tmpos_admission does not hold exactly 013's two routines and this file's one/, DECLARED_015],
+    ['a fourth trigger calling it', `create trigger m5p_fourth before insert or update on public.identity_link
+      for each row execute function ${SERIALIZE};
+      alter table public.identity_link enable always trigger m5p_fourth`, NOT_THE_THREE,
+      [{ ...DECLARED_015[0], name: 'm5p_fourth' }, ...DECLARED_015]],
+    ['the link trigger disabled', 'alter table public.identity_link disable trigger trg_identity_link_standing_serialize',
+      NOT_THE_THREE, but('trg_identity_link_standing_serialize', { enabled: 'D' })],
+    ['the anchor trigger enabled for origin sessions only', 'alter table public.platform_identity enable trigger trg_platform_identity_standing_serialize',
+      NOT_THE_THREE, but('trg_platform_identity_standing_serialize', { enabled: 'O' })],
+    ['the anchor trigger narrowed to UPDATE alone — a replica-mode anchor DELETE would no longer wait',
+      `drop trigger trg_platform_identity_standing_serialize on public.platform_identity;
+      create trigger trg_platform_identity_standing_serialize before update on public.platform_identity
+        for each row execute function ${SERIALIZE};
+      alter table public.platform_identity enable always trigger trg_platform_identity_standing_serialize`,
+      NOT_THE_THREE, but('trg_platform_identity_standing_serialize', { tgtype: 19 })],
+    ['the grant trigger dropped — a replica-mode grant insert would no longer wait',
+      'drop trigger trg_user_membership_standing_serialize on public.user_membership',
+      NOT_THE_THREE, DECLARED_015.filter((t) => t.name !== 'trg_user_membership_standing_serialize')],
+    // Forced row security would hide every account row from the owner-run lock, which would then serialize nothing.
+    ['FORCE ROW LEVEL SECURITY on public.app_user', 'alter table public.app_user force row level security',
+      /row level security would hide public\.app_user rows from m5_platform_standing_serialize/, DECLARED_015],
+  ]) {
+    await rolledBack(async (tx) => {
+      await tx.unsafe(widen).simple();
+      assert.deepEqual(await serializeTriggers(tx), leaves, `${label}: the widening changes that one property and nothing else`);
+      const refused = await refusalIn(tx)((sp) => sp.unsafe(POSTCONDITION_015).simple());
+      assert.equal(refused?.code, '55000', `the postcondition refuses ${label}`);
+      assert.match(refused.message, refusal, label);
+    });
+  }
+  // Control: over the state 015 left, its postcondition holds.
+  await rolledBack(async (tx) => { assert.equal(await refusalIn(tx)((sp) => sp.unsafe(POSTCONDITION_015).simple()), null); });
+
+  await rolledBack(async (tx) => {
+    await tx.unsafe(DOWN_015).simple();
+    // DOWN pinned this transaction's search_path to pg_catalog: every name below is qualified.
+    const [left] = await tx`select pg_catalog.to_regprocedure(${SERIALIZE}) is null as function_gone,
+        (select pg_catalog.array_agg(g.tgname::text order by g.tgname) from pg_catalog.pg_trigger g
+          where g.tgrelid in ('public.platform_identity'::regclass, 'public.identity_link'::regclass, 'public.user_membership'::regclass)
+            and not g.tgisinternal) as triggers`;
+    assert.deepEqual({ ...left }, {
+      function_gone: true,
+      triggers: ['trg_identity_link_platform_authority', 'trg_identity_link_updated_at', 'trg_platform_identity_platform_authority',
+        'trg_platform_identity_updated_at', 'trg_user_membership_platform_authority', 'trg_user_membership_updated_at'],
+    }, '015\'s function and triggers are gone; 013\'s and 001\'s/002\'s/004\'s remain');
+    assert.deepEqual(await versionTriggers(tx), DECLARED, '013 untouched');
+    await tx.unsafe(UP_015).simple();
+    assert.deepEqual(await serializeTriggers(tx), DECLARED_015, 're-applied, exactly as declared');
+  });
+
+  // Applied by a MEMBER of the schema's owner — one that may act as the owner, and so passes every table-ownership
+  // check — section 1 refuses before anything is created: the function would be the member's, not the schema owner's.
+  const member = `m5p_member_${SUFFIX.replace(/-/g, '')}`;
+  await rolledBack(async (tx) => {
+    await tx.unsafe(DOWN_015).simple();
+    await tx.unsafe(`create role ${member} nologin inherit`);
+    const [{ schema_owner: schemaOwner }] = await tx`select n.nspowner::regrole::text as schema_owner
+      from pg_catalog.pg_namespace n where n.nspname = 'tmpos_admission'`;
+    await tx.unsafe(`grant ${schemaOwner} to ${member}`);
+    const refused = await refusalIn(tx)(async (sp) => {
+      await sp.unsafe(`set local role ${member}`);
+      await sp.unsafe(UP_015).simple();
+    });
+    assert.deepEqual(refused, {
+      code: '42501',
+      message: 'migration 015 refused: the applying principal does not own schema tmpos_admission, so the trigger function it creates would not pass the ownership postcondition',
+    }, 'insufficient_privilege, from section 1');
+    assert.deepEqual(await serializeTriggers(tx), [], 'the refused up created no trigger');
+    assert.equal((await tx`select pg_catalog.to_regprocedure(${SERIALIZE}) is null as absent`)[0].absent, true, 'and no function');
+  });
+  assert.deepEqual(await serializeTriggers(), DECLARED_015, 'the shared state is untouched');
 });

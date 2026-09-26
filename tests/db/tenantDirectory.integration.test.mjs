@@ -3,11 +3,14 @@
 // surface over real loopback sockets — the read route and the two existing commands, decided by the canonical platform
 // authorizer, committed by the real store. M5-GIAM-D1-P4: the admin boundary is the durable pair — migration 013's
 // admission, asked at login and on every request, and the authorizer deciding on the scope that admission selected — so
-// an account that is not eligible, or holds no platform grant or two, is refused at the login itself.
+// an account that is not eligible, or holds no platform grant or two, is refused at the login itself. M5-ADMIN-REVOKE-P1:
+// the store runs the production revalidator whole (009's locks, the presenting session held, 013's read of its standing)
+// and the chain the production session store with the login's standing check, so the session a command carries is the
+// durable row its transaction holds.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
-// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-014 and left tenants of
+// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-015 and left tenants of
 // their own: every directory assertion is made against the owner's own ordered read of the whole table, never a count this
 // suite assumes. Every rollback and refusal proof runs inside one transaction that is rolled back.
 import test from 'node:test';
@@ -23,17 +26,20 @@ import { createNodeFsPort } from '../../server/platform-identity/migrationEngine
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
-import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
-import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import {
+  createPostgresPrincipalResolver, lockPlatformAuthority, revalidatePlatformAuthority,
+} from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPlatformAdmission, readPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import { createPostgresSessionStore, holdAdministrativeSession } from '../../server/persistence/postgresSessionStore.ts';
 import { createPostgresTenantDirectory } from '../../server/persistence/postgresTenantDirectory.ts';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../../server/persistence/tenantDisplayNameMutator.ts';
 import { TENANT_STATUS_MUTATOR } from '../../server/persistence/tenantStatusMutator.ts';
 import {
-  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformPermits, createPlatformSessionAdmission,
+  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformPermits,
+  createPlatformSessionAdmission,
 } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { TEST_IDEMPOTENCY_KEY } from '../../server/runtime/idempotencyStore.testkit.ts';
-import { createMemorySessionStore } from '../../server/runtime/memorySessionStore.testkit.ts';
 import { selectScope } from '../../server/runtime/principals.ts';
 import { testRequestLimits } from '../../server/runtime/rateLimiter.testkit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
@@ -146,8 +152,16 @@ runtime = connect(RUNTIME_LOGIN, 2);
 client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
   ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 6, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
 });
+// The production revalidator, composed exactly as productionTransactions.ts composes it (M5-ADMIN-REVOKE-P1).
 const store = createPostgresTransactionalStore({
-  client, mutators: [TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR], revalidate: createPlatformContextRevalidator({ authority: revalidatePlatformAuthority }),
+  client, mutators: [TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR],
+  revalidate: createPlatformContextRevalidator({
+    authority: revalidatePlatformAuthority, session: (sql, key) => holdAdministrativeSession(sql, key, Date.now()), read: readPlatformAdmission,
+  }),
+});
+/** The production session store over the same kernel, with the administrative login's standing check (M5-ADMIN-REVOKE-P1). */
+const SESSIONS = createPostgresSessionStore({
+  client, standing: createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority }),
 });
 const principals = createPostgresPrincipalResolver({ client });
 const directory = createPostgresTenantDirectory({ client });
@@ -202,11 +216,11 @@ const routine = (sql, s, after = null, limit = 51) => sql`select o_outcome, o_te
 // migration 012 as applied
 // ---------------------------------------------------------------------------
 
-test('M5T-01: 001-014 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
+test('M5T-01: 001-015 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
   const routines = await owner`select p.proname, p.prosecdef, p.provolatile, p.proconfig
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_directory'::regnamespace`;
   assert.deepEqual(routines.map((r) => ({ ...r })), [{
@@ -437,7 +451,7 @@ async function withChain(fn) {
         },
         admission: createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) }),
         authorizer: createAdmittedPlatformAuthorizer(),
-        store: createMemorySessionStore(),
+        store: SESSIONS,
       },
     },
   });

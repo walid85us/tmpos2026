@@ -408,6 +408,7 @@ test('a committed transition answers exactly its representation, and the port re
     assert.equal(c.authNotAfter, AUTHENTICATED_AT + RECENT_AUTH_MAX_AGE_MS,
       'the deadline is the PROVIDER\'s authentication plus the window, never the session\'s creation');
     assert.equal(c.unchanged, null, 'this command carries no unchanged response');
+    assert.match(String(c.sessionKey), /^[A-Za-z0-9_-]{43}$/, 'the presenting session\'s store key, for the transaction to hold it (M5-ADMIN-REVOKE-P1)');
     assert.equal(c.events.length, 1, 'exactly one event');
     const [e] = c.events;
     assert.deepEqual({ type: e.type, version: e.version, aggregateType: e.aggregateType, aggregateId: e.aggregateId, aggregateVersion: e.aggregateVersion, payload: e.payload },

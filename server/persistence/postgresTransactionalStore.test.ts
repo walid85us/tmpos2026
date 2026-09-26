@@ -131,7 +131,10 @@ const TRUSTED: TrustedScope = Object.freeze({
   scope: 'platform', tenant: null, store: null, membershipId: '55555555-5555-4555-8555-555555555555', roleId: 'system_owner', limitation: 'none',
 });
 
-/** A command exactly as the runtime prepares one. */
+/** The store key of the administrative session a context-carrying command is presented by (M5-ADMIN-REVOKE-P1). */
+const SESSION_KEY = 's'.repeat(21) + '_-' + 'S'.repeat(20);
+
+/** A command exactly as the runtime prepares one: a context-carrying one presented by a session, as every one is. */
 function command(context: TrustedScope | null = null): TransactionCommand {
   const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
     method: 'POST', path: '/v1/unit', audience: null, tenant: null, store: null, body: Buffer.from('{}'),
@@ -146,6 +149,7 @@ function command(context: TrustedScope | null = null): TransactionCommand {
     scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
     context,
     authNotAfter: null,
+    sessionKey: context === null ? null : SESSION_KEY,
     seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null);
@@ -347,10 +351,12 @@ test('a trusted context is re-read after the fence and before any business state
   });
   const store = createPostgresTransactionalStore({
     client, mutators: [mutator],
-    revalidate: async (_sql, scope, permission) => {
+    revalidate: async (_sql, scope, permission, authNotAfter, sessionKey) => {
       order.push('revalidate');
       assert.deepEqual(scope, TRUSTED);
       assert.equal(permission, 'conformance.write', 'the route\'s own requirement, from the audit record the runtime built');
+      assert.equal(authNotAfter, null);
+      assert.equal(sessionKey, SESSION_KEY, 'the presenting session\'s key, handed to the revalidator as the command carried it (M5-ADMIN-REVOKE-P1)');
       return true;
     },
   });
@@ -359,6 +365,9 @@ test('a trusted context is re-read after the fence and before any business state
   assert.deepEqual(order, ['revalidate', 'mutator'], 'the context is re-read before the mutation');
   const fenceAt = client.texts.findIndex((t) => t.includes('m6_command_fence'));
   assert.ok(fenceAt >= 0 && fenceAt < client.texts.findIndex((t) => t.includes('m6_command_enqueue')), 'the fence still runs first');
+  // The key is the revalidator's parameter and nothing else: no statement the store itself sends — the fence, the
+  // mutation, the audit record, the events, the completion — carries it.
+  assert.ok(!JSON.stringify(client.values).includes(SESSION_KEY), 'the session key reaches no statement of the store\'s own');
 });
 
 test('a lost lease refuses before the context is read at all', async () => {
@@ -470,6 +479,16 @@ test('a command may not name an actor, tenant or store its context did not give 
     { ...c, authNotAfter: 1.5 },
     { ...c, authNotAfter: '1700000000000' },
     { ...c, context: null, audit: { ...c.audit, actor: null, tenant: null, store: null }, authNotAfter: 1_700_000_600_000 },
+    // M5-ADMIN-REVOKE-P1 — the presenting session's key: null or exactly a session key's shape, and never without a context.
+    { ...c, sessionKey: '' },
+    { ...c, sessionKey: 'k'.repeat(42) },
+    { ...c, sessionKey: 'k'.repeat(44) },
+    { ...c, sessionKey: `${'k'.repeat(42)}=` },
+    { ...c, sessionKey: 1 },
+    { ...c, sessionKey: { key: SESSION_KEY } },
+    { ...c, context: null, audit: { ...c.audit, actor: null, tenant: null, store: null }, sessionKey: SESSION_KEY },
+    Object.fromEntries(Object.entries(c).filter(([k]) => k !== 'sessionKey')), //   the field absent: the key set is exact
+    { ...c, session: SESSION_KEY }, //                                                an extra field
   ];
   for (const raw of forged) {
     const store = untouched();
@@ -494,7 +513,7 @@ function renaming(context: TrustedScope | null = TRUSTED): TransactionCommand {
   const plan = planTenantDisplayName({ audience: 'admin', body: { tenantId: TARGET_TENANT, displayName: 'Acme', expectedVersion: 3 }, newAggregateId: randomUUID() });
   const prepared = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, tenantEvents, plan, {
     scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'platform', permission: 'edit_tenant_profile' }),
-    context, authNotAfter: null, seal: (envelope) => keyring.seal(envelope, operation),
+    context, authNotAfter: null, sessionKey: context === null ? null : SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null && prepared.command.unchanged !== null);
   return prepared.command;

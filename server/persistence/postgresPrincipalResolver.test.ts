@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from './postgresPrincipalResolver.js';
+import { createPostgresPrincipalResolver, lockPlatformAuthority, revalidatePlatformAuthority } from './postgresPrincipalResolver.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
 
@@ -149,4 +149,32 @@ test('platform revalidation is exactly the routine saying valid for exactly this
     { ...SCOPE, scope: 'tenant', tenant: '22222222-2222-4222-8222-222222222222', roleId: 'manager' },
   ]) assert.equal(await revalidatePlatformAuthority(watching, scope as TrustedScope, null), false, JSON.stringify(scope));
   assert.equal(asked, false);
+});
+
+test('M5AR-P1 the authority lock answers only what 009 said — valid true, invalid false — and THROWS for everything else, keeping nothing of the fault', async () => {
+  // M5-ADMIN-REVOKE-P1: the administrative login's establish check binds this lock, where a fault read as false would be a
+  // 401 "your standing changed" instead of the 503 an outage is.
+  const bound: unknown[][] = [];
+  const texts: string[] = [];
+  const handle = (rows: unknown): PgTransactionScope =>
+    ((strings: TemplateStringsArray, ...values: unknown[]) => { texts.push(strings.join('?')); bound.push(values); return Promise.resolve(rows as never); }) as unknown as PgTransactionScope;
+  assert.equal(await lockPlatformAuthority(handle([{ outcome: 'valid' }]), SCOPE), true);
+  assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'migration 009\'s routine, which takes the locks');
+  assert.deepEqual(bound[0], [ACTOR, VERSION, MEMBERSHIP, 'system_owner']);
+  assert.equal(texts.length, 1, 'one statement: no freshness is claimed here');
+  assert.equal(await lockPlatformAuthority(handle([{ outcome: 'invalid' }]), SCOPE), false);
+  for (const rows of [[{ outcome: 'VALID' }], [{ outcome: true }], [{ outcome: 'valid', extra: 1 }], [], [{ outcome: 'valid' }, { outcome: 'valid' }], ['valid']]) {
+    await assert.rejects(lockPlatformAuthority(handle(rows), SCOPE), /^Error: platform authority unavailable$/, JSON.stringify(rows));
+  }
+  const fault = new Error('FATAL: M5-UNIT-CANARY lock timeout');
+  await assert.rejects(lockPlatformAuthority((() => Promise.reject(fault)) as unknown as PgTransactionScope, SCOPE), (err: unknown) => err === fault,
+    'a driver fault propagates to the caller\'s kernel, which rolls back and keeps nothing of it');
+  let asked = false;
+  const watching = ((): Promise<never> => { asked = true; return Promise.resolve([{ outcome: 'valid' }] as never); }) as unknown as PgTransactionScope;
+  for (const scope of [{ ...SCOPE, actor: 'root' }, { ...SCOPE, scope: 'tenant', tenant: TENANT, roleId: 'manager' }]) {
+    await assert.rejects(lockPlatformAuthority(watching, scope as TrustedScope), /platform authority unavailable/, JSON.stringify(scope));
+  }
+  assert.equal(asked, false, 'a scope selection could not have produced is never sent');
+  // revalidatePlatformAuthority keeps its one-value contract over the lock: every throw above is false there.
+  assert.equal(await revalidatePlatformAuthority(handle([{ outcome: 'VALID' }]), SCOPE, null), false);
 });

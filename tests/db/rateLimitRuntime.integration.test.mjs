@@ -212,7 +212,7 @@ async function storeDown() {
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-014 and a real non-owner runtime login
+// setup: real migrations 001-015 and a real non-owner runtime login
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -268,7 +268,8 @@ const FACTORIES = Object.freeze({
   }),
   store: createPostgresTransactionalStore,
   platformAdmission: (c) => createPostgresPlatformAdmission({ client: c }),
-  sessionStore: (c) => createPostgresSessionStore({ client: c }),
+  // The administrative login's standing check (M5-ADMIN-REVOKE-P1), forwarded exactly as PRODUCTION_FACTORIES forward it.
+  sessionStore: (c, standing) => createPostgresSessionStore({ client: c, standing }),
   tenantAdmission: (c) => createPostgresTenantAdmission({ client: c }),
   tenantDirectory: (c) => createPostgresTenantDirectory({ client: c }),
   rateLimiter: (c, keySecret) => createPostgresRateLimiter({ client: c, keySecret }),
@@ -455,9 +456,10 @@ const bucketsOpenedSince = async (sinceMs) => (await owner`select count(*)::int 
 // M6RS-00: the composition binds the PostgreSQL limiter
 // ---------------------------------------------------------------------------
 
-test('M6RS-00: 001-014 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
+test('M6RS-00: 001-015 applied; the transaction root hands over the limiter binding and the session root binds it to its own key', async () => {
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.ok(ledger.some((r) => r.version === '014' && r.dirty === false), '014 applied and clean');
+  assert.ok(ledger.some((r) => r.version === '015' && r.dirty === false), '015 applied and clean');
   assert.equal(typeof A.tx.rateLimiter, 'function');
   assert.notEqual(A.tx, B.tx, 'two separately composed roots, each over its own kernel');
 

@@ -200,6 +200,8 @@ Concise ADRs for the major structural choices in this package. Each: **Context �
 
 The tenant boundary keeps revoke-then-create. The login/logout audit record is delivered for the administrative boundary only, and G-AUDIT stays OPEN.
 
+**Amended (M5-ADMIN-REVOKE-P1, [ADR-30](#adr-30--administrative-changes-take-effect-at-commit-except-da-76-and-logins-recent-sign-ins-and-commands-are-ordered-against-them-in-their-own-transactions-decided--m5-admin-revoke-p1)).** On the administrative boundary, two concurrent reauthentications presenting one cookie no longer both create a session. `establish` must end the presented session in its own transaction, so at most one succeeds and the other answers 401 `login_reauth_no_session` (DA-61(b)). The same check now also runs at commit: a presented session that a logout or a revocation ended first refuses the reauthentication, even after it passed the checks above.
+
 ## ADR-29 — Administrative session lifecycle audit in the session transaction (DECIDED — M6-ADMIN-AUDIT-P1)
 
 **Context.** G-AUDIT and G-CPLOGIN both left the login/logout audit record open. The administrative boundary issued sessions with two separate store transactions (revoke, then create), ended them with a third, and recorded none of it. The runtime login already holds INSERT on `public.audit_event` through `tmpos_audit_writer` (migration 005). The supervised kernel runs any number of fixed statements in one transaction, and the command store already writes its audit row on its own transaction through the existing writer (ADR-17).
@@ -232,6 +234,66 @@ The tenant boundary keeps revoke-then-create. The login/logout audit record is d
 - the shared deadline (DA-68).
 
 DA-35's CHECK is not triggered: the store writes only fixed sentences. The evidence is in-process plus disposable PostgreSQL (`tests/db/productionEntry.integration.test.mjs` M6AA-01–14 check the persisted rows together with the session results). Code-only; nothing is deployed, and no managed database was touched.
+
+## ADR-30 — Administrative changes take effect at COMMIT (except DA-76), and logins, recent sign-ins and commands are ordered against them in their own transactions (DECIDED — M5-ADMIN-REVOKE-P1)
+
+**Context.** G-CPLOGIN's pre-operation security requirement left the concurrent-revocation race open. The stage reproduced it at `1e14207` against disposable PostgreSQL, through the production composition, with each competing write scheduled behind a confirmed row lock. Seven defects:
+- R1a: a recent sign-in committed after the revocation of the session it presented.
+- R1b: a recent sign-in committed after that session's logout (5 of 10 rounds).
+- R2: a login established on an admission read taken before a grant removal.
+- R3a and R3b: a tenant command committed after the logout of its own session.
+- R4: a tenant command committed after a grant removal and restoration, which 009 cannot see.
+- R6: a tenant command committed after an identity-anchor repoint, which nothing locked.
+
+A plain grant removal (R5) and a refresh after logout (R7) were already safe. Each defect was contained, because the next request was refused. But a session or a mutation committed after the change that should have refused it.
+
+**Decision.**
+1. **The ordering rule.** Every administrative change — a logout, a revocation, a grant removal or restoration, an account-status change, an identity-link insert or change, or an identity-anchor change — takes effect when its transaction commits. DA-76 is the one input to the standing that is not ordered: a tenant or store status change that moves the actor across 007's 200-grant bound, which the next request refuses.
+   - **R-READ.** A protected request's session is decided by its session read, and its authority by its admission read. A change committed before the read refuses the request (401).
+     - A read request may complete with 200 when its session read came before a logout or revocation and its admission read came before a standing change. That includes a logout committing between its session read and its admission read, because the admission read never reads the session row: this is permitted, not a defect.
+     - Nothing undoes a request that completed first. Its refresh is an UPDATE of an existing row, so it never recreates an ended session.
+     - On the tenant plane, the authorizer's second read may answer 403 (DA-63).
+   - **R-COMMAND.** A tenant-management command takes effect at its commit. Until then its committing transaction holds:
+     - the actor's account FOR UPDATE, and its identity links and grants FOR SHARE (009, unchanged);
+     - the row of the session that presented the command (a touch that changes nothing).
+
+     Under those locks it re-reads 013's admission for that session's provider reference. It requires the recomputed witness to equal the session's, and the selected scope to equal the command's. A change committed first refuses the command: nothing is committed, and the answer is 503 `transaction_unavailable`, the store's existing non-disclosure answer (DA-70). The next request is 401. A change not yet committed waits for the command's COMMIT.
+   - **R-LOGIN.** A login or recent sign-in takes effect when `establish` commits. Its transaction reads admission, takes 009's locks for the scope that read selected, reads admission again, and requires the witness to equal the new record's. Otherwise the answer is 401 `login_standing_changed`, and nothing is created, recorded or revoked.
+     - A recent sign-in also requires the presented session to be, in this order, live, administrative, the same principal's, and ended by this transaction. Otherwise the answer is 401 `login_reauth_no_session`, and nothing is created, ended or recorded.
+     - An ordinary login still ends whatever live session it presents, and still establishes when the presented key names none.
+   - **Outage.** An outage (store, admission, lock timeout, driver fault, malformed answer) is a bounded 503. Before COMMIT it writes and revokes nothing; a COMMIT whose answer was lost stays an outcome unknown (DA-61(a)). The establish check and 009's lock throw on a fault; neither folds a fault into a changed standing.
+   - **No revival.** A revoked cookie never becomes valid again: revocation is a DELETE, nothing inserts under an existing key, and the witness carries 013's authority version, which only increases.
+2. **Migration 015 serializes the changer.** Some changes to an administrator's standing took no lock that 009 conflicts with:
+   - an anchor repoint (the provider reference changed; no key of the account moves);
+   - an identity link inserted for the actor or re-pointed to it (its foreign keys lock anchor rows, not the account);
+   - in replica mode, where no foreign-key check or cascade runs, a grant inserted or re-pointed and an anchor deleted.
+
+   The runtime cannot lock the anchor: migration 005 grants it nothing on that table. An anchor lock taken after the account would also deadlock with an anchor DELETE, whose cascade reaches the account from the other end. So 015 makes the changer wait instead:
+   - One trigger function, `tmpos_admission.m5_platform_standing_serialize`: plpgsql, VOLATILE, SECURITY DEFINER, search_path pinned, granted to nobody.
+   - Three BEFORE ROW triggers, enabled ALWAYS and with no WHEN condition, fire it: on `platform_identity` UPDATE and DELETE (an UPDATE locks only when the anchor or its key moves); on `identity_link` INSERT and UPDATE; on `user_membership` INSERT and UPDATE (every scope).
+   - Each takes FOR KEY SHARE on the account row of every actor the write moves, in uuid order: for an anchor change, the actors before and after it; for an anchor delete, the actor it removes; for a link or grant insert, the actor it names. For a link or grant re-point it is the new actor only, because 009 already holds the row itself whenever a command holds the old actor, and locking the old actor's account after it would reverse 009's order.
+   - FOR KEY SHARE conflicts only with FOR UPDATE: 009's hold, and a DELETE or key change of the account, an anchor delete's cascade included (DA-74(b)). It does not conflict with an ordinary account write (status, display name) or with another changer's FOR KEY SHARE.
+   - 015 adds no table, grant, role or data change, and the runtime never calls the function. It must be applied by the owner of schema `tmpos_admission`, and its postcondition refuses when `public.app_user` forces row security (DA-72).
+3. **Lock order.**
+   - Runtime command: [idempotency fence] → account (FOR UPDATE) → identity links (FOR SHARE) → grants (FOR SHARE) → session row (touch) → tenant → inserts.
+   - `establish`: account → links → grants → presented session → (expired-row prune) → new session → audit record.
+   - Session-only transactions take session rows only.
+   - Changers: their own row → the account (015, FOR KEY SHARE) → the version row (013).
+   - No runtime path takes an anchor row or a version row.
+4. **Required dependencies, failing closed.** `establish` throws `standing_check_missing` when the store has no standing check. The command revalidator refuses construction without the session hold and the admission read, and refuses a command that carries no session key. The session key is a SQL parameter only: it is never audited, logged, evented or returned.
+
+**Alternatives rejected.**
+- (a) *A runtime lock on the identity anchor, after the account.* It needs a new grant. It does not block a link insert, whose foreign-key lock is compatible with FOR SHARE. It stalls profile syncs. And it deadlocks against an anchor DELETE (shown by a probe in the design review).
+- (b) *An in-process mutex.* It does not hold across instances.
+- (c) *Keeping 009's stated carve-out* ("a link inserted concurrently may land in between"). The next request would refuse, but a command or login would still commit after a change committed before it.
+
+**Consequences.**
+- For the administrative boundary, G-CPLOGIN's pre-operation create condition and the in-transaction re-verification of sensitive commands are implemented, in code only. The clause requiring stamp updates to be conditional on the principal's current security version is not implemented: updates are conditional on liveness only. No revival or authority path was found through it (an update never recreates a deleted row, and every administrative request re-reads admission and compares the witness). Amending that clause, or implementing a version-conditional update, is an open owner decision (DA-77). G-CPLOGIN stays OPEN. It stays unmet for the tenant boundary, whose login revokes and then creates with no standing re-read, and which no entry composes.
+- DA-61(b) is closed for the administrative boundary: at most one of several concurrent reauthentications presenting one cookie succeeds (ADR-28, amended above).
+- DA-63 is resolved as a classification: a fail-closed 403 that the test now proves rather than tolerates. The stage's M5A-09/09b runs predate the final runtime and 015; the final verification and CI re-run them. DA-49's last sentence is superseded.
+- The startup preflight's ledger step (ADR-27, step 5) now requires exactly 001–015; the approved runtime grants are unchanged. D4's future managed apply names the contiguous chain through 015, and 005–014 are byte-identical to the stage's entry commit.
+- Residuals: DA-70 to DA-77, among them 015's operator waits and row-security reliance, replica mode, the operator-vs-operator deadlocks, a pre-existing tenant-delete deadlock, the 200-grant bound and the stamp-update clause (DA-77). DA-67 is unchanged: `establish` still touches the presented session before its prune, and a principal-wide revocation takes no account lock.
+- The evidence is disposable PostgreSQL only. `tests/db/adminRevocation.integration.test.mjs` runs two production roots on two kernels; it failed 13 of 27 at the base, and passed 27 of 27 in three runs on this stage's code with 015 at `0ed1a314…`, before the final change to 015, which only adds the refusal unless the applier owns schema `tmpos_admission`. The stage's final verification and CI re-run it on the committed bytes. `tests/db/platformAdmission.integration.test.mjs` M5P-09–11 cover 015. Code-only; nothing is deployed, and no managed database was touched.
 
 ---
 

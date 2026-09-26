@@ -62,6 +62,7 @@ const binding = (newAggregateId = randomUUID()) => ({
   scope: op.scope, lease: 'l'.repeat(43), newAggregateId, authorization: Object.freeze({ scope: 'platform' as const, permission: 'items.write' }),
   context: null,
   authNotAfter: null,
+  sessionKey: null,
   seal: (e: Parameters<typeof keyring.seal>[0]) => keyring.seal(e, op),
 });
 const createPlan = (id: string) => ({
@@ -78,7 +79,7 @@ test('a plan becomes one command: runtime-generated identities, null scope and a
   const prepared = prepareCommand(create, events, createPlan(b.newAggregateId), b);
   assert.ok(prepared);
   const { command } = prepared;
-  assert.deepEqual(Object.keys(command).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'unchanged'], 'values only: no SQL, relation or raw request');
+  assert.deepEqual(Object.keys(command).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'sessionKey', 'unchanged'], 'values only: no SQL, relation or raw request');
   assert.equal(command.unchanged, null, 'a create names no unchanged response');
   // The runtime's own deterministic rejections, sealed for this operation and no other (M5-GIAM-D1-P2-R1).
   assert.deepEqual(keyring.unseal(command.rejected.conflict, op),
@@ -165,6 +166,24 @@ test('the audit annex and the step-up deadline are validated, and a plan out of 
   for (const bad of deadlines) {
     assert.equal(prepareCommand(create, events, good, { ...b, authNotAfter: bad as number }), null, `authNotAfter ${String(bad)}`);
   }
+});
+
+test('M5-ADMIN-REVOKE-P1 the presenting session key travels unchanged beside a context, in a digest\'s shape, and nowhere else', () => {
+  const b = { ...binding(), context: GRANTED.context };
+  const good = createPlan(b.newAggregateId);
+  const KEY = 'K'.repeat(20) + '_-' + 'k'.repeat(21);
+  const held = prepareCommand(create, events, good, { ...b, sessionKey: KEY });
+  assert.ok(held, 'a digest-shaped key beside a context is accepted');
+  assert.equal(held.command.sessionKey, KEY, 'it travels to the store unchanged');
+  assert.equal(prepareCommand(create, events, good, b)?.command.sessionKey, null, 'a command no session presented carries null');
+  // A SQL parameter only: never on the audit record, an event, the response or the context.
+  const carried = JSON.stringify([held.command.audit, held.command.events, held.command.context, held.response]);
+  assert.ok(!carried.includes(KEY), 'the key reaches no record, event, context or response');
+  for (const bad of ['', 'k'.repeat(42), 'k'.repeat(44), `${'k'.repeat(42)}=`, `${'k'.repeat(42)}+`, `${'k'.repeat(42)}/`, 1, true, {}, ['k'.repeat(43)]]) {
+    assert.equal(prepareCommand(create, events, good, { ...b, sessionKey: bad as string }), null, `sessionKey ${JSON.stringify(bad)}`);
+  }
+  assert.equal(prepareCommand(create, events, good, { ...b, context: null, sessionKey: KEY }), null,
+    'a key with no context names nothing this command could be ordered against');
 });
 
 test('command contracts are closed at startup against the event contracts', () => {
@@ -435,7 +454,8 @@ test('a command commits every part together, answers only once committed, and ev
     });
     assert.ok(UUID_V4.test(audit.correlationId) && audit.correlationId !== 'client-chosen-request-id', 'the correlation ID is the server’s, never the client’s request ID');
     assert.deepEqual(committed.events.map((e) => [e.envelope.aggregateId, e.envelope.correlationId, e.envelope.occurredAt]), [[id, audit.correlationId, audit.at]]);
-    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'unchanged']);
+    assert.deepEqual(Object.keys(commits[0]).sort(), ['audit', 'authNotAfter', 'context', 'events', 'lease', 'mutation', 'rejected', 'response', 'scope', 'sessionKey', 'unchanged']);
+    assert.equal(commits[0].sessionKey, null, 'no session presented this route, so it binds no session key');
     assert.deepEqual(Object.keys(plans[0]).sort(), ['audience', 'body', 'newAggregateId'], 'the planner sees its context and nothing else');
     assert.equal(plans[0].newAggregateId, id, 'a create names the runtime’s aggregate ID');
     for (const retry of [await post(port, { key }), await post(port, { key: key.toUpperCase() })]) {

@@ -7,6 +7,11 @@
 // M5-GIAM-D1-P4 composes the chain's admin boundary with the durable pair: migration 013's admission (asked at login and
 // on every request) and the authorizer deciding on the scope that admission selected — so an actor with no platform
 // grant, or two, is refused at the login and never reaches the route.
+// M5-ADMIN-REVOKE-P1 composes the production revalidator whole — 009's locks, the presenting administrative session held,
+// then 013's read of that session's standing — and the production session store with the login's standing check: every
+// context-carrying command below is presented by a real live administrative session established the way the login
+// establishes one (sessionOf), and M5D-22 proves a command whose session ended, or whose standing moved in a way 009
+// cannot see, commits nothing.
 //
 // DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
@@ -17,7 +22,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 
 import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
@@ -30,11 +35,16 @@ import { createNodeFsPort } from '../../server/platform-identity/migrationEngine
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
-import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
-import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import {
+  createPostgresPrincipalResolver, lockPlatformAuthority, revalidatePlatformAuthority,
+} from '../../server/persistence/postgresPrincipalResolver.ts';
+import {
+  PLATFORM_ADMISSION_BOUNDS, createPostgresPlatformAdmission, readPlatformAdmission,
+} from '../../server/persistence/postgresPlatformAdmission.ts';
+import { createPostgresSessionStore, holdAdministrativeSession } from '../../server/persistence/postgresSessionStore.ts';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../../server/persistence/tenantDisplayNameMutator.ts';
 import {
-  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformSessionAdmission,
+  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformSessionAdmission,
 } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { prepareCommand } from '../../server/runtime/commandTransaction.ts';
@@ -44,8 +54,7 @@ import { defineOutboxEvents } from '../../server/runtime/outbox.ts';
 import { selectScope } from '../../server/runtime/principals.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { sessionPaths } from '../../server/runtime/routes.ts';
-import { SESSION_COOKIES, SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
-import { createMemorySessionStore } from '../../server/runtime/memorySessionStore.testkit.ts';
+import { SESSION_COOKIES, SESSION_CSRF_HEADER, principalKeyOf } from '../../server/runtime/sessions.ts';
 import { testRequestLimits } from '../../server/runtime/rateLimiter.testkit.ts';
 import {
   TENANT_DISPLAY_NAME_CONTRACT,
@@ -65,8 +74,14 @@ const DOWN_009 = readFileSync(`${MIG_DIR}/009_m5_first_command_hardening.down.sq
 // M5-GIAM-D1-P2: 010 now sits above 009, and the chain rolls back NEWEST FIRST — so every proof below that
 // replays 008's or 009's own verify, or rolls one of them back, takes 010 off first.
 const DOWN_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.down.sql`, 'utf8');
-/** The production revalidator: 009's exact-authority routine, then the permission on the built-in definitions. */
-const REVALIDATE = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority });
+/**
+ * The production revalidator, composed exactly as productionTransactions.ts composes it: 009's exact-authority routine,
+ * the presenting administrative session held, 013's read of that session's standing (M5-ADMIN-REVOKE-P1), then the
+ * permission on the built-in definitions.
+ */
+const REVALIDATE = createPlatformContextRevalidator({
+  authority: revalidatePlatformAuthority, session: (sql, key) => holdAdministrativeSession(sql, key, Date.now()), read: readPlatformAdmission,
+});
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm5d-migrator', runtimeRef: 'm5d-runtime' };
 const LOCK_KEY = 528_508;
 const NOW = () => new Date().toISOString();
@@ -180,6 +195,11 @@ client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN)
 });
 const store = createPostgresTransactionalStore({ client, mutators: [TENANT_DISPLAY_NAME_MUTATOR], revalidate: REVALIDATE });
 const principals = createPostgresPrincipalResolver({ client });
+/** The production session store over the same kernel, with the administrative login's standing check (M5-ADMIN-REVOKE-P1). */
+const SESSIONS = createPostgresSessionStore({
+  client, standing: createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority }),
+});
+const ADMISSION = createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) });
 const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 const EVENTS = defineOutboxEvents(TENANT_DISPLAY_NAME_EVENTS);
 
@@ -225,12 +245,39 @@ const STORE_ONLY = await actor('store-only', { scope: 'store', tenant: T_STORE, 
 const STALE_VERSION = await actor('stale-version', { scope: 'platform', role: 'system_owner' });
 const STALE_GRANT = await actor('stale-grant', { scope: 'platform', role: 'system_owner' });
 
-/** The trusted scope the canonical authorizer would hand the command: resolved and selected by the real resolver. */
+/**
+ * A live administrative session of `who`, established exactly as the production login establishes one — admitted by
+ * migration 013 at its current witness, then the production session store's own establish: the standing re-read under
+ * 009's locks, the session row and its login audit record, in one transaction — and its store key (the digest of an
+ * identifier nobody holds). No row is written around the store: the store's establish is the login's only write.
+ */
+async function sessionOf(who) {
+  const decision = await ADMISSION.admit(who.principal, 'admin', signal());
+  assert.equal(decision?.admitted, true, `${who.uid} is admitted`);
+  const key = createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url');
+  const t = Date.now();
+  const record = Object.freeze({
+    audience: 'admin', authProvider: who.principal.authProvider, authProviderUid: who.principal.authProviderUid,
+    principalKey: principalKeyOf(who.principal), securityVersion: decision.securityVersion, authenticatedAt: t, createdAt: t, lastSeenAt: t, validatedAt: t,
+  });
+  const audit = Object.freeze({ action: 'login', operationId: randomUUID(), actor: decision.context.actor, authenticatedAt: t });
+  assert.equal(await SESSIONS.establish(key, record, null, audit, signal()), 'established', `${who.uid}: a session is established`);
+  return key;
+}
+/** The store key of the session each actor's latest context was planned under (M5-ADMIN-REVOKE-P1). */
+const SESSION_KEYS = new Map();
+
+/**
+ * The trusted scope the canonical authorizer would hand the command: resolved and selected by the real resolver — and,
+ * as the chain presents every command through a live administrative session, a session of that actor established at
+ * this moment's witness, whose key prepared() binds to the command.
+ */
 async function contextOf(who) {
   const resolution = await principals.resolve(who.principal, signal());
   assert.equal(resolution.outcome, 'resolved', `${who.uid} resolves`);
   const selection = selectScope(resolution.principal, 'platform', { tenant: null, store: null });
   assert.equal(selection.outcome, 'selected');
+  SESSION_KEYS.set(selection.scope.actor, await sessionOf(who));
   return selection.scope;
 }
 
@@ -244,11 +291,14 @@ async function acquired(who, body) {
   return { operation, lease };
 }
 
-/** The command the chain would commit: planned from the body, prepared under the record's lease and the trusted context. */
-function prepared({ operation, lease }, context, body) {
+/**
+ * The command the chain would commit: planned from the body, prepared under the record's lease and the trusted context,
+ * presented by the actor's session from contextOf — or by `sessionKey` when a case names another.
+ */
+function prepared({ operation, lease }, context, body, sessionKey = context === null ? null : (SESSION_KEYS.get(context.actor) ?? null)) {
   const plan = planTenantDisplayName({ audience: 'admin', body, newAggregateId: randomUUID() });
   const command = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, EVENTS, plan, {
-    scope: operation.scope, lease, newAggregateId: randomUUID(), authorization: REQUIREMENT, context, authNotAfter: null,
+    scope: operation.scope, lease, newAggregateId: randomUUID(), authorization: REQUIREMENT, context, authNotAfter: null, sessionKey,
     seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(command !== null, 'the plan is in contract');
@@ -260,10 +310,10 @@ const commit = (command) => store.transactions.commit(command, signal());
 // migration 008 as applied
 // ---------------------------------------------------------------------------
 
-test('M5D-01: 001-014 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
+test('M5D-01: 001-015 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk
@@ -576,9 +626,11 @@ async function withChain(fn, over = {}) {
         },
         // M5-GIAM-D1-P4: the durable pair — migration 013's admission, asked at login and on every request, and the
         // authorizer deciding on the scope that request's admission selected.
-        admission: createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) }),
+        admission: ADMISSION,
         authorizer: createAdmittedPlatformAuthorizer(),
-        store: createMemorySessionStore(),
+        // M5-ADMIN-REVOKE-P1: the durable session store, as production binds it, so the session a command carries is the
+        // row its transaction holds.
+        store: SESSIONS,
       },
     },
   });
@@ -1110,4 +1162,63 @@ test('M5D-21: the runtime validator and the database operation agree character b
   }
   assert.equal(refused, BIDI_CONTROLS.length + 3, 'exactly the Bidi_Control names are refused');
   assert.equal(version, corpus.length - refused + 1, 'and every other name was written');
+});
+
+test('M5D-22: a command commits only while the session presenting it is live and bound to its current standing — ended, absent, another\'s, or a grant removed and restored commits nothing; a logout racing a held command waits for it', async () => {
+  // M5-ADMIN-REVOKE-P1, over the production revalidator: 009's locks, then the presenting session held, then 013's read.
+  const refused = async (label, who, context, sessionKey) => {
+    const tenant = await newTenant(`m5d-session-${label.replace(/[^a-z]+/gi, '-')}-${SUFFIX}`);
+    const body = { tenantId: tenant, displayName: `Session ${label}`, expectedVersion: 1 };
+    const record = await acquired(who, body);
+    const { command } = prepared(record, context, body, sessionKey);
+    assert.deepEqual(await commit(command), { outcome: 'unavailable' }, label);
+    assert.deepEqual([(await tenantRow(tenant)).row_version, (await auditFor(command.audit.correlationId)).length, (await eventsFor(tenant)).length,
+      await recordDone(record.operation.scope)], ['1', 0, 0, false], `${label}: no mutation, audit record, event or completion`);
+  };
+  // The presenting session ended first — a logout or a revocation committed before the command's transaction (R3).
+  const loggedOut = await actor('session-ended', { scope: 'platform', role: 'system_owner' });
+  const context = await contextOf(loggedOut);
+  const ended = SESSION_KEYS.get(loggedOut.id);
+  await SESSIONS.revoke(ended, signal());
+  await refused('the presenting session ended first', loggedOut, context, ended);
+  await refused('no session presented', loggedOut, context, null);
+  // Another administrator's live session: it holds, but its standing selects another grant than the command's scope.
+  const other = await actor('session-other', { scope: 'platform', role: 'system_owner' });
+  await contextOf(other);
+  const self = await actor('session-self', { scope: 'platform', role: 'system_owner' });
+  await refused('another administrator\'s session', self, await contextOf(self), SESSION_KEYS.get(other.id));
+  // The grant removed and restored (R4): 009 alone still answers valid — the same grant, the same role, 007's version
+  // unmoved — but 013's authority version only increases, so the session's witness no longer holds.
+  const restored = await actor('session-restored', { scope: 'platform', role: 'system_owner' });
+  const before = await contextOf(restored);
+  const boundKey = SESSION_KEYS.get(restored.id);
+  await owner`update user_membership set status = 'suspended' where internal_user_id = ${restored.id}`;
+  await owner`update user_membership set status = 'active' where internal_user_id = ${restored.id}`;
+  assert.equal(await client.transaction(signal(), PLATFORM_ADMISSION_BOUNDS, (sql) => revalidatePlatformAuthority(sql, before, null)), true,
+    '009 cannot see a removal followed by a restoration');
+  await refused('a grant removed and restored', restored, before, boundKey);
+  // Control: a session established since, at the new witness, commits the very same command shape.
+  const since = await contextOf(restored);
+  const tenant = await newTenant(`m5d-session-control-${SUFFIX}`);
+  const body = { tenantId: tenant, displayName: 'Session Control', expectedVersion: 1 };
+  assert.deepEqual(await commit(prepared(await acquired(restored, body), since, body).command), { outcome: 'committed' }, 'a live session at the current witness commits');
+
+  // Command first: a logout racing a command that holds its session waits for the command's COMMIT, never slipping in between.
+  const racing = await actor('session-race', { scope: 'platform', role: 'system_owner' });
+  const raceContext = await contextOf(racing);
+  const raceKey = SESSION_KEYS.get(racing.id);
+  const raceTenant = await newTenant(`m5d-session-race-${SUFFIX}`);
+  const raceBody = { tenantId: raceTenant, displayName: 'Session Race', expectedVersion: 1 };
+  const { command } = prepared(await acquired(racing, raceBody), raceContext, raceBody);
+  const { held, arrived, release } = heldStore();
+  const answer = held.transactions.commit(command, signal());
+  await arrived; // revalidated — the session row held — and mutated
+  const logout = SESSIONS.revoke(raceKey, signal());
+  assert.equal(await settlesWithin(logout, 300), 'pending', 'the logout waits on the session row the command holds');
+  assert.ok((await lockWaiters()) > 0, 'waiting on a lock, not merely slow');
+  release();
+  assert.deepEqual(await answer, { outcome: 'committed' }, 'the command committed while its session was live');
+  await logout;
+  assert.equal(await SESSIONS.get(raceKey, signal()), undefined, 'then the logout ended the session');
+  assert.equal((await tenantRow(raceTenant)).row_version, '2');
 });

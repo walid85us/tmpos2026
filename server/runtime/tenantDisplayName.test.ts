@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createApp, createBoundedServer, createReadinessState } from './app.js';
 import { defineCommands } from './commandTransaction.js';
@@ -416,6 +416,10 @@ test('a committed update answers exactly its representation, and the port receiv
     assert.equal(e.correlationId, c.audit.correlationId, 'the event and the audit share one correlation');
     const crossed = JSON.stringify(h.commits);
     for (const spoofed of Object.values(spoof)) assert.ok(!crossed.includes(spoofed), `${spoofed} never crosses the port`);
+    // M5-ADMIN-REVOKE-P1: the presenting session's store key crosses — the digest the store is keyed by, for the transaction
+    // to hold that session — and never the identifier the cookie carries.
+    assert.equal(c.sessionKey, createHash('sha256').update(h.id).digest('base64url'), 'the presenting session\'s store key');
+    assert.ok(!crossed.includes(h.id), 'the session identifier itself never crosses the port');
     assert.deepEqual(h.storeCalls, ['acquire'], 'one acquisition; the commit completes the record');
   });
 });

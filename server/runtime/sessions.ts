@@ -36,7 +36,10 @@
 // re-check: revoking is always allowed. A record that is unknown, malformed, inconsistent, dated
 // beyond the clock-skew allowance into the future, of the other audience, or expired is refused.
 // The scope an admission selects, when it names one, is handed to that same request's route
-// authorizer (ActiveSession.admitted), so authorization decides on the snapshot admission read.
+// authorizer (ActiveSession.admitted), so authorization decides on the snapshot admission read. That
+// snapshot orders a READ request only: a change committed after it may still let the request complete.
+// A command is ordered at its own commit instead — its transaction holds the presenting session and
+// re-reads that session's standing (ActiveSession.key; postgresTransactionalStore.ts, M5-ADMIN-REVOKE-P1).
 //
 // Login. The chain (app.ts) spends the client limit, verifies the credential, applies the
 // boundary's evidence policy (LOGIN_POLICIES: the administrative login needs a provider-verified
@@ -51,6 +54,10 @@
 // reported, and only then rotates exactly as a login does — so a fresh
 // sign-in can renew the recent-authentication evidence of the administrator who started an action,
 // never hand another identity's session to that browser. Any refusal there creates and revokes nothing.
+// Those reads are the handler's; the administrative store decides again where it writes (M5-ADMIN-REVOKE-P1):
+// the standing is re-read in establish's own transaction, and a reauthentication must end the very session it
+// presents there, so a logout, a revocation or an authority change that committed after the handler's reads
+// refuses the login (401) and nothing is created, ended or recorded.
 // Logout revokes the session and clears its cookie with
 // matching attributes; only the logout handler holds that capability, never a business handler.
 //
@@ -241,7 +248,14 @@ export interface SessionEndAudit {
  * neither does. Both refuse any record of an audience other than 'admin', and `create` refuses an
  * administrative record, so `establish` is the only way one is written.
  * - `establish` creates `record` under `key`, first ending the live session under `replaces` when one is
- *   presented (rotation). A taken `key` is refused without touching `replaces`.
+ *   presented (rotation), and answers 'established'. A taken `key` is refused without touching `replaces`.
+ *   ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1), in the same atomic step and answering with no change at
+ *   all: 'standing_changed' when the standing `record` was admitted at no longer holds where the store writes
+ *   (a durable store re-reads it first, with the actor's authority locked until it commits); and, for a
+ *   reauthentication (`audit.action` 'reauthenticate'), 'session_ended' unless `replaces` names a live
+ *   administrative session of `record`'s own principal that THIS step ends — a logout, a revocation or another
+ *   reauthentication that took effect first leaves it nothing to end. An ordinary login still ends whatever live
+ *   session it presents, of any audience, and still establishes when `replaces` names none.
  * - `end` ends the live session under `key` and answers 'ended'; when no live session is there to end —
  *   another operation ended it first, or it reached its absolute expiry — it records nothing and answers
  *   'absent'. A store that keeps expired records deletes any still under `key` in the same step, so no
@@ -334,7 +348,10 @@ function loginModeOf(req: Request): LoginMode {
 export interface ActiveSession {
   readonly principal: VerifiedPrincipal;
   readonly context: SessionContext;
-  /** The record's key (the identifier's digest) and last activity: what an idle refresh needs. */
+  /**
+   * The record's key (the identifier's digest) and last activity: what an idle refresh needs. The chain also binds the
+   * key to a command, whose transaction holds this very session (M5-ADMIN-REVOKE-P1) — as a SQL parameter only.
+   */
   readonly key: string;
   readonly lastSeenAt: number;
   /** The provider-verified authentication time bound to this session at login, or null when it carried none. */
@@ -668,8 +685,9 @@ function createBoundary(
     try {
       // Rotation: a well-formed session presented at a login that succeeds never outlives it, and a
       // reauthentication rotates exactly as an ordinary login does. Two concurrent reauthentications presenting one
-      // cookie can both pass the same-principal check and create two sessions of that same principal
-      // (docs/phase-4/08). What a failure leaves depends on the boundary:
+      // cookie can both pass the same-principal check above, but at most one of them succeeds: the store's step
+      // ends the presented session or refuses, so the other answers 'session_ended' (DA-61; M5-ADMIN-REVOKE-P1).
+      // What a failure leaves depends on the boundary:
       if (audited) {
         // ADMINISTRATIVE (M6-ADMIN-AUDIT-P1): ONE store call ends the presented session, creates the new one and
         // writes the audit record atomically, so a failure before its commit leaves the presented session exactly
@@ -687,7 +705,15 @@ function createBoundary(
           action: mode === 'reauthenticate' ? 'reauthenticate' : 'login', operationId,
           actor: (decision.context as TrustedScope).actor, authenticatedAt,
         });
-        await call((signal) => sessions.establish(digestOf(id), record, presentedKey, audit, signal));
+        // The store decides where it writes (M5-ADMIN-REVOKE-P1): the presented session was ended first — by a logout,
+        // a revocation or another reauthentication — or the standing moved since this login's admission read it. Either
+        // reads as a bad credential and ended, created and recorded nothing; the next request is judged afresh. An
+        // answer that is none of the three words is a broken store: a 503 — and so is 'session_ended' at an ordinary
+        // login, which the port never answers there (only a reauthentication must end what it presents).
+        const established = await call((signal) => sessions.establish(digestOf(id), record, presentedKey, audit, signal));
+        if (established === 'session_ended' && mode === 'reauthenticate') return challenged(res, ctx, 'login_reauth_no_session');
+        if (established === 'standing_changed') return challenged(res, ctx, 'login_standing_changed');
+        if (established !== 'established') return unavailable(res, ctx, 'session_unavailable');
       } else {
         // TENANT (unaudited, stated open): two calls, so a create that fails after the revoke answers 503 and
         // leaves no session at all.

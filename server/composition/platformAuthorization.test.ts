@@ -10,13 +10,17 @@
 //     the one platform scope it selected to the same request's authorizer;
 //   * the AUTHORIZER decides on that admitted scope alone — never the principal, never a second read that could
 //     disagree — by the canonical rule, and a request that reaches it without one is a wiring fault, never a verdict.
-// The transaction-time revalidator and the tenant directory's permits are proved to agree with that authorizer.
+// The transaction-time revalidator and the tenant directory's permits are proved to agree with that authorizer, and
+// (M5-ADMIN-REVOKE-P1) the revalidator's hold of the presenting session and re-read of its standing, and the
+// administrative login's establish check, are proved in their order and in failing closed: a fault throws, never
+// reads as a changed standing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import {
-  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformPermits, createPlatformSessionAdmission,
+  createAdmittedPlatformAuthorizer, createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformPermits,
+  createPlatformSessionAdmission, platformStandingOf,
 } from './platformAuthorization.js';
 import { selectScope } from '../runtime/principals.js';
 import type { PlatformAdmissionPort, TrustedMembership, TrustedPrincipal, TrustedScope } from '../runtime/principals.js';
@@ -25,6 +29,7 @@ import type { RouteView } from '../runtime/access.js';
 import { BUILT_IN_PLATFORM_ROLES, CANONICAL_PLATFORM_PERMISSIONS, evaluateCanonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PlatformRoleDefinition } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PgTransactionScope } from '../persistence/supervisedPgClient.js';
+import type { SessionRecord } from '../runtime/sessions.js';
 
 const ACTOR = '11111111-1111-4111-8111-111111111111';
 const OTHER_ACTOR = '99999999-9999-4999-8999-999999999999';
@@ -432,7 +437,7 @@ test('M5PZ-11 the authorizer refuses to be built with roles that are not a Map, 
 // M5-GIAM-D1-P1-R1 — the same decision, again, inside the committing transaction
 // ---------------------------------------------------------------------------
 
-/** The committing transaction's handle: the synthetic authority check below never sends a statement on it. */
+/** The committing transaction's handle: the synthetic checks below never send a statement on it. */
 const SQL = (() => Promise.reject(new Error('no statement: the authority check is synthetic'))) as unknown as PgTransactionScope;
 /** An authority check answering `answer`, recording what it was handed. */
 function authorityCheck(answer: unknown | (() => unknown)): { check: (sql: PgTransactionScope, scope: TrustedScope) => Promise<boolean>; calls: unknown[][] } {
@@ -440,27 +445,55 @@ function authorityCheck(answer: unknown | (() => unknown)): { check: (sql: PgTra
   return { calls, check: async (...args: unknown[]) => { calls.push(args); return (typeof answer === 'function' ? (answer as () => unknown)() : answer) as boolean; } };
 }
 
+/** The store key of the session presenting a command (M5-ADMIN-REVOKE-P1). */
+const SESSION_KEY = 's'.repeat(43);
+/** The administrative session the store holds for `SESSION_KEY`, bound to the witness `witness`. */
+const heldSession = (witness: string): SessionRecord => Object.freeze({
+  audience: 'admin', authProvider: PRINCIPAL.authProvider, authProviderUid: PRINCIPAL.authProviderUid, principalKey: 'k'.repeat(43),
+  securityVersion: witness, authenticatedAt: 1_700_000_000_000, createdAt: 1_700_000_000_000, lastSeenAt: 1_700_000_000_000, validatedAt: 1_700_000_000_000,
+});
+
+/**
+ * A revalidator over `p`'s standing: 009 answering `authority`, the held session bound to `p`'s own witness (or
+ * `held`), and 013's read answering `p`'s standing (or `answer`) — each step recorded, in order, with its arguments.
+ */
+async function revalidatorFor(p: TrustedPrincipal, over: {
+  authority?: unknown; held?: SessionRecord | undefined | null; answer?: unknown; roles?: ReadonlyMap<string, PlatformRoleDefinition>;
+} = {}) {
+  const steps: string[] = [];
+  const calls: Record<string, unknown[][]> = { authority: [], session: [], read: [] };
+  const held = over.held === null ? undefined : (over.held ?? heldSession(await witnessOf(p)));
+  const record = (name: string, args: unknown[]): void => { steps.push(name); calls[name].push(args); };
+  const revalidate = createPlatformContextRevalidator({
+    authority: async (...args: unknown[]) => { record('authority', args); return ('authority' in over ? over.authority : true) as boolean; },
+    session: async (...args: unknown[]) => { record('session', args); return held; },
+    read: async (...args: unknown[]) => { record('read', args); return 'answer' in over ? over.answer : resolved(p); },
+    ...(over.roles === undefined ? {} : { roles: over.roles }),
+  });
+  return { revalidate, steps, calls };
+}
+
 test('the transaction revalidator asks the database about exactly the scope handed out, then decides the permission on its role', async () => {
-  const authority = authorityCheck(true);
-  const revalidate = createPlatformContextRevalidator({ authority: authority.check });
-  const scope = scopeOf(platformRole('support_admin'));
-  assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile', null), true);
-  assert.equal(authority.calls.length, 1);
-  assert.equal(authority.calls[0][0], SQL, 'on the committing transaction\'s own handle');
-  assert.equal(authority.calls[0][1], scope, 'the scope itself — actor, version, the very grant and its role');
-  assert.equal(authority.calls[0][2], null, 'a route that required no recent authentication claims no freshness');
+  const p = platformRole('support_admin');
+  const { revalidate, calls } = await revalidatorFor(p);
+  const scope = scopeOf(p);
+  assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), true);
+  assert.equal(calls.authority.length, 1);
+  assert.equal(calls.authority[0][0], SQL, 'on the committing transaction\'s own handle');
+  assert.equal(calls.authority[0][1], scope, 'the scope itself — actor, version, the very grant and its role');
+  assert.equal(calls.authority[0][2], null, 'a route that required no recent authentication claims no freshness');
   // A route that DID require one hands its deadline to the database half unchanged (M5-GIAM-D1-P2): the
   // revalidator must forward it, not drop it.
-  const stepUp = authorityCheck(true);
-  const withDeadline = createPlatformContextRevalidator({ authority: stepUp.check });
-  assert.equal(await withDeadline(SQL, scope, 'edit_tenant_profile', 1_700_000_600_000), true);
-  assert.equal(stepUp.calls[0][2], 1_700_000_600_000, 'the step-up deadline reaches the database half');
+  const stepUp = await revalidatorFor(p);
+  assert.equal(await stepUp.revalidate(SQL, scope, 'edit_tenant_profile', 1_700_000_600_000, SESSION_KEY), true);
+  assert.equal(stepUp.calls.authority[0][2], 1_700_000_600_000, 'the step-up deadline reaches the database half');
   // The database confirming the grant is not enough: the role's current definition must still carry the permission.
   for (const roleId of ['billing_admin', 'security_admin']) {
-    assert.equal(await revalidate(SQL, scopeOf(platformRole(roleId)), 'edit_tenant_profile', null), false, `${roleId}: Tenants at View`);
+    const q = platformRole(roleId);
+    assert.equal(await (await revalidatorFor(q)).revalidate(SQL, scopeOf(q), 'edit_tenant_profile', null, SESSION_KEY), false, `${roleId}: Tenants at View`);
   }
   for (const permission of ['tenants:edit', 'Edit_Tenant_Profile', '', 'edit_tenant']) {
-    assert.equal(await revalidate(SQL, scope, permission, null), false, `vocabulary the catalog does not define: ${permission}`);
+    assert.equal(await revalidate(SQL, scope, permission, null, SESSION_KEY), false, `vocabulary the catalog does not define: ${permission}`);
   }
 });
 
@@ -468,13 +501,13 @@ test('initial authorization and transaction revalidation agree on every built-in
   // Equivalent fail-closed semantics: for an unlimited actor holding one platform grant, whatever the authorizer
   // grants on the admitted scope the revalidator grants, and whatever it denies the revalidator denies — over the
   // same role definitions.
-  const revalidate = createPlatformContextRevalidator({ authority: async () => true });
   let compared = 0;
   for (const roleId of BUILT_IN_PLATFORM_ROLES.keys()) {
     const p = platformRole(roleId);
+    const { revalidate } = await revalidatorFor(p);
     for (const permission of CANONICAL_PLATFORM_PERMISSIONS.keys()) {
       const initial = (await decide(scopeOf(p), { scope: 'platform', permission })) !== false;
-      assert.equal(await revalidate(SQL, scopeOf(p), permission, null), initial, `${roleId} / ${permission}`);
+      assert.equal(await revalidate(SQL, scopeOf(p), permission, null, SESSION_KEY), initial, `${roleId} / ${permission}`);
       compared += 1;
     }
   }
@@ -483,39 +516,221 @@ test('initial authorization and transaction revalidation agree on every built-in
 
 test('a custom definition is re-decided through the same injected roles, and a changed definition is honoured at commit time', async () => {
   const p = platformRole('custom_tenant_editor');
-  const at = (level: unknown) => createPlatformContextRevalidator({ authority: async () => true, roles: custom(level) });
-  assert.equal(await at('edit')(SQL, scopeOf(p), 'edit_tenant_profile', null), true, 'custom role at Edit');
-  assert.equal(await at('view')(SQL, scopeOf(p), 'edit_tenant_profile', null), false, 'the same grant, its definition lowered to View before the commit');
-  assert.equal(await createPlatformContextRevalidator({ authority: async () => true })(SQL, scopeOf(p), 'edit_tenant_profile', null), false,
+  // The held session was admitted under the custom definitions (admission asks only that the role be defined).
+  const held = heldSession((await admitStanding(p, AUTHORITY, custom('edit')) as Admitted).securityVersion);
+  const at = async (level: unknown) => (await revalidatorFor(p, { held, roles: custom(level) })).revalidate;
+  assert.equal(await (await at('edit'))(SQL, scopeOf(p), 'edit_tenant_profile', null, SESSION_KEY), true, 'custom role at Edit');
+  assert.equal(await (await at('view'))(SQL, scopeOf(p), 'edit_tenant_profile', null, SESSION_KEY), false, 'the same grant, its definition lowered to View before the commit');
+  assert.equal(await (await revalidatorFor(p, { held })).revalidate(SQL, scopeOf(p), 'edit_tenant_profile', null, SESSION_KEY), false,
     'a role id the deployment\'s definitions do not name');
 });
 
 test('the database half decides first and alone: anything but exactly true denies, and a throw propagates to the store\'s rollback', async () => {
-  const scope = scopeOf(platformRole('system_owner'));
+  const p = platformRole('system_owner');
+  const scope = scopeOf(p);
   for (const answer of [false, 'valid', 1, null, undefined, {}]) {
-    assert.equal(await createPlatformContextRevalidator({ authority: authorityCheck(answer).check })(SQL, scope, 'edit_tenant_profile', null), false, JSON.stringify(answer));
+    const { revalidate, steps } = await revalidatorFor(p, { authority: answer });
+    assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), false, JSON.stringify(answer));
+    assert.deepEqual(steps, ['authority'], `${JSON.stringify(answer)}: the session and the standing are never asked`);
   }
-  await assert.rejects(createPlatformContextRevalidator({ authority: async () => { throw new Error('db down'); } })(SQL, scope, 'edit_tenant_profile', null), /db down/);
+  const failing = createPlatformContextRevalidator({
+    authority: async () => { throw new Error('db down'); }, session: async () => heldSession('x'), read: async () => resolved(p),
+  });
+  await assert.rejects(failing(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), /db down/);
 });
 
 test('a scope the authorizer could not have handed a command is refused before the database is asked', async () => {
-  const authority = authorityCheck(true);
-  const revalidate = createPlatformContextRevalidator({ authority: authority.check });
-  const scope = scopeOf(platformRole('system_owner'));
+  const p = platformRole('system_owner');
+  const { revalidate, steps } = await revalidatorFor(p);
+  const scope = scopeOf(p);
   for (const refused of [
     { ...scope, limitation: 'read_only' },
     { ...scope, scope: 'tenant', tenant: TENANT, roleId: 'manager' },
     { ...scope, scope: 'store', tenant: TENANT, store: STORE, roleId: 'technician' },
-  ] as TrustedScope[]) assert.equal(await revalidate(SQL, refused, 'edit_tenant_profile', null), false, JSON.stringify(refused));
-  assert.equal(authority.calls.length, 0);
+  ] as TrustedScope[]) assert.equal(await revalidate(SQL, refused, 'edit_tenant_profile', null, SESSION_KEY), false, JSON.stringify(refused));
+  assert.deepEqual(steps, []);
 });
 
-test('the revalidator refuses to be built without an authority check or with roles that are not a Map', () => {
-  for (const deps of [undefined, {}, { authority: null }, { authority: 'check' }]) {
+test('the revalidator refuses to be built without an authority check, the session hold or the standing read, or with roles that are not a Map', () => {
+  const authority = async () => true;
+  const session = async () => undefined;
+  const read = async () => ({ outcome: 'refused' });
+  for (const deps of [
+    undefined, {}, { authority: null, session, read }, { authority: 'check', session, read },
+    // M5-ADMIN-REVOKE-P1: the session and the standing are required — there is no revalidation without them.
+    { authority }, { authority, read }, { authority, session }, { authority, session: 'hold', read }, { authority, session, read: null },
+  ]) {
     assert.throws(() => createPlatformContextRevalidator(deps as never), TypeError, JSON.stringify(deps));
   }
   for (const roles of [{}, [], 'roles']) {
-    assert.throws(() => createPlatformContextRevalidator({ authority: async () => true, roles: roles as never }), TypeError, JSON.stringify(roles));
+    assert.throws(() => createPlatformContextRevalidator({ authority, session, read, roles: roles as never }), TypeError, JSON.stringify(roles));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M5-ADMIN-REVOKE-P1 — the presenting session and its standing, inside the committing transaction
+// ---------------------------------------------------------------------------
+
+test('M5AR-01 the revalidator holds the presenting session and reads its standing, in that order, after the authority, on the one handle', async () => {
+  const p = platformRole('support_admin');
+  const { revalidate, steps, calls } = await revalidatorFor(p);
+  assert.equal(await revalidate(SQL, scopeOf(p), 'edit_tenant_profile', 1_700_000_600_000, SESSION_KEY), true);
+  assert.deepEqual(steps, ['authority', 'session', 'read'], 'freshness and 009 first, then the session held, then 013 under those locks');
+  assert.deepEqual(calls.session, [[SQL, SESSION_KEY]], 'the session the command carried, on the committing handle');
+  assert.equal(calls.read[0][0], SQL);
+  assert.deepEqual(calls.read[0][1], { authProvider: PRINCIPAL.authProvider, authProviderUid: PRINCIPAL.authProviderUid },
+    'the standing of the held session\'s own provider reference — nothing from the request');
+});
+
+test('M5AR-02 no session key, or no live session under it, refuses — and nothing further is asked', async () => {
+  const p = platformRole('system_owner');
+  const unkeyed = await revalidatorFor(p);
+  assert.equal(await unkeyed.revalidate(SQL, scopeOf(p), 'edit_tenant_profile', null, null), false, 'a command no session presented');
+  assert.deepEqual(unkeyed.steps, ['authority'], 'the session is never asked about a key that is not there');
+  const ended = await revalidatorFor(p, { held: null });
+  assert.equal(await ended.revalidate(SQL, scopeOf(p), 'edit_tenant_profile', null, SESSION_KEY), false, 'a logout, a revocation or a rotation committed first');
+  assert.deepEqual(ended.steps, ['authority', 'session'], 'the standing is never read for a session that is gone');
+});
+
+test('M5AR-03 the held session\'s standing must still admit, at the session\'s own witness, on exactly the scope handed out', async () => {
+  const scope = scopeOf(BASE);
+  const refuses = async (label: string, over: Parameters<typeof revalidatorFor>[1]): Promise<void> => {
+    const { revalidate } = await revalidatorFor(BASE, over);
+    assert.equal(await revalidate(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), false, label);
+  };
+  await refuses('a refused reference', { answer: { outcome: 'refused' } });
+  await refuses('an account suspended since', { answer: resolved(principalWith(BASE.memberships, { accountStatus: 'suspended' })) });
+  await refuses('the grant withdrawn', { answer: resolved(principalWith([])) });
+  await refuses('a second grant added', { answer: resolved(principalWith([...BASE.memberships, grant()])) });
+  // Each part of the witness moved — the removal-and-restoration case among them (the authority version only
+  // increases), which 009's locks alone cannot see.
+  const changed: Array<[string, TrustedPrincipal, string]> = [
+    ['the account status', principalWith(BASE.memberships, { accountStatus: 'trialing' }), AUTHORITY],
+    ['007\'s security version', principalWith(BASE.memberships, { securityVersion: 'c'.repeat(64) }), AUTHORITY],
+    ['the role on the same grant', principalWith([grant({ membershipId: MEMBERSHIP, roleId: 'operations_admin' })]), AUTHORITY],
+    ['the platform authority version (a grant removed and restored)', BASE, '8'],
+  ];
+  for (const [field, standing, authorityVersion] of changed) await refuses(`${field} moved`, { answer: resolved(standing, authorityVersion) });
+  // A session bound to another standing than the command's scope: its witness holds, but it selects another grant.
+  const other = principalWith([grant({ membershipId: OTHER_MEMBERSHIP, roleId: 'support_admin' })]);
+  await refuses('a session whose standing selects another grant', { held: heldSession(await witnessOf(other)), answer: resolved(other) });
+  // A standing the read cannot decide is an outage: a throw, which the store's kernel rolls back.
+  for (const answer of [{ outcome: 'unavailable' }, null, resolved({ ...BASE, actor: 'nobody' })]) {
+    const { revalidate } = await revalidatorFor(BASE, { answer });
+    await assert.rejects(revalidate(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), /^Error: platform admission unavailable$/, JSON.stringify(answer));
+  }
+  // Positive control: unchanged, it holds.
+  assert.equal(await (await revalidatorFor(BASE)).revalidate(SQL, scope, 'edit_tenant_profile', null, SESSION_KEY), true);
+});
+
+test('M5AR-04 platformStandingOf is admission\'s own decision: the same witness and scope, the same denials, the same outages', async () => {
+  for (const roleId of BUILT_IN_PLATFORM_ROLES.keys()) {
+    const p = platformRole(roleId);
+    const admitted = await admitStanding(p) as Admitted;
+    const standing = platformStandingOf(resolved(p), BUILT_IN_PLATFORM_ROLES);
+    assert.ok(standing !== false);
+    assert.deepEqual(standing, { witness: admitted.securityVersion, scope: admitted.context }, roleId);
+    assert.ok(Object.isFrozen(standing));
+  }
+  for (const answer of [{ outcome: 'refused' }, resolved(principalWith([])), resolved(platformRole('system_owner', { accountStatus: 'suspended' })),
+    resolved(platformRole('system_owner', { limitation: 'read_only' })), resolved(platformRole('custom_unknown_role'))]) {
+    assert.equal(platformStandingOf(answer, BUILT_IN_PLATFORM_ROLES), false, JSON.stringify(answer).slice(0, 80));
+  }
+  assert.ok(platformStandingOf(resolved(platformRole('custom_tenant_editor')), custom('edit')) !== false, 'the roles handed in decide');
+  for (const answer of [null, 'resolved', { outcome: 'unavailable' }, { outcome: 'resolved', principal: BASE }, resolved(BASE, 'x')]) {
+    assert.throws(() => platformStandingOf(answer, BUILT_IN_PLATFORM_ROLES), /^Error: platform admission unavailable$/, JSON.stringify(answer));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M5-ADMIN-REVOKE-P1 — the administrative login's standing check, on establish's own transaction
+// ---------------------------------------------------------------------------
+
+/** An establish check whose reads answer `answers` in turn, and whose 009 lock answers `lock`; every step recorded. */
+function establishCheckWith(answers: unknown[], lock: unknown = true, roles?: ReadonlyMap<string, PlatformRoleDefinition>) {
+  const steps: string[] = [];
+  const calls: unknown[][] = [];
+  let reads = 0;
+  const check = createPlatformEstablishCheck({
+    read: async (...args: unknown[]) => { steps.push('read'); calls.push(args); return answers[reads++]; },
+    authority: async (...args: unknown[]) => {
+      steps.push('lock'); calls.push(args);
+      if (typeof lock === 'function') return (lock as () => unknown)() as boolean;
+      return lock as boolean;
+    },
+    ...(roles === undefined ? {} : { roles }),
+  });
+  return { check, steps, calls };
+}
+
+test('M5AR-05 the establish check reads the standing, locks its authority, and reads it again — true only when both reads are the record\'s witness', async () => {
+  const record = heldSession(await witnessOf(BASE));
+  const { check, steps, calls } = establishCheckWith([resolved(BASE), resolved(BASE)]);
+  assert.equal(await check(SQL, record), true);
+  assert.deepEqual(steps, ['read', 'lock', 'read'], '013, then 009\'s locks for the scope that read selected, then 013 again under them');
+  const reference = { authProvider: PRINCIPAL.authProvider, authProviderUid: PRINCIPAL.authProviderUid };
+  assert.deepEqual(calls[0], [SQL, reference], 'the record\'s own provider reference, on establish\'s handle');
+  assert.equal(calls[1][0], SQL);
+  assert.deepEqual(calls[1][1], scopeOf(BASE), 'the lock is taken for exactly the scope the first read selected');
+  assert.deepEqual(calls[2], [SQL, reference]);
+});
+
+test('M5AR-06 a standing that moved before the locks refuses without locking; one that moved under them refuses after', async () => {
+  const record = heldSession(await witnessOf(BASE));
+  // Each part of the standing moved (as M5PS-09..14), or no longer admitted at all.
+  const changedStandings: Array<[string, unknown]> = [
+    ['the actor', resolved(principalWith(BASE.memberships, { actor: OTHER_ACTOR }))],
+    ['the account status', resolved(principalWith(BASE.memberships, { accountStatus: 'trialing' }))],
+    ['007\'s security version', resolved(principalWith(BASE.memberships, { securityVersion: 'c'.repeat(64) }))],
+    ['the membership', resolved(principalWith([grant({ membershipId: OTHER_MEMBERSHIP, roleId: 'support_admin' })]))],
+    ['the role', resolved(principalWith([grant({ membershipId: MEMBERSHIP, roleId: 'operations_admin' })]))],
+    ['the authority version', resolved(BASE, '8')],
+    ['a refused reference', { outcome: 'refused' }],
+    ['a suspended account', resolved(principalWith(BASE.memberships, { accountStatus: 'suspended' }))],
+    ['no platform grant', resolved(principalWith([]))],
+  ];
+  for (const [label, answer] of changedStandings) {
+    const before = establishCheckWith([answer, resolved(BASE)]);
+    assert.equal(await before.check(SQL, record), false, `${label}, before the locks`);
+    assert.deepEqual(before.steps, ['read'], `${label}: no lock is taken for a standing that no longer matches`);
+    const under = establishCheckWith([resolved(BASE), answer]);
+    assert.equal(await under.check(SQL, record), false, `${label}, committed before the locks were granted`);
+    assert.deepEqual(under.steps, ['read', 'lock', 'read']);
+  }
+  const unlocked = establishCheckWith([resolved(BASE), resolved(BASE)], false);
+  assert.equal(await unlocked.check(SQL, record), false, '009 answering invalid');
+  assert.deepEqual(unlocked.steps, ['read', 'lock'], 'no second read once the lock refused');
+});
+
+test('M5AR-07 a fault anywhere in the establish check THROWS — never false, which would read as a changed standing and answer 401', async () => {
+  const record = heldSession(await witnessOf(BASE));
+  for (const [label, answers] of [
+    ['a first read that is no standing', [{ outcome: 'unavailable' }, resolved(BASE)]],
+    ['a second read that is no standing', [resolved(BASE), { outcome: 'unavailable' }]],
+    ['a malformed principal', [resolved({ ...BASE, actor: 'nobody' }), resolved(BASE)]],
+  ] as Array<[string, unknown[]]>) {
+    await assert.rejects(establishCheckWith(answers).check(SQL, record), /^Error: platform admission unavailable$/, label);
+  }
+  const fault = new Error('lock timeout');
+  await assert.rejects(establishCheckWith([resolved(BASE), resolved(BASE)], () => Promise.reject(fault)).check(SQL, record), (err: unknown) => err === fault,
+    'the lock\'s own fault propagates');
+  const readFault = new Error('driver error');
+  const failing = createPlatformEstablishCheck({ read: async () => { throw readFault; }, authority: async () => true });
+  await assert.rejects(failing(SQL, record), (err: unknown) => err === readFault, 'the read\'s own fault propagates');
+});
+
+test('M5AR-08 the establish check decides over the roles handed in, and refuses to be built without its read and lock', async () => {
+  const p = platformRole('custom_tenant_editor');
+  const record = heldSession((await admitStanding(p, AUTHORITY, custom('edit')) as Admitted).securityVersion);
+  assert.equal(await establishCheckWith([resolved(p), resolved(p)], true, custom('edit')).check(SQL, record), true);
+  assert.equal(await establishCheckWith([resolved(p), resolved(p)]).check(SQL, record), false, 'a role the deployment\'s definitions do not name');
+  const read = async () => ({ outcome: 'refused' });
+  const authority = async () => true;
+  for (const deps of [undefined, {}, { read }, { authority }, { read: 'read', authority }, { read, authority: null }]) {
+    assert.throws(() => createPlatformEstablishCheck(deps as never), TypeError, JSON.stringify(deps));
+  }
+  for (const roles of [{}, [], 'roles']) {
+    assert.throws(() => createPlatformEstablishCheck({ read, authority, roles: roles as never }), TypeError, JSON.stringify(roles));
   }
 });
 

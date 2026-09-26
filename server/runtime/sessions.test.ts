@@ -2029,6 +2029,78 @@ test('M6AA-03 an administrative login whose audited establish fails answers 503 
   });
 });
 
+test('M5AR-L1 the store decides where it writes: session_ended and standing_changed are a generic 401 that ends, creates and records nothing; any other answer is a 503', async () => {
+  const ops: string[] = [];
+  const base = instrumented(ops);
+  // The store's answer, scripted: what a durable store says when a logout, a revocation or an authority change
+  // committed between this login's reads and its establish (M5-ADMIN-REVOKE-P1).
+  const scripted: { answer?: unknown; on: boolean } = { on: false };
+  const store: MemorySessionStore = {
+    ...base,
+    establish: (key, record, replaces, audit, signal) => {
+      if (!scripted.on) return base.establish(key, record, replaces, audit, signal);
+      ops.push('establish');
+      return Promise.resolve(scripted.answer);
+    },
+  };
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    const before = await recordOf(store, owner.id);
+    scripted.on = true;
+    const cases: Array<[string, unknown, () => Promise<Reply>, number, string]> = [
+      ['a reauthentication whose presented session was ended first', 'session_ended', () => reauth(port, 'tok-owner-again', owner.id), 401, 'login_reauth_no_session'],
+      ['a login whose standing moved', 'standing_changed', () => login(port, 'admin', 'tok-owner-again', cookie('admin', owner.id)), 401, 'login_standing_changed'],
+      ['a reauthentication whose standing moved', 'standing_changed', () => reauth(port, 'tok-owner-again', owner.id), 401, 'login_standing_changed'],
+      // The port answers session_ended to a reauthentication only: at an ordinary login it is a broken store.
+      ['an ordinary login answered session_ended', 'session_ended', () => login(port, 'admin', 'tok-owner-again', cookie('admin', owner.id)), 503, 'session_unavailable'],
+      ['no answer', undefined, () => login(port, 'admin', 'tok-owner-again'), 503, 'session_unavailable'],
+      ['an unknown word', 'ESTABLISHED', () => login(port, 'admin', 'tok-owner-again'), 503, 'session_unavailable'],
+      ['an object', { outcome: 'established' }, () => reauth(port, 'tok-owner-again', owner.id), 503, 'session_unavailable'],
+    ];
+    for (const [label, answer, attempt, status, reason] of cases) {
+      scripted.answer = answer;
+      ops.length = 0;
+      const r = await attempt();
+      if (status === 401) {
+        assertRefusal(r, 401, 'unauthenticated', label);
+        assert.equal(r.headers['www-authenticate'], 'Bearer', `${label}: exactly a bad credential's answer`);
+      } else {
+        assertRefusal(r, 503, 'service_unavailable', label);
+      }
+      assert.equal(r.headers['set-cookie'], undefined, `${label}: no cookie issued`);
+      assert.deepEqual(writes(ops), ['establish'], `${label}: the one store step, which wrote nothing — and no revocation of the principal`);
+      assert.ok(await logged(logs, reason), `${label}: ${reason}`);
+    }
+    scripted.on = false;
+    assert.equal(store.audits.length, 1, 'nothing recorded beyond the first sign-in');
+    assert.deepEqual(await recordOf(store, owner.id), before, 'the presented session is exactly as it was');
+    assert.equal((await current(port, 'admin', owner.id)).status, 200, 'and still active: the next request is judged afresh');
+  });
+});
+
+test('M5AR-L2 a recent sign-in whose presented session is ended after the handler read it creates nothing: the store refuses where it writes (R1)', async () => {
+  const memory = createMemorySessionStore();
+  // A logout (or a revocation) that takes effect between the handler's read of the presented session and the store's step.
+  const race: { on: boolean } = { on: false };
+  const store: MemorySessionStore = {
+    ...memory,
+    establish: (key, record, replaces, audit, signal) => {
+      if (race.on && replaces !== null) memory.revoke(replaces, signal);
+      return memory.establish(key, record, replaces, audit, signal);
+    },
+  };
+  await withSessions({ admin: { store } }, async ({ port, logs }) => {
+    const owner = await signIn(port, 'admin', 'tok-owner');
+    race.on = true;
+    const r = await reauth(port, 'tok-owner-again', owner.id);
+    assertRefusal(r, 401, 'unauthenticated', 'the presented session ended first');
+    assert.equal(r.headers['set-cookie'], undefined, 'no session issued');
+    assert.ok(await logged(logs, 'login_reauth_no_session'));
+    assert.equal(memory.audits.length, 1, 'no reauthentication recorded: only the first sign-in');
+    assertRefusal(await current(port, 'admin', owner.id), 401, 'unauthenticated', 'and the ended session stays ended');
+  });
+});
+
 test('M6AA-04 an administrative logout ends the session and records it in one call, attributed to no actor, and answers 204', async () => {
   const ops: string[] = [];
   const store = instrumented(ops);

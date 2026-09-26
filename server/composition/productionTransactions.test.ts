@@ -18,7 +18,7 @@ import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -31,6 +31,7 @@ import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from
 import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
 import { createPostgresRateLimiter } from '../persistence/postgresRateLimiter.js';
 import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
+import type { SessionStandingCheck } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
@@ -46,7 +47,7 @@ import { createApp, createBoundedServer, createReadinessState } from '../runtime
  * about these, so adding them changed no existing expectation.
  */
 const SESSION_FACTORIES = Object.freeze({
-  sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
+  sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => createPostgresSessionStore({ client, standing }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
   rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
@@ -667,7 +668,12 @@ test('the platform admission is composed with the store, once, over the same cli
     client: () => { sharedClient = stub; built.push('client'); return stub as never; },
     store: (options) => { built.push('store'); assert.equal(options.client, sharedClient, 'the store takes the shared client'); assert.equal(typeof options.revalidate, 'function', 'and a revalidator'); return createPostgresTransactionalStore(options); },
     platformAdmission: (client) => { built.push('platformAdmission'); assert.equal(client, sharedClient, 'the platform admission takes the SAME client'); return createPostgresPlatformAdmission({ client }); },
-    sessionStore: (client) => { built.push('sessionStore'); assert.equal(client, sharedClient, 'the session store takes the SAME client'); return createPostgresSessionStore({ client }); },
+    sessionStore: (client, standing) => {
+      built.push('sessionStore');
+      assert.equal(client, sharedClient, 'the session store takes the SAME client');
+      assert.equal(typeof standing, 'function', 'and the administrative login\'s standing check (M5-ADMIN-REVOKE-P1)');
+      return createPostgresSessionStore({ client, standing });
+    },
     tenantAdmission: (client) => { built.push('tenantAdmission'); assert.equal(client, sharedClient, 'tenant admission takes the SAME client'); return createPostgresTenantAdmission({ client }); },
     tenantDirectory: (client) => { built.push('tenantDirectory'); assert.equal(client, sharedClient, 'the tenant directory takes the SAME client'); return createPostgresTenantDirectory({ client }); },
     rateLimiter: (client, keySecret) => {
@@ -781,10 +787,50 @@ test('the platform admission the boundary hands back is the one it built, and th
   assert.equal(await decide('billing_admin'), false, 'a role below Edit on tenant_management is denied');
 });
 
-test('the store is composed with the platform revalidator: migration 009\'s exact-authority routine, then the permission on the same roles', async () => {
+// A fake transaction handle answering the M5-ADMIN-REVOKE-P1 statements by their text, recording each statement and its values.
+const REVAL_ACTOR = '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5';
+const REVAL_MEMBERSHIP = '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
+const REVAL_SESSION_KEY = 'q'.repeat(43);
+const revalScope = (roleId: string) => Object.freeze({
+  actor: REVAL_ACTOR, securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null, membershipId: REVAL_MEMBERSHIP, roleId, limitation: 'none',
+});
+/** The p1 witness over a standing, recomputed here independently of the code under test (platformAuthorization.ts witnessOf). */
+const revalWitness = (roleId: string, authorityVersion = '3', accountStatus = 'active'): string =>
+  `p1:${createHash('sha256').update(['p1', REVAL_ACTOR, accountStatus, 'none', 'sv-1', REVAL_MEMBERSHIP, roleId, authorityVersion].join('\n')).digest('base64url')}`;
+/** Migration 013's row for the actor holding `roleId`, at `authorityVersion`. */
+const admissionRow = (roleId: string, authorityVersion = '3') => ({
+  outcome: 'resolved', actor_id: REVAL_ACTOR, account_status: 'active', limitation: 'none', security_version: 'sv-1', authority_version: authorityVersion,
+  memberships: [{ membershipId: REVAL_MEMBERSHIP, scopeType: 'platform', tenantId: null, storeId: null, roleId, tenantStatus: null, storeStatus: null }],
+});
+/** Migration 011's row for the administrative session bound to `witness`. */
+const sessionRow = (witness: string) => ({
+  audience: 'admin', authProvider: 'firebase', authProviderUid: 'uid-operator', principalKey: 'p'.repeat(43), securityVersion: witness,
+  authenticatedAt: '1700000000000', createdAt: '1700000000000', lastSeenAt: '1700000000000', validatedAt: '1700000000001',
+});
+function revalHandle(over: { fresh?: boolean; authority?: unknown; session?: unknown[]; touch?: string; admission?: unknown[] } = {}) {
+  const texts: string[] = [];
+  const bound: unknown[][] = [];
+  const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const text = strings.join('?');
+    texts.push(text); bound.push(values);
+    if (text.includes('clock_timestamp')) return Promise.resolve([{ fresh: over.fresh ?? true }]);
+    if (text.includes('m5_revalidate_platform_authority')) return Promise.resolve([{ outcome: over.authority ?? 'valid' }]);
+    if (text.includes('m5_session_get')) return Promise.resolve(over.session ?? [sessionRow(revalWitness('support_admin'))]);
+    if (text.includes('m5_session_touch')) return Promise.resolve([{ outcome: over.touch ?? 'updated' }]);
+    if (text.includes('m5_admit_platform_session')) return Promise.resolve(over.admission ?? [admissionRow('support_admin')]);
+    return Promise.reject(new Error(`a statement the composed checks never send: ${text}`));
+  }) as never;
+  const step = (text: string): string => (text.includes('clock_timestamp') ? 'freshness' : text.includes('m5_revalidate_platform_authority') ? '009'
+    : text.includes('m5_session_get') ? 'session get' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_platform_session') ? '013' : 'other');
+  return { sql, texts, bound, steps: () => texts.map(step) };
+}
+
+test('the store is composed with the platform revalidator: freshness, 009\'s locks, the presenting session held, 013\'s read — then the permission on the same roles', async () => {
   // M5-GIAM-D1-P1-R1: not merely "a function" — the revalidator the boundary hands the store asks the database about the
   // very grant selected, and re-decides the route's permission on that role, exactly as the composed authorizer decides it.
-  let revalidate: ((sql: never, scope: never, permission: string, authNotAfter: number | null) => Promise<unknown>) | undefined;
+  // M5-ADMIN-REVOKE-P1: on the same handle it then holds the session that presented the command and re-reads that session's
+  // standing under 009's locks — so the order on the committing transaction is freshness → 009 → session get → touch → 013.
+  let revalidate: ((sql: never, scope: never, permission: string, authNotAfter: number | null, sessionKey: string | null) => Promise<unknown>) | undefined;
   const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
   const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
     client: () => stub as never,
@@ -793,39 +839,82 @@ test('the store is composed with the platform revalidator: migration 009\'s exac
     ...SESSION_FACTORIES,
   });
   assert.ok(boundary !== null && revalidate !== undefined);
-  const texts: string[] = [];
-  const bound: unknown[][] = [];
-  const valid = ((strings: TemplateStringsArray, ...values: unknown[]) => {
-    texts.push(strings.join('?')); bound.push(values); return Promise.resolve([{ outcome: 'valid' }]);
-  }) as never;
-  const scope = (roleId: string) => Object.freeze({
-    actor: '6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', securityVersion: 'sv-1', scope: 'platform', tenant: null, store: null,
-    membershipId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', roleId, limitation: 'none',
-  }) as never;
-  assert.equal(await revalidate(valid, scope('support_admin'), 'edit_tenant_profile', null), true);
-  assert.match(texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine');
-  assert.deepEqual(bound[0], ['6f1c2d3e-4b5a-4c6d-8e7f-8091a2b3c4d5', 'sv-1', '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', 'support_admin']);
-  assert.equal(await revalidate(valid, scope('billing_admin'), 'edit_tenant_profile', null), false,
+  const scope = (roleId: string) => revalScope(roleId) as never;
+  const valid = revalHandle();
+  const before = Date.now();
+  assert.equal(await revalidate(valid.sql, scope('support_admin'), 'edit_tenant_profile', null, REVAL_SESSION_KEY), true);
+  assert.deepEqual(valid.steps(), ['009', 'session get', 'touch', '013'], 'no freshness claimed; then 009, the session held, and 013 under the locks');
+  assert.match(valid.texts[0], /tmpos_command\.m5_revalidate_platform_authority\(/, 'the exact-authority routine');
+  assert.deepEqual(valid.bound[0], [REVAL_ACTOR, 'sv-1', REVAL_MEMBERSHIP, 'support_admin']);
+  assert.equal(valid.bound[1][0], REVAL_SESSION_KEY, 'the session the command carried');
+  assert.ok(typeof valid.bound[1][1] === 'number' && (valid.bound[1][1] as number) >= before, 'read live at this process\'s clock');
+  assert.deepEqual(valid.bound[2], [REVAL_SESSION_KEY, 1_700_000_000_001], 'held by writing back the stamp it read');
+  assert.deepEqual(valid.bound[3], ['firebase', 'uid-operator'], 'the standing of the held session\'s own provider reference');
+  assert.equal(await revalidate(revalHandle().sql, scope('billing_admin'), 'edit_tenant_profile', null, REVAL_SESSION_KEY), false,
     'the database confirming the grant does not make a View role an editor: the permission is decided again');
-  const invalid = (() => Promise.resolve([{ outcome: 'invalid' }])) as never;
-  assert.equal(await revalidate(invalid, scope('support_admin'), 'edit_tenant_profile', null), false, 'and nothing holds once the database says invalid');
+  const invalid = revalHandle({ authority: 'invalid' });
+  assert.equal(await revalidate(invalid.sql, scope('support_admin'), 'edit_tenant_profile', null, REVAL_SESSION_KEY), false, 'and nothing holds once the database says invalid');
+  assert.deepEqual(invalid.steps(), ['009'], 'the session is never touched once 009 refuses');
   // M5-GIAM-D1-P2: a route that required a recent authentication has its deadline judged on the database's
   // clock, on this same transaction, BEFORE the authority routine is asked.
-  texts.length = 0; bound.length = 0;
-  const fresh = ((strings: TemplateStringsArray, ...values: unknown[]) => {
-    texts.push(strings.join('?')); bound.push(values);
-    return Promise.resolve(strings.join('').includes('clock_timestamp') ? [{ fresh: true }] : [{ outcome: 'valid' }]);
-  }) as never;
-  assert.equal(await revalidate(fresh, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000), true);
-  assert.match(texts[0], /clock_timestamp\(\)/, 'the freshness statement runs first, on the database clock');
-  assert.deepEqual(bound[0], ['1700000600000'], 'the deadline is bound as a value, never interpolated');
-  assert.match(texts[1], /m5_revalidate_platform_authority\(/, 'and the authority routine follows it');
-  const stale = ((strings: TemplateStringsArray, ...values: unknown[]) => {
-    texts.push(strings.join('?')); bound.push(values);
-    return Promise.resolve(strings.join('').includes('clock_timestamp') ? [{ fresh: false }] : [{ outcome: 'valid' }]);
-  }) as never;
-  assert.equal(await revalidate(stale, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000), false,
+  const fresh = revalHandle();
+  assert.equal(await revalidate(fresh.sql, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000, REVAL_SESSION_KEY), true);
+  assert.deepEqual(fresh.steps(), ['freshness', '009', 'session get', 'touch', '013'], 'freshness first, on the database clock, then as above');
+  assert.deepEqual(fresh.bound[0], ['1700000600000'], 'the deadline is bound as a value, never interpolated');
+  const stale = revalHandle({ fresh: false });
+  assert.equal(await revalidate(stale.sql, scope('support_admin'), 'edit_tenant_profile', 1_700_000_600_000, REVAL_SESSION_KEY), false,
     'expired evidence denies whatever the authority routine would have said');
+  // M5-ADMIN-REVOKE-P1: no session, a session ended first, and a standing that moved each commit nothing.
+  const unkeyed = revalHandle();
+  assert.equal(await revalidate(unkeyed.sql, scope('support_admin'), 'edit_tenant_profile', null, null), false, 'a command no session presented');
+  assert.deepEqual(unkeyed.steps(), ['009']);
+  for (const [label, over, steps] of [
+    ['a session logged out or revoked first', { session: [] }, ['009', 'session get']],
+    ['a session ended between the read and the hold', { touch: 'absent' }, ['009', 'session get', 'touch']],
+    ['a tenant record under the key', { session: [{ ...sessionRow(revalWitness('support_admin')), audience: 'tenant' }] }, ['009', 'session get']],
+    ['a grant removed and restored since the session was admitted', { admission: [admissionRow('support_admin', '5')] }, ['009', 'session get', 'touch', '013']],
+    ['a standing that no longer admits', { admission: [{ outcome: 'refused', actor_id: null, account_status: null, limitation: null, security_version: null, memberships: null, authority_version: null }] },
+      ['009', 'session get', 'touch', '013']],
+  ] as Array<[string, Parameters<typeof revalHandle>[0], string[]]>) {
+    const handle = revalHandle(over);
+    assert.equal(await revalidate(handle.sql, scope('support_admin'), 'edit_tenant_profile', null, REVAL_SESSION_KEY), false, label);
+    assert.deepEqual(handle.steps(), steps, label);
+  }
+  await boundary.close();
+});
+
+test('the session store is composed with the administrative login\'s standing check: 013, 009\'s locks through the lock that throws, 013 again', async () => {
+  // M5-ADMIN-REVOKE-P1: the check the transaction root hands the session store, run on establish's own handle. It reads the
+  // admission for the RECORD's provider reference, locks exactly the scope that read selected, and reads again — and it is
+  // bound to lockPlatformAuthority, so a malformed 009 answer is an outage (a throw), never "the standing changed".
+  let standing: SessionStandingCheck | undefined;
+  const stub = Object.freeze({ transaction: () => Promise.reject(new Error('unused')), end: async () => undefined });
+  const boundary = assembleTransactions(REQUIRED, CONFIGURED, {
+    client: () => stub as never,
+    store: createPostgresTransactionalStore,
+    platformAdmission: (client) => createPostgresPlatformAdmission({ client }),
+    ...SESSION_FACTORIES,
+    sessionStore: (client, check) => { standing = check; return createPostgresSessionStore({ client, standing: check }); },
+  });
+  assert.ok(boundary !== null && standing !== undefined);
+  const record = Object.freeze({
+    audience: 'admin' as const, authProvider: 'firebase', authProviderUid: 'uid-operator', principalKey: 'p'.repeat(43),
+    securityVersion: revalWitness('support_admin'), authenticatedAt: 1_700_000_000_000, createdAt: 1_700_000_000_000,
+    lastSeenAt: 1_700_000_000_000, validatedAt: 1_700_000_000_000,
+  });
+  const held = revalHandle();
+  assert.equal(await standing(held.sql, record), true);
+  assert.deepEqual(held.steps(), ['013', '009', '013'], 'the standing, then 009\'s locks for the scope it selected, then the standing again');
+  assert.deepEqual(held.bound[0], ['firebase', 'uid-operator'], 'the record\'s own provider reference');
+  assert.deepEqual(held.bound[1], [REVAL_ACTOR, 'sv-1', REVAL_MEMBERSHIP, 'support_admin'], 'the lock names exactly the grant the read selected');
+  assert.deepEqual(held.bound[2], ['firebase', 'uid-operator']);
+  const moved = revalHandle({ admission: [admissionRow('support_admin', '4')] });
+  assert.equal(await standing(moved.sql, record), false, 'a standing that moved since the login\'s admission');
+  assert.deepEqual(moved.steps(), ['013'], 'no lock is taken for it');
+  assert.equal(await standing(revalHandle({ authority: 'invalid' }).sql, record), false, '009 answering invalid');
+  // A fault is an outage — never false.
+  await assert.rejects(standing(revalHandle({ authority: 'maybe' }).sql, record), /platform authority unavailable/, 'a malformed 009 answer throws');
+  await assert.rejects(standing(revalHandle({ admission: [{ outcome: 'resolved' }] }).sql, record), /platform admission unavailable/, 'a malformed 013 answer throws');
   await boundary.close();
 });
 

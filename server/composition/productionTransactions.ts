@@ -41,13 +41,14 @@ import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoin
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
 import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { canonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
-import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
+import { createPostgresPlatformAdmission, readPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
 import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/postgresRateLimiter.js';
 import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
 import { createPostgresStartupPreflight } from '../persistence/postgresStartupPreflight.js';
 import type { StartupPreflight } from '../persistence/postgresStartupPreflight.js';
-import { revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
-import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
+import { lockPlatformAuthority, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
+import { createPostgresSessionStore, holdAdministrativeSession } from '../persistence/postgresSessionStore.js';
+import type { SessionStandingCheck } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
@@ -57,9 +58,9 @@ import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { TenantDirectoryPort, TenantDirectoryPorts } from '../runtime/tenantDirectory.js';
-import { createPlatformContextRevalidator, createPlatformPermits } from './platformAuthorization.js';
+import { createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformPermits } from './platformAuthorization.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
-import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
+import type { PgTransactionScope, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
 import type { IdempotencyDeps } from '../runtime/idempotency.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
@@ -162,7 +163,11 @@ export interface TransactionFactories {
   readonly client: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
   readonly platformAdmission: (client: SupervisedPgClient) => PlatformAdmissionPort;
-  readonly sessionStore: (client: SupervisedPgClient) => SessionStore;
+  /**
+   * The session store over the kernel, with the administrative login's standing check (M5-ADMIN-REVOKE-P1), which this
+   * root builds once and a factory must forward: a store built without it establishes no administrative session.
+   */
+  readonly sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => SessionStore;
   readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
   /** The platform tenant directory's read over migration 012, for the inventory's read routes. */
   readonly tenantDirectory: (client: SupervisedPgClient) => TenantDirectoryPort;
@@ -194,7 +199,7 @@ const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
   client: createRuntimeStoreClient,
   store: createPostgresTransactionalStore,
   platformAdmission: (client: SupervisedPgClient) => createPostgresPlatformAdmission({ client }),
-  sessionStore: (client: SupervisedPgClient) => createPostgresSessionStore({ client }),
+  sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => createPostgresSessionStore({ client, standing }),
   tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
   rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
@@ -253,13 +258,21 @@ export function assembleTransactions(
     if (err instanceof DatabaseTlsRefusal) throw new TransactionCompositionError(['database_tls_invalid']);
     throw err;
   }
+  // The two in-transaction checks that order administrative requests against revocation (M5-ADMIN-REVOKE-P1), each built
+  // once over the persistence layer's plain functions on the caller's own handle: the command revalidator — 009's
+  // freshness and locks, the presenting session held, then 013's read of that session's standing — and the login's
+  // standing check — 013's read, 009's locks through the lock that THROWS on a fault (never the catch-all above it, which
+  // would turn a fault into a 401), then 013 again.
+  const hold = (sql: PgTransactionScope, key: string) => holdAdministrativeSession(sql, key, Date.now());
+  const revalidate = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority, session: hold, read: readPlatformAdmission });
+  const standing = createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority });
   let store: TransactionalStore;
   try {
     // The revalidator the store runs inside each command transaction, over the same client and the
     // same governed endpoint: one credential, one boundary, no second connection. It re-decides exactly
     // what the authorizer below decided — the very grant and role, then the permission on the same role
-    // definitions — on the committing transaction (M5-GIAM-D1-P1-R1).
-    store = factories.store({ client, mutators: inventory.mutators, revalidate: createPlatformContextRevalidator({ authority: revalidatePlatformAuthority }) });
+    // definitions — on the committing transaction (M5-GIAM-D1-P1-R1), while the presenting session is live.
+    store = factories.store({ client, mutators: inventory.mutators, revalidate });
   } catch (err) {
     void client.end(); // nothing opened yet: the kernel connects only when a transaction runs
     throw err;
@@ -277,7 +290,7 @@ export function assembleTransactions(
     idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
     transactions: Object.freeze({ port: store.transactions }),
     platformAdmission: factories.platformAdmission(client),
-    sessionStore: factories.sessionStore(client),
+    sessionStore: factories.sessionStore(client, standing),
     tenantAdmission: factories.tenantAdmission(client),
     rateLimiter: (limiterKey: Uint8Array) => factories.rateLimiter(client, limiterKey),
     routes: served,

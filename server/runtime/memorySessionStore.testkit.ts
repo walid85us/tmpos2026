@@ -47,15 +47,23 @@ export function createMemorySessionStore(): MemorySessionStore {
         if (record.audience === audience && record.principalKey === principalKey) records.delete(key);
       }
     },
-    // One synchronous step each, so all of it takes effect or none does — the durable store's one transaction.
+    // One synchronous step each, so all of it takes effect or none does — the durable store's one transaction. This
+    // store holds no standing to re-read, so it never answers 'standing_changed'; its reauthentication rule is the
+    // durable store's (M5-ADMIN-REVOKE-P1).
     establish: (key, record, replaces, audit) => {
       if (record.audience !== 'admin') refuse('audience_invalid');
+      const held = replaces === null ? undefined : records.get(replaces);
+      // A reauthentication must end the live administrative session of the same principal it presents; anything
+      // else ends, creates and records nothing. Checked first, as the durable store checks it before it creates.
+      if (audit.action === 'reauthenticate' && (held === undefined || held.audience !== 'admin' || held.principalKey !== record.principalKey)) {
+        return 'session_ended';
+      }
       // A taken key is refused BEFORE the presented session is touched.
       if (records.has(key)) refuse('not_created');
-      const held = replaces === null ? undefined : records.get(replaces);
       if (replaces !== null) records.delete(replaces);
       records.set(key, Object.freeze({ ...record }));
       audits.push(Object.freeze({ entry: Object.freeze({ ...audit }), key, replaced: held?.audience === 'admin' ? replaces : null }));
+      return 'established';
     },
     end: (key, audit) => {
       const held = records.get(key);
@@ -90,8 +98,12 @@ const CONTRACT_ACTOR = '0b6f1c2e-4d5a-4e3b-9c8d-7a6b5c4d3e2f';
  * revocation is final; and revoking a principal ends every one of its sessions in that audience
  * and nothing else. An administrative session is never created, only established — ending the
  * presented session it replaces, and refusing a taken key without touching that session — and it
- * is ended by `end`, which answers 'absent' once there is nothing live to end. What a durable store
- * records for them is not observable through the port; its own suite proves the records.
+ * is ended by `end`, which answers 'absent' once there is nothing live to end. A reauthentication
+ * establishes only by ending the live administrative session of its own principal that it presents;
+ * otherwise it answers 'session_ended' and changes nothing (M5-ADMIN-REVOKE-P1). What a durable store
+ * records for them is not observable through the port; its own suite proves the records. A durable
+ * store under this contract must be built with a standing check that admits (its standing is proved
+ * against the real admission elsewhere).
  */
 export async function assertSessionStoreContract(store: SessionStore): Promise<void> {
   const signal = new AbortController().signal;
@@ -107,6 +119,8 @@ export async function assertSessionStoreContract(store: SessionStore): Promise<v
   const logout = (): SessionEndAudit => Object.freeze({ action: 'logout', operationId: randomUUID(), actor: null, authenticatedAt: null });
   const admit = (key: string, r: SessionRecord, replaces: string | null = null): Promise<unknown> =>
     Promise.resolve(audited.establish(key, r, replaces, audit('login'), signal));
+  const reauthenticate = (key: string, r: SessionRecord, replaces: string | null): Promise<unknown> =>
+    Promise.resolve(audited.establish(key, r, replaces, audit('reauthenticate'), signal));
 
   await put('k-a', record('tenant', 'p-1', t));
   assert.deepEqual(await get('k-a'), record('tenant', 'p-1', t), 'a record reads back as written');
@@ -134,18 +148,30 @@ export async function assertSessionStoreContract(store: SessionStore): Promise<v
   assert.equal(await get('k-f'), undefined, 'and the refused create wrote nothing');
   await assert.rejects(async () => admit('k-f', record('tenant', 'p-4', t)), 'establish refuses a record of another audience');
   assert.equal(await get('k-f'), undefined);
-  await admit('k-f', record('admin', 'p-4', t));
+  assert.equal(await admit('k-f', record('admin', 'p-4', t)), 'established', 'an establishment answers established');
   assert.deepEqual(await get('k-f'), record('admin', 'p-4', t), 'an established record reads back as written');
-  await audited.establish('k-g', record('admin', 'p-4', t), 'k-f', audit('reauthenticate'), signal);
+  // A reauthentication that presents no live session, another principal's, or a record of another audience ends,
+  // creates and records nothing (M5-ADMIN-REVOKE-P1).
+  await put('k-t', record('tenant', 'p-4', t));
+  await admit('k-o', record('admin', 'p-9', t));
+  for (const [label, presented] of [['no live session', 'k-absent'], ['another principal\'s session', 'k-o'], ['a record of another audience', 'k-t']]) {
+    assert.equal(await reauthenticate('k-r', record('admin', 'p-4', t), presented), 'session_ended', `a reauthentication presenting ${label}`);
+    assert.equal(await get('k-r'), undefined, `${label}: nothing created`);
+  }
+  assert.notEqual(await get('k-o'), undefined, 'another principal\'s presented session is left as it was');
+  assert.notEqual(await get('k-t'), undefined, 'and so is a presented record of another audience');
+  assert.equal(await reauthenticate('k-g', record('admin', 'p-4', t), 'k-f'), 'established');
   assert.equal(await get('k-f'), undefined, 'the presented session ends with the establishment that replaces it');
   assert.deepEqual(await get('k-g'), record('admin', 'p-4', t));
-  await admit('k-h', record('admin', 'p-4', t), 'k-absent');
+  assert.equal(await reauthenticate('k-r', record('admin', 'p-4', t), 'k-f'), 'session_ended', 'a session already ended cannot be ended again');
+  assert.equal(await get('k-r'), undefined, 'so a second reauthentication presenting it creates nothing');
+  assert.equal(await admit('k-h', record('admin', 'p-4', t), 'k-absent'), 'established');
   assert.notEqual(await get('k-h'), undefined, 'a presented key naming no session changes nothing but still establishes');
   await assert.rejects(async () => admit('k-g', record('admin', 'p-5', t), 'k-h'), 'a taken key is refused');
   assert.notEqual(await get('k-h'), undefined, 'without touching the presented session');
   assert.deepEqual(await get('k-g'), record('admin', 'p-4', t), 'and without overwriting the live one');
   await put('k-i', record('tenant', 'p-6', t));
-  await admit('k-j', record('admin', 'p-6', t), 'k-i');
+  assert.equal(await admit('k-j', record('admin', 'p-6', t), 'k-i'), 'established');
   assert.equal(await get('k-i'), undefined, 'rotation ends whatever record is presented, whatever its audience');
   assert.equal(await audited.end('k-g', logout(), signal), 'ended', 'end ends a live session');
   assert.equal(await get('k-g'), undefined);

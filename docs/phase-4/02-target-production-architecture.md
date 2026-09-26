@@ -46,7 +46,7 @@ Authority moves from the browser to the server. Today the browser holds the role
 2. Database client creation — TLS verified against DATABASE_CA_CERT; nothing connects yet
 3. Database connectivity probe — one SELECT 1 on the app login; fails if TLS cannot verify, endpoint unreachable, credential refused
 4. Runtime login validation (preflight) — app login's role attributes (not superuser, NOBYPASSRLS, NOCREATEROLE, etc.), memberships (tmpos_app, tmpos_audit_writer), owned objects, and the one direct privilege (SELECT on public.schema_migrations — new G-DBROLE requirement)
-5. Migration ledger validation (preflight) — public.schema_migrations must be exactly 001–014 in order, all finished, no dirty rows, every checksum pinned; nothing is applied, rolled back or repaired
+5. Migration ledger validation (preflight) — public.schema_migrations must be exactly 001–015 in order (015 since M5-ADMIN-REVOKE-P1), all finished, no dirty rows, every checksum pinned; nothing is applied, rolled back or repaired
 6. Sessions and transactions composition — admin boundary only (SESSION_TENANT_ORIGINS not read); served route inventory validated against SHIPPING_ROUTES exactly; any missing or extra route refuses
 7. Dependency probes — the idempotency store and the command-transaction port answer their read-only probes
 8. Rate-limit key fingerprint registration and validation — migration 014 registers the fingerprint atomically when none exists, rejects mismatches, refuses if store is read-only or unreachable; registration happens before any request can spend an allowance

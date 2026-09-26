@@ -121,6 +121,13 @@ export type ContextRevalidator = (
    * (M5-GIAM-D1-P2). null when the route required none, and then no freshness is checked.
    */
   authNotAfter: number | null,
+  /**
+   * The store key of the administrative session that presented the command (M5-ADMIN-REVOKE-P1), or null: the
+   * revalidator holds that session's row on this transaction and re-reads the standing it is bound to, so the command
+   * commits only while it is live. Bound as a parameter of that read and nothing else — never audited, logged,
+   * evented or returned.
+   */
+  sessionKey: string | null,
 ) => Promise<boolean>;
 
 export interface TransactionalStoreOptions {
@@ -171,7 +178,7 @@ const MAX_CLAIM_MS = 60 * 60_000;
 const MAX_EVENT_VERSION = 1_000;
 const MAX_PERMISSION_LENGTH = 128;
 const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid'];
-const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'rejected', 'mutation', 'audit', 'events', 'context', 'authNotAfter'];
+const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'rejected', 'mutation', 'audit', 'events', 'context', 'authNotAfter', 'sessionKey'];
 /** The sealed responses for the two deterministic post-authorization rejections (M5-GIAM-D1-P2-R1). */
 const REJECTED_FIELDS: readonly string[] = ['conflict', 'invalidState'];
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
@@ -360,6 +367,8 @@ interface Command {
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
   /** When this attempt's trusted authentication evidence goes stale, or null when its route required none. */
   readonly authNotAfter: number | null;
+  /** The presenting administrative session's store key, or null (M5-ADMIN-REVOKE-P1). A SQL parameter only. */
+  readonly sessionKey: string | null;
 }
 
 
@@ -374,10 +383,13 @@ interface Command {
 function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
-    const { scope, lease, response, unchanged, rejected: rawRejected, mutation, audit, events, context: rawContext, authNotAfter } = raw;
+    const { scope, lease, response, unchanged, rejected: rawRejected, mutation, audit, events, context: rawContext, authNotAfter, sessionKey } = raw;
     // The instant this attempt's trusted authentication evidence goes stale, when its route required one
     // (M5-GIAM-D1-P2). Read once here and judged inside the transaction against the database's clock.
     if (authNotAfter !== null && !isInteger(authNotAfter, 1, Number.MAX_SAFE_INTEGER)) return UNAVAILABLE;
+    // The presenting session's store key (M5-ADMIN-REVOKE-P1), read once: null, or exactly a session key's shape — the
+    // SHA-256 digest of the identifier in base64url (sessions.ts digestOf), 43 characters.
+    if (sessionKey !== null && !isDigest(sessionKey)) return UNAVAILABLE;
     if (!isDigest(scope) || !isDigest(lease)) return LEASE_LOST;
     if (!isSealed(response) || response.length === 0 || !isRecord(mutation) || !hasExactKeys(mutation, MUTATION_FIELDS)) return UNAVAILABLE;
     const { kind, aggregateType, aggregateId, expectedVersion, changes: rawChanges } = mutation;
@@ -406,6 +418,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // A freshness claim with no actor to hold it is not one this store can judge, and it is refused here —
     // at validation, before a transaction is opened — rather than inside the commit.
     if (context === null && authNotAfter !== null) return UNAVAILABLE;
+    // Likewise a session key: with no context there is no revalidation to hold the session in, and a key this store
+    // would carry unread is a key it was handed for nothing.
+    if (context === null && sessionKey !== null) return UNAVAILABLE;
     // A command is a write. A context the resolver marked read-only — because the account, the tenant
     // or the store is `read_only` or `overdue` — may not perform one, and that limiting is applied
     // here rather than left to a caller who might forget it.
@@ -480,7 +495,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       scope, lease, response, unchanged: unchanged as string | null,
       rejected: Object.freeze({ conflict: conflict as string, invalidState: (invalidState ?? null) as string | null }),
       mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
-      authNotAfter: authNotAfter as number | null,
+      authNotAfter: authNotAfter as number | null, sessionKey: sessionKey as string | null,
     });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
@@ -500,10 +515,13 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   //     longer carries — rolls the whole transaction back: no mutation, no completion, no audit
   //     record, no event. The refusal is 'unavailable', the same answer an outage gives, so nothing
   //     distinguishes a revoked actor from a database that could not answer. The permission is the
-  //     route's own requirement, which the runtime put on the audit record (M5-GIAM-D1-P1-R1).
+  //     route's own requirement, which the runtime put on the audit record (M5-GIAM-D1-P1-R1). Since
+  //     M5-ADMIN-REVOKE-P1 it also holds the presenting session's row and re-reads that session's standing
+  //     here, so a logout, a revocation or a removal-and-restoration that committed first refuses the command
+  //     the same way, and one that comes later waits for this COMMIT.
   if (c.context !== null) {
     if (revalidate === null) return refuse(UNAVAILABLE);
-    if ((await revalidate(sql, c.context, c.audit.requiredPermission, c.authNotAfter)) !== true) return refuse(UNAVAILABLE);
+    if ((await revalidate(sql, c.context, c.audit.requiredPermission, c.authNotAfter, c.sessionKey)) !== true) return refuse(UNAVAILABLE);
   }
   // 2. The business mutation, by the kind's own mutator. An update whose aggregate is absent wrote nothing and
   //    rolls back, so no completion, audit record or event exists for it.

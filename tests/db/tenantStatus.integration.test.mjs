@@ -8,6 +8,10 @@
 // randomly named, so the suite re-runs on the shared CI service where earlier suites already applied 001-009 and may
 // have moved other tenants' versions. The rollback and upgrade proof runs inside one transaction that is rolled back,
 // so the shared database keeps its state.
+//
+// M5-ADMIN-REVOKE-P1: the store runs the production revalidator whole — 009's locks, the presenting administrative
+// session held, then 013's read of that session's standing — so every context-carrying command below is presented by a
+// real live administrative session, established the way the login establishes one (sessionOf).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -24,15 +28,21 @@ import { createNodeFsPort } from '../../server/platform-identity/migrationEngine
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
-import { createPostgresPrincipalResolver, revalidatePlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
+import {
+  createPostgresPrincipalResolver, lockPlatformAuthority, revalidatePlatformAuthority,
+} from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createPostgresPlatformAdmission, readPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import { createPostgresSessionStore, holdAdministrativeSession } from '../../server/persistence/postgresSessionStore.ts';
 import { TENANT_STATUS_MUTATOR } from '../../server/persistence/tenantStatusMutator.ts';
-import { createPlatformContextRevalidator } from '../../server/composition/platformAuthorization.ts';
+import {
+  createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformSessionAdmission,
+} from '../../server/composition/platformAuthorization.ts';
 import { prepareCommand } from '../../server/runtime/commandTransaction.ts';
 import { IDEMPOTENCY_POLICY, createIdempotencyKeyring } from '../../server/runtime/idempotency.ts';
 import { TEST_IDEMPOTENCY_KEY } from '../../server/runtime/idempotencyStore.testkit.ts';
 import { defineOutboxEvents } from '../../server/runtime/outbox.ts';
 import { selectScope } from '../../server/runtime/principals.ts';
-import { RECENT_AUTH_MAX_AGE_MS } from '../../server/runtime/sessions.ts';
+import { RECENT_AUTH_MAX_AGE_MS, principalKeyOf } from '../../server/runtime/sessions.ts';
 import {
   TENANT_STATUS_CONTRACT,
   TENANT_STATUS_EVENTS,
@@ -44,8 +54,14 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.up.sql`, 'utf8');
 const DOWN_010 = readFileSync(`${MIG_DIR}/010_m5_tenant_lifecycle_command.down.sql`, 'utf8');
-/** The production revalidator: 009's exact-authority routine, then the permission on the built-in definitions. */
-const REVALIDATE = createPlatformContextRevalidator({ authority: revalidatePlatformAuthority });
+/**
+ * The production revalidator, composed exactly as productionTransactions.ts composes it: 009's exact-authority routine,
+ * the presenting administrative session held, 013's read of that session's standing (M5-ADMIN-REVOKE-P1), then the
+ * permission on the built-in definitions.
+ */
+const REVALIDATE = createPlatformContextRevalidator({
+  authority: revalidatePlatformAuthority, session: (sql, key) => holdAdministrativeSession(sql, key, Date.now()), read: readPlatformAdmission,
+});
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm5s-migrator', runtimeRef: 'm5s-runtime' };
 const LOCK_KEY = 528_510;
 const NOW = () => new Date().toISOString();
@@ -168,6 +184,11 @@ client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN)
 });
 const store = createPostgresTransactionalStore({ client, mutators: [TENANT_STATUS_MUTATOR], revalidate: REVALIDATE });
 const principals = createPostgresPrincipalResolver({ client });
+/** The production session store over the same kernel, with the administrative login's standing check (M5-ADMIN-REVOKE-P1). */
+const SESSIONS = createPostgresSessionStore({
+  client, standing: createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority }),
+});
+const ADMISSION = createPlatformSessionAdmission({ admission: createPostgresPlatformAdmission({ client }) });
 const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 const EVENTS = defineOutboxEvents(TENANT_STATUS_EVENTS);
 
@@ -206,12 +227,39 @@ const OPS = await actor('ops', { scope: 'platform', role: 'operations_admin' });
 const SUPPORT = await actor('support', { scope: 'platform', role: 'support_admin' });
 const BILLING = await actor('billing', { scope: 'platform', role: 'billing_admin' });
 
-/** The trusted scope the canonical authorizer would hand the command: resolved and selected by the real resolver. */
+/**
+ * A live administrative session of `who`, established exactly as the production login establishes one — admitted by
+ * migration 013 at its current witness, then the production session store's own establish: the standing re-read under
+ * 009's locks, the session row and its login audit record, in one transaction — and its store key (the digest of an
+ * identifier nobody holds). No row is written around the store: the store's establish is the login's only write.
+ */
+async function sessionOf(who) {
+  const decision = await ADMISSION.admit(who.principal, 'admin', signal());
+  assert.equal(decision?.admitted, true, `${who.uid} is admitted`);
+  const key = createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url');
+  const t = Date.now();
+  const record = Object.freeze({
+    audience: 'admin', authProvider: who.principal.authProvider, authProviderUid: who.principal.authProviderUid,
+    principalKey: principalKeyOf(who.principal), securityVersion: decision.securityVersion, authenticatedAt: t, createdAt: t, lastSeenAt: t, validatedAt: t,
+  });
+  const audit = Object.freeze({ action: 'login', operationId: randomUUID(), actor: decision.context.actor, authenticatedAt: t });
+  assert.equal(await SESSIONS.establish(key, record, null, audit, signal()), 'established', `${who.uid}: a session is established`);
+  return key;
+}
+/** The store key of the session each actor's latest context was planned under (M5-ADMIN-REVOKE-P1). */
+const SESSION_KEYS = new Map();
+
+/**
+ * The trusted scope the canonical authorizer would hand the command: resolved and selected by the real resolver — and,
+ * as the chain presents every command through a live administrative session, a session of that actor established at
+ * this moment's witness, whose key prepared() binds to the command.
+ */
 async function contextOf(who) {
   const resolution = await principals.resolve(who.principal, signal());
   assert.equal(resolution.outcome, 'resolved', `${who.uid} resolves`);
   const selection = selectScope(resolution.principal, 'platform', { tenant: null, store: null });
   assert.equal(selection.outcome, 'selected');
+  SESSION_KEYS.set(selection.scope.actor, await sessionOf(who));
   return selection.scope;
 }
 
@@ -227,11 +275,15 @@ async function acquired(who, body) {
 
 const bodyOf = (tenant, status, expectedVersion, reason = REASON) => ({ tenantId: tenant, status, reason, expectedVersion });
 
-/** The command the chain would commit: planned from the body, prepared under the record's lease and the trusted context. */
+/**
+ * The command the chain would commit: planned from the body, prepared under the record's lease and the trusted context,
+ * presented by the actor's session from contextOf.
+ */
 function prepared({ operation, lease }, context, body, authNotAfter = Date.now() + RECENT_AUTH_MAX_AGE_MS) {
   const plan = planTenantStatus({ audience: 'admin', body, newAggregateId: randomUUID() });
   const command = prepareCommand(TENANT_STATUS_CONTRACT, EVENTS, plan, {
     scope: operation.scope, lease, newAggregateId: randomUUID(), authorization: REQUIREMENT, context, authNotAfter,
+    sessionKey: context === null ? null : (SESSION_KEYS.get(context.actor) ?? null),
     seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(command !== null, 'the plan is in contract');
@@ -253,11 +305,11 @@ async function transition(who, tenant, status, expectedVersion, over = {}) {
 // migration 010 as applied
 // ---------------------------------------------------------------------------
 
-test('M5S-01: 001-014 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
+test('M5S-01: 001-015 apply clean; 010 is its column, its one operation and one narrow grant', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null,
       pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,

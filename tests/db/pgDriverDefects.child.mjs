@@ -182,6 +182,7 @@ async function held(store) {
     // principal yet, so the command commits without a trusted context, as the runtime does.
     context: null,
     authNotAfter: null, // no route here requires a recent authentication
+    sessionKey: null, // and with no context there is no presenting session to hold (M5-ADMIN-REVOKE-P1)
     seal: (envelope) => KEYRING.seal(envelope, op),
   });
   return { op, acquired: acquired.outcome, command: prepared.command };
