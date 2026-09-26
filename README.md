@@ -65,6 +65,7 @@ Status labels used below:
 - Plans that switch modules on as a shop grows: a starter plan covers checkout, customers, invoices and support, and higher plans add repairs, inventory, services, purchasing, staff, warranties, marketing, prospects, shipping and returns. *(Preview)*
 - Per-role permissions with graded levels (view, create, edit, manage, approve and full), so a team member can, for example, view repair tickets without being able to close or reassign them. *(Preview)*
 - Approving refunds and return payouts is a separate permission. The built-in owner and manager roles include it by default, custom roles start without it, and it can be granted or removed role by role. *(Preview)*
+- Server-checked shop staff sessions: removing a person's access, or suspending their business or store, refuses their next request; a sign-in never completes on access that has already been removed; an ended session is never brought back; and each sign-in, re-confirmation and sign-out is kept in a durable record. *(Built, not deployed; the shop app does not use it yet)*
 
 ### At the counter: point of sale
 - Cart-based checkout for products, services and repairs, with line-item quantity and price edits. *(Preview)*
@@ -287,6 +288,7 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 - [Backend] A "recent sign-in" check before sensitive administrative actions.
 - [Backend] A durable audit record of administrator sign-ins, re-confirmations and sign-outs.
 - [Backend] Sign-outs and access removals are now ordered against administrator actions happening at the same moment: a sign-in, a recent sign-in or a business-account change either completes before the removal or does not happen at all, and an ended session is never brought back.
+- [Backend] Server-side groundwork for shop staff sign-in: shop sessions are ordered against access changes in the same way, and each sign-in and re-confirmation is recorded, as is each sign-out whose record can be written (a sign-out still ends the session when it cannot). Not yet connected to the shop app.
 - [Backend] Request limits connected to durable, platform-wide storage.
 - [Backend] A start-up process that refuses to start unless its configuration checks pass.
 - [Platform] This product page and the proprietary licence.
