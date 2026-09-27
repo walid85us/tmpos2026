@@ -42,7 +42,7 @@ import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
 import { STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES } from './tenantAdmissionWitness.harness.mjs';
 import {
   assertDisposableTestDsn,
@@ -144,7 +144,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-017, a real non-owner runtime login, real adapters
+// setup: real migrations 001-018, a real non-owner runtime login, real adapters, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -189,12 +189,15 @@ client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN)
   user: RUNTIME_LOGIN,
 });
 
+// Migration 018: every tenant session is minted under the issuer key the owner installs (a synthetic one here).
+const ISSUER_KEY = await installTestIssuerKey(owner);
 /**
  * The real adapters, over that one client — what productionTransactions.ts builds for the tenant audience: the store's
  * establish-time standing check holds the actor's standing (016's hold) and re-reads 016's v2 on that transaction.
  */
 const sessionStore = createPostgresSessionStore({
   client,
+  issuerKey: ISSUER_KEY,
   standing: createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission }),
 });
 const tenantAdmission = createPostgresTenantAdmission({ client });
@@ -439,13 +442,14 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-017 applied, and the runtime role reaches the session table only through 011\'s routines', async () => {
+test('M5A-01: migrations 001-018 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-017, so this run applies nothing and its report lists no version.
+  // 001-018, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018']
+      .map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.
   for (const statement of ['select count(*) from tmpos_session.session',
@@ -460,12 +464,14 @@ test('M5A-01: migrations 001-017 applied, and the runtime role reaches the sessi
   const [{ touched }] = await runtime`select tmpos_session.m5_session_touch(${`m5a-absent-${SUFFIX}`}::text, null::text, 1::bigint) as touched`;
   assert.equal(touched, 'invalid');
   // And the schema holds exactly ten routines: 011's five session operations and its admission read, and 016's two
-  // version triggers, v2 read and hold. The runtime role may call eight of them — never a trigger function.
+  // version triggers, v2 read and hold. The runtime role may call seven of them — never a trigger function, and since
+  // migration 018 no longer 011's create, which would let it write a session for anyone (doc 08 DA-83): every session
+  // is created through 018's tmpos_mint.m7a_session_create, a tenant one only with the issuer key's proof.
   const routines = await owner`select proname::text as name,
       pg_catalog.has_function_privilege('tmpos_app', oid, 'EXECUTE') as app
     from pg_catalog.pg_proc where pronamespace = 'tmpos_session'::regnamespace order by proname`;
   assert.deepEqual(routines.map((r) => [r.name, r.app]), [['m5_access_version_moved', false], ['m5_admit_tenant_session', true],
-    ['m5_admit_tenant_session_v2', true], ['m5_hold_tenant_standing', true], ['m5_session_create', true], ['m5_session_get', true],
+    ['m5_admit_tenant_session_v2', true], ['m5_hold_tenant_standing', true], ['m5_session_create', false], ['m5_session_get', true],
     ['m5_session_revoke', true], ['m5_session_revoke_principal', true], ['m5_session_touch', true], ['m5_tenant_grant_moved', false]],
   '011\'s five session operations and admission read, 016\'s v2 read and hold, and two trigger functions nobody may call');
 });
@@ -480,8 +486,9 @@ test('M5A-02: the production session store satisfies the port\'s own conformance
     // `standing` is the establish-time standing check the production composition binds; the store
     // refuses to establish without one. A stub that always answers true, because the contract judges
     // the PORT (create, get, update, revoke, establish, end), not admission.
+    // Since 018 its tenant records are minted, so it carries the issuer key the owner installed.
     await assertSessionStoreContract(createPostgresSessionStore({
-      client, now: () => SESSION_CONTRACT_EPOCH, standing: async () => true,
+      client, now: () => SESSION_CONTRACT_EPOCH, standing: async () => true, issuerKey: ISSUER_KEY,
     }));
   } finally {
     await clearFixtures();

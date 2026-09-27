@@ -9,6 +9,11 @@
 // the authorizer resolved the session's actor and the ONE tenant grant it decided on, and that trusted scope — never a
 // path, query, header, cursor or body — is the only thing that says whose customers are read.
 //
+// BOUND TO THE PRESENTING SESSION (M7A-CUSTOMERS-P2). The route declares `sessionBinding: 'required'`, so the chain
+// hands this handler the presenting session's store key, and the port asks the database with that key alone: the read is
+// bound in the database to the presenting minted session, which derives the tenant itself — a caller holding the
+// runtime's database login but no live minted session reads nothing. The key is a SQL parameter and nothing else.
+//
 // THE QUERY. Exactly two optional parameters, each at most once and nothing else: `limit`, a decimal 1-100 (default 50),
 // and `cursor`, the continuation a previous page returned. Any other key, a repeat, an empty pair, an encoding, a
 // non-canonical spelling or an overlong query is a 400 invalid_request, decided before the customer port is asked (the
@@ -18,9 +23,9 @@
 // position up only among the admitted tenant's customers, so a cursor naming another tenant's customer — or none — is
 // the same 400 as any unknown one and reveals nothing about any tenant.
 //
-// THE PAGE. The port asks migration 017's routine for at most `limit` customers after the cursor, ordered by
-// (name, id) in byte order — a total order, so pages never overlap. The routine re-confirms, in the snapshot it reads,
-// that the trusted scope's grant still holds. Its answer is untrusted: only an exactly shaped answer becomes a page —
+// THE PAGE. The port asks migration 018's session-bound routine, which delegates to migration 017's, for at most `limit`
+// customers after the cursor, ordered by (name, id) in byte order — a total order, so pages never overlap. The routine
+// re-confirms, in the snapshot it reads, that the session's one tenant grant still holds. Its answer is untrusted: only an exactly shaped answer becomes a page —
 // canonical customer ids, none repeated and none the cursor's own, names of 1-200 characters in well-formed UTF-16,
 // in strictly increasing page order (so a continuation can never repeat or skip a row the answer put out of order) —
 // and anything else is a bounded 503. The response is built field by field from that validated answer:
@@ -100,14 +105,15 @@ export interface CustomerDirectoryEntry {
 }
 
 /**
- * The port to migration 017's routine. Its answer is untrusted input, expected to be one of
+ * The port to migration 018's session-bound read, handed the trusted scope and the presenting session's store key
+ * (RouteContext.sessionKey), a SQL parameter it never logs, echoes or stores. Its answer is untrusted input, expected to be one of
  *   { outcome: 'page', customers: CustomerDirectoryEntry[], hasMore: boolean }  — at most query.limit customers;
  *   { outcome: 'denied' }                                                      — the scope's grant no longer holds;
  *   { outcome: 'cursor_unknown' }                                              — query.after names no customer of the tenant.
  * A throw is an outage.
  */
 export interface CustomerDirectoryPort {
-  page(scope: TrustedScope, query: CustomerDirectoryQuery, signal: AbortSignal): unknown;
+  page(scope: TrustedScope, sessionKey: string, query: CustomerDirectoryQuery, signal: AbortSignal): unknown;
 }
 
 /** What the route is built from. */
@@ -242,9 +248,12 @@ export function createCustomerDirectoryRoute(ports: CustomerDirectoryPorts, opti
     // The chain refused this request already unless a tenant scope was resolved; this states it again.
     const scope = ctx.trusted;
     if (scope === null || scope.scope !== 'tenant' || scope.tenant === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    // The route declares the binding, so the chain hands the key; this states it again.
+    const { sessionKey } = ctx;
+    if (sessionKey === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
     let raw: unknown;
     try {
-      raw = await withDeadline(deadlineMs, (signal) => reader.page(scope, query, signal));
+      raw = await withDeadline(deadlineMs, (signal) => reader.page(scope, sessionKey, query, signal));
     } catch (err) {
       return refuse(res, ctx, 503, 'service_unavailable', outage('customer_directory', err));
     }
@@ -268,6 +277,8 @@ export function createCustomerDirectoryRoute(ports: CustomerDirectoryPorts, opti
     // only its tenant, so the route needs the resolved scope, never a verified principal alone. No recent sign-in.
     trustedContext: 'required',
     recentAuth: 'none',
+    // The database binds the read to the presenting minted session, so the handler is handed its store key.
+    sessionBinding: 'required',
     handler,
   };
   return Object.freeze(route);

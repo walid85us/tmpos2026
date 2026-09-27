@@ -32,7 +32,7 @@ import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:c
 import { setTimeout as delay } from 'node:timers/promises';
 import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -237,11 +237,11 @@ function databaseClientOver(relay) {
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-017 and a real non-owner least-privilege runtime login
+// setup: real migrations 001-018 and a real non-owner least-privilege runtime login
 // ---------------------------------------------------------------------------
 
 // The roles the migrations name, PUBLIC's CREATE and TEMPORARY on the database revoked (the startup preflight refuses a
-// login holding either) and migrations 001-017: the approved production state, which every earlier database suite also
+// login holding either) and migrations 001-018: the approved production state, which every earlier database suite also
 // establishes, so it stays in place on a shared database. It is re-established here, not inherited.
 await setupStep(async () => {
   await owner.unsafe(`do $$ begin
@@ -808,7 +808,8 @@ test('M6EP-12: a tenant/store cookie cannot enter the admin boundary', async () 
       ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 2, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
     });
     try {
-      const store = createPostgresSessionStore({ client: rig });
+      // A tenant row is minted (migration 018): the owner installs a synthetic issuer key, and this store holds it.
+      const store = createPostgresSessionStore({ client: rig, issuerKey: await installTestIssuerKey(owner) });
       const id = randomBytes(32).toString('base64url');
       const key = createHash('sha256').update(id).digest('base64url');
       const uid = `m6ep12-tenant-${SUFFIX}`;

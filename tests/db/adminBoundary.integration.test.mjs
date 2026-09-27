@@ -42,7 +42,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -138,7 +138,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-017, a real non-owner runtime login, the production composition
+// setup: real migrations 001-018, a real non-owner runtime login, the production composition
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -167,6 +167,7 @@ await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
 await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
 
 /** The endpoint the root classified from CONFIGURED_ENV — recorded, never dialled. */
+const ISSUER_KEY = await installTestIssuerKey(owner);
 let classifiedEndpoint = null;
 tx = assembleTransactions(PRODUCTION_INVENTORY, CONFIGURED_ENV, {
   client: (endpoint) => {
@@ -178,8 +179,9 @@ tx = assembleTransactions(PRODUCTION_INVENTORY, CONFIGURED_ENV, {
   store: createPostgresTransactionalStore,
   platformAdmission: (c) => createPostgresPlatformAdmission({ client: c }),
   // The standing check the root builds (M5-ADMIN-REVOKE-P1) is forwarded exactly as PRODUCTION_FACTORIES forward it:
-  // dropping it here would leave this suite's administrative logins establishing nothing.
-  sessionStore: (c, standing) => createPostgresSessionStore({ client: c, standing }),
+  // dropping it here would leave this suite's administrative logins establishing nothing. The synthetic issuer key the
+  // owner installed lets M5E-E's one tenant login mint (migration 018); no administrative session needs it.
+  sessionStore: (c, standing) => createPostgresSessionStore({ client: c, standing, issuerKey: ISSUER_KEY }),
   tenantAdmission: (c) => createPostgresTenantAdmission({ client: c }),
   tenantDirectory: (c) => createPostgresTenantDirectory({ client: c }),
   rateLimiter: (c, keySecret) => createPostgresRateLimiter({ client: c, keySecret }),
@@ -371,11 +373,11 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-017 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
+test('M5E-00: 001-018 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018'].map((v) => [v, false]));
 
   // The transaction root classified the configured endpoint before building its one client, and hands back the ports
   // the two boundaries are served with — never the kernel, a pool or the URL.

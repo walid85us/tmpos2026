@@ -15,6 +15,7 @@
 // No CREATE ROLE is issued. The bootstrap superuser is the one `initdb` creates inherently.
 
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, appendFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -163,6 +164,19 @@ export function localPostgresAvailable() {
     }
   }
   return true;
+}
+
+/**
+ * Installs a synthetic tenant issuer key (migration 018, M7A-CUSTOMERS-P2) as the database OWNER, with the owner's own
+ * statement (design-B §3.12): a bound parameter, and an upsert, so it is also a rotation. The key is `issuerKey` when a
+ * suite reinstalls its own, otherwise 32 random bytes made in this process — never written anywhere, never a literal.
+ * The suites run one at a time on the shared CI service, so each installs its own at setup and none contends for the
+ * singleton. Answers the key, for the session store's `issuerKey`.
+ */
+export async function installTestIssuerKey(owner, issuerKey = randomBytes(32)) {
+  await owner`insert into tmpos_mint.issuer_key (singleton, key) values (true, ${issuerKey})
+    on conflict (singleton) do update set key = excluded.key`;
+  return issuerKey;
 }
 
 export { BOOTSTRAP_ROLE, DB_PREFIX };

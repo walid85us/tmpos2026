@@ -36,7 +36,11 @@
 // session's audience (auditEventWriter.ts SESSION_AUDIT_EVENTS): the administrative events at platform scope,
 // the tenant events at scope 'none' — a tenant session selects no tenant or store at login. `create` refuses an
 // administrative record, so establish is this file's only way to write one; the DATABASE does not couple
-// them — the runtime login may still call m5_session_create directly (a routine migration would be needed).
+// them. What the database does couple (M7A-CUSTOMERS-P2, migration 018): every session is created through
+// tmpos_mint.m7a_session_create — the runtime login no longer executes 011's m5_session_create — and a TENANT session
+// only with a proof, HMAC-SHA256 under the tenant issuer key over all eleven values of the row (tenantMintProof), which
+// the routine checks against the key the database owner installed before it writes the session and its mint-ledger row.
+// A store built without the key refuses every tenant write before any statement. The administrative branch takes no proof.
 //
 // ORDERED AGAINST REVOCATION (M5-ADMIN-REVOKE-P1; the tenant login since M5-TENANT-SESSION-P1, ADR-31). establish
 // first re-reads the standing the login was admitted at, on its own transaction and with the actor's standing locked
@@ -55,7 +59,8 @@
 // NOTHING IS LOGGED. Keys, provider references and driver errors are bound as parameters or
 // discarded; the caller learns that an operation failed and nothing else — no SQLSTATE, no
 // statement, no parameter, no connection string, no stack.
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, createSecretKey } from 'node:crypto';
+import type { KeyObject } from 'node:crypto';
 import { SESSION_TTL } from '../runtime/sessions.js';
 import type { SessionEndAudit, SessionEstablishAudit, SessionRecord, SessionStore, SessionUpdate } from '../runtime/sessions.js';
 import type { SessionAudience } from '../runtime/routes.js';
@@ -173,6 +178,58 @@ function expiryOf(record: SessionRecord): number {
   // Number.isSafeInteger already bounds this by MAX_SAFE_INTEGER; a second comparison would be dead.
   if (!Number.isSafeInteger(expiresAt)) throw new SessionStoreUnavailable('lifetime_invalid');
   return expiresAt;
+}
+
+// --- the tenant mint (M7A-CUSTOMERS-P2, migration 018) ------------------------------------------------
+
+const ISSUER_KEY_BYTES = Object.freeze({ min: 32, max: 64 });
+
+const netstring = (s: string): Buffer => {
+  const b = Buffer.from(s, 'utf8');
+  return Buffer.concat([Buffer.from(`${b.length}:`), b, Buffer.from(',')]);
+};
+
+/**
+ * The proof migration 018's mint requires for a TENANT record: HMAC-SHA256 under the issuer key over a versioned prefix
+ * and all eleven values the row is created with, each a netstring, in the routine's argument order — so no value can
+ * be changed, moved or split without the proof changing. A null authentication time is the empty string; every number
+ * is a safe integer, whose decimal text is PostgreSQL's bigint text. Exported for its unit test.
+ */
+export function tenantMintProof(issuerKey: Uint8Array | KeyObject, key: string, record: SessionRecord, expiresAt: number): Buffer {
+  const fields = [key, record.audience, record.authProvider, record.authProviderUid, record.principalKey, record.securityVersion,
+    record.authenticatedAt === null ? '' : String(record.authenticatedAt), String(record.createdAt), String(record.lastSeenAt),
+    String(record.validatedAt), String(expiresAt)];
+  return createHmac('sha256', issuerKey).update(Buffer.concat([Buffer.from('tmpos-tenant-session-mint:v1'), ...fields.map(netstring)])).digest();
+}
+
+/** The issuer key's fingerprint: HMAC-SHA256 under it of a fixed label (014's construction for RATE_LIMIT_KEY). */
+const issuerKeyFingerprint = (issuerKey: Uint8Array | KeyObject): Buffer =>
+  createHmac('sha256', issuerKey).update('tmpos-tenant-issuer-key-fingerprint:v1').digest();
+
+export type IssuerKeyProbe = 'match' | 'mismatch' | 'absent' | 'invalid';
+const ISSUER_KEY_PROBES: ReadonlySet<unknown> = new Set(['match', 'mismatch', 'absent', 'invalid']);
+
+/**
+ * Whether the database holds `issuerKey` (migration 018's m7a_issuer_key_check): one statement, one transaction, under
+ * this store's bounds. The database is handed the key's fingerprint only, never the key, and answers only its word. The
+ * tenant entry's startup and readiness ask it (M7A-CUSTOMERS-P2 checkpoint 3). An aborted call, a fault or an answer
+ * outside the four words THROWS, in this store's own bounded words.
+ */
+export async function probeIssuerKey(client: SupervisedPgClient, issuerKey: Uint8Array, signal: AbortSignal): Promise<IssuerKeyProbe> {
+  if (!(issuerKey instanceof Uint8Array) || issuerKey.byteLength < ISSUER_KEY_BYTES.min || issuerKey.byteLength > ISSUER_KEY_BYTES.max) {
+    throw new SessionStoreUnavailable('issuer_key_invalid');
+  }
+  const fingerprint = issuerKeyFingerprint(issuerKey);
+  if (signal.aborted) throw new SessionStoreUnavailable('aborted');
+  let answer: unknown;
+  try {
+    answer = await client.transaction(signal, SESSION_STORE_BOUNDS, async (sql) => only(
+      await sql`select tmpos_mint.m7a_issuer_key_check(${fingerprint}::bytea) as outcome`, 'outcome'));
+  } catch (err) {
+    throw err instanceof SessionStoreUnavailable ? err : new SessionStoreUnavailable('store_failed');
+  }
+  if (!ISSUER_KEY_PROBES.has(answer)) throw new SessionStoreUnavailable('answer_invalid');
+  return answer as IssuerKeyProbe;
 }
 
 // --- the audited pair (M6-ADMIN-AUDIT-P1) ---------------------------------------------------------
@@ -329,6 +386,13 @@ export interface PostgresSessionStoreDeps {
    * either audience is ever established on a standing this transaction did not re-read.
    */
   readonly standing?: SessionStandingCheck;
+  /**
+   * The tenant issuer key, 32–64 bytes (M7A-CUSTOMERS-P2): the tenant entry's secret, which the database owner installs
+   * in migration 018's tmpos_mint.issuer_key. Optional because the administrative entry must never hold it: a store built
+   * without it writes administrative sessions only, and refuses every tenant write ('issuer_key_missing') before any
+   * statement. Anything but 32–64 bytes is refused at construction. The store keeps a private copy.
+   */
+  readonly issuerKey?: Uint8Array;
 }
 
 // WHY THIS STORE IS NOT BOUND TO ONE AUDIENCE, AND WHAT THAT LEAVES OPEN (doc 08 DA-37).
@@ -359,6 +423,21 @@ export interface PostgresSessionStoreDeps {
 export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): SessionStore {
   const { client, standing } = deps;
   const clock = deps.now ?? Date.now;
+  // A private copy: a later change to the caller's buffer cannot change a proof. The length is checked, never the value.
+  if (deps.issuerKey !== undefined && (!(deps.issuerKey instanceof Uint8Array)
+    || deps.issuerKey.byteLength < ISSUER_KEY_BYTES.min || deps.issuerKey.byteLength > ISSUER_KEY_BYTES.max)) {
+    throw new TypeError('session store issuer key must be 32-64 bytes');
+  }
+  const issuerKey = deps.issuerKey === undefined ? undefined : createSecretKey(Buffer.from(deps.issuerKey));
+  /**
+   * The proof migration 018's mint takes for `record`: null for an administrative record, which the routine refuses to
+   * take one for; a tenant record without the key THROWS here, before any statement — no tenant session without one.
+   */
+  const proofOf = (key: string, record: SessionRecord, expiresAt: number): Buffer | null => {
+    if (record.audience !== 'tenant') return null;
+    if (issuerKey === undefined) throw new SessionStoreUnavailable('issuer_key_missing');
+    return tenantMintProof(issuerKey, key, record, expiresAt);
+  };
   /**
    * The instant liveness is judged at, checked before it is used. An unusable clock — NaN, a fraction,
    * a value past the safe-integer range — would otherwise be sent as the comparison bound and match no
@@ -393,14 +472,17 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
       // carries no expiry field. The lifetime is the RECORD's own audience's, read from the runtime's
       // one table of lifetimes, so a record never outlives the boundary that issued it.
       const expiresAt = expiryOf(record);
+      const proof = proofOf(key, record, expiresAt);
       const outcome = await run(signal, async (sql) => only(await sql`
-        select tmpos_session.m5_session_create(
+        select tmpos_mint.m7a_session_create(
           ${key}::text, ${record.audience}::text, ${record.authProvider}::text, ${record.authProviderUid}::text,
           ${record.principalKey}::text, ${record.securityVersion}::text,
           ${record.authenticatedAt}::bigint, ${record.createdAt}::bigint,
-          ${record.lastSeenAt}::bigint, ${record.validatedAt}::bigint, ${expiresAt}::bigint) as outcome`, 'outcome'));
+          ${record.lastSeenAt}::bigint, ${record.validatedAt}::bigint, ${expiresAt}::bigint, ${proof}::bytea) as outcome`, 'outcome'));
       // A taken key is not a normal outcome: the identifier is 32 random bytes, so a collision means
-      // the source of randomness is wrong. It fails the login rather than overwriting a live session.
+      // the source of randomness is wrong. It fails the login rather than overwriting a live session. The mint's
+      // other refusals — 'refused' (a proof the database's key does not verify, or no key installed) and 'invalid' —
+      // are the same outage: nothing is issued.
       if (outcome !== 'created') throw new SessionStoreUnavailable('not_created');
     },
 
@@ -455,6 +537,7 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
       if (standing === undefined) throw new SessionStoreUnavailable('standing_check_missing');
       // An audience with no lifetime here refuses (audience_invalid); past it, the record's audience is its family.
       const expiresAt = expiryOf(record);
+      const proof = proofOf(key, record, expiresAt);
       const family = record.audience;
       const metadata: AuditMetadata = {
         sessionRef: sessionRefOf(key), ...(record.authenticatedAt === null ? {} : { authenticatedAt: record.authenticatedAt }),
@@ -482,13 +565,14 @@ export function createPostgresSessionStore(deps: PostgresSessionStoreDeps): Sess
         if (reauthenticating && (held === undefined || held.audience !== family || held.principalKey !== record.principalKey
           || !(await endHeld(sql, replaces as string, held)))) return 'session_ended';
         const replaced = reauthenticating || (held !== undefined && (await endHeld(sql, replaces as string, held)) && held.audience === family);
-        // 2. The new session. A taken key fails the whole transaction, so the presented session is left as it was.
+        // 2. The new session, through 018's mint. A taken key — or any mint refusal — fails the whole transaction, so the
+        //    presented session is left as it was.
         const outcome = only(await sql`
-          select tmpos_session.m5_session_create(
+          select tmpos_mint.m7a_session_create(
             ${key}::text, ${record.audience}::text, ${record.authProvider}::text, ${record.authProviderUid}::text,
             ${record.principalKey}::text, ${record.securityVersion}::text,
             ${record.authenticatedAt}::bigint, ${record.createdAt}::bigint,
-            ${record.lastSeenAt}::bigint, ${record.validatedAt}::bigint, ${expiresAt}::bigint) as outcome`, 'outcome');
+            ${record.lastSeenAt}::bigint, ${record.validatedAt}::bigint, ${expiresAt}::bigint, ${proof}::bytea) as outcome`, 'outcome');
         if (outcome !== 'created') throw new SessionStoreUnavailable('not_created');
         // 3. Its record, last.
         await writeSessionAudit(sql, replaced ? { ...row, metadata: { ...metadata, replacedSessionRef: sessionRefOf(replaces as string) } } : row);

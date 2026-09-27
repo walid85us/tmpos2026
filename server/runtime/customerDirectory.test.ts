@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Request, Response } from 'express';
 import { createApp, createBoundedServer, createReadinessState } from './app.js';
@@ -37,6 +37,8 @@ const SCOPE: TrustedScope = Object.freeze({
   actor: ACTOR, securityVersion: 'sv-1', scope: 'tenant', tenant: T1, store: null, membershipId: MEMBERSHIP, roleId: 'manager', limitation: 'none',
 });
 const GRANTED = Object.freeze({ granted: true, context: SCOPE });
+/** A synthetic session store key, in the shape the chain computes one (sessions.ts digestOf). */
+const SESSION_KEY = 'k'.repeat(43);
 
 /** Synthetic customer ids in page order: canonical v4 UUIDs, distinct, generated from an index. */
 const idOf = (i: number): string => `${(0x10000000 + i).toString(16)}-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
@@ -247,7 +249,7 @@ test('inCustomerPageOrder: strictly increasing by name bytes, then id', () => {
   assert.equal(inCustomerPageOrder([e(1, 'Ann'), e(3, 'Cy'), e(2, 'Bob')]), false, 'only the last pair out of order');
 });
 
-test('the route is a GET under the tenant boundary, view_customers at tenant scope, a resolved scope required, no body and no key', () => {
+test('the route is a GET under the tenant boundary, view_customers at tenant scope, a resolved scope and the session binding required, no body and no key', () => {
   const route = createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } });
   assert.equal(route.method, 'GET');
   assert.equal(route.path, '/api/v1/customers');
@@ -255,7 +257,8 @@ test('the route is a GET under the tenant boundary, view_customers at tenant sco
   assert.deepEqual(route.policy, { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'view_customers' } });
   assert.deepEqual([route.body, route.idempotency, route.trustedContext, route.recentAuth], [{ kind: 'none' }, 'none', 'required', 'none']);
   assert.ok(route.idempotency === 'none' && typeof route.handler === 'function');
-  assert.deepEqual(Object.keys(route).sort(), ['body', 'handler', 'idempotency', 'method', 'path', 'policy', 'recentAuth', 'trustedContext']);
+  assert.equal(route.sessionBinding, 'required', 'the handler is handed the presenting session\'s store key (M7A-CUSTOMERS-P2)');
+  assert.deepEqual(Object.keys(route).sort(), ['body', 'handler', 'idempotency', 'method', 'path', 'policy', 'recentAuth', 'sessionBinding', 'trustedContext']);
   assert.ok(Object.isFrozen(route) && Object.isFrozen(route.policy) && Object.isFrozen(route.body));
   assert.ok(route.policy.access === 'session' && Object.isFrozen(route.policy.authorization));
   assert.equal(defineRoutes([route]).list().length, 1, 'the runtime\'s own route table accepts it');
@@ -274,11 +277,11 @@ test('the route is a GET under the tenant boundary, view_customers at tenant sco
 interface Captured { status: number | null; body: unknown; locals: Record<string, unknown> }
 
 /** Run the route's handler once over a minimal request, response and context, recording what the port was handed. */
-async function run(opts: { url?: unknown; trusted?: unknown; answer?: (query: CustomerDirectoryQuery, signal: AbortSignal) => unknown; deadlineMs?: number } = {}) {
-  const calls: Array<{ scope: TrustedScope; query: CustomerDirectoryQuery; signal: AbortSignal }> = [];
+async function run(opts: { url?: unknown; trusted?: unknown; sessionKey?: unknown; answer?: (query: CustomerDirectoryQuery, signal: AbortSignal) => unknown; deadlineMs?: number } = {}) {
+  const calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery; signal: AbortSignal }> = [];
   const port: CustomerDirectoryPort = {
-    page(scope, query, signal) {
-      calls.push({ scope, query, signal });
+    page(scope, sessionKey, query, signal) {
+      calls.push({ scope, sessionKey, query, signal });
       return (opts.answer ?? (() => ({ outcome: 'page', customers: [customer(1)], hasMore: false })))(query, signal);
     },
   };
@@ -292,6 +295,7 @@ async function run(opts: { url?: unknown; trusted?: unknown; answer?: (query: Cu
   const ctx = {
     requestId: 'req-7', principal: null, session: null, authenticatedAt: null, body: undefined,
     trusted: 'trusted' in opts ? opts.trusted : SCOPE,
+    sessionKey: 'sessionKey' in opts ? opts.sessionKey : SESSION_KEY,
   } as unknown as RouteContext;
   assert.ok(route.idempotency === 'none', 'a handler route');
   await route.handler({ url: 'url' in opts ? opts.url : CUSTOMER_DIRECTORY_PATH } as unknown as Request, res as unknown as Response, ctx);
@@ -332,7 +336,13 @@ test('without a resolved TENANT scope naming a tenant the handler refuses 403 an
   }
 });
 
-test('the port is handed exactly the trusted scope and the parsed query, and a 200 carries exactly customers and nextCursor', async () => {
+test('without the presenting session\'s store key the handler refuses 403 and never asks the port', async () => {
+  const { out, calls } = await run({ sessionKey: null });
+  assertHandlerRefusal(out, 403, 'forbidden', 'authz_context_missing', 'no session key');
+  assert.equal(calls.length, 0, 'the port was never asked');
+});
+
+test('the port is handed exactly the trusted scope, the session key and the parsed query, and a 200 carries exactly customers and nextCursor', async () => {
   const c = encodeCustomerCursor(idOf(9));
   const { out, calls, ctx } = await run({
     url: `${CUSTOMER_DIRECTORY_PATH}?limit=2&cursor=${c}`,
@@ -340,6 +350,7 @@ test('the port is handed exactly the trusted scope and the parsed query, and a 2
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].scope, ctx.trusted, 'the very scope object the chain resolved, not a copy the request shaped');
+  assert.equal(calls[0].sessionKey, SESSION_KEY, 'the chain\'s key, unchanged');
   assert.deepEqual(calls[0].query, { after: idOf(9), limit: 2 });
   assert.ok(calls[0].signal instanceof AbortSignal && !calls[0].signal.aborted, 'a live deadline signal');
   assert.equal(out.status, 200);
@@ -427,22 +438,32 @@ function tenantBoundary(authorizations: unknown[][], authorize: (...args: unknow
 
 async function withChain(
   setup: { answer?: (query: CustomerDirectoryQuery) => unknown; authorize?: (...args: unknown[]) => unknown },
-  fn: (h: { calls: Array<{ scope: TrustedScope; query: CustomerDirectoryQuery }>; authorizations: unknown[][]; get: (target?: string, headers?: Record<string, string>) => Promise<Reply> }) => Promise<void>,
+  fn: (h: {
+    calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery }>; authorizations: unknown[][]; logs: string[];
+    probes: Array<string | null>; storeKey: string; get: (target?: string, headers?: Record<string, string>) => Promise<Reply>;
+  }) => Promise<void>,
 ): Promise<void> {
-  const calls: Array<{ scope: TrustedScope; query: CustomerDirectoryQuery }> = [];
+  const calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery }> = [];
   const authorizations: unknown[][] = [];
+  const logs: string[] = [];
+  // ctx.sessionKey as a tenant session route that declares no binding sees it.
+  const probes: Array<string | null> = [];
   const port: CustomerDirectoryPort = {
-    page(scope, query) {
-      calls.push({ scope, query });
+    page(scope, sessionKey, query) {
+      calls.push({ scope, sessionKey, query });
       return (setup.answer ?? (() => ({ outcome: 'page', customers: [customer(1)], hasMore: false })))(query);
     },
   };
   const readiness = createReadinessState();
   readiness.setReady();
   const app = createApp({
-    readiness, log: { log: () => undefined },
+    readiness, log: { log: (line: string) => { logs.push(line); } },
     sessions: { tenant: tenantBoundary(authorizations, setup.authorize ?? (() => GRANTED)) },
-    routes: [createCustomerDirectoryRoute({ customers: port })],
+    routes: [createCustomerDirectoryRoute({ customers: port }), {
+      method: 'GET', path: '/api/v1/unbound-probe', policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'view_customers' } },
+      body: { kind: 'none' }, idempotency: 'none', trustedContext: 'required', recentAuth: 'none',
+      handler: (_req, res, ctx) => { probes.push(ctx.sessionKey); res.status(204).end(); },
+    }],
     limits: testRequestLimits(),
   });
   const server = createBoundedServer(app);
@@ -454,9 +475,12 @@ async function withChain(
     });
     assert.equal(login.status, 200, `tenant login: ${login.body}`);
     const pair = (login.headers['set-cookie'] ?? [''])[0].split('; ')[0];
-    const cookie = `${SESSION_COOKIES.tenant}=${pair.slice(pair.indexOf('=') + 1)}`;
+    const id = pair.slice(pair.indexOf('=') + 1);
+    const cookie = `${SESSION_COOKIES.tenant}=${id}`;
     authorizations.length = 0;
-    await fn({ calls, authorizations, get: (target = CUSTOMER_DIRECTORY_PATH, headers = {}) => request(p, 'GET', target, { cookie, ...headers }) });
+    // The store key the chain derives from the identifier, computed here independently (sessions.ts digestOf).
+    const storeKey = createHash('sha256').update(id).digest('base64url');
+    await fn({ calls, authorizations, logs, probes, storeKey, get: (target = CUSTOMER_DIRECTORY_PATH, headers = {}) => request(p, 'GET', target, { cookie, ...headers }) });
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -470,12 +494,23 @@ test('over the enforced chain: the authorizer is asked for view_customers at ten
     assert.deepEqual(JSON.parse(r.body), { customers: [customer(1), customer(2)], nextCursor: encodeCustomerCursor(idOf(2)) });
     assert.equal(h.authorizations.length, 1);
     assert.deepEqual(h.authorizations[0][1], { scope: 'tenant', permission: 'view_customers' }, 'the declared requirement, never one the request names');
-    assert.deepEqual(h.calls, [{ scope: SCOPE, query: { after: null, limit: 2 } }], 'the authorizer\'s scope, unchanged by any header');
+    assert.deepEqual(h.calls, [{ scope: SCOPE, sessionKey: h.storeKey, query: { after: null, limit: 2 } }],
+      'the authorizer\'s scope, unchanged by any header, and the presenting session\'s store key');
     for (const word of [ACTOR, MEMBERSHIP, T1, 'manager', 'sv-1', 'tenant']) assert.ok(!r.body.includes(word), `the page carries no ${word}`);
     // A malformed query is a 400 before the port; a scope-less grant and a denial are refused by the chain itself.
     const bad = await h.get(`${CUSTOMER_DIRECTORY_PATH}?limit=101`);
     assert.equal(bad.status, 400, bad.body);
     assert.equal(h.calls.length, 1, 'the malformed query never reached the port');
+    // A tenant session route declaring no binding is handed no key, whatever it declares otherwise.
+    const probe = await h.get('/api/v1/unbound-probe');
+    assert.equal(probe.status, 204, probe.body);
+    assert.deepEqual(h.probes, [null], 'ctx.sessionKey is null on a route that does not declare sessionBinding');
+    // The key reaches the port and nothing else: no request log line carries it, the cookie's identifier or the cursor.
+    assert.ok(h.logs.length > 0, 'the chain logged its requests (control)');
+    for (const line of h.logs) {
+      assert.ok(!line.includes(h.storeKey), 'no log line carries the session key');
+      assert.ok(!line.includes(encodeCustomerCursor(idOf(2))), 'nor the continuation');
+    }
   });
   for (const [label, authorize] of [['a denial', () => false], ['a bare true: no scope resolved', () => true]] as const) {
     await withChain({ authorize }, async (h) => {

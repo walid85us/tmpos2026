@@ -1,5 +1,6 @@
-// Phase 4.0 M7A-CUSTOMERS-P1 — the PostgreSQL customer directory adapter: what it hands migration 017's routine, and
+// Phase 4.0 M7A-CUSTOMERS-P1 — the PostgreSQL customer directory adapter: what it hands the database's routine, and
 // what it refuses to read back as a page. DATABASE-FREE; the routine itself is proved against a real cluster.
+// M7A-CUSTOMERS-P2: the routine is migration 018's session-bound read, handed the presenting session's store key.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,6 +13,8 @@ const TENANT = '22222222-2222-4222-8222-222222222222';
 const STORE = '33333333-3333-4333-8333-333333333333';
 const MEMBERSHIP = '55555555-5555-4555-8555-555555555555';
 const OTHER_TENANT = '44444444-4444-4444-8444-444444444444';
+/** A synthetic store key: the shape of a SHA-256 digest in unpadded base64url. */
+const SESSION_KEY = 'k'.repeat(43);
 const C = (i: number): string => `c000000${i}-0000-4000-8000-00000000000${i}`;
 const SCOPE: TrustedScope = Object.freeze({
   actor: ACTOR, securityVersion: 'a'.repeat(64), scope: 'tenant', tenant: TENANT, store: null, membershipId: MEMBERSHIP, roleId: 'technician', limitation: 'read_only',
@@ -52,15 +55,16 @@ function fakeClient(rows: unknown, fault?: Error): Fake {
 
 const live = (): AbortSignal => new AbortController().signal;
 
-test('one fixed call to migration 017\'s routine: the trusted scope\'s five facts, the continuation and one row more than the page', async () => {
+test('one fixed call to migration 018\'s session-bound routine: the session\'s store key, the continuation and one row more than the page', async () => {
   const client = fakeClient([customerRow(1), customerRow(2)]);
   const signal = live();
-  const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, { after: C(9), limit: 2 }, signal);
+  const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, SESSION_KEY, { after: C(9), limit: 2 }, signal);
   assert.equal(client.statements.length, 1);
-  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_customer\.m7a_customer_page\(\?::uuid, \?::text,\s+\?::uuid, \?::text, \?::uuid, \?::uuid, \?::integer\)$/);
-  assert.deepEqual(client.values[0], [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician', TENANT, C(9), 3],
-    'actor, security version, membership, role, tenant, after, limit + 1 — in that order');
-  assert.equal(client.values[0][4], SCOPE.tenant, 'the tenant is the trusted scope\'s own');
+  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_mint\.m7a_customer_page_v2\(\?::text, \?::uuid, \?::integer\)$/);
+  assert.deepEqual(client.values[0], [SESSION_KEY, C(9), 3], 'the session key, after, limit + 1 — in that order');
+  // The routine derives the authority from the session itself: no fact of the scope is a parameter.
+  for (const fact of [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician', TENANT]) assert.ok(!client.values[0].includes(fact), `${fact} is not sent`);
+  assert.ok(!client.statements[0].includes('tmpos_customer'), 'migration 017\'s page is never called directly');
   assert.equal(client.bounds.length, 1);
   assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS, 'the adapter\'s own bounds');
   assert.deepEqual(CUSTOMER_DIRECTORY_BOUNDS, { lock: '2100ms', statement: '2700ms', idle: '6000ms' });
@@ -68,15 +72,15 @@ test('one fixed call to migration 017\'s routine: the trusted scope\'s five fact
   assert.equal(CUSTOMER_DIRECTORY_DEADLINE_MS, 3_000);
   assert.equal(client.signals[0], signal, 'the route\'s deadline signal reaches the kernel');
   assert.deepEqual(answer, { outcome: 'page', hasMore: false, customers: [{ id: C(1), name: 'Customer 1' }, { id: C(2), name: 'Customer 2' }] });
-  // Another scope's tenant is sent, never a constant: the only tenant the adapter can name is the scope's.
+  // The rows are checked against the AUTHORIZER's tenant, never a constant: rows naming the scope's tenant are its page.
   const other = fakeClient([customerRow(1, { o_tenant_id: OTHER_TENANT })]);
-  assert.deepEqual(await createPostgresCustomerDirectory({ client: other }).page({ ...SCOPE, tenant: OTHER_TENANT }, { after: null, limit: 100 }, live()),
+  assert.deepEqual(await createPostgresCustomerDirectory({ client: other }).page({ ...SCOPE, tenant: OTHER_TENANT }, SESSION_KEY, { after: null, limit: 100 }, live()),
     { outcome: 'page', hasMore: false, customers: [{ id: C(1), name: 'Customer 1' }] }, 'rows naming the scope\'s tenant are that tenant\'s page');
-  assert.deepEqual([other.values[0][4], other.values[0][5], other.values[0][6]], [OTHER_TENANT, null, 101], 'no continuation is SQL null; limit 100 asks 101');
+  assert.deepEqual(other.values[0], [SESSION_KEY, null, 101], 'no continuation is SQL null; limit 100 asks 101');
 });
 
 test('the lookahead row says another page follows and is never returned; exactly the limit is the last page; an empty directory is an empty page', async () => {
-  const read = (rows: unknown[], limit: number) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, { after: null, limit }, live());
+  const read = (rows: unknown[], limit: number) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit }, live());
   assert.deepEqual(await read([customerRow(1), customerRow(2), customerRow(3)], 2),
     { outcome: 'page', hasMore: true, customers: [{ id: C(1), name: 'Customer 1' }, { id: C(2), name: 'Customer 2' }] });
   assert.deepEqual(await read([customerRow(1), customerRow(2)], 2),
@@ -91,7 +95,7 @@ test('the lookahead row says another page follows and is never returned; exactly
 
 test('denied and cursor_unknown are the routine\'s only row, with every other column null', async () => {
   for (const outcome of ['denied', 'cursor_unknown']) {
-    assert.deepEqual(await createPostgresCustomerDirectory({ client: fakeClient([refusalRow(outcome)]) }).page(SCOPE, { after: C(1), limit: 5 }, live()), { outcome });
+    assert.deepEqual(await createPostgresCustomerDirectory({ client: fakeClient([refusalRow(outcome)]) }).page(SCOPE, SESSION_KEY, { after: C(1), limit: 5 }, live()), { outcome });
   }
 });
 
@@ -142,15 +146,15 @@ test('everything out of shape is a throw — an outage the route answers as a 50
     ['a null row', [null]],
   ];
   for (const [label, rows] of cases) {
-    await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, { after: null, limit: 2 }, live()) as Promise<unknown>,
+    await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>,
       (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid', label);
   }
   // A driver error propagates as the outage it is; its text is the route's to discard.
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient([], new Error('driver')) }).page(SCOPE, { after: null, limit: 2 }, live()) as Promise<unknown>, /driver/);
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient([], new Error('driver')) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>, /driver/);
 });
 
 test('every row, the lookahead included, must be in the routine\'s order — a page ordered on its own is not enough', async () => {
-  const read = (rows: unknown[]) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, { after: null, limit: 2 }, live()) as Promise<unknown>;
+  const read = (rows: unknown[]) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>;
   const named = (i: number, name: string) => customerRow(i, { o_name: name });
   const invalid = (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid';
   // Amy, Zoe is an ordered page of two; only the lookahead, Bob, is out of order — and the route never sees the lookahead.
@@ -177,11 +181,11 @@ test('an answer longer than limit + 1 is refused before any row is read', async 
       return Reflect.get(target, key, receiver);
     },
   });
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, { after: null, limit: 2 }, live()) as Promise<unknown>,
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>,
     (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid');
   assert.equal(reads, 0, 'no row was read');
   // Control: the same trap at limit + 1 is read, so the refusal above is the bound and not the trap.
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, { after: null, limit: 3 }, live()) as Promise<unknown>, /row read/);
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 3 }, live()) as Promise<unknown>, /row read/);
   assert.ok(reads > 0, 'at limit + 1 the rows are read (control)');
 });
 
@@ -208,7 +212,23 @@ test('only the tenant scope the authorizer selected is an authority, and only a 
   ];
   for (const [label, scope, query] of bad) {
     const client = fakeClient([]);
-    await assert.rejects(createPostgresCustomerDirectory({ client }).page(scope as TrustedScope, query as never, live()) as Promise<unknown>, /answer invalid/, label);
+    await assert.rejects(createPostgresCustomerDirectory({ client }).page(scope as TrustedScope, SESSION_KEY, query as never, live()) as Promise<unknown>, /answer invalid/, label);
+    assert.equal(client.statements.length, 0, `${label}: nothing reached the database`);
+    assert.equal(client.bounds.length, 0, `${label}: no transaction was opened`);
+  }
+});
+
+test('only a key of the store-key shape names a session: an absent or malformed key faults before any statement', async () => {
+  const q = { after: null, limit: 2 };
+  const bad: Array<[string, unknown]> = [
+    ['no key', null], ['undefined', undefined], ['an empty key', ''], ['42 characters', 'k'.repeat(42)], ['44 characters', 'k'.repeat(44)],
+    ['padding', `${'k'.repeat(42)}=`], ['a standard base64 character', `${'k'.repeat(42)}+`], ['a space', `${'k'.repeat(42)} `],
+    ['a number', 7], ['an object', { key: SESSION_KEY }],
+  ];
+  for (const [label, key] of bad) {
+    const client = fakeClient([customerRow(1)]);
+    await assert.rejects(createPostgresCustomerDirectory({ client }).page(SCOPE, key as string, q, live()) as Promise<unknown>,
+      (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid', label);
     assert.equal(client.statements.length, 0, `${label}: nothing reached the database`);
     assert.equal(client.bounds.length, 0, `${label}: no transaction was opened`);
   }

@@ -79,6 +79,14 @@ export type TrustedContextPolicy = 'none' | 'required';
  */
 export type RecentAuthPolicy = 'none' | 'required';
 
+/**
+ * Whether a route's handler receives the presenting session's store key (M7A-CUSTOMERS-P2): never, or always. Only a
+ * session route with a declared authorization, a required trusted context and no idempotency may require it — a read
+ * whose database routine binds the read to the very minted session that presented it, and derives its authority from
+ * that session rather than from the scope a caller could name.
+ */
+export type SessionBindingPolicy = 'none' | 'required';
+
 /** The largest byte cap any route may declare for a JSON body (1 MiB). */
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
@@ -122,6 +130,11 @@ export interface RouteContext {
    * through CommandContext; a read route needs the same, and had no way to reach it.
    */
   readonly trusted: TrustedScope | null;
+  /**
+   * The presenting session's store key, only on a route declaring `sessionBinding: 'required'`; a SQL parameter,
+   * never logged, echoed or stored. Null on every other route.
+   */
+  readonly sessionKey: string | null;
   /** The parsed JSON body — still untrusted input — or undefined when none was taken. */
   readonly body: unknown;
 }
@@ -223,6 +236,8 @@ interface RouteDefinitionBase {
   /** Declared, never defaulted for a route that requires idempotency: startup refuses one that omits it. */
   readonly trustedContext: TrustedContextPolicy;
   readonly recentAuth: RecentAuthPolicy;
+  /** Optional: an undeclared binding is 'none'. */
+  readonly sessionBinding?: SessionBindingPolicy;
 }
 
 export type RouteDefinition =
@@ -269,6 +284,7 @@ export type EnforcementSetupCode =
   | 'route_idempotency_policy_invalid'
   | 'route_trusted_context_invalid'
   | 'route_recent_auth_invalid'
+  | 'route_session_binding_invalid'
   | 'idempotency_required'
   | 'idempotency_invalid'
   | 'idempotency_key_invalid'
@@ -439,6 +455,19 @@ function parseRecentAuth(raw: unknown, policy: RoutePolicy): RecentAuthPolicy {
   throw new EnforcementSetupError('route_recent_auth_invalid');
 }
 
+/**
+ * The session-binding policy (M7A-CUSTOMERS-P2). `required` only on a session route with a declared authorization, a
+ * required trusted context and no idempotency: the key exists only on a session route, and the one route that needs it
+ * is a read resolved under a trusted scope.
+ */
+function parseSessionBinding(raw: unknown, policy: RoutePolicy, trustedContext: TrustedContextPolicy, idempotency: IdempotencyPolicy): SessionBindingPolicy {
+  const declared = raw === undefined || raw === null ? 'none' : raw;
+  if (declared === 'none') return 'none';
+  if (declared === 'required' && policy.access === 'session' && policy.authorization !== null
+    && trustedContext === 'required' && idempotency === 'none') return 'required';
+  throw new EnforcementSetupError('route_session_binding_invalid');
+}
+
 /** The session-boundary rules in the header: a path's namespace and its policy's audience agree. */
 function checkBoundary(method: string, path: string, policy: RoutePolicy, body: BodyPolicy): void {
   const audience = policy.access === 'login' || policy.access === 'session' ? policy.audience : null;
@@ -472,7 +501,7 @@ function parseCommand(raw: unknown): CommandRoute {
 
 function parseDefinition(raw: unknown): RouteDefinition {
   if (!isPlainObject(raw) || !hasOnlyKeys(raw,
-    ['method', 'path', 'policy', 'body', 'idempotency', 'trustedContext', 'recentAuth', 'handler', 'perform', 'command'])) {
+    ['method', 'path', 'policy', 'body', 'idempotency', 'trustedContext', 'recentAuth', 'sessionBinding', 'handler', 'perform', 'command'])) {
     throw new EnforcementSetupError('route_definition_invalid');
   }
   const { method, path, handler, perform, command } = raw;
@@ -487,7 +516,8 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const idempotency = parseIdempotency(raw.idempotency, method, policy);
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
-  const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth };
+  const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency);
+  const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth, sessionBinding };
   // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {
     if (typeof handler !== 'function' || 'perform' in raw || 'command' in raw) throw new EnforcementSetupError('route_handler_invalid');

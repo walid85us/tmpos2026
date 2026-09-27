@@ -186,19 +186,31 @@ const PINNED = {
   // exact-[005] gate is unchanged and still refuses.
   '017_m7a_customer_directory.up.sql': '1fea57a1c4bdba7efdb5da0f34893879a6b8aa741c1f117b2dcf63259f85d66d',
   '017_m7a_customer_directory.down.sql': '8e6b095959670d2c53d139be3a3c00f4c06544b72c264d6febf4373ef67eb440',
+  // Phase 4.0 M7A-CUSTOMERS-P2 — the tenant session mint, in its OWN schema tmpos_mint: the issuer key table (one row,
+  // 32-64 bytes, installed by the owner out of band, never by a migration), the mint ledger (no foreign key, pruned a day
+  // after expiry), two helpers granted to nobody (HMAC-SHA256 from core functions, the netstring mint message), and three
+  // routines tmpos_app may execute: every session create (a tenant one only with an HMAC under the issuer key over all
+  // eleven values; every argument of both audiences checked first), the customer read bound to a minted, live session
+  // under the key installed now (017's page run as its owner), and the key check (docs/phase-4/10 ADR-33). It revokes
+  // tmpos_app's EXECUTE on 011's m5_session_create and on 017's m7a_customer_page: those two ACL changes are its only
+  // effect on earlier objects, and migrations 001-017 are untouched, byte for byte. Proved against disposable PostgreSQL
+  // only; applied to no managed, persistent or application database. D4 now names the contiguous chain through 018; the
+  // exact-[005] gate is unchanged and still refuses.
+  '018_m7a_tenant_session_mint.up.sql': 'e57c72b77e90bd6348e70c42912f073348c90a40e59e75e95c0b6689adc746cf',
+  '018_m7a_tenant_session_mint.down.sql': '03ee4ed497f2774954247520bc2207709791f1b9041357ce0f32fe0adf8c3845',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the thirty-four expected files', () => {
+test('the migrations directory holds exactly the thirty-six expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

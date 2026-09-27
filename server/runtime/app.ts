@@ -813,7 +813,9 @@ export function createApp(deps: AppDeps): Express {
       let authenticatedAt: number | null = null;
       // The store key of the session that presented this request (a digest, never the cookie), for a session route:
       // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1).
-      // It goes nowhere else — no log line, no handler, no context.
+      // It goes nowhere else — no log line, no handler, no context — with ONE declared exception: the handler of a route
+      // declaring `sessionBinding: 'required'` (routes.ts, M7A-CUSTOMERS-P2) receives it as ctx.sessionKey, a SQL
+      // parameter that binds its read to this very session. The request log never includes ctx.
       let sessionKey: string | null = null;
       const { policy } = route;
       if (policy.access === 'authenticated') {
@@ -1016,6 +1018,7 @@ export function createApp(deps: AppDeps): Express {
         // declaring `trustedContext: 'required'` was refused above when this is null, so a handler that
         // needs an actor or a tenant never has to consider the case.
         trusted: context,
+        sessionKey: route.sessionBinding === 'required' ? sessionKey : null,
       }));
     } catch (err) {
       next(err); // bounded 500; the error itself is never logged or echoed

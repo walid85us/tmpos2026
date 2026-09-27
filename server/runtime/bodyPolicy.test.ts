@@ -240,7 +240,9 @@ test('a body-free route is served without a body, and its handler finds nothing 
     assert.deepEqual(seen.streamBytes, [0, 0]);
     // `trusted` joined this set in M5-GIAM-D1-P2-R1: the authorizer's decided scope, carried to the
     // handler so it never re-derives one. A route with no authorization requirement carries null.
-    assert.deepEqual(Object.keys(seen.ctx[0]).sort(), ['authenticatedAt', 'body', 'principal', 'requestId', 'session', 'trusted']);
+    // `sessionKey` joined it in M7A-CUSTOMERS-P2: null on every route that does not declare `sessionBinding: 'required'`.
+    assert.deepEqual(Object.keys(seen.ctx[0]).sort(), ['authenticatedAt', 'body', 'principal', 'requestId', 'session', 'sessionKey', 'trusted']);
+    assert.equal(seen.ctx[0].sessionKey, null, 'a route declaring no session binding is handed no session key');
     assert.equal(seen.ctx[0].session, null, 'a route outside the session boundaries carries no session');
     assert.deepEqual(seen.ctx[0].trusted, GRANTED.context, 'the handler is handed the scope the authorizer decided, and derives none of its own');
     assert.ok(Object.isFrozen(seen.ctx[0]));

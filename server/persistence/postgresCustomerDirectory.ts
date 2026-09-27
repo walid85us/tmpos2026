@@ -1,14 +1,15 @@
 // Phase 4.0 M7a — the PostgreSQL customer directory: the production adapter behind the tenant customer directory's port
-// (server/runtime/customerDirectory.ts), over migration 017's one bounded read (M7A-CUSTOMERS-P1; G-IAM, G-PERSIST).
+// (server/runtime/customerDirectory.ts), over migration 018's session-bound read (M7A-CUSTOMERS-P2; G-IAM, G-PERSIST).
 //
-// WHAT IT ASKS. For the trusted scope the tenant authorizer selected — the actor, its account security version, the one
-// tenant membership, its role and its tenant — and a validated continuation and page size, it calls
-// tmpos_customer.m7a_customer_page once. The routine confirms, in the snapshot it reads the page in, that exactly this
-// authority still holds, and answers a page of THAT tenant's customers, 'denied' or 'cursor_unknown'. The tenant is
-// taken from the trusted scope alone and is a required argument: this adapter has no way to ask for customers without
-// naming the admitted tenant, and the routine refuses a tenant that is not the named grant's. Nothing the request
-// carried is a parameter here beyond the continuation's customer id and the page size, both validated by the runtime
-// before this port is asked.
+// WHAT IT ASKS. For the presenting session's store key, and a validated continuation and page size, it calls
+// tmpos_mint.m7a_customer_page_v2 once. The routine reads the session and its mint-ledger row, requires it minted, of
+// audience tenant, live on the database clock and of an unchanged standing, derives the actor, its account security
+// version and its ONE tenant grant from that session inside the database, and delegates to migration 017's page as its
+// owner — which confirms, in the snapshot it reads the page in, that exactly this authority still holds, and answers a
+// page of THAT tenant's customers, 'denied' or 'cursor_unknown'. The runtime login cannot call 017's page itself. Nothing
+// the request carried is a parameter here beyond the continuation's customer id and the page size, both validated by the
+// runtime before this port is asked; the key is the chain's own (RouteContext.sessionKey), a SQL parameter and nothing
+// else. The trusted scope the authorizer selected is still required, and its tenant is checked against every row.
 //
 // ONE MORE ROW THAN THE PAGE. It asks for limit + 1 rows and returns at most `limit`: the extra row says that another
 // page follows, without a second statement or a count.
@@ -17,7 +18,7 @@
 // built — one client, one credential, one governed endpoint. Importing this file connects to nothing and reads no secret.
 //
 // EVERY ROW MUST NAME THE ADMITTED TENANT. The routine returns each customer's tenant beside it, and a row naming any
-// other tenant is a fault — a second, independent check that a routine which lost its tenant filter (a later
+// tenant but the AUTHORIZER's is a fault — a second, independent check that a routine which lost its tenant filter (a later
 // replacement, a wrong edit) could never put another tenant's customer on a page.
 //
 // FAIL CLOSED. A row out of shape, with a name no row can hold, or out of page order, a row of another tenant, an answer mixing a refusal with customers, an abort, a
@@ -38,9 +39,11 @@ export const CUSTOMER_DIRECTORY_BOUNDS: TransactionBounds = Object.freeze({
   idle: `${CUSTOMER_DIRECTORY_DEADLINE_MS * 2}ms`,
 });
 
-/** The columns migration 017's routine answers with. */
+/** The columns migration 018's routine answers with — 017's own. */
 const ROW_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_customer_id', 'o_name'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A session store key: the SHA-256 of a session identifier, unpadded base64url (sessions.ts digestOf). */
+const SESSION_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /** Every fault is the same bounded message: nothing about the row, the value or the driver. */
 const fault = (): Error => new Error('customer directory answer invalid');
@@ -90,17 +93,18 @@ function answerOf(rows: unknown, limit: number, tenant: string): unknown {
 export function createPostgresCustomerDirectory(deps: { readonly client: SupervisedPgClient }): CustomerDirectoryPort {
   const { client } = deps;
   return Object.freeze({
-    async page(scope: TrustedScope, query: CustomerDirectoryQuery, signal: AbortSignal): Promise<unknown> {
-      // Refused before a statement runs: only a tenant scope the authorizer selected, naming its tenant, is an authority.
+    async page(scope: TrustedScope, sessionKey: string, query: CustomerDirectoryQuery, signal: AbortSignal): Promise<unknown> {
+      // Refused before a statement runs: only a tenant scope the authorizer selected, naming its tenant, is an authority,
+      // and only a key of the store-key shape names a session.
       if (!isTrustedScope(scope) || scope.scope !== 'tenant' || scope.tenant === null || !UUID_RE.test(scope.tenant)) throw fault();
+      if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) throw fault();
       const tenant = scope.tenant;
       const { after, limit } = query;
       if (after !== null && (typeof after !== 'string' || !UUID_RE.test(after))) throw fault();
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > CUSTOMER_DIRECTORY_MAX_LIMIT) throw fault();
       return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
         const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
-          from tmpos_customer.m7a_customer_page(${scope.actor}::uuid, ${scope.securityVersion}::text,
-            ${scope.membershipId}::uuid, ${scope.roleId}::text, ${tenant}::uuid, ${after}::uuid, ${limit + 1}::integer)`;
+          from tmpos_mint.m7a_customer_page_v2(${sessionKey}::text, ${after}::uuid, ${limit + 1}::integer)`;
         return answerOf(rows, limit, tenant);
       });
     },

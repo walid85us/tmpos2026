@@ -9,10 +9,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import {
-  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS,
+  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, probeIssuerKey, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS,
+  tenantMintProof,
 } from './postgresSessionStore.js';
 import type { SessionStandingCheck } from './postgresSessionStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
@@ -22,6 +23,8 @@ import type { SessionEndAudit, SessionEstablishAudit, SessionRecord } from '../r
 const KEY = 'a'.repeat(43);
 const PRINCIPAL_KEY = 'b'.repeat(43);
 const CREATED = 1_700_000_000_000;
+/** A synthetic tenant issuer key, generated per run: no key material is ever written into this file. */
+const ISSUER_KEY = randomBytes(32);
 
 const RECORD: SessionRecord = Object.freeze({
   audience: 'tenant', authProvider: 'firebase', authProviderUid: 'uid-alpha', principalKey: PRINCIPAL_KEY,
@@ -79,9 +82,14 @@ const live = (): AbortSignal => new AbortController().signal;
 const answered = (value: unknown): Promise<unknown> => Promise.resolve(value);
 /** A standing check that admits: the establish tests below prove the store's own steps; the check is proved on its own. */
 const ADMITS: SessionStandingCheck = async () => true;
-const store = (rows: unknown, fault?: Error, now?: () => number, standing: SessionStandingCheck | null = ADMITS) => {
+const store = (rows: unknown, fault?: Error, now?: () => number, standing: SessionStandingCheck | null = ADMITS, issuerKey: Uint8Array | null = ISSUER_KEY) => {
   const client = fakeClient(rows, fault);
-  return { client, store: createPostgresSessionStore({ client, ...(now === undefined ? {} : { now }), ...(standing === null ? {} : { standing }) }) };
+  return {
+    client,
+    store: createPostgresSessionStore({
+      client, ...(now === undefined ? {} : { now }), ...(standing === null ? {} : { standing }), ...(issuerKey === null ? {} : { issuerKey }),
+    }),
+  };
 };
 
 // --- create -------------------------------------------------------------------------------------
@@ -91,11 +99,13 @@ test("create sends the record as given and the expiry this store computes from t
   const { client, store: s } = store([{ outcome: 'created' }]);
   await s.create(KEY, RECORD, live());
   assert.equal(client.statements.length, 1, 'one statement, one round trip');
+  const expiresAt = CREATED + SESSION_TTL.tenant.absoluteMs;
   assert.deepEqual(client.values[0], [
     KEY, 'tenant', 'firebase', 'uid-alpha', PRINCIPAL_KEY, 't1:witness',
-    CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL.tenant.absoluteMs,
-  ], 'every stamp the boundary set travels, and the expiry is its own lifetime');
-  assert.equal(client.statements[0].includes('m5_session_create'), true);
+    CREATED - 1_000, CREATED, CREATED, CREATED, expiresAt, tenantMintProof(ISSUER_KEY, KEY, RECORD, expiresAt),
+  ], 'every stamp the boundary set travels, the expiry is its own lifetime, and the proof covers all eleven');
+  assert.match(client.statements[0], /tmpos_mint\.m7a_session_create\(\s*(?:\?::(?:text|bigint),\s*){11}\?::bytea\) as outcome/);
+  assert.equal(client.statements[0].includes('m5_session_create'), false, '011\'s unproven create is never called');
   // The reference travels as a BOUND VALUE. (Asserting it is absent from the statement text would
   // be vacuous here: the fake joins the template's static strings, which can never hold a value.)
   assert.equal(client.values[0].includes('uid-alpha'), true, 'the reference is a parameter');
@@ -137,7 +147,7 @@ test('get returns the stored record, parsing the driver\'s decimal int8 text rat
 
 test('each operation calls its OWN routine, so a misrouted call cannot pass for a working one', async () => {
   const calls: [string, (s: ReturnType<typeof store>['store']) => unknown][] = [
-    ['m5_session_create', (s) => s.create(KEY, RECORD, live())],
+    ['m7a_session_create', (s) => s.create(KEY, RECORD, live())],
     ['m5_session_get', (s) => s.get(KEY, live())],
     ['m5_session_touch', (s) => s.update(KEY, { lastSeenAt: CREATED }, live())],
     ['m5_session_revoke(', (s) => s.revoke(KEY, live())],
@@ -278,7 +288,7 @@ const inserted = (count: number, command = 'INSERT'): unknown => Object.assign([
 type Step = 'get' | 'touch' | 'revoke' | 'create' | 'insert' | 'other';
 const stepOf = (statement: string): Step => (
   statement.includes('m5_session_get') ? 'get' : statement.includes('m5_session_touch') ? 'touch'
-    : statement.includes('m5_session_revoke(') ? 'revoke' : statement.includes('m5_session_create') ? 'create'
+    : statement.includes('m5_session_revoke(') ? 'revoke' : statement.includes('m7a_session_create') ? 'create'
       : statement.includes('insert into public.audit_event') ? 'insert' : 'other');
 const DEFAULTS: Record<Step, unknown> = {
   get: [ADMIN_ROW], touch: [{ outcome: 'updated' }], revoke: [{ outcome: 'revoked' }], create: [{ outcome: 'created' }],
@@ -322,8 +332,8 @@ test('M6AA-S1 establish ends the presented session, creates the new one and writ
   assert.deepEqual(client.values[2], [KEY]);
   assert.deepEqual(client.values[3], [
     NEW_KEY, 'admin', 'firebase', 'uid-alpha', PRINCIPAL_KEY, 't1:witness',
-    CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL.admin.absoluteMs,
-  ], 'the new record, expiring at the administrative lifetime');
+    CREATED - 1_000, CREATED, CREATED, CREATED, CREATED + SESSION_TTL.admin.absoluteMs, null,
+  ], 'the new record, expiring at the administrative lifetime, with NO proof: the administrative branch takes none');
   assert.deepEqual(masked(recordSent(client)), {
     ...COMMON, actor_internal_user_id: ACTOR, action_id: 'platform.admin.session.reauthenticate', decision: 'allow',
     reason_code: 'admin_session_reauthenticated',
@@ -598,6 +608,7 @@ test('M5T-S1 a tenant login is ONE transaction: the standing FIRST, then rotatio
     assert.equal(client.bounds.length, 1, `${action}: one transaction`);
     assert.equal(client.values[4][1], 'tenant');
     assert.equal(client.values[4][10], CREATED + SESSION_TTL.tenant.absoluteMs, `${action}: the tenant lifetime`);
+    assert.deepEqual(client.values[4][11], tenantMintProof(ISSUER_KEY, NEW_KEY, RECORD, CREATED + SESSION_TTL.tenant.absoluteMs), `${action}: the mint proof`);
     assert.deepEqual(masked(recordSent(client)), {
       ...TENANT_COMMON, actor_internal_user_id: ACTOR, action_id: `tenant.session.${action}`, decision: 'allow',
       reason_code: action === 'login' ? 'tenant_session_created' : 'tenant_session_reauthenticated',
@@ -635,4 +646,98 @@ test('M5T-S3 a tenant logout ends the session with its tenant record in one tran
   const refused = store(answers({ get: [ROW] }));
   await assert.rejects(answered(refused.store.end?.(KEY, { ...LOGOUT, actor: ACTOR } as never, live())), /audit_invalid/);
   assert.deepEqual(refused.client.statements, []);
+});
+
+// --- M7A-CUSTOMERS-P2: the tenant mint (migration 018) --------------------------------------------------
+
+test('M7M-S1 the proof is HMAC-SHA256 over the netstring message and reproduces the recorded vector byte for byte', () => {
+  // The vector key is bytes 0x00..0x1f, built here: no key literal is written into this file.
+  const vectorKey = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
+  const created = 1_790_000_000_000;
+  const record: SessionRecord = {
+    audience: 'tenant', authProvider: 'firebase', authProviderUid: 'uid-Ω-vector', principalKey: 'pk-vector',
+    securityVersion: 't2:vector', authenticatedAt: null, createdAt: created, lastSeenAt: created, validatedAt: created,
+  };
+  const expiresAt = 1_790_028_800_000;
+  const message = 'tmpos-tenant-session-mint:v118:session-key-vector,6:tenant,8:firebase,13:uid-Ω-vector,9:pk-vector,9:t2:vector,0:,'
+    + '13:1790000000000,13:1790000000000,13:1790000000000,13:1790028800000,';
+  assert.equal(Buffer.byteLength(message), 182);
+  const proof = tenantMintProof(vectorKey, 'session-key-vector', record, expiresAt);
+  assert.deepEqual(proof, createHmac('sha256', vectorKey).update(Buffer.from(message, 'utf8')).digest(), 'the message is the netstring encoding');
+  assert.equal(proof.toString('hex'), '54c2bf73916e2d04e33889e948ff9ec4812ea1f054d9895ff282245da79392e4', 'the recorded proof');
+  assert.equal(createHmac('sha256', vectorKey).update('tmpos-tenant-issuer-key-fingerprint:v1').digest('hex'),
+    'e3cea24acf7070c68bee2a3d19a3040ed203fc23f1d1aeef90ea566a52b5ef15', 'the recorded fingerprint');
+  // Every value is covered: changing any one changes the proof.
+  const changed: Array<[string, SessionRecord, string, number]> = [
+    ['the key', record, 'session-key-vectoR', expiresAt], ['the expiry', record, 'session-key-vector', expiresAt + 1],
+    ...(['authProvider', 'authProviderUid', 'principalKey', 'securityVersion'] as const)
+      .map((f): [string, SessionRecord, string, number] => [f, { ...record, [f]: `${record[f]}x` }, 'session-key-vector', expiresAt]),
+    ...(['createdAt', 'lastSeenAt', 'validatedAt'] as const)
+      .map((f): [string, SessionRecord, string, number] => [f, { ...record, [f]: record[f] + 1 }, 'session-key-vector', expiresAt]),
+    ['an authentication time', { ...record, authenticatedAt: created }, 'session-key-vector', expiresAt],
+  ];
+  for (const [label, r, key, at] of changed) assert.notDeepEqual(tenantMintProof(vectorKey, key, r, at), proof, label);
+});
+
+test('M7M-S2 a tenant write without the issuer key throws before any statement; an administrative write needs none', async () => {
+  const { client, store: s } = store(answers({ get: [ROW] }), undefined, () => NOW, ADMITS, null);
+  await assert.rejects(answered(s.create(KEY, RECORD, live())), /session store unavailable: issuer_key_missing/);
+  await assert.rejects(answered(s.establish?.(NEW_KEY, RECORD, KEY, TENANT_LOGIN, live())), /session store unavailable: issuer_key_missing/);
+  assert.deepEqual(client.statements, [], 'nothing was sent');
+  assert.equal(client.bounds.length, 0, 'no transaction opened');
+  // The administrative entry never holds the key, and its logins still establish, sending NULL.
+  const admin = store(answers(), undefined, () => NOW, ADMITS, null);
+  assert.equal(await answered(admin.store.establish?.(NEW_KEY, ADMIN_RECORD, null, LOGIN, live())), 'established');
+  assert.equal(admin.client.values[0][11], null);
+});
+
+test('M7M-S3 an issuer key of anything but 32-64 bytes is refused at construction, and the store keeps a private copy', async () => {
+  for (const bad of [randomBytes(31), randomBytes(65), Buffer.alloc(0), 'k'.repeat(43), [1, 2, 3], null]) {
+    assert.throws(() => createPostgresSessionStore({ client: fakeClient([]), issuerKey: bad as never }), TypeError, String((bad as { length?: number })?.length));
+  }
+  for (const size of [32, 64]) assert.ok(createPostgresSessionStore({ client: fakeClient([]), issuerKey: randomBytes(size) }), `${size} bytes`);
+  const given = Buffer.from(ISSUER_KEY);
+  const client = fakeClient([{ outcome: 'created' }]);
+  const s = createPostgresSessionStore({ client, issuerKey: given });
+  given.fill(0);
+  await s.create(KEY, RECORD, live());
+  assert.deepEqual(client.values[0][11], tenantMintProof(ISSUER_KEY, KEY, RECORD, CREATED + SESSION_TTL.tenant.absoluteMs),
+    'a later change to the caller\'s buffer does not change the proof');
+});
+
+test('M7M-S4 every mint refusal is the same outage: nothing is issued', async () => {
+  for (const outcome of ['refused', 'invalid', 'conflict', null]) {
+    await assert.rejects(answered(store([{ outcome }]).store.create(KEY, RECORD, live())), /not_created/, String(outcome));
+    const { client, store: s } = store(answers({ get: [ROW], create: [{ outcome }] }), undefined, () => NOW);
+    await assert.rejects(answered(s.establish?.(NEW_KEY, RECORD, KEY, TENANT_LOGIN, live())), /not_created/, String(outcome));
+    assert.deepEqual(client.statements.map(stepOf), ['get', 'touch', 'revoke', 'create'], `${String(outcome)}: no record, and the kernel rolls back`);
+  }
+});
+
+test('M7M-S5 probeIssuerKey sends the key\'s fingerprint, never the key, and reads back only the four words', async () => {
+  const fingerprint = createHmac('sha256', ISSUER_KEY).update('tmpos-tenant-issuer-key-fingerprint:v1').digest();
+  for (const outcome of ['match', 'mismatch', 'absent', 'invalid'] as const) {
+    const client = fakeClient([{ outcome }]);
+    assert.equal(await probeIssuerKey(client, ISSUER_KEY, live()), outcome);
+    assert.equal(client.statements.length, 1);
+    assert.match(client.statements[0], /select tmpos_mint\.m7a_issuer_key_check\(\?::bytea\) as outcome/);
+    assert.deepEqual(client.values[0], [fingerprint]);
+    assert.ok(!(client.values[0][0] as Buffer).equals(ISSUER_KEY), 'not the key');
+    assert.deepEqual(client.bounds, [SESSION_STORE_BOUNDS]);
+  }
+  for (const rows of [[{ outcome: 'MATCH' }], [{ outcome: null }], [], [{ outcome: 'match' }, { outcome: 'match' }], [{ other: 'match' }]]) {
+    await assert.rejects(probeIssuerKey(fakeClient(rows), ISSUER_KEY, live()), /session store unavailable/, JSON.stringify(rows));
+  }
+  await assert.rejects(probeIssuerKey(fakeClient(null, new Error('db.example:5432 refused')), ISSUER_KEY, live()),
+    (err: Error) => err.message === 'session store unavailable: store_failed');
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = fakeClient([{ outcome: 'match' }]);
+  await assert.rejects(probeIssuerKey(aborted, ISSUER_KEY, controller.signal), /session store unavailable: aborted/);
+  for (const bad of [randomBytes(31), randomBytes(65), 'k'.repeat(43)]) {
+    const unsent = fakeClient([{ outcome: 'match' }]);
+    await assert.rejects(probeIssuerKey(unsent, bad as never, live()), /session store unavailable: issuer_key_invalid/);
+    assert.deepEqual(unsent.statements, []);
+  }
+  assert.deepEqual(aborted.statements, [], 'an aborted probe sends nothing');
 });

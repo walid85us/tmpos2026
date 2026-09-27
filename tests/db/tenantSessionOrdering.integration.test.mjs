@@ -14,13 +14,17 @@
 //   * an outage is a bounded 503 that revokes nothing; a lost COMMIT answer is a 503 whose outcome the records describe.
 //
 // WHAT IS COMPOSED HERE IS PRODUCTION'S. Each instance is composeProductionTransactions(env, client) — the production root
-// and the factories it ships, so the session store, its establish check and the tenant admission read are exactly what an
+// and the factories it ships, so the session store's establish check and the tenant admission read are exactly what an
 // entry would serve — over its OWN supervised kernel of four one-connection pools; the session root is assembleSessions
 // over durableSessionAdapters with BOTH audiences; createApp serves the result through createBoundedServer on 127.0.0.1.
 //
-// WHAT IS SUBSTITUTED, STATED EXACTLY. Five things, none of them inside a transaction under test:
+// WHAT IS SUBSTITUTED, STATED EXACTLY. Six things, none of them inside a transaction under test:
 //   * THE DATABASE CLIENT: a supervised kernel over the disposable cluster as a non-owner runtime LOGIN holding tmpos_app and
 //     tmpos_audit_writer only (in M5T-J5, through a byte relay that can drop one COMMIT answer).
+//   * THE SESSION STORE'S ISSUER KEY (M7A-CUSTOMERS-P2, migration 018): every tenant session is minted under the tenant
+//     issuer key, which no production root composes until the tenant entry does. So each instance's store is the
+//     production store rebuilt over the root's own kernel, with the root's standing check, plus a synthetic key the owner
+//     installed here; nothing else about it differs.
 //   * THE IDENTITY VERIFIER: a bearer token maps to a synthetic provider reference, authenticated now with a TOTP factor.
 //   * THE RATE LIMITER: the testkit's in-memory limiter, fresh for every instance.
 //   * THE ROUTES: no tenant business route ships (D1/GAP-11), so the protected tenant requests are the harness-only witness
@@ -56,12 +60,18 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
 import { STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES } from './tenantAdmissionWitness.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
+import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
+import { holdTenantStanding, readTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
+import { readPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import { lockPlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
+import { createTenantEstablishCheck } from '../../server/composition/tenantAuthorization.ts';
+import { createPlatformEstablishCheck } from '../../server/composition/platformAuthorization.ts';
 import {
   composeProductionTransactions, productionRouteDeclarations, uncataloguedRoutePermissions,
 } from '../../server/composition/productionTransactions.ts';
@@ -198,6 +208,8 @@ await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb no
 await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
 await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
 runtime = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 2, onnotice: () => {} });
+/** The synthetic tenant issuer key the owner installs (migration 018), which every instance's store mints under. */
+const ISSUER_KEY = await installTestIssuerKey(owner);
 
 const COMMIT_TS = (await probe`select current_setting('track_commit_timestamp') as v`)[0].v === 'on';
 const ON_DISK = readdirSync(MIG_DIR).filter((f) => /^\d{3}_.+\.up\.sql$/.test(f)).map((f) => f.slice(0, 3)).sort();
@@ -252,6 +264,18 @@ function kernel(relay) {
   });
 }
 
+/**
+ * The standing check the production root binds its session store to, built from the same functions and dispatching on the
+ * record's audience as productionTransactions.ts does: the rebuilt store below differs from the root's only by the key.
+ */
+const adminStanding = createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority });
+const tenantStanding = createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission });
+const STANDING = async (sql, record) => {
+  if (record.audience === 'admin') return adminStanding(sql, record);
+  if (record.audience === 'tenant') return tenantStanding(sql, record);
+  throw new Error('session standing unavailable');
+};
+
 /** One-shot gates, each armed for one (site, id): the first matching call waits until the scenario releases it. */
 function gateBox() {
   const armed = new Map();
@@ -294,10 +318,12 @@ const refOf = (key) => createHash('sha256').update(`tmpos-audit-session-ref:v1\n
 
 /** One runtime instance with both boundaries, composed from its configuration exactly as an entry composes one, and served. */
 async function compose(label, relay = null) {
-  const tx = composeProductionTransactions(CONFIGURED_ENV, () => kernel(relay));
+  let client = null;
+  const tx = composeProductionTransactions(CONFIGURED_ENV, () => (client = kernel(relay)));
   const gates = gateBox();
   const refreshes = [];
-  const inner = tx.sessionStore;
+  // The root's store, rebuilt over the root's own kernel with the issuer key it does not yet compose (see the header).
+  const inner = createPostgresSessionStore({ client, standing: STANDING, issuerKey: ISSUER_KEY });
   const store = Object.freeze({
     ...inner,
     get: async (key, signal) => { await gates.pass('get', key); return inner.get(key, signal); },

@@ -349,3 +349,28 @@ test('the idempotency policy is read once, so a getter cannot validate one value
   assert.equal(reads, 1);
   assert.ok(registered !== undefined && Object.isFrozen(registered));
 });
+
+// --- the session binding (M7A-CUSTOMERS-P2) ----------------------------------------------------
+
+test('the session binding is optional, and required only on a session route with an authorization, a trusted context and no idempotency', () => {
+  const bound = (over: Record<string, unknown>): Record<string, unknown> =>
+    route({ path: '/api/v1/probe', policy: SESSION('tenant'), trustedContext: 'required', sessionBinding: 'required', ...over });
+  const table = defineRoutes([bound({}), route({}), route({ path: '/v1/declared', sessionBinding: 'none' }), route({ path: '/v1/nulled', sessionBinding: null })]);
+  assert.equal(table.lookup('GET', '/api/v1/probe')?.sessionBinding, 'required');
+  for (const path of ['/v1/probe', '/v1/declared', '/v1/nulled']) assert.equal(table.lookup('GET', path)?.sessionBinding, 'none', `${path}: undeclared is none`);
+  assert.equal(setupCode([bound({ path: '/admin/v1/probe', policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }) })]), undefined, 'either boundary');
+  for (const [label, def] of [
+    ['a public route', route({ sessionBinding: 'required' })],
+    ['an authenticated route', route({ policy: AUTHED, trustedContext: 'required', sessionBinding: 'required' })],
+    ['the current-session endpoint', route({ path: '/api/v1/session', policy: BARE_SESSION('tenant'), sessionBinding: 'required' })],
+    ['no trusted context', bound({ trustedContext: 'none' })],
+    ['an undeclared trusted context', bound({ trustedContext: undefined })],
+    ['an idempotency-required session route', required({ path: '/api/v1/probe', policy: SESSION('tenant', { scope: 'platform', permission: 'probe.write' }), sessionBinding: 'required' })],
+    ['an unknown word', bound({ sessionBinding: 'optional' })],
+    ['a capitalised word', bound({ sessionBinding: 'Required' })],
+    ['a boolean', bound({ sessionBinding: true })],
+    ['an object', bound({ sessionBinding: { kind: 'required' } })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_session_binding_invalid', label);
+  }
+});

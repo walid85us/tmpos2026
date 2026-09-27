@@ -154,7 +154,7 @@ async function setupStep(fn) {
 }
 
 // The roles the migrations name, PUBLIC's CREATE and TEMPORARY on the database revoked (the preflight refuses a login
-// holding either: database_temporary_privilege) and migrations 001-017: the approved production state, which every
+// holding either: database_temporary_privilege) and migrations 001-018: the approved production state, which every
 // earlier database suite also establishes, so teardown leaves it in place. The runtime suite after this one
 // re-establishes all of it itself, so it inherits nothing it does not prove.
 await setupStep(async () => {
@@ -381,7 +381,7 @@ function get(port, path, headers = {}) {
 // M6PF-01..03: the intended least-privilege login, and the entry it lets listen
 // ---------------------------------------------------------------------------
 
-test('M6PF-01: the least-privilege runtime login has no violations — APPROVED_ROLE_GRANTS matches a fresh 001-017 apply exactly, both directions', async () => {
+test('M6PF-01: the least-privilege runtime login has no violations — APPROVED_ROLE_GRANTS matches a fresh 001-018 apply exactly, both directions', async () => {
   assert.deepEqual(await runtimeLoginViolations(RUNTIME_LOGIN), []);
 });
 
@@ -519,11 +519,11 @@ test('M6PF-16: a login role-defaulted to switch role violates login_role_switche
 // ---------------------------------------------------------------------------
 
 const LEDGER_ENTRY_CASES = [
-  { label: '17', name: 'missing 017', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '017'` },
+  { label: '17', name: 'missing 018', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '018'` },
   { label: '18', name: 'a gap (010 removed)', code: 'migration_not_contiguous', mutate: () => owner`delete from public.schema_migrations where version = '010'` },
   { label: '19', name: 'dirty 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set dirty = true where version = '013'` },
   { label: '20', name: 'finished_at null on 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set finished_at = null where version = '013'` },
-  { label: '21', name: "an extra '018' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('018', ${'0'.repeat(64)}, false, now(), now())` },
+  { label: '21', name: "an extra '019' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('019', ${'0'.repeat(64)}, false, now(), now())` },
   { label: '22', name: 'a changed checksum on 015', code: 'migration_checksum_mismatch', mutate: () => owner`update public.schema_migrations set checksum = ${'f'.repeat(64)} where version = '015'` },
 ];
 for (const { label, name, code, mutate } of LEDGER_ENTRY_CASES) {
