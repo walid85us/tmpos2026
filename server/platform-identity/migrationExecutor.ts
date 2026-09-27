@@ -15,6 +15,7 @@
 
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
+import { posix } from 'path';
 
 import {
   ENGINE_CODES,
@@ -242,8 +243,11 @@ export function assertDisposableTestDsn(raw: unknown): DisposableTestDsn {
     // /var/run/postgresql is absolute too, and would point this executor at a standing local
     // cluster. A disposable cluster lives under the temp root by construction, so that is the
     // confinement actually required.
+    // Strictly BELOW the temp root, in normal form: the root itself is where a standing cluster
+    // puts its socket by default, and a `..` segment passes a prefix test while leaving the root.
     const tempRoot = tmpdir();
-    if (!socketDir.startsWith(`${tempRoot}/`) && socketDir !== tempRoot) {
+    const dir = socketDir.replace(/\/+$/, '');
+    if (!dir.startsWith(`${tempRoot}/`) || posix.normalize(dir) !== dir) {
       return fail(EXECUTOR_CODES.TEST_DSN_HOST_NOT_LOCAL, 'socket directory is not under the temp root');
     }
     hostKind = 'unix_socket';
@@ -1465,6 +1469,13 @@ export async function createPostgresExecutor(
   // the connection to `localhost` over TCP instead of the task-owned socket it was validated for.
   const socketDir = SOCKET_DIR.get(dsn);
   const user = DSN_USER.get(dsn);
+  // Every connection field explicit (M7A-DBTEST-ISOLATION-P0): the driver fills an absent role, port
+  // or password from PGUSER / PGPORT / PGPASSWORD, and an EMPTY password counts as absent — so the
+  // password is a function, and a target that names no role is refused rather than completed.
+  if (user === undefined) return fail(EXECUTOR_CODES.TEST_DSN_INVALID, 'the dsn names no role');
+  const parsed = new URL(raw);
+  const port = parsed.port === '' ? 5432 : Number(parsed.port);
+  const password = decodeURIComponent(parsed.password);
   const statementTimeoutMs =
     Number.isSafeInteger(options.statementTimeoutMs) && (options.statementTimeoutMs as number) > 0
       ? (options.statementTimeoutMs as number)
@@ -1476,7 +1487,9 @@ export async function createPostgresExecutor(
     connect_timeout: 10,
     onnotice: () => {},
     ...(socketDir === undefined ? {} : { host: socketDir }),
-    ...(user === undefined ? {} : { user }),
+    port,
+    user,
+    pass: () => password,
     // SERVER-SIDE bounds, sent as startup parameters. The client-side deadline only stops this
     // process WAITING; it sends no cancel request, and PostgreSQL does not notice a dropped
     // client while it is blocked in a lock wait. Without these a migration statement could hold

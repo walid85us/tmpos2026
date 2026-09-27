@@ -7,16 +7,15 @@
 // side of the server — what the adapter refuses without asking it, and what it does with a malformed
 // answer — is proved without a database in server/persistence/postgresPrincipalResolver.test.ts.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this
-// file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs.
+// DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a
+// cluster this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs.
 // Every fixture is synthetic and randomly named, so the suite is re-runnable against the shared CI
 // service and never collides with another suite's rows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -38,46 +37,15 @@ const UID = `m5-uid-${SUFFIX}`;
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M5-ID INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M5-ID');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
-/**
- * `host`/`user` travel in client options for a socket-form target, never in the URL — every client
- * strips them — so the query is dropped here and the options carry them. With a hostname the URL is
- * what was validated, and a named role REPLACES its userinfo.
- */
-function driverDsn(raw, user) {
-  const url = new URL(raw);
-  url.search = '';
-  if (user !== undefined) { url.username = user; url.password = ''; }
-  return url.toString();
-}
 const connect = (user, max) =>
-  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+  testClient(TARGET, { ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
 
 /** The owner: applies the migrations and writes the fixtures. RLS does not restrict it. */
 const owner = connect(undefined, 2);

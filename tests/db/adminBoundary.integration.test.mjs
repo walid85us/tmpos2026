@@ -32,17 +32,15 @@
 // the database cannot answer is a bounded 503 that revokes nothing and fails readiness. And a revocation racing live
 // requests leaves every request sent after its commit refused, with nothing committed on the old authority.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. Fixtures are synthetic and randomly
+// DISPOSABLE ONLY. The target is whatever the harness resolves — a supplied disposable target or a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Fixtures are synthetic and randomly
 // named; every actor and tenant a test changes is its own, so the suite re-runs on a shared service.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -91,29 +89,9 @@ const CONFIGURED_ENV = Object.freeze({
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M5E INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M5E');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
@@ -127,7 +105,7 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, writes the fixtures, changes grants and observes. RLS does not restrict it. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 3, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 3, onnotice: () => {} });
 let tx = null;
 let closed = false;
 
@@ -172,8 +150,8 @@ let classifiedEndpoint = null;
 tx = assembleTransactions(PRODUCTION_INVENTORY, CONFIGURED_ENV, {
   client: (endpoint) => {
     classifiedEndpoint = endpoint;
-    return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+    return createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, user: RUNTIME_LOGIN,
     });
   },
   store: createPostgresTransactionalStore,

@@ -33,12 +33,12 @@
 // resets nothing; and an instance keyed with another RATE_LIMIT_KEY is refused (503, readiness 503) without writing a
 // bucket or a fingerprint, while the first keeps enforcing.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. The runtime key is the canonical test key
-// (32 bytes of 0x07), so the fingerprint 014 registers is the one every suite on a shared database expects; the second key
-// (32 bytes of 0x08) is never registered. Every principal is random per run, and every client address is random and holds no
-// bucket in the store when it is picked, so the suite re-runs on a shared service inside an earlier run's windows; the
-// production policies are used unchanged (RATE_LIMITS), and no test waits out a window.
+// DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. The runtime key is the
+// canonical test key (32 bytes of 0x07), so the fingerprint 014 registers is the one every suite on a shared database
+// expects; the second key (32 bytes of 0x08) is never registered. Every principal is random per run, and every client
+// address is random and holds no bucket in the store when it is picked, so the suite re-runs on a shared service inside
+// an earlier run's windows; the production policies are used unchanged (RATE_LIMITS), and no test waits out a window.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -48,9 +48,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -108,34 +106,14 @@ const CONFIGURED_ENV = Object.freeze({
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M6RS INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M6RS');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
-/** `host`/`user` travel in client options, never the URL; a named role REPLACES the userinfo. */
+/** Used only to build the URL handed to the raw relay-retargeted driver call below (kernel()). */
 function driverDsn(raw, user) {
   const url = new URL(raw);
   url.search = '';
@@ -144,17 +122,16 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, creates the runtime login and observes the store. RLS does not restrict it. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 2, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 2, onnotice: () => {} });
 
 // ---------------------------------------------------------------------------
 // the relay: every runtime kernel's only way to the server
 // ---------------------------------------------------------------------------
 
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host
-    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
-    : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = TARGET.hostKind === 'unix_socket'
+    ? { path: join(TARGET.host, `.s.PGSQL.${TARGET.port}`) }
+    : { host: TARGET.host, port: TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6rs-relay-'));
   const pairs = new Set();
   // closes: the connections through this relay that a driver has finished closing, as the kernels count them.
@@ -259,12 +236,15 @@ function principal(label) {
   return { token: `tok-${uid}`, key: principalKeyOf({ authProvider: 'firebase', authProviderUid: uid }) };
 }
 
-/** Production's factories, verbatim, but for the client: each call a kernel of its own through the relay. */
+/**
+ * Production's factories, verbatim, but for the client: each call a kernel of its own through the relay.
+ * The driver dials the relay's socket through the harness (testDriverVia); the relay forwards only to TARGET.
+ */
 const FACTORIES = Object.freeze({
-  client: () => createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  client: () => createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
     ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 4, idle_timeout: 0,
     onclose: () => { relay.state.closes += 1; },
-    host: relay.dir, port: 5432, user: RUNTIME_LOGIN,
+    user: RUNTIME_LOGIN,
   }),
   store: createPostgresTransactionalStore,
   platformAdmission: (c) => createPostgresPlatformAdmission({ client: c }),

@@ -1,10 +1,10 @@
 // Phase 4.0 M6-PG-P4 — the PostgreSQL transactional store against a REAL disposable PostgreSQL.
 //
 // Everything here runs against a throwaway `tmpos_s1b_*` database: locally a cluster the S1b harness
-// creates on a task-owned Unix socket, in CI the workflow's disposable loopback service
-// (TM_POS_TEST_DATABASE_URL). No managed provider, persistent database or ambient application DSN is ever
-// consulted: the trusted executor's guard refuses anything that is not a disposable local target, and it
-// runs before any statement.
+// creates on a task-owned Unix socket, in CI the workflow's disposable loopback service, resolved once by
+// the harness's own resolveDisposableTarget. No managed provider, persistent database or ambient application
+// DSN is ever consulted: the trusted executor's guard refuses anything that is not a disposable local target,
+// and it runs before any statement.
 //
 // WHAT IT PROVES. Migration 006 applies through the trusted engine on top of 001-005, refuses a rollback
 // that would destroy work, reverses cleanly and re-applies; its constraints refuse malformed, oversized and
@@ -40,9 +40,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriver, testDriverVia, childEnv } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -106,31 +104,9 @@ const OUTCOME_UNKNOWN = 'transactional_store_outcome_unknown';
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambientTestDsn = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambientTestDsn === 'string' && ambientTestDsn.trim() !== '') {
-  TARGET_DSN = ambientTestDsn.trim();
-  // A socket-form target (no hostname) names its directory (and role) as parameters, which every client strips from
-  // the URL: carry them as options, so no client falls back to PGHOST, PGUSER or localhost instead of the validated
-  // target. With a hostname, the hostname is what was validated, so a host parameter is never used.
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    CLIENT_OPTS = { host: socketDir, ...(target.searchParams.get('user') !== null ? { user: target.searchParams.get('user') } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M6-PG INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M6-PG');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 // VALIDATE BEFORE TOUCHING ANYTHING: the setup below issues cluster-wide DDL (CREATE ROLE).
 assertDisposableTestDsn(TARGET_DSN);
@@ -149,9 +125,9 @@ function driverDsn(raw, user) {
 }
 
 /** The OWNER: fixtures, fault arming and out-of-band observation — never a privilege claim. */
-const observer = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+const observer = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
 /** A second owner connection that holds row locks while a store call waits on them. */
-const lockHolder = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+const lockHolder = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
 
 // ---------------------------------------------------------------------------
 // the relay: the store's only way to the server
@@ -161,10 +137,9 @@ const lockHolder = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idl
 const COMMIT_PARSE = Buffer.from('\0commit\0');
 
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host
-    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
-    : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = TARGET.hostKind === 'unix_socket'
+    ? { path: join(TARGET.host, `.s.PGSQL.${TARGET.port}`) }
+    : { host: TARGET.host, port: TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6-relay-'));
   const pairs = new Set();
   // closes: the connections through this relay that the driver has finished closing, as storeClient counts them.
@@ -234,9 +209,11 @@ await relay.listening;
  * named), as the non-owner probe, each close the driver finishes counted on that relay. Six one-connection pools, not the
  * runtime's ten: the local disposable cluster allows twenty connections in all, and two instances plus the owner's
  * connections must fit — so concurrent callers also queue in the kernel, as they would in production.
+ *
+ * The driver dials the relay's socket (`via.dir`) through the harness (testDriverVia); the relay forwards only to TARGET.
  */
 function storeClient(max = 6, via = relay) {
-  return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, STORE_PROBE), {
+  return createSupervisedPgClient(testDriverVia(TARGET, via.dir), driverDsn(TARGET_DSN, STORE_PROBE), {
     ...runtimeClientOptions(TARGET_DSN),
     // EXPLICIT TLS opt-out at the call site: the disposable target is a task-owned socket or loopback.
     ssl: false,
@@ -245,8 +222,6 @@ function storeClient(max = 6, via = relay) {
     onclose: () => {
       via.state.closes += 1;
     },
-    host: via.dir,
-    port: 5432,
     user: STORE_PROBE,
   });
 }
@@ -955,9 +930,7 @@ test('M6-PG-02: the database refuses malformed, oversized and contradictory valu
 
   // The runtime role, through its own LOGIN, reaches neither table and not the clock: every read and write is refused
   // before a row is seen — the lifecycle routines are its only way to the store.
-  const direct = postgres(driverDsn(TARGET_DSN, STORE_PROBE), {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, user: STORE_PROBE,
-  });
+  const direct = testClient(TARGET, { ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, onnotice: () => {}, user: STORE_PROBE });
   extraClients.push(direct);
   for (const [label, statement] of [
     ['a record read', () => direct`select scope, lease, response from tmpos_internal.idempotency_record where false`],
@@ -1458,7 +1431,7 @@ test('M6-PG-19: a command\'s audit record lands in public.audit_event even when 
 
 /** A session of `role`'s own, on one connection of its own. */
 function sessionAs(role) {
-  const client = postgres(driverDsn(TARGET_DSN, role), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ssl: false, ...CLIENT_OPTS, user: role });
+  const client = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ssl: false, user: role });
   extraClients.push(client);
   return client;
 }
@@ -1904,16 +1877,16 @@ test('M6-PG-29: through the runtime role\'s own SQL, the routines change a recor
 
 const TSX = fileURLToPath(new URL('../../node_modules/.bin/tsx', import.meta.url));
 const DEFECT_CHILD = fileURLToPath(new URL('./pgDriverDefects.child.mjs', import.meta.url));
-const DEFECT_TARGETS = JSON.stringify({
-  owner: { dsn: driverDsn(TARGET_DSN), options: CLIENT_OPTS },
-  store: { dsn: driverDsn(TARGET_DSN, STORE_PROBE), options: { ...CLIENT_OPTS, user: STORE_PROBE } },
-});
+// The child resolves its own target (resolveDisposableTarget('M6D')) from the target variable childEnv sets below;
+// this names only the store's non-owner probe role for it.
+const DEFECT_TARGETS = JSON.stringify({ storeUser: STORE_PROBE });
 const WRITE_AFTER_CLOSE = "Cannot read properties of null (reading 'write')";
 
 /** One scenario of the defect child: its exit code, its RESULT, and everything it printed. */
 function inChild(scenario, variant) {
   return new Promise((done, fail) => {
-    const child = spawn(TSX, [DEFECT_CHILD, scenario, ...(variant === undefined ? [] : [variant])], { env: { ...process.env, M6_DEFECT_TARGETS: DEFECT_TARGETS }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(TSX, [DEFECT_CHILD, scenario, ...(variant === undefined ? [] : [variant])],
+      { env: childEnv(TARGET, { M6_DEFECT_TARGETS: DEFECT_TARGETS }), stdio: ['ignore', 'pipe', 'pipe'] });
     let printed = '';
     child.stdout.on('data', (chunk) => { printed += chunk; });
     child.stderr.on('data', (chunk) => { printed += chunk; });
@@ -2100,7 +2073,7 @@ test('M6-PG-34: nothing a transaction leaves in its session reaches the next one
   }, 'every transaction ran on the one session, and found none of it: the advisory lock was free the moment the call answered, and the setting is back to empty — a custom setting keeps its name after a reset, reading \'\' rather than unset, which migration 005\'s policies read as unset (nullif)');
 
   // The positive control: the same principal, statements and session, through the driver alone — no reset between transactions.
-  const raw = postgres(driverDsn(TARGET_DSN, STORE_PROBE), { ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, ...CLIENT_OPTS, user: STORE_PROBE });
+  const raw = testClient(TARGET, { ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, user: STORE_PROBE });
   try {
     const reserved = await raw.reserve();
     const viaDriver = await trace(async (statement) => {
@@ -2122,8 +2095,8 @@ test('M6-PG-34: nothing a transaction leaves in its session reaches the next one
 test('M6-PG-35: one pool is reset and reused two hundred times, the driver keeping and re-sending no statement — prepare forced off even when asked for — and a caller queued for it runs only after its reset', async () => {
   await ready();
   const built = [];
-  const client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, STORE_PROBE), {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, ...CLIENT_OPTS, user: STORE_PROBE,
+  const client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, STORE_PROBE), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, user: STORE_PROBE,
     prepare: true, debug: (_id, text) => built.push(text.trim()),
   });
   extraClients.push(client);

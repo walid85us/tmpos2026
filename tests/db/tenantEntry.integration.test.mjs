@@ -17,7 +17,7 @@
 // authorization chain, the customer read, readiness and shutdown — is production's own code, unmodified. The hosts are
 // synthetic (tenant.tmpos.test, admin.tmpos.test) and nothing leaves the loopback interface.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
+// DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service it removes its own
 // customer, session and mint-ledger rows, restores the limiter's fingerprint, the issuer key row it found (or its absence)
 // and every grant, ledger row and setting a test changes, and drops its login. What it leaves is what every suite leaves:
@@ -35,9 +35,7 @@ import { spawnSync } from 'node:child_process';
 import tls from 'node:tls';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia, childEnv } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -75,29 +73,9 @@ const ADMIT = 'tmpos_session.m5_admit_tenant_session_v2(text, text)';
 // cluster lifecycle (mirrors tests/db/productionEntry.integration.test.mjs)
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M7TE INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. '
-    + 'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M7TE');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
@@ -111,7 +89,7 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, creates the runtime login and writes/observes fixtures. RLS does not restrict it. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 3, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 3, onnotice: () => {} });
 
 const DROP_RUNTIME_LOGIN = `do $$ begin
   if exists (select 1 from pg_catalog.pg_roles where rolname = '${RUNTIME_LOGIN}') then
@@ -203,10 +181,9 @@ async function setupStep(fn) {
 // ---------------------------------------------------------------------------
 
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host
-    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
-    : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = TARGET.hostKind === 'unix_socket'
+    ? { path: join(TARGET.host, `.s.PGSQL.${TARGET.port}`) }
+    : { host: TARGET.host, port: TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m7te-relay-'));
   const pairs = new Set();
   const state = { closes: 0, pairs };
@@ -259,12 +236,15 @@ async function storeDown(relay) {
   await drained;
 }
 
-/** A production-shaped database client factory bound to one relay, from `kernelModule`; the classified endpoint is ignored. */
+/**
+ * A production-shaped database client factory bound to one relay, from `kernelModule`; the classified endpoint is ignored.
+ * The driver dials the relay's socket through the harness (testDriverVia); the relay forwards only to TARGET.
+ */
 function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MAX_POOLS, runtimeClientOptions }) {
-  return (_endpoint) => kernelModule.createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  return (_endpoint) => kernelModule.createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
     ...kernelModule.runtimeClientOptions(TARGET_DSN), ssl: false, max: kernelModule.MAX_POOLS, idle_timeout: 0,
     onclose: () => { relay.state.closes += 1; },
-    host: relay.dir, port: 5432, user: RUNTIME_LOGIN,
+    user: RUNTIME_LOGIN,
   });
 }
 
@@ -576,7 +556,7 @@ async function adminSessionId(who) {
   const key = createHash('sha256').update(id).digest('base64url');
   KEYS.add(key);
   SECRETS.add(id).add(key);
-  const runtime = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
+  const runtime = testClient(TARGET, { user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
   try {
     const at = Date.now();
     const [{ outcome }] = await runtime`select tmpos_mint.m7a_session_create(${key}::text, 'admin'::text, 'firebase'::text,
@@ -1179,7 +1159,7 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
   const out = mkdtempSync(join(REPO, 'node_modules', '.cache', 'tmpos-tenant-build-'));
   try {
     const build = spawnSync(join(REPO, 'node_modules', '.bin', 'tsc'), ['-p', 'tsconfig.server.tenant.json', '--outDir', out],
-      { cwd: REPO, encoding: 'utf8', timeout: 180_000 });
+      { cwd: REPO, env: childEnv(undefined), encoding: 'utf8', timeout: 180_000 });
     assert.equal(build.status, 0, `the tenant build succeeds:\n${(build.stdout || '') + (build.stderr || '')}`);
     const compiled = (m) => import(pathToFileURL(join(out, m)).href);
     const entry = await compiled('server/entry/tenantEntry.js');

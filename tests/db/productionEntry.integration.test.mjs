@@ -17,7 +17,7 @@
 // unmodified. The administrative session audit section (M6AA, M6-ADMIN-AUDIT-P1) adds only faults
 // made outside it: on the audit table in PostgreSQL, and once a COMMIT's answer dropped on the relay.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this
+// DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this
 // file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,9 +30,7 @@ import { join } from 'node:path';
 import tls from 'node:tls';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -70,34 +68,14 @@ const AUDIT_FAULT_SCHEMA = 'm6aa_fault';
 // cluster lifecycle (mirrors tests/db/rateLimitRuntime.integration.test.mjs)
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M6EP INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. '
-    + 'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M6EP');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
-/** `host`/`user` travel in client options, never the URL; a named role REPLACES the userinfo. */
+/** Used only to build the URL handed to production code that takes a driver, or to a raw relay-retargeted driver call. */
 function driverDsn(raw, user) {
   const url = new URL(raw);
   url.search = '';
@@ -106,7 +84,7 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, creates the runtime login and writes/observes fixtures. RLS does not restrict it. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 3, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 3, onnotice: () => {} });
 
 // The runtime login, existence-guarded: its backends ended before what it owns is dropped, so a rerun never inherits a
 // stuck session — and `drop role` alone refuses while the role still owns anything from a previous, uncleaned run.
@@ -175,10 +153,9 @@ async function setupStep(fn) {
 // ---------------------------------------------------------------------------
 
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host
-    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
-    : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = TARGET.hostKind === 'unix_socket'
+    ? { path: join(TARGET.host, `.s.PGSQL.${TARGET.port}`) }
+    : { host: TARGET.host, port: TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6ep-relay-'));
   const pairs = new Set();
   const state = { closes: 0, pairs, trap: null };
@@ -228,12 +205,16 @@ async function storeDown(relay) {
   await drained;
 }
 
-/** A production-shaped database client factory bound to one relay; the classified endpoint is ignored. */
+/**
+ * A production-shaped database client factory bound to one relay; the classified endpoint is ignored.
+ * The driver dials the relay's socket directory through the harness (testDriverVia); the relay forwards only to
+ * TARGET, and no connection field is left to the environment.
+ */
 function databaseClientOver(relay) {
-  return (_endpoint) => createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  return (_endpoint) => createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
     ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0,
     onclose: () => { relay.state.closes += 1; },
-    host: relay.dir, port: 5432, user: RUNTIME_LOGIN,
+    user: RUNTIME_LOGIN,
   });
 }
 
@@ -807,8 +788,8 @@ test('M6EP-11: wrong Origin, missing pre-session CSRF, or missing session-CSRF e
 
 test('M6EP-12: a tenant/store cookie cannot enter the admin boundary', async () => {
   await withEntry({}, async (ctx) => {
-    const rig = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 2, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+    const rig = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 2, idle_timeout: 0, user: RUNTIME_LOGIN,
     });
     try {
       // A tenant row is minted (migration 018): the owner installs a synthetic issuer key, and this store holds it.
@@ -867,9 +848,10 @@ test('M6EP-16: database outage opens no listener', async () => {
   const ends = { calls: 0, completed: 0 };
   const bindSpy = spyOnBind();
   try {
+    // Deliberately unreachable: a socket directory with no server, dialed through the harness (testDriverVia).
     const construction = {
-      databaseClient: () => recordingEnd(createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, host: deadDir, port: 5432, user: RUNTIME_LOGIN,
+      databaseClient: () => recordingEnd(createSupervisedPgClient(testDriverVia(TARGET, deadDir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, user: RUNTIME_LOGIN,
       }), ends),
       tokenVerifier: VERIFIER,
       listen: () => ({ port: 0, host: '127.0.0.1' }),
@@ -961,9 +943,10 @@ test('M6EP-20: a signal during preflight exits without ever binding', async () =
   const ends = { calls: 0, completed: 0 };
   const bindSpy = spyOnBind();
   try {
+    // A listener that never answers, dialed through the harness (testDriverVia).
     const construction = {
-      databaseClient: () => recordingEnd(createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, host: stallDir, port: 5432, user: RUNTIME_LOGIN,
+      databaseClient: () => recordingEnd(createSupervisedPgClient(testDriverVia(TARGET, stallDir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, user: RUNTIME_LOGIN,
       }), ends),
       tokenVerifier: VERIFIER,
       listen: () => ({ port: 0, host: '127.0.0.1' }),
@@ -1203,7 +1186,7 @@ function assertSessionRecord(row, action, actorId) {
 
 /** A direct connection as the runtime login — no kernel, no relay — for what the login itself may do; always ended. */
 async function asRuntimeLogin(fn) {
-  const sql = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
+  const sql = testClient(TARGET, { user: RUNTIME_LOGIN, max: 1, onnotice: () => {} });
   try {
     return await fn(sql);
   } finally {
@@ -1676,9 +1659,8 @@ test('M6EP-TLS: verified TLS over the plaintext cluster refuses — the driver n
   const ends = { calls: 0, completed: 0 };
   const construction = {
     databaseClient: () => {
-      client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-        ...runtimeClientOptions(TARGET_DSN), ssl: { ca: tls.rootCertificates[0], rejectUnauthorized: true },
-        ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+      client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+        ...runtimeClientOptions(TARGET_DSN), ssl: { ca: tls.rootCertificates[0], rejectUnauthorized: true }, user: RUNTIME_LOGIN,
       });
       return recordingEnd(client, ends);
     },

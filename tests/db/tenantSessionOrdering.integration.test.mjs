@@ -44,7 +44,7 @@
 // fault and the standing hold are detected in the catalog, the ledger is compared to the files on disk, and a login parked
 // on its presented row is found at its touch (establish) or its revoke (the base's two-call rotation).
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
+// DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Fixtures are synthetic and randomly named;
 // every actor, tenant and store a test changes is its own, and every privilege or trigger a test changes is undone before
 // it ends.
@@ -57,9 +57,7 @@ import { appendFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import postgres from 'postgres';
-
-import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, testDriverVia, childEnv } from './localPostgres.harness.mjs';
 import { STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES } from './tenantAdmissionWitness.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
@@ -115,35 +113,16 @@ const CONFIGURED_ENV = Object.freeze({
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
+const DB_TARGET = resolveDisposableTarget('M5T');
+const TARGET_DSN = DB_TARGET.dsn;
+const cluster = DB_TARGET.cluster ?? null;
 
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
+if (cluster !== null) {
   // Commit timestamps make commit ORDER observable. Only a cluster this file created is reconfigured, and it is restarted
   // before any client connects; the harness still stops and removes it.
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith('PG') || k.endsWith('DATABASE_URL')) delete env[k];
   appendFileSync(join(cluster.root, 'data', 'postgresql.conf'), '\ntrack_commit_timestamp = on\n');
   execFileSync('pg_ctl', ['--pgdata', join(cluster.root, 'data'), '--log', join(cluster.root, 'postgres.log'),
-    '--timeout', '60', '-w', '-m', 'fast', 'restart'], { env, stdio: 'ignore' });
-} else {
-  throw new Error(
-    'M5T INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
+    '--timeout', '60', '-w', '-m', 'fast', 'restart'], { env: childEnv(undefined), stdio: 'ignore' });
 }
 
 assertDisposableTestDsn(TARGET_DSN);
@@ -158,9 +137,9 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, writes fixtures, holds the levers and makes the competing changes. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 6, onnotice: () => {} });
+const owner = testClient(DB_TARGET, { max: 6, onnotice: () => {} });
 /** The observer: pg_stat_activity polls and every evidence read, on its own connection. */
-const probe = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 1, onnotice: () => {} });
+const probe = testClient(DB_TARGET, { max: 1, onnotice: () => {} });
 /** The runtime login outside any kernel: 010's status command as the runtime calls it, and the audit-insert probe. */
 let runtime = null;
 const INSTANCES = new Set();
@@ -201,7 +180,7 @@ await owner.unsafe(`drop role if exists ${RUNTIME_LOGIN}`);
 await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
 await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
 await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
-runtime = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 2, onnotice: () => {} });
+runtime = testClient(DB_TARGET, { user: RUNTIME_LOGIN, max: 2, onnotice: () => {} });
 /** The synthetic tenant issuer key the owner installs (migration 018), which every instance's tenant root mints under. */
 const ISSUER_KEY = await installTestIssuerKey(owner);
 /** The tenant root's configuration: the same database and limiter key, and the issuer key (random: canonical, never weak). */
@@ -254,9 +233,15 @@ let kernelsBuilt = 0;
 /** The kernel constructor handed to composeProductionTransactions: the cluster (or a relay to it), as the runtime login. */
 function kernel(relay) {
   kernelsBuilt += 1;
-  return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: KERNEL_MAX, idle_timeout: 0, ...CLIENT_OPTS,
-    ...(relay === null ? {} : { host: relay.dir, port: 5432 }), user: RUNTIME_LOGIN,
+  if (relay === null) {
+    return createSupervisedPgClient(testDriver(DB_TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: KERNEL_MAX, idle_timeout: 0, user: RUNTIME_LOGIN,
+    });
+  }
+  // A relayed instance dials the relay's socket through the harness (testDriverVia); the relay forwards only to the target.
+  return createSupervisedPgClient(testDriverVia(DB_TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: KERNEL_MAX, idle_timeout: 0,
+    user: RUNTIME_LOGIN,
   });
 }
 
@@ -747,10 +732,9 @@ async function withAuditFault(fault, fn) {
 
 /** A unix-socket byte relay to the cluster: a trap may read what the client sends and silence the server's side. */
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host
-    ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) }
-    : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = DB_TARGET.hostKind === 'unix_socket'
+    ? { path: join(DB_TARGET.host, `.s.PGSQL.${DB_TARGET.port}`) }
+    : { host: DB_TARGET.host, port: DB_TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m5ts-relay-'));
   const pairs = new Set();
   const state = { pairs, trap: null };

@@ -17,20 +17,17 @@
 // authenticated now with a TOTP factor) and the rate limiter (the testkit's in-memory one whose clock jumps one maximum
 // window per consume, so no budget is ever spent: this suite is not about limits). Nothing else.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
+// DISPOSABLE ONLY. The target is whatever the harness resolves — a supplied disposable target or a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
 // suffixed, so the suite re-runs on the shared CI service after the other suites. It leaves that service as it found it:
 // 017 and 018 applied, no customer row, session or mint-ledger row of its own; privileges it widens are widened inside
 // transactions that are rolled back. The issuer key it installs stays installed; the next suite that mints installs its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import net from 'node:net';
 import { readFileSync } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import postgres from 'postgres';
-
-import { installTestIssuerKey, startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, unreachableTestDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -84,29 +81,9 @@ const signal = () => AbortSignal.timeout(10_000);
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M7C INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M7C');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
@@ -119,7 +96,7 @@ function driverDsn(raw, user) {
   return url.toString();
 }
 const connect = (user, max) =>
-  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+  testClient(TARGET, { ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
 
 /** The owner: applies the migrations, writes the fixtures and observes. RLS does not restrict it. */
 const owner = connect(undefined, 3);
@@ -178,8 +155,8 @@ await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
 runtime = connect(RUNTIME_LOGIN, 2);
 
 /** The transaction kernel over the runtime login — ONE client, as the composition root builds it. */
-client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-  ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 6, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 6, idle_timeout: 0, user: RUNTIME_LOGIN,
 });
 
 // The owner installs a synthetic issuer key (018; design-B §3.12), and the store mints tenant sessions under it.
@@ -924,12 +901,10 @@ test('M7C-10: the adapter reads only through a minted, live session key: a stale
 });
 
 test('M7C-11: an unreachable database or an out-of-shape answer is a bounded 503; a grant withdrawn mid-request is a 403', async () => {
-  const closedPort = await new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
-  });
-  const dead = createSupervisedPgClient(postgres, `postgres://${RUNTIME_LOGIN}@127.0.0.1:${closedPort}/tmpos_m7c_nowhere`, {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, connect_timeout: 1, host: '127.0.0.1', port: closedPort, user: RUNTIME_LOGIN,
+  // A store nobody listens on: an explicit socket in an empty directory the harness owns, never the
+  // disposable target and never anything ambient.
+  const dead = createSupervisedPgClient(unreachableTestDriver(), 'postgres:///tmpos_s1b_unreachable', {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 1, idle_timeout: 0, connect_timeout: 1, user: RUNTIME_LOGIN,
   });
   try {
     await withApp(async ({ signIn, list, reason }) => {

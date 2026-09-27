@@ -29,9 +29,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -82,47 +80,16 @@ $$;`;
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambientTestDsn = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambientTestDsn === 'string' && ambientTestDsn.trim() !== '') {
-  TARGET_DSN = ambientTestDsn.trim();
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'S3 INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('S3');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 // VALIDATE BEFORE TOUCHING ANYTHING. The statements below include cluster-wide DDL (CREATE
 // ROLE), which is not scoped to a database and cannot be undone by dropping one.
 assertDisposableTestDsn(TARGET_DSN);
 
-/** `host`/`user` are libpq TRANSPORT parameters; forwarded in the URL the server would reject
- *  them as startup settings, so they travel in CLIENT_OPTS instead. Userinfo is REPLACED (not
- *  blanked) when a role is named: the CI service DSN carries `tmpos_s1b_owner@`, and blanking
- *  it would fall back to the OS account, which is not a role in that cluster. */
-function driverDsn(raw, user) {
-  const u = new URL(raw);
-  u.searchParams.delete('host');
-  u.searchParams.delete('user');
-  if (user !== undefined) {
-    u.username = encodeURIComponent(user);
-    u.password = '';
-  }
-  return u.toString();
-}
-
 /** The OWNER connection — fixtures and out-of-band observation only, never a privilege claim. */
-const observer = postgres(driverDsn(TARGET_DSN), {
-  max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS,
-});
+const observer = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
 
 /**
  * A probe client for one non-owner LOGIN role, carrying the RUNTIME PRINCIPAL'S OWN options
@@ -131,7 +98,7 @@ const observer = postgres(driverDsn(TARGET_DSN), {
  * the shared-backend evidence below meaningful.
  */
 function probeClient(role) {
-  return postgres(driverDsn(TARGET_DSN, role), {
+  return testClient(TARGET, {
     ...runtimeClientOptions(TARGET_DSN),
     // EXPLICIT TLS opt-out, stated at the call site rather than inferred from a hostname. The
     // disposable target is a task-owned socket locally and a plaintext loopback service in CI.
@@ -139,7 +106,6 @@ function probeClient(role) {
     max: 1,
     idle_timeout: 0,
     onnotice: () => {},
-    ...CLIENT_OPTS,
     user: role,
   });
 }

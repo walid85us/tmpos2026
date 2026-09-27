@@ -44,8 +44,8 @@
 // order is then also asserted from pg_xact_commit_timestamp. A bound service (CI's) is never reconfigured: there, order is
 // asserted through the lock wait alone — the later writer was observed waiting on the earlier one's backend.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. Fixtures are synthetic and randomly named;
+// DISPOSABLE ONLY. The target is whatever the harness resolves — a supplied disposable target or a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Fixtures are synthetic and randomly named;
 // every actor and tenant a test changes is its own, and every privilege a test revokes is granted back before it ends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,9 +54,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriver, childEnv } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -105,35 +104,16 @@ const CONFIGURED_ENV = Object.freeze({
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
+const TARGET = resolveDisposableTarget('M5R');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
+if (cluster !== null) {
   // Commit timestamps make commit ORDER observable. Only a cluster this file created is reconfigured, and it is restarted
   // before any client connects; the harness still stops and removes it.
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith('PG') || k.endsWith('DATABASE_URL')) delete env[k];
   appendFileSync(join(cluster.root, 'data', 'postgresql.conf'), '\ntrack_commit_timestamp = on\n');
   execFileSync('pg_ctl', ['--pgdata', join(cluster.root, 'data'), '--log', join(cluster.root, 'postgres.log'),
-    '--timeout', '60', '-w', '-m', 'fast', 'restart'], { env, stdio: 'ignore' });
-} else {
-  throw new Error(
-    'M5R INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
+    '--timeout', '60', '-w', '-m', 'fast', 'restart'], { env: childEnv(undefined), stdio: 'ignore' });
 }
 
 assertDisposableTestDsn(TARGET_DSN);
@@ -148,9 +128,9 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, writes fixtures, holds the levers and makes the competing changes. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 6, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 6, onnotice: () => {} });
 /** The observer: pg_stat_activity polls and every evidence read, on its own connection. */
-const probe = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 1, onnotice: () => {} });
+const probe = testClient(TARGET, { max: 1, onnotice: () => {} });
 const INSTANCES = new Set();
 
 test.after(async () => {
@@ -228,8 +208,8 @@ let kernelsBuilt = 0;
 /** The kernel constructor handed to composeProductionTransactions: the disposable cluster, as the runtime login. */
 function kernel() {
   kernelsBuilt += 1;
-  return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: KERNEL_MAX, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+  return createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max: KERNEL_MAX, idle_timeout: 0, user: RUNTIME_LOGIN,
   });
 }
 

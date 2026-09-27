@@ -14,9 +14,8 @@ import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
-import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -32,7 +31,8 @@ const LOCK_KEY = 528_517;
 const NOW = () => new Date().toISOString();
 const SUFFIX = randomUUID().slice(0, 8);
 /** M6PF-35's second database of the cluster; teardown drops it too, before the roles a grant in it would pin. */
-const OTHER_DB = `m6pf_other_${SUFFIX}`;
+/** Must start with the harness's disposable-database prefix so testClient() will connect to it. */
+const OTHER_DB = `tmpos_s1b_m6pf_other_${SUFFIX}`;
 const signal = () => AbortSignal.timeout(10_000);
 
 /** Mirrors createApp's PROBE_REUSE_MS (server/runtime/app.ts, not exported): how long a readiness answer is cached. */
@@ -63,34 +63,14 @@ function watchBinds(onBind) {
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M6PF INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M6PF');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
-/** `host`/`user` travel in client options, never the URL; a named role REPLACES the userinfo. */
+/** Used only to build the URL handed to production code that takes a driver (createSupervisedPgClient below). */
 function driverDsn(raw, user) {
   const url = new URL(raw);
   url.search = '';
@@ -99,7 +79,7 @@ function driverDsn(raw, user) {
 }
 
 /** The owner: applies the migrations, creates roles, mutates the ledger and the fingerprint. RLS does not restrict it. */
-const owner = postgres(driverDsn(TARGET_DSN), { ...CLIENT_OPTS, max: 3, onnotice: () => {} });
+const owner = testClient(TARGET, { max: 3, onnotice: () => {} });
 
 // ---------------------------------------------------------------------------
 // teardown: registered before the first mutation, and run by setupStep should top-level setup stop part-way — node:test
@@ -132,7 +112,7 @@ async function teardown() {
     }
     await step(async () => {
       const roles = await owner`select rolname from pg_catalog.pg_roles where starts_with(rolname, 'tmpos_m6pf_') order by 1`;
-      const databases = await owner`select datname from pg_catalog.pg_database where starts_with(datname, 'm6pf_other_') order by 1`;
+      const databases = await owner`select datname from pg_catalog.pg_database where starts_with(datname, 'tmpos_s1b_m6pf_other_') order by 1`;
       assert.deepEqual({ roles: roles.map((r) => r.rolname), databases: databases.map((d) => d.datname) }, { roles: [], databases: [] });
     });
   } finally {
@@ -198,8 +178,8 @@ async function createLogin(label, opts = {}) {
 const RUNTIME_LOGIN = await setupStep(() => createLogin('probe'));
 
 function clientAs(login, max = 2) {
-  return createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, login), {
-    ...runtimeClientOptions(TARGET_DSN), ssl: false, max, idle_timeout: 0, ...CLIENT_OPTS, user: login,
+  return createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, login), {
+    ...runtimeClientOptions(TARGET_DSN), ssl: false, max, idle_timeout: 0, user: login,
   });
 }
 
@@ -333,8 +313,8 @@ function constructionFor(login, { wrapEnd } = {}) {
   return {
     tokenVerifier: SYNTHETIC_TOKEN_VERIFIER,
     databaseClient: () => {
-      const client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, login), {
-        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, ...CLIENT_OPTS, user: login,
+      const client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, login), {
+        ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, user: login,
       });
       return wrapEnd === undefined ? client : Object.freeze({ transaction: client.transaction.bind(client), end: wrapEnd(() => client.end()) });
     },
@@ -727,9 +707,7 @@ test('M6PF-31: a SECURITY DEFINER routine left at its default ACL in public viol
   await owner.unsafe(`create role ${owningRole} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   createdRoles.add(owningRole);
   await owner.unsafe(`grant usage, create on schema public to ${owningRole}`);
-  // CLIENT_OPTS may itself carry `user` (the ambient embedded socket user); it must lose to the explicit override,
-  // exactly as clientAs() below orders it — otherwise the DDL silently runs as the cluster superuser again.
-  const defOwner = postgres(driverDsn(TARGET_DSN, owningRole), { ...CLIENT_OPTS, max: 1, onnotice: () => {}, user: owningRole });
+  const defOwner = testClient(TARGET, { user: owningRole, max: 1, onnotice: () => {} });
   try {
     const definerName = `m6pf_definer_${SUFFIX}`;
     await defOwner.unsafe(`create function public.${definerName}() returns int language sql security definer as 'select 1'`);
@@ -784,23 +762,18 @@ test('M6PF-35: a privilege recorded in another database of the cluster violates 
   try {
     await owner.unsafe(`create database ${OTHER_DB}`);
   } catch (err) {
-    // A CI-provided cluster (TM_POS_TEST_DATABASE_URL) is expected to grant CREATE DATABASE to this suite's owner;
+    // A CI-provided target (a supplied disposable DSN) is expected to grant CREATE DATABASE to this suite's owner;
     // a refusal there is a real infrastructure regression, not a property of a restricted shared cluster, so it
     // fails the test. Only a local disposable cluster this harness cannot control may legitimately refuse it.
-    if (typeof ambient === 'string' && ambient.trim() !== '') {
-      throw new Error(`CREATE DATABASE refused on the CI-provided cluster (TM_POS_TEST_DATABASE_URL set): ${err.message}`);
+    if (TARGET.source === 'supplied') {
+      throw new Error(`CREATE DATABASE refused on the CI-provided target (a disposable DSN was supplied): ${err.message}`);
     }
     t.skip(`CREATE DATABASE refused by the local disposable cluster: ${err.message}`);
     return;
   }
-  const otherDsn = (() => {
-    const url = new URL(driverDsn(TARGET_DSN));
-    url.pathname = `/${OTHER_DB}`;
-    return url.toString();
-  })();
   let otherClient = null;
   try {
-    otherClient = postgres(otherDsn, { ...CLIENT_OPTS, max: 1, onnotice: () => {} });
+    otherClient = testClient(TARGET, { database: OTHER_DB, max: 1, onnotice: () => {} });
     await otherClient.unsafe(`create table t (x int)`);
     await otherClient.unsafe(`grant select on t to ${RUNTIME_LOGIN}`);
     assert.deepEqual(await runtimeLoginViolations(RUNTIME_LOGIN), ['foreign_database_dependency']);

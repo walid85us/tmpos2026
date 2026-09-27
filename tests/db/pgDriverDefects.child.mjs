@@ -3,17 +3,20 @@
 //
 // The pinned driver's first defect ends the process that meets it, so each scenario runs here, in a child of the PostgreSQL
 // suite, which reads its exit status, its one RESULT line and everything it printed. No scenario installs an
-// uncaughtException handler: a write to a dropped socket ends this process, and the parent sees it. The targets come from the
-// suite alone (M6_DEFECT_TARGETS: the disposable server's DSN and client options for its owner and for the store's non-owner
-// probe). Every store client is the transaction kernel over the runtime's own client options; a scenario reaches the
-// connection through a TCP relay of its own (a FIN, a reset, a lost COMMIT answer) or through the driver's socket hook (a
-// close processed at an exact point). The driver's `debug` and `onclose` options are the witness — every statement the
-// driver builds for a connection, and when that connection closed. Only counts and fixed words leave this process.
+// uncaughtException handler: a write to a dropped socket ends this process, and the parent sees it. The target comes from
+// this process's own resolveDisposableTarget('M6D') (M7A-DBTEST-ISOLATION-P0: childEnv sets the target variable the parent
+// resolved, never an ambient PG*/DSN setting); M6_DEFECT_TARGETS names only the store's non-owner probe role. Every store
+// client is the transaction kernel over the runtime's own client options; a scenario reaches the connection through a TCP
+// relay of its own (a FIN, a reset, a lost COMMIT answer) or through the driver's socket hook (a close processed at an
+// exact point) — both place the transport at a local proxy, so every connection below goes through the harness's
+// checkedDriver: explicit user, disposable database, a local transport, and no ambient setting. The driver's `debug`
+// and `onclose` options are the witness — every statement the driver builds for a connection, and when that connection
+// closed. Only counts and fixed words leave this process.
 import net from 'node:net';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import postgres from 'postgres';
+import { checkedDriver, resolveDisposableTarget } from './localPostgres.harness.mjs';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
 import { RETIRED_POOL_GRACE_S, TransactionFailure, createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
@@ -23,7 +26,24 @@ import { IDEMPOTENCY_DEADLINE_MS, createIdempotencyKeyring } from '../../server/
 import { defineCommands, prepareCommand } from '../../server/runtime/commandTransaction.ts';
 import { defineOutboxEvents } from '../../server/runtime/outbox.ts';
 
-const targets = JSON.parse(process.env.M6_DEFECT_TARGETS ?? 'null');
+const DB_TARGET = resolveDisposableTarget('M6D');
+/** The pinned driver, behind the harness's check: explicit user, disposable database, a local transport, nothing ambient. */
+const postgres = checkedDriver(DB_TARGET);
+const DEFECT_META = JSON.parse(process.env.M6_DEFECT_TARGETS ?? 'null');
+/** `host`/`user` travel in options, never the URL; a named role REPLACES the userinfo (the suite's own convention). */
+function driverDsn(raw, user) {
+  const u = new URL(raw);
+  u.searchParams.delete('host');
+  u.searchParams.delete('user');
+  if (user !== undefined) { u.username = encodeURIComponent(user); u.password = ''; }
+  return u.toString();
+}
+/** `host` only for a unix-socket target: relay() below tells a socket directory from a hostname by this key's presence. */
+const CLIENT_OPTIONS = DB_TARGET.hostKind === 'unix_socket' ? { host: DB_TARGET.host, port: DB_TARGET.port } : { port: DB_TARGET.port };
+const targets = DEFECT_META === null ? null : {
+  owner: { dsn: driverDsn(DB_TARGET.dsn), options: { ...CLIENT_OPTIONS, user: DB_TARGET.user } },
+  store: { dsn: driverDsn(DB_TARGET.dsn, DEFECT_META.storeUser), options: { ...CLIENT_OPTIONS, user: DEFECT_META.storeUser } },
+};
 const report = (result) => console.log(`RESULT ${JSON.stringify(result)}`);
 const codeOf = (e) => (typeof e?.code === 'string' ? e.code : 'none');
 const settled = (p) => p.then(() => 'ok', codeOf);

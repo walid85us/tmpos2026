@@ -28,9 +28,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -136,52 +134,19 @@ const CTX_STORE_A1 = { scopeType: 'store', tenantId: T_A, storeId: S_A1 };
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambientTestDsn = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambientTestDsn === 'string' && ambientTestDsn.trim() !== '') {
-  TARGET_DSN = ambientTestDsn.trim();
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'S2 INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('S2');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 // VALIDATE BEFORE TOUCHING ANYTHING. The statements below include cluster-wide DDL (CREATE
 // ROLE), which is not scoped to a database and cannot be undone by dropping one. Running the
-// executor's own guard here — not later, at apply time — means an ambient
-// TM_POS_TEST_DATABASE_URL pointing anywhere but a disposable local target is refused before a
-// single byte is sent.
+// executor's own guard here — not later, at apply time — means a supplied target pointing
+// anywhere but a disposable local database is refused before a single byte is sent.
 assertDisposableTestDsn(TARGET_DSN);
-
-/** `host`/`user` are libpq TRANSPORT parameters; the driver would forward them to the server as
- *  startup settings and the connection would be refused, so they are stripped from the URL and
- *  travel in CLIENT_OPTS instead. Userinfo is REPLACED (not blanked) when a role is named: the
- *  CI service DSN carries `tmpos_s1b_owner@`, and blanking it would fall back to the OS account,
- *  which is not a role in that cluster. */
-function driverDsn(raw, user) {
-  const u = new URL(raw);
-  u.searchParams.delete('host');
-  u.searchParams.delete('user');
-  if (user !== undefined) {
-    u.username = encodeURIComponent(user);
-    u.password = '';
-  }
-  return u.toString();
-}
 
 /** The OWNER connection. Used only to build fixtures and to observe out of band — never to
  *  make an isolation claim, because the owner is not subject to any policy here. */
-const observer = postgres(driverDsn(TARGET_DSN), {
-  max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS,
-});
+const observer = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
 
 /**
  * A probe client for one non-owner role, configured with the RUNTIME PRINCIPAL'S OWN options.
@@ -193,7 +158,7 @@ const observer = postgres(driverDsn(TARGET_DSN), {
  * one. A larger pool could hand out a fresh backend and prove nothing.
  */
 function probeClient(role) {
-  return postgres(driverDsn(TARGET_DSN, role), {
+  return testClient(TARGET, {
     ...runtimeClientOptions(TARGET_DSN),
     // EXPLICIT TLS opt-out, stated here rather than inferred by db.ts from the hostname. The
     // disposable target is a task-owned socket locally and a plaintext loopback service in CI;
@@ -203,7 +168,6 @@ function probeClient(role) {
     max: 1,
     idle_timeout: 0,
     onnotice: () => {},
-    ...CLIENT_OPTS,
     user: role,
   });
 }
@@ -419,8 +383,8 @@ test("S2-DB-2b: 005's whole role lifecycle succeeds for a NON-superuser holding 
   await observer.unsafe(
     `create role ${MIGRATOR} login nosuperuser createrole nocreatedb noreplication nobypassrls inherit`,
   );
-  const asMigrator = postgres(driverDsn(TARGET_DSN, MIGRATOR), {
-    ssl: false, max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, user: MIGRATOR,
+  const asMigrator = testClient(TARGET, {
+    ssl: false, max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, user: MIGRATOR,
   });
   try {
     const [{ issuper, isowner }] = await asMigrator`
@@ -1280,8 +1244,8 @@ test('S2-DB-30: on an UNPREPARED database, 005 refuses because the roles already
   // it mutates anything — and that 001-004 still apply, so the refusal is 005's alone.
   await observer.unsafe(`drop database if exists ${LIFECYCLE_DB}`);
   await observer.unsafe(`create database ${LIFECYCLE_DB}`);
-  lifecycleClient = postgres(driverDsn(TARGET_DSN), {
-    max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS, database: LIFECYCLE_DB,
+  lifecycleClient = testClient(TARGET, {
+    max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, database: LIFECYCLE_DB,
   });
 
   const dsn = assertDisposableTestDsn(lifecycleDsn());

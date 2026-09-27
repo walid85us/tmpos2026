@@ -8,19 +8,18 @@
 // and the chain the production session store with the login's standing check, so the session a command carries is the
 // durable row its transaction holds.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
-// named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-018 and left tenants of
-// their own: every directory assertion is made against the owner's own ordered read of the whole table, never a count this
+// DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and
+// randomly named, so the suite re-runs on the shared CI service, where earlier suites already applied 001-018 and left tenants
+// of their own: every directory assertion is made against the owner's own ordered read of the whole table, never a count this
 // suite assumes. Every rollback and refusal proof runs inside one transaction that is rolled back.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import postgres from 'postgres';
 
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -72,33 +71,14 @@ const signal = () => AbortSignal.timeout(10_000);
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M5T INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M5T');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
+/** Used only to build the URL handed to production code that takes a driver (createSupervisedPgClient below). */
 function driverDsn(raw, user) {
   const url = new URL(raw);
   url.search = '';
@@ -106,7 +86,7 @@ function driverDsn(raw, user) {
   return url.toString();
 }
 const connect = (user, max) =>
-  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+  testClient(TARGET, { ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
 
 /** The owner: applies the migrations, writes the fixtures and observes. RLS does not restrict it. */
 const owner = connect(undefined, 2);
@@ -150,8 +130,8 @@ await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
 await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
 runtime = connect(RUNTIME_LOGIN, 2);
 
-client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-  ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 6, idle_timeout: 0, ...CLIENT_OPTS, user: RUNTIME_LOGIN,
+client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 6, idle_timeout: 0, user: RUNTIME_LOGIN,
 });
 // The production revalidator, composed exactly as productionTransactions.ts composes it (M5-ADMIN-REVOKE-P1).
 const store = createPostgresTransactionalStore({

@@ -37,12 +37,12 @@
 //   * an observing wrapper around the kernel (never around the adapter) records the failure each failed transaction ended
 //     with, so a timeout can be shown to be PostgreSQL's (55P03, 57014) rather than the adapter's own deadline.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
-// destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe login are
-// synthetic, so the suite re-runs on the shared CI service: the ledger is read rather than this run's report, every
-// rollback and re-application runs inside one owner transaction that is rolled back, every seeded or long-window bucket is
-// deleted by the test that made it, and a test that empties the fingerprint table re-registers the canonical test key
-// (32 bytes of 0x07) before it ends.
+// DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
+// creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe
+// login are synthetic, so the suite re-runs on the shared CI service: the ledger is read rather than this run's report,
+// every rollback and re-application runs inside one owner transaction that is rolled back, every seeded or long-window
+// bucket is deleted by the test that made it, and a test that empties the fingerprint table re-registers the canonical
+// test key (32 bytes of 0x07) before it ends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, connect as netConnect } from 'node:net';
@@ -51,9 +51,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -107,32 +105,15 @@ const UNAVAILABLE = { outcome: 'unavailable' };
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error('M6R INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. Docker and remote databases are not substitutes.');
-}
+const TARGET = resolveDisposableTarget('M6R');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 // VALIDATE BEFORE TOUCHING ANYTHING: the setup below issues cluster-wide DDL (CREATE ROLE).
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
 
-/** `host`/`user` travel in client options, never the URL; a named role REPLACES the userinfo. */
+/** Used only to build the URL handed to the raw relay-retargeted driver call below (kernel()). */
 function driverDsn(raw, user) {
   const url = new URL(raw);
   url.search = '';
@@ -140,7 +121,7 @@ function driverDsn(raw, user) {
   return url.toString();
 }
 const connect = (user, max) =>
-  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+  testClient(TARGET, { ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
 
 /** The owner: applies the migrations, seeds and observes, holds locks. RLS does not restrict it. */
 const owner = connect(undefined, 2);
@@ -150,8 +131,9 @@ const owner = connect(undefined, 2);
 // ---------------------------------------------------------------------------
 
 function startRelay() {
-  const u = new URL(TARGET_DSN);
-  const upstream = CLIENT_OPTS.host ? { path: join(CLIENT_OPTS.host, `.s.PGSQL.${u.port || 5432}`) } : { host: u.hostname, port: Number(u.port || 5432) };
+  const upstream = TARGET.hostKind === 'unix_socket'
+    ? { path: join(TARGET.host, `.s.PGSQL.${TARGET.port}`) }
+    : { host: TARGET.host, port: TARGET.port };
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6r-relay-'));
   const pairs = new Set();
   // closes: the connections through this relay the driver has finished closing, as kernel() counts them.
@@ -187,12 +169,13 @@ const kernels = [];
 /**
  * The transaction kernel over the probe login's runtime options, through the relay; `max` one-connection pools, and
  * `session` startup parameters added to the runtime's own (an application_name that tells kernels apart, say).
+ * The driver dials the relay's socket through the harness (testDriverVia); the relay forwards only to TARGET.
  */
 function kernel(max = 6, session = {}) {
   const options = runtimeClientOptions(TARGET_DSN);
-  const k = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, LOGIN), {
+  const k = createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, LOGIN), {
     ...options, connection: { ...options.connection, ...session }, ssl: false, max, idle_timeout: 0,
-    onclose: () => { relay.state.closes += 1; }, host: relay.dir, port: 5432, user: LOGIN,
+    onclose: () => { relay.state.closes += 1; }, user: LOGIN,
   });
   kernels.push(k);
   return k;
@@ -1228,7 +1211,7 @@ test('M6R-14: a read-only store is never ready and counts nothing', async () => 
   // nothing outlives this test: a fresh kernel, and one direct connection that asks the routine itself.
   const READ_ONLY = { default_transaction_read_only: 'on' };
   const readOnly = kernel(1, READ_ONLY);
-  const direct = postgres(driverDsn(TARGET_DSN, LOGIN), { ...CLIENT_OPTS, user: LOGIN, max: 1, onnotice: () => {}, connection: READ_ONLY });
+  const direct = testClient(TARGET, { user: LOGIN, max: 1, onnotice: () => {}, connection: READ_ONLY });
   const k = key('m6r14');
   try {
     assert.deepEqual((await direct`select outcome from tmpos_rate_limit.m6_rate_limit_probe(${Buffer.from(FP, 'hex')}::bytea)`).map((r) => r.outcome),
@@ -1303,7 +1286,7 @@ test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold
     const faultCounts = Object.fromEntries([...new Set(faults)].map((f) => [f, faults.filter((x) => x === f).length]));
     const [{ version }] = await owner`select pg_catalog.current_setting('server_version') as version`;
     const report = {
-      postgres: version, target: cluster ? 'local disposable cluster (socket, fsync off)' : 'TM_POS_TEST_DATABASE_URL',
+      postgres: version, target: cluster ? 'local disposable cluster (socket, fsync off)' : 'supplied disposable target',
       concurrency: CONCURRENCY, instances: 2, kernelMaxEach: KERNEL_MAX, effectiveInFlightTransactions: 2 * KERNEL_MAX,
       consumes: CONSUMES, hotConsumes: plan.filter((p) => p.k === hot).length, hotLimit: HOT_LIMIT, coldKeys: COLD_KEYS, coldLimit: COLD_LIMIT,
       durationMs: Math.round(duration), throughputPerSec: Math.round(CONSUMES / (duration / 1000)),

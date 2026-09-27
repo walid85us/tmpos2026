@@ -16,9 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -35,38 +33,14 @@ const NOW = () => new Date().toISOString();
 // cluster lifecycle — one disposable target for the whole file
 // ---------------------------------------------------------------------------
 
-/** CI supplies its own disposable loopback service; locally we create the cluster ourselves. */
-const ambientTestDsn = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-/** Driver options the observer connection needs; a socket target must be told its path. */
-let CLIENT_OPTS = {};
-
-if (typeof ambientTestDsn === 'string' && ambientTestDsn.trim() !== '') {
-  TARGET_DSN = ambientTestDsn.trim();
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'S1b INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
-
-/** `host`/`user` are libpq TRANSPORT parameters; the driver would forward them to the server as
- *  startup settings and the connection would be refused. They travel in CLIENT_OPTS instead. */
-function driverDsn(raw) {
-  const u = new URL(raw);
-  u.searchParams.delete('host');
-  u.searchParams.delete('user');
-  return u.toString();
-}
+const TARGET = resolveDisposableTarget('S1b');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
+assertDisposableTestDsn(TARGET_DSN);
 
 /** A SECOND, independent connection used only for out-of-band assertions. max:1 keeps every
  *  probe on ONE backend, which an advisory-lock observation depends on. */
-const observer = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+const observer = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
 
 const fixtureDirs = [];
 
@@ -287,7 +261,7 @@ test('S1b-13: an unresolved dirty marker blocks an ordinary rerun before any eff
 
 test('S1b-14: a concurrent holder of the run lock excludes the executor', async () => {
   await resetTarget();
-  const holder = postgres(driverDsn(TARGET_DSN), { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {}, ...CLIENT_OPTS });
+  const holder = testClient(TARGET, { max: 1, prepare: false, idle_timeout: 0, onnotice: () => {} });
   const held = await holder.reserve();
   try {
     const [{ locked }] = await held`select pg_try_advisory_lock(${LOCK_KEY}::bigint) as locked`;

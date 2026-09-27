@@ -3,7 +3,7 @@
 // M6 store committing the command with its mutator, the trusted context's revalidation and the step-up deadline, the
 // audit record and the event, concurrency, and 010's apply, upgrade and rollback.
 //
-// DISPOSABLE ONLY. The target is TM_POS_TEST_DATABASE_URL when CI binds one, otherwise a cluster this file creates and
+// DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and
 // randomly named, so the suite re-runs on the shared CI service where earlier suites already applied 001-009 and may
 // have moved other tenants' versions. The rollback and upgrade proof runs inside one transaction that is rolled back,
@@ -16,9 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import postgres from 'postgres';
-
-import { startDisposablePostgres, localPostgresAvailable } from './localPostgres.harness.mjs';
+import { resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -81,29 +79,9 @@ const signal = () => AbortSignal.timeout(10_000);
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const ambient = process.env.TM_POS_TEST_DATABASE_URL;
-let cluster = null;
-let TARGET_DSN = null;
-let CLIENT_OPTS = {};
-
-if (typeof ambient === 'string' && ambient.trim() !== '') {
-  TARGET_DSN = ambient.trim();
-  const target = new URL(TARGET_DSN);
-  const socketDir = target.hostname === '' ? target.searchParams.get('host') : null;
-  if (socketDir !== null) {
-    const user = target.searchParams.get('user');
-    CLIENT_OPTS = { host: socketDir, ...(user !== null ? { user } : {}) };
-  }
-} else if (localPostgresAvailable()) {
-  cluster = startDisposablePostgres();
-  TARGET_DSN = cluster.dsn;
-  CLIENT_OPTS = cluster.clientOptions;
-} else {
-  throw new Error(
-    'M5S INFRASTRUCTURE BLOCKER: no TM_POS_TEST_DATABASE_URL and no local initdb/pg_ctl. ' +
-    'Docker and remote databases are not substitutes.',
-  );
-}
+const TARGET = resolveDisposableTarget('M5S');
+const TARGET_DSN = TARGET.dsn;
+const cluster = TARGET.cluster ?? null;
 
 assertDisposableTestDsn(TARGET_DSN);
 const DATABASE = new URL(TARGET_DSN).pathname.slice(1);
@@ -116,7 +94,7 @@ function driverDsn(raw, user) {
   return url.toString();
 }
 const connect = (user, max) =>
-  postgres(driverDsn(TARGET_DSN, user), { ...CLIENT_OPTS, ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
+  testClient(TARGET, { ...(user === undefined ? {} : { user }), max, onnotice: () => {} });
 
 /** The owner: applies the migrations, writes the fixtures and observes. RLS does not restrict it. */
 const owner = connect(undefined, 3);
@@ -176,12 +154,11 @@ await owner.unsafe(`grant tmpos_app to ${SETONLY_LOGIN}`);
 setonly = connect(SETONLY_LOGIN, 1);
 
 /** The transaction kernel over the runtime login (no TLS on a disposable target). */
-client = createSupervisedPgClient(postgres, driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+client = createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
   ...runtimeClientOptions(TARGET_DSN),
   ssl: false,
   max: 6,
   idle_timeout: 0,
-  ...CLIENT_OPTS,
   user: RUNTIME_LOGIN,
 });
 const store = createPostgresTransactionalStore({ client, mutators: [TENANT_STATUS_MUTATOR], revalidate: REVALIDATE });

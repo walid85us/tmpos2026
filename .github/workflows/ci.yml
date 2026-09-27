@@ -30,7 +30,10 @@ jobs:
     # database named `tmpos_s1b_*`, and authenticates a synthetic bootstrap role through
     # trust auth, so no credential is committed at all.
     # It is bound to the tests ONLY through TM_POS_TEST_DATABASE_URL — DATABASE_URL,
-    # SUPABASE_DATABASE_URL and APP_DATABASE_URL are never set here.
+    # SUPABASE_DATABASE_URL and APP_DATABASE_URL are never set here. Each step also declares
+    # TM_POS_TEST_DATABASE_KIND: the harness accepts a TCP target only as this declared service
+    # (M7A-DBTEST-ISOLATION-P0), and every step runs through scripts/run-db-tests.mjs, which
+    # hands each suite a minimal environment with no PG* setting.
     services:
       tmpos_s1b_postgres:
         # postgres:16-alpine, linux/amd64 manifest, pinned by digest like every other image here.
@@ -84,6 +87,11 @@ jobs:
         run: npm run typecheck
       - name: Deterministic tests (existing suites)
         run: npm run test:existing
+      # M7A-DBTEST-ISOLATION-P0 — the ambient-fallback incident reproduced against the real database suites: the step's
+      # children get synthetic PG*/DATABASE_URL settings that point at a listener the test owns, and a suite that dials it
+      # has fallen back. No database service is used. The fast half runs in `npm run test:existing` above.
+      - name: Database tests never fall back to an ambient database (M7A-DBTEST-ISOLATION-P0)
+        run: node_modules/.bin/tsx --test tests/quality/db-test-ambient-fallback.suites.mjs
       # Phase 4.0 M3 S1b — the trusted executor against the disposable service above. Proves
       # session-scoped advisory locking, stable backend identity across per-file commits, durable
       # dirty markers, and idempotent reruns against REAL PostgreSQL. Bound exclusively through
@@ -91,6 +99,7 @@ jobs:
       - name: Migration executor against disposable PostgreSQL (S1b)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: npm run test:db
       # Phase 4.0 M6-PG-P4 — the PostgreSQL transactional store (migration 006 and its adapter) against the SAME
       # disposable service, after the suites above have applied 001-006 to it. Same binding, no new service, no
@@ -98,21 +107,24 @@ jobs:
       - name: Transactional store against disposable PostgreSQL (M6-PG-P4)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/transactionalStore.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/transactionalStore.integration.test.mjs
       # Phase 4.0 M5-ID-P1 — migration 007's trusted principal resolution and transaction-local
       # revalidation against the SAME disposable service, after 001-006 are already applied to it.
       # Same binding, no new service, no secret, no permission change.
       - name: Trusted principal resolution against disposable PostgreSQL (M5-ID-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/principalResolution.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/principalResolution.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P1 — migration 008 and the first server-authorized business command (the tenant display
       # name) through the store and the HTTP chain, against the SAME disposable service after 001-007 are applied to it.
       # Same binding, no new service, no secret, no permission change.
       - name: Tenant display-name command against disposable PostgreSQL (M5-GIAM-D1-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantDisplayName.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantDisplayName.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P2 — migration 010 and the tenant lifecycle command (suspend/reactivate) through the
       # store: the access version, the privilege containment, the audit record and event, concurrency, and 010's
       # apply, upgrade and rollback — against the SAME disposable service after 001-009 are applied to it.
@@ -120,7 +132,8 @@ jobs:
       - name: Tenant status command against disposable PostgreSQL (M5-GIAM-D1-P2)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantStatus.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantStatus.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P2-R1 — migration 011 and EFFECTIVE tenant revocation: the durable session store,
       # the composed PostgreSQL admission, and the suspend/reactivate sequence over real local sockets, against
       # the SAME disposable service after 001-011 are applied to it. This is the suite DA-32's closure rests on,
@@ -128,7 +141,8 @@ jobs:
       - name: Effective tenant revocation against disposable PostgreSQL (M5-GIAM-D1-P2-R1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantAdmission.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantAdmission.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P3 — migration 012 and the platform tenant directory: the gated read routine, its privilege
       # containment, and the Tenant Management page's read and commands over the real resolver, authorizer and store on real
       # local sockets, against the SAME disposable service after 001-012 are applied to it. Same binding, no new service, no
@@ -136,7 +150,8 @@ jobs:
       - name: Platform tenant directory against disposable PostgreSQL (M5-GIAM-D1-P3)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantDirectory.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantDirectory.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P4 — migration 013 and durable platform-administrator admission: the per-actor platform
       # authority version, the four ENABLE ALWAYS row triggers that move it — on platform_identity (its anchor only),
       # app_user, identity_link and user_membership (platform scope only) — on every change to an administrator's standing
@@ -145,14 +160,16 @@ jobs:
       - name: Platform admission against disposable PostgreSQL (M5-GIAM-D1-P4)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/platformAdmission.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/platformAdmission.integration.test.mjs
       # Phase 4.0 M5-GIAM-D1-P4 — the administrative session boundary composed over migration 013's admission and the
       # authorizer deciding on the scope it selected, over real local sockets, against the SAME disposable service. Same
       # binding, no new service, no secret, no permission change.
       - name: Administrative session boundary against disposable PostgreSQL (M5-GIAM-D1-P4)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/adminBoundary.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/adminBoundary.integration.test.mjs
       # Phase 4.0 M5-ADMIN-REVOKE-P1 — administrative revocation under concurrency: logouts, revocations, grant changes,
       # identity changes, recent sign-ins and tenant commands raced across two separately composed production roots over
       # real local sockets, against the SAME disposable service. Commit order is asserted through lock waits here (the
@@ -160,7 +177,8 @@ jobs:
       - name: Administrative revocation ordering against disposable PostgreSQL (M5-ADMIN-REVOKE-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/adminRevocation.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/adminRevocation.integration.test.mjs
       # Phase 4.0 M5-TENANT-SESSION-P1 — migration 016 and tenant session ordering: tenant logins, recent sign-ins and
       # logouts raced against account, grant, anchor, tenant and store changes across two separately composed production
       # roots over real local sockets, with the tenant session audit rows, against the SAME disposable service. Witness
@@ -168,14 +186,16 @@ jobs:
       - name: Tenant session ordering against disposable PostgreSQL (M5-TENANT-SESSION-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantSessionOrdering.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantSessionOrdering.integration.test.mjs
       # Phase 4.0 M7A-CUSTOMERS-P1 — migration 017 and the tenant customer directory: GET /api/v1/customers composed on
       # the tenant session boundary over real local sockets, the routine's re-check, isolation, paging and 017's rollback,
       # against the SAME disposable service. Synthetic data only. Same binding, no new service, no secret, no permission change.
       - name: Tenant customer directory against disposable PostgreSQL (M7A-CUSTOMERS-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/customerDirectory.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerDirectory.integration.test.mjs
       # Phase 4.0 M7A-CUSTOMERS-P2 — migration 018 and the tenant session mint: the issuer key the runtime login cannot
       # touch, the proof every tenant session is minted with, the replay ledger, the customer read bound to a minted, live
       # session, the login's whole privilege set, and 018's rollback — against the SAME disposable service. Synthetic data and
@@ -183,21 +203,24 @@ jobs:
       - name: Tenant session mint against disposable PostgreSQL (M7A-CUSTOMERS-P2)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantSessionMint.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantSessionMint.integration.test.mjs
       # Phase 4.0 M6-RATE-P2 — migration 014 and the distributed rate limiter: the bucket store, the key fingerprint,
       # the consume and probe routines and their privilege containment, against the SAME disposable service after
       # 001-014 are applied to it. Same binding, no new service, no secret, no permission change.
       - name: Distributed rate limiter against disposable PostgreSQL (M6-RATE-P2)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/rateLimiter.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/rateLimiter.integration.test.mjs
       # Phase 4.0 M6-RATE-P2 — the rate-limited runtime composed over the real PostgreSQL limiter, enforcing and
       # releasing real request budgets over real loopback sockets, against the SAME disposable service. Same binding,
       # no new service, no secret, no permission change.
       - name: Rate-limited runtime over real sockets against disposable PostgreSQL (M6-RATE-P2)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/rateLimitRuntime.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/rateLimitRuntime.integration.test.mjs
       # Phase 4.0 M6-ENTRY-P1 — production entry startup preflight (config validation,
       # database connection, migration ledger verification, login privilege check, rate
       # limiter probe) against a disposable PostgreSQL cluster over the least-privilege runtime
@@ -205,14 +228,16 @@ jobs:
       - name: Production entry startup preflight against disposable PostgreSQL (M6-ENTRY-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/productionEntryPreflight.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/productionEntryPreflight.integration.test.mjs
       # Phase 4.0 M6-ENTRY-P1 — production entry runtime (composition, ports,
       # routes, containment) against a real socket bound by the entry over disposable
       # PostgreSQL.
       - name: Production entry runtime against disposable PostgreSQL (M6-ENTRY-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/productionEntry.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/productionEntry.integration.test.mjs
       # M7A-CUSTOMERS-P2 — the tenant entry end to end (configuration refusals, the startup preflight with the issuer key
       # and the parameter-logging guard, the host lock, the tenant session and the customer read, readiness under each
       # dependency's failure) over real loopback sockets, and the COMPILED tenant entry (built by the suite itself) over
@@ -221,7 +246,8 @@ jobs:
       - name: Tenant entry runtime against disposable PostgreSQL (M7A-CUSTOMERS-P2)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
-        run: node_modules/.bin/tsx --test tests/db/tenantEntry.integration.test.mjs
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantEntry.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

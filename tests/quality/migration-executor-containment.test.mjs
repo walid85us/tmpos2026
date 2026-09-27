@@ -451,6 +451,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     'scripts/supabase-migrate.ts',
     'server/platform-identity/migrationExecutor.test.ts',
     'tests/db/migrationEngine.integration.test.mjs',
+    // M7A-DBTEST-ISOLATION-P0: the shared harness validates every supplied test target with the executor's own
+    // assertDisposableTestDsn before any suite builds a client — the one validator, not a second copy. A tests/db/
+    // file, the category already permitted; the production import graph still reaches no executor.
+    'tests/db/localPostgres.harness.mjs',
     // S2: the tenant/store isolation proof applies migrations 001-005 through the SAME trusted
     // executor rather than inventing a second apply path. It is a tests/db/ suite, the category
     // already permitted here, and it changes nothing about the decisive containment property
