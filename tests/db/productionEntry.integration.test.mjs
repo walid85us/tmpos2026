@@ -39,7 +39,8 @@ import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient, MAX_POOLS } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
-import { startProductionEntry, SHIPPING_ROUTES, STARTUP_STEP_DEADLINE_MS } from '../../server/entry/productionEntry.ts';
+import { startProductionEntry, SHIPPING_ROUTES } from '../../server/entry/productionEntry.ts';
+import { STARTUP_STEP_DEADLINE_MS } from '../../server/entry/entryStartup.ts';
 import {
   principalKeyOf, RECENT_AUTH_MAX_AGE_MS, REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES, SESSION_CSRF_HEADER,
 } from '../../server/runtime/sessions.ts';
@@ -601,7 +602,7 @@ async function waitReady(ctx, timeoutMs = 15_000) {
 }
 
 // ===========================================================================
-// M6EP-01..12, 16, 18..23, FORCED SHUTDOWN, TLS, SECRETS
+// M6EP-01..12, 16, 18..24, FORCED SHUTDOWN, TLS, SECRETS
 // ===========================================================================
 
 test('M6EP-01: valid complete configuration starts exactly one listener', async () => {
@@ -739,6 +740,8 @@ test('M6EP-09: test, DEV and witness routes are absent, and never appear in the 
     const absent = [
       '/api/v1/session/login', '/api/v1/session', '/identity/whoami', '/dev', '/__witness',
       '/admin/v1/witness', '/diagnostics', '/bootstrap', '/migrations',
+      // M7A-CUSTOMERS-P2: the customer list is the tenant executable's alone.
+      '/api/v1/customers',
     ];
     for (const path of absent) {
       assertBounded404(await ctx.req('GET', path));
@@ -833,6 +836,29 @@ test('M6EP-12: a tenant/store cookie cannot enter the admin boundary', async () 
       await rig.end();
     }
   });
+});
+
+test('M6EP-24: a TENANT_SESSION_ISSUER_KEY in the administrative process refuses startup config_invalid, with no client and no listener', async () => {
+  // M7A-CUSTOMERS-P2 (D5): the tenant minting secret never sits in the administrative process.
+  let built = 0;
+  const bindSpy = spyOnBind();
+  const cap = makeCapture();
+  try {
+    const result = await startProductionEntry({
+      env: baseEnv({ TENANT_SESSION_ISSUER_KEY: randomBytes(32).toString('base64url') }),
+      construction: { databaseClient: () => { built += 1; throw new Error('never built'); }, tokenVerifier: VERIFIER, listen: () => ({ port: 0, host: '127.0.0.1' }) },
+      proc: cap.proc, exit: cap.exit, log: cap.log,
+    });
+    assert.equal(result.outcome, 'refused', JSON.stringify(result));
+    assert.equal(result.failure, 'config_invalid');
+    assert.deepEqual(result.reasons, ['TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_present']);
+    assert.deepEqual(cap.codes, [1]);
+    assert.equal(built, 0, 'no database client was built');
+    assert.equal(bindSpy.count(), 0, 'no bind attempt');
+  } finally {
+    bindSpy.restore();
+    await ensureShutdown(cap);
+  }
 });
 
 test('M6EP-16: database outage opens no listener', async () => {

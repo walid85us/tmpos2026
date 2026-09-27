@@ -332,3 +332,21 @@ test('M5T-TE3 a fault, a malformed answer or a record of another audience is an 
     assert.throws(() => createTenantEstablishCheck(deps as never), TypeError);
   }
 });
+
+test('M7TA-01 the tenant admission forwards the port\'s readiness probe: true, false and a throw are the port\'s own; a port without one throws, never a verdict', async () => {
+  // M7A-CUSTOMERS-P2 (F4): readiness asks the admission every protected tenant request depends on, through the port.
+  const signals: AbortSignal[] = [];
+  const port = (probe: (signal: AbortSignal) => unknown): TenantAdmissionPort => Object.assign(stub(admitted([grant()])), {
+    probe: (signal: AbortSignal) => { signals.push(signal); return probe(signal); },
+  });
+  const admission = (p: TenantAdmissionPort) => createTenantSessionAdmission({ admission: p });
+  const signal = live();
+  assert.equal(await answered(admission(port(async () => true)).probe?.(signal)), true);
+  assert.equal(await answered(admission(port(async () => false)).probe?.(signal)), false);
+  await assert.rejects(answered(admission(port(async () => { throw new Error('probe outage'); })).probe?.(signal)), /probe outage/);
+  assert.deepEqual(signals, [signal, signal, signal], 'the caller\'s own deadline signal, each time');
+  // A stub port without a probe composes (the boundary is still built), and asking it throws: readiness reads not ready.
+  const noProbe = admission(stub(admitted([grant()])));
+  assert.equal(typeof noProbe.probe, 'function');
+  assert.throws(() => noProbe.probe?.(signal), TypeError);
+});

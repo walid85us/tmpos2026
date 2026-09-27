@@ -1,8 +1,8 @@
 // Phase 4.0 M6-ENTRY-P1 — the deployable entry's database preflight: read-only questions the production entry asks the
 // database, as the runtime login it will serve with, before it binds a listener (server/entry/productionEntry.ts).
 //
-// Three questions here, each one bounded read-only transaction on the transaction root's own kernel — never a write, never
-// DDL, never a repair — and a fourth in the limiter adapter:
+// Four questions here, each one bounded read-only transaction on the transaction root's own kernel — never a write, never
+// DDL, never a repair — and a fifth in the limiter adapter:
 //   connect          — one trivial statement: the kernel reached the server through the transport its client was built with.
 //                      The production client verifies TLS against DATABASE_CA_CERT (platform-identity/db.ts); the driver
 //                      never falls back to plaintext when handed verified-TLS options, so a certificate it cannot verify, a
@@ -10,6 +10,10 @@
 //   runtime login    — the connected login's standing, judged against the approved runtime boundary below;
 //   migration ledger — public.schema_migrations exactly at REQUIRED_MIGRATIONS: 001–018, every row finished and clean, every
 //                      checksum the one pinned here, nothing missing, nothing else;
+//   parameter logging — (the tenant entry only, M7A-CUSTOMERS-P2) the settings the login's sessions run with would log no
+//                      bound parameter — a session store key is one — through the setting-driven paths it can read:
+//                      evaluateParameterLogging below. Not an error DETAIL, and nothing the login cannot read
+//                      (shared_preload_libraries): those stay deployment checks (docs/phase-4/08 DA-102, DA-105);
 //   rate-limit key   — postgresRateLimiter.ts probeRateLimitKey: migration 014 registers the key fingerprint when none is,
 //                      and compares it otherwise. It never replaces one.
 // Each answer is a list of bounded codes — never a role name, an object name, a ledger value or a driver message — and an
@@ -182,6 +186,36 @@ export type LedgerViolation =
   | 'migration_dirty'
   | 'migration_checksum_mismatch';
 
+/** Which setting would put a bound parameter in the server log. Bounded: a setting's name, never its value. */
+export type ParameterLoggingViolation =
+  | 'log_setting_unreadable'
+  | 'log_parameter_max_length_on_error'
+  | 'log_statement'
+  | 'log_min_duration_statement'
+  | 'log_min_duration_sample'
+  | 'log_transaction_sample_rate'
+  | 'debug_print_plan'
+  | 'auto_explain_parameters'
+  | 'pgaudit_parameters';
+
+/**
+ * The settings the login's sessions run with, each as current_setting(name, true) renders it (units included: '64B',
+ * '250ms'). A core setting is always a string; null for a module's setting means the module is not loaded for them.
+ */
+export interface ParameterLoggingFacts {
+  readonly onError: unknown;
+  readonly maxLength: unknown;
+  readonly statement: unknown;
+  readonly minDuration: unknown;
+  readonly minSample: unknown;
+  readonly sampleRate: unknown;
+  readonly printPlan: unknown;
+  readonly aeMinDuration: unknown;
+  readonly pgaParameter: unknown;
+  /** Read, never judged: object auditing logs parameters whatever it says (evaluateParameterLogging). */
+  readonly pgaLog: unknown;
+}
+
 /** The login's own row, as pg_roles reports it, and whether the session runs as that login. */
 export interface LoginFacts {
   readonly canLogin: boolean;
@@ -335,6 +369,36 @@ export function evaluateMigrationLedger(facts: LedgerFacts): LedgerViolation[] {
   return sortedUnique(found);
 }
 
+/**
+ * The parameter-logging judgment: [] when no setting read would log a bound parameter; else every setting that would. Pure.
+ *   - on an error: log_parameter_max_length_on_error must be 0;
+ *   - with a logged statement: log_parameter_max_length 0, or no statement logged — log_statement none or ddl, and no
+ *     duration or sampled logging;
+ *   - debug_print_plan off: a plan folds a parameter's value into its text;
+ *   - auto_explain, when loaded, logs no plan (log_min_duration -1), for the same reason — its parameter length does not
+ *     govern the plan text;
+ *   - pgaudit, when loaded, logs no parameter at all (log_parameter off), whatever pgaudit.log says: object auditing
+ *     through pgaudit.role logs statements, those inside routines included, with their parameters, independently of
+ *     pgaudit.log (the chair's R-A').
+ */
+export function evaluateParameterLogging(facts: ParameterLoggingFacts): ParameterLoggingViolation[] {
+  const { onError, maxLength, statement, minDuration, minSample, sampleRate, printPlan, aeMinDuration, pgaParameter } = facts;
+  // Every core setting exists from PostgreSQL 13: one not answered as text is a server this judgment cannot read.
+  if ([onError, maxLength, statement, minDuration, minSample, sampleRate, printPlan].some((v) => typeof v !== 'string')) return ['log_setting_unreadable'];
+  const found: ParameterLoggingViolation[] = [];
+  if (onError !== '0') found.push('log_parameter_max_length_on_error');
+  if (maxLength !== '0') {
+    if (statement !== 'none' && statement !== 'ddl') found.push('log_statement');
+    if (minDuration !== '-1') found.push('log_min_duration_statement');
+    if (minSample !== '-1') found.push('log_min_duration_sample');
+    if (sampleRate !== '0') found.push('log_transaction_sample_rate');
+  }
+  if (printPlan !== 'off') found.push('debug_print_plan');
+  if (aeMinDuration !== null && aeMinDuration !== '-1') found.push('auto_explain_parameters');
+  if (pgaParameter !== null && pgaParameter !== 'off') found.push('pgaudit_parameters');
+  return sortedUnique(found);
+}
+
 /** The preflight questions over one kernel. Each throws when the database cannot answer. */
 export interface StartupPreflight {
   /** One trivial statement: the connection opened, through the client's own transport. */
@@ -343,6 +407,8 @@ export interface StartupPreflight {
   runtimeLogin(signal: AbortSignal): Promise<RuntimeLoginViolation[]>;
   /** [] when the ledger is exactly the required chain; otherwise every violation. */
   migrationLedger(signal: AbortSignal): Promise<LedgerViolation[]>;
+  /** [] when the login's sessions would log no bound parameter; otherwise every setting that would. */
+  parameterLogging(signal: AbortSignal): Promise<ParameterLoggingViolation[]>;
 }
 
 type Row = Readonly<Record<string, unknown>>;
@@ -509,6 +575,26 @@ async function readLedger(sql: PgTransactionScope): Promise<LedgerFacts> {
   return { present, readable, rows: rows.map((r) => ({ version: r.version, checksum: r.checksum, dirty: r.dirty, finished: r.finished })) };
 }
 
+async function readParameterLogging(sql: PgTransactionScope): Promise<ParameterLoggingFacts> {
+  // The kernel resets every session before reuse and sets no log setting, so one read answers for all of its sessions.
+  const [row] = rowsOf(await sql`select pg_catalog.current_setting('log_parameter_max_length_on_error', true) as on_error,
+      pg_catalog.current_setting('log_parameter_max_length', true) as max_length,
+      pg_catalog.current_setting('log_statement', true) as statement,
+      pg_catalog.current_setting('log_min_duration_statement', true) as min_duration,
+      pg_catalog.current_setting('log_min_duration_sample', true) as min_sample,
+      pg_catalog.current_setting('log_transaction_sample_rate', true) as sample_rate,
+      pg_catalog.current_setting('debug_print_plan', true) as print_plan,
+      pg_catalog.current_setting('auto_explain.log_min_duration', true) as ae_min_duration,
+      pg_catalog.current_setting('pgaudit.log_parameter', true) as pga_parameter,
+      pg_catalog.current_setting('pgaudit.log', true) as pga_log`);
+  if (row === undefined) throw invalidAnswer();
+  return {
+    onError: row.on_error, maxLength: row.max_length, statement: row.statement, minDuration: row.min_duration,
+    minSample: row.min_sample, sampleRate: row.sample_rate, printPlan: row.print_plan, aeMinDuration: row.ae_min_duration,
+    pgaParameter: row.pga_parameter, pgaLog: row.pga_log,
+  };
+}
+
 /** The preflight over the kernel the transaction root built. Constructs nothing and opens nothing until asked. */
 export function createPostgresStartupPreflight(deps: { readonly client: SupervisedPgClient }): StartupPreflight {
   const { client } = deps;
@@ -522,6 +608,9 @@ export function createPostgresStartupPreflight(deps: { readonly client: Supervis
     },
     async migrationLedger(signal: AbortSignal): Promise<LedgerViolation[]> {
       return evaluateMigrationLedger(await client.transaction(signal, PREFLIGHT_BOUNDS, readLedger));
+    },
+    async parameterLogging(signal: AbortSignal): Promise<ParameterLoggingViolation[]> {
+      return evaluateParameterLogging(await client.transaction(signal, PREFLIGHT_BOUNDS, readParameterLogging));
     },
   });
 }

@@ -9,10 +9,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   APPROVED_ROLE_GRANTS, LEDGER_READ_GRANT, PREFLIGHT_BOUNDS, REQUIRED_MIGRATIONS, RUNTIME_PRIVILEGE_ROLES,
-  createPostgresStartupPreflight, evaluateMigrationLedger, evaluateRuntimeLogin,
+  createPostgresStartupPreflight, evaluateMigrationLedger, evaluateParameterLogging, evaluateRuntimeLogin,
 } from './postgresStartupPreflight.js';
 import type {
-  LedgerFacts, LedgerRowFacts, LedgerViolation, MembershipFacts, ReachedRoleFacts, RuntimeLoginFacts, RuntimeLoginViolation,
+  LedgerFacts, LedgerRowFacts, LedgerViolation, MembershipFacts, ParameterLoggingFacts, ReachedRoleFacts, RuntimeLoginFacts, RuntimeLoginViolation,
 } from './postgresStartupPreflight.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
@@ -369,4 +369,111 @@ test('migrationLedger: reads the ledger rows only when the relation is present a
   const { client } = fakeClient({ ledgerAccess: [{ present: true, readable: false }], ledgerRows: never });
   const violations = await createPostgresStartupPreflight({ client }).migrationLedger(new AbortController().signal);
   assert.deepEqual(violations, ['migration_ledger_unreadable']);
+});
+
+// --- M7A-CUSTOMERS-P2 — the parameter-logging guard (the tenant entry's) ------------------------------------------------
+
+/** The defaults of a PostgreSQL 16 server, as current_setting renders them, with neither module loaded. */
+const SAFE_LOGGING: ParameterLoggingFacts = Object.freeze({
+  onError: '0', maxLength: '-1', statement: 'none', minDuration: '-1', minSample: '-1', sampleRate: '0', printPlan: 'off',
+  aeMinDuration: null, pgaParameter: null, pgaLog: null,
+});
+
+test('M7TL-01 evaluateParameterLogging: the safe defaults pass, and each setting that would log a bound parameter is named alone', () => {
+  assert.deepEqual(evaluateParameterLogging(SAFE_LOGGING), []);
+  const cases: Array<[string, Partial<ParameterLoggingFacts>, string[]]> = [
+    ['parameters on an error, with units', { onError: '64B' }, ['log_parameter_max_length_on_error']],
+    ['parameters on an error, unlimited', { onError: '-1' }, ['log_parameter_max_length_on_error']],
+    ['mod statements logged with their parameters', { statement: 'mod' }, ['log_statement']],
+    ['every statement logged', { statement: 'all' }, ['log_statement']],
+    ['statements over a duration', { minDuration: '0' }, ['log_min_duration_statement']],
+    ['statements over a duration, with units', { minDuration: '250ms' }, ['log_min_duration_statement']],
+    ['sampled statements', { minSample: '250ms' }, ['log_min_duration_sample']],
+    ['sampled transactions', { sampleRate: '0.01' }, ['log_transaction_sample_rate']],
+    ['plans printed', { printPlan: 'on' }, ['debug_print_plan']],
+    ['auto_explain logging every plan', { aeMinDuration: '0' }, ['auto_explain_parameters']],
+    ['auto_explain over a duration, with units', { aeMinDuration: '250ms' }, ['auto_explain_parameters']],
+    ['pgaudit logging reads with parameters', { pgaParameter: 'on', pgaLog: 'read' }, ['pgaudit_parameters']],
+    ['pgaudit logging writes with parameters', { pgaParameter: 'on', pgaLog: 'ddl, write' }, ['pgaudit_parameters']],
+    ['pgaudit logging everything with parameters', { pgaParameter: 'on', pgaLog: 'ALL' }, ['pgaudit_parameters']],
+    ['pgaudit logging routine calls with parameters', { pgaParameter: 'on', pgaLog: 'function' }, ['pgaudit_parameters']],
+    ['pgaudit with no readable class list', { pgaParameter: 'on', pgaLog: null }, ['pgaudit_parameters']],
+    // Object auditing (pgaudit.role) logs statements, those inside routines included, with their parameters whatever
+    // pgaudit.log names — so parameters on refuses even with no session class logged (the chair's R-A').
+    ['pgaudit with parameters on and no session class', { pgaParameter: 'on', pgaLog: 'none' }, ['pgaudit_parameters']],
+    ['pgaudit with parameters on and only unparameterized classes', { pgaParameter: 'on', pgaLog: 'ddl, role, misc' }, ['pgaudit_parameters']],
+    ['pgaudit with parameters on, every class subtracted', { pgaParameter: 'on', pgaLog: '-read' }, ['pgaudit_parameters']],
+    ['pgaudit with parameters in another spelling', { pgaParameter: 'true', pgaLog: 'none' }, ['pgaudit_parameters']],
+  ];
+  for (const [label, over, expected] of cases) assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, ...over }), expected, label);
+  // Every statement setting at once is named in full, in a fixed order.
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, onError: '64B', statement: 'all', minDuration: '0', minSample: '0', sampleRate: '1',
+    printPlan: 'on', aeMinDuration: '0', pgaParameter: 'on', pgaLog: 'all' }), ['auto_explain_parameters', 'debug_print_plan',
+    'log_min_duration_sample', 'log_min_duration_statement', 'log_parameter_max_length_on_error', 'log_statement', 'log_transaction_sample_rate',
+    'pgaudit_parameters']);
+});
+
+test('M7TL-02 evaluateParameterLogging: log_parameter_max_length 0 makes statement logging safe; auto_explain\'s own length and pgaudit\'s class list do not', () => {
+  // A logged statement carries no parameter when their length is 0 — but an error still does, and so does a plan.
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, maxLength: '0', statement: 'all', minDuration: '0', minSample: '0', sampleRate: '1' }), []);
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, maxLength: '0', onError: '64B' }), ['log_parameter_max_length_on_error']);
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, maxLength: '0', printPlan: 'on' }), ['debug_print_plan']);
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, maxLength: '64B', statement: 'mod' }), ['log_statement'], 'a nonzero length');
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, statement: 'ddl' }), [], 'DDL takes no bound parameter');
+  // auto_explain folds parameter values into the plan text itself: its parameter length does not govern that (the chair's A1).
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, aeMinDuration: '0', maxLength: '0' }), ['auto_explain_parameters'], 'ae_min 0 with ae_params 0');
+  assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, aeMinDuration: '-1' }), [], 'auto_explain loaded, logging nothing');
+  // pgaudit loaded with parameters off passes whatever pgaudit.log says; absent (not installed) passes.
+  for (const [pgaParameter, pgaLog] of [['off', 'all'], ['off', 'none'], ['off', null], [null, 'all'], [null, null]]) {
+    assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, pgaParameter, pgaLog }), [], `${String(pgaParameter)} / ${String(pgaLog)}`);
+  }
+});
+
+test('M7TL-03 evaluateParameterLogging: a core setting not answered as text is unreadable, never a pass', () => {
+  for (const key of ['onError', 'maxLength', 'statement', 'minDuration', 'minSample', 'sampleRate', 'printPlan'] as const) {
+    for (const value of [null, undefined, 0, false]) {
+      assert.deepEqual(evaluateParameterLogging({ ...SAFE_LOGGING, [key]: value }), ['log_setting_unreadable'], `${key}: ${String(value)}`);
+    }
+  }
+});
+
+test('M7TL-04 parameterLogging: one statement under PREFLIGHT_BOUNDS reads the ten settings as the login\'s sessions run with them, and no value leaves', async () => {
+  const boundsSeen: TransactionBounds[] = [];
+  const texts: string[] = [];
+  let row: Record<string, unknown> = {
+    on_error: '0', max_length: '-1', statement: 'none', min_duration: '-1', min_sample: '-1', sample_rate: '0', print_plan: 'off',
+    ae_min_duration: null, pga_parameter: null, pga_log: null,
+  };
+  const sql = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]): Promise<readonly Row[]> => {
+    texts.push(strings.join('$'));
+    assert.equal(values.length, 0, 'the statement binds nothing');
+    return [row];
+  }, { json: (v: unknown) => v });
+  const client: SupervisedPgClient = Object.freeze({
+    transaction: async <T>(_signal: AbortSignal, bounds: TransactionBounds, work: (s: PgTransactionScope) => Promise<T>): Promise<T> => {
+      boundsSeen.push(bounds);
+      return work(sql as unknown as PgTransactionScope);
+    },
+    end: async (): Promise<void> => undefined,
+  });
+  const preflight = createPostgresStartupPreflight({ client });
+  assert.deepEqual(await preflight.parameterLogging(new AbortController().signal), []);
+  assert.deepEqual(boundsSeen, [PREFLIGHT_BOUNDS]);
+  assert.equal(texts.length, 1);
+  for (const name of ['log_parameter_max_length_on_error', 'log_parameter_max_length', 'log_statement', 'log_min_duration_statement',
+    'log_min_duration_sample', 'log_transaction_sample_rate', 'debug_print_plan', 'auto_explain.log_min_duration', 'pgaudit.log_parameter', 'pgaudit.log']) {
+    assert.ok(texts[0].includes(`pg_catalog.current_setting('${name}', true)`), `reads ${name}, missing_ok`);
+  }
+  row = { ...row, on_error: 'M7TL-MARKER-64B', ae_min_duration: '0' };
+  const named = await preflight.parameterLogging(new AbortController().signal);
+  assert.deepEqual(named, ['auto_explain_parameters', 'log_parameter_max_length_on_error']);
+  assert.ok(!JSON.stringify(named).includes('M7TL-MARKER'), 'a setting\'s name, never its value');
+  // No row is a question the database did not answer: a throw, never a pass.
+  const none = Object.assign(async (): Promise<readonly Row[]> => [], { json: (v: unknown) => v });
+  const empty = createPostgresStartupPreflight({ client: {
+    ...client,
+    transaction: async <T>(_signal: AbortSignal, _bounds: TransactionBounds, work: (s: PgTransactionScope) => Promise<T>): Promise<T> =>
+      work(none as unknown as PgTransactionScope),
+  } });
+  await assert.rejects(() => empty.parameterLogging(new AbortController().signal), /preflight_answer_invalid/);
 });

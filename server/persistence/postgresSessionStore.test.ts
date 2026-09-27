@@ -12,8 +12,8 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import {
-  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, probeIssuerKey, SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS,
-  tenantMintProof,
+  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, probeIssuerKey, probeSessionMint, SESSION_STORE_BOUNDS,
+  SESSION_STORE_DEADLINE_MS, tenantMintProof,
 } from './postgresSessionStore.js';
 import type { SessionStandingCheck } from './postgresSessionStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
@@ -739,5 +739,25 @@ test('M7M-S5 probeIssuerKey sends the key\'s fingerprint, never the key, and rea
     await assert.rejects(probeIssuerKey(unsent, bad as never, live()), /session store unavailable: issuer_key_invalid/);
     assert.deepEqual(unsent.statements, []);
   }
+  assert.deepEqual(aborted.statements, [], 'an aborted probe sends nothing');
+});
+
+test('M7M-S6 probeSessionMint calls 018\'s mint with every argument null and is true only for its answer invalid', async () => {
+  const client = fakeClient([{ outcome: 'invalid' }]);
+  assert.equal(await probeSessionMint(client, live()), true);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], /select tmpos_mint\.m7a_session_create\(null::text, null::text, null::text, null::text, null::text, null::text,\s+null::bigint, null::bigint, null::bigint, null::bigint, null::bigint, null::bytea\) as outcome/);
+  assert.deepEqual(client.values[0], [], 'nothing is bound: no key, record or proof is sent');
+  assert.deepEqual(client.bounds, [SESSION_STORE_BOUNDS]);
+  // Any other word, a row out of shape, no row, or a fault (a withdrawn EXECUTE included) is not ready — never a throw.
+  for (const rows of [[{ outcome: 'created' }], [{ outcome: 'refused' }], [{ outcome: 'conflict' }], [{ outcome: 'INVALID' }], [{ outcome: null }],
+    [], [{ outcome: 'invalid' }, { outcome: 'invalid' }], [{ other: 'invalid' }]]) {
+    assert.equal(await probeSessionMint(fakeClient(rows), live()), false, JSON.stringify(rows));
+  }
+  assert.equal(await probeSessionMint(fakeClient(null, new Error('permission denied for function m7a_session_create')), live()), false);
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = fakeClient([{ outcome: 'invalid' }]);
+  assert.equal(await probeSessionMint(aborted, controller.signal), false);
   assert.deepEqual(aborted.statements, [], 'an aborted probe sends nothing');
 });

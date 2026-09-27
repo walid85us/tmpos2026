@@ -23,8 +23,14 @@ const REPO = resolve(HERE, '..', '..');
 const EXECUTOR = 'server/platform-identity/migrationExecutor.ts';
 /** The production executable (M6-ENTRY-P1): tsconfig.server.json emits exactly its import closure, and the walk starts here. */
 const PRODUCTION_ENTRY = 'server/entry/main.ts';
-/** The modules that closure compiles to (52 at M6-ENTRY-P1): a walk reaching fewer did not traverse it. */
-const PRODUCTION_CLOSURE_MIN = 52;
+/** The modules that closure compiles to (52 at M6-ENTRY-P1, 54 at M7A-CUSTOMERS-P2): a walk reaching fewer did not traverse it. */
+const PRODUCTION_CLOSURE_MIN = 54;
+/** The tenant executable (M7A-CUSTOMERS-P2): tsconfig.server.tenant.json emits exactly its import closure. */
+const TENANT_ENTRY = 'server/entry/tenantMain.ts';
+/** The modules the tenant closure compiles to (47 at M7A-CUSTOMERS-P2). */
+const TENANT_CLOSURE_MIN = 47;
+/** Both executables, each with its build config and its closure's size: every containment walk below starts at each. */
+const EXECUTABLES = [[PRODUCTION_ENTRY, 'tsconfig.server.json', PRODUCTION_CLOSURE_MIN], [TENANT_ENTRY, 'tsconfig.server.tenant.json', TENANT_CLOSURE_MIN]];
 
 const read = (p) => readFileSync(join(REPO, p), 'utf8');
 
@@ -111,23 +117,25 @@ function reachableFrom(entry) {
 
 test('the executor exists and is the module under containment', () => {
   assert.ok(existsSync(join(REPO, EXECUTOR)), `${EXECUTOR} must exist`);
-  assert.ok(existsSync(join(REPO, PRODUCTION_ENTRY)), `${PRODUCTION_ENTRY} must exist`);
+  for (const [entry] of EXECUTABLES) assert.ok(existsSync(join(REPO, entry)), `${entry} must exist`);
 });
 
-test('S1b-25: the production application-server import graph cannot reach migrationExecutor', () => {
-  const reachable = reachableFrom(PRODUCTION_ENTRY);
-  assert.ok(reachable.size >= PRODUCTION_CLOSURE_MIN, `the graph walk must actually traverse imports (reached ${reachable.size})`);
-  assert.ok(reachable.has('server/platform-identity/db.ts'), 'the walk reaches the directory the executor lives in');
-  assert.equal(
-    reachable.has(EXECUTOR),
-    false,
-    `the production server graph reached the executor via: ${[...reachable].join(', ')}`,
-  );
+test('S1b-25: neither production application-server import graph can reach migrationExecutor', () => {
+  for (const [entry, , min] of EXECUTABLES) {
+    const reachable = reachableFrom(entry);
+    assert.ok(reachable.size >= min, `the ${entry} graph walk must actually traverse imports (reached ${reachable.size})`);
+    assert.ok(reachable.has('server/platform-identity/db.ts'), `the ${entry} walk reaches the directory the executor lives in`);
+    assert.equal(
+      reachable.has(EXECUTOR),
+      false,
+      `the ${entry} graph reached the executor via: ${[...reachable].join(', ')}`,
+    );
+  }
 });
 
 test('S1b-25: no production runtime or frontend source names the executor at all', () => {
   const offenders = [];
-  for (const file of new Set([...localSources('server/entry', 'server/runtime', 'src'), ...reachableFrom(PRODUCTION_ENTRY)])) {
+  for (const file of new Set([...localSources('server/entry', 'server/runtime', 'src'), ...EXECUTABLES.flatMap(([entry]) => [...reachableFrom(entry)])])) {
     const src = stripComments(read(file));
     if (src.includes('migrationExecutor')) offenders.push(file);
   }
@@ -157,31 +165,36 @@ test('S1b-25: the PostgreSQL driver has a declared, unchanged set of importers',
   );
   assert.ok(importers.includes(EXECUTOR), 'the executor is the migrator-side driver importer');
 
-  // The decisive property: the executable's graph reaches the driver through the application runtime pool
+  // The decisive property: each executable's graph reaches the driver through the application runtime pool
   // alone (M6-ENTRY-P1 ships db.ts) — never through the executor or the request-time authorization reader.
-  const reachable = reachableFrom(PRODUCTION_ENTRY);
-  assert.deepEqual(importers.filter((f) => reachable.has(f)), ['server/platform-identity/db.ts'],
-    'the production entrypoint reaches exactly one driver importer: the application runtime pool');
+  for (const [entry] of EXECUTABLES) {
+    const reachable = reachableFrom(entry);
+    assert.deepEqual(importers.filter((f) => reachable.has(f)), ['server/platform-identity/db.ts'],
+      `${entry} reaches exactly one driver importer: the application runtime pool`);
+  }
 });
 
-test('S1b-25: the compiled production build cannot contain the executor', () => {
-  const cfg = JSON.parse(read('tsconfig.server.json'));
-  assert.deepEqual(cfg.files, [PRODUCTION_ENTRY], 'the emitting build compiles the executable and its import closure only');
-  assert.equal(cfg.include, undefined, 'no include glob can add a module outside that closure');
-  // The executor shares a directory with modules the closure ships, so the proof is the emitted artifact itself.
-  const out = mkdtempSync(join(tmpdir(), 'tmpos-executor-build-'));
-  try {
-    execFileSync('node_modules/.bin/tsc', ['-p', 'tsconfig.server.json', '--outDir', out], { cwd: REPO, stdio: 'pipe', timeout: 120000 });
-    const emitted = readdirSync(out, { recursive: true }).filter((f) => isFile(join(out, f))).sort();
-    assert.ok(emitted.length >= PRODUCTION_CLOSURE_MIN && emitted.includes('server/entry/main.js') && emitted.includes('server/platform-identity/db.js'),
-      `the build emitted the executable and its database boundary (${emitted.length} files)`);
-    const MIGRATION_AUTHORITY = /migrationExecutor|migrationEngine|runTrustedApply|runTrustedLedgerRead|createPostgresExecutor|runMigrations/;
-    for (const f of emitted) {
-      assert.doesNotMatch(f, MIGRATION_AUTHORITY, `${f}: the executor or the engine was emitted`);
-      assert.doesNotMatch(readFileSync(join(out, f), 'utf8'), MIGRATION_AUTHORITY, `${f}: the artifact references the executor or the engine`);
+test('S1b-25: neither compiled production build can contain the executor', () => {
+  for (const [entry, config, min] of EXECUTABLES) {
+    const cfg = JSON.parse(read(config));
+    assert.deepEqual(cfg.files, [entry], `${config} compiles its executable and that import closure only`);
+    assert.equal(cfg.include, undefined, `${config}: no include glob can add a module outside that closure`);
+    // The executor shares a directory with modules the closure ships, so the proof is the emitted artifact itself.
+    const out = mkdtempSync(join(tmpdir(), 'tmpos-executor-build-'));
+    try {
+      execFileSync('node_modules/.bin/tsc', ['-p', config, '--outDir', out], { cwd: REPO, stdio: 'pipe', timeout: 120000 });
+      const emitted = readdirSync(out, { recursive: true }).filter((f) => isFile(join(out, f))).sort();
+      const executable = entry.replace(/\.ts$/, '.js');
+      assert.ok(emitted.length >= min && emitted.includes(executable) && emitted.includes('server/platform-identity/db.js'),
+        `${config} emitted the executable and its database boundary (${emitted.length} files)`);
+      const MIGRATION_AUTHORITY = /migrationExecutor|migrationEngine|runTrustedApply|runTrustedLedgerRead|createPostgresExecutor|runMigrations/;
+      for (const f of emitted) {
+        assert.doesNotMatch(f, MIGRATION_AUTHORITY, `${f}: the executor or the engine was emitted`);
+        assert.doesNotMatch(readFileSync(join(out, f), 'utf8'), MIGRATION_AUTHORITY, `${f}: the artifact references the executor or the engine`);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
     }
-  } finally {
-    rmSync(out, { recursive: true, force: true });
   }
 });
 
@@ -516,6 +529,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // 018's mint, its session-bound read or their privilege containment, and applies them through the SAME trusted
     // executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/tenantSessionMint.integration.test.mjs',
+    // M7A-CUSTOMERS-P2: the tenant entry's proof, the compiled executable included, needs 001-018 applied before it can start
+    // at all, and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the
+    // containment property above is untouched.
+    'tests/db/tenantEntry.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second
@@ -1144,9 +1161,9 @@ const BASELINE_LAUNCHER = 'scripts/managed-baseline-launcher.mjs';
 
 test('C2B-M005-B0: the 005 launcher is unreachable from the production import graph', () => {
   // Same rule the executor lives under: a parent that can apply a migration must not be reachable
-  // from anything the application server can load.
-  const reachable = reachableFrom(PRODUCTION_ENTRY);
-  assert.ok(!reachable.has(M005_LAUNCHER), 'the production graph must not reach the 005 launcher');
+  // from anything the application server can load — either executable (M7A-CUSTOMERS-P2).
+  const reachable = new Set(EXECUTABLES.flatMap(([entry]) => [...reachableFrom(entry)]));
+  assert.ok(!reachable.has(M005_LAUNCHER), 'neither production graph may reach the 005 launcher');
   // The named roots AND the whole production closure: it now spans server/composition, server/persistence and
   // server/platform-identity, where a name (a spawn path, say) would reach the launcher without an import edge.
   for (const file of new Set([...localSources('server/entry', 'server/runtime', 'src'), ...reachable])) {

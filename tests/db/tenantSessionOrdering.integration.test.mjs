@@ -13,18 +13,17 @@
 //   * a login, a recent sign-in and a logout each write exactly one tenant.session.* record, and a refusal writes none;
 //   * an outage is a bounded 503 that revokes nothing; a lost COMMIT answer is a 503 whose outcome the records describe.
 //
-// WHAT IS COMPOSED HERE IS PRODUCTION'S. Each instance is composeProductionTransactions(env, client) — the production root
-// and the factories it ships, so the session store's establish check and the tenant admission read are exactly what an
-// entry would serve — over its OWN supervised kernel of four one-connection pools; the session root is assembleSessions
-// over durableSessionAdapters with BOTH audiences; createApp serves the result through createBoundedServer on 127.0.0.1.
+// WHAT IS COMPOSED HERE IS PRODUCTION'S. Each instance composes both production roots over its OWN supervised kernel of four
+// one-connection pools — composeProductionTransactions(env, …) and composeTenantTransactions(env, …) (M7A-CUSTOMERS-P2), the
+// roots and the factories they ship — so the session stores, their establish checks and the tenant admission read are
+// exactly what the entries serve: the session store and tenant admission are the tenant root's, which mints under the issuer
+// key the owner installed here, and the administrative boundary's store is the administrative root's. The session root is
+// assembleSessions over durableSessionAdapters with BOTH audiences, each on its own root's store; createApp serves the result
+// through createBoundedServer on 127.0.0.1.
 //
-// WHAT IS SUBSTITUTED, STATED EXACTLY. Six things, none of them inside a transaction under test:
+// WHAT IS SUBSTITUTED, STATED EXACTLY. Five things, none of them inside a transaction under test:
 //   * THE DATABASE CLIENT: a supervised kernel over the disposable cluster as a non-owner runtime LOGIN holding tmpos_app and
 //     tmpos_audit_writer only (in M5T-J5, through a byte relay that can drop one COMMIT answer).
-//   * THE SESSION STORE'S ISSUER KEY (M7A-CUSTOMERS-P2, migration 018): every tenant session is minted under the tenant
-//     issuer key, which no production root composes until the tenant entry does. So each instance's store is the
-//     production store rebuilt over the root's own kernel, with the root's standing check, plus a synthetic key the owner
-//     installed here; nothing else about it differs.
 //   * THE IDENTITY VERIFIER: a bearer token maps to a synthetic provider reference, authenticated now with a TOTP factor.
 //   * THE RATE LIMITER: the testkit's in-memory limiter, fresh for every instance.
 //   * THE ROUTES: no tenant business route ships (D1/GAP-11), so the protected tenant requests are the harness-only witness
@@ -66,15 +65,10 @@ import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
-import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
-import { holdTenantStanding, readTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
-import { readPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
-import { lockPlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
-import { createTenantEstablishCheck } from '../../server/composition/tenantAuthorization.ts';
-import { createPlatformEstablishCheck } from '../../server/composition/platformAuthorization.ts';
 import {
   composeProductionTransactions, productionRouteDeclarations, uncataloguedRoutePermissions,
 } from '../../server/composition/productionTransactions.ts';
+import { composeTenantTransactions } from '../../server/composition/tenantTransactions.ts';
 import { assembleSessions, durableSessionAdapters } from '../../server/composition/productionSessions.ts';
 import { SHIPPING_ROUTES } from '../../server/entry/productionEntry.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
@@ -208,8 +202,10 @@ await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb no
 await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
 await owner.unsafe(`grant tmpos_audit_writer to ${RUNTIME_LOGIN}`);
 runtime = postgres(driverDsn(TARGET_DSN, RUNTIME_LOGIN), { ...CLIENT_OPTS, user: RUNTIME_LOGIN, max: 2, onnotice: () => {} });
-/** The synthetic tenant issuer key the owner installs (migration 018), which every instance's store mints under. */
+/** The synthetic tenant issuer key the owner installs (migration 018), which every instance's tenant root mints under. */
 const ISSUER_KEY = await installTestIssuerKey(owner);
+/** The tenant root's configuration: the same database and limiter key, and the issuer key (random: canonical, never weak). */
+const TENANT_ENV = Object.freeze({ ...CONFIGURED_ENV, TENANT_SESSION_ISSUER_KEY: ISSUER_KEY.toString('base64url') });
 
 const COMMIT_TS = (await probe`select current_setting('track_commit_timestamp') as v`)[0].v === 'on';
 const ON_DISK = readdirSync(MIG_DIR).filter((f) => /^\d{3}_.+\.up\.sql$/.test(f)).map((f) => f.slice(0, 3)).sort();
@@ -264,18 +260,6 @@ function kernel(relay) {
   });
 }
 
-/**
- * The standing check the production root binds its session store to, built from the same functions and dispatching on the
- * record's audience as productionTransactions.ts does: the rebuilt store below differs from the root's only by the key.
- */
-const adminStanding = createPlatformEstablishCheck({ read: readPlatformAdmission, authority: lockPlatformAuthority });
-const tenantStanding = createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission });
-const STANDING = async (sql, record) => {
-  if (record.audience === 'admin') return adminStanding(sql, record);
-  if (record.audience === 'tenant') return tenantStanding(sql, record);
-  throw new Error('session standing unavailable');
-};
-
 /** One-shot gates, each armed for one (site, id): the first matching call waits until the scenario releases it. */
 function gateBox() {
   const armed = new Map();
@@ -318,13 +302,13 @@ const refOf = (key) => createHash('sha256').update(`tmpos-audit-session-ref:v1\n
 
 /** One runtime instance with both boundaries, composed from its configuration exactly as an entry composes one, and served. */
 async function compose(label, relay = null) {
-  let client = null;
-  const tx = composeProductionTransactions(CONFIGURED_ENV, () => (client = kernel(relay)));
+  // Both production roots over the instance's ONE kernel (kernel.end() is idempotent, so each root may close it).
+  const shared = kernel(relay);
+  const tx = composeProductionTransactions(CONFIGURED_ENV, () => shared);
+  const ttx = composeTenantTransactions(TENANT_ENV, () => shared);
   const gates = gateBox();
   const refreshes = [];
-  // The root's store, rebuilt over the root's own kernel with the issuer key it does not yet compose (see the header).
-  const inner = createPostgresSessionStore({ client, standing: STANDING, issuerKey: ISSUER_KEY });
-  const store = Object.freeze({
+  const gated = (inner) => Object.freeze({
     ...inner,
     get: async (key, signal) => { await gates.pass('get', key); return inner.get(key, signal); },
     update: (key, fields, signal) => {
@@ -333,7 +317,8 @@ async function compose(label, relay = null) {
       return p;
     },
   });
-  const tenant = tx.tenantAdmission;
+  const tenantStore = gated(ttx.sessionStore);
+  const tenant = ttx.tenantAdmission;
   const tenantAdmission = Object.freeze({
     ...tenant,
     admit: async (principal, signal) => {
@@ -346,7 +331,9 @@ async function compose(label, relay = null) {
   const limits = testRequestLimits();
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: limits.trustedProxies, keySecret: limits.keySecret,
-    ...durableSessionAdapters({ store, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS }),
+    ...durableSessionAdapters({ store: tenantStore, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS }),
+    // Each audience on its own root's store: the tenant root's mints under the issuer key, the administrative root's never does.
+    store: Object.freeze({ tenant: tenantStore, admin: gated(tx.sessionStore) }),
     limiter: limits.limiter,
   });
   const logs = [];
@@ -372,7 +359,7 @@ async function compose(label, relay = null) {
     quietly(send(port, 'POST', sessionPaths(audience).login, { ...guarded(audience), authorization: `Bearer tok-${who.uid}`, ...extra }));
   let closed = false;
   const instance = {
-    label, tx, relay, gates, refreshes, records, sessionOf, login,
+    label, tx, ttx, relay, gates, refreshes, records, sessionOf, login,
     reauth: (who, s) => login(who, { cookie: s.cookie, [REAUTHENTICATE_HEADER]: REAUTHENTICATE_VALUE }),
     async signIn(who, audience = 'tenant') {
       const reply = await login(who, {}, audience);
@@ -417,6 +404,7 @@ async function compose(label, relay = null) {
       gates.releaseAll();
       await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
       await tx.close();
+      await ttx.close();
     },
   };
   INSTANCES.add(instance);
@@ -823,9 +811,12 @@ test('M5T-A0: every migration on disk is applied, and two instances are two prod
   }
   const before = kernelsBuilt;
   await withPair(async ({ A, B }) => {
-    assert.equal(kernelsBuilt - before, 2, 'each instance asked the production root for its own kernel');
+    assert.equal(kernelsBuilt - before, 2, 'each instance built its own kernel, and both of its production roots compose over that one');
     assert.notEqual(A.tx, B.tx, 'two separately composed roots');
-    for (const inst of [A, B]) assert.notEqual(inst.tx.preflight, null, `${inst.label}: composed through the production factories`);
+    for (const inst of [A, B]) {
+      assert.notEqual(inst.tx.preflight, null, `${inst.label}: composed through the production factories`);
+      assert.notEqual(inst.ttx.preflight, null, `${inst.label}: and the tenant root through the kernel's`);
+    }
     const { who } = await tenantActor('a0');
     const s = await A.signIn(who);
     assert.equal((await B.witness(s)).status, 200, 'a tenant session issued through A is served by B: one durable store');

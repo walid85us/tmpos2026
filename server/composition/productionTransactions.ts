@@ -1,9 +1,11 @@
 // Phase 4.0 M6-PG-P7-R1 — the production transaction boundary: durable idempotency and the command-transaction port, composed
 // from the M6 PostgreSQL store (server/persistence) only for a route that requires them.
 //
-// One authority. This is the one production module that composes the store, its transaction kernel and IDEMPOTENCY_KEY; the
-// sessions root (productionSessions.ts) composes the session boundaries and the request limits, and nothing else. It is driven
-// by the production route inventory below, validated by the runtime's own route table (defineRoutes):
+// One authority. This is the one production module that composes the store and IDEMPOTENCY_KEY, over the transaction kernel
+// both production roots share (transactionKernel.ts, M7A-CUSTOMERS-P2: the one reader of APP_DATABASE_URL, the kernel over it
+// and the adapters both entries compose over it); the sessions root (productionSessions.ts) composes the session boundaries
+// and the request limits, and nothing else. It is driven by the production route inventory below, validated by the runtime's
+// own route table (defineRoutes):
 //   - no route declares `idempotency: 'required'`, so nothing is read, built or probed: not APP_DATABASE_URL, not IDEMPOTENCY_KEY,
 //     no client, kernel, store or readiness probe. The answer is null, and createApp keeps serving the probes and the bounded
 //     fallback exactly as before;
@@ -36,20 +38,12 @@
 // constructed over the classified endpoint — the deployable entry's construction boundary, defaulted to the production
 // client (createRuntimeStoreClient: verified TLS, the sealed target). A disposable-database harness hands a client over its
 // own cluster; nothing else — no store, adapter, factory or inventory — can be handed to it.
-import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
-import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
-import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
-import { DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
-import { canonicalPermission, isDecidablePermission } from '../platform-identity/m5CanonicalPermissions.js';
+import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
 import { createPostgresPlatformAdmission, readPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
-import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/postgresRateLimiter.js';
-import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
-import { createPostgresStartupPreflight } from '../persistence/postgresStartupPreflight.js';
-import type { StartupPreflight } from '../persistence/postgresStartupPreflight.js';
 import { lockPlatformAuthority, revalidatePlatformAuthority } from '../persistence/postgresPrincipalResolver.js';
-import { createPostgresSessionStore, holdAdministrativeSession } from '../persistence/postgresSessionStore.js';
+import { holdAdministrativeSession } from '../persistence/postgresSessionStore.js';
 import type { SessionStandingCheck } from '../persistence/postgresSessionStore.js';
-import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../persistence/postgresTenantAdmission.js';
+import { holdTenantStanding, readTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
@@ -60,6 +54,8 @@ import { createTenantDirectoryRoute } from '../runtime/tenantDirectory.js';
 import type { TenantDirectoryPort, TenantDirectoryPorts } from '../runtime/tenantDirectory.js';
 import { createPlatformContextRevalidator, createPlatformEstablishCheck, createPlatformPermits } from './platformAuthorization.js';
 import { createTenantEstablishCheck } from './tenantAuthorization.js';
+import { KERNEL_FACTORIES, TransactionCompositionError, kernelOver, runtimeEndpoint, uncataloguedRoutePermissions } from './transactionKernel.js';
+import type { KernelFactories, ReadRouteFactory, TransactionCompositionBlocker, TransactionPreflight } from './transactionKernel.js';
 import type { AggregateMutator, TransactionalStore, TransactionalStoreOptions } from '../persistence/postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -71,44 +67,19 @@ import type { PlatformAdmissionPort, TenantAdmissionPort } from '../runtime/prin
 import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
 import type { SessionStore } from '../runtime/sessions.js';
 
-export type TransactionCompositionBlocker =
-  | RuntimeDatabaseRefusal
-  | 'database_tls_invalid'
-  | 'idempotency_key_missing'
-  | 'idempotency_key_invalid'
-  | 'idempotency_key_shared'
-  | 'command_mutator_unavailable'
-  /** A route requires a permission no canonical catalog entry defines, at its declared scope. */
-  | 'route_permission_uncatalogued'
-  /** A route requires a tenant- or store-scope permission, which GAP-11 leaves undecidable. */
-  | 'route_permission_undecidable'
-  /** The inventory has read routes but no route that requires idempotency, so no kernel exists to serve them over. */
-  | 'read_route_without_boundary';
-
-/** Composition refusal: every blocker, as bounded codes only. */
-export class TransactionCompositionError extends Error {
-  readonly blockers: readonly TransactionCompositionBlocker[];
-
-  constructor(blockers: readonly TransactionCompositionBlocker[]) {
-    super(`production transaction composition refused: ${blockers.join(',')}`);
-    this.name = 'TransactionCompositionError';
-    this.blockers = Object.freeze([...blockers]);
-  }
-}
-
-/**
- * A read route over this root's kernel (M5-GIAM-D1-P3). A definition holds its port, and the port exists only once the
- * kernel does, so the inventory names the route's FACTORY and this root builds it — once, over the same client as the
- * store — from the read ports it composed. Building a definition runs nothing: it is inert until served.
- */
-export type ReadRouteFactory = (ports: TenantDirectoryPorts) => RouteDefinition;
+// The kernel's composition refusal and permission census, as this root has always exported them.
+export { TransactionCompositionError, uncataloguedRoutePermissions } from './transactionKernel.js';
 
 /** The routes a deployment serves beyond the probes, and the mutator each command kind commits through: trusted source. */
 export interface TransactionInventory {
   readonly routes: readonly RouteDefinition[];
   readonly mutators: readonly AggregateMutator[];
-  /** The read routes, built over this root's kernel; none when absent. They are composed with the command boundary. */
-  readonly reads?: readonly ReadRouteFactory[];
+  /**
+   * The read routes (M5-GIAM-D1-P3). A definition holds its port, and the port exists only once the kernel does, so the
+   * inventory names each route's FACTORY and this root builds it — once, over the same client as the store — from the read
+   * ports it composed; none when absent. They are composed with the command boundary.
+   */
+  readonly reads?: readonly ReadRouteFactory<TenantDirectoryPorts>[];
 }
 
 /** createApp's `idempotency` and `transactions`, always together, and the kernel's shutdown. */
@@ -124,8 +95,8 @@ export interface ProductionTransactions {
   /**
    * The durable session store over that same kernel (M5-GIAM-D1-P2-R1, migration 011): the store the
    * session boundaries have always required and never had. It is built HERE, not in the session root,
-   * because this root is the one production authority for APP_DATABASE_URL — a second root reading it
-   * would be a second credential and a second classification of the same endpoint.
+   * because the runtime database's configuration is read by the transaction kernel alone (transactionKernel.ts) — a
+   * second root reading it would be a second credential and a second classification of the same endpoint.
    */
   readonly sessionStore: SessionStore;
   /**
@@ -153,30 +124,16 @@ export interface ProductionTransactions {
   readonly close: () => Promise<void>;
 }
 
-/** The startup preflight over the kernel, with the limiter key's boot check over the same kernel (postgresRateLimiter.ts). */
-export interface TransactionPreflight extends StartupPreflight {
-  /** m6_rate_limit_probe's answer for `keySecret` — registering its fingerprint when none is registered. */
-  rateLimitKey(keySecret: Uint8Array, signal: AbortSignal): Promise<RateLimitKeyStatus>;
-}
-
-/** How the boundary is built: the client over a classified endpoint, then the store over that client. */
-export interface TransactionFactories {
-  readonly client: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
+/**
+ * How the boundary is built: the kernel's factories (the client over a classified endpoint, the session store — one standing
+ * check for both audiences here, dispatching on the record's, and no issuer key — the tenant admission, the limiter and the
+ * preflight), then the store and the administrative adapters over that client.
+ */
+export interface TransactionFactories extends KernelFactories {
   readonly store: (options: TransactionalStoreOptions) => TransactionalStore;
   readonly platformAdmission: (client: SupervisedPgClient) => PlatformAdmissionPort;
-  /**
-   * The session store over the kernel, with the login's standing check (M5-ADMIN-REVOKE-P1, M5-TENANT-SESSION-P1) — one
-   * check for both audiences, dispatching on the record's — which this root builds once and a factory must forward: a
-   * store built without it establishes no session.
-   */
-  readonly sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => SessionStore;
-  readonly tenantAdmission: (client: SupervisedPgClient) => TenantAdmissionPort;
   /** The platform tenant directory's read over migration 012, for the inventory's read routes. */
   readonly tenantDirectory: (client: SupervisedPgClient) => TenantDirectoryPort;
-  /** The distributed rate limiter over migration 014, bound to a RATE_LIMIT_KEY. */
-  readonly rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => DistributedRateLimiter;
-  /** The deployable entry's startup preflight over the kernel; a harness composing no entry may leave it out. */
-  readonly preflight?: (client: SupervisedPgClient) => TransactionPreflight;
 }
 
 // The production route inventory, added to here and only here. Its first business route (owner decision D1, M5-GIAM-D1-P1) is
@@ -196,19 +153,13 @@ export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({
   reads: Object.freeze([createTenantDirectoryRoute]),
 });
 
-// The approved production factories: the runtime principal's kernel over the classified endpoint, and the M6 PostgreSQL store.
+// The approved production factories: the kernel's (transactionKernel.ts), and the M6 PostgreSQL store with the administrative
+// adapters over it.
 const PRODUCTION_FACTORIES: TransactionFactories = Object.freeze({
-  client: createRuntimeStoreClient,
+  ...KERNEL_FACTORIES,
   store: createPostgresTransactionalStore,
   platformAdmission: (client: SupervisedPgClient) => createPostgresPlatformAdmission({ client }),
-  sessionStore: (client: SupervisedPgClient, standing: SessionStandingCheck) => createPostgresSessionStore({ client, standing }),
-  tenantAdmission: (client: SupervisedPgClient) => createPostgresTenantAdmission({ client }),
   tenantDirectory: (client: SupervisedPgClient) => createPostgresTenantDirectory({ client }),
-  rateLimiter: (client: SupervisedPgClient, keySecret: Uint8Array) => createPostgresRateLimiter({ client, keySecret }),
-  preflight: (client: SupervisedPgClient): TransactionPreflight => Object.freeze({
-    ...createPostgresStartupPreflight({ client }),
-    rateLimitKey: (keySecret: Uint8Array, signal: AbortSignal) => probeRateLimitKey(client, keySecret, signal),
-  }),
 });
 
 /**
@@ -234,7 +185,7 @@ export function assembleTransactions(
   }
 
   const blockers: TransactionCompositionBlocker[] = [];
-  const endpoint = classifyRuntimeDatabaseUrl(env[APP_DATABASE_URL_VAR]);
+  const endpoint = runtimeEndpoint(env);
   if (typeof endpoint === 'string') blockers.push(endpoint);
   const rawKey = env.IDEMPOTENCY_KEY;
   const keySecret = rawKey === undefined || rawKey === '' ? null : parseKeyMaterial(rawKey);
@@ -253,13 +204,7 @@ export function assembleTransactions(
   })) blockers.push('command_mutator_unavailable');
   if (blockers.length > 0) throw new TransactionCompositionError(blockers);
 
-  let client: SupervisedPgClient;
-  try {
-    client = factories.client(endpoint as RuntimeDatabaseEndpoint);
-  } catch (err) {
-    if (err instanceof DatabaseTlsRefusal) throw new TransactionCompositionError(['database_tls_invalid']);
-    throw err;
-  }
+  const client = kernelOver(factories.client, endpoint as RuntimeDatabaseEndpoint);
   // The two in-transaction checks that order administrative requests against revocation (M5-ADMIN-REVOKE-P1), each built
   // once over the persistence layer's plain functions on the caller's own handle: the command revalidator — 009's
   // freshness and locks, the presenting session held, then 013's read of that session's standing — and the login's
@@ -341,30 +286,4 @@ const INERT_READ_PORTS: TenantDirectoryPorts = Object.freeze({
  */
 export function productionRouteDeclarations(): readonly RouteDefinition[] {
   return Object.freeze([...PRODUCTION_INVENTORY.routes, ...(PRODUCTION_INVENTORY.reads ?? []).map((build) => build(INERT_READ_PORTS))]);
-}
-
-/**
- * The blockers a route inventory earns for the permissions it declares (M5-ID-P1; docs/phase-4/04
- * §2-§3, 03 §6). Every permission a DEPLOYED route requires must be one canonical catalog entry,
- * matched exactly and case-sensitively: a key the catalog does not define is a typo or an invented
- * permission, and a catalogued key the catalog cannot DECIDE — every tenant- or store-scope key except the tenant route
- * permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; m5CanonicalPermissions.ts isDecidablePermission)
- * — is undecidable until D1 defines a specific route and its authoritative product rules (M5-GAP11-P5). Either way the
- * deployment refuses to start rather than denying at run time
- * — or, worse, allowing on a comparison whose meaning has not been settled.
- *
- * It is exported, and applied to the PRODUCTION inventory rather than inside assembleTransactions, so
- * a conformance harness may still drive the boundary with a synthetic route while every route that
- * could actually be served is checked. Empty means every declared permission is canonical.
- */
-export function uncataloguedRoutePermissions(routes: readonly RouteDefinition[]): TransactionCompositionBlocker[] {
-  const blockers: TransactionCompositionBlocker[] = [];
-  for (const route of defineRoutes(routes).list()) {
-    const requirement = route.policy.access === 'authenticated' || route.policy.access === 'session'
-      ? route.policy.authorization : null;
-    if (requirement === null) continue;
-    if (canonicalPermission(requirement.scope, requirement.permission) === null) blockers.push('route_permission_uncatalogued');
-    else if (!isDecidablePermission(requirement.scope, requirement.permission)) blockers.push('route_permission_undecidable');
-  }
-  return blockers;
 }

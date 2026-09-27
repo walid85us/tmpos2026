@@ -7,10 +7,9 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import {
-  PRODUCTION_CONSTRUCTION, SHIPPING_ROUTES, STARTUP_STEP_DEADLINE_MS, servesExactlyShippingRoutes, startProductionEntry, validateEntryConfig,
-} from './productionEntry.js';
-import type { EntryConstruction, EntryResult, ServedRoute } from './productionEntry.js';
+import { SHIPPING_ROUTES, servesExactlyShippingRoutes, startProductionEntry, validateEntryConfig } from './productionEntry.js';
+import { PRODUCTION_CONSTRUCTION, STARTUP_STEP_DEADLINE_MS } from './entryStartup.js';
+import type { EntryConstruction, EntryResult, ServedRoute } from './entryStartup.js';
 import { createApp, createReadinessState } from '../runtime/app.js';
 import { composeProductionSessions } from '../composition/productionSessions.js';
 import { productionRouteDeclarations } from '../composition/productionTransactions.js';
@@ -112,6 +111,9 @@ test('validateEntryConfig: every code, each in a targeted case', () => {
     ['NODE_OPTIONS', 'tls_trust_store_override_forbidden', envWith({ NODE_OPTIONS: '"--use-openssl\\-ca"' })],
     ['SUPABASE_DATABASE_URL', 'owner_credential_forbidden', envWith({ SUPABASE_DATABASE_URL: `postgres://postgres:synthetic-pw@db.${REF}.supabase.co:5432/postgres` })],
     ['SUPABASE_SERVICE_ROLE_KEY', 'owner_credential_forbidden', envWith({ SUPABASE_SERVICE_ROLE_KEY: 'synthetic-service-role' })],
+    // M7A-CUSTOMERS-P2: the tenant entry's minting key never sits in this process, whatever its value.
+    ['TENANT_SESSION_ISSUER_KEY', 'tenant_issuer_key_present', envWith({ TENANT_SESSION_ISSUER_KEY: randomBytes(32).toString('base64url') })],
+    ['TENANT_SESSION_ISSUER_KEY', 'tenant_issuer_key_present', envWith({ TENANT_SESSION_ISSUER_KEY: 'not-a-key' })],
   ];
   for (const [field, code, env] of cases) {
     assert.deepEqual(validateEntryConfig(env), [{ field, code }], `${field}:${code} over ${JSON.stringify(env[field])}`);
@@ -133,7 +135,7 @@ test('validateEntryConfig: NODE_OPTIONS without --use-openssl-ca, SSL_CERT_FILE 
   }
   // Hosting platforms set these by default; they matter only under --use-openssl-ca, which is refused.
   assert.deepEqual(validateEntryConfig(envWith({ SSL_CERT_FILE: '/etc/ssl/cert.pem', SSL_CERT_DIR: '/etc/ssl/certs' })), []);
-  for (const field of ['NODE_EXTRA_CA_CERTS', 'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']) {
+  for (const field of ['NODE_EXTRA_CA_CERTS', 'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TENANT_SESSION_ISSUER_KEY']) {
     assert.deepEqual(validateEntryConfig(envWith({ [field]: '' })), [], `empty ${field}`);
   }
 });
@@ -172,6 +174,7 @@ test('validateEntryConfig: no returned field or code carries any part of the sub
     NODE_OPTIONS: `--use-openssl-ca ${MARKER}`,
     SUPABASE_DATABASE_URL: MARKER,
     SUPABASE_SERVICE_ROLE_KEY: MARKER,
+    TENANT_SESSION_ISSUER_KEY: MARKER,
   });
   const errors = validateEntryConfig(env);
   assert.ok(errors.length > 0, 'the marker-laden configuration is refused');
@@ -189,7 +192,7 @@ const DOCUMENTED_ENV_KEYS: readonly string[] = [
   'APP_DATABASE_URL', 'DATABASE_CA_CERT', DRIVER_TLS_ENV_VAR, 'RATE_LIMIT_KEY', 'IDEMPOTENCY_KEY',
   'TRUSTED_PROXY_CIDRS', 'SESSION_ADMIN_ORIGINS', 'FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON',
   'FIREBASE_AUTH_EMULATOR_HOST', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS', 'NODE_OPTIONS',
-  'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TENANT_SESSION_ISSUER_KEY',
 ];
 
 test('validateEntryConfig: opens no handle, reads only the named keys of the supplied env, and never process.env', () => {
@@ -418,6 +421,35 @@ test('an env carrying FIREBASE_AUTH_EMULATOR_HOST refuses config_invalid naming 
     assert.ok(result.reasons.includes('FIREBASE_AUTH_EMULATOR_HOST:identity_emulator_forbidden'), JSON.stringify(result.reasons));
     assert.equal(dbCalls, 0);
     assert.deepEqual(exits, [1]);
+    assert.equal(spy.calls(), 0, 'a refused startup must never attempt to bind');
+  } finally {
+    spy.restore();
+  }
+});
+
+test('M7A-CUSTOMERS-P2: an env carrying TENANT_SESSION_ISSUER_KEY refuses config_invalid naming it, and never builds a database client', async () => {
+  // The administrative process never holds the tenant minting key: holding it would let this process mint tenant sessions.
+  const { proc } = fakeProc();
+  const exits: number[] = [];
+  const logs: string[] = [];
+  let dbCalls = 0;
+  const key = randomBytes(32).toString('base64url');
+  const spy = listenSpy();
+  try {
+    const result = await startProductionEntry({
+      env: envWith({ TENANT_SESSION_ISSUER_KEY: key }),
+      construction: {
+        databaseClient: () => { dbCalls++; throw new Error('must never be called'); }, listen: (port) => ({ port }),
+        tokenVerifier: SYNTHETIC_VERIFIER,
+      },
+      proc, exit: (code) => exits.push(code), log: { log: (line) => logs.push(line) },
+    });
+    assert.equal(result.outcome, 'refused');
+    assert.equal(result.failure, 'config_invalid');
+    assert.deepEqual(result.reasons, ['TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_present']);
+    assert.equal(dbCalls, 0);
+    assert.deepEqual(exits, [1]);
+    assert.ok(!logs.some((l) => l.includes(key)), 'the key is never logged');
     assert.equal(spy.calls(), 0, 'a refused startup must never attempt to bind');
   } finally {
     spy.restore();

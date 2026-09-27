@@ -7,7 +7,8 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { emitLog } from '../runtime/logging.js';
-import { PRODUCTION_CONSTRUCTION, startProductionEntry } from './productionEntry.js';
+import { PRODUCTION_CONSTRUCTION } from './entryStartup.js';
+import { startProductionEntry } from './productionEntry.js';
 
 function main(): void {
   startProductionEntry({

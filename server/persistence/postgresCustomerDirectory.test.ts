@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDirectory } from './postgresCustomerDirectory.js';
+import { CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDirectory, probeCustomerDirectory } from './postgresCustomerDirectory.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
 
@@ -232,4 +232,40 @@ test('only a key of the store-key shape names a session: an absent or malformed 
     assert.equal(client.statements.length, 0, `${label}: nothing reached the database`);
     assert.equal(client.bounds.length, 0, `${label}: no transaction was opened`);
   }
+});
+
+test('M7TP-01 probeCustomerDirectory: true only for the routine\'s one refusal of a random key, asked once under the adapter\'s bounds', async () => {
+  // M7A-CUSTOMERS-P2 (the tenant entry's readiness): 018's routine refuses an unknown key before any other read (DA-108).
+  const client = fakeClient([refusalRow('denied')]);
+  const signal = live();
+  assert.equal(await probeCustomerDirectory(client, signal), true);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_mint\.m7a_customer_page_v2\(\?::text, null::uuid, 1::integer\)$/);
+  assert.equal(client.values[0].length, 1, 'the key alone is bound');
+  assert.match(client.values[0][0] as string, /^[A-Za-z0-9_-]{43}$/, 'a store-key-shaped key');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  await probeCustomerDirectory(client, live());
+  assert.notEqual(client.values[1][0], client.values[0][0], 'a fresh random key per call');
+});
+
+test('M7TP-02 probeCustomerDirectory: any other answer, a fault or an abort is false — never a throw, never a page', async () => {
+  const cases: Array<[string, unknown]> = [
+    ['no row', []],
+    ['two refusals', [refusalRow('denied'), refusalRow('denied')]],
+    ['a customer row', [customerRow(1)]],
+    ['cursor_unknown', [refusalRow('cursor_unknown')]],
+    ['a refusal naming a tenant', [refusalRow('denied', { o_tenant_id: TENANT })]],
+    ['a refusal naming a customer', [refusalRow('denied', { o_customer_id: C(1) })]],
+    ['a refusal naming a name', [refusalRow('denied', { o_name: 'x' })]],
+    ['an extra column', [{ ...refusalRow('denied'), extra: 1 }]],
+    ['not rows', { rows: 1 }],
+  ];
+  for (const [label, rows] of cases) assert.equal(await probeCustomerDirectory(fakeClient(rows), live()), false, label);
+  assert.equal(await probeCustomerDirectory(fakeClient(null, Object.assign(new Error('M7TP-CANARY'), { code: '42501' })), live()), false, 'a driver error');
+  const aborted = new AbortController();
+  aborted.abort();
+  const idle = fakeClient([refusalRow('denied')]);
+  assert.equal(await probeCustomerDirectory(idle, aborted.signal), false, 'an aborted probe');
+  assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
 });

@@ -68,7 +68,12 @@
 // is on its way retires the pool too, and answers once ROLLBACK does. The answer is fixed once COMMIT or
 // ROLLBACK is acknowledged, before the reset: a reset that fails, or a close or abort while it runs, retires the pool and
 // changes nothing about the answer, which an abort or a close then gives at once. Nothing is retried or replayed.
-import type { PgRows } from './postgresTransactionalStore.js';
+
+/**
+ * A statement's rows, with the number of rows it affected. Defined here, where the kernel answers them, so a module over the
+ * kernel alone (the tenant executable, M7A-CUSTOMERS-P2) needs no command store to name them.
+ */
+export type PgRows = readonly Readonly<Record<string, unknown>>[] & { readonly count: number };
 
 /** A statement the driver has built: a promise of its rows that runs when first awaited, handed to its connection by `handler`. */
 interface DriverQuery extends PromiseLike<PgRows> {

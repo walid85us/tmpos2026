@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 149; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +3, the platform tenant directory route, its PostgreSQL adapter and the console's name/reason parity with the server; M5-GIAM-D1-P4: +1, the platform admission adapter (sentinels below); M6-RATE-P2: +1, the PostgreSQL rate limiter adapter; M6-ENTRY-P1: +4, the startup preflight, the production entry, its executable and the administrative host boundary; M7A-CUSTOMERS-P1: +2, the tenant customer directory route (server/runtime/customerDirectory.test.ts) and its PostgreSQL adapter (server/persistence/postgresCustomerDirectory.test.ts)
+export const MIN_SUITES = 151; // M5-GAP11-P5: +4, the family-contract, money-capability, reachable-state and containment suites; M5-GAP11-P5-R1: +1, the money-action inventory; M5-GIAM-D1-P1: +3, the tenant display-name command, the access grant and the canonical platform authorizer; M5-GIAM-D1-P2: +3, the tenant status command, the one tenant-state decision and the status mutator; M5-GIAM-D1-P2-R1: +3, the durable session store, the tenant admission adapter and the tenant boundary's two decisions; M5-GIAM-D1-P3: +3, the platform tenant directory route, its PostgreSQL adapter and the console's name/reason parity with the server; M5-GIAM-D1-P4: +1, the platform admission adapter (sentinels below); M6-RATE-P2: +1, the PostgreSQL rate limiter adapter; M6-ENTRY-P1: +4, the startup preflight, the production entry, its executable and the administrative host boundary; M7A-CUSTOMERS-P1: +2, the tenant customer directory route (server/runtime/customerDirectory.test.ts) and its PostgreSQL adapter (server/persistence/postgresCustomerDirectory.test.ts); M7A-CUSTOMERS-P2: +2, the tenant entry (server/entry/tenantEntry.test.ts) and its executable (server/entry/tenantMain.test.ts)
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -127,6 +127,8 @@ export const REQUIRED_SENTINELS = [
   'server/entry/productionEntry.test.ts',                     // the entry's configuration contract, refusal categories and startup order (M6-ENTRY-P1)
   'server/entry/main.test.ts',                                // the executable starts only when run, and refuses without a listener (M6-ENTRY-P1)
   'server/runtime/hostBoundary.test.ts',                      // the exact administrative Host allowlist, probes exempt (M6-ENTRY-P1)
+  'server/entry/tenantEntry.test.ts',                         // the tenant entry's configuration, refusals, startup order, host lock and readiness (M7A-CUSTOMERS-P2)
+  'server/entry/tenantMain.test.ts',                          // the tenant executable starts only when run, and refuses without a listener (M7A-CUSTOMERS-P2)
 ];
 
 export const isTestPath = (f) =>

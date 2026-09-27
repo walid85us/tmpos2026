@@ -79,7 +79,7 @@ For each domain: canonical tables, aggregate root, tenant/store ownership, lifec
   - rows not in strictly increasing (name bytes, id) order (checked by the adapter over every row it reads, the look-ahead included, and by the runtime over the page);
   - a name that is not 1–200 characters of well-formed UTF-16.
 - **Audit.** None, by owner decision; whether personal-data list reads are audited is open ([08](./08-production-gate-and-risk-register.md) DA-88).
-- **Availability.** Served by no deployment: the deployable entry composes the administrative boundary only. A tenant host must also list the route in the tenant authorizer's read classification and add a customer port to the transaction root's read ports ([08](./08-production-gate-and-risk-register.md) DA-87). Since M7A-CUSTOMERS-P2 it must also compose the session store with the tenant issuer key, which the database owner installs ([08](./08-production-gate-and-risk-register.md) DA-101).
+- **Availability.** Served in code by the compiled tenant entry (M7A-CUSTOMERS-P2, commit 2; [ADR-33](./10-architecture-decision-records.md) decision 8), on the tenant host alone, and not deployed; the administrative entry still composes the administrative boundary only. The tenant entry lists the route in the tenant authorizer's read classification, builds the customer port over the shared transaction kernel, and composes the session store with the tenant issuer key, which the database owner installs ([08](./08-production-gate-and-risk-register.md) DA-87, DA-101).
 
 ## 3. API & error contract (production standard)
 

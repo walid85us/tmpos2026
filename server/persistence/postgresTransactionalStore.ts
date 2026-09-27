@@ -65,7 +65,7 @@ const trustedScopeOf = (raw: unknown): TrustedScope | undefined => {
 };
 import type { TrustedScope } from '../runtime/principals.js';
 import { TransactionFailure } from './supervisedPgClient.js';
-import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
+import type { PgRows, PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter.js';
 import { COMMAND_TRANSACTION_DEADLINE_MS } from '../runtime/commandTransaction.js';
 import type { CommandTransactionPort, TransactionMutation } from '../runtime/commandTransaction.js';
@@ -77,8 +77,8 @@ import {
 } from '../runtime/outbox.js';
 import type { OutboxDeliveryStore } from '../runtime/outbox.js';
 
-/** A statement's rows, with the number of rows it affected. */
-export type PgRows = readonly Readonly<Record<string, unknown>>[] & { readonly count: number };
+/** A statement's rows, with the number of rows it affected: the kernel's (supervisedPgClient.ts), named here too for mutators. */
+export type { PgRows } from './supervisedPgClient.js';
 /** One statement on the open transaction, through the kernel's gate. */
 export type PgStatement = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<PgRows>;
 

@@ -140,6 +140,39 @@ test('when unavailable, readiness returns 503 without awaiting a hanging depende
   });
 });
 
+test('M7TR-01 an injected dependency check is shared like the stores\' probes: asked once per PROBE_REUSE_MS however many readiness requests arrive', async () => {
+  // M7A-CUSTOMERS-P2: /readiness is host- and limiter-exempt, so any client can send it; each injected check (the tenant
+  // entry's database reads) must reach its dependency at most once per reuse window, like every composed store's probe.
+  const readiness = createReadinessState();
+  readiness.setReady();
+  let t = 1_700_000_000_000;
+  let calls = 0;
+  let answer = true;
+  const app = createApp({ readiness, log: silent, now: () => t, dependencyChecks: [async () => { calls++; return answer; }] });
+  await withServer(app, async (base) => {
+    const statuses = await Promise.all(Array.from({ length: 5 }, () => fetch(`${base}/readiness`).then((r) => r.status)));
+    assert.deepEqual(statuses, [200, 200, 200, 200, 200]);
+    assert.equal((await fetch(`${base}/readiness`)).status, 200);
+    assert.equal(calls, 1, 'concurrent and repeated requests within the window share one call');
+    answer = false;
+    t += 999;
+    assert.equal((await fetch(`${base}/readiness`)).status, 200, 'still the shared answer inside the window');
+    assert.equal(calls, 1);
+    t += 1;
+    assert.equal((await fetch(`${base}/readiness`)).status, 503, 'asked again once the window has passed');
+    assert.equal(calls, 2);
+    answer = true;
+    t += 1_000;
+    assert.equal((await fetch(`${base}/readiness`)).status, 200, 'and recovers on the next window');
+    assert.equal(calls, 3);
+  });
+  // A check answering anything but exactly true is not ready.
+  const truthy = createApp({ readiness, log: silent, dependencyChecks: [() => 1 as unknown as boolean] });
+  await withServer(truthy, async (base) => {
+    assert.equal((await fetch(`${base}/readiness`)).status, 503, 'a truthy non-true answer is not ready');
+  });
+});
+
 test('HEAD on a declared route does NOT receive the GET success contract (404)', async () => {
   const readiness = createReadinessState();
   readiness.setReady();

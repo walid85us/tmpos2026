@@ -513,3 +513,37 @@ test('M6E-S05 assembleSessions(parts, [\'admin\']) composes the admin boundary a
     (err: unknown) => err instanceof ProductionCompositionError && err.blockers.includes('session_origins_missing'),
     'a missing admin origin is still named when only the admin boundary is composed');
 });
+
+test('M6E-S06 options.audiences: [\'tenant\'] still requires SESSION_ADMIN_ORIGINS on a distinct host, and composes the tenant boundary alone', () => {
+  // M7A-CUSTOMERS-P2 (F5): the tenant entry composes the tenant boundary without the administrative one, so the root reads
+  // SESSION_ADMIN_ORIGINS for the host comparison alone: missing, malformed or on the tenant's host (port ignored) refuses.
+  const refusedWith = (admin: string | undefined, tenant = TOPOLOGY.SESSION_TENANT_ORIGINS): readonly string[] => {
+    try {
+      composeProductionSessions({ ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SA, SESSION_TENANT_ORIGINS: tenant, SESSION_ADMIN_ORIGINS: admin },
+        undefined, { audiences: ['tenant'] });
+    } catch (err) {
+      assert.ok(err instanceof ProductionCompositionError);
+      return err.blockers;
+    }
+    return assert.fail('must refuse');
+  };
+  assert.equal(refusedWith(undefined)[0], 'session_origins_missing');
+  assert.equal(refusedWith('')[0], 'session_origins_missing');
+  assert.equal(refusedWith('http://admin.example.test')[0], 'session_origins_invalid');
+  assert.equal(refusedWith('https://admin.example.test/')[0], 'session_origins_invalid');
+  assert.equal(refusedWith(TOPOLOGY.SESSION_TENANT_ORIGINS)[0], 'session_origins_ambiguous', 'the same origin');
+  assert.equal(refusedWith('https://pos.example.test:8443')[0], 'session_origins_ambiguous', 'the same host on another port');
+  assert.equal(refusedWith('https://other.example.test,https://pos.example.test')[0], 'session_origins_ambiguous', 'any listed admin origin on the tenant host');
+  // Distinct hosts: only the adapter and limiter blockers remain without a bundle, and never an origin one.
+  assert.deepEqual(refusedWith(TOPOLOGY.SESSION_ADMIN_ORIGINS),
+    [LIMITER, 'tenant_session_store_unavailable', 'tenant_admission_unavailable', 'tenant_authorizer_unavailable']);
+  // With a durable bundle, the tenant boundary composes and sessions.admin is never registered.
+  const { rateLimiter } = limiterBinding();
+  const { sessions } = composeProductionSessions(
+    { ...CONFIGURED },
+    { store: createMemorySessionStore(), tenantAdmission: TENANT_ADMISSION, rateLimiter, tenantReads: new Set(['GET /api/v1/customers']) },
+    { audiences: ['tenant'] },
+  );
+  assert.deepEqual(Object.keys(sessions), ['tenant']);
+  assert.deepEqual(sessions.tenant?.trustedOrigins, [TOPOLOGY.SESSION_TENANT_ORIGINS]);
+});

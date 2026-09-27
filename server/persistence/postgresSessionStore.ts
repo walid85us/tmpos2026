@@ -232,6 +232,24 @@ export async function probeIssuerKey(client: SupervisedPgClient, issuerKey: Uint
   return answer as IssuerKeyProbe;
 }
 
+/**
+ * Whether the login can call migration 018's mint (m7a_session_create), which every login needs: one statement, one
+ * transaction, under this store's bounds, with every argument null. 018's first check (section 1) answers 'invalid' for
+ * a null key before the routine reads or writes anything, so the probe mints, reads and writes nothing; a withdrawn
+ * EXECUTE is a fault. True only for exactly 'invalid' — any other word, a row out of shape, an abort or a fault is false,
+ * and nothing about it is disclosed. The tenant entry's startup and readiness ask it (M7A-CUSTOMERS-P2, R-E).
+ */
+export async function probeSessionMint(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  try {
+    return await client.transaction(signal, SESSION_STORE_BOUNDS, async (sql) => only(await sql`
+      select tmpos_mint.m7a_session_create(null::text, null::text, null::text, null::text, null::text, null::text,
+        null::bigint, null::bigint, null::bigint, null::bigint, null::bigint, null::bytea) as outcome`, 'outcome')) === 'invalid';
+  } catch {
+    return false;
+  }
+}
+
 // --- the audited pair (M6-ADMIN-AUDIT-P1) ---------------------------------------------------------
 
 /**

@@ -41,7 +41,9 @@
 // (server/entry/productionEntry.ts) composes the administrative boundary alone — it serves no
 // tenant or store route — so SESSION_TENANT_ORIGINS is then neither read nor required, and the
 // tenant boundary's routes are never registered. The two hosts must still differ whenever both
-// are composed. The entry is also this root's construction boundary for the provider: it may hand
+// are composed, and when the tenant boundary is composed alone (the tenant entry,
+// server/entry/tenantEntry.ts, M7A-CUSTOMERS-P2) SESSION_ADMIN_ORIGINS is required and read for that
+// comparison only. The entry is also this root's construction boundary for the provider: it may hand
 // the Firebase adapter the token verifier a disposable-database harness substitutes for the
 // identity provider (tokenVerifier); production hands none, and the adapter verifies through the
 // Firebase Admin SDK. Nothing in the configuration can select either.
@@ -219,6 +221,15 @@ function sessionOrigins(env: Readonly<Record<string, string | undefined>>, audie
   if (all.some((origin) => normalizeOrigin(origin) !== origin || !origin.startsWith('https://'))) return 'session_origins_invalid';
   if (new Set(all).size !== all.length) return 'session_origins_ambiguous';
   if (origins.tenant !== undefined && origins.admin !== undefined && sharesHost(origins.tenant, origins.admin)) return 'session_origins_ambiguous';
+  // A tenant boundary composed WITHOUT the administrative one (the tenant entry) must still prove the hosts differ. It reads
+  // SESSION_ADMIN_ORIGINS for that comparison alone and refuses without it. The administrative entry never reads the tenant's.
+  if (origins.tenant !== undefined && origins.admin === undefined) {
+    const admin = env.SESSION_ADMIN_ORIGINS;
+    if (typeof admin !== 'string' || admin === '') return 'session_origins_missing';
+    const adminOrigins = admin.split(',');
+    if (adminOrigins.some((origin) => normalizeOrigin(origin) !== origin || !origin.startsWith('https://'))) return 'session_origins_invalid';
+    if (sharesHost(origins.tenant, adminOrigins)) return 'session_origins_ambiguous';
+  }
   const frozen: Partial<Record<SessionAudience, readonly string[]>> = {};
   for (const audience of audiences) frozen[audience] = Object.freeze(origins[audience] as string[]);
   return Object.freeze(frozen);

@@ -237,33 +237,36 @@ test('the observational modules never import a production decision entry point',
   }
 });
 
-test('the compiled deployable server cannot contain the observational modules', () => {
+test('neither compiled deployable server can contain the observational modules', () => {
   // M6-ENTRY-P1: the server build compiles the executable (server/entry/main.ts) and its import closure, which now
   // ships part of server/platform-identity — the directory the observational modules live in. So the proof is the
-  // artifact itself: this suite builds it to a scratch directory and reads every emitted file.
-  const cfg = JSON.parse(readFileSync(join(REPO, 'tsconfig.server.json'), 'utf8'));
-  assert.deepEqual(cfg.files, ['server/entry/main.ts'], 'the build compiles the executable and its import closure only');
-  assert.equal(cfg.include, undefined, 'no include glob can add a module outside that closure');
-  const out = mkdtempSync(join(tmpdir(), 'tmpos-gap11-build-'));
-  try {
-    execFileSync(join(REPO, 'node_modules', '.bin', 'tsc'), ['-p', 'tsconfig.server.json', '--outDir', out], { cwd: REPO, stdio: 'pipe', timeout: 120000 });
-    const emitted = readdirSync(out, { recursive: true }).filter((f) => f.endsWith('.js')).sort();
-    assert.ok(emitted.includes('server/entry/main.js') && emitted.includes('server/platform-identity/permissionCatalog.js'),
-      `the build emitted the executable and the catalog beside the observational modules (${emitted.length} files)`);
-    // Structural, not by name: each server-side observational module's own emitted file is absent, so a future one
-    // whose path lacks 'gap11' (and whose text names nothing OBSERVATIONAL_NAMES knows) still cannot ship.
-    const serverModules = OBSERVATIONAL_MODULES.filter((m) => m.startsWith('server/') && m.endsWith('.ts'));
-    assert.equal(serverModules.length, OBSERVATIONAL_MODULES.length, 'every observational module is a server-side .ts module the build could emit');
-    for (const m of serverModules) {
-      const js = m.replace(/\.ts$/, '.js');
-      assert.ok(!emitted.includes(js) && !existsSync(join(out, js)), `${js}: an observational module was emitted`);
+  // artifact itself: this suite builds it to a scratch directory and reads every emitted file. M7A-CUSTOMERS-P2: the tenant
+  // executable's build (server/entry/tenantMain.ts) ships from the same directory and is read the same way.
+  for (const [config, executable] of [['tsconfig.server.json', 'server/entry/main.ts'], ['tsconfig.server.tenant.json', 'server/entry/tenantMain.ts']]) {
+    const cfg = JSON.parse(readFileSync(join(REPO, config), 'utf8'));
+    assert.deepEqual(cfg.files, [executable], `${config} compiles the executable and its import closure only`);
+    assert.equal(cfg.include, undefined, `${config}: no include glob can add a module outside that closure`);
+    const out = mkdtempSync(join(tmpdir(), 'tmpos-gap11-build-'));
+    try {
+      execFileSync(join(REPO, 'node_modules', '.bin', 'tsc'), ['-p', config, '--outDir', out], { cwd: REPO, stdio: 'pipe', timeout: 120000 });
+      const emitted = readdirSync(out, { recursive: true }).filter((f) => f.endsWith('.js')).sort();
+      assert.ok(emitted.includes(executable.replace(/\.ts$/, '.js')) && emitted.includes('server/platform-identity/permissionCatalog.js'),
+        `${config} emitted the executable and the catalog beside the observational modules (${emitted.length} files)`);
+      // Structural, not by name: each server-side observational module's own emitted file is absent, so a future one
+      // whose path lacks 'gap11' (and whose text names nothing OBSERVATIONAL_NAMES knows) still cannot ship.
+      const serverModules = OBSERVATIONAL_MODULES.filter((m) => m.startsWith('server/') && m.endsWith('.ts'));
+      assert.equal(serverModules.length, OBSERVATIONAL_MODULES.length, 'every observational module is a server-side .ts module the build could emit');
+      for (const m of serverModules) {
+        const js = m.replace(/\.ts$/, '.js');
+        assert.ok(!emitted.includes(js) && !existsSync(join(out, js)), `${config}: ${js}: an observational module was emitted`);
+      }
+      for (const f of emitted) {
+        assert.ok(!/gap11/i.test(f), `${config}: ${f}: an observational module was emitted`);
+        assert.ok(!OBSERVATIONAL_NAMES.test(readFileSync(join(out, f), 'utf8')), `${config}: ${f}: the artifact names a candidate-only module, table or evaluator`);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
     }
-    for (const f of emitted) {
-      assert.ok(!/gap11/i.test(f), `${f}: an observational module was emitted`);
-      assert.ok(!OBSERVATIONAL_NAMES.test(readFileSync(join(out, f), 'utf8')), `${f}: the artifact names a candidate-only module, table or evaluator`);
-    }
-  } finally {
-    rmSync(out, { recursive: true, force: true });
   }
 });
 

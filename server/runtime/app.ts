@@ -505,8 +505,9 @@ export interface AppDeps {
   readiness: ReadinessState;
   log?: LogSink;
   now?: () => number;
-  // Injectable for later slices; the skeleton mounts no real dependency. Each check runs
-  // under the port deadline and is handed its AbortSignal.
+  // Further readiness checks (the tenant entry's issuer key, customer read, session read, session mint and logging
+  // guard). Each runs under the port deadline, is handed its AbortSignal, and is shared per PROBE_REUSE_MS like the
+  // stores' probes.
   dependencyChecks?: Array<(signal: AbortSignal) => boolean | Promise<boolean>>;
   /** Further routes, admitted only through the same table and chain as the operational ones. */
   routes?: readonly RouteDefinition[];
@@ -613,7 +614,7 @@ export function createApp(deps: AppDeps): Express {
     };
   };
   const readinessChecks: Array<(signal: AbortSignal) => unknown> = [
-    ...(deps.dependencyChecks ?? []),
+    ...(deps.dependencyChecks ?? []).map((check) => sharedProbe(check, deadlineMs)),
     ...(limits === null ? [] : [sharedProbe((signal) => limits.limiter.probe(signal), LIMITER_DEADLINE_MS)]),
     ...(idempotency === null ? [] : [sharedProbe((signal) => idempotency.store.probe(signal), IDEMPOTENCY_DEADLINE_MS)]),
     ...(transactions === null ? [] : [sharedProbe((signal) => transactions.port.probe(signal), COMMAND_TRANSACTION_DEADLINE_MS)]),

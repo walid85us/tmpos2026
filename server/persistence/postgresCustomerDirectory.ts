@@ -25,6 +25,13 @@
 // timeout, a lost connection and a driver error are all a THROW — an outage the route answers as a bounded 503 — never a page, and never a refusal. The
 // runtime validates the answer again before any of it reaches a response. Nothing is logged: a driver error propagates
 // without a message of this file's own, and the route discards it.
+//
+// READINESS (probeCustomerDirectory, the tenant entry's). It asks the same routine for a random key no session holds and
+// requires its one refusal: the login's EXECUTE and the routine's own reads of the session and its ledger row answer. The
+// routine refuses an unknown key before it reads the issuer key, 016's admission or 017's page, so those are not
+// re-proved here: the issuer key and the admission are readiness checks of their own, and 017's page is pinned by the
+// startup ledger's checksum (docs/phase-4/08 DA-108).
+import { randomBytes } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import { CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isStorableName } from '../runtime/customerDirectory.js';
@@ -109,4 +116,21 @@ export function createPostgresCustomerDirectory(deps: { readonly client: Supervi
       });
     },
   });
+}
+
+/** Readiness: true only for the routine's one refusal of a random key no session holds; any other answer or fault is false. */
+export async function probeCustomerDirectory(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  const absentKey = randomBytes(32).toString('base64url');
+  try {
+    return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+        from tmpos_mint.m7a_customer_page_v2(${absentKey}::text, null::uuid, 1::integer)`;
+      if (!Array.isArray(rows) || rows.length !== 1) return false;
+      const row = rowOf(rows[0]);
+      return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;
+    });
+  } catch {
+    return false; // an outage, an abort, an overrun, a driver fault or a row out of shape: nothing is disclosed
+  }
 }

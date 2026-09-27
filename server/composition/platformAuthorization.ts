@@ -61,7 +61,6 @@ import { isTrustedPrincipal, isTrustedScope, selectScope, trustedScopeOf } from 
 import type { PlatformAdmissionPort, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, SessionAudience, VerifiedPrincipal } from '../runtime/routes.js';
 import type { SessionAdmission, SessionRecord } from '../runtime/sessions.js';
-import type { PlatformPermits } from '../runtime/tenantDirectory.js';
 import { BUILT_IN_PLATFORM_ROLES, evaluateCanonicalPermission } from '../platform-identity/m5CanonicalPermissions.js';
 import type { PlatformRoleDefinition } from '../platform-identity/m5CanonicalPermissions.js';
 
@@ -202,9 +201,11 @@ export function createAdmittedPlatformAuthorizer(deps: RoleDeps = {}): RouteAuth
  * definitions (M5-GIAM-D1-P3). It exists for one purpose: the tenant directory's `actions`, which tell the console which
  * controls to show (server/runtime/tenantDirectory.ts). That answer is presentation and grants nothing — every command is
  * authorized again, from the beginning, by the chain that serves it. Only a platform scope can hold a platform
- * permission; the read-only cap applies exactly as it does in the authorizer; anything else is false.
+ * permission; the read-only cap applies exactly as it does in the authorizer; anything else is false. Typed by its shape,
+ * not by the tenant directory's PlatformPermits: this module also ships in the tenant executable, which carries no
+ * administrative route module (M7A-CUSTOMERS-P2).
  */
-export function createPlatformPermits(deps: { readonly roles?: ReadonlyMap<string, PlatformRoleDefinition> } = {}): PlatformPermits {
+export function createPlatformPermits(deps: { readonly roles?: ReadonlyMap<string, PlatformRoleDefinition> } = {}): (scope: TrustedScope, permission: string) => boolean {
   const roles = deps?.roles ?? BUILT_IN_PLATFORM_ROLES;
   if (!(roles instanceof Map)) throw new TypeError('platform permits dependencies invalid');
   return (scope: TrustedScope, permission: string): boolean =>

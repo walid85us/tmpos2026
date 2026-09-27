@@ -18,7 +18,7 @@ import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -30,14 +30,14 @@ import type { ProductionTransactions, TransactionFactories, TransactionInventory
 import { DRIVER_TLS_ENV_VAR, DatabaseTlsRefusal, createRuntimeStoreClient } from '../platform-identity/db.js';
 import { createPostgresPlatformAdmission } from '../persistence/postgresPlatformAdmission.js';
 import { createPostgresRateLimiter } from '../persistence/postgresRateLimiter.js';
-import { createPostgresSessionStore } from '../persistence/postgresSessionStore.js';
+import { createPostgresSessionStore, tenantMintProof } from '../persistence/postgresSessionStore.js';
 import type { SessionStandingCheck } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import { createPostgresTenantDirectory } from '../persistence/postgresTenantDirectory.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator, TransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import { RETIRED_POOL_GRACE_S, createSupervisedPgClient } from '../persistence/supervisedPgClient.js';
-import type { DriverPool, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
+import type { DriverPool, PgTransactionScope, SupervisedPgClient, TransactionBounds } from '../persistence/supervisedPgClient.js';
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 
 /**
@@ -67,6 +67,8 @@ import { TENANT_DISPLAY_NAME_ROUTE } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_ROUTE } from '../runtime/tenantStatus.js';
 import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMutator.js';
 import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
+import { composeReadTransactions, parseTenantIssuerKey } from './transactionKernel.js';
+import { TENANT_INVENTORY, composeTenantTransactions, tenantRouteDeclarations } from './tenantTransactions.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolvePath(HERE, '..', '..');
@@ -1144,4 +1146,236 @@ test('M6R-C04 readiness through the session root\'s limits is ready only when th
     });
     await boundary.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// M7A-CUSTOMERS-P2 — the read-only composition over the shared kernel (transactionKernel.ts), for the tenant root
+// (tenantTransactions.ts) alone
+// ---------------------------------------------------------------------------
+// What is proved: TENANT_SESSION_ISSUER_KEY is judged before any client exists (missing, invalid, shared with RATE_LIMIT_KEY
+// however padded, weak), and so is APP_DATABASE_URL; a valid configuration builds the kernel once and hands back exactly the
+// customer route, bound to the session and classified as a read; the session store mints under the issuer key and holds
+// the tenant standing alone; the issuer-key probe sends a fingerprint, never the key; the reads' probe is the inventory's;
+// a fault after the kernel exists ends it; and the administrative root still composes no key. Substituted: the kernel (an
+// in-test recorder answering by statement text).
+
+/** A random key: canonical, never RATE_LIMIT_KEY, and (with ~30 distinct values in 32 bytes) never weak. */
+const TENANT_ISSUER_KEY = randomBytes(32);
+const TENANT_CONFIGURED = Object.freeze({
+  APP_DATABASE_URL: DIRECT_URL, RATE_LIMIT_KEY, TENANT_SESSION_ISSUER_KEY: TENANT_ISSUER_KEY.toString('base64url'),
+});
+
+/** A kernel that answers by statement text and records every statement's bound values; no driver, no socket. */
+function recordingKernel(answer: (text: string) => unknown = () => []) {
+  const statements: { text: string; values: unknown[] }[] = [];
+  let ended = 0;
+  const sql = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown> => {
+    const text = strings.join('?');
+    statements.push({ text, values });
+    return answer(text);
+  }, { json: (v: unknown) => v });
+  const client: SupervisedPgClient = Object.freeze({
+    transaction: async <T>(_signal: AbortSignal, _bounds: TransactionBounds, work: (scope: PgTransactionScope) => Promise<T>): Promise<T> =>
+      work(sql as unknown as PgTransactionScope),
+    end: async (): Promise<void> => { ended++; },
+  });
+  return { client, statements, ended: () => ended };
+}
+
+const blockersOfRead = (env: Record<string, string | undefined>): readonly string[] => {
+  try {
+    composeReadTransactions(TENANT_INVENTORY, env, () => assert.fail('no client may be built'));
+  } catch (err) {
+    if (err instanceof TransactionCompositionError) return err.blockers;
+    throw err;
+  }
+  return assert.fail('composition must refuse');
+};
+
+test('M7TK-01 parseTenantIssuerKey: missing, invalid, shared with RATE_LIMIT_KEY however padded, and weak are each refused; a random key is its bytes', () => {
+  const env = (key: string | undefined, over: Record<string, string | undefined> = {}) => ({ RATE_LIMIT_KEY, ...over, TENANT_SESSION_ISSUER_KEY: key });
+  const b64 = (bytes: Buffer): string => bytes.toString('base64url');
+  const vector = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
+  const cases: Array<[string, Record<string, string | undefined>, string]> = [
+    ['absent', env(undefined), 'tenant_issuer_key_missing'],
+    ['empty', env(''), 'tenant_issuer_key_missing'],
+    ['too short', env(b64(randomBytes(31))), 'tenant_issuer_key_invalid'],
+    ['too long', env(b64(randomBytes(65))), 'tenant_issuer_key_invalid'],
+    ['padded base64url', env(`${b64(randomBytes(32))}=`), 'tenant_issuer_key_invalid'],
+    ['not canonical (stray bits in the last character)', env(`${b64(TENANT_ISSUER_KEY).slice(0, 42)}B`), 'tenant_issuer_key_invalid'],
+    ['equal to RATE_LIMIT_KEY', env(RATE_LIMIT_KEY), 'tenant_issuer_key_shared'],
+    ['RATE_LIMIT_KEY zero-padded to 33 bytes (the same HMAC key)', env(b64(Buffer.concat([Buffer.from(RATE_LIMIT_KEY, 'base64url'), Buffer.alloc(1)]))), 'tenant_issuer_key_shared'],
+    ['equal to a random RATE_LIMIT_KEY', env(b64(TENANT_ISSUER_KEY), { RATE_LIMIT_KEY: b64(TENANT_ISSUER_KEY) }), 'tenant_issuer_key_shared'],
+    ['the recorded test vector (bytes 0x00..0x1f)', env(b64(vector)), 'tenant_issuer_key_weak'],
+    ['the test vector zero-padded (the same HMAC key)', env(b64(Buffer.concat([vector, Buffer.alloc(8)]))), 'tenant_issuer_key_weak'],
+    ['one repeated byte', env(b64(Buffer.alloc(32, 0x5a))), 'tenant_issuer_key_weak'],
+    ['all zeros', env(b64(Buffer.alloc(32))), 'tenant_issuer_key_weak'],
+    ['two bytes then zeros (2 effective bytes)', env(b64(Buffer.concat([Buffer.from([0xab, 0xcd]), Buffer.alloc(30)]))), 'tenant_issuer_key_weak'],
+    ['15 distinct values', env(b64(Buffer.from(Array.from({ length: 32 }, (_, i) => 100 + (i % 15))))), 'tenant_issuer_key_weak'],
+  ];
+  for (const [label, e, code] of cases) assert.equal(parseTenantIssuerKey(e), code, label);
+  // Exactly 16 distinct values is the floor that passes; a random key is its own bytes, whatever RATE_LIMIT_KEY is.
+  const sixteen = Buffer.from(Array.from({ length: 32 }, (_, i) => 100 + (i % 16)));
+  assert.deepEqual(parseTenantIssuerKey(env(b64(sixteen))), sixteen, '16 distinct values');
+  assert.deepEqual(parseTenantIssuerKey(env(b64(TENANT_ISSUER_KEY))), TENANT_ISSUER_KEY, 'a random key');
+  assert.deepEqual(parseTenantIssuerKey(env(b64(TENANT_ISSUER_KEY), { RATE_LIMIT_KEY: undefined })), TENANT_ISSUER_KEY, 'without a limiter key to compare');
+  const long = randomBytes(64);
+  assert.deepEqual(parseTenantIssuerKey(env(b64(long))), long, 'a 64-byte key');
+});
+
+test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL and the issuer key before any client exists, naming every blocker', () => {
+  assert.deepEqual(blockersOfRead({}), ['app_database_url_missing', 'tenant_issuer_key_missing']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, APP_DATABASE_URL: POOLER_URL.replace(':5432', ':6543') }), ['app_database_endpoint_unsupported']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, TENANT_SESSION_ISSUER_KEY: 'short' }), ['tenant_issuer_key_invalid']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, TENANT_SESSION_ISSUER_KEY: RATE_LIMIT_KEY }), ['tenant_issuer_key_shared']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, TENANT_SESSION_ISSUER_KEY: Buffer.alloc(32, 7).toString('base64url'), RATE_LIMIT_KEY: undefined }),
+    ['tenant_issuer_key_weak']);
+  assert.throws(() => composeReadTransactions(TENANT_INVENTORY, TENANT_CONFIGURED, 'not a constructor' as never), TypeError);
+  // A TLS configuration the client refuses is a bounded blocker, exactly as for the administrative root.
+  assert.throws(() => composeReadTransactions(TENANT_INVENTORY, TENANT_CONFIGURED, () => { throw new DatabaseTlsRefusal('synthetic'); }),
+    (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
+});
+
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the customer route, session-bound and classified as a read', async () => {
+  const customerId = randomUUID();
+  const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v2')
+    ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }] : []));
+  let calls = 0;
+  let seen: unknown;
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, (endpoint) => { calls++; seen = endpoint; return kernel.client; });
+  assert.equal(calls, 1, 'the handed constructor is called exactly once');
+  assert.equal((seen as { family: string }).family, 'direct', 'over the classified endpoint');
+  assert.deepEqual(ttx.routes.map((r) => [r.method, r.path, r.policy.access, r.policy.access === 'session' ? r.policy.audience : null,
+    r.sessionBinding, r.trustedContext]), [['GET', '/api/v1/customers', 'session', 'tenant', 'required', 'required']]);
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'every route of the inventory is explicitly a read');
+  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers']);
+  const preflight = ttx.preflight as unknown as Record<string, unknown>;
+  assert.deepEqual(['connect', 'runtimeLogin', 'migrationLedger', 'parameterLogging', 'rateLimitKey'].map((k) => typeof preflight[k]), Array(5).fill('function'));
+  assert.equal(typeof ttx.tenantAdmission.probe, 'function');
+  assert.ok(Object.isFrozen(ttx) && Object.isFrozen(ttx.routes));
+  assert.equal(kernel.statements.length, 0, 'composing sends nothing');
+  // The served route reads through the production adapter over this kernel: 018's session-bound routine, with the key.
+  const route = ttx.routes[0];
+  assert.ok(route.idempotency === 'none' && typeof route.handler === 'function');
+  const sessionKey = 'k'.repeat(43);
+  const scope = Object.freeze({
+    actor: REVAL_ACTOR, securityVersion: 'sv-1', scope: 'tenant', tenant: REVAL_TENANT, store: null, membershipId: REVAL_MEMBERSHIP,
+    roleId: 'manager', limitation: 'none',
+  });
+  const reply: { status: number | null; body: unknown } = { status: null, body: undefined };
+  const res = { locals: {}, status(code: number) { reply.status = code; return res; }, json(body: unknown) { reply.body = body; return res; } };
+  await route.handler({ url: '/api/v1/customers?limit=1' } as never, res as never,
+    { requestId: 'req-m7tk03', principal: null, session: null, authenticatedAt: null, trusted: scope, sessionKey } as never);
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[sessionKey, null, 2]], 'one statement: the session key, no cursor, the limit and its lookahead');
+  assert.match(kernel.statements[0].text, /from tmpos_mint\.m7a_customer_page_v2\(\?::text, \?::uuid, \?::integer\)/);
+  assert.deepEqual([reply.status, reply.body], [200, { customers: [{ id: customerId, name: 'n' }], nextCursor: null }]);
+  await ttx.close();
+  assert.equal(kernel.ended(), 1);
+});
+
+test('M7TK-04 the tenant session store mints under the issuer key and holds the tenant standing alone: an administrative record throws before any statement', async () => {
+  const tenantRow = tenantAdmissionRow();
+  const kernel = recordingKernel((text) => {
+    if (text.includes('m5_hold_tenant_standing')) return [{ outcome: 'held' }];
+    if (text.includes('m5_admit_tenant_session_v2')) return [tenantRow];
+    if (text.includes('m7a_session_create')) return [{ outcome: 'created' }];
+    if (/insert into public\.audit_event/.test(text)) return Object.assign([], { count: 1, command: 'INSERT' });
+    throw new Error(`a statement the tenant store never sends here: ${text.slice(0, 80)}`);
+  });
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
+  const now = Date.now();
+  const record = Object.freeze({
+    audience: 'tenant' as const, authProvider: 'firebase', authProviderUid: 'uid-tenant', principalKey: 'p'.repeat(43),
+    securityVersion: tenantWitness, authenticatedAt: now - 1_000, createdAt: now, lastSeenAt: now, validatedAt: now,
+  });
+  const audit = Object.freeze({ action: 'login' as const, operationId: randomUUID(), actor: REVAL_ACTOR, authenticatedAt: now - 1_000 });
+  const key = 'k'.repeat(43);
+  assert.equal(await ttx.sessionStore.establish?.(key, record, null, audit, new AbortController().signal), 'established');
+  const steps = kernel.statements.map((st) => (st.text.includes('m5_hold_tenant_standing') ? '016 hold' : st.text.includes('m5_admit_tenant_session_v2') ? '016 v2'
+    : st.text.includes('m7a_session_create') ? 'mint' : 'audit'));
+  assert.deepEqual(steps, ['016 hold', '016 v2', 'mint', 'audit'], 'the tenant standing, then 018\'s mint, then the record');
+  const mint = kernel.statements[2].values;
+  assert.equal(mint.length, 12);
+  assert.deepEqual(mint[11], tenantMintProof(TENANT_ISSUER_KEY, key, record, mint[10] as number), 'the proof under this process\'s issuer key');
+  // An administrative record is a wiring fault in the tenant process: refused before anything is sent.
+  const sent = kernel.statements.length;
+  await assert.rejects(Promise.resolve(ttx.sessionStore.establish?.('a'.repeat(43), { ...record, audience: 'admin', securityVersion: 'v1' }, null, audit,
+    new AbortController().signal)), /session store unavailable/);
+  assert.equal(kernel.statements.length, sent, 'nothing sent for an administrative record');
+  await ttx.close();
+});
+
+test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s', async () => {
+  let answer: unknown = [{ outcome: 'match' }];
+  let page: unknown = [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }];
+  let minted: unknown = [{ outcome: 'invalid' }];
+  const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v2') ? page
+    : text.includes('m7a_session_create') ? minted : []));
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
+  const signal = new AbortController().signal;
+  assert.equal(await ttx.issuerKey(signal), 'match');
+  for (const word of ['mismatch', 'absent', 'invalid']) {
+    answer = [{ outcome: word }];
+    assert.equal(await ttx.issuerKey(signal), word);
+  }
+  answer = [{ outcome: 'maybe' }];
+  await assert.rejects(ttx.issuerKey(signal), /answer_invalid/, 'an answer outside the four words throws');
+  const probes = kernel.statements.filter((st) => st.text.includes('m7a_issuer_key_check'));
+  assert.equal(probes.length, 5);
+  const keyHex = TENANT_ISSUER_KEY.toString('hex');
+  for (const { values } of probes) {
+    assert.equal(values.length, 1);
+    assert.ok(Buffer.isBuffer(values[0]) && (values[0] as Buffer).length === 32, 'one 32-byte fingerprint');
+    assert.ok(!(values[0] as Buffer).equals(TENANT_ISSUER_KEY), 'never the key itself');
+  }
+  assert.ok(!JSON.stringify(kernel.statements).includes(keyHex) && !JSON.stringify(kernel.statements).includes(TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY),
+    'no statement carries the key in any spelling');
+  assert.equal(await ttx.readsProbe(signal), true, 'the one refusal of an unknown key');
+  page = [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: REVAL_MEMBERSHIP, o_name: 'n' }];
+  assert.equal(await ttx.readsProbe(signal), false, 'anything else is not ready');
+  assert.ok(kernel.statements.some((st) => /tmpos_mint\.m7a_customer_page_v2\(/.test(st.text)), 'the probe asks 018\'s routine');
+  assert.equal(await ttx.mintProbe(signal), true, 'the mint\'s refusal of all-null arguments');
+  minted = [{ outcome: 'refused' }];
+  assert.equal(await ttx.mintProbe(signal), false, 'anything else is not ready');
+  const mints = kernel.statements.filter((st) => /tmpos_mint\.m7a_session_create\(/.test(st.text));
+  assert.equal(mints.length, 2);
+  assert.ok(mints.every((st) => st.values.length === 0), 'the mint probe binds nothing');
+  await ttx.close();
+});
+
+test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; the read-only composition never builds a store or a command port', async () => {
+  const kernel = recordingKernel();
+  const boom = new Error('synthetic read port fault');
+  const inventory = { ...TENANT_INVENTORY, ports: (): never => { throw boom; } };
+  assert.throws(() => composeReadTransactions(inventory, TENANT_CONFIGURED, () => kernel.client), (err: unknown) => err === boom);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(kernel.ended(), 1, 'the kernel is ended: the caller holds nothing to close yet');
+  // A route factory that throws only once served (over the real ports) ends it too.
+  const served = recordingKernel();
+  const throwing = { ...TENANT_INVENTORY, reads: [(ports: unknown) => (ports === TENANT_INVENTORY.inert ? tenantRouteDeclarations()[0] : (() => { throw boom; })())] };
+  assert.throws(() => composeReadTransactions(throwing, TENANT_CONFIGURED, () => served.client), (err: unknown) => err === boom);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(served.ended(), 1);
+  // The declared table is validated before any client exists: a duplicate refuses with nothing to close.
+  const duplicate = { ...TENANT_INVENTORY, reads: [createCustomerDirectoryRoute, createCustomerDirectoryRoute] };
+  assert.throws(() => composeReadTransactions(duplicate, TENANT_CONFIGURED, () => assert.fail('no client may be built')),
+    (err: unknown) => err instanceof EnforcementSetupError && err.code === 'route_duplicate');
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => recordingKernel().client) as unknown as Record<string, unknown>;
+  assert.deepEqual(Object.keys(ttx).sort(),
+    ['close', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads'],
+    'no idempotency, command port, platform admission or store');
+});
+
+test('M7TK-07 the administrative root still composes no issuer key: its store refuses a tenant record before any statement', async () => {
+  const fake = fakeDriver();
+  const boundary = composeProductionTransactions({ ...CONFIGURED, TENANT_SESSION_ISSUER_KEY: TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY },
+    () => createSupervisedPgClient(fake.driver, '', { max: 2 }));
+  assert.ok(boundary !== null);
+  const now = Date.now();
+  await assert.rejects(Promise.resolve(boundary!.sessionStore.create('k'.repeat(43), {
+    audience: 'tenant', authProvider: 'firebase', authProviderUid: 'uid-tenant', principalKey: 'p'.repeat(43), securityVersion: tenantWitness,
+    authenticatedAt: null, createdAt: now, lastSeenAt: now, validatedAt: now,
+  }, new AbortController().signal)), /session store unavailable: issuer_key_missing/);
+  assert.equal(fake.texts.length, 0, 'nothing sent');
+  await boundary!.close();
 });

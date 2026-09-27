@@ -31,11 +31,11 @@
 //
 // WHAT IT SERVES. SHIPPING_ROUTES and nothing else: the two operational probes, the administrative boundary's login,
 // current-session and logout, the tenant directory read and the two tenant commands — then the bounded 404. No tenant or
-// store route (the tenant boundary is not composed), no DEV, witness, diagnostic, bootstrap or migration route. Only the
-// administrative host is served: every request but the probes must name SESSION_ADMIN_ORIGINS's one authority in Host, or
-// it gets that same bounded 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real
-// edge must route the administrative hostname to this entry alone and pass its Host through unaltered or reject any other
-// (docs/phase-4/08 DA-9 — not proven here).
+// store route (the tenant boundary is served by the separate tenant executable, server/entry/tenantMain.ts, never here),
+// no DEV, witness, diagnostic, bootstrap or migration route. Only the administrative host is served: every request but the
+// probes must name SESSION_ADMIN_ORIGINS's one authority in Host, or it gets that same bounded 404 before the limiter is
+// asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the administrative hostname to this
+// entry alone and pass its Host through unaltered or reject any other (docs/phase-4/08 DA-9 — not proven here).
 //
 // AFTER STARTUP. Nothing terminates the process for a dependency outage: /health stays alive and prompt, /readiness answers
 // 503 while any composed store is unavailable, and protected traffic fails closed with a bounded 503 (app.ts) — no local
@@ -50,68 +50,27 @@
 // is the only one the executable (main.ts) passes: the verified-TLS client over the classified endpoint, the Firebase Admin
 // SDK behind the Firebase adapter, and the configured PORT on every interface. A disposable-database harness passes its own
 // — a client over its cluster, a synthetic provider token verifier, a loopback ephemeral port — and nothing in the
-// configuration can select one; no testkit or fake is reachable from this file.
+// configuration can select one; no testkit or fake is reachable from this file. The construction boundary, the configuration
+// both entries share, the step bound and the refusal lines are entryStartup.ts's (M7A-CUSTOMERS-P2), shared with the tenant
+// entry; this process refuses the tenant's minting key (TENANT_SESSION_ISSUER_KEY) and never holds it.
 import { createHash, randomBytes } from 'node:crypto';
-import { createApp, createBoundedServer, createReadinessState, parseServedHosts } from '../runtime/app.js';
-import { parseTrustedProxies } from '../runtime/clientAddress.js';
+import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 import { loadConfig } from '../runtime/config.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { createLifecycle } from '../runtime/lifecycle.js';
-import type { SignalSource } from '../runtime/lifecycle.js';
 import { emitLog } from '../runtime/logging.js';
-import type { LogSink } from '../runtime/logging.js';
 import { parseRateLimitKey } from '../runtime/rateLimit.js';
-import { normalizeOrigin } from '../runtime/requestSecurity.js';
 import { EnforcementSetupError } from '../runtime/routes.js';
 import { TENANT_DISPLAY_NAME_EVENTS } from '../runtime/tenantDisplayName.js';
 import { TENANT_STATUS_EVENTS } from '../runtime/tenantStatus.js';
-import { APP_DATABASE_URL_VAR, DATABASE_CA_CERT_VAR, SUPABASE_DATABASE_URL_VAR } from '../platform-identity/config.js';
-import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
-import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
-import { DRIVER_TLS_ENV_VAR, assertCaCertificates, createRuntimeStoreClient } from '../platform-identity/db.js';
-import { IdentityCompositionError, createRuntimeIdentityVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
-import type { FirebaseIdTokenVerifier } from '../platform-identity/firebaseAdminAuthAdapter.js';
 import { ProductionCompositionError, composeProductionSessions } from '../composition/productionSessions.js';
 import type { ProductionSessions } from '../composition/productionSessions.js';
 import { TransactionCompositionError, composeProductionTransactions } from '../composition/productionTransactions.js';
 import type { ProductionTransactions } from '../composition/productionTransactions.js';
-import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
-
-// The listener and its bound address, typed through the runtime that owns the network modules (only server/runtime
-// imports them).
-type BoundServer = ReturnType<typeof createBoundedServer>;
-type BoundAddress = Exclude<ReturnType<BoundServer['address']>, string | null>;
-
-/** Each bounded startup step's deadline: above the driver's 10 s connect timeout, far below any orchestrator's start budget. */
-export const STARTUP_STEP_DEADLINE_MS = 15_000;
-/** The existing forced-shutdown deadline (lifecycle.ts): past it the process exits 1 whatever still hangs. */
-export const SHUTDOWN_FORCE_TIMEOUT_MS = 10_000;
-
-/** Why startup refused, as an operator reads it. Each carries bounded codes only. */
-export type StartupFailure =
-  | 'config_invalid'
-  | 'database_tls_invalid'
-  | 'database_unavailable'
-  | 'database_login_unsafe'
-  | 'migration_state_invalid'
-  | 'composition_refused'
-  | 'route_inventory_mismatch'
-  | 'dependency_unready'
-  | 'rate_limit_key_mismatch'
-  | 'rate_limit_store_read_only'
-  | 'rate_limit_store_unavailable'
-  | 'rate_limit_probe_malformed'
-  | 'listen_failed'
-  | 'startup_failed';
-
-/** One served route, as the runtime inventories it (app.locals.routes). */
-export interface ServedRoute {
-  readonly method: string;
-  readonly path: string;
-  readonly access: string;
-  readonly body: string;
-  readonly idempotency: string;
-}
+import {
+  SHUTDOWN_FORCE_TIMEOUT_MS, bounded, canonicalRoutes, present, refusalLines, validateCommonEntryConfig,
+} from './entryStartup.js';
+import type { BoundAddress, BoundServer, EntryConfigError, EntryOptions, EntryResult, ServedRoute, StartupFailure } from './entryStartup.js';
 
 /** The exact shipping inventory: nothing else is ever served, and startup refuses if the composed table differs. */
 export const SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
@@ -129,220 +88,27 @@ export const SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
 const PRODUCTION_EVENTS = Object.freeze([...TENANT_DISPLAY_NAME_EVENTS, ...TENANT_STATUS_EVENTS]);
 
 /**
- * What the entry takes from outside its configuration: the process's external dependencies, never policy. Production's is
- * PRODUCTION_CONSTRUCTION; a disposable-database harness supplies its own. Nothing in the configuration selects one.
- */
-export interface EntryConstruction {
-  /** The kernel over the classified APP_DATABASE_URL endpoint. */
-  readonly databaseClient: (endpoint: RuntimeDatabaseEndpoint) => SupervisedPgClient;
-  /** The identity provider's token verification behind the Firebase adapter; the Firebase Admin SDK's when absent. */
-  readonly tokenVerifier?: FirebaseIdTokenVerifier;
-  /** Where to bind, given the configured PORT. */
-  readonly listen: (port: number) => { readonly port: number; readonly host?: string };
-}
-
-/** The production construction: verified TLS over the sealed endpoint, the Firebase Admin SDK, PORT on every interface. */
-export const PRODUCTION_CONSTRUCTION: EntryConstruction = Object.freeze({
-  databaseClient: createRuntimeStoreClient,
-  listen: (port: number) => Object.freeze({ port }),
-});
-
-export interface EntryOptions {
-  /** The configuration: the process environment in production. */
-  readonly env: Readonly<Record<string, string | undefined>>;
-  readonly construction: EntryConstruction;
-  /** The signal source the lifecycle installs its handlers on: the process in production. */
-  readonly proc: SignalSource;
-  /** Ends the process: process.exit in production. Called at most once. */
-  readonly exit: (code: number) => void;
-  readonly log?: LogSink;
-  /** The forced-shutdown deadline; SHUTDOWN_FORCE_TIMEOUT_MS unless a test shortens it. */
-  readonly forceTimeoutMs?: number;
-}
-
-/** How startup ended. One interface, read by `outcome` (this repository compiles non-strict as well). */
-export interface EntryResult {
-  readonly outcome: 'listening' | 'refused' | 'interrupted';
-  /** The refusal's category, when refused. */
-  readonly failure: StartupFailure | null;
-  /** The refusal's bounded codes. */
-  readonly reasons: readonly string[];
-  /** The bound address, when listening. */
-  readonly address: BoundAddress | null;
-  /** The served inventory, once composed. */
-  readonly routes: readonly ServedRoute[];
-}
-
-/** One configuration refusal: the field and a bounded code, never the value. */
-export interface EntryConfigError {
-  readonly field: string;
-  readonly code: string;
-}
-
-const present = (value: unknown): value is string => typeof value === 'string' && value !== '';
-
-/** Whether the runtime's host allowlist accepts this authority — the same judgment createApp makes of `hosts`. */
-const servableHost = (host: string): boolean => {
-  try {
-    parseServedHosts([host]);
-    return true;
-  } catch (err) {
-    if (!(err instanceof EnforcementSetupError)) throw err;
-    return false;
-  }
-};
-
-/** Verifies nothing: handed to the adapter only to run its configuration check, and never asked to verify. */
-const CONFIGURATION_ONLY: FirebaseIdTokenVerifier = Object.freeze({
-  verify: (): Promise<never> => Promise.reject(new Error('configuration check only')),
-});
-
-/**
- * Whether NODE_OPTIONS selects OpenSSL's trust store. Node reads it as whitespace-separated flags, drops double quotes
- * and backslash escapes anywhere in them, treats `_` in a flag name as `-`, and enables a boolean flag given any `=value`
- * (even `=false`). So every quote and backslash is removed first (single quotes too, erring toward refusal), and each
- * token's name before `=` is compared in that normal form; `--no-use-openssl-ca` and longer names do not match.
- */
-const nodeOptionsUseOpensslCa = (options: string): boolean =>
-  options
-    .replace(/["'\\]/g, '')
-    .replace(/_/g, '-')
-    .split(/\s+/)
-    .some((token) => token.split('=', 1)[0] === '--use-openssl-ca');
-
-/**
  * Every configuration refusal, each as a field and a bounded code — [] when the configuration is complete. Pure: it reads
- * only the named keys of `env`, contacts nothing and constructs no client, listener or provider app.
+ * only the named keys of `env`, contacts nothing and constructs no client, listener or provider app. The shared judgments
+ * (entryStartup.ts), then this entry's own: the command secret, and never the tenant's minting key.
  */
 export function validateEntryConfig(env: Readonly<Record<string, string | undefined>>): EntryConfigError[] {
-  const errors: EntryConfigError[] = [];
-  // NODE_ENV, PORT and the DEV action flags that must never be armed in production (config.ts).
-  const base = loadConfig(env);
-  errors.push(...base.errors);
-  if (base.config !== undefined && !base.config.isProduction) errors.push({ field: 'NODE_ENV', code: 'env_not_production' });
-
-  // The runtime database: the classified endpoint, its trust anchor, and no driver-level transport override.
-  const endpoint = classifyRuntimeDatabaseUrl(env[APP_DATABASE_URL_VAR]);
-  if (typeof endpoint === 'string') errors.push({ field: APP_DATABASE_URL_VAR, code: endpoint });
-  const ca = env[DATABASE_CA_CERT_VAR];
-  if (!present(ca) || ca.trim() === '') errors.push({ field: DATABASE_CA_CERT_VAR, code: 'database_ca_missing' });
-  else {
-    try {
-      assertCaCertificates(ca.trim());
-    } catch {
-      errors.push({ field: DATABASE_CA_CERT_VAR, code: 'database_ca_invalid' });
-    }
-  }
-  if (present(env[DRIVER_TLS_ENV_VAR])) errors.push({ field: DRIVER_TLS_ENV_VAR, code: 'driver_tls_override_forbidden' });
-
-  // The two keyed-hash secrets: each well formed, and never the same key.
+  const errors = validateCommonEntryConfig(env);
+  // The command secret: well formed, and never the limiter's key.
   const limiterKey = present(env.RATE_LIMIT_KEY) ? parseRateLimitKey(env.RATE_LIMIT_KEY) : null;
-  if (!present(env.RATE_LIMIT_KEY)) errors.push({ field: 'RATE_LIMIT_KEY', code: 'rate_limit_key_missing' });
-  else if (limiterKey === null) errors.push({ field: 'RATE_LIMIT_KEY', code: 'rate_limit_key_invalid' });
   const idempotencyKey = present(env.IDEMPOTENCY_KEY) ? parseKeyMaterial(env.IDEMPOTENCY_KEY) : null;
   if (!present(env.IDEMPOTENCY_KEY)) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_missing' });
   else if (idempotencyKey === null) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_invalid' });
   else if (limiterKey !== null && sameKeyMaterial(idempotencyKey, limiterKey)) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_shared' });
-
-  // The trusted proxies: production always sits behind them, so `none` is refused like an absent list.
-  const proxies = env.TRUSTED_PROXY_CIDRS;
-  if (!present(proxies) || proxies === 'none') errors.push({ field: 'TRUSTED_PROXY_CIDRS', code: 'trusted_proxies_missing' });
-  else {
-    try {
-      parseTrustedProxies(proxies.split(','));
-    } catch (err) {
-      if (!(err instanceof EnforcementSetupError)) throw err;
-      errors.push({ field: 'TRUSTED_PROXY_CIDRS', code: 'trusted_proxies_invalid' });
-    }
-  }
-
-  // The administrative origin: exactly one exact canonical https origin — the host the listener serves and the one origin
-  // its unsafe requests may come from. No wildcard, no list, nothing normalized on the operator's behalf.
-  const admin = env.SESSION_ADMIN_ORIGINS;
-  if (!present(admin)) errors.push({ field: 'SESSION_ADMIN_ORIGINS', code: 'session_admin_origin_missing' });
-  else if (admin.includes(',')) errors.push({ field: 'SESSION_ADMIN_ORIGINS', code: 'session_admin_origin_not_single' });
-  else if (normalizeOrigin(admin) !== admin || !admin.startsWith('https://') || !servableHost(new URL(admin).host)) {
-    errors.push({ field: 'SESSION_ADMIN_ORIGINS', code: 'session_admin_origin_invalid' });
-  }
-
-  // The identity provider: the Firebase adapter's own configuration check, verifying nothing and building no provider app.
-  try {
-    createRuntimeIdentityVerifier(env, { verifier: CONFIGURATION_ONLY });
-  } catch (err) {
-    if (!(err instanceof IdentityCompositionError)) throw err;
-    errors.push({ field: 'FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON', code: 'identity_verifier_unconfigured' });
-  }
-  // Process-wide switches the Firebase Admin SDK and Node's TLS read from the environment themselves, past every check
-  // above: the emulator host makes the SDK accept unsigned tokens, and the TLS switch stops it verifying the provider's
-  // certificates. Production sets neither.
-  if (present(env.FIREBASE_AUTH_EMULATOR_HOST)) errors.push({ field: 'FIREBASE_AUTH_EMULATOR_HOST', code: 'identity_emulator_forbidden' });
-  if (present(env.NODE_TLS_REJECT_UNAUTHORIZED)) errors.push({ field: 'NODE_TLS_REJECT_UNAUTHORIZED', code: 'tls_verification_override_forbidden' });
-  // The trust store those provider calls verify against: extra roots, or OpenSSL's own store (and with it SSL_CERT_FILE /
-  // SSL_CERT_DIR, which matter only then). The database is unaffected — its client passes an explicit `ca`.
-  if (present(env.NODE_EXTRA_CA_CERTS)) errors.push({ field: 'NODE_EXTRA_CA_CERTS', code: 'tls_trust_store_override_forbidden' });
-  if (present(env.NODE_OPTIONS) && nodeOptionsUseOpensslCa(env.NODE_OPTIONS)) {
-    errors.push({ field: 'NODE_OPTIONS', code: 'tls_trust_store_override_forbidden' });
-  }
-
-  // The owner/migration principal (bypasses RLS) and the provider's service-role key: the process holds the runtime login
-  // alone, and the least-privilege preflight judges APP_DATABASE_URL only — so neither may sit beside it.
-  for (const field of [SUPABASE_DATABASE_URL_VAR, 'SUPABASE_SERVICE_ROLE_KEY']) {
-    if (present(env[field])) errors.push({ field, code: 'owner_credential_forbidden' });
-  }
+  // The tenant entry's minting secret never sits in this process: holding it would let the administrative process mint
+  // tenant sessions (docs/phase-4/08 DA-101). Refused whatever its value, which is never read.
+  if (present(env.TENANT_SESSION_ISSUER_KEY)) errors.push({ field: 'TENANT_SESSION_ISSUER_KEY', code: 'tenant_issuer_key_present' });
   return errors;
 }
-
-/** The composed table in a canonical order, for comparison with SHIPPING_ROUTES. */
-const canonicalRoutes = (routes: readonly ServedRoute[]): string =>
-  JSON.stringify(routes.map((r) => [r.method, r.path, r.access, r.body, r.idempotency])
-    .sort((a, b) => `${a[0]} ${a[1]}`.localeCompare(`${b[0]} ${b[1]}`)));
 
 /** Whether a served table is exactly SHIPPING_ROUTES — every route, attribute for attribute, and nothing else. */
 export const servesExactlyShippingRoutes = (routes: readonly ServedRoute[]): boolean =>
   canonicalRoutes(routes) === canonicalRoutes(SHIPPING_ROUTES);
-
-/** The log's cap on one field (logging.ts MAX_VALUE_LEN): a refusal's codes are split across lines rather than cut. */
-const REFUSAL_LINE_MAX = 200;
-
-/** `category` or `category:code,code,...`, as many lines as the codes need, none longer than the log keeps. */
-function refusalLines(failure: StartupFailure, reasons: readonly string[]): string[] {
-  const lines: string[] = [];
-  let line: string = failure;
-  let separator = ':';
-  for (const code of reasons) {
-    if (line.length + separator.length + code.length > REFUSAL_LINE_MAX && separator === ',') {
-      lines.push(line);
-      line = failure;
-      separator = ':';
-    }
-    line += separator + code;
-    separator = ',';
-  }
-  lines.push(line);
-  return lines;
-}
-
-/** A startup step abandoned: its deadline passed, or a signal asked the process to stop. Carries nothing. */
-class StepAbandoned extends Error {}
-
-/** `work` bounded by STARTUP_STEP_DEADLINE_MS and by `stop`; it answers the moment either ends, whatever `work` does. */
-async function bounded<T>(stop: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const step = new AbortController();
-  const abandon = (): void => step.abort();
-  const timer = setTimeout(abandon, STARTUP_STEP_DEADLINE_MS);
-  const abandoned = new Promise<never>((_resolve, reject) => {
-    step.signal.addEventListener('abort', () => reject(new StepAbandoned()), { once: true });
-  });
-  abandoned.catch(() => undefined); // raced below or never needed: never an unhandled rejection
-  stop.addEventListener('abort', abandon, { once: true });
-  try {
-    if (stop.aborted) throw new StepAbandoned();
-    return await Promise.race([Promise.resolve().then(() => work(step.signal)), abandoned]);
-  } finally {
-    clearTimeout(timer);
-    stop.removeEventListener('abort', abandon);
-  }
-}
 
 /**
  * Start the production entry: compose, preflight, and bind only once every precondition holds. A refusal logs its category,

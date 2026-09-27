@@ -11,7 +11,8 @@
 // session admitted before such a transition is refused after it and the boundary revokes it; the actor is
 // the internal user the session's audit records name (M5-TENANT-SESSION-P1). A denial ends every session
 // that principal holds on this boundary; an outage is a throw, which the boundary turns into a bounded 503
-// and never into a verdict.
+// and never into a verdict. Its readiness probe is the port's own (M7A-CUSTOMERS-P2), forwarded as the
+// platform sibling forwards its own, so readiness asks the admission every protected request depends on.
 //
 // THE LOGIN'S STANDING CHECK (createTenantEstablishCheck, M5-TENANT-SESSION-P1) is that same admission asked
 // once more where a tenant login writes: first on establish's own transaction the actor's standing rows are
@@ -145,6 +146,10 @@ export function createTenantSessionAdmission(deps: TenantAdmissionDeps): Session
       const answer = await admitted(admission, principal, signal);
       if (!answer.admitted) return false;
       return Object.freeze({ admitted: true, securityVersion: answer.securityVersion, actor: answer.principal.actor });
+    },
+    // The port declares it (principals.ts); a port without one throws here, which readiness reads as not ready.
+    probe(signal: AbortSignal): unknown {
+      return admission.probe(signal);
     },
   });
 }

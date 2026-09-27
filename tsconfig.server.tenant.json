@@ -1,0 +1,6 @@
+{
+  "//": "M7A-CUSTOMERS-P2 - the tenant-serving executable: server/entry/tenantMain.ts and its import closure only, to dist-server-tenant. Every compiler option is tsconfig.server.json's.",
+  "extends": "./tsconfig.server.json",
+  "compilerOptions": { "outDir": "dist-server-tenant" },
+  "files": ["server/entry/tenantMain.ts"]
+}
