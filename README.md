@@ -125,6 +125,7 @@ Status labels used below:
 - Estimates and quotes (draft, sent, accepted, rejected) that convert into a sale, plus customer enquiry intake. *(Preview)*
 - Marketing campaigns and loyalty-performance views. *(Preview (sample figures))*
 - A customer list kept on the server, showing a signed-in team member only their own business's customers, by name. *(Built, not deployed; the shop app does not use it yet and still keeps customers in the browser)*
+- Adding a customer to that server-side list by name, for team members whose role allows it. Each addition is recorded in the audit trail, and retrying the same request is designed not to add the same customer twice. *(Built, not deployed; the shop app does not use it yet)*
 
 ### Running the business
 - Staff profiles, clock in and out with break tracking, and a time-log editor. *(Preview)*
@@ -239,7 +240,7 @@ TM POS2026 is delivered in stages. "Done" means the work is complete and tested;
 - **Next:** putting this foundation to work in each shop area as it moves onto the platform.
 
 ### Next up
-1. **The first server-backed action inside an individual shop.**
+1. **The first server-backed actions inside an individual shop.** Adding a customer is built and not yet deployed.
 2. **Secure shop staff sign-in** connected to the server, matching what already exists for administrators.
 
 ### Stage 5: Shop data moves onto the platform *(Planned)*
@@ -282,7 +283,7 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 **[Shop]** marks the shop app, **[Backend]** marks the Backend Control Plane and the platform server, and **[Platform]** marks work for the service provider. Every **[Shop]** item is interactive-preview work on sample data. **[Platform]** items in v0.1–v0.3 are sample-data console concepts. **[Backend]** items are built in code and not deployed. Nothing in this history is live.
 
 ### v0.8: Server-checked permissions and business-account management
-*18–26 September 2026*
+*18–28 September 2026*
 - [Backend] One unified set of permission rules, checked by the server for administrative actions.
 - [Backend] The first administrative actions running fully on the server: renaming a business account, and suspending or reactivating one with a recorded reason, each with a change record.
 - [Backend] A business-account page in the Backend Control Plane.
@@ -291,6 +292,7 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 - [Backend] Sign-outs and access removals are now ordered against administrator actions happening at the same moment: a sign-in, a recent sign-in or a business-account change either completes before the removal or does not happen at all, and an ended session is never brought back.
 - [Backend] Server-side groundwork for shop staff sign-in: shop sessions are ordered against access changes in the same way, and each sign-in and re-confirmation is recorded, as is each sign-out whose record can be written (a sign-out still ends the session when it cannot). Not yet connected to the shop app.
 - [Backend] A server-side customer list for shops, names only, that shows each business only its own customers and checks the team member's permission on the server. Not yet switched on, and not yet connected to the shop app.
+- [Backend] Adding a customer on the server by name, for shop team members whose role allows it, recorded in the audit trail and safe to retry. Not yet switched on, and not yet connected to the shop app.
 - [Backend] Request limits connected to durable, platform-wide storage.
 - [Backend] A start-up process that refuses to start unless its configuration checks pass.
 - [Platform] This product page and the proprietary licence.

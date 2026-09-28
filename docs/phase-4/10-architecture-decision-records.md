@@ -401,6 +401,8 @@ A review of the first draft of 016, which moved access versions on status change
 
 **Amended (M7A-CUSTOMERS-P2, ADR-33).** Decision 4's grant is revoked: `tmpos_app` no longer executes `m7a_customer_page`. The route reads through migration 018's `m7a_customer_page_v2`, bound to the presenting minted session, which calls 017's page as its owner for the authority it derives. The contract in decisions 1, 2 and 5 is unchanged, and so is the adapter's check of every row against the authorizer's tenant. The fourth consequence is superseded: DA-83 is contained against the runtime credential alone, not closed. In the fifth, the ledger step now requires exactly 001–018, and D4 names the chain through 018. Decision 6 (Availability) is superseded by ADR-33 decision 8: the compiled tenant entry serves the route in code, lists it in the tenant authorizer's read classification and builds its customer port over the shared kernel; it is not deployed (DA-87).
 
+**Amended (M7A-CUSTOMERS-P3, 2026-09-28, ADR-34).** Decision 3 now has a second decided key. `create_customers` (the Customers domain at Create or above, tenant scope only) authorizes `POST /api/v1/customers`, decided by the same materializer and ordering, with no role default changed. Every other tenant or store key stays `undecidable`. The module's load-time guard (decision 1) now admits a non-sensitive route permission at View or Create, not only a View read, and states the read-only rule where it is enforced: under a `read_only` limitation only a View route permission is granted, so `create_customers` is denied. The G-PERSIST consequence's "no write path" is superseded: customer creation exists in code, not deployed. PII classification, retention, DSAR behaviour and the data cutover still do not exist. DA-92 is dispositioned for new writes (ADR-34 decision 9). The GET's contract, tenant source and cursor (decisions 1, 2 and 5) are unchanged. In the fifth consequence, the ledger step now requires exactly 001–019.
+
 ## ADR-33 — A tenant session exists only when the issuer-key holder mints it, and the customer read is bound in the database to that session (DECIDED — M7A-CUSTOMERS-P2)
 
 **Context.** Doc 08 DA-83: `tmpos_app` could execute migration 007's resolver, which answers any provider UID's actor, security version, membership and role, and 017's `m7a_customer_page`, which takes exactly that tuple as its authority. SQL running as the runtime role alone (a leaked `APP_DATABASE_URL`, an injection) could therefore list any tenant's customers. The same role could execute 011's `m5_session_create` and create a session for any principal. The test for this stage is possession of the runtime database role alone, so nothing that role can produce proves anything: a session variable, a request identifier, an obscured identifier or an application-only assertion. The database cannot verify an identity provider's token without an extension this stage may not add. The proof chosen is therefore a key the role can neither read nor write. This is the first of the stage's two commits, the database boundary; the tenant entry that composes the key is the second.
@@ -466,6 +468,182 @@ A review of the first draft of 016, which moved access versions on status change
 - The database boundary is implemented in code, and since the second commit the compiled tenant entry composes it and starts locally over disposable PostgreSQL (DA-87, narrowed). It is not deployed and not authorized for deployment: there is no real tenant hostname or edge (DA-107), and the owner has yet to decide issuer-key custody, install the key and confirm the database's logging settings (DA-93, DA-101, DA-102), and a managed apply awaits D4.
 - The second commit narrows DA-87, DA-93, DA-99, DA-101 and DA-102, and records DA-105 (the logging judgment is re-read by readiness, not per statement), DA-106 (readiness asks neither the identity provider nor the audit writer), DA-107 (the tenant-host edge, the shared `RATE_LIMIT_KEY` and the `SESSION_ADMIN_ORIGINS` consistency check) and DA-108 (the customer readiness probe's scope). It adds no migration, and 001–018 are byte-identical. `tests/db/tenantSessionOrdering.integration.test.mjs` now composes the tenant store and admission from the tenant root and the administrative store from the administrative root, over one kernel.
 - The evidence is disposable PostgreSQL only. `tests/db/tenantSessionMint.integration.test.mjs` covers M7M-01 to M7M-10, M7M-12, M7M-02b, M7M-02c, M7M-03b, M7M-06b and M7M-09b. In `tests/db/customerDirectory.integration.test.mjs`, M7C-02, M7C-09, M7C-10 and M7C-14 are rewritten because they asserted the DA-83 exposure, and M7C-12's log scan now also covers session identifiers and keys, mint proofs and the issuer key. Code-only; nothing is deployed, and no managed database was touched.
+
+**Amended (M7A-CUSTOMERS-P3, 2026-09-28, ADR-34).** The records above describe the state at M7A-CUSTOMERS-P2. Since P3:
+- **Decisions 5 and 8, configuration.** The tenant entry no longer refuses `IDEMPOTENCY_KEY`. It now requires its own, judged by configuration and again by the transaction root: `idempotency_key_missing`, `idempotency_key_invalid` (not canonical key material), and `idempotency_key_shared` (the same HMAC key as `RATE_LIMIT_KEY` or as `TENANT_SESSION_ISSUER_KEY`, however padded). `idempotency_key_present` no longer exists. The administrative entry still refuses `TENANT_SESSION_ISSUER_KEY` (`tenant_issuer_key_present`). The tenant process therefore now checks that its own idempotency key differs from its issuer key. Whether the administrative process holds issuer-equivalent bytes under another name, its own `IDEMPOTENCY_KEY` included, is still not code-enforced and stays an owner custody item (doc 08 DA-101).
+- **Decision 6.** The binding rule now covers writes. 019's create takes the presenting session's store key as its only authority argument and derives the tenant in the database. No routine that takes an authority tuple over tenant data is granted to `tmpos_app`.
+- **Decision 7.** The ledger step requires exactly 001–019, with 019's up file pinned at `1d260ca4…` (two P3 review fixes: one locked the mint-ledger row alongside the session row, the other added the unlocked pre-check; see decision 5, step 6). `APPROVED_ROLE_GRANTS` adds EXECUTE on `tmpos_customer_write.m7a_customer_create` and USAGE on `tmpos_customer_write`: 30 function EXECUTEs. D4's future managed apply names the contiguous chain through 019 (001–019).
+- **Decision 8, what the entry serves.**
+  - `TENANT_SHIPPING_ROUTES` adds `POST /api/v1/customers` (session, JSON body, idempotency required).
+  - The transaction root is no longer read-only. `TENANT_INVENTORY` has a write slot (`writes`: the route and its mutator), and `composeReadTransactions` composes the tenant store over the same kernel for it. The POST is never in the read classification.
+  - Startup step 5 requires 001–019.
+  - Step 7's composition includes the tenant store's idempotency and command ports, with no event contract.
+  - Step 10 and `/readiness` add `idempotency_store` and `command_transactions` (006's probe).
+  - The tenant artifact is 50 files: `server/runtime/customerCreate.js`, `server/persistence/postgresCustomerCreate.js` and `server/persistence/postgresTransactionalStore.js` are added. The administrative artifact is unchanged (54 files).
+- **Consequences.** The second consequence's "customer creation … stay open" is superseded for creation, which is delivered in code by ADR-34, not deployed. Customer import stays open.
+
+## ADR-34 — A tenant user creates a customer through one idempotent command whose authority the database re-derives from the presenting session (DECIDED — M7A-CUSTOMERS-P3)
+
+**Context.** ADR-32 gave the tenant boundary its first route, a customer read. ADR-33 bound that read in the database to a minted tenant session, and left customer creation open. The owner brief for M7A-CUSTOMERS-P3 asks for `POST /api/v1/customers` on the tenant entry: an authorized tenant user creates a customer with a server-generated id and a name. The write must:
+- use the existing tenant session boundary;
+- enforce current authority at commit;
+- isolate tenants;
+- append its audit record;
+- complete idempotency atomically.
+
+At entry `9a25cb7`, only the administrative side had those pieces:
+- `routes.ts` admitted `idempotency: 'required'` only under a platform-scope requirement.
+- The idempotency fingerprint's tenant and store slots were reserved and always null.
+- The PostgreSQL transactional store committed platform contexts only.
+- The tenant entry refused any `IDEMPOTENCY_KEY` (`idempotency_key_present`).
+- `view_customers` was the one decidable tenant key, and the module refused to load a tenant route permission above View.
+- `tmpos_app` held no privilege on `tmpos_customer.customer`, and it still holds none.
+
+**Decision.**
+1. **The contract.** `POST /api/v1/customers` (`server/runtime/customerCreate.ts`, `CUSTOMER_CREATE_ROUTE`) is a session route of the tenant boundary under `create_customers` at tenant scope, on the GET's path. It declares:
+   - a required JSON body of at most 4,096 bytes;
+   - `idempotency: 'required'` and `trustedContext: 'required'`;
+   - no recent sign-in and no `sessionBinding`;
+   - a `command`: contract `tenant.customer.create`, mode `create`, aggregate type `customer`, one change field `name`, no event.
+
+   Its rules:
+   - **Body.** Exactly `{ name }`. Any other shape, a missing or extra field, or a name decision 9 refuses is 400 `invalid_request`. That is decided once the idempotency record is acquired. It writes no customer, audit record or completion, the key stays bound to that request's fingerprint, and the attempt's lease waits out its 60 s (doc 08 DA-117).
+   - **Answer.** `201 { customer: { id, name } }`: the runtime's new version-4 id and the name as stored. There is no `Location` header, because no customer-detail route exists. The same name under two keys is two customers, because no repository rule makes customer names unique.
+   - **Refusals** keep the chain's generic bodies:
+     - 401 for a session refusal;
+     - 403 `forbidden` for any denial;
+     - 400 `invalid_request` for a missing, repeated or malformed `Idempotency-Key`;
+     - 409 `request_in_progress` while another attempt under the key holds its lease and no command transaction holds the record;
+     - 422 `idempotency_key_reused` for a different request under the key;
+     - 429 from the limiter;
+     - the bounded 404 on any host but the tenant host;
+     - 503 `service_unavailable` for an outage, for every refusal inside the committing transaction (lost authority, a duplicate id, a store fault), and for a commit whose acknowledgement was lost, an unknown outcome (decision 5);
+     - 503 `service_unavailable` (reason `idempotency_unavailable`), retryable, for a same-key request, typically on another instance, while the winner's command transaction holds the record: that transaction holds the record row as its fence, so the request's acquire waits on it until its lock bound. It is not a 409.
+   - **Unchanged.** Host, Origin, CSRF, security headers, body limits and rate limits are the chain's, unchanged.
+2. **The permission (owner decision for this route).** The owner brief names "the canonical Customers Create authority". ADR-32 recorded M7A-CUSTOMERS-P1's D1 for the GET the same way, from that stage's brief. `create_customers` is a new canonical tenant ROUTE permission (`TENANT_ROUTE_PERMISSIONS`, `server/platform-identity/m5CanonicalPermissions.ts`): the Customers domain at Create or above, at tenant scope only, non-sensitive.
+   - It is decided exactly as `view_customers` is: `materializeTenantPermissions(role, {}, false)`, then `meetsTenantPermissionLevel(level, 'create')`. There is no second evaluator and no role-name branch, and no role default is changed. `store_owner` (Full), `manager` (Full) and `sales_staff` (Create) hold it. `technician` (View) is refused.
+   - The read-only rule is stated where it is enforced (`TENANT_ROUTE_THRESHOLDS`). A `read_only` limitation grants a tenant route permission at View only, so `create_customers` is denied under it. The limitation comes from an account or tenant status of `read_only` or `overdue`. The load-time guard now admits a non-sensitive View or Create threshold, and still refuses a key that collides with a sub-permission.
+   - `isDecidablePermission` answers true for both route permissions at tenant scope only. Every other tenant or store key stays undecidable.
+   - A store or platform grant never satisfies it. The authorizer counts tenant-scope grants alone: none or several deny.
+   - The POST is not in the tenant authorizer's read classification.
+3. **Tenant-scope idempotency, for tenant session commands only.**
+   - **Where it is admitted.** `parseIdempotency` (`server/runtime/routes.ts`) admits `required` at platform scope, as before, or at tenant scope on a route that is a `command` with `access: 'session'` and `audience: 'tenant'`. These stay refused (`route_idempotency_policy_invalid`): a tenant `perform`, which runs outside the store transaction; a Bearer tenant route; an administrative-audience tenant requirement; and every store-scope route.
+   - **What binds the operation.** The chain binds it to the authorizer's trusted scope (`server/runtime/app.ts`): tenant, store and the app-owned actor come from the context the authorizer handed out, never from the request. A missing context is refused 403 (`authz_context_missing`) rather than bound as nulls.
+   - **The fingerprint.** It gains the actor (`OperationBinding.actor`), and `operationOf` throws on a slot that is neither a string nor null (`idempotency_binding_invalid`). The record's scope is per principal. So the same principal, key and body under another tenant or actor is a 422, never a replay of the other context's response.
+   - **The contract version.** `IDEMPOTENCY_CONTRACT_VERSION` moves from 1 to 2. The version is in every tag, so every record starts afresh, the administrative commands' included. Nothing is deployed, so no drain is needed now. A deployment that carries version-1 records needs a drain of one retention period (24 h), as a key rotation does.
+   - **Unchanged.** Lease, fingerprint, seal, replay and conflict policies. A replay still runs after the session, CSRF, authorizer and trusted-context checks, so a revoked session or grant gets its refusal, never the recorded 201.
+4. **The tenant revalidator** (`createTenantContextRevalidator`, `server/composition/tenantAuthorization.ts`). The tenant store's `ContextRevalidator` answers true only when all of these hold:
+   - the scope is tenant, the limitation `none`, no recent-authentication deadline is set, and a session key is present;
+   - the presenting tenant session is still live and now held by the committing transaction;
+   - 016's v2 admission, re-read under the held standing, admits the principal at the session's own security version;
+   - the same one-grant selection the authorizer makes (`scopeOf`) equals the authorized scope field by field: actor, security version, membership, role, limitation, tenant and store;
+   - the route's permission, decided again on that role, is granted.
+
+   A refusal is `false`. A hold, read or session fault throws. Either way the kernel rolls back and nothing commits.
+5. **The transaction and its lock order.** The tenant root composes the M6 PostgreSQL store (`createPostgresTransactionalStore`) over the same kernel with `contextScope: 'tenant'`.
+   - **What the store admits.** It requires a revalidator. It refuses a contextless command, and a context not of tenant scope or not of limitation `none`. It audits each command at exactly its context's scope: tenant scope, the context's tenant and no store. The administrative store's platform behaviour is unchanged, apart from step 7's audit-row check, which now applies to every command.
+   - **One transaction, in this order:**
+     1. the idempotency fence;
+     2. the presenting session read without a lock (`readTenantSession`), for its provider reference alone;
+     3. 016's hold of that actor's standing (`m5_hold_tenant_standing`: the account FOR UPDATE, then its links, grants, tenants and stores FOR SHARE);
+     4. the session row read again and held by its touch (`holdTenantSession`);
+     5. the v2 re-read, the witness and exact-scope compare, and `create_customers` decided again (decision 4);
+     6. the mutator (`server/persistence/postgresCustomerCreate.ts`) calls 019's routine. It first runs an unlocked pre-check, taking no row lock, that refuses a key whose session is not live on the database clock now or was minted under an issuer key other than the one installed now; a key that passes is judged again under the locks that follow, so the pre-check adds no race (it only refuses, and each refusal is decided on rows committed when it read them). It then takes 016's hold again (already held, so it does not wait), takes the session row and its mint-ledger row FOR SHARE together, then the issuer-key row FOR SHARE, reads the database clock only after those lock waits, derives the authority afresh, and inserts. The mint-ledger row's own FOR SHARE and the pre-check were both added in P3 review fixes after the routine's first draft: without the lock, a delete of the ledger row raced the create instead of waiting on it (proved by `tests/db/customerCreateRoutine.integration.test.mjs` M7CR-10, red without the lock); without the pre-check, an expired or wrongly-minted key was still refused only after taking 016's hold and the session, ledger and issuer-key locks, so an owner probe on any of those rows waited on the doomed transaction (55P03) instead of running free (M7CR-11, red without the pre-check);
+     7. the audit record, where exactly one row INSERTed is required or the transaction rolls back;
+     8. the sealed completion;
+     9. COMMIT.
+   - **Races.** A revocation, logout, suspension, grant change or key rotation committed before the lock that decides it refuses the command. One attempted after it waits for the command's COMMIT. A tenant logout takes the session row only: the mint ledger has no foreign key and never cascades. This is ADR-31's establish order (standing, then session), so no lock cycle with a login or a logout was found.
+   - **The mutator's answers.** It answers `applied` only for exactly one row whose `o_tenant_id`, `o_actor_id` and `o_membership_id` equal the context's tenant, actor and `membershipId`. No row is `refused`, and anything else is `mismatch`; both roll back. It never answers `conflict`, whose sealed 409 would commit.
+   - **Raises.** A duplicate id (23505), a name 017's CHECK refuses (23514), an INSERT that wrote no row (`no_data_found`, decision 6), a malformed argument (22023) and an isolation other than READ COMMITTED (55000) raise and roll back. The kernel refuses savepoints, so the transaction cannot record a completion after a raise.
+   - **Refusals.** Every refusal inside the transaction writes no customer, audit record, outbox event or completion, and answers 503 (DA-70's rule). The lease was acquired in its own earlier transaction, and it stays until it expires; it is not reported as rolled back.
+   - **A lost commit acknowledgement** is an unknown outcome, also a 503, and never reported as a rollback. The app's command-port deadline answers first (reason `transaction_timeout`), before the store's outcome-unknown rejection. The lease is not released. A retry under the same key resolves through the retained idempotency record: it replays the sealed 201 if the commit landed. If it did not, the retry gets 409 until the lease expires, then reclaims the record and plans a fresh id.
+   - **Success.** The 201 goes out only after COMMIT is acknowledged.
+6. **Migration 019 (`019_m7a_customer_create`).** Its own schema, `tmpos_customer_write`, holds one routine: `m7a_customer_create(p_session_key text, p_customer_id uuid, p_name text)`. It is `VOLATILE SECURITY DEFINER`, with its search path pinned to `pg_catalog, pg_temp` and `row_security = off`. It returns one row `(o_tenant_id, o_actor_id, o_membership_id)` or no row. 019 creates no table, role, trigger or type, and changes nothing 001–018 created, their ACLs included.
+   - **Authority.** The session key is the only authority argument. The routine derives everything as 018's read does:
+     - a tenant session with a mint-ledger row, live on the database clock with the ledger's own expiry, minted under the issuer key installed now;
+     - 016's answer `resolved`, with the minted standing digest;
+     - exactly one tenant-scope grant.
+   - **Write allow-list.** The account status and the grant's tenant status must be `active` or `trialing`. That is narrower than the read, which also admits `overdue` and `read_only`.
+   - **Role set.** The role must be `store_owner`, `manager` or `sales_staff`. This is the catalog's Customers ≥ Create restated in SQL for the four durable roles migration 003 admits. A parity test pins it for every `TENANT_ROLE_IDS` entry, from the installed source and by behaviour (`tests/db/customerCreateRoutine.integration.test.mjs` M7CR-06). When a custom role becomes durable (doc 08 DA-85), the set must be replaced, not extended by hand.
+   - **A written row.** After its INSERT the routine refuses when no row was written: it raises `no_data_found` (fixed text), so the transaction rolls back and the client gets 503. Without it, an owner-installed BEFORE INSERT trigger on `tmpos_customer.customer` that returns NULL would let the command commit its audit record and completion, and answer 201, with no customer. Only the table's owner can install such a trigger; `tmpos_app` cannot.
+   - **Bounded inputs.** The key has 011's shape, the id is a version-4 UUID, and the name is 1–200 characters. The character rules are 017's CHECK, judged at the INSERT. Constraint errors are raised again with fixed text, so no name or id reaches a DETAIL line.
+   - **Privileges.** EXECUTE is revoked from `PUBLIC`, `anon` and `authenticated` and granted to `tmpos_app` alone, with USAGE on the schema. `tmpos_app` still holds no privilege on the customer table.
+   - **Preconditions.** 018 and `tmpos_app` exist and the schema does not. The applier can execute 016's hold and v2 read. The applier owns, or inherits the owner of, the session table, the mint ledger, the issuer key and the customer table, none with forced row security, and holds each privilege the routine uses on them.
+   - **Postconditions (a)–(j)**, in 017's and 018's form:
+     - the schema holds exactly the routine, with the attributes above;
+     - no grant exists beyond the owner's and a non-grantable EXECUTE and USAGE to `tmpos_app`;
+     - `tmpos_audit_writer`, `anon` and `authenticated` cannot execute the routine by any path (`PUBLIC`, an inherited role, or `SET ROLE`);
+     - no runtime role is a member of an owner of the schema, the routine or those four tables;
+     - no runtime role, nor any role it is a member of, holds a privilege on those four tables; no column grant exists on them; each still has row security enabled and not forced;
+     - 017's and 018's surfaces hold, by count and exact signature;
+     - membership closure: `tmpos_app` and `tmpos_audit_writer` are members of nothing, and `anon` and `authenticated` reach neither.
+   - **Rollback.** The down file drops only the routine and the schema. It does not refuse while customers exist, because they are 017's rows and stay readable. It has two costs:
+     - every POST then answers 503;
+     - both entries refuse to restart (`role_privilege_missing`) until the code rolls back too.
+
+     Roll 019 back before 016–018. The database does not enforce that order: a PL/pgSQL body records no dependency.
+7. **Audit.** The store appends one `audit_event` row in the same transaction, through the existing writer, under 005's context-independent append policy (`tmpos_audit_writer_append`):
+   - action `tenant.customer.create`;
+   - required permission `create_customers`;
+   - scope `tenant`, `tenant_id` the context's tenant, no store;
+   - actor the context's app-owned actor;
+   - `request_id` the command's server-generated correlation id;
+   - reason `command_committed`;
+   - metadata `{}`.
+
+   It records neither the name nor the customer id, and `subject_tenant_id` stays null (it names tenant aggregates only). The row therefore does not name the created customer (doc 08 DA-111). Its tenant and actor are proven equal to the revalidated context in TypeScript and to 019's derived identity by the mutator. No database rule ties the row to the session (DA-114). The request log never carries the name.
+8. **No outbox event.** No approved customer event contract exists, and none is invented: `events: []`. The tenant root composes no delivery port.
+9. **The name rule for new writes.** `normalizeCustomerName` applies these steps in order:
+   - It trims the edges. ES `trim` strips exactly the 25 edge code points 017's CHECK refuses at an edge, which a sweep of every code point pins.
+   - It refuses C0 controls (NUL included), DEL, C1 controls, U+2028, U+2029, lone surrogates and Bidi_Control, written as `\u` escapes and never as raw characters.
+   - It refuses a length outside 1–200 scalars.
+   - It refuses a name with no scalar outside White_Space, Default_Ignorable_Code_Point, Cf, M and U+2800. Private-use and unassigned scalars count as visible, a recorded product choice.
+
+   So the runtime is at least as strict as the column's CHECK, and the database never refuses a name the runtime admits. Internal whitespace is kept, with no case folding or normalization.
+
+   DA-92 is thereby dispositioned for new customer writes. Existing customer names are never rewritten, 017's CHECK stays the database's floor, and 009's display-name rule is unchanged.
+
+   The name travels in the command's change set. Command change schemas alone get a 400-UTF-16-unit string cap (`MAX_CHANGE_STRING_FIELD_LENGTH`), so a 200-scalar astral name fits. Event payloads and envelopes keep `MAX_STRING_FIELD_LENGTH` (256), and every record keeps its 4,096-byte bound.
+10. **Startup and readiness of the tenant entry** (ADR-33 decision 8, amended above).
+    - **Keys and mutators.** `IDEMPOTENCY_KEY` is required, and its refusal codes are in the ADR-33 amendment. The write slot requires every command route to commit through exactly one mutator of its contract's kind, mode and aggregate type (`command_mutator_unavailable`).
+    - **What `createApp` is handed.** The tenant store's `idempotency` and `transactions`, and no `events`.
+    - **Readiness.** It adds exactly the two probes `createApp` adds: `idempotency_store` and `command_transactions`, both 006's `m6_store_probe`. There is no 019 readiness probe. The login's EXECUTE on the routine is proven at every start by `APPROVED_ROLE_GRANTS` (`role_privilege_missing`). `/health` is unchanged.
+    - **The administrative entry** is unchanged: its inventory, audience, configuration and artifact.
+
+**Alternatives not taken.**
+- (a) *A sealed 409 for a duplicate id.* The routine's raise aborts the transaction, and the kernel refuses a savepoint, so no completion can be written after it. A duplicate id is a 503, and a retry plans a fresh id.
+- (b) *A tenant-scope `perform`.* It runs outside the store transaction, so nothing re-proves the tenant where the write commits, and it keeps the crash window.
+- (c) *A routine taking tenant, actor or membership arguments.* ADR-33 decision 6 forbids granting `tmpos_app` a routine over an authority tuple the role can build.
+- (d) *A direct INSERT grant to `tmpos_app`, confined by 005's row policies.* Their context is self-set (DA-29).
+- (e) *A readiness probe that calls 019.* It would need a key, and the grant is already proven at startup.
+- (f) *An id chosen by the database.* The 201, id included, is sealed into the completion before COMMIT, so the id must exist when the plan is made. The runtime generates it, and a `tmpos_app` holder can choose one (DA-115).
+- (g) *The customer id or name in the audit metadata.* The writer's metadata allow-list has no such key. Widening the shared audit shape is later work (DA-111).
+
+**Consequences.**
+- G-IAM, G-PERSIST, G-AUDIT, G-IDEMPOT, G-DBROLE, G-MIGRATE, G-CPLOGIN, G-STATUS and G-ISOLATION stay OPEN.
+  - Creation is repository code, served only by the compiled tenant entry, which is not deployed.
+  - A role an owner narrowed in the client is not honoured server-side, and can now create (DA-85).
+  - There is no PII classification, retention rule, DSAR behaviour or cutover from client memory, and the shop app still keeps its customers in the browser.
+- **Residuals.** Every write below is made with no audit record, no idempotency record, no idle timeout and no name rule beyond 017's CHECK:
+  - A holder of `tmpos_app` plus a live minted session key creates customers in that session's tenant, with ids it chooses, until expiry, logout, revocation or a standing change (DA-97, DA-115).
+  - A reader of `tmpos_mint.issuer_key` who also holds `tmpos_app` can mint a session for any principal, and so create customers in any tenant where some principal holds a Create-capable grant (DA-94, DA-97).
+  - The tenant process holds the role and the issuer key together, so its compromise now also writes (DA-93).
+- **Further residuals.**
+  - The customer primary key is global, so a `tmpos_app` holder with a live Create-capable key learns from 23505 whether an id it chooses exists in any tenant (DA-115).
+  - A `tmpos_app` holder can keep its transaction open after the routine's locks, with no time limit, and so delay that principal's logins, commands, standing and grant changes, 010's status command on its tenants, updates of its tenants and stores, touches, logout and revocation of the held session (not of its other sessions), every key rotation and, once the held ledger row is a day past its expiry, every tenant login (DA-115; the account, tenant and store delays DA-82 already allows).
+  - Audit provenance is TypeScript-only (DA-114), and the audit row does not name the customer (DA-111).
+  - Every tenant instance must hold one `IDEMPOTENCY_KEY`, and nothing checks it (DA-112).
+  - READ COMMITTED is a deployment condition (DA-113).
+  - The 019 rollback has the costs in decision 6 (DA-116).
+- **Unchanged and still open:** DA-95 (administrative minting), DA-83 (contained, not closed), DA-86 and DA-88, customer import, rename and delete, a store-scope customer route, the real tenant-host edge (DA-107) and managed migrations (D4).
+- The driver's type-fetch rejection that failed M6R-PERF is recorded, not fixed (DA-110).
+- **Evidence.** It is disposable PostgreSQL and local sockets only:
+  - `tests/db/customerCreate.integration.test.mjs` (M7CC-01 to M7CC-10), end to end over real loopback HTTP through the production tenant entry: creation in the session's own tenant and isolation (01); no tenant session or not the tenant host (02); authority and standing (03); races decided inside the command transaction (04); the `Idempotency-Key` (05); two instances with one `IDEMPOTENCY_KEY` (06); the request's bounded refusals and the limiter (07); failure atomicity, the 019 refusal and the lost COMMIT answer (08); the runtime login itself (09); and logs (10);
+  - `tests/db/tenantEntry.integration.test.mjs`: the route table (M7TE-01), the POST removed from the bounded-404 list while PUT, PATCH and DELETE on its path stay 404 (M7TE-04), the `IDEMPOTENCY_KEY` refusals (M7TE-07), 019's EXECUTE withdrawn refusing startup (M7TE-08), the store probe withdrawn failing readiness (M7TE-11), the compiled tenant entry creating one customer with the administrative inventory still eight routes (M7TE-C1), and no key in the logs (M7TE-13);
+  - `tests/db/customerCreateRoutine.integration.test.mjs` (M7CR-01 to M7CR-11; M7CR-09, M7CR-10 and M7CR-11 were added after review — the BEFORE INSERT trigger case, the mint-ledger lock and the unlocked pre-check, all decision 5, step 6);
+  - the unit suites of the route, mutator, store, revalidator, kernel and entry.
+
+  001–018 are byte-identical to the entry commit. Code-only: nothing is deployed, and no managed database was touched.
 
 ---
 
