@@ -40,6 +40,8 @@ const CONFIGURED = { ...TOPOLOGY, ...LIMITS_CONFIG, FIREBASE_ADMIN_SERVICE_ACCOU
 // With no durable bundle (or none carrying the limiter's binding, or no valid key) the limiter slot is null, named
 // before the session adapters.
 const LIMITER = 'rate_limit_store_unavailable';
+/** The owner's durable role edits (M7A-CUSTOMERS-P3-R1): none stored. The tenant authorizer is built only over this read. */
+const ROLE_LEVELS = async (): Promise<unknown> => ({});
 const ADAPTER_BLOCKERS = [
   'tenant_session_store_unavailable', 'tenant_admission_unavailable', 'tenant_authorizer_unavailable',
   'admin_session_store_unavailable', 'admin_admission_unavailable', 'admin_authorizer_unavailable',
@@ -162,18 +164,23 @@ test('the durable bundle fills the tenant slots and ONE store for both boundarie
   };
   // Without the platform admission the bundle removes the three tenant blockers AND the admin store's: one store
   // serves both boundaries (DA-37). The admin boundary's admission and authorizer stay named, both of them.
-  assert.deepEqual(blockersWith({ store, tenantAdmission }),
+  assert.deepEqual(blockersWith({ store, tenantAdmission, roleLevels: ROLE_LEVELS }),
     [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
+  // M7A-CUSTOMERS-P3-R1: without the role-levels read no tenant authorizer is built — it could decide a role only on
+  // defaults an owner may have narrowed — and the tenant boundary names it.
+  assert.deepEqual(blockersWith({ store, tenantAdmission }),
+    [LIMITER, 'tenant_authorizer_unavailable', 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
+  assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, roleLevels: 'levels' as never }), TypeError, 'a read that is not one');
   // M5-GIAM-D1-P4: the platform admission the transaction root builds (migration 013) fills BOTH admin slots, and
   // what remains is exactly the limiter — this bundle carries no binding (M6-RATE-P2; the bundle that does composes,
   // M6R-S01 below).
-  assert.deepEqual(blockersWith({ store, tenantAdmission, platformAdmission: platformPort() }), [LIMITER]);
+  assert.deepEqual(blockersWith({ store, tenantAdmission, roleLevels: ROLE_LEVELS, platformAdmission: platformPort() }), [LIMITER]);
   // The removed P1 slot is no way in: an authorizer handed over on its own fills nothing, whatever it answers.
-  assert.deepEqual(blockersWith({ store, tenantAdmission, adminAuthorizer: { authorize: () => true } } as never),
+  assert.deepEqual(blockersWith({ store, tenantAdmission, roleLevels: ROLE_LEVELS, adminAuthorizer: { authorize: () => true } } as never),
     [LIMITER, 'admin_admission_unavailable', 'admin_authorizer_unavailable']);
   // A malformed bundle is refused when the adapters are built, not at the first request: the tenant ones ...
   assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission: {} as never }), TypeError);
-  assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, tenantReads: ['GET /x'] as never }), TypeError);
+  assert.throws(() => composeProductionSessions(CONFIGURED, { store, tenantAdmission, roleLevels: ROLE_LEVELS, tenantReads: ['GET /x'] as never }), TypeError);
   // ... and a platform admission that is not a whole port — admit AND probe — never becomes a boundary.
   const admit = () => ({ outcome: 'refused' });
   const probe = () => true;
@@ -186,11 +193,14 @@ test('the durable bundle fills the tenant slots and ONE store for both boundarie
 test('durableSessionAdapters fills the admin admission and authorizer only together, from the platform admission, and no limiter without a binding and a key', async () => {
   const store = createMemorySessionStore();
   const tenantAdmission = { admit: () => ({ outcome: 'refused' }), probe: () => true };
-  const without = durableSessionAdapters({ store, tenantAdmission });
+  const without = durableSessionAdapters({ store, tenantAdmission, roleLevels: ROLE_LEVELS });
   assert.deepEqual({ admission: without.admission.admin, authorizer: without.authorizer.admin, limiter: without.limiter },
     { admission: null, authorizer: null, limiter: null }, 'no platform admission: neither admin slot, and no limiter binding: no limiter');
+  // M7A-CUSTOMERS-P3-R1: no role-levels read (the administrative entry's bundle), no tenant authorizer; the admission stays.
+  const noLevels = durableSessionAdapters({ store, tenantAdmission });
+  assert.ok(noLevels.admission.tenant !== null && noLevels.authorizer.tenant === null, 'the tenant authorizer only over the role-levels read');
   const port = platformPort();
-  const adapters = durableSessionAdapters({ store, tenantAdmission, platformAdmission: port });
+  const adapters = durableSessionAdapters({ store, tenantAdmission, roleLevels: ROLE_LEVELS, platformAdmission: port });
   for (const table of [without, adapters]) {
     assert.equal(table.store.tenant, store, 'the one store ...');
     assert.equal(table.store.admin, store, '... serves both boundaries');
@@ -358,7 +368,7 @@ function limiterBinding(): { rateLimiter: (keySecret: Uint8Array) => ReturnType<
 test('M6R-S01 a bundle carrying the limiter binding composes: the limits hold exactly its limiter, bound once to the parsed RATE_LIMIT_KEY', () => {
   const store = createMemorySessionStore();
   const { rateLimiter, calls, limiter } = limiterBinding();
-  const { sessions, limits } = composeProductionSessions(CONFIGURED, { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter });
+  const { sessions, limits } = composeProductionSessions(CONFIGURED, { store, tenantAdmission: TENANT_ADMISSION, roleLevels: ROLE_LEVELS, platformAdmission: platformPort(), rateLimiter });
   assert.deepEqual(Object.keys(sessions).sort(), ['admin', 'tenant'], 'both boundaries: no blocker remains');
   assert.equal(limits.limiter, limiter, 'exactly the limiter the binding returned: no wrapper, no fallback');
   assert.equal(calls.length, 1, 'the binding is called exactly once');
@@ -372,7 +382,7 @@ test('M6R-S02 a missing or malformed RATE_LIMIT_KEY never reaches the binding, a
   const store = createMemorySessionStore();
   const blockersWith = (key: string | undefined, rateLimiter: unknown): readonly string[] => {
     try {
-      composeProductionSessions({ ...CONFIGURED, RATE_LIMIT_KEY: key }, { store, tenantAdmission: TENANT_ADMISSION, platformAdmission: platformPort(), rateLimiter: rateLimiter as never });
+      composeProductionSessions({ ...CONFIGURED, RATE_LIMIT_KEY: key }, { store, tenantAdmission: TENANT_ADMISSION, roleLevels: ROLE_LEVELS, platformAdmission: platformPort(), rateLimiter: rateLimiter as never });
     } catch (err) {
       if (err instanceof ProductionCompositionError) return err.blockers;
       throw err;
@@ -541,7 +551,7 @@ test('M6E-S06 options.audiences: [\'tenant\'] still requires SESSION_ADMIN_ORIGI
   const { rateLimiter } = limiterBinding();
   const { sessions } = composeProductionSessions(
     { ...CONFIGURED },
-    { store: createMemorySessionStore(), tenantAdmission: TENANT_ADMISSION, rateLimiter, tenantReads: new Set(['GET /api/v1/customers']) },
+    { store: createMemorySessionStore(), tenantAdmission: TENANT_ADMISSION, roleLevels: ROLE_LEVELS, rateLimiter, tenantReads: new Set(['GET /api/v1/customers']) },
     { audiences: ['tenant'] },
   );
   assert.deepEqual(Object.keys(sessions), ['tenant']);

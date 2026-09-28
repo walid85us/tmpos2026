@@ -26,6 +26,13 @@
 // the refused call's transaction stays open, the ledger row, the issuer key row and the principal's account row are all
 // free (M7CR-11).
 //
+// THE CHAIN THROUGH 019 (M7A-CUSTOMERS-P3-R1). Migration 020 revokes the login's EXECUTE on 019's create routine (and on
+// 018's page_v2), so this file — 019's own behaviour — applies 001-019 only: the migration file port the trusted executor
+// reads hides every later file (tests/db/migrationsThrough.mjs). On a shared service where a later migration is already
+// applied, that migration's own down file rolls it back first (with its ledger row), and it is re-applied, with its exact
+// ledger row, when this file ends; so M7CR-07's rollback of 019 never runs under an applied 020. 020's replacement routines
+// are proved by tests/db/tenantRoleLevelRoutine.integration.test.mjs.
+//
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a
 // cluster this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every
 // fixture is synthetic and randomly suffixed, and every issuer key is random bytes made here. It leaves the shared service
@@ -38,6 +45,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { installTestIssuerKey, resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
+import { portThrough, rollBackAbove } from './migrationsThrough.mjs';
 import { materializeTenantPermissions, meetsTenantPermissionLevel } from '../../server/platform-identity/permissionCatalog.ts';
 import { TENANT_ROLE_IDS } from '../../server/platform-identity/authorizationConstants.ts';
 import { principalKeyOf } from '../../server/runtime/sessions.ts';
@@ -105,6 +113,8 @@ const TENANTS = [];
 const KEYS = new Set();
 /** The issuer key row this suite found (undefined until read, then the bytes or null), restored at the end. */
 let keyBeforeSuite;
+/** The later migrations (020) this file rolled back to run on 001-019, re-applied at the end. */
+let later = null;
 
 test.after(async () => {
   const quietly = async (fn) => { try { await fn(); } catch { /* an earlier failure left less to clean */ } };
@@ -117,6 +127,8 @@ test.after(async () => {
   if (KEYS.size > 0) await quietly(() => owner`delete from tmpos_mint.tenant_session where session_key = any(${[...KEYS]}::text[])`);
   if (UIDS.length > 0) await owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`;
   if (TENANTS.length > 0) await owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`;
+  // The shared service is left with the later migrations it had (020), each with its exact ledger row.
+  if (later !== null) await later.restore();
   if (keyBeforeSuite !== undefined) {
     await quietly(async () => {
       await owner`delete from tmpos_mint.issuer_key`;
@@ -142,12 +154,13 @@ end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
 
+later = await rollBackAbove(owner, MIG_DIR, '019');
 let applyReport;
 {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     applyReport = await runTrustedApply({
-      fsPort: createNodeFsPort(MIG_DIR, MIG_REL), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
+      fsPort: portThrough(createNodeFsPort(MIG_DIR, MIG_REL), '019'), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
       credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 180_000,
     });
   } finally {

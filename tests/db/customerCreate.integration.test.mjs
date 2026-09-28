@@ -2,6 +2,12 @@
 // creating customers over REAL loopback HTTP and a disposable PostgreSQL holding migrations 001-019, composed exactly as
 // server/entry/tenantMain.ts composes it but for its construction.
 //
+// M7A-CUSTOMERS-P3-R1 UPDATE. The chain is now 001-020 and the create is 020's tmpos_role.m7a_customer_create — 019's body
+// with its built-in role allow-list replaced by the role's effective Customers level (an owner's durable edit, else the
+// catalog default) — so every "019" below names the create's behaviour 020 keeps; no role level is edited in this file, so
+// every role decides at its default and the pinned outcomes are unchanged. M7CC-09's direct calls go to 020's routine and
+// 019's is refused to the login. An owner's edit reaching this route is tests/db/roleLevels.integration.test.mjs's.
+//
 // WHAT IS SUBSTITUTED, STATED EXACTLY — the three things tests/db/tenantEntry.integration.test.mjs substitutes, none of them
 // on the path under test: the database client (a supervised kernel over the cluster as a non-owner least-privilege runtime
 // LOGIN, tmpos_m7cc_probe, holding tmpos_app and tmpos_audit_writer and nothing else, through a byte relay that can also
@@ -274,7 +280,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: 001-019, the runtime login, the three keys, and the owner's proof schema
+// setup: 001-020, the runtime login, the three keys, and the owner's proof schema
 // ---------------------------------------------------------------------------
 
 await setupStep(async () => {
@@ -1317,10 +1323,12 @@ test('M7CC-08: an audit INSERT that raises or writes no row, a 019 refusal, and 
 // M7CC-09: the runtime login itself
 // ===========================================================================
 
-test('M7CC-09: as the runtime login, no direct write reaches the customer table (42501); a technician\'s live key creates nothing; another tenant\'s key creates only in its own tenant — the routine takes no tenant argument', async () => {
+// M7A-CUSTOMERS-P3-R1: the routine the login can call is 020's tmpos_role.m7a_customer_create (019's decided on the role's
+// name alone and is revoked from the login, with its schema's USAGE); the direct calls below go to it, and 019's is refused.
+test('M7CC-09: as the runtime login, no direct write reaches the customer table (42501) and 019\'s create is closed (42501); a technician\'s live key creates nothing; another tenant\'s key creates only in its own tenant — the routine takes no tenant argument', async () => {
   const tech = await actor('m7cc09-tech', [tenantGrant(T_A, 'technician')]);
   const bManager = await actor('m7cc09-b', [tenantGrant(T_B, 'manager')]);
-  const [{ args }] = await owner`select pg_catalog.pg_get_function_identity_arguments('tmpos_customer_write.m7a_customer_create(text, uuid, text)'::regprocedure) as args`;
+  const [{ args }] = await owner`select pg_catalog.pg_get_function_identity_arguments('tmpos_role.m7a_customer_create(text, uuid, text)'::regprocedure) as args`;
   assert.equal(args, 'p_session_key text, p_customer_id uuid, p_name text', 'the session key is the only authority argument');
   await withEntry({}, async (ctx) => {
     const techSession = await signIn(ctx, tech);
@@ -1335,14 +1343,17 @@ test('M7CC-09: as the runtime login, no direct write reaches the customer table 
         ['DELETE', runtime`delete from tmpos_customer.customer where tenant_id = ${T_A}`],
         ['TRUNCATE', runtime`truncate tmpos_customer.customer`],
       ]) assert.equal(await codeOf(query), '42501', `${label} on the customer table`);
-      const none = await runtime`select * from tmpos_customer_write.m7a_customer_create(${techSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`;
+      // 019's routine, with a live key it would once have honoured (B's manager): permission denied, nothing written.
+      assert.equal(await codeOf(runtime`select * from tmpos_customer_write.m7a_customer_create(${bSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`),
+        '42501', '019\'s create is closed to the runtime login');
+      const none = await runtime`select * from tmpos_role.m7a_customer_create(${techSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`;
       assert.equal(none.length, 0, 'a technician\'s live key: no row');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'nothing written');
 
       // B's live key, called by the login directly: there is no tenant to name, so the one row lands in B, never in A.
       const [{ n: inA }] = await owner`select count(*)::int as n from tmpos_customer.customer where tenant_id = ${T_A}`;
       const id = randomUUID();
-      const made = await runtime`select * from tmpos_customer_write.m7a_customer_create(${bSession.key}::text, ${id}::uuid, ${name}::text)`;
+      const made = await runtime`select * from tmpos_role.m7a_customer_create(${bSession.key}::text, ${id}::uuid, ${name}::text)`;
       const [{ membership_id: grant }] = await owner`select membership_id from user_membership where internal_user_id = ${bManager.id}`;
       assert.deepEqual(made.map((r) => ({ ...r })), [{ o_tenant_id: T_B, o_actor_id: bManager.id, o_membership_id: grant }],
         'the key\'s own tenant, actor and grant');

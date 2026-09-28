@@ -210,19 +210,29 @@ const PINNED = {
   // and still refuses.
   '019_m7a_customer_create.up.sql': '1d260ca4cc98fe3ee6df18403da16db4a21712c064d3c911b195980a0496e0e2',
   '019_m7a_customer_create.down.sql': '83e66b3fbe51f3b5ae3939db7ee9df1bfa176ea4addbacc10737f0b87189e5bb',
+  // Phase 4.0 M7A-CUSTOMERS-P3-R1 — owner-edited tenant role levels, in its OWN schema tmpos_role: one table of an owner's
+  // durable Customers level per tenant and editable built-in role (manager, technician, sales_staff; the runtime role holds
+  // no privilege on it), the levels read every tenant route decision makes, the owner's session-bound edit, and successors
+  // of 019's create and 018's page_v2 that decide the grant's role on its CURRENT Customers level under a lock on that
+  // role's row. It revokes tmpos_app's EXECUTE on 019's create and 018's page_v2 and USAGE on tmpos_customer_write: those
+  // ACL changes are its only effect on earlier objects, and migrations 001-019 are untouched, byte for byte. Proved against
+  // disposable PostgreSQL only; applied to no managed, persistent or application database. D4 now names the contiguous
+  // chain through 020; the exact-[005] gate is unchanged and still refuses.
+  '020_m7a_tenant_role_levels.up.sql': '0a289ad4dcefdb4a5a260aed7a2121d93e23c5efe4f3550eb9fdc39094d9acfe',
+  '020_m7a_tenant_role_levels.down.sql': '182718aaf001567531ed9b3737e1cd723e040c4d9305f76a60e9c1c99f8185fc',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the thirty-eight expected files', () => {
+test('the migrations directory holds exactly the forty expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

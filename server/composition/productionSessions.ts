@@ -61,6 +61,7 @@ import type { SessionAdmission, SessionBoundaryDeps, SessionDeps, SessionStore }
 import type { PlatformAdmissionPort, TenantAdmissionPort } from '../runtime/principals.js';
 import { createAdmittedPlatformAuthorizer, createPlatformSessionAdmission } from './platformAuthorization.js';
 import { createTenantRouteAuthorizer, createTenantSessionAdmission } from './tenantAuthorization.js';
+import type { TenantRoleLevelsRead } from './tenantAuthorization.js';
 
 export type CompositionBlocker =
   | 'session_origins_missing'
@@ -167,6 +168,13 @@ export interface DurableSessionAdapters {
    */
   readonly tenantReads?: ReadonlySet<string>;
   /**
+   * The owner's durable role edits over that same kernel (M7A-CUSTOMERS-P3-R1, migration 020): the tenant route authorizer
+   * decides every tenant route permission on the selected role's current definition, so it is built only over this read.
+   * Absent — the administrative entry, which composes no tenant boundary — the tenant authorizer slot stays null and a
+   * composition of the tenant boundary names it.
+   */
+  readonly roleLevels?: TenantRoleLevelsRead;
+  /**
    * The distributed rate limiter over that same kernel (migration 014, M6-RATE-P2), awaiting its key: called
    * with RATE_LIMIT_KEY's bytes, it answers the limiter bound to that key's fingerprint. This root calls it
    * with the key it parsed itself and nothing else. Absent, the limiter slot stays null and is named.
@@ -197,7 +205,8 @@ export function durableSessionAdapters(
       admin: platform === undefined ? null : createPlatformSessionAdmission({ admission: platform }),
     }),
     authorizer: Object.freeze({
-      tenant: createTenantRouteAuthorizer({ admission: durable.tenantAdmission, reads: durable.tenantReads }),
+      tenant: durable.roleLevels === undefined
+        ? null : createTenantRouteAuthorizer({ admission: durable.tenantAdmission, reads: durable.tenantReads, levels: durable.roleLevels }),
       admin: platform === undefined ? null : createAdmittedPlatformAuthorizer(),
     }),
     limiter,

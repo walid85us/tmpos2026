@@ -316,7 +316,10 @@ async function compose(label, relay = null) {
   const limits = testRequestLimits();
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: limits.trustedProxies, keySecret: limits.keySecret,
-    ...durableSessionAdapters({ store: tenantStore, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS }),
+    // The tenant route authorizer over the tenant root's own durable role-level read (migration 020, M7A-CUSTOMERS-P3-R1).
+    ...durableSessionAdapters({
+      store: tenantStore, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS, roleLevels: ttx.roleLevels,
+    }),
     // Each audience on its own root's store: the tenant root's mints under the issuer key, the administrative root's never does.
     store: Object.freeze({ tenant: tenantStore, admin: gated(tx.sessionStore) }),
     limiter: limits.limiter,

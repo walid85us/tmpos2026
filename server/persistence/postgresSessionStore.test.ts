@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import {
-  createPostgresSessionStore, holdAdministrativeSession, holdTenantSession, persistedAuditMetadata, probeIssuerKey, probeSessionMint, readTenantSession,
+  authenticationFresh, createPostgresSessionStore, holdAdministrativeSession, holdTenantSession, persistedAuditMetadata, probeIssuerKey, probeSessionMint, readTenantSession,
   SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS, tenantMintProof,
 } from './postgresSessionStore.js';
 import type { SessionStandingCheck } from './postgresSessionStore.js';
@@ -807,4 +807,27 @@ test('M7M-S6 probeSessionMint calls 018\'s mint with every argument null and is 
   const aborted = fakeClient([{ outcome: 'invalid' }]);
   assert.equal(await probeSessionMint(aborted, controller.signal), false);
   assert.deepEqual(aborted.statements, [], 'an aborted probe sends nothing');
+});
+
+// --- M7A-CUSTOMERS-P3-R1: the recent-authentication deadline on the database's clock ------------------------------------
+
+test('authenticationFresh asks the database\'s clock once, with the deadline bound, and any doubt is a throw — never false', async () => {
+  const sent: Array<[string, unknown[]]> = [];
+  const handle = (answer: unknown) => (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    sent.push([strings.join('?'), values]);
+    return answer;
+  }) as unknown as PgTransactionScope;
+  assert.equal(await authenticationFresh(handle([{ fresh: true }]), 1_700_000_000_000), true);
+  assert.equal(await authenticationFresh(handle([{ fresh: false }]), 1_700_000_000_000), false);
+  assert.match(sent[0][0], /^select \(pg_catalog\.clock_timestamp\(\) <=\s+pg_catalog\.to_timestamp\(\?::bigint \/ 1000\.0\)\) as fresh$/,
+    'the administrative revalidation\'s own statement (postgresPrincipalResolver.ts)');
+  assert.deepEqual(sent[0][1], ['1700000000000'], 'the deadline, bound as text for the bigint cast');
+  for (const answer of [[], [{ fresh: null }], [{ fresh: 'true' }], [{ fresh: true, extra: 1 }], [{ fresh: true }, { fresh: true }]]) {
+    await assert.rejects(authenticationFresh(handle(answer), 1_700_000_000_000), /session store unavailable/, JSON.stringify(answer));
+  }
+  const before = sent.length;
+  for (const deadline of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, '1700000000000']) {
+    await assert.rejects(authenticationFresh(handle([{ fresh: true }]), deadline as never), /session store unavailable/, String(deadline));
+  }
+  assert.equal(sent.length, before, 'a malformed deadline sends nothing');
 });

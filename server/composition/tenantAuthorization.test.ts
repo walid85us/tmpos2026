@@ -63,13 +63,15 @@ function stub(answer: unknown, fault?: Error): TenantAdmissionPort & { calls: nu
 }
 
 const live = (): AbortSignal => new AbortController().signal;
+/** No owner edit stored: every role at its catalog default (M7A-CUSTOMERS-P3-R1). */
+const NO_EDITS = async (): Promise<unknown> => ({});
 /**
  * Both ports declare their methods as answering `unknown` — a port never promises a shape — so each
  * call is adapted once, here, rather than cast at every assertion.
  */
 const answered = (value: unknown): Promise<unknown> => Promise.resolve(value);
 const authorize = (port: TenantAdmissionPort, requirement = TENANT_REQUIREMENT, reads?: ReadonlySet<string>): Promise<unknown> =>
-  answered(createTenantRouteAuthorizer({ admission: port, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, ROUTE, live(), null));
+  answered(createTenantRouteAuthorizer({ admission: port, levels: NO_EDITS, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, ROUTE, live(), null));
 
 // --- admission ----------------------------------------------------------------------------------
 
@@ -132,15 +134,15 @@ test('dependencies that are not an admission port are refused at construction, n
   // An object whose `has` answers true for anything would otherwise classify every write as a read.
   const everything = { has: () => true, size: 0 };
   for (const reads of [[readKey('GET', '/api/v1/probe')], 'GET /api/v1/probe', {}, null, everything, new Set([1]), new Map([['GET /api/v1/probe', true]])]) {
-    assert.throws(() => createTenantRouteAuthorizer({ admission: port, reads: reads as never }), TypeError, String(reads));
+    assert.throws(() => createTenantRouteAuthorizer({ admission: port, levels: NO_EDITS, reads: reads as never }), TypeError, String(reads));
   }
-  assert.ok(createTenantRouteAuthorizer({ admission: port, reads: new Set<string>() }), 'an empty set is the closed default, and valid');
+  assert.ok(createTenantRouteAuthorizer({ admission: port, levels: NO_EDITS, reads: new Set<string>() }), 'an empty set is the closed default, and valid');
 });
 
 test('the read classification is copied at construction, so mutating the caller\'s set later widens nothing', async () => {
   const readOnly = stub(admitted([grant({ tenantStatus: 'read_only' })]));
   const shared = new Set<string>();
-  const authorizer = createTenantRouteAuthorizer({ admission: readOnly, reads: shared });
+  const authorizer = createTenantRouteAuthorizer({ admission: readOnly, levels: NO_EDITS, reads: shared });
   shared.add(readKey(ROUTE.method, ROUTE.path));
   assert.equal(await answered(authorizer.authorize(PRINCIPAL, TENANT_REQUIREMENT, ROUTE, live(), null)), false,
     'a route classified after construction is still not a read for this authorizer');
@@ -236,7 +238,7 @@ test('the read classification is the exact method and path the table registered'
 const CUSTOMERS_ROUTE: RouteView = Object.freeze({ method: 'GET', path: '/api/v1/customers', audience: 'tenant' });
 const VIEW_CUSTOMERS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'view_customers' });
 const customers = (port: TenantAdmissionPort, requirement = VIEW_CUSTOMERS, reads?: ReadonlySet<string>): Promise<unknown> =>
-  answered(createTenantRouteAuthorizer({ admission: port, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, CUSTOMERS_ROUTE, live(), null));
+  answered(createTenantRouteAuthorizer({ admission: port, levels: NO_EDITS, ...(reads === undefined ? {} : { reads }) }).authorize(PRINCIPAL, requirement, CUSTOMERS_ROUTE, live(), null));
 
 test('view_customers: one tenant grant under every built-in tenant role is granted, carrying the selected scope', async () => {
   for (const roleId of TENANT_ROLE_IDS) {
@@ -359,7 +361,7 @@ const CREATE_ROUTE: RouteView = Object.freeze({ method: 'POST', path: '/api/v1/c
 const CREATE_CUSTOMERS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'create_customers' });
 /** The POST decided as the composition decides it: the GET, and only the GET, classified as a read. */
 const create = (port: TenantAdmissionPort): Promise<unknown> => answered(createTenantRouteAuthorizer({
-  admission: port, reads: new Set([readKey('GET', '/api/v1/customers')]),
+  admission: port, levels: NO_EDITS, reads: new Set([readKey('GET', '/api/v1/customers')]),
 }).authorize(PRINCIPAL, CREATE_CUSTOMERS, CREATE_ROUTE, live(), null));
 
 test('create_customers: store_owner, manager and sales_staff are granted with the selected scope; a technician, a read-only actor, a store grant beside it and two tenant grants deny', async () => {
@@ -391,8 +393,11 @@ const SCOPE: TrustedScope = Object.freeze({
 });
 const SESSION: SessionRecord = Object.freeze({ ...RECORD, securityVersion: WITNESS });
 
-/** A revalidator over a peek, a hold, a session hold and a read answering as given, recording each step with its handle and argument. */
-function revalidator(over: { peek?: unknown; hold?: unknown; session?: unknown; read?: unknown } = {}) {
+/**
+ * A revalidator over a peek, a hold, a session hold, a read, a levels read and a clock answering as given, recording each
+ * step with its handle and argument.
+ */
+function revalidator(over: { peek?: unknown; hold?: unknown; session?: unknown; read?: unknown; levels?: unknown; fresh?: unknown } = {}) {
   const steps: Array<[string, unknown, unknown]> = [];
   const answer = (value: unknown) => (value instanceof Error ? Promise.reject(value) : Promise.resolve(value));
   const revalidate = createTenantContextRevalidator<string>({
@@ -400,6 +405,8 @@ function revalidator(over: { peek?: unknown; hold?: unknown; session?: unknown; 
     hold: async (sql, principal) => { steps.push(['hold', sql, principal]); return answer('hold' in over ? over.hold : true) as never; },
     session: async (sql, key) => { steps.push(['session', sql, key]); return answer('session' in over ? over.session : SESSION) as never; },
     read: async (sql, principal) => { steps.push(['read', sql, principal]); return answer('read' in over ? over.read : admitted([grant({ roleId: 'manager' })])); },
+    levels: async (sql, tenant, role) => { steps.push(['levels', sql, [tenant, role]]); return answer('levels' in over ? over.levels : {}); },
+    fresh: async (sql, notAfter) => { steps.push(['fresh', sql, notAfter]); return answer('fresh' in over ? over.fresh : true) as never; },
   });
   return { revalidate, steps };
 }
@@ -408,7 +415,9 @@ test('M7TR-01 the revalidator peeks, holds the standing, holds the session, THEN
   for (const roleId of ['store_owner', 'manager', 'sales_staff']) {
     const { revalidate, steps } = revalidator({ read: admitted([grant({ roleId })]) });
     assert.equal(await revalidate('tx', { ...SCOPE, roleId }, 'create_customers', null, KEY), true, roleId);
-    assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read'], `${roleId}: the ADR-31 order: the standing held before the session row`);
+    assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'levels'],
+      `${roleId}: the ADR-31 order: the standing held before the session row, and the role's current definition read last`);
+    assert.deepEqual(steps.find(([step]) => step === 'levels')?.[2], [TENANT, roleId], 'the confirmed grant\'s own tenant and role');
     assert.ok(steps.every(([, sql]) => sql === 'tx'), 'every step on the committing transaction\'s own handle');
     assert.deepEqual(steps.filter(([step]) => step === 'peek' || step === 'session').map(([, , key]) => key), [KEY, KEY], 'the presenting session\'s key');
     assert.ok(steps.filter(([step]) => step === 'hold' || step === 'read').every(([, , p]) => JSON.stringify(p) === JSON.stringify(PRINCIPAL)),
@@ -438,8 +447,18 @@ test('M7TR-02 every lost authority is false: the scope, the session, the standin
     ['a suspended tenant', { read: admitted([grant({ roleId: 'manager', tenantStatus: 'suspended' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
     ['a tenant turned read-only', { read: admitted([grant({ roleId: 'manager', tenantStatus: 'read_only' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
     ['a moved account security version', { read: movedAccount }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
-    ['a technician, whom create_customers never admits', { read: admitted([grant({ roleId: 'technician' })]) }, { ...SCOPE, roleId: 'technician' }, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
-    ['an undecidable tenant key', {}, SCOPE, 'view_shipping_costs', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a technician, whom create_customers never admits', { read: admitted([grant({ roleId: 'technician' })]) }, { ...SCOPE, roleId: 'technician' }, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['an undecidable tenant key', {}, SCOPE, 'view_shipping_costs', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    // M7A-CUSTOMERS-P3-R1: the role's CURRENT definition decides — an owner's edit that committed first is read here.
+    ['a manager the owner narrowed to Customers View', { levels: { customers: 'view' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a manager the owner narrowed to Customers None', { levels: { customers: 'none' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['edits that are not a plain object', { levels: null }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['edits naming an unknown domain', { levels: { customer: 'full' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['an edit at a non-canonical level', { levels: { customers: 'Full' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['edit_role_levels with no recent-authentication deadline', { read: admitted([grant()]) }, { ...SCOPE, roleId: 'store_owner' }, 'edit_role_levels', null, KEY, []],
+    ['edit_role_levels with a deadline that is not a positive integer', { read: admitted([grant()]) }, { ...SCOPE, roleId: 'store_owner' }, 'edit_role_levels', 0, KEY, []],
+    ['edit_role_levels past its deadline on the database clock', { read: admitted([grant()]), fresh: false }, { ...SCOPE, roleId: 'store_owner' }, 'edit_role_levels', 1_700_000_000_000, KEY, ['peek', 'hold', 'session', 'read', 'fresh']],
+    ['edit_role_levels for a manager', {}, SCOPE, 'edit_role_levels', 1_700_000_000_000, KEY, ['peek', 'hold', 'session', 'read', 'fresh', 'levels']],
   ];
   for (const [label, over, scope, permission, authNotAfter, key, expected] of cases) {
     const { revalidate, steps } = revalidator(over);
@@ -450,13 +469,119 @@ test('M7TR-02 every lost authority is false: the scope, the session, the standin
 
 test('M7TR-03 a fault is an outage — a throw, never false — and dependencies are checked at construction', async () => {
   const fault = new Error('lock timeout');
-  for (const step of ['peek', 'hold', 'session', 'read'] as const) {
+  for (const step of ['peek', 'hold', 'session', 'read', 'levels'] as const) {
     await assert.rejects(revalidator({ [step]: fault }).revalidate('tx', SCOPE, 'create_customers', null, KEY), (err: unknown) => err === fault, step);
   }
+  await assert.rejects(revalidator({ read: admitted([grant()]), fresh: fault }).revalidate('tx', { ...SCOPE, roleId: 'store_owner' }, 'edit_role_levels', 1_700_000_000_000, KEY),
+    (err: unknown) => err === fault, 'fresh');
   await assert.rejects(revalidator({ hold: 'held' }).revalidate('tx', SCOPE, 'create_customers', null, KEY), /tenant admission unavailable/, 'a hold answering no boolean');
   await assert.rejects(revalidator({ read: { outcome: 'unavailable' } }).revalidate('tx', SCOPE, 'create_customers', null, KEY), /tenant admission unavailable/);
   const ok = async () => undefined;
-  for (const deps of [undefined, {}, { hold: ok, read: ok, peek: ok }, { hold: ok, read: ok, session: ok }, { hold: ok, read: 'x', peek: ok, session: ok }]) {
+  const all = { hold: ok, read: ok, peek: ok, session: ok, levels: ok, fresh: ok };
+  for (const deps of [undefined, {}, { hold: ok, read: ok, peek: ok }, { hold: ok, read: ok, session: ok }, { ...all, read: 'x' },
+    { ...all, levels: undefined }, { ...all, fresh: undefined }, { ...all, levels: {} }]) {
     assert.throws(() => createTenantContextRevalidator(deps as never), TypeError);
   }
+  assert.doesNotThrow(() => createTenantContextRevalidator(all as never), 'every dependency present (control)');
+});
+
+// --- the role's CURRENT definition (M7A-CUSTOMERS-P3-R1) ---------------------------------------------------------------
+
+/** An authorizer over `port` whose levels read answers `levels` (or throws it), recording each (tenant, role) it was asked for. */
+function withLevels(port: TenantAdmissionPort, levels: unknown) {
+  const asked: Array<[string, string]> = [];
+  const authorizer = createTenantRouteAuthorizer({
+    admission: port, reads: new Set([readKey('GET', '/api/v1/customers')]),
+    levels: async (tenant, role, signal) => {
+      asked.push([tenant, role]);
+      assert.ok(signal instanceof AbortSignal, 'the request\'s own deadline signal');
+      if (levels instanceof Error) throw levels;
+      return levels;
+    },
+  });
+  const decide = (requirement: AuthorizationRequirement, route: RouteView = CREATE_ROUTE): Promise<unknown> =>
+    answered(authorizer.authorize(PRINCIPAL, requirement, route, live(), null));
+  return { decide, asked };
+}
+const grantedOf = (answer: unknown): boolean => (answer as { granted?: unknown }).granted === true;
+
+test('M7TL-01 the authorizer refuses to be built without the role-levels read, and reads it only for a permission the catalog decides', async () => {
+  for (const levels of [undefined, null, {}, 'levels']) {
+    assert.throws(() => createTenantRouteAuthorizer({ admission: stub(admitted([grant()])), levels } as never), TypeError, String(levels));
+  }
+  const undecided = withLevels(stub(admitted([grant({ roleId: 'manager' })])), {});
+  assert.ok(grantedOf(await undecided.decide(TENANT_REQUIREMENT, ROUTE)), 'an undecidable key (control)');
+  assert.deepEqual(undecided.asked, [], 'no read for a key decided on membership and lifecycle alone');
+  const decided = withLevels(stub(admitted([grant({ roleId: 'sales_staff' })])), {});
+  assert.ok(grantedOf(await decided.decide(CREATE_CUSTOMERS)));
+  assert.deepEqual(decided.asked, [[TENANT, 'sales_staff']], 'the selected grant\'s tenant and role, once, never the request\'s');
+});
+
+test('M7TL-02 an owner\'s edit replaces the default: narrowed below Create denies the create, below View denies the read; widened grants', async () => {
+  const cases: Array<[string, string, unknown, AuthorizationRequirement, boolean]> = [
+    ['sales_staff at its default', 'sales_staff', {}, CREATE_CUSTOMERS, true],
+    ['sales_staff narrowed to View: no create', 'sales_staff', { customers: 'view' }, CREATE_CUSTOMERS, false],
+    ['sales_staff narrowed to View: still reads', 'sales_staff', { customers: 'view' }, VIEW_CUSTOMERS, true],
+    ['sales_staff narrowed to None: no read', 'sales_staff', { customers: 'none' }, VIEW_CUSTOMERS, false],
+    ['manager narrowed to Create: still creates', 'manager', { customers: 'create' }, CREATE_CUSTOMERS, true],
+    ['manager narrowed to None: no create', 'manager', { customers: 'none' }, CREATE_CUSTOMERS, false],
+    ['technician widened to Create', 'technician', { customers: 'create' }, CREATE_CUSTOMERS, true],
+    ['technician at its default (View)', 'technician', {}, CREATE_CUSTOMERS, false],
+    ['the owner is never narrowed', 'store_owner', { customers: 'none' }, CREATE_CUSTOMERS, true],
+    ['an edit of another domain leaves Customers at its default', 'sales_staff', { sales: 'none' }, CREATE_CUSTOMERS, true],
+    ['malformed edits deny even the default', 'sales_staff', { customers: 'writer' }, CREATE_CUSTOMERS, false],
+    ['an unknown domain denies', 'sales_staff', { customer: 'full' }, VIEW_CUSTOMERS, false],
+    ['edits that are an array deny', 'sales_staff', [], VIEW_CUSTOMERS, false],
+    ['no edits answered at all denies', 'sales_staff', undefined, VIEW_CUSTOMERS, false],
+  ];
+  for (const [label, roleId, levels, requirement, expected] of cases) {
+    const route = requirement === VIEW_CUSTOMERS ? CUSTOMERS_ROUTE : CREATE_ROUTE;
+    assert.equal(grantedOf(await withLevels(stub(admitted([grant({ roleId })])), levels).decide(requirement, route)), expected, label);
+  }
+  // A read-only actor is still capped at View whatever the edit says: a widened role creates nothing while read-only.
+  const readOnly = withLevels(stub(admitted([grant({ roleId: 'technician', tenantStatus: 'read_only' })])), { customers: 'full' });
+  assert.equal(await readOnly.decide(CREATE_CUSTOMERS), false, 'read-only caps the edit');
+  assert.ok(grantedOf(await readOnly.decide(VIEW_CUSTOMERS, CUSTOMERS_ROUTE)), 'and the classified read stays granted');
+});
+
+test('M7TL-03 a levels read that cannot answer is an outage — the thrown error, never a decision on the defaults', async () => {
+  const fault = new Error('role levels answer invalid');
+  await assert.rejects(withLevels(stub(admitted([grant({ roleId: 'sales_staff' })])), fault).decide(CREATE_CUSTOMERS), (err: unknown) => err === fault);
+});
+
+const EDIT_ROUTE: RouteView = Object.freeze({ method: 'PUT', path: '/api/v1/roles/levels', audience: 'tenant' });
+const EDIT_ROLE_LEVELS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'edit_role_levels' });
+
+test('M7TL-04 edit_role_levels is the OWNER RULE: the owner role alone, unlimited — never a manager, however its level is edited', async () => {
+  const granted = Object.fromEntries(await Promise.all(TENANT_ROLE_IDS.map(async (roleId) =>
+    [roleId, grantedOf(await withLevels(stub(admitted([grant({ roleId })])), {}).decide(EDIT_ROLE_LEVELS, EDIT_ROUTE))])));
+  assert.deepEqual(granted, { store_owner: true, manager: false, technician: false, sales_staff: false });
+  for (const [label, answer, levels] of [
+    ['a manager edited to Full', admitted([grant({ roleId: 'manager' })]), { customers: 'full' }],
+    ['a read-only owner', admitted([grant({ tenantStatus: 'read_only' })]), {}],
+    ['an owner of a read-only account', admitted([grant()], 'read_only'), {}],
+    ['an owner whose edits are unreadable', admitted([grant()]), { customers: 'bogus' }],
+    ['a platform owner on a tenant grant', admitted([grant({ roleId: 'system_owner' })]), {}],
+    ['a store owner grant alone', admitted([grant({ scopeType: 'store', store: STORE, storeStatus: 'active' })]), {}],
+  ] as const) {
+    assert.equal(await withLevels(stub(answer), levels).decide(EDIT_ROLE_LEVELS, EDIT_ROUTE), false, label);
+  }
+  assert.equal(await withLevels(stub(admitted([grant({ scopeType: 'store', store: STORE, storeStatus: 'active' })])), {})
+    .decide({ scope: 'store', permission: 'edit_role_levels' }, EDIT_ROUTE), false, 'edit_role_levels names nothing at store scope');
+});
+
+test('M7TL-05 the revalidator decides edit_role_levels on a fresh authentication judged on the committing handle, and re-decides the owner', async () => {
+  const owner = { ...SCOPE, roleId: 'store_owner' };
+  const { revalidate, steps } = revalidator({ read: admitted([grant()]) });
+  assert.equal(await revalidate('tx', owner, 'edit_role_levels', 1_700_000_000_000, KEY), true);
+  assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'fresh', 'levels'], 'the clock after every lock');
+  assert.deepEqual(steps.find(([step]) => step === 'fresh')?.slice(1), ['tx', 1_700_000_000_000], 'the deadline, on the committing handle');
+  // An owner whose grant was re-roled since the authorizer decided is refused by the scope comparison.
+  assert.equal(await revalidator({ read: admitted([grant({ roleId: 'manager' })]) }).revalidate('tx', owner, 'edit_role_levels', 1_700_000_000_000, KEY), false);
+  // Widened edits never make a manager an owner.
+  assert.equal(await revalidator({ levels: { customers: 'full' } }).revalidate('tx', SCOPE, 'edit_role_levels', 1_700_000_000_000, KEY), false);
+  // And a widened technician creates on this transaction's reading.
+  const technician = { ...SCOPE, roleId: 'technician' };
+  assert.equal(await revalidator({ read: admitted([grant({ roleId: 'technician' })]), levels: { customers: 'create' } })
+    .revalidate('tx', technician, 'create_customers', null, KEY), true);
 });

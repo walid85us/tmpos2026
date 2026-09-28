@@ -200,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 7 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 8 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -209,6 +209,7 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 7 frozen tenant routes', () 
     { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
+    { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
@@ -227,6 +228,7 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
   const limiter: DistributedRateLimiter = { consume: async () => ({ outcome: 'unavailable' }), probe: async () => true };
   const sessions = composeProductionSessions(VALID_ENV, {
     store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers']),
+    roleLevels: async () => ({}),
   }, { audiences: ['tenant'], tokenVerifier: SYNTHETIC_VERIFIER });
   const readiness = createReadinessState();
   // M7A-CUSTOMERS-P3: the POST requires the idempotency store and the command port, handed in as the tenant root hands them.
@@ -298,7 +300,7 @@ function classify(text: string): Kind {
   if (text.includes('m5_session_get')) return 'sessionGet';
   if (text.includes('m7a_session_create')) return 'sessionMint';
   if (text.includes('m5_admit_tenant_session_v2')) return 'tenantAdmissionProbe';
-  if (text.includes('m7a_customer_page_v2')) return 'customerProbe';
+  if (text.includes('m7a_customer_page_v3')) return 'customerProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }

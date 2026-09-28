@@ -108,11 +108,14 @@ export interface AggregateMutator {
 /**
  * What the store hands a mutator beside its mutation (M7A-CUSTOMERS-P3): the trusted context and the presenting session's
  * key THIS transaction revalidated — the store's own frozen checked copies, never the caller's. Both null for a
- * contextless command. The key is a session-bound definer routine's parameter and nothing else.
+ * contextless command. The key is a session-bound definer routine's parameter and nothing else. Since M7A-CUSTOMERS-P3-R1
+ * also the recent-authentication deadline the revalidator judged (null when the route requires none), so a mutator whose
+ * routine can wait on a lock AFTER that judgment judges it again once the wait is over (postgresRoleLevels.ts).
  */
 export interface MutationAuthority {
   readonly context: TrustedScope | null;
   readonly sessionKey: string | null;
+  readonly authNotAfter: number | null;
 }
 
 /**
@@ -525,7 +528,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       rejected: Object.freeze({ conflict: conflict as string, invalidState: (invalidState ?? null) as string | null }),
       mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
       authNotAfter: authNotAfter as number | null, sessionKey: sessionKey as string | null,
-      authority: Object.freeze({ context, sessionKey: sessionKey as string | null }),
+      authority: Object.freeze({ context, sessionKey: sessionKey as string | null, authNotAfter: authNotAfter as number | null }),
     });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract

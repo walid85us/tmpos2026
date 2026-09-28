@@ -654,14 +654,20 @@ test('a tenant store needs its revalidator, and no other scope is ever admitted:
   assert.doesNotThrow(() => createPostgresTransactionalStore({ client, mutators: [], contextScope: 'platform' }), 'platform is the default, explicit too');
 });
 
-test('the mutator is handed the context and session key this transaction revalidated — the store\'s frozen copy, never the caller\'s object', async () => {
+test('the mutator is handed the context, session key and recent-sign-in deadline this transaction revalidated — the store\'s frozen copy, never the caller\'s object', async () => {
   const seen: unknown[] = [];
   const capturing: AggregateMutator = Object.freeze({ ...CREATE_MUTATOR, apply: async (_sql: PgStatement, _m: unknown, authority: unknown) => { seen.push(authority); return 'applied'; } });
   const c = command(TENANT_CONTEXT);
   assert.deepEqual(await tenantStore(scripted(c.lease), [capturing]).transactions.commit(c, live()), COMMITTED);
   const contextless = command();
   assert.deepEqual(await createPostgresTransactionalStore({ client: scripted(contextless.lease), mutators: [capturing] }).transactions.commit(contextless, live()), COMMITTED);
-  assert.deepEqual(seen, [{ context: TENANT_CONTEXT, sessionKey: SESSION_KEY }, { context: null, sessionKey: null }]);
+  assert.deepEqual(seen, [{ context: TENANT_CONTEXT, sessionKey: SESSION_KEY, authNotAfter: null }, { context: null, sessionKey: null, authNotAfter: null }]);
+  // A sensitive command's deadline reaches the mutator as the store checked it (M7A-CUSTOMERS-P3-R1: the role-level edit
+  // judges it again after its routine's lock wait).
+  const deadline = Date.now() + 60_000;
+  const sensitive = { ...command(TENANT_CONTEXT), authNotAfter: deadline };
+  assert.deepEqual(await tenantStore(scripted(sensitive.lease), [capturing]).transactions.commit(sensitive, live()), COMMITTED);
+  assert.deepEqual(seen.at(-1), { context: TENANT_CONTEXT, sessionKey: SESSION_KEY, authNotAfter: deadline });
   const [authority] = seen as Array<{ context: TrustedScope }>;
   assert.ok(Object.isFrozen(authority) && Object.isFrozen(authority.context), 'frozen');
   assert.notStrictEqual(authority.context, c.context, 'the checked copy the revalidator was handed, not the caller\'s object');

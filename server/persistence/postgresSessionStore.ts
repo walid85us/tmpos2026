@@ -70,7 +70,7 @@ import {
 } from '../platform-identity/auditEventWriter.js';
 import type { AuditEventWriteInput, AuditSqlExecutor } from '../platform-identity/auditEventWriter.js';
 import type { AuditMetadata } from '../platform-identity/auditEventContract.js';
-import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
+import type { PgRows, PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
 /**
  * A plain session operation is one short statement; `end` at most four, and `establish` at most eight — the
@@ -402,6 +402,24 @@ export async function readTenantSession(sql: PgTransactionScope, key: string, no
 export async function holdTenantSession(sql: PgTransactionScope, key: string, now: number): Promise<SessionRecord | undefined> {
   const held = await readTenantSession(sql, key, now);
   return held !== undefined && (await hold(sql, key, held)) ? held : undefined;
+}
+
+/**
+ * Whether a session's trusted authentication evidence that goes stale at `authNotAfter` (epoch ms) is still fresh by the
+ * DATABASE's clock, on the caller's transaction (M7A-CUSTOMERS-P3-R1): the tenant command revalidator's recent-
+ * authentication check, the same statement the administrative revalidation runs (postgresPrincipalResolver.ts
+ * revalidatePlatformAuthority, M5-GIAM-D1-P2). clock_timestamp() is the wall clock inside the transaction, not its start,
+ * so a long commit cannot keep stale evidence alive; this process's clock is never read. A deadline that is not a positive
+ * safe integer, or any doubt about the answer, THROWS — the caller's kernel rolls back. It sends one statement and binds no
+ * JSON, so it takes any statement handle — the revalidator's transaction scope, or a mutator's statement function (the
+ * role-level edit judges the deadline again after its lock wait, postgresRoleLevels.ts).
+ */
+export async function authenticationFresh(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<PgRows>, authNotAfter: number): Promise<boolean> {
+  if (typeof authNotAfter !== 'number' || !Number.isSafeInteger(authNotAfter) || authNotAfter < 1) throw new SessionStoreUnavailable('clock_invalid');
+  const fresh = only(await sql`select (pg_catalog.clock_timestamp() <=
+    pg_catalog.to_timestamp(${String(authNotAfter)}::bigint / 1000.0)) as fresh`, 'fresh');
+  if (typeof fresh !== 'boolean') throw new SessionStoreUnavailable('answer_shape_invalid');
+  return fresh;
 }
 
 /**

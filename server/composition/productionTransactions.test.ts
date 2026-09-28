@@ -71,6 +71,7 @@ import { composeReadTransactions, parseTenantIssuerKey } from './transactionKern
 import { TENANT_INVENTORY, composeTenantTransactions, tenantRouteDeclarations } from './tenantTransactions.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import { CUSTOMER_CREATE_CONTRACT, planCustomerCreate } from '../runtime/customerCreate.js';
+import { ROLE_LEVEL_UPDATE_CONTRACT, planRoleLevelUpdate } from '../runtime/roleLevelUpdate.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
 import { defineOutboxEvents } from '../runtime/outbox.js';
 
@@ -1135,9 +1136,11 @@ test('M6R-C04 readiness through the session root\'s limits is ready only when th
   for (const [label, answer, expected] of cases) {
     const { factories, fake } = counted(fakeDriver(answer));
     const boundary = assembleTransactions(REQUIRED, CONFIGURED, factories) as ProductionTransactions;
+    // The administrative boundary alone, as the administrative entry composes it: that root builds no role-levels read, so
+    // it composes no tenant authorizer (M7A-CUSTOMERS-P3-R1).
     const { limits } = composeProductionSessions(sessionEnv, {
       store: boundary.sessionStore, tenantAdmission: boundary.tenantAdmission, platformAdmission: boundary.platformAdmission, rateLimiter: boundary.rateLimiter,
-    });
+    }, { audiences: ['admin'] });
     const readiness = createReadinessState();
     readiness.setReady();
     await serve(createApp({ readiness, log: { log: () => undefined }, limits }), async (get) => {
@@ -1253,10 +1256,11 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the customer routes: the read session-bound and classified as a read, the create a command that is not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the read session-bound and classified as a read, the two commands not', async () => {
   const customerId = randomUUID();
-  const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v2')
-    ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }] : []));
+  const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3')
+    ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
+    : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
   let calls = 0;
   let seen: unknown;
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, (endpoint) => { calls++; seen = endpoint; return kernel.client; });
@@ -1266,9 +1270,10 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the cust
     r.sessionBinding, r.trustedContext, r.idempotency]), [
     ['GET', '/api/v1/customers', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
+    ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
-  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'the read alone is classified as a read: never the create');
-  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers', 'POST /api/v1/customers']);
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'the read alone is classified as a read: never a command');
+  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers', 'POST /api/v1/customers', 'PUT /api/v1/roles/levels']);
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
@@ -1289,8 +1294,13 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the cust
   await route.handler({ url: '/api/v1/customers?limit=1' } as never, res as never,
     { requestId: 'req-m7tk03', principal: null, session: null, authenticatedAt: null, trusted: scope, sessionKey } as never);
   assert.deepEqual(kernel.statements.map((st) => st.values), [[sessionKey, null, 2]], 'one statement: the session key, no cursor, the limit and its lookahead');
-  assert.match(kernel.statements[0].text, /from tmpos_mint\.m7a_customer_page_v2\(\?::text, \?::uuid, \?::integer\)/);
+  assert.match(kernel.statements[0].text, /from tmpos_role\.m7a_customer_page_v3\(\?::text, \?::uuid, \?::integer\)/);
   assert.deepEqual([reply.status, reply.body], [200, { customers: [{ id: customerId, name: 'n' }], nextCursor: null }]);
+  // M7A-CUSTOMERS-P3-R1: the role-levels read the entry hands the tenant route authorizer, over this same kernel.
+  kernel.statements.length = 0;
+  assert.deepEqual(await ttx.roleLevels(REVAL_TENANT, 'sales_staff', new AbortController().signal), { customers: 'view' });
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT, 'sales_staff']], 'one statement: the trusted tenant and role');
+  assert.match(kernel.statements[0].text, /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as levels$/);
   await ttx.close();
   assert.equal(kernel.ended(), 1);
 });
@@ -1331,7 +1341,7 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   let answer: unknown = [{ outcome: 'match' }];
   let page: unknown = [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }];
   let minted: unknown = [{ outcome: 'invalid' }];
-  const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v2') ? page
+  const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
     : text.includes('m7a_session_create') ? minted : []));
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
   const signal = new AbortController().signal;
@@ -1355,7 +1365,7 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.equal(await ttx.readsProbe(signal), true, 'the one refusal of an unknown key');
   page = [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: REVAL_MEMBERSHIP, o_name: 'n' }];
   assert.equal(await ttx.readsProbe(signal), false, 'anything else is not ready');
-  assert.ok(kernel.statements.some((st) => /tmpos_mint\.m7a_customer_page_v2\(/.test(st.text)), 'the probe asks 018\'s routine');
+  assert.ok(kernel.statements.some((st) => /tmpos_role\.m7a_customer_page_v3\(/.test(st.text)), 'the probe asks 020\'s routine');
   assert.equal(await ttx.mintProbe(signal), true, 'the mint\'s refusal of all-null arguments');
   minted = [{ outcome: 'refused' }];
   assert.equal(await ttx.mintProbe(signal), false, 'anything else is not ready');
@@ -1384,14 +1394,14 @@ test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; only
     (err: unknown) => err instanceof EnforcementSetupError && err.code === 'route_duplicate');
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => recordingKernel().client) as unknown as Record<string, unknown>;
   assert.deepEqual(Object.keys(ttx).sort(),
-    ['close', 'idempotency', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads',
-      'transactions'], 'the write slot\'s idempotency and command ports — no delivery port, platform admission or store');
+    ['close', 'idempotency', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'roleLevels', 'routes', 'sessionStore', 'tenantAdmission',
+      'tenantReads', 'transactions'], 'the write slot\'s idempotency and command ports and the role-levels read — no delivery port, platform admission or store');
   assert.deepEqual(Object.keys(ttx.idempotency as object).sort(), ['keySecret', 'store']);
   assert.deepEqual(Object.keys(ttx.transactions as object), ['port']);
   // Without a write slot the composition is read-only, exactly as before.
   const { writes: _writes, ...readOnly } = TENANT_INVENTORY;
   assert.deepEqual(Object.keys(composeReadTransactions(readOnly, TENANT_CONFIGURED, () => recordingKernel().client)).sort(),
-    ['close', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads']);
+    ['close', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'roleLevels', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads']);
   // A write route with no mutator of its kind, or one that is no idempotent command, refuses before any client exists.
   const slot = TENANT_INVENTORY.writes;
   assert.ok(slot !== undefined);
@@ -1426,7 +1436,7 @@ test('M7TK-07 the administrative root still composes no issuer key: its store re
   await boundary!.close();
 });
 
-test('M7TK-08 the composed tenant store commits the customer create in the ADR-34 order — fence, session peek, 016 hold, session held, v2 re-read, 019 on the session key alone, the tenant audit record, the completion — and a session ended before its hold commits nothing', async () => {
+test('M7TK-08 the composed tenant store commits the customer create in the ADR-34 order — fence, session peek, 016 hold, session held, v2 re-read, the role\'s levels, 020 on the session key alone, the tenant audit record, the completion — and a session ended before its hold commits nothing', async () => {
   // M7A-CUSTOMERS-P3: the tenant root's write slot as composed, over a kernel answering by statement text.
   const tenantSession = { ...sessionRow(tenantWitness), audience: 'tenant', authProviderUid: 'uid-tenant' };
   let gets = 0;
@@ -1437,6 +1447,7 @@ test('M7TK-08 the composed tenant store commits the customer create in the ADR-3
     if (text.includes('m5_hold_tenant_standing')) return [{ outcome: 'held' }];
     if (text.includes('m5_session_touch')) return [{ outcome: 'updated' }];
     if (text.includes('m5_admit_tenant_session_v2')) return [tenantAdmissionRow()];
+    if (text.includes('m7a_role_levels')) return [{ levels: {} }];
     if (text.includes('m7a_customer_create')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP }];
     if (/insert into public\.audit_event/.test(text)) return Object.assign([], { count: 1, command: 'INSERT' });
     if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
@@ -1467,12 +1478,15 @@ test('M7TK-08 the composed tenant store commits the customer create in the ADR-3
   };
   const step = (text: string): string => (text.includes('m6_command_fence') ? 'fence' : text.includes('m5_session_get') ? 'session get'
     : text.includes('m5_hold_tenant_standing') ? '016 hold' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_tenant_session_v2') ? '016 v2'
-      : text.includes('m7a_customer_create') ? '019' : text.includes('audit_event') ? 'audit' : text.includes('m6_idempotency_complete') ? 'completion' : 'other');
+      : text.includes('m7a_role_levels') ? 'levels' : text.includes('m7a_customer_create') ? '020' : text.includes('audit_event') ? 'audit'
+        : text.includes('m6_idempotency_complete') ? 'completion' : 'other');
   const { id, command } = prepared();
   assert.deepEqual(await ttx.transactions.port.commit(command, new AbortController().signal), { outcome: 'committed' });
   assert.deepEqual(kernel.statements.map((st) => step(st.text)),
-    ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', '019', 'audit', 'completion'], 'the standing held before the session row, both before the write');
-  const create = kernel.statements.find((st) => step(st.text) === '019');
+    ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'levels', '020', 'audit', 'completion'],
+    'the standing held before the session row, both before the role\'s current levels are read, all before the write');
+  assert.deepEqual(kernel.statements.find((st) => step(st.text) === 'levels')?.values, [REVAL_TENANT, 'store_owner'], 'the confirmed grant\'s tenant and role');
+  const create = kernel.statements.find((st) => step(st.text) === '020');
   assert.deepEqual(create?.values, [REVAL_SESSION_KEY, id, 'Ada'], 'the presenting session\'s key as the only authority input');
   const audit = kernel.statements.find((st) => step(st.text) === 'audit');
   assert.deepEqual([audit?.values[4], audit?.values[7], audit?.values[8], audit?.values[9]], [REVAL_ACTOR, 'tenant', REVAL_TENANT, null],
@@ -1484,4 +1498,117 @@ test('M7TK-08 the composed tenant store commits the customer create in the ADR-3
   assert.deepEqual(await ttx.transactions.port.commit(prepared().command, new AbortController().signal), { outcome: 'unavailable' });
   assert.deepEqual(kernel.statements.map((st) => step(st.text)), ['fence', 'session get', '016 hold', 'session get']);
   await ttx.close();
+});
+
+// --- M7A-CUSTOMERS-P3-R1: the role's current definition and the owner's role-level edit, through the composed tenant store ---
+
+/** Migration 016's answer and the t2 witness for the actor holding `roleId` on the one tenant grant, recomputed independently. */
+const tenantStanding = (roleId: string) => ({
+  row: { ...tenantAdmissionRow(), memberships: [{ ...tenantAdmissionRow().memberships[0], roleId }] },
+  witness: `t2:${createHash('sha256').update(['t2', REVAL_ACTOR, 'active', 'none', 'sv-1', '0', '1', '1',
+    REVAL_MEMBERSHIP, 'tenant', REVAL_TENANT, '', roleId, 'active', '', '1', ''].join('\n')).digest('base64url')}`,
+});
+
+/** The composed tenant store over a kernel answering by statement text, the standing `roleId`'s, the stored levels and the clock as given. */
+function tenantCommandKernel(roleId: string, over: { levels?: unknown; fresh?: boolean | readonly boolean[] } = {}) {
+  const standing = tenantStanding(roleId);
+  // `fresh` as a list answers the database clock's successive judgements in order (the last one repeats).
+  let clocks = 0;
+  const freshNow = (): boolean => (Array.isArray(over.fresh) ? over.fresh[Math.min(clocks++, over.fresh.length - 1)] : (over.fresh as boolean | undefined) ?? true);
+  const tenantSession = { ...sessionRow(standing.witness), audience: 'tenant', authProviderUid: 'uid-tenant' };
+  const kernel = recordingKernel((text) => {
+    if (text.includes('m6_command_fence')) return [{ held: true }];
+    if (text.includes('m5_session_get')) return [tenantSession];
+    if (text.includes('m5_hold_tenant_standing')) return [{ outcome: 'held' }];
+    if (text.includes('m5_session_touch')) return [{ outcome: 'updated' }];
+    if (text.includes('m5_admit_tenant_session_v2')) return [standing.row];
+    if (text.includes('clock_timestamp')) return [{ fresh: freshNow() }];
+    if (text.includes('m7a_role_levels')) return [{ levels: over.levels ?? {} }];
+    if (text.includes('m7a_role_level_set')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP, o_level: 'view' }];
+    if (text.includes('m7a_customer_create')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP }];
+    if (/insert into public\.audit_event/.test(text)) return Object.assign([], { count: 1, command: 'INSERT' });
+    if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
+    throw new Error(`a statement the tenant command never sends: ${text.slice(0, 80)}`);
+  });
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
+  const step = (text: string): string => (text.includes('m6_command_fence') ? 'fence' : text.includes('m5_session_get') ? 'session get'
+    : text.includes('m5_hold_tenant_standing') ? '016 hold' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_tenant_session_v2') ? '016 v2'
+      : text.includes('clock_timestamp') ? 'clock' : text.includes('m7a_role_levels') ? 'levels' : text.includes('m7a_role_level_set') ? '020 set'
+        : text.includes('m7a_customer_create') ? '020 create' : text.includes('audit_event') ? 'audit' : text.includes('m6_idempotency_complete') ? 'completion' : 'other');
+  const context = Object.freeze({
+    actor: REVAL_ACTOR, securityVersion: 'sv-1', scope: 'tenant' as const, tenant: REVAL_TENANT, store: null, membershipId: REVAL_MEMBERSHIP,
+    roleId, limitation: 'none' as const,
+  });
+  return { kernel, ttx, step, context };
+}
+
+/** A command prepared exactly as the runtime prepares it, for `contract` over `body`, under `context`. */
+function preparedTenantCommand(contract: typeof CUSTOMER_CREATE_CONTRACT, plan: typeof planCustomerCreate, body: unknown, method: 'POST' | 'PUT', path: string,
+  permission: string, context: Record<string, unknown>, authNotAfter: number | null) {
+  const events = defineOutboxEvents([]);
+  const registered = defineCommands([contract], events).contract(contract.kind);
+  assert.ok(registered !== undefined);
+  const keyring = createIdempotencyKeyring(Buffer.from(IDEMPOTENCY_KEY, 'base64url'));
+  const id = randomUUID();
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'firebase', authProviderUid: 'uid-tenant' }), {
+    method, path, audience: 'tenant', tenant: REVAL_TENANT, store: null, actor: REVAL_ACTOR, body: Buffer.from(JSON.stringify(body)),
+  });
+  const command = prepareCommand(registered, events, plan({ audience: 'tenant', body, newAggregateId: id }) as never, {
+    scope: operation.scope, lease: randomBytes(32).toString('base64url'), newAggregateId: id,
+    authorization: Object.freeze({ scope: 'tenant', permission }), context: context as never, authNotAfter, sessionKey: REVAL_SESSION_KEY,
+    seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(command !== null);
+  return command.command;
+}
+
+const EDIT_BODY = Object.freeze({ roleId: 'sales_staff', domain: 'customers', level: 'view', reason: 'Sales staff no longer onboard customers.' });
+
+test('M7TK-09 the composed tenant store commits the owner\'s role-level edit — the standing held, the deadline judged on the database clock, the owner re-decided, 020 on the session key alone — and a stale deadline commits nothing', async () => {
+  const { kernel, ttx, step, context } = tenantCommandKernel('store_owner');
+  assert.ok(ttx.transactions !== undefined);
+  const edit = (authNotAfter: number | null) => preparedTenantCommand(ROLE_LEVEL_UPDATE_CONTRACT, planRoleLevelUpdate, EDIT_BODY, 'PUT', '/api/v1/roles/levels',
+    'edit_role_levels', context, authNotAfter);
+  const deadline = Date.now() + 60_000;
+  assert.deepEqual(await ttx.transactions.port.commit(edit(deadline), new AbortController().signal), { outcome: 'committed' });
+  assert.deepEqual(kernel.statements.map((st) => step(st.text)),
+    ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'clock', 'levels', '020 set', 'clock', 'audit', 'completion'],
+    'exactly one statement between 020\'s set and the audit record: the deadline judged again on the database clock');
+  assert.deepEqual(kernel.statements.filter((st) => step(st.text) === 'clock').map((st) => st.values), [[String(deadline)], [String(deadline)]],
+    'the same deadline, judged by the database before and after 020\'s lock wait');
+  assert.deepEqual(kernel.statements.find((st) => step(st.text) === '020 set')?.values, [REVAL_SESSION_KEY, 'sales_staff', 'customers', 'view'],
+    'the presenting session\'s key as the only authority input, then the edit');
+  const audit = kernel.statements.find((st) => step(st.text) === 'audit');
+  assert.ok(JSON.stringify(audit?.values).includes('role_sales_staff_customers_to_view'), 'the audited reason code');
+  // Past its deadline on the database's clock: nothing after the clock, nothing written.
+  kernel.statements.length = 0;
+  const stale = tenantCommandKernel('store_owner', { fresh: false });
+  assert.deepEqual(await stale.ttx.transactions!.port.commit(edit(deadline), new AbortController().signal), { outcome: 'unavailable' });
+  assert.deepEqual(stale.kernel.statements.map((st) => stale.step(st.text)), ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'clock']);
+  // Fresh at the revalidator, stale once 020 answered (it went stale during the role row's lock wait): nothing after the
+  // second clock — no audit record, no completion.
+  const lapsed = tenantCommandKernel('store_owner', { fresh: [true, false] });
+  assert.deepEqual(await lapsed.ttx.transactions!.port.commit(edit(deadline), new AbortController().signal), { outcome: 'unavailable' });
+  assert.deepEqual(lapsed.kernel.statements.map((st) => lapsed.step(st.text)),
+    ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'clock', 'levels', '020 set', 'clock']);
+  await lapsed.ttx.close();
+  // No deadline at all: refused before anything but the fence.
+  assert.deepEqual(await stale.ttx.transactions!.port.commit(edit(null), new AbortController().signal), { outcome: 'unavailable' });
+  await ttx.close();
+  await stale.ttx.close();
+});
+
+test('M7TK-10 a role the owner narrowed below Create is refused on the committing transaction before 020\'s create is called, an already-issued session included', async () => {
+  const narrowed = tenantCommandKernel('sales_staff', { levels: { customers: 'view' } });
+  const create = preparedTenantCommand(CUSTOMER_CREATE_CONTRACT, planCustomerCreate, { name: 'Ada' }, 'POST', '/api/v1/customers', 'create_customers',
+    narrowed.context, null);
+  assert.deepEqual(await narrowed.ttx.transactions!.port.commit(create, new AbortController().signal), { outcome: 'unavailable' });
+  assert.deepEqual(narrowed.kernel.statements.map((st) => narrowed.step(st.text)), ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'levels'],
+    'decided on the stored level: no create, no audit record, no completion');
+  // The same sales_staff at its default creates (control).
+  const ok = tenantCommandKernel('sales_staff');
+  assert.deepEqual(await ok.ttx.transactions!.port.commit(preparedTenantCommand(CUSTOMER_CREATE_CONTRACT, planCustomerCreate, { name: 'Ada' }, 'POST',
+    '/api/v1/customers', 'create_customers', ok.context, null), new AbortController().signal), { outcome: 'committed' });
+  await narrowed.ttx.close();
+  await ok.ttx.close();
 });

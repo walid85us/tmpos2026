@@ -24,6 +24,12 @@
 // tenant contexts (`contextScope: 'tenant'`) and re-proved in each command's transaction by the tenant revalidator
 // (tenantAuthorization.ts createTenantContextRevalidator) over the session store's tenant reads and 016's hold and read. It
 // hands back the idempotency store with its key and the command port — never a delivery port, and no event contract.
+//
+// M7A-CUSTOMERS-P3-R1 UPDATE. A tenant inventory also hands in the owner's durable role edits as two reads (RoleLevelReads):
+// the kernel binds one to its client for the tenant route authorizer (ReadTransactions.roleLevels, which the entry passes to
+// the session root) and composes the other into the tenant revalidator, with the recent-authentication check on the
+// database's clock. The adapter behind both is the tenant root's, so this module names none and ships none to the
+// administrative artifact.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
@@ -33,10 +39,12 @@ import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/pos
 import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
 import { createPostgresStartupPreflight } from '../persistence/postgresStartupPreflight.js';
 import type { StartupPreflight } from '../persistence/postgresStartupPreflight.js';
-import { createPostgresSessionStore, holdTenantSession, probeIssuerKey, probeSessionMint, readTenantSession } from '../persistence/postgresSessionStore.js';
+import {
+  authenticationFresh, createPostgresSessionStore, holdTenantSession, probeIssuerKey, probeSessionMint, readTenantSession,
+} from '../persistence/postgresSessionStore.js';
 import type { IssuerKeyProbe, SessionStandingCheck } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../persistence/postgresTenantAdmission.js';
-import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
+import type { PgTransactionScope, SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
 import type { AggregateMutator } from '../persistence/postgresTransactionalStore.js';
 import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
@@ -48,6 +56,7 @@ import type { TenantAdmissionPort } from '../runtime/principals.js';
 import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
 import type { SessionStore } from '../runtime/sessions.js';
 import { createTenantContextRevalidator, createTenantEstablishCheck, readKey } from './tenantAuthorization.js';
+import type { TenantRoleLevelsHeld, TenantRoleLevelsRead } from './tenantAuthorization.js';
 
 export type TransactionCompositionBlocker =
   | RuntimeDatabaseRefusal
@@ -189,8 +198,19 @@ export interface WriteInventory {
 }
 
 /**
+ * The owner's durable role edits (M7A-CUSTOMERS-P3-R1, migration 020), read two ways, handed in by the tenant root that owns
+ * the adapter so this shared module — and the administrative artifact it ships in — names no role-level module: on the
+ * kernel's own client for the tenant route authorizer, and on the committing transaction for the command revalidator.
+ */
+export interface RoleLevelReads {
+  readonly read: (client: SupervisedPgClient) => TenantRoleLevelsRead;
+  readonly held: TenantRoleLevelsHeld<PgTransactionScope>;
+}
+
+/**
  * A tenant inventory: read routes over the kernel (M7A-CUSTOMERS-P2) and, in its write slot (M7A-CUSTOMERS-P3), command
  * routes committed through the tenant store. Without a write slot it is read-only — no key, store or port, as before.
+ * Since M7A-CUSTOMERS-P3-R1 it also carries the role-level reads every tenant route decision needs.
  */
 export interface ReadInventory<P> {
   readonly reads: readonly ReadRouteFactory<P>[];
@@ -202,6 +222,8 @@ export interface ReadInventory<P> {
   readonly inert: P;
   /** The reads' readiness over the kernel: true only when they can be served. */
   readonly probe: (client: SupervisedPgClient, signal: AbortSignal) => Promise<boolean>;
+  /** The selected role's durable edits (M7A-CUSTOMERS-P3-R1): the authorizer's read and the revalidator's. */
+  readonly roleLevels: RoleLevelReads;
 }
 
 /** What the tenant composition hands its entry: the tenant boundary's durable adapters, the served routes and probes. */
@@ -219,6 +241,8 @@ export interface ReadTransactions {
   /** Whether the login can call 018's mint, which every login needs: true only for its answer to all-null arguments. */
   readonly mintProbe: (signal: AbortSignal) => Promise<boolean>;
   readonly readsProbe: (signal: AbortSignal) => Promise<boolean>;
+  /** The selected role's durable edits over the kernel, for the tenant route authorizer (M7A-CUSTOMERS-P3-R1). */
+  readonly roleLevels: TenantRoleLevelsRead;
   /** Ends the kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
   /** createApp's `idempotency` and `transactions`, together, only for an inventory with a write slot (M7A-CUSTOMERS-P3). */
@@ -279,12 +303,16 @@ export function composeReadTransactions<P>(
     const served = defineRoutes([...inventory.reads.map((build) => build(inventory.ports(kernel))), ...(writes?.routes ?? [])]).list();
     // The write slot's store over the SAME kernel, admitting tenant contexts alone, each re-proved inside its command's
     // transaction: the presenting tenant session held and the actor's standing held and re-read (ADR-34 lock order).
+    // M7A-CUSTOMERS-P3-R1: the permission is re-decided on the role's current definition read on that transaction, and a
+    // recent-authentication deadline judged on the database's clock.
     const store = writes === undefined ? null : createPostgresTransactionalStore({
       client: kernel, mutators: writes.mutators, contextScope: 'tenant',
-      revalidate: createTenantContextRevalidator({
+      revalidate: createTenantContextRevalidator<PgTransactionScope>({
         hold: holdTenantStanding, read: readTenantAdmission,
         peek: (sql, sessionKey) => readTenantSession(sql, sessionKey, Date.now()),
         session: (sql, sessionKey) => holdTenantSession(sql, sessionKey, Date.now()),
+        levels: inventory.roleLevels.held,
+        fresh: authenticationFresh,
       }),
     });
     return Object.freeze({
@@ -297,6 +325,7 @@ export function composeReadTransactions<P>(
       issuerKey: (signal: AbortSignal) => probeIssuerKey(kernel, key, signal),
       mintProbe: (signal: AbortSignal) => probeSessionMint(kernel, signal),
       readsProbe: (signal: AbortSignal) => inventory.probe(kernel, signal),
+      roleLevels: inventory.roleLevels.read(kernel),
       close: () => kernel.end(),
       ...(store === null ? {} : {
         idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),

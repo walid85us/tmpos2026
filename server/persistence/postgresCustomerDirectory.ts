@@ -1,8 +1,10 @@
 // Phase 4.0 M7a — the PostgreSQL customer directory: the production adapter behind the tenant customer directory's port
-// (server/runtime/customerDirectory.ts), over migration 018's session-bound read (M7A-CUSTOMERS-P2; G-IAM, G-PERSIST).
+// (server/runtime/customerDirectory.ts), over migration 020's session-bound read (M7A-CUSTOMERS-P2, -P3-R1; G-IAM, G-PERSIST).
 //
 // WHAT IT ASKS. For the presenting session's store key, and a validated continuation and page size, it calls
-// tmpos_mint.m7a_customer_page_v2 once. The routine reads the session and its mint-ledger row, requires it minted, of
+// tmpos_role.m7a_customer_page_v3 once — migration 018's page_v2, which 020 revokes from the runtime role, plus the role's
+// CURRENT Customers level (M7A-CUSTOMERS-P3-R1): a role an owner narrowed below View is answered 'denied', exactly as a
+// withdrawn grant is. The routine reads the session and its mint-ledger row, requires it minted, of
 // audience tenant, live on the database clock and of an unchanged standing, derives the actor, its account security
 // version and its ONE tenant grant from that session inside the database, and delegates to migration 017's page as its
 // owner — which confirms, in the snapshot it reads the page in, that exactly this authority still holds, and answers a
@@ -28,9 +30,9 @@
 //
 // READINESS (probeCustomerDirectory, the tenant entry's). It asks the same routine for a random key no session holds and
 // requires its one refusal: the login's EXECUTE and the routine's own reads of the session and its ledger row answer. The
-// routine refuses an unknown key before it reads the issuer key, 016's admission or 017's page, so those are not
-// re-proved here: the issuer key and the admission are readiness checks of their own, and 017's page is pinned by the
-// startup ledger's checksum (docs/phase-4/08 DA-108).
+// routine refuses an unknown key before it reads the issuer key, 016's admission, the role's level or 017's page, so those
+// are not re-proved here: the issuer key and the admission are readiness checks of their own, and 017's page and 020's
+// level read are pinned by the startup ledger's checksums (docs/phase-4/08 DA-108).
 import { randomBytes } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
@@ -46,7 +48,7 @@ export const CUSTOMER_DIRECTORY_BOUNDS: TransactionBounds = Object.freeze({
   idle: `${CUSTOMER_DIRECTORY_DEADLINE_MS * 2}ms`,
 });
 
-/** The columns migration 018's routine answers with — 017's own. */
+/** The columns migration 020's routine answers with — 018's and 017's own. */
 const ROW_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_customer_id', 'o_name'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** A session store key: the SHA-256 of a session identifier, unpadded base64url (sessions.ts digestOf). */
@@ -111,7 +113,7 @@ export function createPostgresCustomerDirectory(deps: { readonly client: Supervi
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > CUSTOMER_DIRECTORY_MAX_LIMIT) throw fault();
       return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
         const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
-          from tmpos_mint.m7a_customer_page_v2(${sessionKey}::text, ${after}::uuid, ${limit + 1}::integer)`;
+          from tmpos_role.m7a_customer_page_v3(${sessionKey}::text, ${after}::uuid, ${limit + 1}::integer)`;
         return answerOf(rows, limit, tenant);
       });
     },
@@ -125,7 +127,7 @@ export async function probeCustomerDirectory(client: SupervisedPgClient, signal:
   try {
     return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
       const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
-        from tmpos_mint.m7a_customer_page_v2(${absentKey}::text, null::uuid, 1::integer)`;
+        from tmpos_role.m7a_customer_page_v3(${absentKey}::text, null::uuid, 1::integer)`;
       if (!Array.isArray(rows) || rows.length !== 1) return false;
       const row = rowOf(rows[0]);
       return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;

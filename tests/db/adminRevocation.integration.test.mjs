@@ -279,11 +279,14 @@ async function compose(label) {
     },
   });
   const limits = testRequestLimits();
+  // The administrative boundary alone, as the administrative entry composes it (M7A-CUSTOMERS-P3-R1): the tenant route
+  // authorizer is built only over migration 020's role-level read, which this administrative root does not carry, and
+  // nothing here signs a tenant in.
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: limits.trustedProxies, keySecret: limits.keySecret,
     ...durableSessionAdapters({ store, tenantAdmission: tx.tenantAdmission, platformAdmission }),
     limiter: limits.limiter,
-  });
+  }, ['admin']);
   const logs = [];
   const readiness = createReadinessState();
   readiness.setReady();

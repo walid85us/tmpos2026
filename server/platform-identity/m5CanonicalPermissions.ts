@@ -33,7 +33,7 @@
 //     startup rather than guessing. It is a refusal to answer, never an answer of 'allow'.
 // This matches what the runtime already enforces: routes.ts admits an idempotency-required route only
 // under a platform-scope requirement, precisely because M5 has not landed (M7A-CUSTOMERS-P3: or a
-// tenant-scope one on a tenant-session route, whose permission — create_customers — is decided here).
+// tenant-scope one on a tenant-session route, whose permission — create_customers, and since M7A-CUSTOMERS-P3-R1 edit_role_levels — is decided here).
 //
 // M5-GIAM-D1-P1 UPDATE. The platform decision reads a role through its DEFINITION — levels and money
 // grants as data (PlatformRoleDefinition) — rather than through its id, so owner decision D1's rules hold
@@ -60,10 +60,23 @@
 // changed: store_owner, manager and sales_staff hold it, technician (Customers View) does not. It is the first route
 // permission above View, so the read_only rule is stated where it is enforced: a read_only limitation grants a tenant
 // route permission at View only, and denies every threshold above it.
+//
+// M7A-CUSTOMERS-P3-R1 UPDATE. A tenant route permission is decided on the role's CURRENT definition, not its default: the
+// caller must hand the owner's durable edits of the selected role (`levels`, read from the database for that grant's tenant
+// and role — migration 020), and the materializer applies them before the entitlement gate and the read-only cap. The
+// levels are REQUIRED on that branch: absent, not a plain object, naming an unknown domain or holding a non-canonical level,
+// the permission is denied — never decided on the defaults as if no owner had edited the role. The one sensitive tenant
+// route permission, edit_role_levels (PUT /api/v1/roles/levels), is decided by the OWNER RULE instead of a level: the
+// selected grant's role is the catalog's owner role (TENANT_OWNER_ROLE_ID — the only built-in tenant role the catalog makes
+// Full everywhere and the product never lets anyone edit) and the limitation is 'none'. It is deliberately not Employees at
+// some level: Employees is plan-gated and the server holds no entitlement set, so that rule would deny everyone; and the
+// client's delegated editing (manage_role_permissions) is refused on the server until the owner decides its parity rules —
+// its grant is itself owner-editable only in client memory.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
   PLATFORM_SUB_PERMISSIONS,
+  TENANT_OWNER_ROLE_ID,
   TENANT_SUB_PERMISSIONS,
   isPermissionLevel,
   materializeTenantPermissions,
@@ -128,25 +141,36 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
  * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1, -P3): each names exactly one tenant DOMAIN and the level a role
  * must hold on it, as the owner fixed it for one route. They are the only tenant keys this module decides, and only at
  * TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route permission
- * never shares a key with a sub-permission, and every one is non-sensitive at View or Create — the module refuses to load
- * otherwise.
+ * never shares a key with a sub-permission, and every one but the owner-only edit_role_levels is non-sensitive at View or
+ * Create — the module refuses to load otherwise.
  *   * view_customers   — GET /api/v1/customers: the Customers domain at View or above.
  *   * create_customers — POST /api/v1/customers: the Customers domain at Create or above (ADR-34).
+ *   * edit_role_levels — PUT /api/v1/roles/levels (M7A-CUSTOMERS-P3-R1): the OWNER RULE (header), sensitive. Its parent and
+ *     threshold record where the product edits roles (Employees) and the level the owner holds there; neither is compared.
  */
 export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_customers', Object.freeze({ key: 'view_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'view' as const })],
   ['create_customers', Object.freeze({ key: 'create_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'create' as const })],
+  ['edit_role_levels', Object.freeze({ key: 'edit_role_levels', plane: 'tenant' as const, parent: 'employees', sensitive: true, threshold: 'full' as const })],
 ]));
+
+/** The tenant route permissions decided by the owner rule rather than a level: exactly edit_role_levels. */
+const OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['edit_role_levels']);
 
 /**
  * The thresholds a tenant route permission may carry. THE READ_ONLY RULE: a read_only limitation grants a tenant route
  * permission only at threshold View — the materializer caps every domain at View, and evaluateCanonicalPermission
  * denies every threshold above View under read_only before anything is materialized — so a Create permission is
- * DENIED under read_only. A sensitive permission, or one above Create, needs its own rule before it is added.
+ * DENIED under read_only. A sensitive permission, or one above Create, needs its own rule before it is added: the one
+ * such rule is the owner rule, admitted here for exactly the sensitive, Full-threshold edit_role_levels and nothing else.
  */
 const TENANT_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create']);
 for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
   if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
+  if (OWNER_ONLY_ROUTE_PERMISSIONS.has(key)) {
+    if (!entry.sensitive || entry.threshold !== 'full') throw new Error('an owner-only tenant route permission is not sensitive at Full');
+    continue;
+  }
   if (entry.sensitive || entry.threshold === null || !TENANT_ROUTE_THRESHOLDS.has(entry.threshold)) {
     throw new Error('tenant route permission is not a non-sensitive View or Create threshold');
   }
@@ -270,6 +294,11 @@ function platformSubGranted(role: PlatformRoleDefinition, key: string, visiting:
  * for a read-only limitation — must meet the threshold on the tenant family ordering. A role the materializer does not
  * know (a platform role, a custom or misspelled id) materializes nothing and is denied. Every other tenant or store
  * key remains 'undecidable'.
+ *
+ * M7A-CUSTOMERS-P3-R1: on that branch `levels` — the owner's durable edits of the selected role, as the database answered
+ * them — are REQUIRED and replace the role's defaults for the domains they name; missing or malformed, the permission is
+ * denied. An owner-only permission (edit_role_levels) is granted only to the owner role at limitation 'none', its levels
+ * still required to be readable. Every other branch ignores `levels`.
  */
 export function evaluateCanonicalPermission(input: {
   readonly scope: CanonicalPermissionScope;
@@ -277,18 +306,27 @@ export function evaluateCanonicalPermission(input: {
   readonly permission: string;
   readonly limitation: 'none' | 'read_only';
   readonly roles?: ReadonlyMap<string, PlatformRoleDefinition>;
+  readonly levels?: unknown;
 }): 'granted' | 'denied' | 'undecidable' {
-  const { scope, roleId, permission, limitation, roles } = input;
+  const { scope, roleId, permission, limitation, roles, levels } = input;
   const entry = canonicalPermission(scope, permission);
   if (entry === null) return 'denied';
   if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
   if (scope === 'tenant' && TENANT_ROUTE_PERMISSIONS.get(entry.key) === entry) {
     if (typeof roleId !== 'string') return 'denied';
-    // THE READ_ONLY RULE (TENANT_ROUTE_THRESHOLDS): View only — create_customers is denied here. It also holds for a
-    // sensitive entry added to the (surface-frozen) map after the load-time check.
+    // The role's current definition is required: no edits read is not "no edits" (R3).
+    if (!isPlainRecord(levels)) return 'denied';
+    // THE READ_ONLY RULE (TENANT_ROUTE_THRESHOLDS): View only — create_customers and the sensitive edit_role_levels are
+    // denied here. It also holds for a sensitive entry added to the (surface-frozen) map after the load-time check.
     if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
-    const levels = materializeTenantPermissions(roleId, {}, limitation === 'read_only');
-    const level = hasOwn(levels, entry.parent) ? levels[entry.parent] : 'none';
+    // The materializer applies the edits (and refuses malformed ones with {}) before the gate and the cap.
+    const materialized = materializeTenantPermissions(roleId, {}, limitation === 'read_only', levels);
+    const level = hasOwn(materialized, entry.parent) ? materialized[entry.parent] : 'none';
+    // THE OWNER RULE (header): the owner role, unlimited, whose edits were readable (the materializer answered its
+    // complete map, not {}) — decided by role, never by a level.
+    if (OWNER_ONLY_ROUTE_PERMISSIONS.has(entry.key)) {
+      return roleId === TENANT_OWNER_ROLE_ID && limitation === 'none' && hasOwn(materialized, entry.parent) ? 'granted' : 'denied';
+    }
     if (!isPermissionLevel(level) || entry.threshold === null || !meetsTenantPermissionLevel(level, entry.threshold)) return 'denied';
     return 'granted';
   }

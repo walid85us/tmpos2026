@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 18;
-export const MIN_FRONTEND_CASES = 369;
+export const MIN_FRONTEND_FILES = 19;
+export const MIN_FRONTEND_CASES = 387;
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated

@@ -14,12 +14,12 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–019, clean, checksums pinned;
+//    5. the migration ledger — exactly 001–020, clean, checksums pinned (M7A-CUSTOMERS-P3-R1: 020 moves with this build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
-//    7. the composition — the session root (the tenant boundary alone), the request limits, the durable ports, the tenant
-//       store's idempotency and command ports (no event contract) and the route table, validated by the runtime itself;
-//       the served inventory must equal TENANT_SHIPPING_ROUTES exactly;
+//    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
+//       edits), the request limits, the durable ports, the tenant store's idempotency and command ports (no event contract)
+//       and the route table, validated by the runtime itself; the served inventory must equal TENANT_SHIPPING_ROUTES exactly;
 //    8. the issuer key — the database must hold this process's key: its fingerprint alone is sent, and only `match` passes.
 //       Before the limiter's step, so a wrong key refuses before 014's fingerprint is registered;
 //    9. the limiter key — as the administrative entry's: registered when the store has none, compared otherwise. Both
@@ -32,8 +32,9 @@
 // ever opened. There is no degraded mode, no in-memory fallback, no automatic migration and no key installation.
 //
 // WHAT IT SERVES. TENANT_SHIPPING_ROUTES and nothing else: the two operational probes, the tenant boundary's login,
-// current-session and logout, GET /api/v1/customers over the production customer directory and — M7A-CUSTOMERS-P3 —
-// POST /api/v1/customers, the customer create, idempotent and committed through the tenant store — then the bounded 404.
+// current-session and logout, GET /api/v1/customers over the production customer directory, — M7A-CUSTOMERS-P3 —
+// POST /api/v1/customers, the customer create, and — M7A-CUSTOMERS-P3-R1 — PUT /api/v1/roles/levels, an owner's durable
+// edit of a built-in role's Customers level, each idempotent and committed through the tenant store — then the bounded 404.
 // No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -76,6 +77,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -225,6 +227,7 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     try {
       sessions = composeProductionSessions(env, {
         store: tx.sessionStore, tenantAdmission: tx.tenantAdmission, rateLimiter: tx.rateLimiter, tenantReads: tx.tenantReads,
+        roleLevels: tx.roleLevels,
       }, { audiences: ['tenant'], tokenVerifier: construction.tokenVerifier });
     } catch (err) {
       if (!(err instanceof ProductionCompositionError)) throw err;

@@ -14,6 +14,14 @@
 // admin branch over a real socket (M7M-10); and the standing digest's rendering pin and its independence from the
 // caller's settings (M7M-12). The HTTP log scan is M7C-12's.
 //
+// THE CHAIN THROUGH 019 (M7A-CUSTOMERS-P3-R1). Migration 020 revokes the login's EXECUTE on 018's page_v2 (and on 019's
+// create), replacing it with tmpos_role.m7a_customer_page_v3, so this file — 018's own behaviour — applies 001-019 only:
+// the migration file port the trusted executor reads hides every later file (tests/db/migrationsThrough.mjs). On a shared
+// service where a later migration is already applied, its own down file rolls it back first (with its ledger row) and it
+// is re-applied, with its exact ledger row, when this file ends. The startup preflight now requires 001-020, so M7M-02b
+// applies 020 through the same executor for its verdict and rolls it back again. page_v3's own proofs are
+// tests/db/tenantRoleLevelRoutine.integration.test.mjs's.
+//
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates and
 // destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and randomly
 // suffixed, and every issuer key is random bytes made here. It leaves the shared service as it found it: 018 applied, the
@@ -27,6 +35,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
+import { portThrough, rollBackAbove } from './migrationsThrough.mjs';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
 import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { SESSION_COOKIES, principalKeyOf } from '../../server/runtime/sessions.ts';
@@ -37,6 +46,7 @@ const UP_017 = readFileSync(`${MIG_DIR}/017_m7a_customer_directory.up.sql`, 'utf
 const DOWN_017 = readFileSync(`${MIG_DIR}/017_m7a_customer_directory.down.sql`, 'utf8');
 const UP_018 = readFileSync(`${MIG_DIR}/018_m7a_tenant_session_mint.up.sql`, 'utf8');
 const DOWN_018 = readFileSync(`${MIG_DIR}/018_m7a_tenant_session_mint.down.sql`, 'utf8');
+const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 /** 018's section 8 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_018 = UP_018.slice(UP_018.lastIndexOf('do $$'));
 const CREATE_011 = 'tmpos_session.m5_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint)';
@@ -133,12 +143,17 @@ const TENANTS = [];
 const KEYS = new Set();
 /** The issuer key row this suite found (undefined until read, then the bytes or null), restored at the end. */
 let keyBeforeSuite;
+/** The later migrations (020) this file rolled back to run on 001-019, re-applied at the end. */
+let later = null;
 
 test.after(async () => {
   const quietly = async (fn) => { try { await fn(); } catch { /* 018 rolled back by a failed M7M-09: nothing of ours is left in it */ } };
   if (KEYS.size > 0) await quietly(() => owner`delete from tmpos_mint.tenant_session where session_key = any(${[...KEYS]}::text[])`);
   if (UIDS.length > 0) await owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`;
   if (TENANTS.length > 0) await owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`;
+  // A failed M7M-02b may have left 020 applied: back to 019 first, then the service gets back the later migrations it had.
+  await quietly(() => rollBackAbove(owner, MIG_DIR, '019'));
+  if (later !== null) await later.restore();
   if (keyBeforeSuite !== undefined) {
     await quietly(async () => {
       await owner`delete from tmpos_mint.issuer_key`;
@@ -165,12 +180,13 @@ end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
 
+later = await rollBackAbove(owner, MIG_DIR, '019');
 let applyReport;
 {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     applyReport = await runTrustedApply({
-      fsPort: createNodeFsPort(MIG_DIR, MIG_REL), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
+      fsPort: portThrough(createNodeFsPort(MIG_DIR, MIG_REL), '019'), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
       credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 180_000,
     });
   } finally {
@@ -1022,6 +1038,9 @@ test('M7M-09b: 017 rolled back beneath 018 leaves the read raising for a live se
   assert.equal(live.outcome, 'created');
   const out = await rolledBack('isolation level read committed', async (tx) => {
     const v2 = (key) => tx`select o_outcome from tmpos_mint.m7a_customer_page_v2(${key}::text, null::uuid, 101::integer)`;
+    // The grants the preflight approves are the whole chain's (001-020): 020 applied first, in this same rolled-back
+    // transaction, so the only grant it can refuse below is 017's page re-granted (v2 is called as the owner).
+    await tx.unsafe(UP_020).simple();
     await tx`delete from tmpos_customer.customer`;
     await tx.unsafe(DOWN_017).simple();
     // 017's rollback does not know about 018: tmpos_mint stays, and the read raises once it reaches 017's page.
@@ -1209,8 +1228,28 @@ test('M7M-12: the standing digest is pinned to PostgreSQL\'s record and jsonb re
 });
 
 test('M7M-02b: the real startup preflight accepts the login after 018, and refused 017\'s grants (needs the preflight pins for 018)', async () => {
-  assert.deepEqual(await runtimePreflight(), { runtimeLogin: [], migrationLedger: [] },
-    'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018');
+  // The preflight now requires the whole chain, 001-020 (M7A-CUSTOMERS-P3-R1): at this file's 019 it refuses exactly the
+  // missing 020 — its ledger row and its grants — and 019's create / 018's page_v2 grants 020 revokes.
+  const at019 = await runtimePreflight();
+  assert.deepEqual(at019, { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
+    `at 019 the preflight refuses the missing 020: ${JSON.stringify(at019)}`);
+  // 020 applied through the same trusted executor (the full file port), judged, then rolled back to this file's chain.
+  const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
+  try {
+    const report = await runTrustedApply({
+      fsPort: createNodeFsPort(MIG_DIR, MIG_REL), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
+      credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 180_000,
+    });
+    assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 400));
+  } finally {
+    await handle.dispose();
+  }
+  try {
+    assert.deepEqual(await runtimePreflight(), { runtimeLogin: [], migrationLedger: [] },
+      'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018 (and, since P3-R1, 019 and 020)');
+  } finally {
+    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['020']);
+  }
   assert.ok(preflightAt017 !== null, 'M7M-09 captured the 017-era answer');
   // 018 rolled back: both categories. The codes name categories, not grants; which grants moved (011's create and 017's
   // page back, the mint's routines and schema gone) is M7M-09's own check. DA-100's "017 re-applied over 018" state is

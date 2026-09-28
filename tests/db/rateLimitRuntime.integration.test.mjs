@@ -254,8 +254,16 @@ const FACTORIES = Object.freeze({
   tenantDirectory: (c) => createPostgresTenantDirectory({ client: c }),
   rateLimiter: (c, keySecret) => createPostgresRateLimiter({ client: c, keySecret }),
 });
+/**
+ * M7A-CUSTOMERS-P3-R1: the tenant route authorizer is built only over the owner's durable role edits (migration 020's
+ * read), which the administrative transaction root does not carry. The runtimes here serve no tenant route — only the
+ * session routes whose login budgets this suite spends — so the authorizer never asks it; it throws if it ever does,
+ * rather than answer a level. The real read is proved by tests/db/roleLevels.integration.test.mjs.
+ */
+const NO_TENANT_ROUTE_LEVELS = () => { throw new Error('rateLimitRuntime serves no tenant route: no role level is read'); };
 const bundleOf = (tx) => ({
   store: tx.sessionStore, tenantAdmission: tx.tenantAdmission, platformAdmission: tx.platformAdmission, rateLimiter: tx.rateLimiter,
+  roleLevels: NO_TENANT_ROUTE_LEVELS,
 });
 
 const instances = new Set();

@@ -1,6 +1,7 @@
 // Phase 4.0 M7A-CUSTOMERS-P1 — the PostgreSQL customer directory adapter: what it hands the database's routine, and
 // what it refuses to read back as a page. DATABASE-FREE; the routine itself is proved against a real cluster.
-// M7A-CUSTOMERS-P2: the routine is migration 018's session-bound read, handed the presenting session's store key.
+// M7A-CUSTOMERS-P2: the routine is migration 018's session-bound read, handed the presenting session's store key — since
+// M7A-CUSTOMERS-P3-R1 migration 020's page_v3, which adds the role's current Customers level to 018's derivation.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -55,12 +56,12 @@ function fakeClient(rows: unknown, fault?: Error): Fake {
 
 const live = (): AbortSignal => new AbortController().signal;
 
-test('one fixed call to migration 018\'s session-bound routine: the session\'s store key, the continuation and one row more than the page', async () => {
+test('one fixed call to migration 020\'s session-bound routine: the session\'s store key, the continuation and one row more than the page', async () => {
   const client = fakeClient([customerRow(1), customerRow(2)]);
   const signal = live();
   const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, SESSION_KEY, { after: C(9), limit: 2 }, signal);
   assert.equal(client.statements.length, 1);
-  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_mint\.m7a_customer_page_v2\(\?::text, \?::uuid, \?::integer\)$/);
+  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_role\.m7a_customer_page_v3\(\?::text, \?::uuid, \?::integer\)$/);
   assert.deepEqual(client.values[0], [SESSION_KEY, C(9), 3], 'the session key, after, limit + 1 — in that order');
   // The routine derives the authority from the session itself: no fact of the scope is a parameter.
   for (const fact of [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician', TENANT]) assert.ok(!client.values[0].includes(fact), `${fact} is not sent`);
@@ -235,12 +236,13 @@ test('only a key of the store-key shape names a session: an absent or malformed 
 });
 
 test('M7TP-01 probeCustomerDirectory: true only for the routine\'s one refusal of a random key, asked once under the adapter\'s bounds', async () => {
-  // M7A-CUSTOMERS-P2 (the tenant entry's readiness): 018's routine refuses an unknown key before any other read (DA-108).
+  // M7A-CUSTOMERS-P2 (the tenant entry's readiness): the routine (020's page_v3, as 018's before it) refuses an unknown key
+  // before any other read (DA-108).
   const client = fakeClient([refusalRow('denied')]);
   const signal = live();
   assert.equal(await probeCustomerDirectory(client, signal), true);
   assert.equal(client.statements.length, 1);
-  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_mint\.m7a_customer_page_v2\(\?::text, null::uuid, 1::integer\)$/);
+  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_role\.m7a_customer_page_v3\(\?::text, null::uuid, 1::integer\)$/);
   assert.equal(client.values[0].length, 1, 'the key alone is bound');
   assert.match(client.values[0][0] as string, /^[A-Za-z0-9_-]{43}$/, 'a store-key-shaped key');
   assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);

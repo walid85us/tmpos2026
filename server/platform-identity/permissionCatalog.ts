@@ -22,8 +22,10 @@
 //
 // SERVER-AUTHORITATIVE (binding): operates ONLY on a server-resolved role id +
 // the server-resolved, enabled-only entitlement map + a server-resolved
-// read-only limitation flag. It NEVER reads a request body, a token's
-// user_metadata, or any client-asserted role / permission / entitlement.
+// read-only limitation flag — and, since M7A-CUSTOMERS-P3-R1, the owner's durable
+// role edits exactly as the database stored them (migration 020). It NEVER reads a
+// request body, a token's user_metadata, or any client-asserted role / permission /
+// entitlement / level.
 //
 // SECURITY (binding): references NO access token, refresh token, raw JWT, JWT
 // payload, JWKS, service-role key, DB URL, connection string, or password. None
@@ -477,6 +479,14 @@ function normalizeEntitlements(ent: FeatureEntitlements): FeatureEntitlements {
 // TENANT / STORE role defaults (mirror tenantRoles in accessConfig)
 // =============================================================================
 
+/**
+ * The tenant OWNER role (M7A-CUSTOMERS-P3-R1): the `_grant: 'full'` short-circuit below — Full on every domain and every
+ * non-money sub-permission — and the one built-in tenant role the product never lets anyone edit or delete (the client's
+ * role editor locks it). One source for every reader: the materializers here, and the owner-only route permission in
+ * m5CanonicalPermissions.ts.
+ */
+export const TENANT_OWNER_ROLE_ID: Extract<TenantRoleId, 'store_owner'> = 'store_owner';
+
 // store_owner uses the `_grant: 'full'` owner short-circuit (handled in the
 // materializer) so it carries no explicit map here.
 export const TENANT_ROLE_PERMISSION_DEFAULTS: Readonly<
@@ -608,7 +618,7 @@ export const TENANT_ROLE_SUBPERMISSION_DEFAULTS: Readonly<
 };
 
 const TENANT_ROLE_IDS_SET: ReadonlySet<string> = new Set<string>([
-  'store_owner',
+  TENANT_OWNER_ROLE_ID,
   'manager',
   'technician',
   'sales_staff',
@@ -839,14 +849,44 @@ function ownDefaultLevel(map: Readonly<Record<string, Level>> | undefined, key: 
   return map !== undefined && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : 'none';
 }
 
-function tenantBaseDomainLevel(role: TenantRoleId, domain: string): Level {
-  if (role === 'store_owner') return 'full'; // _grant: 'full' owner short-circuit
+/**
+ * A role's base level on `domain`: the owner's Full, else the level an owner's durable edit stored for that role and
+ * domain (`levels`, M7A-CUSTOMERS-P3-R1), else the role default. An edit REPLACES the default — it may narrow or widen
+ * it — and is then capped exactly as a default is: by the entitlement gate and the read-only status.
+ */
+function tenantBaseDomainLevel(role: TenantRoleId, domain: string, levels: Readonly<Record<string, Level>> = NO_LEVELS): Level {
+  if (role === TENANT_OWNER_ROLE_ID) return 'full'; // _grant: 'full' owner short-circuit; never edited
+  if (Object.prototype.hasOwnProperty.call(levels, domain)) return levels[domain];
   return ownDefaultLevel((TENANT_ROLE_PERMISSION_DEFAULTS as Record<string, Record<string, Level>>)[role], domain);
 }
 
+/** No durable edit: every role at its default. */
+const NO_LEVELS: Readonly<Record<string, Level>> = Object.freeze(Object.create(null) as Record<string, Level>);
+
+/**
+ * A role's durable edits (M7A-CUSTOMERS-P3-R1) as a private copy, or null. The server-authoritative answer the database
+ * stored for one tenant's role — never a request's — and still judged here as untrusted input: a plain object (prototype
+ * Object.prototype or null) whose every own key is a tenant domain and every value one of the seven canonical levels, each
+ * read once. Anything else — an array, a symbol or unknown domain, a non-canonical level, an inherited key — is null, and
+ * the materializer then answers {} (fail closed), never the defaults.
+ */
+function tenantLevelEdits(levels: unknown): Readonly<Record<string, Level>> | null {
+  if (typeof levels !== 'object' || levels === null || Array.isArray(levels)) return null;
+  const proto: unknown = Object.getPrototypeOf(levels);
+  if (proto !== Object.prototype && proto !== null) return null;
+  const copy = Object.create(null) as Record<string, Level>;
+  for (const key of Reflect.ownKeys(levels)) {
+    if (typeof key !== 'string' || !TENANT_PERMISSION_DOMAINS.includes(key)) return null;
+    const level: unknown = (levels as Record<string, unknown>)[key];
+    if (!isPermissionLevel(level)) return null;
+    copy[key] = level;
+  }
+  return Object.freeze(copy);
+}
+
 /** Role base level capped by entitlement gate only (NOT status). */
-function tenantEntitledDomainLevel(role: TenantRoleId, domain: string, ent: FeatureEntitlements): Level {
-  const base = tenantBaseDomainLevel(role, domain);
+function tenantEntitledDomainLevel(role: TenantRoleId, domain: string, ent: FeatureEntitlements, levels: Readonly<Record<string, Level>> = NO_LEVELS): Level {
+  const base = tenantBaseDomainLevel(role, domain, levels);
   if (base === 'none') return 'none';
   const gate = TENANT_DOMAIN_ENTITLEMENT[domain];
   if (gate && ent[gate] !== true) return 'none'; // plan-disabled domain → removed (cap-only)
@@ -859,19 +899,26 @@ function tenantEntitledDomainLevel(role: TenantRoleId, domain: string, ent: Feat
  * NORMALIZED to canonical first (cap-only — see normalizeEntitlements). Returns a
  * complete map over every tenant domain (explicit `none` entries included — never
  * empty on a resolvable role).
+ *
+ * M7A-CUSTOMERS-P3-R1: `levels`, when given, are an owner's durable edits of this role (tenantLevelEdits): each replaces
+ * a non-owner built-in role's base level for the domain it names, BEFORE the entitlement gate and the read-only cap; the
+ * owner ignores them. Malformed edits materialize {} (fail closed). Absent, every caller before this stage is unchanged.
  */
 export function materializeTenantPermissions(
   role: TenantRoleId | string,
   entitlements: FeatureEntitlements,
   limited: boolean,
+  levels?: unknown,
 ): EffectivePermissions {
   if (!TENANT_ROLE_IDS_SET.has(role)) return {}; // fail closed on unknown role
   if (typeof limited !== 'boolean') return {}; // an unreadable limitation is not "unlimited"
+  const edits = levels === undefined ? NO_LEVELS : tenantLevelEdits(levels);
+  if (edits === null) return {}; // an unreadable edit is not "no edit"
   const r = role as TenantRoleId;
   const ent = normalizeEntitlements(entitlements);
   const out: EffectivePermissions = {};
   for (const domain of TENANT_PERMISSION_DOMAINS) {
-    let level = tenantEntitledDomainLevel(r, domain, ent);
+    let level = tenantEntitledDomainLevel(r, domain, ent, edits);
     if (limited) level = capTenantLevelForReadOnly(level);
     out[domain] = level;
   }
@@ -913,7 +960,7 @@ export function materializeTenantSubPermissions(
       const parent = tenantEntitledDomainLevel(r, sub.parentDomain, ent);
       granted = meetsTenantPermissionLevel(parent, sub.minModuleLevel)
         && hasExplicitMoneyGrant(builtInMoneyGrants(r), sub.id);
-    } else if (r === 'store_owner') {
+    } else if (r === TENANT_OWNER_ROLE_ID) {
       // 2) Owner short-circuit, AFTER plan gating.
       granted = true;
     } else {

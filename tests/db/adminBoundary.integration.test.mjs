@@ -175,7 +175,16 @@ const VERIFIER = Object.freeze({
 });
 const EVENTS = Object.freeze([...TENANT_DISPLAY_NAME_EVENTS, ...TENANT_STATUS_EVENTS]);
 const ORIGINS = Object.freeze({ tenant: Object.freeze([TENANT_ORIGIN]), admin: Object.freeze([ADMIN_ORIGIN]) });
-const durable = () => durableSessionAdapters({ store: tx.sessionStore, tenantAdmission: tx.tenantAdmission, platformAdmission: tx.platformAdmission });
+/**
+ * M7A-CUSTOMERS-P3-R1: the tenant route authorizer is built only over the owner's durable role edits (migration 020's
+ * read), which the administrative transaction root does not carry. This suite serves no tenant route — M5E-E's tenant
+ * login is the session boundary alone — so the authorizer never asks it; it throws if it ever does, rather than answer a
+ * level. The real read is proved by tests/db/roleLevels.integration.test.mjs.
+ */
+const NO_TENANT_ROUTE_LEVELS = () => { throw new Error('adminBoundary serves no tenant route: no role level is read'); };
+const durable = () => durableSessionAdapters({
+  store: tx.sessionStore, tenantAdmission: tx.tenantAdmission, platformAdmission: tx.platformAdmission, roleLevels: NO_TENANT_ROUTE_LEVELS,
+});
 
 // ---------------------------------------------------------------------------
 // fixtures and observations — all through the owner
@@ -351,11 +360,12 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-019 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
+test('M5E-00: 001-020 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']
+      .map((v) => [v, false]));
 
   // The transaction root classified the configured endpoint before building its one client, and hands back the ports
   // the two boundaries are served with — never the kernel, a pool or the URL.

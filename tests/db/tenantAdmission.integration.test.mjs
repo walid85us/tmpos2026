@@ -54,6 +54,7 @@ import { createSupervisedPgClient } from '../../server/persistence/supervisedPgC
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
 import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
+import { createPostgresRoleLevels } from '../../server/persistence/postgresRoleLevels.ts';
 import {
   createTenantEstablishCheck,
   createTenantRouteAuthorizer,
@@ -123,7 +124,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-018, a real non-owner runtime login, real adapters, the issuer key installed by the owner
+// setup: real migrations 001-020, a real non-owner runtime login, real adapters, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -179,6 +180,12 @@ const sessionStore = createPostgresSessionStore({
   standing: createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission }),
 });
 const tenantAdmission = createPostgresTenantAdmission({ client });
+/**
+ * The owner's durable role edits (migration 020, M7A-CUSTOMERS-P3-R1), read by the production reader: the tenant route
+ * authorizer requires it and decides each permission on the selected role's current definition. No level is edited here,
+ * so every role decides at its catalog default and this suite's admission proofs are unchanged.
+ */
+const roleLevels = createPostgresRoleLevels({ client });
 
 /** A counting relay over the REAL admission: it delegates every call and adds nothing. */
 function counted(port) {
@@ -372,7 +379,7 @@ async function withRuntime(fn, over = {}) {
         trustedOrigins: [TENANT_ORIGIN],
         verifier,
         admission: createTenantSessionAdmission({ admission }),
-        authorizer: createTenantRouteAuthorizer({ admission: authorizerAdmission, reads: over.reads ?? WITNESS_READS }),
+        authorizer: createTenantRouteAuthorizer({ admission: authorizerAdmission, reads: over.reads ?? WITNESS_READS, levels: roleLevels }),
         store: over.store ?? sessionStore,
       },
       admin: {
@@ -420,13 +427,13 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-019 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
+test('M5A-01: migrations 001-020 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-019, so this run applies nothing and its report lists no version.
+  // 001-020, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']
       .map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.

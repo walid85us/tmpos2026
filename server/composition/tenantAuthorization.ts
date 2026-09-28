@@ -59,6 +59,16 @@
 // compared field by field with the scope the authorizer handed out, and the route's permission decided again. It
 // adds no authority either: every answer is the database's, every rule this file's.
 //
+// M7A-CUSTOMERS-P3-R1 UPDATE. A role is decided on its CURRENT definition. Both decisions read the owner's durable edits
+// of the selected grant's role — keyed by that grant's tenant and role, which come from the admission answer and never
+// from the request (migration 020, tmpos_role.m7a_role_levels) — and hand them to the canonical decision, which requires
+// them: the authorizer on the composition's own client (`levels`; a read fault is a throw, a bounded 503), the revalidator
+// on the committing transaction after the standing is held and re-read. So an owner who narrows a role denies that role's
+// next request, an already-issued session included, with no re-login. The owner-only edit_role_levels route declares a
+// recent authentication; the revalidator judges that deadline on the database's clock, exactly as the administrative
+// revalidation does (postgresPrincipalResolver.ts), and it still refuses a deadline on a route whose permission is not
+// sensitive — no such route declares one — so neither kind can commit under the other's evidence.
+//
 // EVERY DENIAL IS ONE VALUE, `false` — the chain's generic 403 — whatever failed: no actor, no grant,
 // an ambiguous grant, a suspended tenant, a stale witness, an uncatalogued permission, a read-only
 // actor on a route that is not a read. A caller cannot tell which, so none of them is a probe.
@@ -200,6 +210,22 @@ export function createTenantEstablishCheck<Handle>(deps: TenantEstablishCheckDep
   };
 }
 
+/**
+ * The owner's durable edits of one tenant's role (M7A-CUSTOMERS-P3-R1; in production postgresRoleLevels.ts over the
+ * composition's own client): the stored levels by domain — {} when nothing is stored — for the canonical decision to
+ * judge. A fault THROWS: an outage, never an answer of "no edits".
+ */
+export type TenantRoleLevelsRead = (tenantId: string, roleId: string, signal: AbortSignal) => Promise<unknown>;
+
+/** The same read on the caller's own handle — the committing transaction (in production postgresRoleLevels.ts readRoleLevels). */
+export type TenantRoleLevelsHeld<Handle> = (sql: Handle, tenantId: string, roleId: string) => Promise<unknown>;
+
+/**
+ * Whether trusted authentication evidence that goes stale at `authNotAfter` (epoch ms) is still fresh by the DATABASE's
+ * clock on the caller's handle (in production postgresSessionStore.ts authenticationFresh). A fault throws.
+ */
+export type TenantAuthenticationFresh<Handle> = (sql: Handle, authNotAfter: number) => Promise<boolean>;
+
 export interface TenantAuthorizerDeps extends TenantAdmissionDeps {
   /**
    * The routes EXPLICITLY classified as reads, as `${method} ${path}` — the only ones a read-only
@@ -207,6 +233,8 @@ export interface TenantAuthorizerDeps extends TenantAdmissionDeps {
    * closed default.
    */
   readonly reads?: ReadonlySet<string>;
+  /** The selected role's durable edits, read for every permission the catalog decides. Required. */
+  readonly levels: TenantRoleLevelsRead;
 }
 
 /** The route's classification key: exactly the method and literal path the table registered. */
@@ -242,6 +270,10 @@ export interface TenantRevalidatorDeps<Handle> {
   readonly peek: TenantSessionRead<Handle>;
   /** The presenting session, read again and held until COMMIT (holdTenantSession). */
   readonly session: TenantSessionRead<Handle>;
+  /** The selected role's durable edits, read on the committing transaction (M7A-CUSTOMERS-P3-R1). */
+  readonly levels: TenantRoleLevelsHeld<Handle>;
+  /** The recent-authentication deadline, judged on the database's clock (M7A-CUSTOMERS-P3-R1). */
+  readonly fresh: TenantAuthenticationFresh<Handle>;
 }
 
 /**
@@ -256,11 +288,19 @@ export interface TenantRevalidatorDeps<Handle> {
  * revocation committed first leaves nothing to hold, one not yet committed waits for this COMMIT), then 016's admission
  * re-read under those locks. So a suspension, a grant change or an account change committed before the hold refuses the
  * command, and one attempted after it waits. The mutator's definer routine then re-holds the same rows and re-derives
- * the tenant from the same session key (migration 019).
+ * the tenant from the same session key (migration 019; since M7A-CUSTOMERS-P3-R1 its successors in migration 020).
  *
- * No tenant route requires a recent authentication, and none is judged on the database's clock, so `authNotAfter` set
- * is refused; so is a command with no session key. A refusal is false; a hold, read or session fault THROWS, and the
- * store's kernel rolls back either way — nothing commits.
+ * THE PERMISSION, ON THE ROLE'S CURRENT DEFINITION (M7A-CUSTOMERS-P3-R1): after those reads, the owner's durable edits of the
+ * selected role are read on this transaction (`levels`) and the permission is decided with them. An edit that committed
+ * first is read and decides; one racing this command orders on the role row the mutator's definer routine locks
+ * (migration 020), which re-decides on the locked value.
+ *
+ * RECENT AUTHENTICATION: required exactly for a SENSITIVE tenant route permission — edit_role_levels, whose route declares
+ * `recentAuth: 'required'` — and judged by `fresh` on the database's clock (clock_timestamp(), the administrative path's
+ * rule), so evidence that expired between the chain's check and this point commits nothing. A non-sensitive permission's
+ * route declares none, so `authNotAfter` set on one is refused; a sensitive one without it is refused too. A command with
+ * no session key is refused. A refusal is false; a hold, read, session, levels or clock fault THROWS, and the store's
+ * kernel rolls back either way — nothing commits.
  */
 export function createTenantContextRevalidator<Handle>(
   deps: TenantRevalidatorDeps<Handle>,
@@ -269,11 +309,17 @@ export function createTenantContextRevalidator<Handle>(
   const read = deps?.read;
   const peek = deps?.peek;
   const session = deps?.session;
-  if (typeof hold !== 'function' || typeof read !== 'function' || typeof peek !== 'function' || typeof session !== 'function') {
+  const levels = deps?.levels;
+  const fresh = deps?.fresh;
+  if (typeof hold !== 'function' || typeof read !== 'function' || typeof peek !== 'function' || typeof session !== 'function'
+    || typeof levels !== 'function' || typeof fresh !== 'function') {
     throw new TypeError('tenant revalidator dependencies invalid');
   }
   return async (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null, sessionKey: string | null): Promise<boolean> => {
-    if (scope.scope !== 'tenant' || scope.limitation !== 'none' || authNotAfter !== null || sessionKey === null) return false;
+    if (scope.scope !== 'tenant' || scope.limitation !== 'none' || scope.tenant === null || sessionKey === null) return false;
+    // A deadline exactly when the permission is sensitive: the route that requires it declares a recent authentication.
+    const sensitive = canonicalPermission('tenant', permission)?.sensitive === true;
+    if (sensitive ? !(typeof authNotAfter === 'number' && Number.isSafeInteger(authNotAfter) && authNotAfter > 0) : authNotAfter !== null) return false;
     const seen = await peek(sql, sessionKey);
     if (seen === undefined) return false;
     const principal: VerifiedPrincipal = Object.freeze({ authProvider: seen.authProvider, authProviderUid: seen.authProviderUid });
@@ -287,14 +333,22 @@ export function createTenantContextRevalidator<Handle>(
     // the command was authorized on — the actor, the very grant, its role and tenant — and the permission decided again.
     const answer = admittedOf(await read(sql, principal));
     if (!answer.admitted || answer.securityVersion !== live.securityVersion) return false;
-    const fresh = scopeOf(answer.principal, 'tenant');
-    if (fresh === null || !sameScope(fresh, scope)) return false;
-    return evaluateCanonicalPermission({ scope: 'tenant', roleId: scope.roleId, permission, limitation: 'none' }) === 'granted';
+    const selected = scopeOf(answer.principal, 'tenant');
+    if (selected === null || !sameScope(selected, scope)) return false;
+    // The recent authentication, when the permission requires one, on the database's clock — after every lock above.
+    if (authNotAfter !== null && (await fresh(sql, authNotAfter)) !== true) return false;
+    // The role's current definition, on this transaction, for exactly the grant the database just confirmed.
+    const edits = await levels(sql, scope.tenant, scope.roleId);
+    return evaluateCanonicalPermission({ scope: 'tenant', roleId: scope.roleId, permission, limitation: 'none', levels: edits }) === 'granted';
   };
 }
 
 export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAuthorizer {
   const admission = checked(deps);
+  // Required, like the port: an authorizer that could decide a role without its current definition would decide on the
+  // defaults an owner may have narrowed (M7A-CUSTOMERS-P3-R1).
+  const readLevels = deps.levels;
+  if (typeof readLevels !== 'function') throw new TypeError('tenant authorizer role levels invalid');
   // Validated at CONSTRUCTION, like the port beside it, and COPIED. A classification that is not a
   // real Set — an array, a string, or an object whose `has` answers true for anything — would otherwise
   // either fail only when a read-only actor first reached a route (a 500, for some actors and not
@@ -328,13 +382,18 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       // The permission must NAME something: a key the catalog does not define is a typo or an
       // invention, never a weaker permission. Where the catalog DECIDES the key — the tenant route
       // permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; create_customers,
-      // M7A-CUSTOMERS-P3, ADR-34) — the selected grant's ROLE must hold it, on the scope's limitation. Any
-      // other catalogued key stays undecidable and is not decided here (see the header: the production
-      // inventory refuses such a route at startup).
+      // M7A-CUSTOMERS-P3, ADR-34; the owner-only edit_role_levels, M7A-CUSTOMERS-P3-R1) — the selected grant's ROLE must
+      // hold it, on the scope's limitation and the role's current definition: the owner's durable edits of that role in
+      // that tenant, read now (a fault throws — a 503, never a decision on the defaults). Any other catalogued key stays
+      // undecidable and is not decided here (see the header: the production inventory refuses such a route at startup).
       if (canonicalPermission(requirement.scope, requirement.permission) === null) return false;
-      if (isDecidablePermission(requirement.scope, requirement.permission) && evaluateCanonicalPermission({
-        scope: requirement.scope, roleId: scope.roleId, permission: requirement.permission, limitation: scope.limitation,
-      }) !== 'granted') return false;
+      if (isDecidablePermission(requirement.scope, requirement.permission)) {
+        if (scope.tenant === null) return false; // a decided key is tenant scope, which always names its tenant
+        const levels = await readLevels(scope.tenant, scope.roleId, signal);
+        if (evaluateCanonicalPermission({
+          scope: requirement.scope, roleId: scope.roleId, permission: requirement.permission, limitation: scope.limitation, levels,
+        }) !== 'granted') return false;
+      }
 
       // A read-only actor — read-only account, read-only tenant, or an overdue one — may reach only a
       // route classified as a read. The classification is the table's, supplied by the composition,
