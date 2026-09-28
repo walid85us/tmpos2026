@@ -69,6 +69,10 @@ import { TENANT_DISPLAY_NAME_MUTATOR } from '../persistence/tenantDisplayNameMut
 import { TENANT_STATUS_MUTATOR } from '../persistence/tenantStatusMutator.js';
 import { composeReadTransactions, parseTenantIssuerKey } from './transactionKernel.js';
 import { TENANT_INVENTORY, composeTenantTransactions, tenantRouteDeclarations } from './tenantTransactions.js';
+import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
+import { CUSTOMER_CREATE_CONTRACT, planCustomerCreate } from '../runtime/customerCreate.js';
+import { createIdempotencyKeyring } from '../runtime/idempotency.js';
+import { defineOutboxEvents } from '../runtime/outbox.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolvePath(HERE, '..', '..');
@@ -659,9 +663,10 @@ test('a deployed route may require only a canonical platform permission, and sta
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
 });
 
-test('M7A-CUSTOMERS-P1 view_customers is the one decidable tenant key: its route clears the gate, every other tenant key and any store use does not', () => {
+test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are the decidable tenant keys: the customer routes clear the gate, every other tenant key and any store use does not', () => {
   const customerRoute = createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } });
   assert.deepEqual(uncataloguedRoutePermissions([customerRoute]), [], 'the customer directory\'s requirement is catalogued and decidable');
+  assert.deepEqual(uncataloguedRoutePermissions(tenantRouteDeclarations()), [], 'M7A-CUSTOMERS-P3: so is the customer create\'s, create_customers');
   const route = (permission: string, scope: 'platform' | 'tenant' | 'store', path = '/api/v1/unit') => Object.freeze({
     method: 'GET' as const, path,
     policy: Object.freeze({ access: 'session' as const, audience: 'tenant' as const, authorization: Object.freeze({ scope, permission }) }),
@@ -1163,6 +1168,8 @@ test('M6R-C04 readiness through the session root\'s limits is ready only when th
 const TENANT_ISSUER_KEY = randomBytes(32);
 const TENANT_CONFIGURED = Object.freeze({
   APP_DATABASE_URL: DIRECT_URL, RATE_LIMIT_KEY, TENANT_SESSION_ISSUER_KEY: TENANT_ISSUER_KEY.toString('base64url'),
+  // M7A-CUSTOMERS-P3: the tenant process's own command secret for the write slot, never the limiter's or the issuer key.
+  IDEMPOTENCY_KEY,
 });
 
 /** A kernel that answers by statement text and records every statement's bound values; no driver, no socket. */
@@ -1223,8 +1230,18 @@ test('M7TK-01 parseTenantIssuerKey: missing, invalid, shared with RATE_LIMIT_KEY
   assert.deepEqual(parseTenantIssuerKey(env(b64(long))), long, 'a 64-byte key');
 });
 
-test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL and the issuer key before any client exists, naming every blocker', () => {
-  assert.deepEqual(blockersOfRead({}), ['app_database_url_missing', 'tenant_issuer_key_missing']);
+test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key and — for the write slot — IDEMPOTENCY_KEY before any client exists, naming every blocker', () => {
+  assert.deepEqual(blockersOfRead({}), ['app_database_url_missing', 'tenant_issuer_key_missing', 'idempotency_key_missing']);
+  // M7A-CUSTOMERS-P3: the write slot's key — present, canonical, and never the limiter's or the issuer key, however padded.
+  for (const missing of [undefined, '']) assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: missing }), ['idempotency_key_missing']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: 'short' }), ['idempotency_key_invalid']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: RATE_LIMIT_KEY }), ['idempotency_key_shared']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY }), ['idempotency_key_shared']);
+  assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: Buffer.concat([TENANT_ISSUER_KEY, Buffer.alloc(1)]).toString('base64url') }),
+    ['idempotency_key_shared'], 'the issuer key zero-padded is the same HMAC key');
+  // A read-only inventory (no write slot) still reads no IDEMPOTENCY_KEY at all.
+  const { writes: _writes, ...readOnly } = TENANT_INVENTORY;
+  assert.doesNotThrow(() => composeReadTransactions(readOnly, { ...TENANT_CONFIGURED, IDEMPOTENCY_KEY: undefined }, () => recordingKernel().client));
   assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, APP_DATABASE_URL: POOLER_URL.replace(':5432', ':6543') }), ['app_database_endpoint_unsupported']);
   assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, TENANT_SESSION_ISSUER_KEY: 'short' }), ['tenant_issuer_key_invalid']);
   assert.deepEqual(blockersOfRead({ ...TENANT_CONFIGURED, TENANT_SESSION_ISSUER_KEY: RATE_LIMIT_KEY }), ['tenant_issuer_key_shared']);
@@ -1236,7 +1253,7 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL and the issuer ke
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the customer route, session-bound and classified as a read', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the customer routes: the read session-bound and classified as a read, the create a command that is not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v2')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }] : []));
@@ -1246,9 +1263,14 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the cust
   assert.equal(calls, 1, 'the handed constructor is called exactly once');
   assert.equal((seen as { family: string }).family, 'direct', 'over the classified endpoint');
   assert.deepEqual(ttx.routes.map((r) => [r.method, r.path, r.policy.access, r.policy.access === 'session' ? r.policy.audience : null,
-    r.sessionBinding, r.trustedContext]), [['GET', '/api/v1/customers', 'session', 'tenant', 'required', 'required']]);
-  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'every route of the inventory is explicitly a read');
-  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers']);
+    r.sessionBinding, r.trustedContext, r.idempotency]), [
+    ['GET', '/api/v1/customers', 'session', 'tenant', 'required', 'required', 'none'],
+    ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
+  ]);
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'the read alone is classified as a read: never the create');
+  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers', 'POST /api/v1/customers']);
+  assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
+  assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
   assert.deepEqual(['connect', 'runtimeLogin', 'migrationLedger', 'parameterLogging', 'rateLimitKey'].map((k) => typeof preflight[k]), Array(5).fill('function'));
   assert.equal(typeof ttx.tenantAdmission.probe, 'function');
@@ -1343,7 +1365,7 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   await ttx.close();
 });
 
-test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; the read-only composition never builds a store or a command port', async () => {
+test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; only a write slot builds the store, its two ports and nothing else', async () => {
   const kernel = recordingKernel();
   const boom = new Error('synthetic read port fault');
   const inventory = { ...TENANT_INVENTORY, ports: (): never => { throw boom; } };
@@ -1362,8 +1384,32 @@ test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; the 
     (err: unknown) => err instanceof EnforcementSetupError && err.code === 'route_duplicate');
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => recordingKernel().client) as unknown as Record<string, unknown>;
   assert.deepEqual(Object.keys(ttx).sort(),
-    ['close', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads'],
-    'no idempotency, command port, platform admission or store');
+    ['close', 'idempotency', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads',
+      'transactions'], 'the write slot\'s idempotency and command ports — no delivery port, platform admission or store');
+  assert.deepEqual(Object.keys(ttx.idempotency as object).sort(), ['keySecret', 'store']);
+  assert.deepEqual(Object.keys(ttx.transactions as object), ['port']);
+  // Without a write slot the composition is read-only, exactly as before.
+  const { writes: _writes, ...readOnly } = TENANT_INVENTORY;
+  assert.deepEqual(Object.keys(composeReadTransactions(readOnly, TENANT_CONFIGURED, () => recordingKernel().client)).sort(),
+    ['close', 'issuerKey', 'mintProbe', 'preflight', 'rateLimiter', 'readsProbe', 'routes', 'sessionStore', 'tenantAdmission', 'tenantReads']);
+  // A write route with no mutator of its kind, or one that is no idempotent command, refuses before any client exists.
+  const slot = TENANT_INVENTORY.writes;
+  assert.ok(slot !== undefined);
+  for (const [label, writes] of [
+    ['no mutator', { ...slot, mutators: [] }],
+    ['a mutator of another mode', { ...slot, mutators: [{ ...slot.mutators[0], mode: 'update' }] }],
+    ['a mutator of another aggregate type', { ...slot, mutators: [{ ...slot.mutators[0], aggregateType: 'tenant' }] }],
+    ['two mutators of the kind', { ...slot, mutators: [...slot.mutators, ...slot.mutators] }],
+    ['a read in the write slot', { ...slot, routes: [...slot.routes, { ...tenantRouteDeclarations()[0], path: '/api/v1/unit' }] }],
+  ] as const) {
+    try {
+      composeReadTransactions({ ...TENANT_INVENTORY, writes } as never, TENANT_CONFIGURED, () => assert.fail('no client may be built'));
+      assert.fail(`${label}: composition must refuse`);
+    } catch (err) {
+      assert.ok(err instanceof TransactionCompositionError, `${label}: ${String(err)}`);
+      assert.deepEqual(err.blockers, ['command_mutator_unavailable'], label);
+    }
+  }
 });
 
 test('M7TK-07 the administrative root still composes no issuer key: its store refuses a tenant record before any statement', async () => {
@@ -1378,4 +1424,64 @@ test('M7TK-07 the administrative root still composes no issuer key: its store re
   }, new AbortController().signal)), /session store unavailable: issuer_key_missing/);
   assert.equal(fake.texts.length, 0, 'nothing sent');
   await boundary!.close();
+});
+
+test('M7TK-08 the composed tenant store commits the customer create in the ADR-34 order — fence, session peek, 016 hold, session held, v2 re-read, 019 on the session key alone, the tenant audit record, the completion — and a session ended before its hold commits nothing', async () => {
+  // M7A-CUSTOMERS-P3: the tenant root's write slot as composed, over a kernel answering by statement text.
+  const tenantSession = { ...sessionRow(tenantWitness), audience: 'tenant', authProviderUid: 'uid-tenant' };
+  let gets = 0;
+  let endedAfterPeek = false;
+  const kernel = recordingKernel((text) => {
+    if (text.includes('m6_command_fence')) return [{ held: true }];
+    if (text.includes('m5_session_get')) return endedAfterPeek && gets++ > 0 ? [] : [tenantSession];
+    if (text.includes('m5_hold_tenant_standing')) return [{ outcome: 'held' }];
+    if (text.includes('m5_session_touch')) return [{ outcome: 'updated' }];
+    if (text.includes('m5_admit_tenant_session_v2')) return [tenantAdmissionRow()];
+    if (text.includes('m7a_customer_create')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP }];
+    if (/insert into public\.audit_event/.test(text)) return Object.assign([], { count: 1, command: 'INSERT' });
+    if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
+    throw new Error(`a statement the tenant command never sends: ${text.slice(0, 80)}`);
+  });
+  const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
+  assert.ok(ttx.transactions !== undefined);
+  const events = defineOutboxEvents([]);
+  const contract = defineCommands([CUSTOMER_CREATE_CONTRACT], events).contract(CUSTOMER_CREATE_CONTRACT.kind);
+  assert.ok(contract !== undefined);
+  const keyring = createIdempotencyKeyring(Buffer.from(IDEMPOTENCY_KEY, 'base64url'));
+  const context = Object.freeze({
+    actor: REVAL_ACTOR, securityVersion: 'sv-1', scope: 'tenant' as const, tenant: REVAL_TENANT, store: null, membershipId: REVAL_MEMBERSHIP,
+    roleId: 'store_owner', limitation: 'none' as const,
+  });
+  const prepared = () => {
+    const id = randomUUID();
+    const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'firebase', authProviderUid: 'uid-tenant' }), {
+      method: 'POST', path: '/api/v1/customers', audience: 'tenant', tenant: REVAL_TENANT, store: null, actor: REVAL_ACTOR, body: Buffer.from('{"name":"Ada"}'),
+    });
+    const command = prepareCommand(contract, events, planCustomerCreate({ audience: 'tenant', body: { name: 'Ada' }, newAggregateId: id }) as never, {
+      scope: operation.scope, lease: randomBytes(32).toString('base64url'), newAggregateId: id,
+      authorization: Object.freeze({ scope: 'tenant', permission: 'create_customers' }), context, authNotAfter: null, sessionKey: REVAL_SESSION_KEY,
+      seal: (envelope) => keyring.seal(envelope, operation),
+    });
+    assert.ok(command !== null);
+    return { id, command: command.command };
+  };
+  const step = (text: string): string => (text.includes('m6_command_fence') ? 'fence' : text.includes('m5_session_get') ? 'session get'
+    : text.includes('m5_hold_tenant_standing') ? '016 hold' : text.includes('m5_session_touch') ? 'touch' : text.includes('m5_admit_tenant_session_v2') ? '016 v2'
+      : text.includes('m7a_customer_create') ? '019' : text.includes('audit_event') ? 'audit' : text.includes('m6_idempotency_complete') ? 'completion' : 'other');
+  const { id, command } = prepared();
+  assert.deepEqual(await ttx.transactions.port.commit(command, new AbortController().signal), { outcome: 'committed' });
+  assert.deepEqual(kernel.statements.map((st) => step(st.text)),
+    ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', '019', 'audit', 'completion'], 'the standing held before the session row, both before the write');
+  const create = kernel.statements.find((st) => step(st.text) === '019');
+  assert.deepEqual(create?.values, [REVAL_SESSION_KEY, id, 'Ada'], 'the presenting session\'s key as the only authority input');
+  const audit = kernel.statements.find((st) => step(st.text) === 'audit');
+  assert.deepEqual([audit?.values[4], audit?.values[7], audit?.values[8], audit?.values[9]], [REVAL_ACTOR, 'tenant', REVAL_TENANT, null],
+    'audited at tenant scope: the context\'s actor and tenant, no store');
+  assert.ok(!JSON.stringify(audit?.values).includes('Ada'), 'the customer\'s name is not in the audit record');
+  // A logout that committed between the peek and the hold: the held read finds nothing, and nothing is written.
+  kernel.statements.length = 0;
+  endedAfterPeek = true;
+  assert.deepEqual(await ttx.transactions.port.commit(prepared().command, new AbortController().signal), { outcome: 'unavailable' });
+  assert.deepEqual(kernel.statements.map((st) => step(st.text)), ['fence', 'session get', '016 hold', 'session get']);
+  await ttx.close();
 });

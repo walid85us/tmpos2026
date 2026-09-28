@@ -188,7 +188,7 @@ const ownerSql = () => postgres(targets.owner.dsn, { ...targets.owner.options, m
 /** A fresh operation acquired on `store`, and a create command held by it. */
 async function held(store) {
   const op = KEYRING.operationOf(randomUUID(), Object.freeze({ authProvider: 'm6-defect', authProviderUid: 'actor' }), {
-    method: 'POST', path: '/v1/m6-defect', audience: null, tenant: null, store: null, body: Buffer.from(randomUUID()),
+    method: 'POST', path: '/v1/m6-defect', audience: null, tenant: null, store: null, actor: null, body: Buffer.from(randomUUID()),
   });
   const lease = randomBytes(32).toString('base64url');
   const acquired = await store.idempotency.acquire(Object.freeze({ scope: op.scope, fingerprint: op.fingerprint, lease, leaseMs: 60_000, retentionMs: 600_000 }), live());

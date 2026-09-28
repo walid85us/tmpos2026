@@ -79,6 +79,12 @@ export const MAX_RECORD_BYTES = 4_096;
 export const MAX_RECORD_FIELDS = 16;
 /** The longest string field a schema may declare, in UTF-16 code units. */
 export const MAX_STRING_FIELD_LENGTH = 256;
+/**
+ * The longest string field a COMMAND change set may declare (parseChangeSchema), in UTF-16 code units. M7A-CUSTOMERS-P3:
+ * a customer name is 200 scalars, up to 400 UTF-16 units. Changes are the mutation's input, never an event or an
+ * envelope, so every payload and envelope keeps MAX_STRING_FIELD_LENGTH, and MAX_RECORD_BYTES bounds every record.
+ */
+export const MAX_CHANGE_STRING_FIELD_LENGTH = 400;
 /** The largest serialized outbox envelope: a bounded payload beside the fixed, format-bounded fields. */
 export const MAX_OUTBOX_ENVELOPE_BYTES = MAX_RECORD_BYTES + 1_024;
 /** The most events one command may enqueue. */
@@ -275,10 +281,10 @@ const isCleanString = (v: unknown, max: number): v is string =>
 export const isContractName = (v: unknown): v is string =>
   typeof v === 'string' && v.length <= MAX_CONTRACT_NAME_LENGTH && CONTRACT_NAME_RE.test(v);
 
-function parseField(raw: unknown): FieldSchema | null {
+function parseField(raw: unknown, maxStringLength: number): FieldSchema | null {
   if (!isRecord(raw)) return null;
   const { type, maxLength, min, max, values } = raw;
-  if (type === 'string' && hasExactKeys(raw, ['type', 'maxLength']) && isInteger(maxLength, 1, MAX_STRING_FIELD_LENGTH)) {
+  if (type === 'string' && hasExactKeys(raw, ['type', 'maxLength']) && isInteger(maxLength, 1, maxStringLength)) {
     return Object.freeze({ type, maxLength });
   }
   if (type === 'integer' && hasExactKeys(raw, ['type', 'min', 'max']) && isInteger(min, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
@@ -302,19 +308,28 @@ function isRefusedFieldName(name: string): boolean {
   return FORBIDDEN_NAMES.includes(lower) || lower.endsWith('key') || FORBIDDEN_NAME_PARTS.some((part) => lower.includes(part));
 }
 
-/** A strictly valid record schema as a frozen copy, or null. Definitions are source code, validated once at startup. */
-export function parseRecordSchema(raw: unknown): RecordSchema | null {
+function parseSchema(raw: unknown, maxStringLength: number): RecordSchema | null {
   if (!isRecord(raw)) return null;
   const names = Reflect.ownKeys(raw);
   if (names.length > MAX_RECORD_FIELDS) return null;
   const schema: Record<string, FieldSchema> = {};
   for (const name of names) {
     if (typeof name !== 'string' || isRefusedFieldName(name)) return null;
-    const field = parseField(raw[name]);
+    const field = parseField(raw[name], maxStringLength);
     if (field === null) return null;
     schema[name] = field;
   }
   return Object.freeze(schema);
+}
+
+/** A strictly valid record schema as a frozen copy, or null. Definitions are source code, validated once at startup. */
+export function parseRecordSchema(raw: unknown): RecordSchema | null {
+  return parseSchema(raw, MAX_STRING_FIELD_LENGTH);
+}
+
+/** A command change-set schema: parseRecordSchema's rules, its strings up to MAX_CHANGE_STRING_FIELD_LENGTH. Never an event's. */
+export function parseChangeSchema(raw: unknown): RecordSchema | null {
+  return parseSchema(raw, MAX_CHANGE_STRING_FIELD_LENGTH);
 }
 
 function fieldAccepts(field: FieldSchema, value: unknown): boolean {

@@ -320,13 +320,14 @@ async function rolledBack(isolation, fn) {
 // M7M-01..04: the migration, the login, the vectors, key custody
 // ---------------------------------------------------------------------------
 
-test('M7M-01: 001-018 applied clean; 005-017 byte-identical to their pins; 018\'s postcondition re-proven, and refusing every widening', async () => {
+test('M7M-01: 001-019 applied clean; 005-017 byte-identical to their pins; 018\'s postcondition re-proven, and refusing every widening', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019']
       .map((v) => [v, false]));
-  assert.equal(ledger.at(-1).checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/018_m7a_tenant_session_mint.up.sql`)).digest('hex'),
+  assert.equal(ledger.find((r) => r.version === '018').checksum,
+    createHash('sha256').update(readFileSync(`${MIG_DIR}/018_m7a_tenant_session_mint.up.sql`)).digest('hex'),
     'the ledger records the committed 018 up file');
   // 005-017: postgresStartupPreflight.ts REQUIRED_MIGRATIONS (up) and the earlier suites' pins (down), unchanged by 018.
   const PINNED = {
@@ -440,10 +441,11 @@ test('M7M-01: 001-018 applied clean; 005-017 byte-identical to their pins; 018\'
   assert.deepEqual({ ...after }, { granted: false, inherits: true }, 'the widenings did not survive');
 });
 
-/** design-B §9: every routine the runtime login may execute in a tmpos_* schema after 018 — 29, by name. */
+/** design-B §9: every routine the runtime login may execute in a tmpos_* schema after 018 — 29, by name — and 019's create: 30. */
 const LOGIN_ROUTINES = [
   'tmpos_admission.m5_admit_platform_session',
   'tmpos_command.m5_revalidate_platform_authority', 'tmpos_command.m5_tenant_display_name_update_v2', 'tmpos_command.m5_tenant_status_change',
+  'tmpos_customer_write.m7a_customer_create',
   'tmpos_directory.m5_tenant_directory_page',
   'tmpos_identity.m5_resolve_principal', 'tmpos_identity.m5_revalidate_principal_context',
   'tmpos_internal.m6_command_enqueue', 'tmpos_internal.m6_command_fence', 'tmpos_internal.m6_idempotency_acquire',
@@ -456,13 +458,13 @@ const LOGIN_ROUTINES = [
   'tmpos_session.m5_session_touch',
 ];
 
-test('M7M-02: the login\'s own privileges by every grant path: exactly the 29 tmpos_* routines, two appends and two columns, and no other table or column write', async () => {
+test('M7M-02: the login\'s own privileges by every grant path: exactly the 30 tmpos_* routines, two appends and two columns, and no other table or column write', async () => {
   // Every routine outside the catalogs the login may execute, by any path.
   const executable = await runtime`select n.nspname || '.' || p.proname as name, p.prosecdef as definer
       from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace
      where n.nspname not in ('pg_catalog', 'information_schema') and pg_catalog.has_function_privilege(p.oid, 'EXECUTE')
      order by 1`;
-  assert.equal(LOGIN_ROUTINES.length, 29);
+  assert.equal(LOGIN_ROUTINES.length, 30);
   assert.deepEqual(executable.filter((r) => r.name.startsWith('tmpos_')).map((r) => r.name), LOGIN_ROUTINES);
   // Outside tmpos_*: only public's routines (pgcrypto's and 001-005's trigger helpers), each SECURITY INVOKER — it runs
   // with the login's own privileges, so it reaches nothing the login could not reach directly.

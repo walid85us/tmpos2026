@@ -56,7 +56,7 @@ const create = commands.contract(TEST_CREATE.kind) as CommandContract;
 const rename = commands.contract(TEST_RENAME.kind) as CommandContract;
 const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
 const op = keyring.operationOf(randomUUID(), { authProvider: 'synthetic', authProviderUid: 'uid-a' }, {
-  method: 'POST', path: '/v1/items', audience: null, tenant: null, store: null, body: Buffer.from('{}'),
+  method: 'POST', path: '/v1/items', audience: null, tenant: null, store: null, actor: null, body: Buffer.from('{}'),
 });
 const binding = (newAggregateId = randomUUID()) => ({
   scope: op.scope, lease: 'l'.repeat(43), newAggregateId, authorization: Object.freeze({ scope: 'platform' as const, permission: 'items.write' }),
@@ -198,6 +198,10 @@ test('command contracts are closed at startup against the event contracts', () =
     assert.throws(() => defineCommands(defs, events), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', label);
   }
   assert.equal(defineCommands([{ ...base, events: [] }], events).list().length, 1, 'a command may enqueue no event');
+  // M7A-CUSTOMERS-P3: a change set's strings reach MAX_CHANGE_STRING_FIELD_LENGTH (400: a 200-scalar name), and no further.
+  assert.equal(defineCommands([{ ...base, changes: { name: { type: 'string', maxLength: 400 } } }], events).list().length, 1, 'a 400-unit name');
+  assert.throws(() => defineCommands([{ ...base, changes: { name: { type: 'string', maxLength: 401 } } }], events),
+    (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', 'a 401-unit name');
 });
 
 test('only an exact commit answer is obeyed; everything else is refused for what it is, never read as a rollback', async () => {

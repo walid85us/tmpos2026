@@ -313,7 +313,7 @@ function conformanceKit(h: TransactionalOutboxHarness) {
     Promise.resolve().then(() => h.idempotency.acquire(Object.freeze({ ...operation, lease: held, leaseMs: LEASE_MS, retentionMs: RETAIN_MS }), live()));
   /** An operation nobody has acquired. */
   const operationOf = (): OperationIdentity => keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'conformance', authProviderUid: `${run}-actor` }), {
-    method: 'POST', path: '/v1/conformance', audience: null, tenant: null, store: null, body: Buffer.from(`{"n":${++serial}}`),
+    method: 'POST', path: '/v1/conformance', audience: null, tenant: null, store: null, actor: null, body: Buffer.from(`{"n":${++serial}}`),
   });
   /** A fresh operation, its lease acquired. */
   const begin = async (): Promise<Attempt> => {

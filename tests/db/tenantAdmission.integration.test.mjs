@@ -420,13 +420,13 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-018 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
+test('M5A-01: migrations 001-019 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-018, so this run applies nothing and its report lists no version.
+  // 001-019, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019']
       .map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.

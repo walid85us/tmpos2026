@@ -537,6 +537,14 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // at all, and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the
     // containment property above is untouched.
     'tests/db/tenantEntry.integration.test.mjs',
+    // M7A-CUSTOMERS-P3: the customer-create routine's proof needs 001-019 applied (and 019 rolled back and re-applied)
+    // before it can say anything about migration 019's routine or its privilege containment, and applies them through the
+    // SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
+    'tests/db/customerCreateRoutine.integration.test.mjs',
+    // M7A-CUSTOMERS-P3: the create's end-to-end HTTP proof needs 001-019 applied before its tenant entry can start at all,
+    // and applies them through the SAME trusted executor. Same category (a tests/db/ suite), same reasoning; the
+    // containment property above is untouched.
+    'tests/db/customerCreate.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

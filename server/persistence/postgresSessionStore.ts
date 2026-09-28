@@ -48,7 +48,8 @@
 // for a tenant one), and refuses — writing nothing — when it moved. A reauthentication must then END the live session
 // of its own audience and principal that it presents, or it ends, creates and records nothing: a logout or a
 // revocation that committed first leaves it nothing to end. And holdAdministrativeSession lets the command
-// transaction hold the very session that presented a command, so that command commits only while it is live.
+// transaction hold the very session that presented a command, so that command commits only while it is live —
+// for a tenant command (M7A-CUSTOMERS-P3) readTenantSession, then holdTenantSession, once its standing is locked.
 //
 // FAIL CLOSED, NEVER FAIL OPEN. A malformed row, an unexpected column set, a row count other than
 // the one expected, an out-of-range timestamp, an abort, a timeout, a lost connection and a driver
@@ -378,6 +379,29 @@ export async function holdAdministrativeSession(sql: PgTransactionScope, key: st
   const held = await liveRecord(sql, key, now);
   if (held === undefined || held.audience !== 'admin') return undefined;
   return (await hold(sql, key, held)) ? held : undefined;
+}
+
+/**
+ * The live TENANT session under `key` as the caller's transaction reads it — no lock taken — or undefined when there is
+ * none or it is of another audience (M7A-CUSTOMERS-P3). The tenant command's revalidator reads it first only to learn the
+ * provider reference whose standing it must lock (016's hold) BEFORE it holds the session row (holdTenantSession), the
+ * ADR-31 order; a key never changes its reference. Any other doubt THROWS. `key` is a SQL parameter and nothing else.
+ */
+export async function readTenantSession(sql: PgTransactionScope, key: string, now: number): Promise<SessionRecord | undefined> {
+  if (typeof now !== 'number' || !Number.isSafeInteger(now) || now < 1) throw new SessionStoreUnavailable('clock_invalid');
+  const record = await liveRecord(sql, key, now);
+  return record !== undefined && record.audience === 'tenant' ? record : undefined;
+}
+
+/**
+ * The live TENANT session under `key`, held by the caller's transaction until it ends, or undefined when there is none
+ * (M7A-CUSTOMERS-P3) — holdAdministrativeSession's twin for the tenant command transaction: read live again, then held
+ * by the touch, so a logout or a revocation that committed first leaves nothing to hold and one that comes later waits
+ * for the command's COMMIT. Undefined, before anything is written, for no live record or a record of another audience.
+ */
+export async function holdTenantSession(sql: PgTransactionScope, key: string, now: number): Promise<SessionRecord | undefined> {
+  const held = await readTenantSession(sql, key, now);
+  return held !== undefined && (await hold(sql, key, held)) ? held : undefined;
 }
 
 /**

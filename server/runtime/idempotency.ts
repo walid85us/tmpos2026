@@ -20,12 +20,13 @@
 //   scope       = H(key digest, principal digest) — the record the store keeps. Each principal has
 //                 its own key namespace, so another principal using the same key collides with,
 //                 waits on and learns of nothing.
-//   fingerprint = H(scope, method, route path, session boundary, tenant, store, SHA-256 of the exact
-//                 body bytes) — the request the record is bound to: everything the operation sees.
-//                 The tenant and store slots are reserved — no tenant or store context exists in the
-//                 runtime before M5, so the chain passes null — and any context later handed to an
-//                 operation must enter the fingerprint with it.
-// The same key and principal with another operation, boundary, tenant, store or body is the same
+//   fingerprint = H(scope, method, route path, session boundary, tenant, store, actor, SHA-256 of the
+//                 exact body bytes) — the request the record is bound to: everything the operation sees.
+//                 Tenant, store and actor are the authorizer's TRUSTED scope (app.ts; principals.ts
+//                 TrustedScope), never the request's: the tenant and store it selected (null at platform
+//                 scope) and the app-owned actor it resolved (M7A-CUSTOMERS-P3, contract version 2). So a
+//                 principal whose tenant or actor changed cannot replay one context's record in another's.
+// The same key and principal with another operation, boundary, tenant, store, actor or body is the same
 // scope under another fingerprint: a conflict, answered identically whatever differs. No digest is
 // a bare hash, so neither a small body nor a known key can be guessed from what the store holds.
 //
@@ -79,8 +80,8 @@
 // one — never exactly-once execution — and is never approved for a production route. A `command`
 // closes the window by contract (commandTransaction.ts): its business mutation, the lease-checked
 // completion, its audit record and its outbox events commit in one transaction of the authoritative
-// store, so at most one attempt commits. No adapter implements that yet: none is approved
-// (server/composition binds none) and no production route requires idempotency.
+// store, so at most one attempt commits. Every production route that requires idempotency is a `command`
+// (the PostgreSQL store, server/persistence/postgresTransactionalStore.ts); none is a `perform`.
 //
 // Also bounded: a record lives IDEMPOTENCY_POLICY.retentionMs (24 h) from its acquisition, so a
 // retry with the same key after that is a new operation; and IDEMPOTENCY_KEY and the contract
@@ -93,7 +94,11 @@ import { secretKeyOf } from './keyMaterial.js';
 import { EnforcementSetupError } from './routes.js';
 import type { RouteMethod, SessionAudience, VerifiedPrincipal } from './routes.js';
 
-export const IDEMPOTENCY_CONTRACT_VERSION = 1;
+/**
+ * In every tag, so a change starts every record afresh (the drain above). 2 since M7A-CUSTOMERS-P3: the fingerprint
+ * gained the trusted actor and the chain began binding the trusted tenant and store.
+ */
+export const IDEMPOTENCY_CONTRACT_VERSION = 2;
 
 /** The lease and retention every acquisition is handed: source-defined, identical on every instance. */
 export const IDEMPOTENCY_POLICY = Object.freeze({ leaseMs: 60_000, retentionMs: 24 * 60 * 60_000 });
@@ -182,9 +187,13 @@ export interface OperationBinding {
   readonly method: RouteMethod;
   readonly path: string;
   readonly audience: SessionAudience | null;
-  /** Reserved for M5's tenant and store context; null until the runtime has one. */
+  /**
+   * The authorizer's trusted scope (app.ts), never the request's: the tenant and store it selected — both null at
+   * platform scope — and the app-owned actor it resolved.
+   */
   readonly tenant: string | null;
   readonly store: string | null;
+  readonly actor: string | null;
   /** The exact body bytes read. */
   readonly body: Uint8Array;
 }
@@ -195,6 +204,7 @@ export interface OperationIdentity {
 }
 
 export interface IdempotencyKeyring {
+  /** Throws a TypeError on a binding whose audience, tenant, store or actor is neither a string nor null. */
   operationOf(key: string, principal: VerifiedPrincipal, binding: OperationBinding): OperationIdentity;
   seal(envelope: ReplayEnvelope, operation: OperationIdentity): string;
   unseal(sealed: unknown, operation: OperationIdentity): ReplayEnvelope | null;
@@ -349,9 +359,12 @@ export function createIdempotencyKeyring(secret: unknown): IdempotencyKeyring {
   const associated = (operation: OperationIdentity): Buffer => Buffer.from(tag('seal', operation.scope, operation.fingerprint));
   return Object.freeze({
     operationOf(clientKey: string, principal: VerifiedPrincipal, binding: OperationBinding): OperationIdentity {
+      // A slot that is neither a string nor null — an omitted actor, say — would hash as null: refuse it instead.
+      const slots: readonly unknown[] = [binding.audience, binding.tenant, binding.store, binding.actor];
+      if (!slots.every((slot) => slot === null || typeof slot === 'string')) throw new TypeError('idempotency_binding_invalid');
       const scope = digest(tag('scope', digest(tag('key', clientKey)), digest(tag('principal', principal.authProvider, principal.authProviderUid))));
       const body = createHash('sha256').update(binding.body).digest('base64url');
-      const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, body));
+      const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, binding.actor, body));
       return Object.freeze({ scope, fingerprint });
     },
     seal(envelope: ReplayEnvelope, operation: OperationIdentity): string {

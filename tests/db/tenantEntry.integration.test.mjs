@@ -22,6 +22,12 @@
 // customer, session and mint-ledger rows, restores the limiter's fingerprint, the issuer key row it found (or its absence)
 // and every grant, ledger row and setting a test changes, and drops its login. What it leaves is what every suite leaves:
 // its synthetically named identities, tenants and store, and the approved PUBLIC revokes every suite establishes.
+//
+// M7A-CUSTOMERS-P3 UPDATE. The entry now also serves POST /api/v1/customers (tests/db/customerCreate.integration.test.mjs
+// proves it end to end), so it requires its own IDEMPOTENCY_KEY — present, canonical, never the limiter's or the issuer's
+// key — and readiness also asks the tenant store's probe. M7TE-01 pins the seven-route table, M7TE-07 the key's three
+// refusals, M7TE-08 the create's EXECUTE at startup, M7TE-11 the store probe after it, and M7TE-C1 has the COMPILED entry
+// create one customer while the administrative inventory stays its eight routes.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -43,7 +49,8 @@ import { createSupervisedPgClient, MAX_POOLS } from '../../server/persistence/su
 import { tenantMintProof } from '../../server/persistence/postgresSessionStore.ts';
 import { rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
 import { startTenantEntry, TENANT_SHIPPING_ROUTES } from '../../server/entry/tenantEntry.ts';
-import { principalKeyOf, SESSION_COOKIES, SESSION_TTL } from '../../server/runtime/sessions.ts';
+import { SHIPPING_ROUTES } from '../../server/entry/productionEntry.ts';
+import { principalKeyOf, SESSION_COOKIES, SESSION_CSRF_HEADER, SESSION_TTL } from '../../server/runtime/sessions.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { sessionPaths } from '../../server/runtime/routes.ts';
 import { SECURITY_HEADERS, HSTS_HEADER } from '../../server/runtime/securityHeaders.ts';
@@ -68,6 +75,9 @@ const V2 = 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)';
 const MINT = 'tmpos_mint.m7a_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint, bytea)';
 const SESSION_GET = 'tmpos_session.m5_session_get(text, bigint)';
 const ADMIT = 'tmpos_session.m5_admit_tenant_session_v2(text, text)';
+/** M7A-CUSTOMERS-P3: 019's create, and 006's probe the tenant store answers readiness with (its idempotency and command ports). */
+const CREATE = 'tmpos_customer_write.m7a_customer_create(text, uuid, text)';
+const STORE_PROBE = 'tmpos_internal.m6_store_probe()';
 
 // ---------------------------------------------------------------------------
 // cluster lifecycle (mirrors tests/db/productionEntry.integration.test.mjs)
@@ -249,7 +259,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-018, a real non-owner least-privilege runtime login, the issuer key and the limiter key
+// setup: real migrations 001-019, a real non-owner least-privilege runtime login, the issuer key and the limiter key
 // ---------------------------------------------------------------------------
 
 await setupStep(async () => {
@@ -280,9 +290,13 @@ await setupStep(async () => {
   await owner.unsafe(`grant select on public.schema_migrations to ${RUNTIME_LOGIN}`);
 });
 
-/** Made in this process, never written anywhere: the limiter's key and the tenant issuer key (a fresh key is not weak). */
+/**
+ * Made in this process, never written anywhere: the limiter's key, the tenant issuer key (a fresh key is not weak) and the
+ * tenant entry's own command key (M7A-CUSTOMERS-P3), three distinct keys.
+ */
 const RATE_KEY = randomBytes(32);
 const ISSUER_KEY = randomBytes(32);
+const IDEMPOTENCY_KEY = randomBytes(32);
 
 await setupStep(async () => {
   rateLimitFingerprintBefore = await fingerprintRow();
@@ -331,6 +345,7 @@ function baseEnv(overrides = {}) {
     SESSION_ADMIN_ORIGINS: ADMIN_ORIGIN,
     SESSION_TENANT_ORIGINS: TENANT_ORIGIN,
     TENANT_SESSION_ISSUER_KEY: ISSUER_KEY.toString('base64url'),
+    IDEMPOTENCY_KEY: IDEMPOTENCY_KEY.toString('base64url'),
     FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: FIREBASE_JSON,
     ...overrides,
   };
@@ -373,8 +388,9 @@ function makeCapture() {
   return { lines, codes, proc, log, exit };
 }
 
-function sendReq(port, method, path, headers = {}, localAddress) {
-  const framed = { ...(method === 'GET' ? {} : { 'content-length': '0' }), ...headers };
+function sendReq(port, method, path, headers = {}, localAddress, body) {
+  const payload = body === undefined ? undefined : Buffer.from(body);
+  const framed = { ...(method === 'GET' ? {} : { 'content-length': String(payload?.length ?? 0) }), ...headers };
   return new Promise((resolve, reject) => {
     const options = { host: '127.0.0.1', port, method, path, headers: framed, agent: false };
     if (localAddress) options.localAddress = localAddress;
@@ -386,7 +402,7 @@ function sendReq(port, method, path, headers = {}, localAddress) {
     });
     request.on('error', reject);
     request.setTimeout(10_000, () => request.destroy(new Error(`no reply within 10 s: ${method} ${path}`)));
-    request.end();
+    request.end(payload);
   });
 }
 
@@ -602,7 +618,7 @@ async function withEntry(overrides, fn) {
   const port = result.address?.port ?? null;
   const ctx = {
     result, cap, relay, ends, port, clientAddress, bindAttempts: bindSpy.count(), clientsBuilt: () => built,
-    req: (method, path, headers = {}) => sendReq(port, method, path, { host: TENANT_HOST, ...headers }, clientAddress),
+    req: (method, path, headers = {}, body) => sendReq(port, method, path, { host: TENANT_HOST, ...headers }, clientAddress, body),
     raw: (text) => rawRequest(port, text, { localAddress: clientAddress }),
     login: (who, extra = {}) => sendReq(port, 'POST', sessionPaths('tenant').login, {
       host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE,
@@ -624,8 +640,9 @@ async function signIn(ctx, who) {
   const setCookie = (reply.headers['set-cookie'] ?? [''])[0];
   const cookie = setCookie.split('; ')[0];
   await noteSession(cookie);
-  SECRETS.add(JSON.parse(reply.body).csrfToken);
-  return { cookie, setCookie };
+  const csrf = JSON.parse(reply.body).csrfToken;
+  SECRETS.add(csrf);
+  return { cookie, setCookie, csrf };
 }
 
 const list = (ctx, cookie, query = '') => {
@@ -753,6 +770,17 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
     assert.equal(ctx.result.address.address, '127.0.0.1');
     assert.deepEqual(canonical(ctx.result.routes), canonical(TENANT_SHIPPING_ROUTES));
+    // The table itself, pinned here rather than read from the module: the customer create (M7A-CUSTOMERS-P3) is its one
+    // body-bearing, idempotent route.
+    assert.deepEqual(canonical(ctx.result.routes), [
+      'GET /api/v1/customers session none none',
+      'GET /api/v1/session session none none',
+      'GET /health public none none',
+      'GET /readiness public none none',
+      'POST /api/v1/customers session json required',
+      'POST /api/v1/session/login login none none',
+      'POST /api/v1/session/logout session none none',
+    ]);
     assert.equal(ctx.bindAttempts, 1, 'exactly one real bind attempt');
     assert.equal(ctx.clientsBuilt(), 1, 'one kernel');
     for (const host of [TENANT_HOST, ADMIN_HOST, 'foreign.test']) {
@@ -846,7 +874,9 @@ test('M7TE-04: an administrative session is no tenant session; no administrative
     for (const [method, path] of [['POST', sessionPaths('admin').login], ['GET', sessionPaths('admin').current], ['POST', sessionPaths('admin').logout],
       ['GET', '/admin/v1/tenants'], ['PATCH', '/admin/v1/tenants/display-name'], ['PATCH', '/admin/v1/tenants/status'],
       ['GET', '/__witness'], ['GET', '/admin/v1/witness'], ['GET', '/dev'], ['GET', '/identity/whoami'], ['GET', '/diagnostics'],
-      ['GET', '/bootstrap'], ['GET', '/migrations'], ['POST', CUSTOMER_DIRECTORY_PATH], ['GET', `${CUSTOMER_DIRECTORY_PATH}/x`]]) {
+      // M7A-CUSTOMERS-P3: POST on the customer path is now the create (M7TE-01); no other write method is.
+      ['GET', '/bootstrap'], ['GET', '/migrations'], ['PUT', CUSTOMER_DIRECTORY_PATH], ['PATCH', CUSTOMER_DIRECTORY_PATH],
+      ['DELETE', CUSTOMER_DIRECTORY_PATH], ['GET', `${CUSTOMER_DIRECTORY_PATH}/x`]]) {
       assertBounded404(await ctx.req(method, path, { cookie: `${SESSION_COOKIES.admin}=${id}` }), `${method} ${path}`);
       assert.ok(!ctx.result.routes.some((r) => r.method === method && r.path === path), `${method} ${path} is not in the served inventory`);
     }
@@ -919,7 +949,11 @@ test('M7TE-07: each missing or malformed tenant configuration refuses config_inv
     ['issuer key = the recorded vector', { TENANT_SESSION_ISSUER_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString('base64url') },
       'TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_weak'],
     ['issuer key of one repeated byte', { TENANT_SESSION_ISSUER_KEY: Buffer.alloc(32, weakByte).toString('base64url') }, 'TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_weak'],
-    ['IDEMPOTENCY_KEY present', { IDEMPOTENCY_KEY: randomBytes(32).toString('base64url') }, 'IDEMPOTENCY_KEY:idempotency_key_present'],
+    // M7A-CUSTOMERS-P3: the entry's own command key — required, canonical, and neither of the other two keys.
+    ['IDEMPOTENCY_KEY missing', { IDEMPOTENCY_KEY: undefined }, 'IDEMPOTENCY_KEY:idempotency_key_missing'],
+    ['IDEMPOTENCY_KEY malformed', { IDEMPOTENCY_KEY: 'abc' }, 'IDEMPOTENCY_KEY:idempotency_key_invalid'],
+    ['IDEMPOTENCY_KEY = RATE_LIMIT_KEY', { IDEMPOTENCY_KEY: RATE_KEY.toString('base64url') }, 'IDEMPOTENCY_KEY:idempotency_key_shared'],
+    ['IDEMPOTENCY_KEY = the issuer key', { IDEMPOTENCY_KEY: ISSUER_KEY.toString('base64url') }, 'IDEMPOTENCY_KEY:idempotency_key_shared'],
     ['RATE_LIMIT_KEY missing', { RATE_LIMIT_KEY: undefined }, 'RATE_LIMIT_KEY:rate_limit_key_missing'],
     ['RATE_LIMIT_KEY malformed', { RATE_LIMIT_KEY: 'abc' }, 'RATE_LIMIT_KEY:rate_limit_key_invalid'],
     ['APP_DATABASE_URL missing', { APP_DATABASE_URL: undefined }, 'APP_DATABASE_URL:app_database_url_missing'],
@@ -935,7 +969,7 @@ test('M7TE-07: each missing or malformed tenant configuration refuses config_inv
   }
 });
 
-test('M7TE-08: the database must hold this process\'s issuer key; the limiter must hold its key; the login must hold the customer read and the session mint — each refuses startup with its bounded code', async () => {
+test('M7TE-08: the database must hold this process\'s issuer key; the limiter must hold its key; the login must hold the customer read, the customer create and the session mint — each refuses startup with its bounded code', async () => {
   try {
     await owner`delete from tmpos_mint.issuer_key`;
     await withEntry({}, async (ctx) => assertRefused(ctx, 'tenant_issuer_key_absent', [], 'no key installed'));
@@ -959,6 +993,9 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   // The mint withdrawn: the runtime login's grant census names it before the readiness step's mint probe is reached.
   await withoutExecute(MINT, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the session mint withdrawn')));
+  // The customer create withdrawn (M7A-CUSTOMERS-P3): the same census names it — the write never serves without 019.
+  await withoutExecute(CREATE, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the customer create withdrawn')));
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'restored: it starts'));
 });
 
@@ -995,25 +1032,25 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-018 refuses startup migration_state_invalid', async () => {
+test('M7TE-10: a migration ledger that is not exactly 001-019 refuses startup migration_state_invalid', async () => {
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '018'`;
-  assert.ok(row !== undefined, '018 is recorded');
+    from public.schema_migrations where version = '019'`;
+  assert.ok(row !== undefined, '019 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('018', '019')`;
+    await sql`delete from public.schema_migrations where version in ('019', '020')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '018'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 017'));
+    await owner`delete from public.schema_migrations where version = '019'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 018'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 018').digest('hex')} where version = '018'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '018 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 019').digest('hex')} where version = '019'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '019 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('019', ${createHash('sha256').update('019').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 019'));
+      values ('020', ${createHash('sha256').update('020').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 020'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1023,11 +1060,11 @@ test('M7TE-10: a migration ledger that is not exactly 001-018 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '018'`;
+    from public.schema_migrations where version = '019'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 
-test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted or rotated, parameter logging is on, the customer read, the session mint, the session read or the tenant admission is withdrawn, the limiter key is replaced or the database is down — each alone, and 200 once each recovers; /health stays 200', async () => {
+test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted or rotated, parameter logging is on, the customer read, the session mint, the session read, the tenant admission or the tenant store\'s probe is withdrawn, the limiter key is replaced or the database is down — each alone, and 200 once each recovers; /health stays 200', async () => {
   const who = await actor('m7te11', [tenantGrant(T_A, 'manager')]);
   await withEntry({}, async (ctx) => {
     assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
@@ -1117,6 +1154,15 @@ test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted o
       assert.ok(await readinessUntil(ctx, 200), `${label} restored: ready`);
     }
 
+    // The tenant store's probe withdrawn (M7A-CUSTOMERS-P3): its idempotency and command ports answer readiness with it, so
+    // not ready — while the read, which needs neither, still answers.
+    await withoutExecute(STORE_PROBE, async () => {
+      await readinessHolds(ctx, 503);
+      assert.deepEqual(pageOf(await list(ctx, session.cookie), 'a read with the store probe withdrawn').customers, SEED_A);
+      assert.equal((await ctx.req('GET', '/health')).status, 200);
+    });
+    assert.ok(await readinessUntil(ctx, 200), 'the store probe restored: ready');
+
     // The database down.
     await storeDown(ctx.relay);
     await readinessHolds(ctx, 503);
@@ -1149,7 +1195,19 @@ test('M7TE-12: shutdown closes the listener and ends the database client exactly
 // M7TE-C1: the COMPILED tenant entry over the same disposable database and real sockets
 // ===========================================================================
 
-test('M7TE-C1: the compiled tenant entry starts over the disposable database, serves the customer read on the tenant host alone (in another letter case too, never with a trailing dot), refuses the admin cookie, and stops cleanly', async () => {
+test('M7TE-C1: the compiled tenant entry starts over the disposable database, serves the customer read on the tenant host alone (in another letter case too, never with a trailing dot), refuses the admin cookie, creates one customer, and stops cleanly; the administrative inventory is still its eight routes', async () => {
+  // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES (its compiled inventory is pinned by
+  // production-runtime-contract): still exactly these eight — no customer route, nothing of the tenant boundary's.
+  assert.deepEqual(canonical(SHIPPING_ROUTES), [
+    'GET /admin/v1/session session none none',
+    'GET /admin/v1/tenants session none none',
+    'GET /health public none none',
+    'GET /readiness public none none',
+    'PATCH /admin/v1/tenants/display-name session json required',
+    'PATCH /admin/v1/tenants/status session json required',
+    'POST /admin/v1/session/login login none none',
+    'POST /admin/v1/session/logout session none none',
+  ]);
   // The compiled ENTRY module is started, as the source one is above: the compiled executable (tenantMain.js) passes
   // PRODUCTION_CONSTRUCTION — verified TLS to the sealed managed endpoint — which no disposable database can answer. Its own
   // bytes are pinned elsewhere: it runs under node and refuses (production-runtime-contract), and its one call passes
@@ -1192,6 +1250,25 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       assertBounded404(await ctx.req('GET', '/admin/v1/tenants', { cookie: `${SESSION_COOKIES.admin}=${adminId}` }), 'compiled: no administrative route');
       assert.equal((await ctx.req('GET', '/readiness')).status, 200);
 
+      // M7A-CUSTOMERS-P3: the compiled artifact carries the create and its store — one real POST commits one customer in the
+      // session's tenant, with its one audit record (the full contract is tests/db/customerCreate.integration.test.mjs's).
+      const name = `Compiled create ${SUFFIX}`;
+      const key = randomUUID();
+      SECRETS.add(name).add(key);
+      const created = await ctx.req('POST', CUSTOMER_DIRECTORY_PATH, {
+        origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: session.cookie,
+        [SESSION_CSRF_HEADER]: session.csrf, 'content-type': 'application/json', 'idempotency-key': key,
+      }, JSON.stringify({ name }));
+      assert.equal(created.status, 201, `compiled create: ${created.body}`);
+      const { customer } = JSON.parse(created.body);
+      SECRETS.add(customer.id);
+      assert.equal(customer.name, name);
+      const [row] = await owner`select tenant_id, name from tmpos_customer.customer where customer_id = ${customer.id}`;
+      assert.deepEqual({ ...row }, { tenant_id: T_A, name }, 'compiled create: the row, in the session\'s tenant');
+      const [{ n }] = await owner`select count(*)::int as n from public.audit_event
+        where action_id = 'tenant.customer.create' and actor_internal_user_id = ${who.id}`;
+      assert.equal(n, 1, 'compiled create: one audit record');
+
       ctx.cap.proc.emit('SIGTERM');
       await waitFor(() => ctx.cap.codes.length > 0, 5_000);
       assert.deepEqual(ctx.cap.codes, [0], 'the compiled entry stops cleanly, exit 0');
@@ -1205,7 +1282,7 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
 test('M7TE-13: no captured log line carries a configuration value, a key, a proof, a session identifier or key, a token, a customer name or id, or a cursor', () => {
   const forbidden = [
     'synthetic-pw',
-    ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e)]),
+    ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e), IDEMPOTENCY_KEY.toString(e)]),
     ...FIREBASE_PRIVATE_KEY.split('\n').filter((line) => line.length > 20 && !line.startsWith('-----')),
     ...SECRETS,
   ];

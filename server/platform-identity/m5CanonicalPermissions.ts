@@ -32,7 +32,8 @@
 //   * a TENANT- or STORE-scope permission is UNDECIDABLE, and composition refuses such a route at
 //     startup rather than guessing. It is a refusal to answer, never an answer of 'allow'.
 // This matches what the runtime already enforces: routes.ts admits an idempotency-required route only
-// under a platform-scope requirement, precisely because M5 has not landed.
+// under a platform-scope requirement, precisely because M5 has not landed (M7A-CUSTOMERS-P3: or a
+// tenant-scope one on a tenant-session route, whose permission — create_customers — is decided here).
 //
 // M5-GIAM-D1-P1 UPDATE. The platform decision reads a role through its DEFINITION — levels and money
 // grants as data (PlatformRoleDefinition) — rather than through its id, so owner decision D1's rules hold
@@ -52,6 +53,13 @@
 // catalog's own tenant materializer (materializeTenantPermissions — the role defaults, the entitlement gate and the
 // read-only cap the client engines mirror), compared on the tenant family ordering: no second evaluator, no role id
 // read as a shortcut, and no default widened.
+//
+// M7A-CUSTOMERS-P3 UPDATE. The second tenant route permission, create_customers, is the Customers domain at Create or
+// above — the canonical Customers Create authority the owner brief names for POST /api/v1/customers (docs/phase-4/10
+// ADR-34). It is decided exactly as view_customers is, by the same materializer and ordering, with no role default
+// changed: store_owner, manager and sales_staff hold it, technician (Customers View) does not. It is the first route
+// permission above View, so the read_only rule is stated where it is enforced: a read_only limitation grants a tenant
+// route permission at View only, and denies every threshold above it.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -117,21 +125,31 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
 );
 
 /**
- * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1): each names exactly one tenant DOMAIN and the level a role
- * must hold on it, as owner decision D1 fixed it for one route. They are the only tenant keys this module decides, and
- * only at TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route
- * permission never shares a key with a sub-permission, and every one is a non-sensitive View read — the module refuses
- * to load otherwise. A read_only limitation caps every domain at View (the materializer's own cap), so it grants
- * exactly these; a route permission above View, or a sensitive one, needs its own read_only rule before it is added.
- *   * view_customers — GET /api/v1/customers: the Customers domain at View or above.
+ * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1, -P3): each names exactly one tenant DOMAIN and the level a role
+ * must hold on it, as the owner fixed it for one route. They are the only tenant keys this module decides, and only at
+ * TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route permission
+ * never shares a key with a sub-permission, and every one is non-sensitive at View or Create — the module refuses to load
+ * otherwise.
+ *   * view_customers   — GET /api/v1/customers: the Customers domain at View or above.
+ *   * create_customers — POST /api/v1/customers: the Customers domain at Create or above (ADR-34).
  */
-export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map([
+export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_customers', Object.freeze({ key: 'view_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'view' as const })],
-] as const));
+  ['create_customers', Object.freeze({ key: 'create_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'create' as const })],
+]));
 
+/**
+ * The thresholds a tenant route permission may carry. THE READ_ONLY RULE: a read_only limitation grants a tenant route
+ * permission only at threshold View — the materializer caps every domain at View, and evaluateCanonicalPermission
+ * denies every threshold above View under read_only before anything is materialized — so a Create permission is
+ * DENIED under read_only. A sensitive permission, or one above Create, needs its own rule before it is added.
+ */
+const TENANT_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create']);
 for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
   if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
-  if (entry.threshold !== 'view' || entry.sensitive) throw new Error('tenant route permission is not a non-sensitive View read');
+  if (entry.sensitive || entry.threshold === null || !TENANT_ROUTE_THRESHOLDS.has(entry.threshold)) {
+    throw new Error('tenant route permission is not a non-sensitive View or Create threshold');
+  }
 }
 
 /** The one message a refusal to evaluate the tenant plane carries, so every caller says the same thing. */
@@ -266,7 +284,8 @@ export function evaluateCanonicalPermission(input: {
   if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
   if (scope === 'tenant' && TENANT_ROUTE_PERMISSIONS.get(entry.key) === entry) {
     if (typeof roleId !== 'string') return 'denied';
-    // The load-time check already refuses such an entry; this holds if one is added to the (surface-frozen) map later.
+    // THE READ_ONLY RULE (TENANT_ROUTE_THRESHOLDS): View only — create_customers is denied here. It also holds for a
+    // sensitive entry added to the (surface-frozen) map after the load-time check.
     if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
     const levels = materializeTenantPermissions(roleId, {}, limitation === 'read_only');
     const level = hasOwn(levels, entry.parent) ? levels[entry.parent] : 'none';

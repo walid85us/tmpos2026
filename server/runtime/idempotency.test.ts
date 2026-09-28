@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp, createBoundedServer, createReadinessState } from './app.js';
 import type { AppDeps } from './app.js';
 import {
-  IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, MAX_REPLAY_BODY_BYTES, MAX_SEALED_LENGTH, REPLAY_CONTENT_TYPE,
+  IDEMPOTENCY_CONTRACT_VERSION, IDEMPOTENCY_DEADLINE_MS, IDEMPOTENCY_POLICY, MAX_REPLAY_BODY_BYTES, MAX_SEALED_LENGTH, REPLAY_CONTENT_TYPE,
   acquireIdempotency, completeIdempotency, createIdempotency, createIdempotencyKeyring, envelopeFromOutcome, readIdempotencyKey,
   refusalEnvelope,
 } from './idempotency.js';
@@ -196,7 +196,7 @@ test('the Idempotency-Key is one UUID version 4 in hyphenated hexadecimal form, 
 
 const principal = (uid: string): VerifiedPrincipal => Object.freeze({ authProvider: 'synthetic', authProviderUid: uid });
 const binding = (over: Record<string, unknown> = {}) => ({
-  method: 'POST' as const, path: '/v1/items', audience: null, tenant: null, store: null, body: Buffer.from('{"n":1}'), ...over,
+  method: 'POST' as const, path: '/v1/items', audience: null, tenant: null, store: null, actor: null, body: Buffer.from('{"n":1}'), ...over,
 });
 
 test('the scope binds the client key and the principal; the fingerprint binds everything the operation sees', () => {
@@ -210,9 +210,20 @@ test('the scope binds the client key and the principal; the fingerprint binds ev
   for (const who of [principal('uid-b'), Object.freeze({ authProvider: 'other', authProviderUid: 'uid-a' })]) {
     assert.notEqual(keyring.operationOf(key, who, binding()).scope, base.scope, 'each principal has its own key namespace');
   }
+  assert.equal(IDEMPOTENCY_CONTRACT_VERSION, 2, 'the actor slot is contract version 2 (M7A-CUSTOMERS-P3): every record starts afresh');
+  // An omitted or mistyped slot is refused, never hashed as null (JSON would spell undefined as null).
+  const noActor: Record<string, unknown> = binding();
+  delete noActor.actor;
+  assert.throws(() => keyring.operationOf(key, principal('uid-a'), noActor as never), TypeError, 'an omitted actor');
+  for (const slot of ['audience', 'tenant', 'store', 'actor']) {
+    for (const bad of [undefined, 0, false, {}]) {
+      assert.throws(() => keyring.operationOf(key, principal('uid-a'), binding({ [slot]: bad })), TypeError, `${slot} ${String(bad)}`);
+    }
+  }
   const seen = new Set([base.fingerprint]);
   for (const over of [
     { method: 'PUT' }, { path: '/v1/items/other' }, { audience: 'tenant' }, { audience: 'admin' }, { tenant: 'tenant-1' }, { store: 'tenant-1' },
+    { actor: 'tenant-1' }, { tenant: 'tenant-1', actor: 'actor-1' }, { tenant: 'actor-1', actor: 'tenant-1' },
     { body: Buffer.from('{"n":2}') }, { body: Buffer.from('{"n": 1}') }, { body: Buffer.alloc(0) },
   ]) {
     const moved = keyring.operationOf(key, principal('uid-a'), binding(over));
@@ -518,6 +529,23 @@ test('under one client key another body or operation is the same 422, and anothe
   });
 });
 
+test('the chain binds the authorizer\'s trusted actor: the same principal, key and body under another resolved actor is the 422, never a replay (M7A-CUSTOMERS-P3)', async () => {
+  let actor: string = GRANTED.context.actor;
+  const authorize = () => ({ granted: true, context: { ...GRANTED.context, actor } });
+  await withIdem({ authorize }, async ({ port, runs, recorded }) => {
+    const key = uuid();
+    assert.equal((await post(port, { key })).status, 201);
+    actor = '00000000-0000-4000-8000-0000000000aa';
+    const moved = await post(port, { key });
+    assert.deepEqual([moved.status, (JSON.parse(moved.body) as { error?: unknown }).error], [422, 'idempotency_key_reused'], moved.body);
+    assert.equal(recorded.acquires[1].scope, recorded.acquires[0].scope, 'one key under one principal is one record');
+    assert.notEqual(recorded.acquires[1].fingerprint, recorded.acquires[0].fingerprint, 'bound to another actor');
+    actor = GRANTED.context.actor;
+    assert.equal((await post(port, { key })).headers['idempotent-replayed'], 'true', 'the first actor still replays its own');
+    assert.equal(runs.length, 1);
+  });
+});
+
 test('a request in progress is a 409; completion survives a client that hangs up, and the retry replays it', async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -752,12 +780,12 @@ test('the runtime mints its own sealed refusal for exactly two words, and an out
   // A sealed refusal must read back, or no retry could replay it: the bound is structural, not lexical.
   const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
   const operation = keyring.operationOf(randomUUID(), { authProvider: 'p', authProviderUid: 'u' }, {
-    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from('{}'),
   });
   const sealed = keyring.seal(refusalEnvelope('write_conflict')!, operation);
   assert.deepEqual(keyring.unseal(sealed, operation), refusalEnvelope('write_conflict'), 'it unseals for its own operation');
   const other = keyring.operationOf(randomUUID(), { authProvider: 'p', authProviderUid: 'u' }, {
-    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+    method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from('{}'),
   });
   assert.equal(keyring.unseal(sealed, other), null, 'and for no other');
 });

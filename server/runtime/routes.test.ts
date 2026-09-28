@@ -295,9 +295,25 @@ test('only a state-changing route of a verified principal under a declared autho
     'a tenant-boundary session route under a platform-scope requirement');
   for (const scope of ['tenant', 'store']) {
     assert.equal(setupCode([required({ policy: { access: 'authenticated', authorization: { scope, permission: 'probe.write' } } })]),
-      'route_idempotency_policy_invalid', `a ${scope}-scoped route: no ${scope} context exists to bind before M5`);
+      'route_idempotency_policy_invalid', `a ${scope}-scoped Bearer route: no session for the store to hold`);
   }
-  assert.equal(setupCode([required({ path: '/api/v1/probe', policy: SESSION('tenant') })]), 'route_idempotency_policy_invalid', 'a tenant-scoped session route');
+  // M7A-CUSTOMERS-P3: a tenant-scoped requirement on a tenant-session COMMAND route, and nowhere else.
+  const command = (over: Record<string, unknown>): Record<string, unknown> => {
+    const { perform: _perform, ...rest } = required({ path: '/api/v1/probe', policy: SESSION('tenant'), ...over });
+    return { ...rest, command: { contract: {}, plan: () => ({}) } };
+  };
+  assert.equal(setupCode([command({})]), undefined, 'a tenant-scoped tenant-session command');
+  assert.equal(defineRoutes([command({})]).lookup('POST', '/api/v1/probe')?.idempotency, 'required');
+  assert.equal(setupCode([required({ path: '/api/v1/probe', policy: SESSION('tenant') })]), 'route_idempotency_policy_invalid',
+    'a tenant-scoped perform: it runs outside the store transaction that re-proves the tenant');
+  assert.equal(setupCode([command({ policy: SESSION('tenant', { scope: 'store', permission: 'probe.write' }) })]),
+    'route_idempotency_policy_invalid', 'a store-scoped tenant-session command: no store command is decided');
+  assert.equal(setupCode([command({ method: 'PATCH', path: '/admin/v1/probe', policy: SESSION('admin', { scope: 'tenant', permission: 'probe.write' }) })]),
+    'route_idempotency_policy_invalid', 'a tenant-scoped command on the admin boundary');
+  assert.equal(setupCode([command({ policy: { access: 'authenticated', authorization: { scope: 'tenant', permission: 'probe.write' } }, path: '/v1/probe' })]),
+    'route_idempotency_policy_invalid', 'a tenant-scoped Bearer command');
+  assert.equal(setupCode([command({ trustedContext: 'none' })]), 'route_trusted_context_invalid', 'a tenant-scoped command still needs its trusted context');
+  assert.equal(setupCode([command({ sessionBinding: 'required' })]), 'route_session_binding_invalid', 'and still binds no session key to a handler');
   assert.equal(setupCode([required({ method: 'PATCH', path: '/admin/v1/probe', policy: SESSION('admin', { scope: 'platform', permission: 'probe.write' }) })]),
     undefined, 'an admin session route');
   for (const [label, def] of [

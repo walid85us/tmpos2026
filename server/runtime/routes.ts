@@ -411,17 +411,21 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
 
 /**
  * The idempotency policy. Only a state-changing request of a verified principal under a declared
- * platform-scope authorization runs under a key: never a read, a public or login route, or a
- * session's own current-session and logout endpoints (whose authorization is null). A tenant- or
- * store-scoped route may not require one until the runtime has server-derived tenant and store
- * context to bind into the operation's fingerprint (M5): without it, one tenant's recorded
- * response could replay in another's context.
+ * authorization runs under a key: never a read, a public or login route, or a session's own
+ * current-session and logout endpoints (whose authorization is null). The requirement is at platform
+ * scope, or — M7A-CUSTOMERS-P3 — at tenant scope on a TENANT-SESSION `command` route only: app.ts binds
+ * the authorizer's trusted tenant and actor into the operation's fingerprint, so one tenant's recorded
+ * response never replays in another's context, and the tenant store re-proves both inside the committing
+ * transaction while holding the presenting session — which a Bearer-authenticated tenant route does not
+ * have, and a `perform` never reaches. A store-scoped route may not require one: no store command has
+ * been decided.
  */
-function parseIdempotency(raw: unknown, method: string, policy: RoutePolicy): IdempotencyPolicy {
+function parseIdempotency(raw: unknown, method: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
   if (raw === undefined || raw === null) throw new EnforcementSetupError('route_idempotency_policy_missing');
   if (raw === 'none') return 'none';
   const requirement = requirementOf(policy);
-  if (raw === 'required' && method !== 'GET' && requirement !== null && requirement.scope === 'platform') return 'required';
+  if (raw === 'required' && method !== 'GET' && requirement !== null && (requirement.scope === 'platform'
+    || (requirement.scope === 'tenant' && command && policy.access === 'session' && policy.audience === 'tenant'))) return 'required';
   throw new EnforcementSetupError('route_idempotency_policy_invalid');
 }
 
@@ -513,7 +517,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (policy.access === 'public' && method !== 'GET') throw new EnforcementSetupError('route_public_unsafe');
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
-  const idempotency = parseIdempotency(raw.idempotency, method, policy);
+  const idempotency = parseIdempotency(raw.idempotency, method, policy, 'command' in raw);
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
   const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency);

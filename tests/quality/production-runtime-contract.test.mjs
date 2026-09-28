@@ -75,24 +75,26 @@ const ARTIFACT = [
   'src/authorization/moneyCapabilities.js', 'src/authorization/permissionFamilies.js', 'src/types.js',
 ].sort();
 // M7A-CUSTOMERS-P2: the tenant executable's compiled artifact, exactly — the customer route and its production adapter over
-// the shared kernel and chain; no administrative route, mutator, entry or transaction root, and no command store or
-// platform admission adapter.
+// the shared kernel and chain; no administrative route, mutator, entry or transaction root, and no platform admission
+// adapter. M7A-CUSTOMERS-P3: plus the customer create (its route module and its mutator) and the transactional store the
+// tenant root's write slot composes it through — the store alone, never an administrative mutator.
 const TENANT_ARTIFACT = [
   ...['platformAuthorization', 'productionSessions', 'tenantAuthorization', 'tenantTransactions', 'transactionKernel'].map((m) => `server/composition/${m}.js`),
   ...['entryStartup', 'tenantEntry', 'tenantMain'].map((m) => `server/entry/${m}.js`),
-  ...['postgresCustomerDirectory', 'postgresRateLimiter', 'postgresSessionStore', 'postgresStartupPreflight', 'postgresTenantAdmission',
-    'supervisedPgClient'].map((m) => `server/persistence/${m}.js`),
+  ...['postgresCustomerCreate', 'postgresCustomerDirectory', 'postgresRateLimiter', 'postgresSessionStore', 'postgresStartupPreflight', 'postgresTenantAdmission',
+    'postgresTransactionalStore', 'supervisedPgClient'].map((m) => `server/persistence/${m}.js`),
   ...['auditEventContract', 'auditEventWriter', 'authorizationConstants', 'authorizationContract', 'config', 'databaseEndpoint', 'db',
     'firebaseAdminAuthAdapter', 'm5CanonicalPermissions', 'permissionCatalog'].map((m) => `server/platform-identity/${m}.js`),
-  ...['access', 'app', 'clientAddress', 'commandTransaction', 'config', 'correlation', 'customerDirectory', 'deadline', 'idempotency', 'keyMaterial',
-    'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'routes', 'securityHeaders', 'sessions', 'tenantState']
+  ...['access', 'app', 'clientAddress', 'commandTransaction', 'config', 'correlation', 'customerCreate', 'customerDirectory', 'deadline', 'idempotency',
+    'keyMaterial', 'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'routes', 'securityHeaders', 'sessions', 'tenantState']
     .map((m) => `server/runtime/${m}.js`),
   'src/authorization/moneyCapabilities.js', 'src/authorization/permissionFamilies.js', 'src/types.js',
 ].sort();
 // A module that declares a servable route: a `create…Route` factory or a `…_ROUTE` constant. Each artifact ships exactly
-// its own: the tenant's the customer directory, the administrative one its three tenant-management routes.
+// its own: the tenant's the customer directory and the customer create (M7A-CUSTOMERS-P3), the administrative one its three
+// tenant-management routes.
 const ROUTE_DEFINITION = /^export (?:async )?function create\w*Route\(|^export const [A-Z0-9_]*_ROUTE\b/m;
-const TENANT_ROUTE_MODULES = ['server/runtime/customerDirectory.js'];
+const TENANT_ROUTE_MODULES = ['server/runtime/customerCreate.js', 'server/runtime/customerDirectory.js'];
 const ADMIN_ROUTE_MODULES = ['server/runtime/tenantDirectory.js', 'server/runtime/tenantDisplayName.js', 'server/runtime/tenantStatus.js'];
 // Its only bare (package) imports, each from exactly one module: the web framework, the database driver, the identity
 // provider's admin SDK and one built-in. Any other — the Firebase client SDK, @supabase, pg — fails.
@@ -264,7 +266,7 @@ test('the compiled artifact emits runnable JS, excludes tests, and has no forbid
   }
 });
 
-test('the compiled tenant artifact is exactly its executable\'s closure: the customer route and its production adapter, and no administrative route, mutator, entry, test kit or fake store', () => {
+test('the compiled tenant artifact is exactly its executable\'s closure: the customer routes, their production adapter, mutator and store, and no administrative route, mutator, entry, test kit or fake store', () => {
   // M7A-CUSTOMERS-P2 (acceptance 4, read literally): the tenant build emits the intended route and adapter and nothing
   // unintended. The exact list is the proof; the named checks below say what it excludes.
   const out = mkdtempSync(join(tmpdir(), 'tmpos-tenant-build-'));
@@ -274,17 +276,18 @@ test('the compiled tenant artifact is exactly its executable\'s closure: the cus
     const emitted = emittedUnder(out);
     assert.deepEqual(emitted, TENANT_ARTIFACT, 'the tenant artifact is exactly the tenant executable\'s import closure');
     for (const m of ['server/entry/tenantMain.js', 'server/composition/tenantTransactions.js', 'server/runtime/customerDirectory.js',
-      'server/persistence/postgresCustomerDirectory.js']) {
+      'server/persistence/postgresCustomerDirectory.js', 'server/runtime/customerCreate.js', 'server/persistence/postgresCustomerCreate.js',
+      'server/persistence/postgresTransactionalStore.js']) {
       assert.ok(emitted.includes(m), `the tenant artifact ships ${m}`);
     }
     for (const m of [...ADMIN_ROUTE_MODULES, 'server/persistence/tenantDisplayNameMutator.js', 'server/persistence/tenantStatusMutator.js',
-      'server/persistence/postgresTenantDirectory.js', 'server/persistence/postgresTransactionalStore.js', 'server/persistence/postgresPlatformAdmission.js',
+      'server/persistence/postgresTenantDirectory.js', 'server/persistence/postgresPlatformAdmission.js',
       'server/composition/productionTransactions.js', 'server/entry/productionEntry.js', 'server/entry/main.js']) {
       assert.ok(!emitted.includes(m), `${m}: an administrative module in the tenant artifact`);
     }
     assert.ok(!emitted.some((f) => /\.test\.js$|\.testkit\.js$/.test(f)), 'no test or test support module is compiled into the tenant artifact');
     assert.deepEqual(scanArtifact(out, emitted), ARTIFACT_BARE_IMPORTS, 'the tenant artifact imports exactly the administrative artifact\'s packages');
-    assert.deepEqual(routeModulesOf(out, emitted), TENANT_ROUTE_MODULES, 'the tenant artifact declares exactly one route module: the customer directory');
+    assert.deepEqual(routeModulesOf(out, emitted), TENANT_ROUTE_MODULES, 'the tenant artifact declares exactly two route modules: the customer directory and the customer create');
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
@@ -368,15 +371,16 @@ test('the compiled tenant executable runs under node and fails closed on missing
       const { TENANT_SHIPPING_ROUTES } = await import(${url('server/entry/tenantEntry.js')});
       process.stdout.write(JSON.stringify({
         declarations: tenantRouteDeclarations().map((r) => [r.method, r.path, r.policy.access, r.policy.audience,
-          r.policy.authorization.scope, r.policy.authorization.permission, r.sessionBinding, r.trustedContext, r.recentAuth,
+          r.policy.authorization.scope, r.policy.authorization.permission, r.sessionBinding ?? 'none', r.trustedContext, r.recentAuth,
           r.body.kind, r.idempotency]),
         shipping: TENANT_SHIPPING_ROUTES,
       }));`], { cwd: REPO, encoding: 'utf8', timeout: 20000, env });
     assert.equal(read.status, 0, `the compiled modules import under node:\n${read.stderr}`);
     const compiled = JSON.parse(read.stdout);
-    assert.deepEqual(compiled.declarations,
-      [['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required', 'required', 'none', 'none', 'none']],
-      'the compiled customer route is exactly the pinned declaration');
+    assert.deepEqual(compiled.declarations, [
+      ['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required', 'required', 'none', 'none', 'none'],
+      ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required', 'none', 'json', 'required'],
+    ], 'the compiled customer routes are exactly the pinned declarations');
     const { TENANT_SHIPPING_ROUTES } = await import('../../server/entry/tenantEntry.ts');
     assert.deepEqual(compiled.shipping, JSON.parse(JSON.stringify(TENANT_SHIPPING_ROUTES)), 'the compiled inventory is the source literal');
   } finally {
@@ -531,7 +535,7 @@ test('the in-memory session store is imported by test files only, anywhere in th
   assert.deepEqual(offenders, [], 'only test files may import the in-memory session store or rate limiter');
 });
 
-test('the tenant-admission witness is harness-only: no production source declares it, the administrative inventory carries no tenant route, and the tenant inventory exactly the customer route', async () => {
+test('the tenant-admission witness is harness-only: no production source declares it, the administrative inventory carries no tenant route, and the tenant inventory exactly the customer routes', async () => {
   // 1. IT IS A REAL ROUTE. Without this the rest of the test would pass vacuously.
   assert.equal(WITNESS_ROUTES.length, 2, 'a tenant-scope witness and a store-scope one');
   assert.deepEqual(WITNESS_ROUTES.map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization.scope]), [
@@ -565,8 +569,8 @@ test('the tenant-admission witness is harness-only: no production source declare
   assert.deepEqual(offenders, [], 'the witness route exists only in the integration harness');
 
   // 3. THE ADMINISTRATIVE INVENTORY DOES NOT CARRY IT: it declares no tenant or store requirement at all and nothing on the
-  // tenant boundary. (A tenant business route ships since M7A-CUSTOMERS-P2 — GET /api/v1/customers, owner decision D1 —
-  // in the tenant executable's own inventory alone, pinned in step 4.)
+  // tenant boundary. (Tenant business routes ship since M7A-CUSTOMERS-P2 — GET /api/v1/customers, owner decision D1, and
+  // since M7A-CUSTOMERS-P3 POST /api/v1/customers, ADR-34 — in the tenant executable's own inventory alone, pinned in step 4.)
   const { productionRouteDeclarations } = await import('../../server/composition/productionTransactions.ts');
   // Every route the inventory would serve, its read routes included (M5-GIAM-D1-P3), built over ports that answer nothing.
   const served = productionRouteDeclarations();
@@ -578,12 +582,15 @@ test('the tenant-admission witness is harness-only: no production source declare
   assert.deepEqual(tenantScoped, [], 'no administrative route declares a tenant or store authorization requirement');
   assert.equal(paths.some((p) => p.startsWith('/api/v1/')), false, 'and no administrative route sits on the tenant boundary');
 
-  // 4. THE TENANT INVENTORY (M7A-CUSTOMERS-P2) is exactly one route: the customer list, a tenant-scope view_customers read
-  // bound to the presenting session — no store scope, no witness, nothing administrative.
+  // 4. THE TENANT INVENTORY (M7A-CUSTOMERS-P2) is exactly the customer routes: the list, a tenant-scope view_customers read
+  // bound to the presenting session, and (M7A-CUSTOMERS-P3) the create, a tenant-scope create_customers command whose
+  // session is held by the tenant store — no store scope, no witness, nothing administrative.
   const { tenantRouteDeclarations } = await import('../../server/composition/tenantTransactions.ts');
   assert.deepEqual(tenantRouteDeclarations().map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization.scope,
-    r.policy.authorization.permission, r.sessionBinding]),
-  [['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required']], 'the tenant inventory is the customer route alone');
+    r.policy.authorization.permission, r.sessionBinding ?? 'none', r.idempotency]), [
+    ['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required', 'none'],
+    ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required'],
+  ], 'the tenant inventory is the customer routes alone');
 });
 
 test('no per-process limiter, fallback or second proxy contract exists in the production runtime or composition', () => {
@@ -613,7 +620,7 @@ test('no per-process limiter, fallback or second proxy contract exists in the pr
   assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
 });
 
-test('durable idempotency is composed only by the transaction root, for a route that requires it: only the two tenant commands require one, and its port imports no database or provider adapter', () => {
+test('durable idempotency is composed only by the transaction roots, for a route that requires it: only the two tenant-management commands and the tenant customer create require one, and its port imports no database or provider adapter', () => {
   // M6-IDEMPOT-P2, M6-PG-P7-R1: the port is provider-independent; the transaction root (productionTransactions.ts) is the one
   // production authority for it, composing the approved PostgreSQL store only for a route in its inventory that requires
   // idempotency — and nothing in the production graph registers such a route yet.
@@ -624,16 +631,17 @@ test('durable idempotency is composed only by the transaction root, for a route 
   const REQUIRED_ROUTE = /(?<!readonly )\bidempotency\s*:\s*['"`]required['"`]/;
   for (const sample of ["{ idempotency: 'required', perform }", 'idempotency:"required"']) assert.match(sample, REQUIRED_ROUTE, `the scan must catch: ${sample}`);
   // M5-GIAM-D1-P1 (owner decision D1) and M5-GIAM-D1-P2: the production routes that require idempotency are the tenant
-  // display-name command and the tenant status command, each declared in its own runtime module. Any other production file
-  // that registers one fails.
-  const REQUIRED_ROUTE_FILES = [join(RUNTIME_DIR, 'tenantDisplayName.ts'), join(RUNTIME_DIR, 'tenantStatus.ts')];
+  // display-name command and the tenant status command, each declared in its own runtime module; M7A-CUSTOMERS-P3 adds the
+  // tenant customer create (customerCreate.ts), served by the tenant executable alone. Any other production file that
+  // registers one fails.
+  const REQUIRED_ROUTE_FILES = [join(RUNTIME_DIR, 'tenantDisplayName.ts'), join(RUNTIME_DIR, 'tenantStatus.ts'), join(RUNTIME_DIR, 'customerCreate.ts')];
   const registering = [];
   for (const f of production) {
     const code = readFileSync(f, 'utf8').replace(/\/\/.*$/gm, ''); // code only: a comment may name what it explains
     assert.doesNotMatch(code, /createMemoryIdempotencyStore|assertIdempotencyStoreContract|idempotencyStore\.testkit/, `${f}: a per-process idempotency store in production`);
     if (REQUIRED_ROUTE.test(code)) registering.push(f);
   }
-  assert.deepEqual(registering.sort(), [...REQUIRED_ROUTE_FILES].sort(), 'only the two tenant commands register a route that requires idempotency');
+  assert.deepEqual(registering.sort(), [...REQUIRED_ROUTE_FILES].sort(), 'only the two tenant-management commands and the tenant customer create register a route that requires idempotency');
   // M5-GIAM-D1-P3: and exactly one read route factory, the platform tenant directory (GET /admin/v1/tenants), which requires no key.
   const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR\]\),\n {2}reads: Object\.freeze\(\[createTenantDirectoryRoute\]\),\n\}\);$/m;
   assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n  reads: Object.freeze([createTenantDirectoryRoute]),\n});", INVENTORY,
@@ -641,17 +649,18 @@ test('durable idempotency is composed only by the transaction root, for a route 
   assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n  reads: Object.freeze([createTenantDirectoryRoute, createOrdersRoute]),\n});", INVENTORY,
     'the scan must catch a read route added to the inventory');
   assert.match(readFileSync(join(COMPOSITION_DIR, 'productionTransactions.ts'), 'utf8'), INVENTORY, 'the production inventory holds exactly the two tenant commands, their mutators and the tenant directory read');
-  // IDEMPOTENCY_KEY belongs to the transaction root alone in the composition layer, and APP_DATABASE_URL to the transaction
-  // kernel both roots share (M7A-CUSTOMERS-P2): one reader each.
+  // IDEMPOTENCY_KEY belongs to the transaction roots' key readers alone in the composition layer — the administrative root, and
+  // since M7A-CUSTOMERS-P3 the kernel for the tenant root's write slot (never the tenant root itself) — and APP_DATABASE_URL
+  // to the transaction kernel both roots share (M7A-CUSTOMERS-P2).
   const OWNED = [
-    [/\bIDEMPOTENCY_KEY\b|\bidempotencyStore\b|\bIdempotencyDeps\b/, 'productionTransactions.ts', ['env.IDEMPOTENCY_KEY', 'idempotencyStore: null,']],
-    [/\bAPP_DATABASE_URL(?:_VAR)?\b/, 'transactionKernel.ts', ['env[APP_DATABASE_URL_VAR]', 'APP_DATABASE_URL']],
+    [/\bIDEMPOTENCY_KEY\b|\bidempotencyStore\b|\bIdempotencyDeps\b/, ['productionTransactions.ts', 'transactionKernel.ts'], ['env.IDEMPOTENCY_KEY', 'idempotencyStore: null,']],
+    [/\bAPP_DATABASE_URL(?:_VAR)?\b/, ['transactionKernel.ts'], ['env[APP_DATABASE_URL_VAR]', 'APP_DATABASE_URL']],
   ];
-  for (const [pattern, owner, samples] of OWNED) {
+  for (const [pattern, owners, samples] of OWNED) {
     for (const sample of samples) assert.match(sample, pattern, `the scan must catch: ${sample}`);
-    assert.match(readFileSync(join(COMPOSITION_DIR, owner), 'utf8'), pattern, `${owner} is the one reader`);
-    for (const f of readdirSync(COMPOSITION_DIR).filter((n) => n.endsWith('.ts') && !n.endsWith('.test.ts') && n !== owner)) {
-      assert.doesNotMatch(readFileSync(join(COMPOSITION_DIR, f), 'utf8').replace(/\/\/.*$/gm, ''), pattern, `${f}: only ${owner} names ${pattern}`);
+    for (const owner of owners) assert.match(readFileSync(join(COMPOSITION_DIR, owner), 'utf8'), pattern, `${owner} is a reader`);
+    for (const f of readdirSync(COMPOSITION_DIR).filter((n) => n.endsWith('.ts') && !n.endsWith('.test.ts') && !owners.includes(n))) {
+      assert.doesNotMatch(readFileSync(join(COMPOSITION_DIR, f), 'utf8').replace(/\/\/.*$/gm, ''), pattern, `${f}: only ${owners.join(' and ')} name ${pattern}`);
     }
   }
   const port = readFileSync(join(RUNTIME_DIR, 'idempotency.ts'), 'utf8');
@@ -682,16 +691,18 @@ test('durable idempotency is composed only by the transaction root, for a route 
     'the entry never rewrites a member of the transaction root\'s result');
 
   // M7A-CUSTOMERS-P2: the tenant entry composes the tenant transaction root once and hands the runtime what it returned, on
-  // one host with HSTS, through the same session root and listener as the administrative entry — no command port at all.
+  // one host with HSTS, through the same session root and listener as the administrative entry. M7A-CUSTOMERS-P3: that
+  // includes the root's idempotency and command ports, exactly as returned — and still no event contract.
   const tenant = readFileSync(join(REPO, 'server', 'entry', 'tenantEntry.ts'), 'utf8');
   assert.deepEqual([...tenant.matchAll(/\bcomposeTenantTransactions\([^)]*\)/g)].map((m) => m[0]), ['composeTenantTransactions(env, construction.databaseClient)'],
     'the tenant entry composes the tenant transaction root once, over its configuration and its database client');
   const tenantApp = [...tenant.matchAll(/\bcreateApp\(\{([^}]*)\}\)/g)].map((m) => m[1]);
   assert.equal(tenantApp.length, 1, 'the tenant entry builds the runtime once');
-  for (const field of ['routes: tx\\.routes', 'limits: sessions\\.limits', 'sessions: sessions\\.sessions', 'hsts: true', 'hosts: \\[tenantHost\\]']) {
+  for (const field of ['routes: tx\\.routes', 'idempotency: tx\\.idempotency', 'transactions: tx\\.transactions', 'limits: sessions\\.limits',
+    'sessions: sessions\\.sessions', 'hsts: true', 'hosts: \\[tenantHost\\]']) {
     assert.match(tenantApp[0], new RegExp(`(?:^|\\s)${field},`), `the tenant runtime's ${field.replace(/\\/g, '')}`);
   }
-  assert.doesNotMatch(tenantApp[0], /\b(?:idempotency|transactions|events)\s*:/, 'the tenant runtime composes no idempotency, transaction port or event contract');
+  assert.doesNotMatch(tenantApp[0], /\bevents\s*:/, 'the tenant runtime composes no event contract');
   assert.deepEqual([...tenant.matchAll(/\bcreateBoundedServer\([^)]*\)/g)].map((m) => m[0]), ['createBoundedServer(app, { hsts: true })'],
     'the tenant entry binds one listener, with HSTS');
   assert.deepEqual([...tenant.matchAll(/^.*\btenantHost\s*(?::[^=\n]*)?=(?!=).*$/gm)].map((m) => m[0].trim()),
@@ -785,7 +796,8 @@ test('the transactional outbox has no bound production adapter and no worker, it
   assert.deepEqual([...table[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), ['store', 'admission', 'authorizer', 'limiter'],
     'the approved-adapter table holds no idempotency, transaction or outbox adapter');
   assert.match(table[1], /\blimiter:\s*null,\s*$/, 'and, with no durable bundle, binds no limiter: only the transaction root\'s binding fills that slot (M6-RATE-P2)');
-  // Only the transaction root composes a transaction port, and it composes no outbox delivery store, event contract or worker (M8).
+  // Only the transaction roots compose a transaction port — the administrative root, and the kernel for the tenant root's write
+  // slot (M7A-CUSTOMERS-P3) — and neither composes an outbox delivery store, event contract or worker (M8).
   const TRANSACTION_PORT = /commandTransaction|outbox|transactions\s*:|events\s*:/i;
   const OUTBOX = /outbox|events\s*:|\.delivery\b|\bdelivery\s*:|worker/i;
   for (const sample of ['transactions: { port }', "from '../runtime/outbox.js'", 'events: TEST_EVENTS']) assert.match(sample, TRANSACTION_PORT, `the scan must catch: ${sample}`);
@@ -794,8 +806,8 @@ test('the transactional outbox has no bound production adapter and no worker, it
   assert.ok(compositionFiles.includes('productionTransactions.ts'), 'the scan reaches the transaction root');
   for (const f of compositionFiles) {
     const code = codeOf(join(REPO, 'server', 'composition', f));
-    if (f === 'productionTransactions.ts') assert.doesNotMatch(code, OUTBOX, `${f}: the transaction root composes no outbox delivery store, event contract or worker`);
-    else assert.doesNotMatch(code, TRANSACTION_PORT, `${f}: only the transaction root composes a transaction port; no composition file composes an outbox or event contract`);
+    if (f === 'productionTransactions.ts' || f === 'transactionKernel.ts') assert.doesNotMatch(code, OUTBOX, `${f}: a transaction root composes no outbox delivery store, event contract or worker`);
+    else assert.doesNotMatch(code, TRANSACTION_PORT, `${f}: only the transaction roots compose a transaction port; no composition file composes an outbox or event contract`);
   }
 });
 
@@ -885,7 +897,11 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     return production.filter((p) => mentions(trees.get(p), name)).map(rel).sort();
   };
   assert.deepEqual(names('createPostgresTransactionalStore', 'store: createPostgresTransactionalStore'),
-    ['server/composition/productionTransactions.ts', 'server/persistence/postgresTransactionalStore.ts'], 'the store is composed by the transaction root alone');
+    ['server/composition/productionTransactions.ts', 'server/composition/transactionKernel.ts', 'server/persistence/postgresTransactionalStore.ts'],
+    'the store is composed by the transaction roots alone: the administrative root, and the kernel for the tenant root\'s write slot (M7A-CUSTOMERS-P3)');
+  // M7A-CUSTOMERS-P3: the customer create's mutator is registered by the tenant root alone.
+  assert.deepEqual(names('CUSTOMER_CREATE_MUTATOR', 'mutators: [CUSTOMER_CREATE_MUTATOR]'),
+    ['server/composition/tenantTransactions.ts', 'server/persistence/postgresCustomerCreate.ts'], 'the customer create\'s mutator is registered by the tenant root alone');
   // M6-RATE-P2: the PostgreSQL rate limiter likewise, over that root's one kernel — the session root receives only its binding.
   assert.deepEqual(names('createPostgresRateLimiter', 'rateLimiter: createPostgresRateLimiter'),
     ['server/composition/transactionKernel.ts', 'server/persistence/postgresRateLimiter.ts'], 'the rate limiter is composed by the transaction kernel alone');
@@ -910,15 +926,20 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     assert.deepEqual(names(name, `ports: ${name}`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresCustomerDirectory.ts'],
       `${name} is bound by the tenant root alone`);
   }
-  // The tenant inventory, exactly (as PRODUCTION_INVENTORY is pinned above): the customer route over its production adapter
-  // and probe. A route added, or the adapter or probe swapped for another, fails here.
-  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute\]\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\) \}\),\n {2}inert: INERT,\n {2}probe: probeCustomerDirectory,\n\}\);$/m;
-  const tenantInventory = (reads, adapter) => `export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }) }),\n  inert: INERT,\n  probe: probeCustomerDirectory,\n});`;
+  // The tenant inventory, exactly (as PRODUCTION_INVENTORY is pinned above): the customer list over its production adapter
+  // and probe, and (M7A-CUSTOMERS-P3) the customer create over its one mutator. A route added, or the adapter, mutator or
+  // probe swapped for another, fails here.
+  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute\]\),\n {2}writes: Object\.freeze\(\{ routes: Object\.freeze\(\[CUSTOMER_CREATE_ROUTE\]\), mutators: Object\.freeze\(\[CUSTOMER_CREATE_MUTATOR\]\) \}\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\) \}\),\n {2}inert: INERT,\n {2}probe: probeCustomerDirectory,\n\}\);$/m;
+  const tenantInventory = (reads, adapter, writes = 'CUSTOMER_CREATE_ROUTE', mutators = 'CUSTOMER_CREATE_MUTATOR') => `export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  writes: Object.freeze({ routes: Object.freeze([${writes}]), mutators: Object.freeze([${mutators}]) }),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }) }),\n  inert: INERT,\n  probe: probeCustomerDirectory,\n});`;
   assert.match(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the pin reads the real shape');
   assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createOrdersRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a route added');
   assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createMemoryCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a swapped adapter');
+  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ORDER_CREATE_ROUTE'), TENANT_INVENTORY,
+    'the scan must catch a second write route');
+  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE', 'TENANT_STATUS_MUTATOR'), TENANT_INVENTORY,
+    'the scan must catch a swapped mutator');
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'), TENANT_INVENTORY,
-    'the tenant inventory is exactly the customer route over the production customer directory');
+    'the tenant inventory is exactly the customer list over the production customer directory and the customer create over its mutator');
   // A census of names cannot follow a capability re-exported under another name, so the modules allowed to hold one export an
   // exact value surface, read from the syntax tree: a new export (an alias, a wrapper, a re-export list, a default) fails here
   // until it is reviewed into the list. Interfaces and type aliases carry no capability and are not listed.

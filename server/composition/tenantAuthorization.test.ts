@@ -13,9 +13,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createTenantEstablishCheck, createTenantRouteAuthorizer, createTenantSessionAdmission, readKey } from './tenantAuthorization.js';
+import {
+  createTenantContextRevalidator, createTenantEstablishCheck, createTenantRouteAuthorizer, createTenantSessionAdmission, readKey,
+} from './tenantAuthorization.js';
 import type { SessionRecord } from '../runtime/sessions.js';
-import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership } from '../runtime/principals.js';
+import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
 import { TENANT_ROLE_IDS } from '../platform-identity/authorizationConstants.js';
@@ -349,4 +351,112 @@ test('M7TA-01 the tenant admission forwards the port\'s readiness probe: true, f
   const noProbe = admission(stub(admitted([grant()])));
   assert.equal(typeof noProbe.probe, 'function');
   assert.throws(() => noProbe.probe?.(signal), TypeError);
+});
+
+// --- create_customers: the route decision (M7A-CUSTOMERS-P3, ADR-34) --------------------------------------------
+
+const CREATE_ROUTE: RouteView = Object.freeze({ method: 'POST', path: '/api/v1/customers', audience: 'tenant' });
+const CREATE_CUSTOMERS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'create_customers' });
+/** The POST decided as the composition decides it: the GET, and only the GET, classified as a read. */
+const create = (port: TenantAdmissionPort): Promise<unknown> => answered(createTenantRouteAuthorizer({
+  admission: port, reads: new Set([readKey('GET', '/api/v1/customers')]),
+}).authorize(PRINCIPAL, CREATE_CUSTOMERS, CREATE_ROUTE, live(), null));
+
+test('create_customers: store_owner, manager and sales_staff are granted with the selected scope; a technician, a read-only actor, a store grant beside it and two tenant grants deny', async () => {
+  const granted = Object.fromEntries(await Promise.all(TENANT_ROLE_IDS.map(async (roleId) =>
+    [roleId, ((await create(stub(admitted([grant({ roleId })])))) as { granted?: boolean }).granted === true])));
+  assert.deepEqual(granted, { store_owner: true, manager: true, technician: false, sales_staff: true }, 'Customers at Create or above, and no other role');
+  assert.deepEqual(await create(stub(admitted([grant({ roleId: 'sales_staff' })]))), {
+    granted: true,
+    context: { actor: ACTOR, securityVersion: 'sv1', scope: 'tenant', tenant: TENANT, store: null, membershipId: MEMBERSHIP, roleId: 'sales_staff', limitation: 'none' },
+  });
+  const storeManager = grant({ membershipId: '77777777-7777-4777-8777-777777777777', scopeType: 'store', store: STORE, storeStatus: 'active', roleId: 'manager' });
+  for (const [label, answer] of [
+    ['a read-only tenant', admitted([grant({ tenantStatus: 'read_only' })])],
+    ['an overdue tenant', admitted([grant({ tenantStatus: 'overdue' })])],
+    ['a read-only account', admitted([grant()], 'read_only')],
+    ['a tenant technician with a store manager grant in the same tenant', admitted([grant({ roleId: 'technician' }), storeManager])],
+    ['a store manager grant alone', admitted([storeManager])],
+    ['two tenant grants', admitted([grant(), grant({ membershipId: '66666666-6666-4666-8666-666666666666', tenant: OTHER_TENANT })])],
+    ['a suspended tenant', admitted([grant({ tenantStatus: 'suspended' })])],
+  ] as const) assert.equal(await create(stub(answer)), false, label);
+});
+
+// --- the tenant command's revalidator (M7A-CUSTOMERS-P3, ADR-34 R5) ----------------------------------------------
+
+const KEY = 'k'.repeat(43);
+/** The scope the authorizer handed the create: the actor's one tenant grant as `admitted` selects it. */
+const SCOPE: TrustedScope = Object.freeze({
+  actor: ACTOR, securityVersion: 'sv1', scope: 'tenant', tenant: TENANT, store: null, membershipId: MEMBERSHIP, roleId: 'manager', limitation: 'none',
+});
+const SESSION: SessionRecord = Object.freeze({ ...RECORD, securityVersion: WITNESS });
+
+/** A revalidator over a peek, a hold, a session hold and a read answering as given, recording each step with its handle and argument. */
+function revalidator(over: { peek?: unknown; hold?: unknown; session?: unknown; read?: unknown } = {}) {
+  const steps: Array<[string, unknown, unknown]> = [];
+  const answer = (value: unknown) => (value instanceof Error ? Promise.reject(value) : Promise.resolve(value));
+  const revalidate = createTenantContextRevalidator<string>({
+    peek: async (sql, key) => { steps.push(['peek', sql, key]); return answer('peek' in over ? over.peek : SESSION) as never; },
+    hold: async (sql, principal) => { steps.push(['hold', sql, principal]); return answer('hold' in over ? over.hold : true) as never; },
+    session: async (sql, key) => { steps.push(['session', sql, key]); return answer('session' in over ? over.session : SESSION) as never; },
+    read: async (sql, principal) => { steps.push(['read', sql, principal]); return answer('read' in over ? over.read : admitted([grant({ roleId: 'manager' })])); },
+  });
+  return { revalidate, steps };
+}
+
+test('M7TR-01 the revalidator peeks, holds the standing, holds the session, THEN re-reads admission — all on the committing handle — and re-decides create_customers', async () => {
+  for (const roleId of ['store_owner', 'manager', 'sales_staff']) {
+    const { revalidate, steps } = revalidator({ read: admitted([grant({ roleId })]) });
+    assert.equal(await revalidate('tx', { ...SCOPE, roleId }, 'create_customers', null, KEY), true, roleId);
+    assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read'], `${roleId}: the ADR-31 order: the standing held before the session row`);
+    assert.ok(steps.every(([, sql]) => sql === 'tx'), 'every step on the committing transaction\'s own handle');
+    assert.deepEqual(steps.filter(([step]) => step === 'peek' || step === 'session').map(([, , key]) => key), [KEY, KEY], 'the presenting session\'s key');
+    assert.ok(steps.filter(([step]) => step === 'hold' || step === 'read').every(([, , p]) => JSON.stringify(p) === JSON.stringify(PRINCIPAL)),
+      'the standing of the session\'s own provider reference');
+  }
+});
+
+test('M7TR-02 every lost authority is false: the scope, the session, the standing, the witness, the selection and the role', async () => {
+  const current = admitted([grant({ roleId: 'manager' })]) as unknown as { principal: Record<string, unknown> };
+  const movedAccount = { ...current, principal: { ...current.principal, securityVersion: 'sv2' } };
+  const cases: Array<[string, Parameters<typeof revalidator>[0], TrustedScope, string, number | null, string | null, string[]]> = [
+    ['a platform scope', {}, { ...SCOPE, scope: 'platform', tenant: null }, 'create_customers', null, KEY, []],
+    ['a store scope', {}, { ...SCOPE, scope: 'store', store: STORE }, 'create_customers', null, KEY, []],
+    ['a read-only scope', {}, { ...SCOPE, limitation: 'read_only' }, 'create_customers', null, KEY, []],
+    ['a recent-authentication claim', {}, SCOPE, 'create_customers', 1_700_000_000_000, KEY, []],
+    ['no session key', {}, SCOPE, 'create_customers', null, null, []],
+    ['a session ended before the peek', { peek: undefined }, SCOPE, 'create_customers', null, KEY, ['peek']],
+    ['no account behind the reference', { hold: false }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold']],
+    ['a session ended while the standing was held', { session: undefined }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session']],
+    ['a held session of another principal', { session: { ...SESSION, authProviderUid: 'uid-beta' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session']],
+    ['a refused admission', { read: { outcome: 'refused' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a moved witness', { read: { ...admitted([grant({ roleId: 'manager' })]), securityVersion: 't1:moved' } }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a changed role', { read: admitted([grant({ roleId: 'sales_staff' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a replaced grant', { read: admitted([grant({ roleId: 'manager', membershipId: '66666666-6666-4666-8666-666666666666' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a grant moved to another tenant', { read: admitted([grant({ roleId: 'manager', tenant: OTHER_TENANT })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a second tenant grant', { read: admitted([grant({ roleId: 'manager' }), grant({ roleId: 'manager', membershipId: '66666666-6666-4666-8666-666666666666', tenant: OTHER_TENANT })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a suspended tenant', { read: admitted([grant({ roleId: 'manager', tenantStatus: 'suspended' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a tenant turned read-only', { read: admitted([grant({ roleId: 'manager', tenantStatus: 'read_only' })]) }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a moved account security version', { read: movedAccount }, SCOPE, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['a technician, whom create_customers never admits', { read: admitted([grant({ roleId: 'technician' })]) }, { ...SCOPE, roleId: 'technician' }, 'create_customers', null, KEY, ['peek', 'hold', 'session', 'read']],
+    ['an undecidable tenant key', {}, SCOPE, 'view_shipping_costs', null, KEY, ['peek', 'hold', 'session', 'read']],
+  ];
+  for (const [label, over, scope, permission, authNotAfter, key, expected] of cases) {
+    const { revalidate, steps } = revalidator(over);
+    assert.equal(await revalidate('tx', scope, permission, authNotAfter, key), false, label);
+    assert.deepEqual(steps.map(([step]) => step), expected, `${label}: stops there`);
+  }
+});
+
+test('M7TR-03 a fault is an outage — a throw, never false — and dependencies are checked at construction', async () => {
+  const fault = new Error('lock timeout');
+  for (const step of ['peek', 'hold', 'session', 'read'] as const) {
+    await assert.rejects(revalidator({ [step]: fault }).revalidate('tx', SCOPE, 'create_customers', null, KEY), (err: unknown) => err === fault, step);
+  }
+  await assert.rejects(revalidator({ hold: 'held' }).revalidate('tx', SCOPE, 'create_customers', null, KEY), /tenant admission unavailable/, 'a hold answering no boolean');
+  await assert.rejects(revalidator({ read: { outcome: 'unavailable' } }).revalidate('tx', SCOPE, 'create_customers', null, KEY), /tenant admission unavailable/);
+  const ok = async () => undefined;
+  for (const deps of [undefined, {}, { hold: ok, read: ok, peek: ok }, { hold: ok, read: ok, session: ok }, { hold: ok, read: 'x', peek: ok, session: ok }]) {
+    assert.throws(() => createTenantContextRevalidator(deps as never), TypeError);
+  }
 });

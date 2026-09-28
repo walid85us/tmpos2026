@@ -15,6 +15,7 @@ import { composeProductionSessions } from '../composition/productionSessions.js'
 import { tenantRouteDeclarations } from '../composition/tenantTransactions.js';
 import { APPROVED_ROLE_GRANTS, REQUIRED_MIGRATIONS, RUNTIME_PRIVILEGE_ROLES } from '../persistence/postgresStartupPreflight.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from '../persistence/supervisedPgClient.js';
+import { createMemoryIdempotencyStore } from '../runtime/idempotencyStore.testkit.js';
 import { createMemorySessionStore } from '../runtime/memorySessionStore.testkit.js';
 import type { TenantAdmissionPort } from '../runtime/principals.js';
 import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
@@ -33,6 +34,8 @@ const SERVICE_ACCOUNT_JSON = JSON.stringify({
 const RATE_LIMIT_KEY = Buffer.alloc(32, 7).toString('base64url');
 /** Runtime-generated: canonical, never RATE_LIMIT_KEY and (about 30 distinct values in 32 bytes) never weak. */
 const ISSUER_KEY = randomBytes(32).toString('base64url');
+/** The tenant process's own command secret (M7A-CUSTOMERS-P3): runtime-generated, never RATE_LIMIT_KEY or the issuer key. */
+const IDEMPOTENCY_KEY = randomBytes(32).toString('base64url');
 const TENANT_HOST = 'tenant.tmpos.test';
 const ADMIN_HOST = 'admin.tmpos.test';
 
@@ -47,6 +50,7 @@ const VALID_ENV: Readonly<Record<string, string>> = Object.freeze({
   SESSION_ADMIN_ORIGINS: `https://${ADMIN_HOST}`,
   SESSION_TENANT_ORIGINS: `https://${TENANT_HOST}`,
   TENANT_SESSION_ISSUER_KEY: ISSUER_KEY,
+  IDEMPOTENCY_KEY,
   FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SERVICE_ACCOUNT_JSON,
 });
 
@@ -58,9 +62,9 @@ const VECTOR = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
 // A. validateTenantEntryConfig — pure, no network, no listener, no client
 // ===========================================================================================================
 
-test('M7TU-01 validateTenantEntryConfig: a complete synthetic valid configuration clears every check, with no IDEMPOTENCY_KEY', () => {
+test('M7TU-01 validateTenantEntryConfig: a complete synthetic valid configuration clears every check, with its own IDEMPOTENCY_KEY', () => {
   assert.deepEqual(validateTenantEntryConfig(VALID_ENV), []);
-  assert.equal(VALID_ENV.IDEMPOTENCY_KEY, undefined);
+  assert.equal(typeof VALID_ENV.IDEMPOTENCY_KEY, 'string', 'M7A-CUSTOMERS-P3: the command secret is required');
 });
 
 test('M7TU-02 validateTenantEntryConfig: every code, each in a targeted single-fault case', () => {
@@ -116,15 +120,22 @@ test('M7TU-02 validateTenantEntryConfig: every code, each in a targeted single-f
     ['TENANT_SESSION_ISSUER_KEY', 'tenant_issuer_key_weak', envWith({ TENANT_SESSION_ISSUER_KEY: b64(Buffer.alloc(32)) })],
     ['TENANT_SESSION_ISSUER_KEY', 'tenant_issuer_key_weak', envWith({ TENANT_SESSION_ISSUER_KEY: b64(Buffer.concat([Buffer.from([0xab, 0xcd]), Buffer.alloc(30)])) })],
     ['TENANT_SESSION_ISSUER_KEY', 'tenant_issuer_key_weak', envWith({ TENANT_SESSION_ISSUER_KEY: b64(Buffer.concat([randomBytes(12), Buffer.alloc(20)])) })],
-    // The administrative command secret never sits in this process, whatever its value.
-    ['IDEMPOTENCY_KEY', 'idempotency_key_present', envWith({ IDEMPOTENCY_KEY: b64(randomBytes(32)) })],
-    ['IDEMPOTENCY_KEY', 'idempotency_key_present', envWith({ IDEMPOTENCY_KEY: 'not-a-key' })],
+    // M7A-CUSTOMERS-P3: this process's own command secret — present, canonical, and never the limiter's or the minting key.
+    ['IDEMPOTENCY_KEY', 'idempotency_key_missing', envWith({ IDEMPOTENCY_KEY: undefined })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_missing', envWith({ IDEMPOTENCY_KEY: '' })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_invalid', envWith({ IDEMPOTENCY_KEY: 'not-a-key' })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_invalid', envWith({ IDEMPOTENCY_KEY: b64(randomBytes(31)) })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_invalid', envWith({ IDEMPOTENCY_KEY: `${IDEMPOTENCY_KEY}=` })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: RATE_LIMIT_KEY })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: b64(Buffer.concat([Buffer.alloc(32, 7), Buffer.alloc(1)])) })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: ISSUER_KEY })],
+    ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: b64(Buffer.concat([Buffer.from(ISSUER_KEY, 'base64url'), Buffer.alloc(1)])) })],
   ];
   for (const [field, code, env] of cases) {
     assert.deepEqual(validateTenantEntryConfig(env), [{ field, code }], `${field}:${code} over ${JSON.stringify(env[field])}`);
   }
   // Empty values of the refused-when-present keys add nothing.
-  for (const field of ['IDEMPOTENCY_KEY', 'SUPABASE_DATABASE_URL', 'FIREBASE_AUTH_EMULATOR_HOST']) {
+  for (const field of ['SUPABASE_DATABASE_URL', 'FIREBASE_AUTH_EMULATOR_HOST']) {
     assert.deepEqual(validateTenantEntryConfig(envWith({ [field]: '' })), [], `empty ${field}`);
   }
   // A malformed administrative origin is named once; the host comparison is not made against it.
@@ -189,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 6 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 7 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -197,6 +208,7 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 6 frozen tenant routes', () 
     { method: 'GET', path: '/api/v1/session', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
@@ -217,7 +229,12 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
     store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers']),
   }, { audiences: ['tenant'], tokenVerifier: SYNTHETIC_VERIFIER });
   const readiness = createReadinessState();
-  const app = createApp({ readiness, routes: tenantRouteDeclarations(), limits: sessions.limits, sessions: sessions.sessions, hsts: true, hosts: [TENANT_HOST] });
+  // M7A-CUSTOMERS-P3: the POST requires the idempotency store and the command port, handed in as the tenant root hands them.
+  const app = createApp({
+    readiness, routes: tenantRouteDeclarations(), limits: sessions.limits, sessions: sessions.sessions, hsts: true, hosts: [TENANT_HOST],
+    idempotency: { store: createMemoryIdempotencyStore(), keySecret: Buffer.from(IDEMPOTENCY_KEY, 'base64url') },
+    transactions: { port: { commit: async () => ({ outcome: 'unavailable' }), probe: async () => true } },
+  });
   assert.deepEqual(canonical(app.locals.routes as readonly ServedRoute[]), canonical(TENANT_SHIPPING_ROUTES));
 });
 
@@ -260,7 +277,8 @@ function listenSpy(): { calls: () => number; restore: () => void } {
 type Row = Readonly<Record<string, unknown>>;
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
-  | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe';
+  | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
+  | 'storeProbe';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -281,6 +299,7 @@ function classify(text: string): Kind {
   if (text.includes('m7a_session_create')) return 'sessionMint';
   if (text.includes('m5_admit_tenant_session_v2')) return 'tenantAdmissionProbe';
   if (text.includes('m7a_customer_page_v2')) return 'customerProbe';
+  if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
 
@@ -318,6 +337,7 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   sessionMint: [{ outcome: 'invalid' }],
   tenantAdmissionProbe: [{ outcome: 'refused' }],
   customerProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
+  storeProbe: [{ ok: true }],
 });
 
 /** One call's answer: rows, 'reject' (the statement throws) or 'default' (GOLDEN). */
@@ -400,7 +420,8 @@ test('M7TU-08 an invalid construction refuses startup_failed; an invalid configu
   let built = 0;
   for (const [env, reason] of [
     [{}, 'SESSION_TENANT_ORIGINS:session_tenant_origin_missing'],
-    [envWith({ IDEMPOTENCY_KEY: b64(randomBytes(32)) }), 'IDEMPOTENCY_KEY:idempotency_key_present'],
+    [envWith({ IDEMPOTENCY_KEY: undefined }), 'IDEMPOTENCY_KEY:idempotency_key_missing'],
+    [envWith({ IDEMPOTENCY_KEY: ISSUER_KEY }), 'IDEMPOTENCY_KEY:idempotency_key_shared'],
     [envWith({ TENANT_SESSION_ISSUER_KEY: b64(VECTOR) }), 'TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_weak'],
     [envWith({ SESSION_TENANT_ORIGINS: `https://${ADMIN_HOST}` }), 'SESSION_TENANT_ORIGINS:session_tenant_origin_shares_admin_host'],
   ] as const) {
@@ -461,7 +482,7 @@ test('M7TU-13 the limiter key refuses as the administrative entry does', async (
   await assertRefused({ rateLimitProbe: ['reject'] }, 'rate_limit_store_unavailable', []);
 });
 
-test('M7TU-14 dependency_unready: the session store, the session mint, the tenant admission, the limiter and the customer directory, each alone', async () => {
+test('M7TU-14 dependency_unready: the session store, the session mint, the tenant admission, the limiter, the customer directory and the two command ports, each alone', async () => {
   const sessionRow = { audience: 'tenant', authProvider: 'firebase', authProviderUid: 'probe-uid', principalKey: 'probe-principal',
     securityVersion: 'v1', authenticatedAt: null, createdAt: 1_000, lastSeenAt: 1_000, validatedAt: 1_000 };
   await assertRefused({ sessionGet: [[sessionRow]] }, 'dependency_unready', ['session_store']);
@@ -474,6 +495,11 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ rateLimitProbe: ['default', [{ outcome: 'key_mismatch' }]] }, 'dependency_unready', ['rate_limiter']);
   await assertRefused({ customerProbe: [[GOLDEN.customerProbe[0], GOLDEN.customerProbe[0]]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
+  await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
+  await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);
+  await assertRefused({ storeProbe: ['default', [{ ok: false }]] }, 'dependency_unready', ['command_transactions']);
+  await assertRefused({ storeProbe: ['default', 'reject'] }, 'dependency_unready', ['command_transactions']);
 });
 
 test('M7TU-15 the golden path listens on exactly the tenant inventory, in the startup order: ledger, logging, issuer key, limiter key, readiness', async () => {
@@ -486,7 +512,7 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     assert.equal(binds, 1, 'binds exactly once');
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
-      'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe'],
+      'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'storeProbe'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
   } finally {
     await stop();
@@ -518,7 +544,7 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
     assert.equal(result.outcome, 'listening');
     const port = (result.address as { port: number }).port;
     for (const host of [ADMIN_HOST, 'unknown.tmpos.test', `${TENANT_HOST}.evil.test`, '127.0.0.1', `${TENANT_HOST}:443`]) {
-      for (const [method, path] of [['GET', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants']]) {
+      for (const [method, path] of [['GET', '/api/v1/customers'], ['POST', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants']]) {
         const reply = await send(port, method, path, { host, origin: `https://${TENANT_HOST}` });
         assert.equal(reply.status, 404, `${method} ${path} on ${host}`);
         assert.equal(JSON.parse(reply.body).error, 'not_found');
@@ -559,6 +585,8 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the session mint withdrawn', 'sessionMint', 'reject'],
       ['the session mint answers another word', 'sessionMint', [{ outcome: 'refused' }]],
       ['the customer probe answers two rows', 'customerProbe', [GOLDEN.customerProbe[0], GOLDEN.customerProbe[0]]],
+      ['the idempotency store and command port probe fails', 'storeProbe', 'reject'],
+      ['the store probe answers false', 'storeProbe', [{ ok: false }]],
       ['the tenant admission fails', 'tenantAdmissionProbe', 'reject'],
       ['the tenant admission answers unavailable', 'tenantAdmissionProbe', [{ outcome: 'unavailable' }]],
       ['the limiter key rotated', 'rateLimitProbe', [{ outcome: 'key_mismatch' }]],
@@ -566,7 +594,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the database is down for everything', 'connect', 'default'],
     ];
     for (const [label, kind, entry] of transitions) {
-      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) fake.live[k] = 'reject';
+      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
       else fake.live[kind] = entry;
       t.mock.timers.tick(1_000);
       assert.equal(await ready(), 503, label);
@@ -582,6 +610,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
     for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
+    assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');
   } finally {
     await stop();
   }
@@ -651,7 +680,7 @@ test('M7TU-20 no captured log line, across refusals and a listening run, carries
   await listening.stop();
   assert.ok(logs.length > 0);
   const all = logs.join('\n');
-  for (const secret of [marker, ISSUER_KEY, Buffer.from(ISSUER_KEY, 'base64url').toString('hex'), RATE_LIMIT_KEY, 'synthetic-pw']) {
+  for (const secret of [marker, ISSUER_KEY, Buffer.from(ISSUER_KEY, 'base64url').toString('hex'), RATE_LIMIT_KEY, IDEMPOTENCY_KEY, 'synthetic-pw']) {
     assert.ok(!all.includes(secret), 'no configuration value or key in any log line');
   }
 });

@@ -7,31 +7,33 @@
 //    1. configuration — the judgments both entries share (validateCommonEntryConfig), then this entry's own, purely:
 //       SESSION_TENANT_ORIGINS, exactly one canonical https origin on a host distinct from SESSION_ADMIN_ORIGINS's (which is
 //       required here for that comparison); TENANT_SESSION_ISSUER_KEY, the minting secret (transactionKernel.ts
-//       parseTenantIssuerKey: present, canonical, never RATE_LIMIT_KEY, not weak); and no IDEMPOTENCY_KEY, the
-//       administrative command secret this process composes nothing with and must not hold. A refusal names each field and
-//       a bounded code, never a value;
+//       parseTenantIssuerKey: present, canonical, never RATE_LIMIT_KEY, not weak); and IDEMPOTENCY_KEY, this process's own
+//       command secret (M7A-CUSTOMERS-P3): present, canonical, never RATE_LIMIT_KEY or the issuer key. A refusal names each
+//       field and a bounded code, never a value;
 //    2. the database client — the tenant transaction root composes the kernel over the classified APP_DATABASE_URL through
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–018, clean, checksums pinned;
+//    5. the migration ledger — exactly 001–019, clean, checksums pinned;
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
-//    7. the composition — the session root (the tenant boundary alone), the request limits, the durable ports and the
-//       route table, validated by the runtime itself; the served inventory must equal TENANT_SHIPPING_ROUTES exactly;
+//    7. the composition — the session root (the tenant boundary alone), the request limits, the durable ports, the tenant
+//       store's idempotency and command ports (no event contract) and the route table, validated by the runtime itself;
+//       the served inventory must equal TENANT_SHIPPING_ROUTES exactly;
 //    8. the issuer key — the database must hold this process's key: its fingerprint alone is sent, and only `match` passes.
 //       Before the limiter's step, so a wrong key refuses before 014's fingerprint is registered;
 //    9. the limiter key — as the administrative entry's: registered when the store has none, compared otherwise. Both
 //       processes hold the same RATE_LIMIT_KEY, since 014 keeps one fingerprint per database;
 //   10. readiness — the session store reads, the session mint answers its probe (018's refusal of all-null arguments,
-//       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready and the
-//       customer directory answers its probe;
+//       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready, the
+//       customer directory answers its probe, and the idempotency store and the command port answer theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
 // ever opened. There is no degraded mode, no in-memory fallback, no automatic migration and no key installation.
 //
 // WHAT IT SERVES. TENANT_SHIPPING_ROUTES and nothing else: the two operational probes, the tenant boundary's login,
-// current-session and logout, and GET /api/v1/customers over the production customer directory — then the bounded 404.
+// current-session and logout, GET /api/v1/customers over the production customer directory and — M7A-CUSTOMERS-P3 —
+// POST /api/v1/customers, the customer create, idempotent and committed through the tenant store — then the bounded 404.
 // No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -39,7 +41,8 @@
 //
 // AFTER STARTUP. /health stays alive; /readiness answers 503 while any dependency fails — the limiter, the tenant
 // admission, the issuer key (deleted or rotated: 503 until a restart with the right key), the customer directory, the
-// session store, the session mint and the parameter-logging judgment, each shared per PROBE_REUSE_MS — and protected
+// session store, the session mint, the idempotency store, the command port and the parameter-logging judgment, each
+// shared per PROBE_REUSE_MS — and protected
 // traffic fails closed with a bounded 503. Nothing terminates the process for a dependency outage.
 //
 // SHUTDOWN, and THE CONSTRUCTION BOUNDARY, exactly as the administrative entry's (productionEntry.ts): the lifecycle is
@@ -50,6 +53,7 @@ import { createApp, createBoundedServer, createReadinessState } from '../runtime
 import { loadConfig } from '../runtime/config.js';
 import { createLifecycle } from '../runtime/lifecycle.js';
 import { emitLog } from '../runtime/logging.js';
+import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { normalizeOrigin } from '../runtime/requestSecurity.js';
 import { EnforcementSetupError } from '../runtime/routes.js';
 import { sharesHost } from '../runtime/sessions.js';
@@ -71,6 +75,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/session', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -92,8 +97,15 @@ export function validateTenantEntryConfig(env: Readonly<Record<string, string | 
   // The minting secret, judged as the transaction root judges it.
   const issuerKey = parseTenantIssuerKey(env);
   if (typeof issuerKey === 'string') errors.push({ field: 'TENANT_SESSION_ISSUER_KEY', code: issuerKey });
-  // The administrative command secret never sits in this process: it composes no command, and holds no other entry's secret.
-  if (present(env.IDEMPOTENCY_KEY)) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_present' });
+  // This process's own command secret (M7A-CUSTOMERS-P3): well formed, and never the limiter's key or the minting key.
+  // Whether it equals the administrative process's IDEMPOTENCY_KEY cannot be judged here (an owner custody item, DA-101).
+  const limiterKey = present(env.RATE_LIMIT_KEY) ? parseKeyMaterial(env.RATE_LIMIT_KEY) : null;
+  const idempotencyKey = present(env.IDEMPOTENCY_KEY) ? parseKeyMaterial(env.IDEMPOTENCY_KEY) : null;
+  if (!present(env.IDEMPOTENCY_KEY)) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_missing' });
+  else if (idempotencyKey === null) errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_invalid' });
+  else if ((limiterKey !== null && sameKeyMaterial(idempotencyKey, limiterKey)) || (typeof issuerKey !== 'string' && sameKeyMaterial(idempotencyKey, issuerKey))) {
+    errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_shared' });
+  }
   return errors;
 }
 
@@ -226,6 +238,8 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
         readiness,
         log,
         routes: tx.routes,
+        idempotency: tx.idempotency,
+        transactions: tx.transactions,
         limits: sessions.limits,
         sessions: sessions.sessions,
         hsts: true,
@@ -268,7 +282,8 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     if (keyStatus === 'consume_unavailable') return await refuse('rate_limit_store_unavailable', ['consume_unavailable']);
     if (keyStatus !== 'ready') return await refuse('rate_limit_probe_malformed');
 
-    // 10. Readiness of what protected traffic needs: a session read, the mint, the tenant admission, the limiter, the customer read.
+    // 10. Readiness of what protected traffic needs: a session read, the mint, the tenant admission, the limiter, the customer
+    //     read, and the tenant store's two ports.
     const unready: string[] = [];
     const probe = async (name: string, check: (signal: AbortSignal) => unknown): Promise<void> => {
       const ok = await bounded(startup.signal, async (signal) => (await check(signal)) === true).catch(() => false);
@@ -280,6 +295,8 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     await probe('tenant_admission', (signal) => (typeof tenantAdmission?.probe === 'function' ? tenantAdmission.probe(signal) : false));
     await probe('rate_limiter', (signal) => sessions.limits.limiter.probe(signal));
     await probe('customer_directory', (signal) => tx.readsProbe(signal));
+    await probe('idempotency_store', (signal) => tx.idempotency?.store.probe(signal));
+    await probe('command_transactions', (signal) => tx.transactions?.port.probe(signal));
     if (unready.length > 0) return await refuse('dependency_unready', unready);
 
     // 11. Listen — only now, and bounded like every step. A socket that binds after startup gave up on this step (a signal

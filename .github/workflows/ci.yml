@@ -248,6 +248,21 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantEntry.integration.test.mjs
+      # M7A-CUSTOMERS-P3 — migration 019's customer create routine as the runtime login (apply, postcondition, refused keys,
+      # the role set's parity with the catalog, rollback and re-apply), then POST /api/v1/customers end to end over real
+      # loopback sockets (authority, races, idempotency across two instances, failure atomicity, the lost COMMIT answer),
+      # against the SAME disposable service. Synthetic data and keys made at run time only. Same binding, no new service, no
+      # secret, no permission change.
+      - name: Tenant customer create routine against disposable PostgreSQL (M7A-CUSTOMERS-P3)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerCreateRoutine.integration.test.mjs
+      - name: Tenant customer create over HTTP against disposable PostgreSQL (M7A-CUSTOMERS-P3)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerCreate.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

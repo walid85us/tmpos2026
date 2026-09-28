@@ -4,18 +4,26 @@
 // Two roots compose over it, each in its own executable:
 //   - the administrative transaction root (productionTransactions.ts) — its command inventory, the store and the
 //     administrative admission — for the administrative entry (server/entry/productionEntry.ts);
-//   - the tenant transaction root (tenantTransactions.ts) — a read-only inventory, the customer directory — for the tenant
-//     entry (server/entry/tenantEntry.ts), through composeReadTransactions below.
+//   - the tenant transaction root (tenantTransactions.ts) — the customer directory's read and, since M7A-CUSTOMERS-P3, the
+//     customer create in its write slot — for the tenant entry (server/entry/tenantEntry.ts), through composeReadTransactions.
 // This module names no route, mutator or administrative adapter, so the tenant executable ships none of them; each root
 // hands in only its own inventory. It reads, and classifies before any client exists:
 //   - APP_DATABASE_URL: the runtime principal's connection (platform-identity/databaseEndpoint.ts), classified here for both
 //     roots — the one composition module that reads it; the kernel is built over the classified endpoint by the caller's
 //     constructor, a TLS refusal mapped to a bounded code;
-//   - TENANT_SESSION_ISSUER_KEY (the read-only path alone): the tenant entry's minting secret, which the database owner
+//   - TENANT_SESSION_ISSUER_KEY (the tenant root alone): the tenant entry's minting secret, which the database owner
 //     installs in migration 018's tmpos_mint.issuer_key. The session store mints tenant sessions under it and the database
 //     is asked only for its fingerprint (probeIssuerKey). It is never RATE_LIMIT_KEY and never a key HMAC would treat as the
-//     recorded test vector, and a key of fewer than 16 distinct byte values is refused as guessable.
+//     recorded test vector, and a key of fewer than 16 distinct byte values is refused as guessable;
+//   - IDEMPOTENCY_KEY (the tenant root's write slot alone, M7A-CUSTOMERS-P3): the tenant process's own keyed-hash secret for
+//     idempotency records (keyMaterial.ts), never RATE_LIMIT_KEY or the issuer key. Every tenant instance must hold the same
+//     one, which no process can check (ADR-34); the administrative process holds its own under the same name.
 // A refusal names every blocker as a bounded code before any client exists — never configuration content.
+//
+// M7A-CUSTOMERS-P3 UPDATE. The tenant root's write slot composes the M6 PostgreSQL store over the SAME kernel, scoped to
+// tenant contexts (`contextScope: 'tenant'`) and re-proved in each command's transaction by the tenant revalidator
+// (tenantAuthorization.ts createTenantContextRevalidator) over the session store's tenant reads and 016's hold and read. It
+// hands back the idempotency store with its key and the command port — never a delivery port, and no event contract.
 import { APP_DATABASE_URL_VAR } from '../platform-identity/config.js';
 import { classifyRuntimeDatabaseUrl } from '../platform-identity/databaseEndpoint.js';
 import type { RuntimeDatabaseEndpoint, RuntimeDatabaseRefusal } from '../platform-identity/databaseEndpoint.js';
@@ -25,17 +33,21 @@ import { createPostgresRateLimiter, probeRateLimitKey } from '../persistence/pos
 import type { RateLimitKeyStatus } from '../persistence/postgresRateLimiter.js';
 import { createPostgresStartupPreflight } from '../persistence/postgresStartupPreflight.js';
 import type { StartupPreflight } from '../persistence/postgresStartupPreflight.js';
-import { createPostgresSessionStore, probeIssuerKey, probeSessionMint } from '../persistence/postgresSessionStore.js';
+import { createPostgresSessionStore, holdTenantSession, probeIssuerKey, probeSessionMint, readTenantSession } from '../persistence/postgresSessionStore.js';
 import type { IssuerKeyProbe, SessionStandingCheck } from '../persistence/postgresSessionStore.js';
 import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../persistence/postgresTenantAdmission.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
+import { createPostgresTransactionalStore } from '../persistence/postgresTransactionalStore.js';
+import type { AggregateMutator } from '../persistence/postgresTransactionalStore.js';
+import type { CommandTransactionDeps } from '../runtime/commandTransaction.js';
+import type { IdempotencyDeps } from '../runtime/idempotency.js';
 import { parseKeyMaterial, sameKeyMaterial } from '../runtime/keyMaterial.js';
 import { defineRoutes } from '../runtime/routes.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import type { TenantAdmissionPort } from '../runtime/principals.js';
 import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
 import type { SessionStore } from '../runtime/sessions.js';
-import { createTenantEstablishCheck, readKey } from './tenantAuthorization.js';
+import { createTenantContextRevalidator, createTenantEstablishCheck, readKey } from './tenantAuthorization.js';
 
 export type TransactionCompositionBlocker =
   | RuntimeDatabaseRefusal
@@ -170,9 +182,20 @@ export function parseTenantIssuerKey(env: Readonly<Record<string, string | undef
 /** A read route over the kernel: its factory, built by the root once the ports exist. Building it runs nothing. */
 export type ReadRouteFactory<P> = (ports: P) => RouteDefinition;
 
-/** A read-only inventory (M7A-CUSTOMERS-P2): read routes over the kernel and nothing that writes — no key, store or port. */
+/** The tenant root's command routes and the mutator each commits through (M7A-CUSTOMERS-P3): trusted source. */
+export interface WriteInventory {
+  readonly routes: readonly RouteDefinition[];
+  readonly mutators: readonly AggregateMutator[];
+}
+
+/**
+ * A tenant inventory: read routes over the kernel (M7A-CUSTOMERS-P2) and, in its write slot (M7A-CUSTOMERS-P3), command
+ * routes committed through the tenant store. Without a write slot it is read-only — no key, store or port, as before.
+ */
 export interface ReadInventory<P> {
   readonly reads: readonly ReadRouteFactory<P>[];
+  /** The command routes and their mutators; absent, nothing is written. Never a read: no read-only actor reaches one. */
+  readonly writes?: WriteInventory;
   /** The read ports, built once over the root's kernel. */
   readonly ports: (client: SupervisedPgClient) => P;
   /** Ports that answer nothing, for validating the declared table before any client exists. */
@@ -181,12 +204,12 @@ export interface ReadInventory<P> {
   readonly probe: (client: SupervisedPgClient, signal: AbortSignal) => Promise<boolean>;
 }
 
-/** What a read-only composition hands its entry: the tenant boundary's durable adapters, the served routes and probes. */
+/** What the tenant composition hands its entry: the tenant boundary's durable adapters, the served routes and probes. */
 export interface ReadTransactions {
   /** The session store, minting tenant sessions under the issuer key; an administrative record's standing throws. */
   readonly sessionStore: SessionStore;
   readonly tenantAdmission: TenantAdmissionPort;
-  /** The routes explicitly classified as reads, from the inventory's declaration: here, every one. */
+  /** The routes explicitly classified as reads, from the inventory's `reads` alone: never a route of its write slot. */
   readonly tenantReads: ReadonlySet<string>;
   readonly rateLimiter: (keySecret: Uint8Array) => DistributedRateLimiter;
   readonly routes: readonly RouteDefinition[];
@@ -198,11 +221,15 @@ export interface ReadTransactions {
   readonly readsProbe: (signal: AbortSignal) => Promise<boolean>;
   /** Ends the kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
   readonly close: () => Promise<void>;
+  /** createApp's `idempotency` and `transactions`, together, only for an inventory with a write slot (M7A-CUSTOMERS-P3). */
+  readonly idempotency?: IdempotencyDeps;
+  readonly transactions?: CommandTransactionDeps;
 }
 
 /**
- * The read-only composition over the kernel (M7A-CUSTOMERS-P2), for the tenant root alone: configuration and the kernel's
- * constructor in, the tenant boundary's adapters and `inventory`'s routes over one kernel out — or a refusal naming every
+ * The tenant composition over the kernel (M7A-CUSTOMERS-P2), for the tenant root alone: configuration and the kernel's
+ * constructor in, the tenant boundary's adapters and `inventory`'s routes over one kernel out — and, for a write slot
+ * (M7A-CUSTOMERS-P3), the tenant store's idempotency and command ports over that same kernel — or a refusal naming every
  * blocker before any client exists. A fault after the kernel is built ends it before rethrowing: the caller holds nothing
  * to close yet.
  */
@@ -212,20 +239,54 @@ export function composeReadTransactions<P>(
   client: KernelFactories['client'],
 ): ReadTransactions {
   if (typeof client !== 'function') throw new TypeError('database client constructor invalid');
-  // The table, as declared over ports that answer nothing, is validated before any client exists; every route in it is a read.
-  const declared = defineRoutes(inventory.reads.map((build) => build(inventory.inert))).list();
+  // The whole table, as declared over ports that answer nothing, is validated before any client exists: its reads, then
+  // its write slot's commands, one table — so a command can never shadow a read or register twice.
+  const declared = inventory.reads.map((build) => build(inventory.inert));
+  const writes = inventory.writes;
+  defineRoutes([...declared, ...(writes?.routes ?? [])]);
   const blockers: TransactionCompositionBlocker[] = [];
   const endpoint = runtimeEndpoint(env);
   if (typeof endpoint === 'string') blockers.push(endpoint);
   const issuerKey = parseTenantIssuerKey(env);
   if (typeof issuerKey === 'string') blockers.push(issuerKey);
+  // A write slot requires this process's own idempotency key — present, canonical and never RATE_LIMIT_KEY or the issuer
+  // key — and each command route committing through exactly one mutator of its contract's kind, mode and aggregate type:
+  // the administrative root's rules (productionTransactions.ts), applied to the tenant root's commands.
+  // ponytail: copied from assembleTransactions, which stays byte-identical; share one helper when a third root appears.
+  const rawKey = writes === undefined ? undefined : env.IDEMPOTENCY_KEY;
+  const keySecret = rawKey === undefined || rawKey === '' ? null : parseKeyMaterial(rawKey);
+  if (writes !== undefined) {
+    if (rawKey === undefined || rawKey === '') blockers.push('idempotency_key_missing');
+    else if (keySecret === null) blockers.push('idempotency_key_invalid');
+    else {
+      const limiterKey = parseKeyMaterial(env.RATE_LIMIT_KEY);
+      if ((limiterKey !== null && sameKeyMaterial(keySecret, limiterKey)) || (typeof issuerKey !== 'string' && sameKeyMaterial(keySecret, issuerKey))) {
+        blockers.push('idempotency_key_shared');
+      }
+    }
+    const commands = writes.routes.flatMap((route) => (route.idempotency === 'required' && 'command' in route ? [route.command.contract] : []));
+    if (commands.length !== writes.routes.length || commands.some((contract) => {
+      const matching = writes.mutators.filter((mutator) => mutator.kind === contract.kind);
+      return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType;
+    })) blockers.push('command_mutator_unavailable');
+  }
   if (blockers.length > 0) throw new TransactionCompositionError(blockers);
   const key = issuerKey as Buffer;
   const kernel = kernelOver(client, endpoint as RuntimeDatabaseEndpoint);
   try {
     // The tenant login's standing check alone: an administrative record is a wiring fault here, a throw.
     const standing = createTenantEstablishCheck({ hold: holdTenantStanding, read: readTenantAdmission });
-    const served = defineRoutes(inventory.reads.map((build) => build(inventory.ports(kernel)))).list();
+    const served = defineRoutes([...inventory.reads.map((build) => build(inventory.ports(kernel))), ...(writes?.routes ?? [])]).list();
+    // The write slot's store over the SAME kernel, admitting tenant contexts alone, each re-proved inside its command's
+    // transaction: the presenting tenant session held and the actor's standing held and re-read (ADR-34 lock order).
+    const store = writes === undefined ? null : createPostgresTransactionalStore({
+      client: kernel, mutators: writes.mutators, contextScope: 'tenant',
+      revalidate: createTenantContextRevalidator({
+        hold: holdTenantStanding, read: readTenantAdmission,
+        peek: (sql, sessionKey) => readTenantSession(sql, sessionKey, Date.now()),
+        session: (sql, sessionKey) => holdTenantSession(sql, sessionKey, Date.now()),
+      }),
+    });
     return Object.freeze({
       sessionStore: KERNEL_FACTORIES.sessionStore(kernel, standing, key),
       tenantAdmission: KERNEL_FACTORIES.tenantAdmission(kernel),
@@ -237,6 +298,10 @@ export function composeReadTransactions<P>(
       mintProbe: (signal: AbortSignal) => probeSessionMint(kernel, signal),
       readsProbe: (signal: AbortSignal) => inventory.probe(kernel, signal),
       close: () => kernel.end(),
+      ...(store === null ? {} : {
+        idempotency: Object.freeze({ store: store.idempotency, keySecret: keySecret as Uint8Array }),
+        transactions: Object.freeze({ port: store.transactions }),
+      }),
     });
   } catch (err) {
     void kernel.end(); // nothing opened yet: the kernel connects only when a transaction runs

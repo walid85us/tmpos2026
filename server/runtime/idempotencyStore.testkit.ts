@@ -130,9 +130,10 @@ export async function assertIdempotencyStoreContract(harness: IdempotencyStoreHa
   const run = randomBytes(8).toString('hex');
   interface Op { readonly scope: string; readonly fingerprint: string }
   /** An operation under a fresh client key (or `key`) for principal `who`, with a variant binding. */
-  const op = (over: { key?: string; who?: string; tenant?: string | null; body?: string; path?: string } = {}): Op =>
+  const op = (over: { key?: string; who?: string; tenant?: string | null; actor?: string | null; body?: string; path?: string } = {}): Op =>
     keyring.operationOf(over.key ?? randomUUID(), Object.freeze({ authProvider: 'conformance', authProviderUid: `${run}-${over.who ?? 'a'}` }), {
-      method: 'POST', path: over.path ?? '/v1/conformance', audience: null, tenant: over.tenant ?? null, store: null, body: Buffer.from(over.body ?? '{"n":1}'),
+      method: 'POST', path: over.path ?? '/v1/conformance', audience: null, tenant: over.tenant ?? null, store: null, actor: over.actor ?? null,
+      body: Buffer.from(over.body ?? '{"n":1}'),
     });
   const lease = (): string => randomBytes(32).toString('base64url');
   /** An opaque sealed response, as the runtime hands the store: the store keeps and returns it byte for byte. */
@@ -183,8 +184,10 @@ export async function assertIdempotencyStoreContract(harness: IdempotencyStoreHa
   assert.deepEqual(await acquire(other, lease(), peer), CONFLICT, 'another body under an operation in progress conflicts');
   assert.deepEqual(await complete(other, lease(), sealed()), LEASE_LOST, 'the conflicting caller holds no lease');
   assert.deepEqual(await complete(first, lf, firstResponse), COMPLETED, 'the conflict changed nothing: the holder still completes');
-  for (const variant of [other, op({ key, body: '{"n":2}', path: '/v1/conformance/other' }), op({ key, body: '{"n":2}', tenant: 'tenant-b' })]) {
-    assert.deepEqual(await acquire(variant, lease()), CONFLICT, 'another body, operation or tenant under a completed operation conflicts');
+  for (const variant of [
+    other, op({ key, body: '{"n":2}', path: '/v1/conformance/other' }), op({ key, body: '{"n":2}', tenant: 'tenant-b' }), op({ key, body: '{"n":2}', actor: 'actor-b' }),
+  ]) {
+    assert.deepEqual(await acquire(variant, lease()), CONFLICT, 'another body, operation, tenant or actor under a completed operation conflicts');
   }
   assert.deepEqual(await acquire(first, lease(), peer), replay(firstResponse), 'and never displaces the stored response');
 

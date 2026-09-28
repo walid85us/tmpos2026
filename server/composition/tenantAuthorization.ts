@@ -40,8 +40,9 @@
 //   7. where the catalog decides the permission, the selected grant's role must hold it (below).
 //
 // THE ROLE DECISION, AND WHERE IT IS NOT MADE. For a key the canonical catalog DECIDES — the tenant
-// route permissions owner decision D1 fixed, today view_customers for GET /api/v1/customers
-// (M7A-CUSTOMERS-P1) — the selected grant's role must hold it (step 7 below), by the catalog's own rule.
+// route permissions owner decision D1 fixed: view_customers for GET /api/v1/customers (M7A-CUSTOMERS-P1)
+// and create_customers for POST /api/v1/customers (M7A-CUSTOMERS-P3, ADR-34) — the selected grant's role
+// must hold it (step 7 below), by the catalog's own rule.
 // Every other tenant- and store-scope key is 'undecidable' until D1 defines its route and authoritative
 // product rules (m5CanonicalPermissions.ts GAP_11_TENANT_ORDERING_UNRESOLVED, GAP-11), and deciding it
 // here would be exactly the comparison-of-unsettled-meaning that gate exists to prevent. For those the
@@ -52,6 +53,12 @@
 // requirement is null is skipped. So no deployment serves a route decided on membership and lifecycle
 // alone; the witness harnesses that prove that enforcement over real sockets use such keys.
 //
+// M7A-CUSTOMERS-P3 UPDATE. THE COMMAND'S REVALIDATOR (createTenantContextRevalidator) asks the same questions
+// again inside the tenant command's own transaction, where the write commits: the presenting tenant session held,
+// 016's hold of the actor's standing, the admission re-read at the session's witness, the SAME selection (scopeOf)
+// compared field by field with the scope the authorizer handed out, and the route's permission decided again. It
+// adds no authority either: every answer is the database's, every rule this file's.
+//
 // EVERY DENIAL IS ONE VALUE, `false` — the chain's generic 403 — whatever failed: no actor, no grant,
 // an ambiguous grant, a suspended tenant, a stale witness, an uncatalogued permission, a read-only
 // actor on a route that is not a read. A caller cannot tell which, so none of them is a probe.
@@ -59,7 +66,7 @@
 // NOTHING IS LOGGED OR KEPT. No principal, actor, role or decision leaves this file except as the answer.
 import type { RouteAuthorizer, RouteView } from '../runtime/access.js';
 import { isTrustedPrincipal, selectScope } from '../runtime/principals.js';
-import type { TenantAdmissionPort, TrustedPrincipal } from '../runtime/principals.js';
+import type { TenantAdmissionPort, TrustedPrincipal, TrustedScope } from '../runtime/principals.js';
 import type { AuthorizationRequirement, AuthorizationScope, SessionAudience, VerifiedPrincipal } from '../runtime/routes.js';
 import type { SessionAdmission, SessionRecord } from '../runtime/sessions.js';
 import { canonicalPermission, evaluateCanonicalPermission, isDecidablePermission } from '../platform-identity/m5CanonicalPermissions.js';
@@ -207,6 +214,85 @@ export function readKey(method: string, path: string): string {
   return `${method} ${path}`;
 }
 
+/**
+ * The ONE selection both the authorizer and the command revalidator make: the actor's own grants at `scope` — exactly
+ * one, never a choice between several — through selectScope's lifecycle decision. The selected scope, or null.
+ */
+function scopeOf(resolved: TrustedPrincipal, scope: AuthorizationScope): TrustedScope | null {
+  const atScope = resolved.memberships.filter((m) => m.scopeType === scope);
+  if (atScope.length !== 1) return null;
+  const selection = selectScope(resolved, scope, { tenant: atScope[0].tenant, store: atScope[0].store });
+  return selection.outcome === 'selected' ? selection.scope : null;
+}
+
+/** The eight fields of a trusted scope, compared one by one (platformAuthorization.ts's rule, restated for this plane). */
+const sameScope = (a: TrustedScope, b: TrustedScope): boolean =>
+  a.scope === b.scope && a.actor === b.actor && a.securityVersion === b.securityVersion && a.membershipId === b.membershipId
+  && a.roleId === b.roleId && a.limitation === b.limitation && a.tenant === b.tenant && a.store === b.store;
+
+/** A tenant session on the caller's own handle (in production postgresSessionStore.ts readTenantSession / holdTenantSession). */
+export type TenantSessionRead<Handle> = (sql: Handle, key: string) => Promise<SessionRecord | undefined>;
+
+export interface TenantRevalidatorDeps<Handle> {
+  /** 016's hold of the actor's standing rows (postgresTenantAdmission.ts holdTenantStanding). */
+  readonly hold: TenantStandingHold<Handle>;
+  /** 016's v2 admission, re-read under that hold (postgresTenantAdmission.ts readTenantAdmission). */
+  readonly read: TenantStandingRead<Handle>;
+  /** The presenting session, read WITHOUT a lock, only for the reference its standing is held by (readTenantSession). */
+  readonly peek: TenantSessionRead<Handle>;
+  /** The presenting session, read again and held until COMMIT (holdTenantSession). */
+  readonly session: TenantSessionRead<Handle>;
+}
+
+/**
+ * The tenant store's ContextRevalidator (postgresTransactionalStore.ts, `contextScope: 'tenant'`; M7A-CUSTOMERS-P3, ADR-34):
+ * exactly true only when the scope is one this authorizer could have handed out — tenant, not read-only — the tenant
+ * session that presented the command is still live and now held by the committing transaction, the standing it is bound
+ * to still admits it at its own witness and selects exactly this scope, and `permission` is still granted to that role.
+ *
+ * ORDERED AGAINST REVOCATION, on the committing transaction after the store's fence (ADR-31's establish order): the
+ * session read unlocked (`peek`, for its provider reference alone), 016's hold of that actor's standing — the account FOR
+ * UPDATE, then its links, grants, tenants and stores FOR SHARE — then the session row held (`session`: a logout or a
+ * revocation committed first leaves nothing to hold, one not yet committed waits for this COMMIT), then 016's admission
+ * re-read under those locks. So a suspension, a grant change or an account change committed before the hold refuses the
+ * command, and one attempted after it waits. The mutator's definer routine then re-holds the same rows and re-derives
+ * the tenant from the same session key (migration 019).
+ *
+ * No tenant route requires a recent authentication, and none is judged on the database's clock, so `authNotAfter` set
+ * is refused; so is a command with no session key. A refusal is false; a hold, read or session fault THROWS, and the
+ * store's kernel rolls back either way — nothing commits.
+ */
+export function createTenantContextRevalidator<Handle>(
+  deps: TenantRevalidatorDeps<Handle>,
+): (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null, sessionKey: string | null) => Promise<boolean> {
+  const hold = deps?.hold;
+  const read = deps?.read;
+  const peek = deps?.peek;
+  const session = deps?.session;
+  if (typeof hold !== 'function' || typeof read !== 'function' || typeof peek !== 'function' || typeof session !== 'function') {
+    throw new TypeError('tenant revalidator dependencies invalid');
+  }
+  return async (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null, sessionKey: string | null): Promise<boolean> => {
+    if (scope.scope !== 'tenant' || scope.limitation !== 'none' || authNotAfter !== null || sessionKey === null) return false;
+    const seen = await peek(sql, sessionKey);
+    if (seen === undefined) return false;
+    const principal: VerifiedPrincipal = Object.freeze({ authProvider: seen.authProvider, authProviderUid: seen.authProviderUid });
+    const held = await hold(sql, principal);
+    if (held === false) return false;
+    if (held !== true) throw new Error(UNAVAILABLE);
+    // The session row, now held: still live, and still the same principal's (a key never changes its reference).
+    const live = await session(sql, sessionKey);
+    if (live === undefined || live.authProvider !== seen.authProvider || live.authProviderUid !== seen.authProviderUid) return false;
+    // The standing, read again under every lock above: admitted at the session's own witness, selecting exactly the scope
+    // the command was authorized on — the actor, the very grant, its role and tenant — and the permission decided again.
+    const answer = admittedOf(await read(sql, principal));
+    if (!answer.admitted || answer.securityVersion !== live.securityVersion) return false;
+    const fresh = scopeOf(answer.principal, 'tenant');
+    if (fresh === null || !sameScope(fresh, scope)) return false;
+    return evaluateCanonicalPermission({ scope: 'tenant', roleId: scope.roleId, permission, limitation: 'none' }) === 'granted';
+  };
+}
+
 export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAuthorizer {
   const admission = checked(deps);
   // Validated at CONSTRUCTION, like the port beside it, and COPIED. A classification that is not a
@@ -236,17 +322,15 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       // well. Both fail closed, which is the right direction, but a genuine multi-store operator
       // cannot use a store route under this rule. Settling that is part of owner decision D1, which
       // also gates the first such route, so nothing is blocked by it today.
-      const atScope = resolved.memberships.filter((m) => m.scopeType === requirement.scope);
-      if (atScope.length !== 1) return false;
-      const selection = selectScope(resolved, requirement.scope, { tenant: atScope[0].tenant, store: atScope[0].store });
-      if (selection.outcome !== 'selected') return false;
-      const { scope } = selection;
+      const scope = scopeOf(resolved, requirement.scope);
+      if (scope === null) return false;
 
       // The permission must NAME something: a key the catalog does not define is a typo or an
       // invention, never a weaker permission. Where the catalog DECIDES the key — the tenant route
-      // permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1) — the selected grant's
-      // ROLE must hold it, on the scope's limitation. Any other catalogued key stays undecidable and is
-      // not decided here (see the header: the production inventory refuses such a route at startup).
+      // permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; create_customers,
+      // M7A-CUSTOMERS-P3, ADR-34) — the selected grant's ROLE must hold it, on the scope's limitation. Any
+      // other catalogued key stays undecidable and is not decided here (see the header: the production
+      // inventory refuses such a route at startup).
       if (canonicalPermission(requirement.scope, requirement.permission) === null) return false;
       if (isDecidablePermission(requirement.scope, requirement.permission) && evaluateCanonicalPermission({
         scope: requirement.scope, roleId: scope.roleId, permission: requirement.permission, limitation: scope.limitation,

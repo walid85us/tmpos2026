@@ -9,9 +9,9 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { AUDIT_FORBIDDEN_FIELDS } from '../platform-identity/auditEventContract.js';
 import {
-  MAX_CLAIM_BATCH, MAX_OUTBOX_ENVELOPE_BYTES, MAX_PUBLISH_DEADLINE_MS, MAX_RECORD_BYTES, OUTBOX_DEADLINE_MS, OUTBOX_DELIVERY_POLICY,
+  MAX_CLAIM_BATCH, MAX_OUTBOX_ENVELOPE_BYTES, MAX_PUBLISH_DEADLINE_MS, MAX_RECORD_BYTES, MAX_CHANGE_STRING_FIELD_LENGTH, MAX_STRING_FIELD_LENGTH, OUTBOX_DEADLINE_MS, OUTBOX_DELIVERY_POLICY,
   acknowledgeOutbox, claimOutbox, createOutboxDelivery, deadLetterOutbox, defineOutboxEvents, deliverOutboxBatch, envelopeOf,
-  parseRecordSchema, recordOf, retryDelayMs, retryOutbox,
+  parseChangeSchema, parseRecordSchema, recordOf, retryDelayMs, retryOutbox,
 } from './outbox.js';
 import type { OutboxClaimRequest, OutboxDelivery, OutboxDeliveryStore, OutboxEnvelope, OutboxSettleRequest } from './outbox.js';
 import { EnforcementSetupError } from './routes.js';
@@ -30,6 +30,13 @@ test('a record schema is flat, closed and bounded, and refuses a field named for
   const sixteen = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`field${i}`, { type: 'boolean' }]));
   assert.ok(parseRecordSchema({ name: { type: 'string', maxLength: 64 }, count: { type: 'integer', min: 0, max: 9 }, flag: { type: 'boolean' }, kind: { type: 'enum', values: ['a', 'b-c'] } }));
   assert.ok(parseRecordSchema({}) && parseRecordSchema(sixteen), 'from no field up to sixteen');
+  // M7A-CUSTOMERS-P3: an event payload's string cap stays 256; only a command change set admits 400 (a 200-scalar name).
+  assert.deepEqual([MAX_STRING_FIELD_LENGTH, MAX_CHANGE_STRING_FIELD_LENGTH], [256, 400]);
+  assert.ok(parseRecordSchema({ a: { type: 'string', maxLength: 256 } }), 'a string of exactly the cap');
+  assert.equal(parseRecordSchema({ a: { type: 'string', maxLength: 400 } }), null, 'a record schema never takes the change-set cap');
+  assert.ok(parseChangeSchema({ a: { type: 'string', maxLength: 400 } }), 'a change set takes up to its own cap');
+  assert.equal(parseChangeSchema({ a: { type: 'string', maxLength: 401 } }), null, 'and no further');
+  assert.equal(parseChangeSchema({ password: { type: 'boolean' } }), null, 'under every other record-schema rule');
   for (const [label, schema] of [
     ['seventeen fields', { ...sixteen, extra: { type: 'boolean' } }], ['a snake_case name', { first_name: { type: 'boolean' } }],
     ['an upper-case initial', { Name: { type: 'boolean' } }], ['an Object.prototype member', { constructor: { type: 'boolean' } }],
@@ -91,10 +98,12 @@ test('event contracts are closed at startup: the grammar, the versions, one aggr
     ['a fractional version', [{ ...base, version: 1.5 }]], ['an upper-case aggregate', [{ ...base, aggregateType: 'Thing' }]],
     ['a secret-named field', [{ ...base, payload: { token: { type: 'boolean' } } }]], ['an extra key', [{ ...base, actor: true }]],
     ['one version twice', [base, base]], ['one type over two aggregates', [base, { ...base, version: 2, aggregateType: 'other' }]],
+    ['a payload string at the change-set cap (M7A-CUSTOMERS-P3)', [{ ...base, payload: { name: { type: 'string', maxLength: 400 } } }]],
   ] as const) {
     assert.throws(() => defineOutboxEvents(defs), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'outbox_registry_invalid', label);
   }
   assert.equal(defineOutboxEvents([base, { ...base, version: 2 }]).list().length, 2, 'the versions of one type coexist while events of each can be claimed');
+  assert.equal(defineOutboxEvents([{ ...base, payload: { name: { type: 'string', maxLength: 256 } } }]).list().length, 1, 'a payload string up to 256');
 });
 
 const registry = defineOutboxEvents(TEST_EVENTS);

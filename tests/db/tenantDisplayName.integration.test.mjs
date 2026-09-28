@@ -263,7 +263,7 @@ async function contextOf(who) {
 /** An idempotency record acquired under a fresh key, as the chain acquires one. */
 async function acquired(who, body) {
   const operation = keyring.operationOf(randomUUID(), who.principal, {
-    method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, body: Buffer.from(JSON.stringify(body)),
+    method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from(JSON.stringify(body)),
   });
   const lease = randomBytes(32).toString('base64url');
   assert.deepEqual(await store.idempotency.acquire({ ...operation, lease, ...IDEMPOTENCY_POLICY }, signal()), { outcome: 'acquired', reclaimed: false });
@@ -289,10 +289,10 @@ const commit = (command) => store.transactions.commit(command, signal());
 // migration 008 as applied
 // ---------------------------------------------------------------------------
 
-test('M5D-01: 001-018 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
+test('M5D-01: 001-019 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk
@@ -689,7 +689,7 @@ test('M5D-10: over HTTP — 200, replay, 409, 404, 400 that records nothing, 422
     const missing = await patch({ tenantId: randomUUID(), displayName: 'Nobody', expectedVersion: 1 });
     assert.deepEqual([missing.status, errorOf(missing)], [404, 'not_found']);
 
-    const scopeOf = (k) => keyring.operationOf(k, OWNER.principal, { method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, body: Buffer.alloc(0) }).scope;
+    const scopeOf = (k) => keyring.operationOf(k, OWNER.principal, { method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.alloc(0) }).scope;
     for (const invalid of [
       { tenantId: tenant, displayName: '   ', expectedVersion: 2 }, { tenantId: tenant.toUpperCase(), displayName: 'n', expectedVersion: 2 },
       { tenantId: tenant, displayName: 'n', expectedVersion: 0 }, { tenantId: tenant, displayName: 'n\u0000', expectedVersion: 2 },
@@ -992,7 +992,7 @@ test('M5D-17: a no-op whose completion cannot hold rolls back whole — no compl
   // A record retained for 300 ms, and a transaction that outlives it after the operation answered: 006's completion judges
   // retention again on the store's clock, refuses, and the no-op's decision rolls back with it.
   const operation = keyring.operationOf(randomUUID(), OWNER.principal, {
-    method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, body: Buffer.from(JSON.stringify(body)),
+    method: 'PATCH', path: TENANT_DISPLAY_NAME_PATH, audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from(JSON.stringify(body)),
   });
   const lease = randomBytes(32).toString('base64url');
   // Everything the commit needs is built BEFORE the short-lived record is acquired, so only the mutator's own

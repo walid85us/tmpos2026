@@ -813,8 +813,9 @@ export function createApp(deps: AppDeps): Express {
       // from the session record alone (sessions.ts), never from the request.
       let authenticatedAt: number | null = null;
       // The store key of the session that presented this request (a digest, never the cookie), for a session route:
-      // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1).
-      // It goes nowhere else — no log line, no handler, no context — with ONE declared exception: the handler of a route
+      // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1), and
+      // (M7A-CUSTOMERS-P3) a tenant command's store also hands it, inside that transaction, to its mutator's session-bound
+      // routine (migration 019), which derives the command's authority from it alone. It goes nowhere else — no log line, no handler, no context — with ONE declared exception: the handler of a route
       // declaring `sessionBinding: 'required'` (routes.ts, M7A-CUSTOMERS-P2) receives it as ctx.sessionKey, a SQL
       // parameter that binds its read to this very session. The request log never includes ctx.
       let sessionKey: string | null = null;
@@ -926,8 +927,13 @@ export function createApp(deps: AppDeps): Express {
         const key = readIdempotencyKey(req.rawHeaders);
         if (typeof key === 'string') return refuse(req, res, 400, 'invalid_request', key);
         const audience = policy.access === 'session' ? policy.audience : null;
+        // Tenant, store and actor from the authorizer's trusted scope alone — never the request's — so one tenant's or
+        // actor's recorded response never replays in another's context (M7A-CUSTOMERS-P3). Registration forces a
+        // trusted context on every idempotent route and the chain refused above without one; should that ever stop
+        // holding, refuse rather than bind an empty scope.
+        if (context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
         const operation = store.keyring.operationOf(key.key, principal as VerifiedPrincipal, {
-          method: route.method, path: route.path, audience, tenant: null, store: null, body: bytes,
+          method: route.method, path: route.path, audience, tenant: context.tenant, store: context.store, actor: context.actor, body: bytes,
         });
         const lease = randomBytes(32).toString('base64url');
         const acquired = await acquireIdempotency(store, Object.freeze({ ...operation, lease, ...IDEMPOTENCY_POLICY }), deadlineMs);

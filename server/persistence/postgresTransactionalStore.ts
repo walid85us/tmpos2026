@@ -3,11 +3,12 @@
 // CommandTransactionPort (commandTransaction.ts) and OutboxDeliveryStore (outbox.ts) — over migration 006's
 // internal schema, tmpos_internal (G-IDEMPOT, G-AUDIT; docs/phase-4/10 ADR-17).
 //
-// NOT COMPOSED. No production module imports this file: the composition root binds no idempotency store,
-// transaction port or outbox, the production entry serves the probes and the bounded fallback only, and the
-// emitted server artifact (tsconfig.server.json) does not contain it. Binding it is a later, separately
-// authorized step: a runtime LOGIN holding tmpos_app and tmpos_audit_writer (G-DBROLE) over a database where
-// migration 006 is applied (G-MIGRATE), and a real business route (G-IDEMPOT).
+// COMPOSED BY THE TWO TRANSACTION ROOTS ALONE, each over its own kernel and for its own scope: the administrative root
+// (server/composition/productionTransactions.ts) for platform-scope commands, and since M7A-CUSTOMERS-P3 the tenant root
+// (server/composition/transactionKernel.ts, `contextScope: 'tenant'`) for tenant-scope ones — neither binds the outbox
+// delivery port or a worker. A store admits contexts of its ONE scope, each re-proved by the revalidator its root hands it,
+// and audits each command at exactly that scope. Deploying either still waits on a runtime LOGIN holding tmpos_app and
+// tmpos_audit_writer (G-DBROLE) over a database where the migrations are applied (G-MIGRATE).
 //
 // What it is handed, and what it never holds. The caller hands it the transaction kernel (supervisedPgClient.ts) over the
 // runtime principal's client options, which server/platform-identity/db.ts builds under the verified-TLS policy, and the
@@ -97,9 +98,21 @@ export interface AggregateMutator {
    * — its changes already hold at expectedVersion, so it wrote nothing,
    * and it holds the aggregate's row locked until the transaction ends, so the store's completion of the
    * no-op is recorded at the moment it was decided (M5-GIAM-D1-P1-R1). Anything else — another answer, a
-   * throw — commits nothing.
+   * throw — commits nothing. `authority` is what this transaction revalidated before the mutator runs
+   * (M7A-CUSTOMERS-P3): the store always hands it; a mutator that needs neither of its values ignores it, and one that
+   * does treats its absence as a fault.
    */
-  readonly apply: (sql: PgStatement, mutation: TransactionMutation) => Promise<unknown>;
+  readonly apply: (sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority) => Promise<unknown>;
+}
+
+/**
+ * What the store hands a mutator beside its mutation (M7A-CUSTOMERS-P3): the trusted context and the presenting session's
+ * key THIS transaction revalidated — the store's own frozen checked copies, never the caller's. Both null for a
+ * contextless command. The key is a session-bound definer routine's parameter and nothing else.
+ */
+export interface MutationAuthority {
+  readonly context: TrustedScope | null;
+  readonly sessionKey: string | null;
 }
 
 /**
@@ -122,9 +135,10 @@ export type ContextRevalidator = (
    */
   authNotAfter: number | null,
   /**
-   * The store key of the administrative session that presented the command (M5-ADMIN-REVOKE-P1), or null: the
-   * revalidator holds that session's row on this transaction and re-reads the standing it is bound to, so the command
-   * commits only while it is live. Bound as a parameter of that read and nothing else — never audited, logged,
+   * The store key of the session that presented the command (M5-ADMIN-REVOKE-P1; a tenant session since
+   * M7A-CUSTOMERS-P3), or null: the revalidator holds that session's row on this transaction and re-reads the standing it
+   * is bound to, so the command commits only while it is live. Bound as a parameter of those reads — and, for a tenant
+   * command, of its mutator's session-bound routine (MutationAuthority) — and nothing else: never audited, logged,
    * evented or returned.
    */
   sessionKey: string | null,
@@ -138,6 +152,12 @@ export interface TransactionalStoreOptions {
    * commands and refuses every command that carries one — it never commits one unrevalidated.
    */
   readonly revalidate?: ContextRevalidator;
+  /**
+   * The ONE scope whose contexts this store's revalidator re-proves (M7A-CUSTOMERS-P3): 'platform' — the default, the
+   * administrative root's store, unchanged — or 'tenant', the tenant root's, which requires `revalidate` and refuses every
+   * contextless command. A store scope is never admitted.
+   */
+  readonly contextScope?: 'platform' | 'tenant';
 }
 
 /** The three ports over one database: separate objects, each only its own interface. */
@@ -367,20 +387,23 @@ interface Command {
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
   /** When this attempt's trusted authentication evidence goes stale, or null when its route required none. */
   readonly authNotAfter: number | null;
-  /** The presenting administrative session's store key, or null (M5-ADMIN-REVOKE-P1). A SQL parameter only. */
+  /** The presenting session's store key, or null (M5-ADMIN-REVOKE-P1). A SQL parameter only. */
   readonly sessionKey: string | null;
+  /** The context and key the mutator is handed once they are revalidated: the frozen copies above. */
+  readonly authority: MutationAuthority;
 }
 
 
 /**
  * A command in contract, re-checked at the store's boundary: LEASE_LOST when its fence can never match a
- * granted lease; UNAVAILABLE when anything else is malformed or no mutator serves its kind. Only a
- * PLATFORM-scope command commits: a tenant- or store-scoped context waits on GAP-11's permission ordering
- * and on the audit writer carrying the tenant RLS context. An event names no tenant, store or actor in any
- * case — those columns are keyed digests in migration 006, and this stage keys none. Since M5-ID-P1 the
- * AUDIT record names the app-owned actor whenever a trusted context is carried.
+ * granted lease; UNAVAILABLE when anything else is malformed or no mutator serves its kind. Only a command of
+ * the store's own `contextScope` commits (M7A-CUSTOMERS-P3): the administrative store's platform-scope ones —
+ * contextless included — or the tenant store's tenant-scope ones, each audited at exactly that scope. A store
+ * scope is never admitted. An event names no tenant, store or actor in any case — those columns are keyed
+ * digests in migration 006, and this stage keys none. Since M5-ID-P1 the AUDIT record names the app-owned actor
+ * whenever a trusted context is carried.
  */
-function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>): Command | Answer {
+function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>, contextScope: 'platform' | 'tenant'): Command | Answer {
   try {
     if (!isRecord(raw) || !hasExactKeys(raw, COMMAND_FIELDS)) return UNAVAILABLE;
     const { scope, lease, response, unchanged, rejected: rawRejected, mutation, audit, events, context: rawContext, authNotAfter, sessionKey } = raw;
@@ -425,12 +448,16 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // or the store is `read_only` or `overdue` — may not perform one, and that limiting is applied
     // here rather than left to a caller who might forget it.
     if (context !== null && context.limitation !== 'none') return UNAVAILABLE;
-    // Until owner decision D1 defines a tenant/store route (M5-GAP11-P5), and until the audit writer carries the tenant RLS
-    // context, only a PLATFORM-scope context commits here; a tenant- or store-scoped one is refused
-    // rather than audited at a scope this transaction cannot prove.
-    if (context !== null && context.scope !== 'platform') return UNAVAILABLE;
+    // Only a context of the scope this store's revalidator re-proves commits here (M7A-CUSTOMERS-P3): the administrative
+    // store's platform contexts, contextless commands included, or the tenant store's tenant contexts — never a
+    // contextless command there, whose tenant nothing would prove. Any other is refused rather than audited at a scope
+    // this transaction cannot prove, and a store scope never is.
+    if (context === null ? contextScope === 'tenant' : context.scope !== contextScope) return UNAVAILABLE;
     const { action, permission, scope: auditScope, tenant, store, actor, correlationId, reasonCode, reason } = audit;
-    if (action !== kind || auditScope !== 'platform') return UNAVAILABLE;
+    // The record is audited at exactly the context's scope. Migration 005's audit policy checks the tuple's shape alone,
+    // not the session's context, so this equality — with the tenant, store and actor checks below — is the provenance
+    // (G-AUDIT: TypeScript-only).
+    if (action !== kind || auditScope !== (context === null ? 'platform' : context.scope)) return UNAVAILABLE;
     // The bounded reason pair a sensitive command records: both present or both absent, each within the
     // same bounds the runtime's own contract applied. A reason with no code, or a code with no reason,
     // is not a pair this store will write.
@@ -472,7 +499,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     const auditEvent: AuditEventWriteInput = {
       requestId: correlationId, traceId: null, actorInternalUserId: context === null ? null : context.actor,
       actorAuthProvider: null, onBehalfOfInternalUserId: null,
-      scopeType: 'platform', tenantId: null, storeId: null, actionId: kind as string, requiredPermission: permission, decision: 'allow',
+      // The scope, tenant and store proven equal to the context's above: platform with neither, or a tenant with no store.
+      scopeType: auditScope as 'platform' | 'tenant', tenantId: tenant as string | null, storeId: store as string | null,
+      actionId: kind as string, requiredPermission: permission, decision: 'allow',
       // A sensitive command's own bounded pair when it carries one — the transition it performed, and the
       // operator's words as its planner validated them (M5-GIAM-D1-P2) — otherwise the fixed pair every
       // command has always written. Neither is ever taken from a caller-named audit field: the runtime
@@ -496,6 +525,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       rejected: Object.freeze({ conflict: conflict as string, invalidState: (invalidState ?? null) as string | null }),
       mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
       authNotAfter: authNotAfter as number | null, sessionKey: sessionKey as string | null,
+      authority: Object.freeze({ context, sessionKey: sessionKey as string | null }),
     });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
@@ -533,7 +563,7 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   // COPY, SET, DO, CALL, LOCK — is refused before the driver is asked'). The guarantee is therefore the
   // mutator's, stated in its contract above and held by both registered mutators, each of which decides
   // and writes inside one fixed definer routine. Recorded as DA-36.
-  const applied = await c.mutator.apply(sql, c.mutation);
+  const applied = await c.mutator.apply(sql, c.mutation, c.authority);
   // 2a. The aggregate is not at the version this request named (M5-GIAM-D1-P2-R1). The mutator wrote
   //     nothing, and still holds whatever row it read under the lease this transaction fenced at step 1
   //     and the authority it revalidated at step 1b — so the rejection is a decided property of the
@@ -562,11 +592,19 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
     return (await completed(sql, c.scope, c.lease, c.unchanged)) ? UNCHANGED : refuse(UNAVAILABLE);
   }
   if (applied !== 'applied') return refuse(UNAVAILABLE);
-  // 3. The audit record, through the existing writer, on this transaction and nowhere else.
-  const executor: AuditSqlExecutor = Object.assign((strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {
+  // 3. The audit record, through the existing writer, on this transaction and nowhere else. Exactly one row INSERTed, or
+  //    the whole transaction rolls back (M7A-CUSTOMERS-P3, decision R6): a BEFORE INSERT trigger answering NULL would
+  //    otherwise drop the record while the mutation and its completion committed — the session store's rule, here too.
+  let audited = false;
+  const executor: AuditSqlExecutor = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]): Promise<void> => {
+    const result = await sql(strings, ...values);
+    if (Reflect.get(result, 'command') !== 'INSERT' || result.count !== 1) refuse(UNAVAILABLE);
+    audited = true;
+  }, {
     json: (value: unknown) => sql.json(value),
   });
   await writeAuditEvent(c.audit, { executor });
+  if (!audited) return refuse(UNAVAILABLE);
   // 4. The events, each under the fence: pending, due now by the store's clock, stamped with the transaction's timestamp.
   for (const e of c.events) {
     const { inserted } = single(await sql`select tmpos_internal.m6_command_enqueue(${c.scope}::text, ${c.lease}::text, ${e.eventId}::uuid,
@@ -579,10 +617,11 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   return (await completed(sql, c.scope, c.lease, c.response)) ? COMMITTED : refuse(UNAVAILABLE);
 }
 
-function transactionPort(client: SupervisedPgClient, mutators: ReadonlyMap<string, AggregateMutator>, revalidate: ContextRevalidator | null): CommandTransactionPort {
+function transactionPort(client: SupervisedPgClient, mutators: ReadonlyMap<string, AggregateMutator>, revalidate: ContextRevalidator | null,
+  contextScope: 'platform' | 'tenant'): CommandTransactionPort {
   return Object.freeze({
     async commit(raw: unknown, signal: AbortSignal): Promise<Answer> {
-      const command = commandOf(raw, mutators);
+      const command = commandOf(raw, mutators, contextScope);
       if (!('mutator' in command)) return command;
       return transact(client, signal, TRANSACTION_BOUNDS, (sql) => commit(sql, command as Command, revalidate));
     },
@@ -695,11 +734,15 @@ function mutatorOf(raw: unknown): AggregateMutator {
 
 /** The three ports over `client`. Validates the mutator table; opens nothing until a port is called. */
 export function createPostgresTransactionalStore(options: TransactionalStoreOptions): TransactionalStore {
-  const { client, mutators, revalidate } = isRecord(options) ? options : ({} as Partial<TransactionalStoreOptions>);
+  const { client, mutators, revalidate, contextScope = 'platform' } = isRecord(options) ? options : ({} as Partial<TransactionalStoreOptions>);
   if (typeof client !== 'object' || client === null || typeof client.transaction !== 'function' || !Array.isArray(mutators)) {
     throw new TypeError('transactional store options invalid');
   }
   if (revalidate !== undefined && typeof revalidate !== 'function') throw new TypeError('transactional store options invalid');
+  // A tenant store without its revalidator could never commit, and a scope it does not know is a wiring fault.
+  if ((contextScope !== 'platform' && contextScope !== 'tenant') || (contextScope === 'tenant' && revalidate === undefined)) {
+    throw new TypeError('transactional store options invalid');
+  }
   const table = new Map<string, AggregateMutator>();
   for (const raw of mutators) {
     const mutator = mutatorOf(raw);
@@ -708,7 +751,7 @@ export function createPostgresTransactionalStore(options: TransactionalStoreOpti
   }
   return Object.freeze({
     idempotency: idempotencyPort(client),
-    transactions: transactionPort(client, table, revalidate ?? null),
+    transactions: transactionPort(client, table, revalidate ?? null, contextScope),
     delivery: deliveryPort(client),
   });
 }

@@ -12,8 +12,8 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import {
-  createPostgresSessionStore, holdAdministrativeSession, persistedAuditMetadata, probeIssuerKey, probeSessionMint, SESSION_STORE_BOUNDS,
-  SESSION_STORE_DEADLINE_MS, tenantMintProof,
+  createPostgresSessionStore, holdAdministrativeSession, holdTenantSession, persistedAuditMetadata, probeIssuerKey, probeSessionMint, readTenantSession,
+  SESSION_STORE_BOUNDS, SESSION_STORE_DEADLINE_MS, tenantMintProof,
 } from './postgresSessionStore.js';
 import type { SessionStandingCheck } from './postgresSessionStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
@@ -592,6 +592,53 @@ test('M5AR-S6 holdAdministrativeSession holds the live administrative session un
     await assert.rejects(client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => holdAdministrativeSession(sql, KEY, now)), /clock_invalid/, String(now));
     assert.deepEqual(client.statements, [], `${now}: nothing sent`);
   }
+});
+
+test('M7CS-S1 readTenantSession reads the live tenant session and takes no lock; holdTenantSession reads it again and holds it — either answers undefined before writing anything', async () => {
+  // M7A-CUSTOMERS-P3: the tenant command's revalidator reads first (to learn the reference whose standing it locks), then holds.
+  const run = async (fn: typeof readTenantSession, over: Partial<Record<Step, unknown>>, now = NOW) => {
+    const client = fakeClient(answers({ get: [ROW], ...over }));
+    const held = await client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => fn(sql, KEY, now));
+    return { client, held };
+  };
+  const read = await run(readTenantSession, {});
+  assert.deepEqual(read.held, RECORD, 'the record, as read');
+  assert.deepEqual(read.client.statements.map(stepOf), ['get'], 'a read alone: no touch, no lock');
+  assert.deepEqual(read.client.values, [[KEY, NOW]]);
+  const held = await run(holdTenantSession, {});
+  assert.deepEqual(held.held, RECORD);
+  assert.deepEqual(held.client.statements.map(stepOf), ['get', 'touch']);
+  assert.deepEqual(held.client.values, [[KEY, NOW], [KEY, CREATED]], 'read live at the given instant, then held by writing back the stamp it read');
+  for (const [label, over, readSteps, holdSteps] of [
+    ['no live session', { get: [] }, ['get'], ['get']],
+    ['an administrative record', { get: [ADMIN_ROW] }, ['get'], ['get']],
+    ['a session another transaction ended since the read', { touch: [{ outcome: 'absent' }] }, ['get'], ['get', 'touch']],
+  ] as Array<[string, Partial<Record<Step, unknown>>, Step[], Step[]]>) {
+    const r = await run(readTenantSession, over);
+    if (label !== 'a session another transaction ended since the read') assert.equal(r.held, undefined, `read: ${label}`);
+    assert.deepEqual(r.client.statements.map(stepOf), readSteps, `read: ${label}`);
+    const h = await run(holdTenantSession, over);
+    assert.equal(h.held, undefined, `hold: ${label}`);
+    assert.deepEqual(h.client.statements.map(stepOf), holdSteps, `hold: ${label}: nothing written`);
+  }
+  // The administrative twin still refuses a tenant record: each hold serves its own audience only.
+  const cross = fakeClient(answers({ get: [ROW] }));
+  assert.equal(await cross.transaction(live(), SESSION_STORE_BOUNDS, (sql) => holdAdministrativeSession(sql, KEY, NOW)), undefined);
+  // Every other doubt throws, and the caller's kernel rolls back.
+  for (const fn of [readTenantSession, holdTenantSession]) {
+    for (const [label, over, reason] of [
+      ['two live rows', { get: [ROW, ROW] }, /answer_shape_invalid/],
+      ['a malformed record', { get: [{ ...ROW, extra: 1 }] }, /row_shape_invalid/],
+    ] as Array<[string, Partial<Record<Step, unknown>>, RegExp]>) {
+      await assert.rejects(run(fn, over), reason, `${fn.name}: ${label}`);
+    }
+    for (const now of [0, -1, 1.5, Number.NaN]) {
+      const client = fakeClient(answers());
+      await assert.rejects(client.transaction(live(), SESSION_STORE_BOUNDS, (sql) => fn(sql, KEY, now)), /clock_invalid/, `${fn.name}: ${now}`);
+      assert.deepEqual(client.statements, [], `${fn.name}: ${now}: nothing sent`);
+    }
+  }
+  await assert.rejects(run(holdTenantSession, { touch: [{ outcome: 'invalid' }] }), /not_updated/, 'a touch the routine calls invalid');
 });
 
 // --- M5-TENANT-SESSION-P1: the tenant session through the same audited pair ----------------------------

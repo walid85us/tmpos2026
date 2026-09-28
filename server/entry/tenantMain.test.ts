@@ -88,7 +88,7 @@ test('M7TM-02 spawned as the entry point under tsx with only NODE_ENV=production
   assert.match(stdout, /"event":"startup_refused"/, 'stdout must carry the startup_refused event');
   assert.match(stdout, /"reason":"config_invalid[:,]/, 'the refusal category must be config_invalid');
   for (const pair of ['PORT:port_missing', 'DATABASE_CA_CERT:database_ca_invalid', 'RATE_LIMIT_KEY:rate_limit_key_invalid',
-    'IDEMPOTENCY_KEY:idempotency_key_present', 'TRUSTED_PROXY_CIDRS:trusted_proxies_invalid', 'SESSION_TENANT_ORIGINS:session_tenant_origin_invalid',
+    'IDEMPOTENCY_KEY:idempotency_key_invalid', 'TRUSTED_PROXY_CIDRS:trusted_proxies_invalid', 'SESSION_TENANT_ORIGINS:session_tenant_origin_invalid',
     'FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON:identity_verifier_unconfigured']) {
     assert.ok(stdout.includes(pair), `stdout must carry the field:code pair ${pair}\n${stdout}`);
   }

@@ -19,9 +19,10 @@
 //   - zero or more outbox events, stamped with the transaction's own timestamp.
 // Only values cross the port: a registered command kind, canonical UUIDs, a version, typed bounded
 // changes and events, the lease and a sealed response — never SQL, a relation, column or schema name, a
-// raw request, key, credential, cookie or body. The one exception is the presenting administrative session's
-// store key (M5-ADMIN-REVOKE-P1), a digest the chain derived, never the cookie: it is bound as a parameter of
-// the session hold and nothing else — never audited, logged, evented or returned. The adapter owns every statement: a closed set of kinds,
+// raw request, key, credential, cookie or body. The one exception is the presenting session's store key
+// (M5-ADMIN-REVOKE-P1), a digest the chain derived, never the cookie: it is bound as a parameter of the session
+// hold and — for a tenant command (M7A-CUSTOMERS-P3) — of its mutator's session-bound routine, which derives the
+// command's authority from that key alone, and nothing else — never audited, logged, evented or returned. The adapter owns every statement: a closed set of kinds,
 // each mapped to static statements and columns; every value a command carries is bound as data, and no
 // kind, type or field name is ever interpolated into SQL. The planner's context holds no header, cookie,
 // key, credential or principal, so none reaches a command through it; the parsed body can — a schema
@@ -89,7 +90,7 @@ import { types } from 'node:util';
 import { outage, withDeadline } from './deadline.js';
 import { envelopeFromOutcome, refusalEnvelope } from './idempotency.js';
 import type { ReplayEnvelope } from './idempotency.js';
-import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, isContractName, parseRecordSchema, recordOf } from './outbox.js';
+import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, isContractName, parseChangeSchema, recordOf } from './outbox.js';
 import type { EventContract, OutboxEventDraft, OutboxEventRegistry, RecordSchema, RecordValue } from './outbox.js';
 import { EnforcementSetupError } from './routes.js';
 import type { AuthorizationRequirement, AuthorizationScope } from './routes.js';
@@ -240,12 +241,14 @@ export interface TransactionCommand {
    */
   readonly authNotAfter: number | null;
   /**
-   * The store key of the administrative session that presented this command (M5-ADMIN-REVOKE-P1) — the SHA-256
-   * digest of its identifier, never the identifier or the cookie — or null for a command no session presented. The
-   * committing transaction holds that session's row and re-reads the standing it is bound to, so the command commits
-   * only while that session is live; a logout or revocation that committed first refuses it. It is a SQL parameter
-   * and nothing else: never audited, logged, evented, returned or put on a trusted scope or a route context — the key
-   * is what the session routines accept, so a reader holding it could read, extend or end the session.
+   * The store key of the session that presented this command (M5-ADMIN-REVOKE-P1; a tenant session's since
+   * M7A-CUSTOMERS-P3) — the SHA-256 digest of its identifier, never the identifier or the cookie — or null for a
+   * command no session presented. The committing transaction holds that session's row and re-reads the standing it is
+   * bound to, so the command commits only while that session is live; a logout or revocation that committed first
+   * refuses it. A tenant command's store also hands it to the mutator's session-bound routine as that routine's only
+   * authority input. It is a SQL parameter and nothing else: never audited, logged, evented, returned or put on a
+   * trusted scope or a route context — the key is what the session routines accept, so a reader holding it could read,
+   * extend or end the session.
    */
   readonly sessionKey: string | null;
 }
@@ -342,7 +345,7 @@ function eventRefOf(raw: unknown, aggregateType: string, events: OutboxEventRegi
 function parseCommandContract(raw: unknown, events: OutboxEventRegistry): CommandContract {
   if (isRecord(raw) && hasExactKeys(raw, ['kind', 'mode', 'aggregateType', 'changes', 'events'])) {
     const { kind, mode, aggregateType, changes, events: refs } = raw;
-    const schema = parseRecordSchema(changes);
+    const schema = parseChangeSchema(changes); // strings up to MAX_CHANGE_STRING_FIELD_LENGTH (M7A-CUSTOMERS-P3)
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string'
       && AGGREGATE_TYPE_RE.test(aggregateType) && schema !== null && isPlainArray(refs) && refs.length <= MAX_EVENTS_PER_COMMAND) {
       const parsed: Readonly<{ type: string; version: number }>[] = [];

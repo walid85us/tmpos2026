@@ -476,11 +476,11 @@ const routineAsLogin = routineAs(runtime);
 // M7C-01..02: the composition and migration 017 as applied
 // ---------------------------------------------------------------------------
 
-test('M7C-01: 001-018 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
+test('M7C-01: 001-019 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019']
       .map((v) => [v, false]));
   // 005-016 up checksums are postgresStartupPreflight.ts REQUIRED_MIGRATIONS; down checksums are the committed pins of
   // the earlier suites (tenantDirectory, migration-files-contract). 017's are M7A-CUSTOMERS-P1's; 018's are pinned by the

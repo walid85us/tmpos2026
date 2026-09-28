@@ -63,7 +63,8 @@ async function within(answer: Promise<unknown>, ms: number): Promise<unknown> {
  * driver would make to a dropped socket (doc 08, DA-15). `texts` is every statement handed over on the reserved connection, in
  * order; the statement the kernel opens a new pool's connection with answers and is not recorded.
  */
-function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error; spent?: () => number; completion?: string } = {}) {
+function scripted(lease: string, options: { failAt?: string; error?: Error; lost?: boolean; commit?: Error; spent?: () => number; completion?: string;
+  audit?: { readonly count: number; readonly command: string } } = {}) {
   let writesAfterLoss = 0;
   const texts: string[] = [];
   const values: unknown[][] = [];
@@ -102,7 +103,8 @@ function scripted(lease: string, options: { failAt?: string; error?: Error; lost
             if (failed && options.lost === true) { rejectFn(options.error); close(options.error as Error); } // the statement first, then the close
             else if (failed) rejectFn(options.error);
             else if (commitFails) rejectFn(options.commit);
-            else { const rows = rowsFor(text, boundValues); resolveFn(Object.assign(rows, { count: rows.length, command: text.split(/\s/)[0].toUpperCase() })); }
+            else if (options.audit !== undefined && text.includes('insert into public.audit_event')) resolveFn(Object.assign([], options.audit));
+            else { const rows = rowsFor(text, boundValues); resolveFn(Object.assign(rows, { count: rows.length, command: text.trim().split(/\s/)[0].toUpperCase() })); }
           });
         },
         then: (a?: (v: unknown) => unknown, b?: (e: unknown) => unknown) => {
@@ -137,7 +139,7 @@ const SESSION_KEY = 's'.repeat(21) + '_-' + 'S'.repeat(20);
 /** A command exactly as the runtime prepares one: a context-carrying one presented by a session, as every one is. */
 function command(context: TrustedScope | null = null): TransactionCommand {
   const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
-    method: 'POST', path: '/v1/unit', audience: null, tenant: null, store: null, body: Buffer.from('{}'),
+    method: 'POST', path: '/v1/unit', audience: null, tenant: null, store: null, actor: null, body: Buffer.from('{}'),
   });
   const id = randomUUID();
   const contract = commands.contract(TEST_CREATE.kind);
@@ -146,7 +148,8 @@ function command(context: TrustedScope | null = null): TransactionCommand {
     aggregateId: id, expectedVersion: null, changes: { name: 'n', quantity: 1 },
     events: [{ type: 'conformance.item.created', payload: { name: 'n', quantity: 1 } }], response: { status: 201, body: { id } },
   }, {
-    scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'platform', permission: 'conformance.write' }),
+    scope: operation.scope, lease: digest(), newAggregateId: id,
+    authorization: Object.freeze({ scope: context === null ? 'platform' : context.scope, permission: 'conformance.write' }),
     context,
     authNotAfter: null,
     sessionKey: context === null ? null : SESSION_KEY,
@@ -198,7 +201,7 @@ test('a malformed request, an unserved kind, a pre-M5 scope or an aborted signal
     ['a command under a malformed lease', () => store.transactions.commit({ ...good, lease: 'x' }, live()), LEASE_LOST],
     ['a command with a field too many', () => store.transactions.commit({ ...good, sql: 'select 1' } as never, live()), UNAVAILABLE],
     ['a kind no mutator serves', () => store.transactions.commit({ ...good, mutation: { ...good.mutation, kind: 'conformance.item.rename' } }, live()), UNAVAILABLE],
-    ['a tenant-scope audit before M5', () => store.transactions.commit({ ...good, audit: { ...good.audit, scope: 'tenant' } }, live()), UNAVAILABLE],
+    ['a tenant-scope audit under no tenant context', () => store.transactions.commit({ ...good, audit: { ...good.audit, scope: 'tenant' } }, live()), UNAVAILABLE],
     ['an event of another aggregate', () => store.transactions.commit({ ...good, events: [{ ...event, aggregateId: randomUUID() }] }, live()), UNAVAILABLE],
     ['an event ID twice', () => store.transactions.commit({ ...good, events: [event, event] }, live()), UNAVAILABLE],
     ['nine events', () => store.transactions.commit({ ...good, events: Array.from({ length: 9 }, () => ({ ...event, eventId: randomUUID() })) }, live()), UNAVAILABLE],
@@ -416,8 +419,8 @@ test('a context the store cannot revalidate is never committed', async () => {
 });
 
 test('a context whose scope this transaction cannot prove is refused before any statement', async () => {
-  // Tenant and store scopes wait on GAP-11 and on the audit writer carrying the tenant RLS context;
-  // until then the store refuses rather than auditing at a scope it cannot prove.
+  // The default (administrative) store re-proves platform contexts alone: a tenant or store context is refused there
+  // rather than audited at a scope it cannot prove — only a store composed for tenant scope admits one (below).
   const tenant = '22222222-2222-4222-8222-222222222222';
   for (const scope of [
     { ...TRUSTED, scope: 'tenant' as const, tenant, roleId: 'manager' },
@@ -508,7 +511,7 @@ const tenantEvents = defineOutboxEvents(TENANT_DISPLAY_NAME_EVENTS);
 /** A display-name command exactly as the runtime prepares one: an update whose plan names its unchanged response. */
 function renaming(context: TrustedScope | null = TRUSTED): TransactionCommand {
   const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
-    method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin', tenant: null, store: null, body: Buffer.from('{}'),
+    method: 'PATCH', path: '/admin/v1/tenants/display-name', audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from('{}'),
   });
   const plan = planTenantDisplayName({ audience: 'admin', body: { tenantId: TARGET_TENANT, displayName: 'Acme', expectedVersion: 3 }, newAggregateId: randomUUID() });
   const prepared = prepareCommand(TENANT_DISPLAY_NAME_CONTRACT, tenantEvents, plan, {
@@ -597,4 +600,87 @@ test('the audit record names a tenant command\'s own target as its subject — n
   assert.deepEqual(await createPostgresTransactionalStore({ client: untouchedClient, mutators: [tenantMutator('applied')], revalidate: async () => true })
     .transactions.commit({ ...c, audit: { ...c.audit, subjectTenantId: randomUUID() } } as never, live()), UNAVAILABLE);
   assert.equal(begins(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// M7A-CUSTOMERS-P3 — the tenant store, the mutator's authority and the one-row audit rule
+// ---------------------------------------------------------------------------
+
+const TENANT = '22222222-2222-4222-8222-222222222222';
+/** A tenant context as the tenant authorizer selects one: the actor's one tenant grant, no store. */
+const TENANT_CONTEXT: TrustedScope = Object.freeze({ ...TRUSTED, scope: 'tenant', tenant: TENANT, roleId: 'manager' });
+const tenantStore = (client: SupervisedPgClient, mutators: readonly AggregateMutator[] = [CREATE_MUTATOR]) =>
+  createPostgresTransactionalStore({ client, mutators, contextScope: 'tenant', revalidate: async () => true });
+
+test('a tenant store commits a tenant context audited at tenant scope, naming its tenant and no store', async () => {
+  const c = command(TENANT_CONTEXT);
+  assert.deepEqual([c.audit.scope, c.audit.tenant, c.audit.store], ['tenant', TENANT, null], 'the runtime audits at the route\'s scope');
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client).transactions.commit(c, live()), COMMITTED);
+  const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
+  assert.ok(audit >= 0 && !client.texts[audit].includes('subject_tenant_id'), 'a customer is no tenant aggregate: no subject column');
+  const bound = client.values[audit];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9]], [TENANT_CONTEXT.actor, 'tenant', TENANT, null],
+    'the actor, the tenant scope, the context\'s own tenant and no store');
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+});
+
+test('a tenant store refuses every command not of its scope, and the audit scope must equal the context\'s, before any statement', async () => {
+  const c = command(TENANT_CONTEXT);
+  const store = '44444444-4444-4444-8444-444444444444';
+  for (const [label, raw] of [
+    ['a platform context', command(TRUSTED)],
+    ['a store context', command({ ...TENANT_CONTEXT, scope: 'store', store, roleId: 'technician' })],
+    ['a contextless command, whose tenant nothing proves', command()],
+    ['a tenant context audited at platform scope', { ...c, audit: { ...c.audit, scope: 'platform' } }],
+    ['a tenant context audited at store scope', { ...c, audit: { ...c.audit, scope: 'store', store } }],
+    ['a tenant context audited under another tenant', { ...c, audit: { ...c.audit, tenant: '33333333-3333-4333-8333-333333333333' } }],
+    ['a read-only tenant context', command({ ...TENANT_CONTEXT, limitation: 'read_only' })],
+  ] as const) {
+    const { client, begins } = untouched();
+    assert.deepEqual(await tenantStore(client).transactions.commit(raw as TransactionCommand, live()), UNAVAILABLE, label);
+    assert.equal(begins(), 0, `${label}: no transaction opens`);
+  }
+});
+
+test('a tenant store needs its revalidator, and no other scope is ever admitted: construction refuses', () => {
+  const client = untouched().client;
+  for (const options of [
+    { client, mutators: [], contextScope: 'tenant' },
+    { client, mutators: [], contextScope: 'store', revalidate: async () => true },
+    { client, mutators: [], contextScope: 'bogus', revalidate: async () => true },
+    { client, mutators: [], contextScope: null, revalidate: async () => true },
+  ]) assert.throws(() => createPostgresTransactionalStore(options as never), TypeError, JSON.stringify(options.contextScope));
+  assert.doesNotThrow(() => createPostgresTransactionalStore({ client, mutators: [], contextScope: 'platform' }), 'platform is the default, explicit too');
+});
+
+test('the mutator is handed the context and session key this transaction revalidated — the store\'s frozen copy, never the caller\'s object', async () => {
+  const seen: unknown[] = [];
+  const capturing: AggregateMutator = Object.freeze({ ...CREATE_MUTATOR, apply: async (_sql: PgStatement, _m: unknown, authority: unknown) => { seen.push(authority); return 'applied'; } });
+  const c = command(TENANT_CONTEXT);
+  assert.deepEqual(await tenantStore(scripted(c.lease), [capturing]).transactions.commit(c, live()), COMMITTED);
+  const contextless = command();
+  assert.deepEqual(await createPostgresTransactionalStore({ client: scripted(contextless.lease), mutators: [capturing] }).transactions.commit(contextless, live()), COMMITTED);
+  assert.deepEqual(seen, [{ context: TENANT_CONTEXT, sessionKey: SESSION_KEY }, { context: null, sessionKey: null }]);
+  const [authority] = seen as Array<{ context: TrustedScope }>;
+  assert.ok(Object.isFrozen(authority) && Object.isFrozen(authority.context), 'frozen');
+  assert.notStrictEqual(authority.context, c.context, 'the checked copy the revalidator was handed, not the caller\'s object');
+});
+
+test('an audit INSERT that did not insert exactly one row rolls the whole command back — no completion, no COMMIT (decision R6)', async () => {
+  for (const [label, audit] of [
+    ['no row (a BEFORE INSERT trigger answering NULL)', { count: 0, command: 'INSERT' }],
+    ['two rows', { count: 2, command: 'INSERT' }],
+    ['not an INSERT', { count: 1, command: 'SELECT' }],
+  ] as const) {
+    for (const [scope, c, store] of [
+      ['platform', command(TRUSTED), (client: SupervisedPgClient) => createPostgresTransactionalStore({ client, mutators: [CREATE_MUTATOR], revalidate: async () => true })],
+      ['tenant', command(TENANT_CONTEXT), (client: SupervisedPgClient) => tenantStore(client)],
+    ] as const) {
+      const client = scripted(c.lease, { audit });
+      assert.deepEqual(await store(client).transactions.commit(c, live()), UNAVAILABLE, `${scope}: ${label}`);
+      assert.ok(!client.texts.some((t) => t.includes('m6_idempotency_complete')), `${scope}: ${label}: no completion`);
+      assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], `${scope}: ${label}: rolled back`);
+    }
+  }
 });
