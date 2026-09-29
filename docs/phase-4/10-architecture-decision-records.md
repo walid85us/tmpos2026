@@ -516,7 +516,7 @@ At entry `9a25cb7`, only the administrative side had those pieces:
 
    Its rules:
    - **Body.** Exactly `{ name }`. Any other shape, a missing or extra field, or a name decision 9 refuses is 400 `invalid_request`. That is decided once the idempotency record is acquired. It writes no customer, audit record or completion, the key stays bound to that request's fingerprint, and the attempt's lease waits out its 60 s (doc 08 DA-117).
-   - **Answer.** `201 { customer: { id, name } }`: the runtime's new version-4 id and the name as stored. There is no `Location` header, because no customer-detail route exists. The same name under two keys is two customers, because no repository rule makes customer names unique.
+   - **Answer.** `201 { customer: { id, name } }`: the runtime's new version-4 id and the name as stored. There was no `Location` header at P3, because no customer-detail route existed. *(Amended M7A-CUSTOMERS-P4 Part 2, ADR-38: the 201 now carries `Location: /api/v1/customers/<id>`, sealed in the idempotency envelope and replayed identically; a completion sealed before that build replays without it.)* The same name under two keys is two customers, because no repository rule makes customer names unique.
    - **Refusals** keep the chain's generic bodies:
      - 401 for a session refusal;
      - 403 `forbidden` for any denial;
@@ -788,7 +788,7 @@ So a role narrowed to View still created, and a role narrowed to None still read
 
 **Consequences.**
 - **Nothing closes.** G-IAM, G-PERSIST, G-AUDIT, G-IDEMPOT, G-DBROLE, G-MIGRATE, G-CPLOGIN, G-STATUS and G-ISOLATION stay OPEN, and DA-118 and DA-119 remain pre-deployment blockers and G-AUDIT exceptions.
-  - The existing customer list and create, `GET` and `POST /api/v1/customers`, decide on the stored level (ADR-35); the shop app does not call them, and `GET /api/v1/customers/{id}` does not exist yet.
+  - The existing customer list and create, `GET` and `POST /api/v1/customers`, decide on the stored level (ADR-35); the shop app does not call them, and `GET /api/v1/customers/{id}` did not exist yet at R2 *(it exists in code since M7A-CUSTOMERS-P4 Part 2, ADR-38; the shop app does not call it)*.
   - The tenant entry is not deployed, and the shop build and `/api/v1/*` must be served on one origin, the tenant host (DA-107).
 - **Supersedes.** ADR-35's and doc 09's R1 statements that the shop editor is unchanged and calls no route are superseded for built-in Customers levels (ADR-35 amendment above).
 - **Register.** DA-85 is narrowed again, not closed. DA-43, DA-107, DA-121 and DA-124 are amended. DA-125 to DA-127 are new:
@@ -841,6 +841,60 @@ So a role narrowed to View still created, and a role narrowed to None still read
   - the unit suites of the route, the directory, the command transaction, the store, the mutator and the preflight, and of the shop panel (`src/tenant/ServerCustomerLevels.test.tsx`, SCL-01 to SCL-46, SCL-26 to SCL-46 new) and client (`src/tenant/roleLevelsClient.test.ts`, RLC-01 to RLC-09). The frontend runner's floor is 436 cases (`MIN_FRONTEND_CASES`).
 
   Two new CI steps run the database suites against the disposable service. Counts and exits: local gate on the `e4ba510` bytes: disposable-database gate 26 suites 525/525, shared-service CI replay 26 steps 479/479, shop browser gate 14/14 under the Firestore emulator, frontend 442/442, run-tests 159/159, 0 sentinel dials; `build:check` and the admin browser build were killed locally (SIGKILL) and are not counted as passed; exact-commit CI: run 36616730497, green on attempt 1. 001–020 and the four frozen operator paths (`scripts/supabase-migrate.ts`, `scripts/managed-baseline-launcher.mjs`, `scripts/managed-m005-launcher.mjs`, `server/platform-identity/migrationExecutor.ts`) are byte-identical to the entry commit. Code-only: nothing is deployed, and no managed database was touched.
+
+## ADR-38 — One customer by id: a single route template, authentication before the id, identical foreign and missing 404s, and a sealed Location (DECIDED — M7A-CUSTOMERS-P4 Part 2)
+
+**Context.** The tenant plane could list and create customers (ADR-32 to ADR-35) but not read one. The owner brief for M7A-CUSTOMERS-P4 asks for `GET /api/v1/customers/{id}`:
+- under the list's permission, `view_customers`, and the current server-backed Customers level;
+- with the tenant taken from the selected session scope only;
+- with a canonical UUID id, and a bounded 400 for a malformed id if that matches existing conventions;
+- with indistinguishable 404s for a missing id and another tenant's id;
+- answering `{ id, name }` only;
+- rechecked at the database read boundary as the list is;
+- with no direct table SELECT for the login.
+
+It also asks for `Location` on the create's 201, but only if the sealed idempotency response can replay it consistently. Until this stage the route table held literal paths only, matched exactly (`server/runtime/routes.ts`).
+
+**Decision.**
+1. **One template, admitted by name.** `routes.ts` admits exactly one templated route, `GET /api/v1/customers/{id}` (`TEMPLATED_ROUTES`); any other method, path or template is refused at registration (`route_path_invalid`).
+   - The template is never idempotent. A literal path directly below its prefix is refused at registration, so no literal route can sit beside the template's segment.
+   - A request matches it only as the prefix `/api/v1/customers`, one `/`, and ONE raw, undecoded, non-empty segment of 1–128 characters with no `/` (`MAX_PATH_ID_SEGMENT_LENGTH`).
+   - A 129-character or longer segment, an empty segment, a trailing slash or an extra segment matches no route: the terminal bounded 404, as before.
+   - Literal routes are still matched first and exactly. The authorizer sees the template path (`route.path`), never the id. The request log classifies the path as `other` (`classifyRoute`), so it carries no id.
+2. **Authentication before the id.** The chain runs as for any tenant session read: the Host check, the limiter, the session, and the tenant authorizer deciding `view_customers` on the role's current level. An unauthenticated or unauthorized request gets the chain's 401 or 403 whatever the segment, so the id's shape is judged only after authorization. The handler (`createCustomerDetailRoute`, `server/runtime/customerDirectory.ts`) then refuses in this order:
+   - any query, an empty one included: 400 `invalid_request`;
+   - a missing trusted tenant scope or session key: 403;
+   - a segment that is not a canonical lowercase UUID (`pathIdOf`; uppercase, %-encoded, braces, anything else): 400 `invalid_request`.
+3. **The route-surface change (C2.5).** Every `GET /api/v1/customers/<segment of 1–128 characters>` is now an authenticated route: 401 or 403 before authentication and authorization, and 400 for a non-UUID segment after them. Before this stage it was the terminal 404. Template lookup is keyed by method, so any other method on such a path is still the terminal 404 (doc 08 DA-136).
+4. **One port call per canonical id, one database routine.** A canonical id makes exactly one call, with no cache and no early answer, through `createPostgresCustomerDetail` (`server/persistence/postgresCustomerDirectory.ts`) to migration 022's `tmpos_customer_detail.m7a_customer_get(p_session_key, p_customer_id, p_expected_tenant)`. It is `STABLE SECURITY DEFINER` and session-bound, and on one snapshot it:
+   - re-derives the tenant, grant and role from the session as 020's `m7a_customer_page_v3` does, and requires the role's current Customers level at View or above;
+   - requires the derived tenant to equal the trusted scope's (a precondition, never a selector) before any customer row is visited;
+   - re-runs 017's rechecks;
+   - probes 017's primary key for the id, filtered to the derived tenant.
+
+   `tmpos_app` gets USAGE on the schema and EXECUTE on the routine only, and still holds no privilege on the customer table (doc 05 §2).
+5. **Indistinguishable foreign and missing 404s.** Another tenant's id and a missing id each make one routine call, take the same SQL statement and outcome branch, and answer the same row. They become the same status (404), the same error code and body shape (`{ error: 'not_found', requestId }`) and one bounded log reason (`customer_not_found`). Per-request metadata differs: the `requestId`, `X-Request-Id`, `Date` and similar headers. Their timing is not equalized, and the residual is unbounded by design. M7CD-05 asserts only a sanity bound on medians, max(2 ms, 25%), and logs them (doc 08 DA-135).
+6. **The answer.** `200 { customer: { id, name } }`, nothing else: the create's 201 body shape and the list entry's two fields. It writes no audit record, like the list (doc 08 DA-131). The compiled tenant entry serves it (ten routes); the administrative entry does not.
+7. **Location through the sealed envelope.** The create's plan now returns `headers: { location: '/api/v1/customers/<id>' }` (`server/runtime/customerCreate.ts`). The idempotency envelope's header allowlist is `location` (`server/runtime/idempotency.ts`), and the whole envelope is sealed into the completion, so a same-key replay on either instance answers the same body and the same `Location` with `Idempotent-Replayed: true`. A completion sealed before this build carried `headers: {}` and replays without `Location`, exactly as committed (doc 08 DA-134).
+
+**Alternatives not taken.**
+- (a) *A generic router template or parameter syntax* (`/v1/{param}` anywhere). It would open every route family to parameterized paths and their prefix, case and encoding variants; the table admits the one template by name instead (C2.5).
+- (b) *A terminal 404 for a malformed id* (the design's first draft, D5). The brief asks for a bounded 400 where conventions match, and the list's convention is a post-authentication 400 `invalid_request` for invalid input. The price is decision 3's route-surface change, recorded as DA-136.
+- (c) *A tenant-first index to equalize foreign and missing timing.* It would change 017's table, and a tenant-filtered lookup still differs by what the heap visit finds; the residual is recorded (DA-135), not claimed away.
+- (d) *Judging the id before authentication.* It would give an unauthenticated caller an id-shape oracle (400 vs 404 vs 401) on a tenant route; the chain decides first.
+- (e) *A second, new runtime module.* The detail route, port and adapter live beside the list's, so the tenant artifact's module inventory is unchanged.
+
+**Consequences.**
+- **Nothing closes.** G-IAM, G-PERSIST, G-AUDIT, G-IDEMPOT, G-DBROLE, G-MIGRATE, G-CPLOGIN, G-STATUS and G-ISOLATION stay OPEN, and DA-118 and DA-119 remain pre-deployment blockers and G-AUDIT exceptions.
+- **Deploy and rollback.** The startup preflight requires exactly 001–022 and 022's two grants, so 022 and the runtime move together. 022's rollback holds no data and removes only its schema; the order is 022, then 021, then 020 (doc 08 DA-133).
+- **Register.** DA-131 to DA-136 are new.
+- **Evidence.** Disposable PostgreSQL and local sockets only:
+  - `tests/db/customerDetail.integration.test.mjs` (M7CD-01 to M7CD-09 and M7CD-02b): apply and postcondition, grants and indirect-path refusals, own/foreign/missing/invalid/unknown-key/foreign-tenant/revoked answers, list parity, timing sanity, the adapter and probe, no writes, rollback, and the out-of-order 020 case;
+  - `tests/db/tenantEntry.integration.test.mjs` M7TE-14 and M7TE-C1 over the source and compiled tenant entry;
+  - `tests/db/productionEntry.integration.test.mjs`, which pins that the administrative entry serves no detail path;
+  - the unit suites of the route table, the handler, the adapter and the create's `Location`, including a pre-change envelope replayed without `Location`.
+
+  A new CI step runs `customerDetail.integration.test.mjs`. Counts and exits: local gate on the `5a26e08` bytes: disposable-database gate 27 suites 536/536, shared-service CI replay 27 steps 490/490, shop browser gate 14/14 under the Firestore emulator, frontend and run-tests 159/159 green, 0 sentinel dials; `build:check` and the admin browser build were killed locally (SIGKILL) and are not counted as passed; commit `5a26e08`; exact-commit CI: run 36638041302, green on attempt 1. Code-only: nothing is deployed, and no managed database was touched.
 
 ---
 
