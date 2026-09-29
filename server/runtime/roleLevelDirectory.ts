@@ -1,5 +1,6 @@
 // Phase 4.0 M7a — the read-back of the owner's built-in Customers role levels: what the tenant server decides each built-in
-// role's Customers access on, shown to the one person who may change it (M7A-CUSTOMERS-P3-R2; G-IAM, DA-85; migration 020).
+// role's Customers access on, shown to the one person who may change it (M7A-CUSTOMERS-P3-R2; G-IAM, DA-85; migration 020),
+// with each editable level's version, the precondition an edit asserts (M7A-CUSTOMERS-P4; DA-125; migration 021).
 //
 // GET /api/v1/roles/levels — a session route of the TENANT boundary, beside the edit (PUT, roleLevelUpdate.ts) on the same
 // literal path. It carries no tenant, and it takes no query: any `?` in the target is a 400 invalid_request, decided before
@@ -14,26 +15,32 @@
 // not the sensitive change the edit is.
 //
 // THE ANSWER. The port reads, for the scope's tenant, the level 020 stores for each editable role (manager, technician,
-// sales_staff — EDITABLE_TENANT_ROLES) on ONE snapshot, and hands each beside its catalog default; the owner role comes
-// first, at its fixed level, never stored. The port's answer is untrusted: only exactly
-//   [ { roleId: 'store_owner', stored: null, defaultLevel: 'full' }, { roleId: 'manager', stored, defaultLevel },
-//     …technician, …sales_staff ]
+// sales_staff — EDITABLE_TENANT_ROLES) and its version (021's per-row edit counter) on ONE snapshot, and hands each beside
+// its catalog default; the owner role comes first, at its fixed level, never stored and never versioned. The port's answer
+// is untrusted: only exactly
+//   [ { roleId: 'store_owner', stored: null, defaultLevel: 'full', version: null },
+//     { roleId: 'manager', stored, defaultLevel, version }, …technician, …sales_staff ]
 // — four plain records of exactly those keys, in that order, the owner's record exactly that one, `stored` null or one of
-// the seven level words, `defaultLevel` one of them — becomes a response; anything else, a throw or an overrun is a bounded
-// 503. The owner's record is pinned whole because the response calls it fixed Full: a port that named another owner word
-// or level would otherwise have that shown as the owner's truth.
+// the seven level words, `defaultLevel` one of them, an editable role's `version` a safe integer of at least 0 — becomes a
+// response; anything else, a throw or an overrun is a bounded 503. The owner's record is pinned whole because the response
+// calls it fixed Full: a port that named another owner word or level would otherwise have that shown as the owner's truth.
 // The response is built field by field from that validated answer:
-//   200 { tenant, domain: 'customers', roles: [ { roleId, level, defaultLevel, source, editable } ×4 ] }
+//   200 { tenant, domain: 'customers', roles: [ { roleId, level, defaultLevel, source, editable, version } ×4 ] }
 // where `level` is the stored level when one is stored and the default otherwise — the same replacement the authorizer
-// applies (permissionCatalog.ts) — `source` is 'fixed' (the owner), 'stored' or 'default', and `editable` is true for the
-// three the edit accepts. A lock row (020's NULL level) reads as no edit: 'default'. It carries nothing else: no actor,
-// grant, membership, session or database detail. Chain-wide headers mark every response no-store, so neither the browser
-// nor an intermediary keeps a tenant's answer.
+// applies (permissionCatalog.ts) — `source` is 'fixed' (the owner), 'stored' or 'default', `editable` is true for the
+// three the edit accepts, and `version` is null for the owner and the editable role's version otherwise. A lock row (020's
+// NULL level) reads as no edit: 'default'. It carries nothing else: no actor, grant, membership, session or database
+// detail. Chain-wide headers mark every response no-store, so neither the browser nor an intermediary keeps a tenant's
+// answer.
+//
+// THE PRECONDITION IT FEEDS (M7A-CUSTOMERS-P4). `tenant` and a role's `version` are what the owner's client sends back with
+// an edit of that role as expectedTenant and expectedVersion (roleLevelUpdate.ts): the edit writes only while both still
+// hold, so a draft made from this answer can land neither on another tenant nor over a newer edit.
 //
 // WHAT THIS IS NOT. The effective permission of a PERSON: the authorizer still caps a read-only account (View) at request
 // time, and no entitlement gates the Customers domain. It is the configuration the owner edits, as the server holds it.
-// Two edits racing from two tabs are last-writer-wins on the server (the edit has no version precondition); this read shows
-// whichever committed last.
+// Two edits racing from two tabs that asserted the same version: the first to commit wins, and the other writes nothing (409);
+// this read shows the one that committed, at its version.
 //
 // NO AUDIT RECORD, like the customer read: a configuration read writes none. The request log names the route, the status and
 // a bounded reason — never a level, a role or the tenant.
@@ -57,6 +64,8 @@ export interface RoleLevelView {
   readonly defaultLevel: string;
   readonly source: 'fixed' | 'stored' | 'default';
   readonly editable: boolean;
+  /** The editable role's version (021's edit counter); null for the owner, which is never edited. */
+  readonly version: number | null;
 }
 
 /**
@@ -75,7 +84,7 @@ export interface RoleLevelDirectoryPorts {
 /** The one owner record the port may answer (header): the catalog's owner role at its fixed level, never stored. */
 const OWNER_ROLE_ID = 'store_owner';
 const OWNER_LEVEL = 'full';
-const ENTRY_KEYS: readonly string[] = ['roleId', 'stored', 'defaultLevel'];
+const ENTRY_KEYS: readonly string[] = ['roleId', 'stored', 'defaultLevel', 'version'];
 
 const isPlain = (value: unknown): value is Record<string, unknown> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
@@ -83,6 +92,7 @@ const isPlain = (value: unknown): value is Record<string, unknown> => {
   return proto === Object.prototype || proto === null;
 };
 const isLevel = (value: unknown): value is string => typeof value === 'string' && ROLE_LEVELS.includes(value);
+const isVersion = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
 /** The port's answer as the four validated roles, owner first — or null for anything out of shape. Never throws. */
 export function roleLevelDirectoryOf(raw: unknown): readonly RoleLevelView[] | null {
@@ -99,17 +109,19 @@ export function roleLevelDirectoryOf(raw: unknown): readonly RoleLevelView[] | n
       const keys = Object.keys(entry);
       if (keys.length !== ENTRY_KEYS.length || !ENTRY_KEYS.every((key) => keys.includes(key))) return null;
       // Read once each, so a value validated is the value copied.
-      const { roleId, stored, defaultLevel } = entry;
+      const { roleId, stored, defaultLevel, version } = entry;
       if (typeof roleId !== 'string' || !isLevel(defaultLevel)) return null;
       if (i === 0) {
-        // The owner: exactly the one record the header names, never stored.
-        if (roleId !== OWNER_ROLE_ID || stored !== null || defaultLevel !== OWNER_LEVEL) return null;
-        out.push(Object.freeze({ roleId, level: defaultLevel, defaultLevel, source: 'fixed', editable: false }));
+        // The owner: exactly the one record the header names, never stored and never versioned.
+        if (roleId !== OWNER_ROLE_ID || stored !== null || defaultLevel !== OWNER_LEVEL || version !== null) return null;
+        out.push(Object.freeze({ roleId, level: defaultLevel, defaultLevel, source: 'fixed', editable: false, version: null }));
         continue;
       }
       const level = stored === null ? null : isLevel(stored) ? stored : undefined;
-      if (roleId !== EDITABLE_TENANT_ROLES[i - 1] || level === undefined) return null;
-      out.push(Object.freeze({ roleId, level: level ?? defaultLevel, defaultLevel, source: level === null ? 'default' : 'stored', editable: true }));
+      if (roleId !== EDITABLE_TENANT_ROLES[i - 1] || level === undefined || !isVersion(version)) return null;
+      out.push(Object.freeze({
+        roleId, level: level ?? defaultLevel, defaultLevel, source: level === null ? 'default' : 'stored', editable: true, version,
+      }));
     }
     return Object.freeze(out);
   } catch {
@@ -149,7 +161,7 @@ export function createRoleLevelDirectoryRoute(ports: RoleLevelDirectoryPorts, op
     res.status(200).json({
       tenant,
       domain: ROLE_LEVEL_DOMAINS[0],
-      roles: roles.map((r) => ({ roleId: r.roleId, level: r.level, defaultLevel: r.defaultLevel, source: r.source, editable: r.editable })),
+      roles: roles.map((r) => ({ roleId: r.roleId, level: r.level, defaultLevel: r.defaultLevel, source: r.source, editable: r.editable, version: r.version })),
     });
   };
   const route: RouteDefinition = {

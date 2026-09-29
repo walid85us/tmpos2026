@@ -1,7 +1,9 @@
 // Phase 4.0 M7A-CUSTOMERS-P3-R1 — an owner's durable role-level edit through the runtime: the planner's input contract and
 // its reason rule, the vocabulary's parity with the catalog, the route's and the contract's registration, and the enforced
 // chain over real loopback sockets on the TENANT boundary — session, CSRF, step-up, the authorizer's trusted scope, the
-// command handed to the transaction port (its deadline and session included), replay, and the bounded refusals.
+// command handed to the transaction port (its deadline and session included), replay, and the bounded refusals. Since
+// M7A-CUSTOMERS-P4 the six-field body (the asserted tenant and version, preconditions only), the 200's committed version,
+// and the store's 'precondition_failed' answered as an UNSEALED 409 write_conflict that records nothing.
 //
 // Synthetic principals, sessions, keys and ports only. The transaction port here is a recording stand-in whose lease check
 // is the idempotency store's own; the owner rule is m5CanonicalPermissions.test.ts's, and the PostgreSQL store, the tenant
@@ -41,7 +43,7 @@ const SCOPE: TrustedScope = Object.freeze({
   actor: ACTOR, securityVersion: 'sv-1', scope: 'tenant', tenant: T1, store: null, membershipId: MEMBERSHIP, roleId: 'store_owner', limitation: 'none',
 });
 const REASON = 'Sales staff no longer onboard customers.';
-const BODY = Object.freeze({ roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON });
+const BODY = Object.freeze({ roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON, expectedTenant: T1, expectedVersion: 3 });
 const ch = (...codes: number[]): string => String.fromCodePoint(...codes);
 const plan = (body: unknown) => planRoleLevelUpdate({ audience: 'tenant', body, newAggregateId: randomUUID() });
 
@@ -73,13 +75,19 @@ test('the reason is the tenant status command\'s rule exactly: trimmed, 10-500 s
   assert.deepEqual(wrong, []);
 });
 
-test('the plan: the runtime\'s new id, no version, the edit as the change, no event, a 200 naming the stored level, and the audit annex', () => {
+test('the plan: the runtime\'s new id, no store version, the edit and its two preconditions as the change, no event, a 200 naming the stored level at the next version, and the audit annex', () => {
   const newAggregateId = randomUUID();
   assert.deepEqual(planRoleLevelUpdate({ audience: 'tenant', body: { ...BODY, reason: ` ${REASON} ` }, newAggregateId }), {
-    aggregateId: newAggregateId, expectedVersion: null, changes: { roleId: 'sales_staff', domain: 'customers', level: 'view' }, events: [],
-    response: { status: 200, body: { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view' } } },
+    aggregateId: newAggregateId, expectedVersion: null,
+    changes: { roleId: 'sales_staff', domain: 'customers', level: 'view', expectedTenant: T1, expectedVersion: 3 }, events: [],
+    response: { status: 200, body: { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view', version: 4 } } },
     audit: { reasonCode: 'role_sales_staff_customers_to_view', reason: REASON },
   });
+  // A never-edited role is version 0 and commits at 1; any tenant id the database renders — any UUID version — is accepted.
+  for (const [expectedTenant, expectedVersion] of [[T1, 0], [T2, Number.MAX_SAFE_INTEGER - 1], ['00000000-0000-0000-0000-000000000000', 7]] as const) {
+    const p = plan({ ...BODY, expectedTenant, expectedVersion }) as { changes: Record<string, unknown>; response: { body: { roleLevel: { version: number } } } };
+    assert.deepEqual([p.changes.expectedTenant, p.changes.expectedVersion, p.response.body.roleLevel.version], [expectedTenant, expectedVersion, expectedVersion + 1]);
+  }
   for (const roleId of EDITABLE_TENANT_ROLES) for (const level of ROLE_LEVELS) {
     const p = plan({ ...BODY, roleId, level });
     assert.notEqual(p, COMMAND_REQUEST_INVALID, `${roleId}/${level}`);
@@ -87,17 +95,29 @@ test('the plan: the runtime\'s new id, no version, the edit as the change, no ev
   }
 });
 
-test('a body the contract refuses plans nothing: exactly the four fields, an editable role, the one domain, a canonical level and a bounded reason', () => {
+test('a body the contract refuses plans nothing: exactly the six fields, an editable role, the one domain, a canonical level, a bounded reason and two well-formed preconditions', () => {
+  const { expectedTenant: _t, expectedVersion: _v, ...fourFields } = BODY;
   const invalid: Array<[string, unknown]> = [
     ['null', null], ['an array', [BODY]], ['a string', 'x'], ['no field', {}],
-    ['a missing reason', { roleId: 'manager', domain: 'customers', level: 'view' }], ['a tenant selector', { ...BODY, tenantId: T2 }],
+    ['a missing reason', { roleId: 'manager', domain: 'customers', level: 'view', expectedTenant: T1, expectedVersion: 0 }],
+    ['a tenant selector', { ...BODY, tenantId: T2 }],
+    // M7A-CUSTOMERS-P4: the pre-P4 four-field body, either precondition missing, or either one malformed.
+    ['the four-field body (no precondition)', fourFields], ['no expected tenant', { ...fourFields, expectedVersion: 0 }],
+    ['no expected version', { ...fourFields, expectedTenant: T1 }], ['a null expected tenant', { ...BODY, expectedTenant: null }],
+    ['an uppercase expected tenant', { ...BODY, expectedTenant: T1.toUpperCase() }], ['a braced expected tenant', { ...BODY, expectedTenant: `{${T1}}` }],
+    ['an expected tenant without dashes', { ...BODY, expectedTenant: T1.replace(/-/g, '') }], ['a padded expected tenant', { ...BODY, expectedTenant: ` ${T1}` }],
+    ['an expected tenant that is not a UUID', { ...BODY, expectedTenant: 'store-a' }], ['a numeric expected tenant', { ...BODY, expectedTenant: 1 }],
+    ['a negative expected version', { ...BODY, expectedVersion: -1 }], ['a fractional expected version', { ...BODY, expectedVersion: 1.5 }],
+    ['an expected version as text', { ...BODY, expectedVersion: '3' }], ['a null expected version', { ...BODY, expectedVersion: null }],
+    ['an unsafe expected version', { ...BODY, expectedVersion: 2 ** 53 }], ['an expected version whose successor is unsafe', { ...BODY, expectedVersion: Number.MAX_SAFE_INTEGER }],
+    ['an infinite expected version', { ...BODY, expectedVersion: Infinity }], ['a boolean expected version', { ...BODY, expectedVersion: true }],
     ['an actor', { ...BODY, actor: ACTOR }], ['the owner role', { ...BODY, roleId: 'store_owner' }], ['a platform role', { ...BODY, roleId: 'system_owner' }],
     ['a custom role', { ...BODY, roleId: 'cashier' }], ['a cased role', { ...BODY, roleId: 'Sales_Staff' }], ['a padded role', { ...BODY, roleId: ' manager' }],
     ['another domain', { ...BODY, domain: 'sales' }], ['a cased domain', { ...BODY, domain: 'Customers' }], ['no level', { ...BODY, level: '' }],
     ['a cased level', { ...BODY, level: 'View' }], ['an unknown level', { ...BODY, level: 'owner' }], ['a numeric level', { ...BODY, level: 2 }],
     ['a short reason', { ...BODY, reason: 'too short' }], ['a long reason', { ...BODY, reason: 'a'.repeat(501) }],
     ['a Bidi override', { ...BODY, reason: `a reason ${ch(0x202e)} here` }], ['a reason that is not text', { ...BODY, reason: 12345678901 }],
-    ['an own __proto__ key', JSON.parse(`{"roleId":"manager","domain":"customers","level":"view","reason":"${REASON}","__proto__":{"x":1}}`)],
+    ['an own __proto__ key', JSON.parse(JSON.stringify(BODY).replace(/\}$/, ',"__proto__":{"x":1}}'))],
   ];
   for (const [label, body] of invalid) assert.equal(plan(body), COMMAND_REQUEST_INVALID, label);
 });
@@ -127,7 +147,8 @@ test('the contract registers with no event, as a create of its own aggregate typ
   assert.deepEqual(contract, {
     kind: 'tenant.role.level.update', mode: 'create', aggregateType: 'tenant_role_level', events: [],
     changes: { roleId: { type: 'enum', values: ['manager', 'technician', 'sales_staff'] }, domain: { type: 'enum', values: ['customers'] },
-      level: { type: 'enum', values: ['approve', 'create', 'edit', 'full', 'manage', 'none', 'view'] } },
+      level: { type: 'enum', values: ['approve', 'create', 'edit', 'full', 'manage', 'none', 'view'] },
+      expectedTenant: { type: 'string', maxLength: 36 }, expectedVersion: { type: 'integer', min: 0, max: Number.MAX_SAFE_INTEGER } },
   });
   const newAggregateId = randomUUID();
   const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
@@ -142,7 +163,7 @@ test('the contract registers with no event, as a create of its own aggregate typ
   assert.ok(prepared !== null, 'prepared');
   assert.deepEqual(prepared.command.mutation, {
     kind: 'tenant.role.level.update', aggregateType: 'tenant_role_level', aggregateId: newAggregateId, expectedVersion: null,
-    changes: { roleId: 'sales_staff', domain: 'customers', level: 'view' },
+    changes: { roleId: 'sales_staff', domain: 'customers', level: 'view', expectedTenant: T1, expectedVersion: 3 },
   });
   assert.deepEqual({ ...prepared.command.audit, correlationId: '' }, {
     action: 'tenant.role.level.update', permission: 'edit_role_levels', scope: 'tenant', tenant: T1, store: null, actor: ACTOR, correlationId: '',
@@ -174,6 +195,8 @@ function request(port: number, method: string, path: string, headers: Record<str
 interface Harness {
   commits: TransactionCommand[]; storeKey: string; authenticatedAt: number;
   setScope(scope: TrustedScope | false): void;
+  /** The store's next answers instead of committing: an outcome word, or null to commit again. */
+  setAnswer(outcome: string | null): void;
   put(over?: { body?: string; key?: string | null; headers?: Record<string, string> }): Promise<Reply>;
 }
 
@@ -181,11 +204,14 @@ interface Harness {
 async function withChain(ageMs: number, fn: (h: Harness) => Promise<void>): Promise<void> {
   const commits: TransactionCommand[] = [];
   let scope: TrustedScope | false = SCOPE;
+  let answer: string | null = null;
   const authenticatedAt = Date.now() - ageMs;
   const inner = createMemoryIdempotencyStore();
   const port: CommandTransactionPort = {
     async commit(c, s) {
       commits.push(c);
+      if (answer !== null) return { outcome: answer }; // a rolled-back refusal: nothing completed
+
       const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: c.response }), s);
       return { outcome: (done as { outcome?: unknown }).outcome === 'completed' ? 'committed' : 'lease_lost' };
     },
@@ -227,7 +253,7 @@ async function withChain(ageMs: number, fn: (h: Harness) => Promise<void>): Prom
       cookie: `${SESSION_COOKIES.tenant}=${id}`, [SESSION_CSRF_HEADER]: csrf, 'content-length': String(Buffer.byteLength(body)),
       ...(key === null ? {} : { 'idempotency-key': key }), ...headers,
     }, body);
-    await fn({ commits, storeKey, authenticatedAt, put, setScope: (s) => { scope = s; } });
+    await fn({ commits, storeKey, authenticatedAt, put, setScope: (s) => { scope = s; }, setAnswer: (o) => { answer = o; } });
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -240,10 +266,10 @@ test('a committed edit answers 200 { roleLevel }, and the port receives the trus
     const key = randomUUID();
     const r = await h.put({ key, headers: { 'x-tenant-id': T2, 'x-role': 'store_owner' } });
     assert.equal(r.status, 200, r.body);
-    assert.deepEqual(JSON.parse(r.body), { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view' } });
+    assert.deepEqual(JSON.parse(r.body), { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view', version: 4 } });
     assert.equal(h.commits.length, 1);
     const [c] = h.commits;
-    assert.deepEqual(c.mutation.changes, { roleId: 'sales_staff', domain: 'customers', level: 'view' });
+    assert.deepEqual(c.mutation.changes, { roleId: 'sales_staff', domain: 'customers', level: 'view', expectedTenant: T1, expectedVersion: 3 });
     assert.deepEqual(c.context, SCOPE, 'the authorizer\'s scope, unchanged by any header');
     assert.equal(c.sessionKey, h.storeKey);
     assert.equal(c.authNotAfter, h.authenticatedAt + RECENT_AUTH_MAX_AGE_MS, 'the provider authentication bound at login, plus the fixed window');
@@ -252,7 +278,38 @@ test('a committed edit answers 200 { roleLevel }, and the port receives the trus
     assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed']], [200, r.body, 'true'], 'a same-key retry replays');
     const conflict = await h.put({ key, body: JSON.stringify({ ...BODY, level: 'none' }) });
     assert.deepEqual([conflict.status, errorOf(conflict)], [422, 'idempotency_key_reused'], 'the same key with another body');
+    for (const over of [{ expectedVersion: 4 }, { expectedTenant: T2 }]) {
+      const reasserted = await h.put({ key, body: JSON.stringify({ ...BODY, ...over }) });
+      assert.deepEqual([reasserted.status, errorOf(reasserted)], [422, 'idempotency_key_reused'], `another precondition under the key: ${JSON.stringify(over)}`);
+    }
     assert.equal(h.commits.length, 1, 'one commit for the key');
+  });
+});
+
+test('a precondition that no longer holds: the store\'s precondition_failed is an UNSEALED 409 write_conflict — nothing recorded, the lease left — and the asserted tenant is never the scope', async () => {
+  await withChain(1_000, async (h) => {
+    h.setAnswer('precondition_failed');
+    const key = randomUUID();
+    // An A draft sent on a session whose scope is T1 asserting T2: the port receives the scope's tenant, the assertion as a change.
+    const body = JSON.stringify({ ...BODY, expectedTenant: T2 });
+    const r = await h.put({ key, body });
+    assert.equal(r.status, 409, r.body);
+    const refusal = JSON.parse(r.body) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(refusal).sort(), ['error', 'requestId'], 'the chain\'s own refusal shape, not a recorded body');
+    assert.equal(refusal.error, 'write_conflict');
+    assert.equal(refusal.requestId, r.headers['x-request-id'], 'this request\'s own id');
+    assert.equal(r.headers['idempotent-replayed'], undefined);
+    const [c] = h.commits;
+    assert.deepEqual(c.context, SCOPE, 'the authority is the session\'s scope');
+    assert.deepEqual([c.audit.tenant, c.mutation.changes.expectedTenant], [T1, T2], 'the assertion is a precondition beside the scope, never a selector');
+    // Nothing was completed, so an identical retry waits on the lease instead of replaying a decision.
+    const retry = await h.put({ key, body });
+    assert.deepEqual([retry.status, errorOf(retry)], [409, 'request_in_progress'], 'unsealed: the key is not terminal');
+    assert.equal(h.commits.length, 1, 'the retry never reached the store');
+    // A fresh key re-decides; answering committed then is the ordinary 200.
+    h.setAnswer(null);
+    const again = await h.put();
+    assert.deepEqual([again.status, JSON.parse(again.body)], [200, { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view', version: 4 } }]);
   });
 });
 

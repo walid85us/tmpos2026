@@ -35,6 +35,11 @@
 // M7TE-08 the login's EXECUTE on 020's page_v3, create, level read and level set at startup — and refuses 019's create or
 // 018's page_v2 given back —, M7TE-10 the 001-020 ledger (a fake next row is '021'), and M7TE-11 withdraws page_v3 after
 // startup.
+//
+// M7A-CUSTOMERS-P4 UPDATE. The owner's edit is conditional on the tenant and version the owner reviewed (DA-125): migration
+// 021's schema tmpos_role_edit holds the set the runtime calls and the one-snapshot read-back, and 021 revokes 020's
+// unconditional set from the runtime role. The chain is 001-021: M7TE-08 requires the login's EXECUTE on 021's set and read
+// instead of 020's set — and refuses 020's set given back —, and M7TE-10 pins the 001-021 ledger (a fake next row is '022').
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -85,12 +90,16 @@ const SESSION_GET = 'tmpos_session.m5_session_get(text, bigint)';
 const ADMIT = 'tmpos_session.m5_admit_tenant_session_v2(text, text)';
 /**
  * The customer create — since M7A-CUSTOMERS-P3-R1 020's (019's is revoked from the login) —, 020's role-level read (the
- * tenant route authorizer's) and its set (the owner's edit), and 006's probe the tenant store answers readiness with (its
- * idempotency and command ports).
+ * tenant route authorizer's), 021's conditional set (the owner's edit) and one-snapshot states read (its read-back) — since
+ * M7A-CUSTOMERS-P4, when 020's unconditional set left the login —, and 006's probe the tenant store answers readiness with
+ * (its idempotency and command ports).
  */
 const CREATE = 'tmpos_role.m7a_customer_create(text, uuid, text)';
 const LEVELS_READ = 'tmpos_role.m7a_role_levels(uuid, text)';
-const LEVEL_SET = 'tmpos_role.m7a_role_level_set(text, text, text, text)';
+const LEVEL_SET = 'tmpos_role_edit.m7a_role_level_set_v2(text, text, text, text, uuid, bigint)';
+const LEVEL_STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
+/** 020's unconditional set: revoked from the login by 021, and a grant too many if given back. */
+const LEVEL_SET_020 = 'tmpos_role.m7a_role_level_set(text, text, text, text)';
 const STORE_PROBE = 'tmpos_internal.m6_store_probe()';
 
 // ---------------------------------------------------------------------------
@@ -273,7 +282,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-020, a real non-owner least-privilege runtime login, the issuer key and the limiter key
+// setup: real migrations 001-021, a real non-owner least-privilege runtime login, the issuer key and the limiter key
 // ---------------------------------------------------------------------------
 
 await setupStep(async () => {
@@ -1011,15 +1020,20 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   await withoutExecute(MINT, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the session mint withdrawn')));
   // The customer create withdrawn (M7A-CUSTOMERS-P3): the same census names it — the write never serves without it (020's
-  // since M7A-CUSTOMERS-P3-R1). So do 020's role-level read, which every tenant route decision asks, and its set.
+  // since M7A-CUSTOMERS-P3-R1). So do 020's role-level read, which every tenant route decision asks, and — since
+  // M7A-CUSTOMERS-P4 — 021's set and its states read.
   await withoutExecute(CREATE, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer create withdrawn')));
   await withoutExecute(LEVELS_READ, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the role-level read withdrawn')));
   await withoutExecute(LEVEL_SET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the role-level set withdrawn')));
-  // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many.
-  for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)']]) {
+  await withoutExecute(LEVEL_STATES, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the role-level states read withdrawn')));
+  // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many; so is
+  // 020's unconditional set (M7A-CUSTOMERS-P4: an edit that asserts neither the tenant nor the version).
+  for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)'],
+    ['020\'s set', LEVEL_SET_020]]) {
     try {
       await owner.unsafe(`grant execute on function ${fn} to tmpos_app`);
       await withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_unexpected'], `${label} given back`));
@@ -1063,26 +1077,26 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-020 refuses startup migration_state_invalid', async () => {
-  // M7A-CUSTOMERS-P3-R1: the newest required migration is 020, and the fake "next migration" row is '021'.
+test('M7TE-10: a migration ledger that is not exactly 001-021 refuses startup migration_state_invalid', async () => {
+  // M7A-CUSTOMERS-P4: the newest required migration is 021, and the fake "next migration" row is '022'.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '020'`;
-  assert.ok(row !== undefined, '020 is recorded');
+    from public.schema_migrations where version = '021'`;
+  assert.ok(row !== undefined, '021 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('020', '021')`;
+    await sql`delete from public.schema_migrations where version in ('021', '022')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '020'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 019'));
+    await owner`delete from public.schema_migrations where version = '021'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 020'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 020').digest('hex')} where version = '020'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '020 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 021').digest('hex')} where version = '021'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '021 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('021', ${createHash('sha256').update('021').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 021'));
+      values ('022', ${createHash('sha256').update('022').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 022'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1092,7 +1106,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-020 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '020'`;
+    from public.schema_migrations where version = '021'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 

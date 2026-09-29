@@ -690,3 +690,32 @@ test('an audit INSERT that did not insert exactly one row rolls the whole comman
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// M7A-CUSTOMERS-P4 — a precondition that no longer holds: rolled back, NOTHING recorded (DA-125)
+// ---------------------------------------------------------------------------
+
+test('precondition_failed from a tenant create rolls everything back with NO completion — unlike the sealed conflict — and from any other shape is the fault', async () => {
+  const failing = Object.freeze({ ...CREATE_MUTATOR, apply: async () => 'precondition_failed' });
+  const c = command(TENANT_CONTEXT);
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [failing]).transactions.commit(c, live()), { outcome: 'precondition_failed' });
+  for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event', 'm6_command_enqueue']) {
+    assert.ok(!client.texts.some((t) => t.includes(recorded)), `no ${recorded}: nothing is recorded, the key is not terminal`);
+  }
+  assert.ok(client.texts.some((t) => t.includes('m6_command_fence')), 'decided under the fence');
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], 'rolled back, never committed');
+  // The sealed conflict, for contrast: it commits its own completion.
+  const sealed = scripted(c.lease);
+  assert.deepEqual(await tenantStore(sealed, [Object.freeze({ ...CREATE_MUTATOR, apply: async () => 'conflict' })]).transactions.commit(c, live()), { outcome: 'conflict' });
+  assert.deepEqual(sealed.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+  assert.ok(sealed.texts.some((t) => t.includes('m6_idempotency_complete')), 'the conflict records its sealed 409');
+  // Only a create, in a tenant store, under its revalidated tenant context: a platform command or an update answering it is a fault.
+  for (const [label, run] of [
+    ['a platform create', () => { const p = command(TRUSTED); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [failing], revalidate: async () => true }).transactions.commit(p, live()); }],
+    ['a contextless create', () => { const p = command(); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [failing] }).transactions.commit(p, live()); }],
+    ['an update', () => { const p = renaming(); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [tenantMutator('precondition_failed')], revalidate: async () => true }).transactions.commit(p, live()); }],
+  ] as const) {
+    assert.deepEqual(await run(), UNAVAILABLE, label);
+  }
+});

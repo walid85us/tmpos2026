@@ -360,11 +360,11 @@ async function listed(session, tenantId) {
 // M5E-00: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5E-00: 001-020 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
+test('M5E-00: 001-021 applied, the production roots compose over them, and this suite\'s durable() leaves only the limiter unbound', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021']
       .map((v) => [v, false]));
 
   // The transaction root classified the configured endpoint before building its one client, and hands back the ports

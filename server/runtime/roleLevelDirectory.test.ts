@@ -2,6 +2,8 @@
 // validation of the port's untrusted answer, the route's declaration, the handler's every outcome, and the enforced chain
 // over a real loopback socket on the TENANT boundary — the session, the authorizer's owner requirement, the trusted tenant.
 //
+// Since M7A-CUSTOMERS-P4 every record carries `version`: null for the owner, 021's edit counter for an editable role.
+//
 // Synthetic principals, sessions and ports only. The PostgreSQL read is proved database-free in
 // server/composition/productionTransactions.test.ts (M7TK-03) and end to end in tests/db/roleLevels.integration.test.mjs.
 import test from 'node:test';
@@ -31,16 +33,16 @@ const SCOPE: TrustedScope = Object.freeze({
 
 /** The port's answer in its one valid shape: the owner first, then the three editable roles. */
 const answer = (manager: string | null = null, technician: string | null = 'none', sales: string | null = null) => [
-  { roleId: 'store_owner', stored: null, defaultLevel: 'full' },
-  { roleId: 'manager', stored: manager, defaultLevel: 'full' },
-  { roleId: 'technician', stored: technician, defaultLevel: 'view' },
-  { roleId: 'sales_staff', stored: sales, defaultLevel: 'create' },
+  { roleId: 'store_owner', stored: null, defaultLevel: 'full', version: null },
+  { roleId: 'manager', stored: manager, defaultLevel: 'full', version: 0 },
+  { roleId: 'technician', stored: technician, defaultLevel: 'view', version: 2 },
+  { roleId: 'sales_staff', stored: sales, defaultLevel: 'create', version: 0 },
 ];
 const VIEW = [
-  { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
-  { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true },
-  { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true },
-  { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'default', editable: true },
+  { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
+  { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true, version: 0 },
+  { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true, version: 2 },
+  { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'default', editable: true, version: 0 },
 ];
 
 // --- 1. the port's answer is untrusted ------------------------------------------------------------------------------------
@@ -50,7 +52,9 @@ test('only the exact four-role answer becomes a response: level = stored ?? defa
   assert.deepEqual(view, VIEW);
   assert.ok(view !== null && Object.isFrozen(view) && view.every((r) => Object.isFrozen(r)));
   // A stored level equal to the default is still an override: 'stored'.
-  assert.deepEqual(roleLevelDirectoryOf(answer(null, null, 'create'))?.[3], { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'stored', editable: true });
+  assert.deepEqual(roleLevelDirectoryOf(answer(null, null, 'create'))?.[3], { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'stored', editable: true, version: 0 });
+  // A version is handed through as it is: the largest safe one included.
+  assert.equal(roleLevelDirectoryOf([answer()[0], { ...answer()[1], version: Number.MAX_SAFE_INTEGER }, answer()[2], answer()[3]])?.[1].version, Number.MAX_SAFE_INTEGER);
   const owner = answer()[0];
   const bad: Array<[string, unknown]> = [
     ['null', null], ['an object', { roles: answer() }], ['three roles', answer().slice(1)], ['five roles', [...answer(), answer()[1]]],
@@ -62,7 +66,13 @@ test('only the exact four-role answer becomes a response: level = stored ?? defa
     ['the owner a custom role word', [{ ...owner, roleId: 'store_owner_2' }, ...answer().slice(1)]],
     ['the owner below Full', [{ ...owner, defaultLevel: 'view' }, ...answer().slice(1)]],
     ['the owner at manage', [{ ...owner, defaultLevel: 'manage' }, ...answer().slice(1)]],
-    ['the owner at no default', [{ roleId: 'store_owner', stored: null }, ...answer().slice(1)]],
+    ['the owner at no default', [{ roleId: 'store_owner', stored: null, version: null }, ...answer().slice(1)]],
+    // M7A-CUSTOMERS-P4: the owner is never versioned, and every editable role is — a safe integer of at least 0.
+    ['the owner versioned', [{ ...owner, version: 0 }, ...answer().slice(1)]], ['the owner without a version', [{ roleId: 'store_owner', stored: null, defaultLevel: 'full' }, ...answer().slice(1)]],
+    ['an editable role without a version', [owner, { roleId: 'manager', stored: null, defaultLevel: 'full' }, answer()[2], answer()[3]]],
+    ['a null version', [owner, { ...answer()[1], version: null }, answer()[2], answer()[3]]], ['a negative version', [owner, answer()[1], answer()[2], { ...answer()[3], version: -1 }]],
+    ['a fractional version', [owner, answer()[1], { ...answer()[2], version: 1.5 }, answer()[3]]], ['a version as text', [owner, answer()[1], { ...answer()[2], version: '2' }, answer()[3]]],
+    ['an unsafe version', [owner, { ...answer()[1], version: 2 ** 53 }, answer()[2], answer()[3]]], ['a bigint version', [owner, { ...answer()[1], version: 1n }, answer()[2], answer()[3]]],
     ['the owner stored at Full', [{ ...owner, stored: 'full' }, ...answer().slice(1)]],
     ['the owner stored undefined', [{ ...owner, stored: undefined }, ...answer().slice(1)]],
     ['the owner with an extra field', [{ ...owner, editable: false }, ...answer().slice(1)]],
@@ -71,12 +81,12 @@ test('only the exact four-role answer becomes a response: level = stored ?? defa
     ['roles out of order', [owner, answer()[2], answer()[1], answer()[3]]],
     ['an unknown role', [owner, answer()[1], answer()[2], { ...answer()[3], roleId: 'cashier' }]],
     ['a level outside the seven', answer('owner')], ['a level in another case', answer('View')], ['a numeric level', answer(3 as never)],
-    ['no default', [owner, { roleId: 'manager', stored: null }, answer()[2], answer()[3]]],
+    ['no default', [owner, { roleId: 'manager', stored: null, version: 0 }, answer()[2], answer()[3]]],
     ['a default outside the seven', [owner, { ...answer()[1], defaultLevel: 'all' }, answer()[2], answer()[3]]],
     ['an undefined stored level', [owner, { ...answer()[1], stored: undefined }, answer()[2], answer()[3]]],
     ['an extra field', [owner, { ...answer()[1], tenant: T2 }, answer()[2], answer()[3]]],
-    ['a class instance', [owner, new (class R { roleId = 'manager'; stored = null; defaultLevel = 'full'; })(), answer()[2], answer()[3]]],
-    ['a throwing getter', [owner, { roleId: 'manager', stored: null, get defaultLevel(): string { throw new Error('x'); } }, answer()[2], answer()[3]]],
+    ['a class instance', [owner, new (class R { roleId = 'manager'; stored = null; defaultLevel = 'full'; version = 0; })(), answer()[2], answer()[3]]],
+    ['a throwing getter', [owner, { roleId: 'manager', stored: null, version: 0, get defaultLevel(): string { throw new Error('x'); } }, answer()[2], answer()[3]]],
   ];
   for (const [label, raw] of bad) assert.equal(roleLevelDirectoryOf(raw), null, label);
 });

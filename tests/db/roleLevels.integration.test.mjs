@@ -1,6 +1,16 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-020, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-021, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+//
+// M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
+// the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
+// Every edit here is built the way the shop builds it — edit() reads GET /api/v1/roles/levels first and asserts that read's
+// tenant and version — or, where a case needs a precondition without an owner read (a refused editor, a malformed body, a
+// race lever), from the version 021 stores (preOf, an owner read). An applied edit answers the version it committed at, one
+// past the asserted one, and the read-back carries each editable role's version. M7RLH-08 records the residual on 021's set
+// (020's is no longer the runtime role's to call), and M7RLH-10 the precondition through the route: a stale version and a
+// foreign tenant are an UNSEALED 409 write_conflict with nothing written, the key's lease kept; a restored default moves
+// the version, so the draft from before it stays refused; a replay still answers its own committed 200.
 //
 // WHAT IS SUBSTITUTED, STATED EXACTLY — the three things tests/db/customerCreate.integration.test.mjs substitutes, none of
 // them on the path under test: the database client (a supervised kernel over the cluster as a non-owner least-privilege
@@ -34,9 +44,9 @@
 //            whose answer is lost is a 503 and the retry replays what committed — a create and an edit alike;
 //   M7RLH-08 the runtime login directly (the residuals, witnessed with their counts): a live sales_staff key creates on 020's
 //            routine with NO audit, completion or outbox row, and is refused once the owner narrows; a live owner key changes
-//            a level on 020's set routine with NO audit or completion; 019's create and 018's page_v2 are 42501, and neither
-//            the customer table nor the role table takes a direct write;
-//   M7RLH-09 two entries on one database: the owner's recent sign-in goes stale WHILE its edit waits inside 020's set routine
+//            a level on 021's set routine (given the tenant and version) with NO audit or completion; 020's set, 019's create
+//            and 018's page_v2 are 42501, and neither the customer table nor the role table takes a direct write;
+//   M7RLH-09 two entries on one database: the owner's recent sign-in goes stale WHILE its edit waits inside 021's set routine
 //            for a create holding the role row FOR SHARE; the create commits (201), the edit is refused on the database clock
 //            after the routine answered (503, level unchanged, no edit audit record, no completion, its lease kept: 409 for
 //            the same key within it); M7RLH-09b the same shape with the deadline far off commits both (201, 200);
@@ -51,10 +61,15 @@
 //            refused on its next read (the changed standing ends the session: 401 — never the old answer) and its re-login
 //            as a manager reads 403; every 401/403 answer is no-store; a stored `manage` (a level the shop's grid never
 //            offers) round-trips through the edit and the read-back as stored.
+//   M7RLH-10 (M7A-CUSTOMERS-P4) the precondition: a stale version and another tenant's id are 409 write_conflict in the
+//            chain's { error, requestId } shape — no level, version, audit record or completion, the lease kept (409
+//            request_in_progress for the same key, and once it lapses the same key is decided afresh: 409 again); a key
+//            whose edit committed replays that 200 after a later edit superseded it; default -> None -> the default Create
+//            moves the version twice, so the draft of the first read is refused and Create stands.
 //
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster
 // this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service
-// it removes its own customer, role-level, session and mint-ledger rows and its proof schema, restores the limiter's
+// it removes its own customer, role-level (021's versions first), session and mint-ledger rows and its proof schema, restores the limiter's
 // fingerprint and the issuer key row it found (or its absence), drops every trigger it installed and its login. What it
 // leaves is what every suite leaves: its synthetically named identities, tenants and stores, their audit records and
 // idempotency records.
@@ -186,8 +201,13 @@ async function teardown() {
     // The proof schema's function carries every trigger this file installed: CASCADE drops them with it.
     await step(() => owner.unsafe('drop schema if exists m7rlh_proof cascade'));
     if (TENANTS.length > 0) {
-      // 020's rollback refuses while a stored level differs from its default: this suite's edits are removed. The table is
-      // absent on a database before 020 (the entry commit's red run), and then there is nothing to remove.
+      // 021's rollback refuses while any version row exists, and 020's while a stored level differs from its default: this
+      // suite's versions, then its edits, are removed. Either table is absent on a database before its migration (the entry
+      // commit's red run), and then there is nothing to remove.
+      await step(async () => {
+        const [{ versions }] = await owner`select pg_catalog.to_regclass('tmpos_role_edit.role_level_version') is not null as versions`;
+        if (versions) await owner`delete from tmpos_role_edit.role_level_version where tenant_id = any(${TENANTS}::uuid[])`;
+      });
       await step(async () => {
         const [{ present }] = await owner`select pg_catalog.to_regclass('tmpos_role.tenant_role_level') is not null as present`;
         if (present) await owner`delete from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[])`;
@@ -311,7 +331,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-020 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-021 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 
@@ -524,10 +544,14 @@ function createdOf(reply, name, label, { replayed = false } = {}) {
   return body.customer;
 }
 
-/** An applied edit: 200, exactly { roleLevel: { roleId, domain, level } }, no Set-Cookie. */
-function editedOf(reply, roleId, level, label, { replayed = false } = {}) {
+/**
+ * An applied edit: 200, exactly { roleLevel: { roleId, domain, level, version } } — the version it committed at, one past the
+ * asserted one (M7A-CUSTOMERS-P4) — no Set-Cookie.
+ */
+function editedOf(reply, roleId, level, label, { replayed = false, version } = {}) {
   assert.equal(reply.status, 200, `${label}: ${reply.status} ${reply.body}`);
-  assert.deepEqual(JSON.parse(reply.body), { roleLevel: { roleId, domain: 'customers', level } }, label);
+  assert.ok(Number.isSafeInteger(version) && version > 0, `${label}: the case names the committed version`);
+  assert.deepEqual(JSON.parse(reply.body), { roleLevel: { roleId, domain: 'customers', level, version } }, label);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assert.equal(reply.headers['set-cookie'], undefined, `${label}: no Set-Cookie`);
   assertBaseline(reply, label);
@@ -537,15 +561,18 @@ function editedOf(reply, roleId, level, label, { replayed = false } = {}) {
 const CUSTOMERS_DEFAULTS = Object.freeze({ manager: 'full', technician: 'view', sales_staff: 'create' });
 
 /**
- * A read-back: 200, exactly { tenant, domain, roles } — the owner first and fixed, then each editable role at its stored
- * level (`stored`, by role) or its default — no-store, no Set-Cookie, the baseline headers.
+ * A read-back: 200, exactly { tenant, domain, roles } — the owner first, fixed and unversioned, then each editable role at
+ * its stored level (`stored`, by role) or its default, and at its version (`versions`, by role; 0 when never edited:
+ * M7A-CUSTOMERS-P4) — no-store, no Set-Cookie, the baseline headers.
  */
-function readBackOf(reply, tenant, stored, label) {
+function readBackOf(reply, tenant, stored, label, versions = {}) {
   assert.equal(reply.status, 200, `${label}: ${reply.status} ${reply.body}`);
-  const roles = [{ roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
+  const roles = [{ roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
     ...Object.entries(CUSTOMERS_DEFAULTS).map(([roleId, defaultLevel]) => {
       const level = stored[roleId] ?? null;
-      return { roleId, level: level ?? defaultLevel, defaultLevel, source: level === null ? 'default' : 'stored', editable: true };
+      return {
+        roleId, level: level ?? defaultLevel, defaultLevel, source: level === null ? 'default' : 'stored', editable: true, version: versions[roleId] ?? 0,
+      };
     })];
   assert.deepEqual(JSON.parse(reply.body), { tenant, domain: 'customers', roles }, label);
   assert.equal(reply.headers['cache-control'], 'no-store', `${label}: never cached`);
@@ -553,8 +580,13 @@ function readBackOf(reply, tenant, stored, label) {
   assertBaseline(reply, label);
 }
 
-/** The edit route's body: exactly its four fields. */
-const levelBody = (roleId, level, reason = REASON) => ({ roleId, domain: 'customers', level, reason });
+/**
+ * The edit route's body: exactly its six fields (M7A-CUSTOMERS-P4) — the edit, then the precondition `pre` = { tenant,
+ * version } it asserts.
+ */
+const levelBody = (roleId, level, pre, reason = REASON) => ({
+  roleId, domain: 'customers', level, reason, expectedTenant: pre.tenant, expectedVersion: pre.version,
+});
 
 // ---------------------------------------------------------------------------
 // fixtures — all written through the owner
@@ -624,6 +656,15 @@ async function levelOf(tenant, roleId) {
     where tenant_id = ${tenant} and role_id = ${roleId} and domain = 'customers'`;
   return rows.length === 0 ? undefined : rows[0].level;
 }
+
+/** A role's version as 021 stores it: 0 until the first edit since 021 (no row). */
+async function versionOf(tenant, roleId) {
+  const rows = await owner`select version from tmpos_role_edit.role_level_version
+    where tenant_id = ${tenant} and role_id = ${roleId} and domain = 'customers'`;
+  return rows.length === 0 ? 0 : Number(rows[0].version);
+}
+/** The precondition a draft of `roleId` made now asserts: the tenant and the role's current version (an owner read). */
+const preOf = async (tenant, roleId) => ({ tenant, version: await versionOf(tenant, roleId) });
 
 /** The scopes of every idempotency record still in progress (a lease, no completion). */
 const openLeases = async () => new Set((await owner`select scope from tmpos_internal.idempotency_record where response is null`).map((r) => r.scope));
@@ -750,10 +791,17 @@ async function signIn(ctx, who, { token = who.token } = {}) {
   return { cookie, csrf: JSON.parse(reply.body).csrfToken, key };
 }
 
-/** The owner's edit through the route, which must apply. */
+/**
+ * The owner's edit through the route, which must apply — built as the shop builds it (M7A-CUSTOMERS-P4): the read-back first,
+ * then the edit asserting that read's tenant and the role's version, answered at the next version.
+ */
 async function edit(ctx, s, roleId, level, label = `the owner sets ${roleId} to ${level}`) {
-  const reply = await ctx.put(s, levelBody(roleId, level));
-  editedOf(reply, roleId, level, label);
+  const read = await ctx.levels(s);
+  assert.equal(read.status, 200, `${label}: the read the draft is made from: ${read.body}`);
+  const { tenant, roles } = JSON.parse(read.body);
+  const { version } = roles.find((r) => r.roleId === roleId);
+  const reply = await ctx.put(s, levelBody(roleId, level, { tenant, version }));
+  editedOf(reply, roleId, level, label, { version: version + 1 });
   return reply;
 }
 
@@ -895,7 +943,7 @@ test('M7RLH-01: THE REGRESSION — a store owner narrows sales_staff to View ove
   await withEntry({}, async (ctx) => {
     const salesSession = await signIn(ctx, sales);
     const bossSession = await signIn(ctx, boss); // a recent sign-in: the edit is a step-up action
-    const put = await ctx.put(bossSession, levelBody('sales_staff', 'view'));
+    const put = await ctx.put(bossSession, levelBody('sales_staff', 'view', await preOf(tenant, 'sales_staff')));
     const name = nameOf('m7rlh01 after the narrowing');
     const before = await counts();
     const post = await ctx.post(salesSession, { name });
@@ -905,7 +953,7 @@ test('M7RLH-01: THE REGRESSION — a store owner narrows sales_staff to View ove
     assert.deepEqual(observed, { put: 200, post: 403, customers: 0, audits: 0, completions: 0 },
       `the owner's narrowing must reach the committing decision — observed ${JSON.stringify(observed)}; PUT ${put.body}; POST ${post.body}`);
 
-    editedOf(put, 'sales_staff', 'view', 'the owner\'s edit');
+    editedOf(put, 'sales_staff', 'view', 'the owner\'s edit', { version: 1 });
     assertRefusal(post, 403, 'forbidden', 'the narrowed role\'s create');
     await assertDelta(before, { ...NOTHING, L: 0 }, 'refused at the authorizer, before any key is acquired');
     assert.equal(await levelOf(tenant, 'sales_staff'), 'view', 'the edit is durable: migration 020\'s row holds it');
@@ -1040,12 +1088,13 @@ test('M7RLH-04: two entries on one database — the owner\'s edit, parked holdin
     createdOf(await b.post(s, { name: first }), first, 'the default role creates');
     assert.equal(await levelOf(tenant, 'sales_staff'), null, 'the lock row exists, at the default');
 
-    // The edit (instance A) takes the role row FOR UPDATE in 020's set routine and parks at its audit INSERT, uncommitted.
+    // The edit (instance A) takes the role row FOR UPDATE in 021's set routine and parks at its audit INSERT, uncommitted.
     // The create (instance B) passes the authorizer and the in-transaction revalidator — both read the COMMITTED level,
     // still the default — and reaches 020's create routine, which waits on the edit's row. The edit commits; the routine
     // re-reads the row under READ COMMITTED, finds View, and answers no row: the transaction rolls back whole.
     const key = randomUUID();
     const name = nameOf('m7rlh04 raced');
+    const pre = await preOf(tenant, 'sales_staff');
     const leasesBefore = await openLeases();
     const before = await counts();
     let editReq;
@@ -1056,7 +1105,7 @@ test('M7RLH-04: two entries on one database — the owner\'s edit, parked holdin
     await withTrigger('public.audit_event', EDIT_AUDIT, 'park', async () => {
       const lever = await holdPark();
       try {
-        editReq = quietly(a.put(o, levelBody('sales_staff', 'view')));
+        editReq = quietly(a.put(o, levelBody('sales_staff', 'view', pre)));
         const editPid = waitingPid(await blockedOrSettled(editReq, { by: lever.pid }), 'the edit parked at its audit INSERT, its role row locked');
         sentAt = Date.now();
         createReq = quietly(b.post(s, { name }, { key }));
@@ -1067,7 +1116,7 @@ test('M7RLH-04: two entries on one database — the owner\'s edit, parked holdin
       } finally {
         await lever.commit();
       }
-      editedOf(await replyTo(editReq, 'the edit'), 'sales_staff', 'view', 'the edit commits first');
+      editedOf(await replyTo(editReq, 'the edit'), 'sales_staff', 'view', 'the edit commits first', { version: 1 });
     });
     const refused = await replyTo(createReq, 'the create');
     const elapsed = repliedAt - sentAt;
@@ -1120,6 +1169,7 @@ test('M7RLH-05: two entries on one database — a create parked holding the role
     createdOf(await a.post(s, { name: first }), first, 'the default role creates');
 
     const name = nameOf('park m7rlh05');
+    const pre = await preOf(tenant, 'sales_staff');
     const before = await counts();
     let createReq;
     let editReq;
@@ -1132,16 +1182,16 @@ test('M7RLH-05: two entries on one database — a create parked holding the role
         createReq = quietly(a.post(s, { name }));
         const createPid = waitingPid(await blockedOrSettled(createReq, { by: lever.pid }), 'the create parked at its INSERT');
         held = await roleTableLocks(createPid);
-        // The edit (instance B) reaches 020's set routine and waits for the create's lock.
-        editReq = quietly(b.put(o, levelBody('sales_staff', 'view')));
-        const editPid = waitingPid(await blockedOrSettled(editReq, { by: createPid, query: /tmpos_role\.m7a_role_level_set/ }),
-          'the edit waiting on the create inside 020\'s set routine');
+        // The edit (instance B) reaches 021's set routine and waits for the create's lock.
+        editReq = quietly(b.put(o, levelBody('sales_staff', 'view', pre)));
+        const editPid = waitingPid(await blockedOrSettled(editReq, { by: createPid, query: /tmpos_role_edit\.m7a_role_level_set_v2/ }),
+          'the edit waiting on the create inside 021\'s set routine');
         editLocks = await waitingLocks(editPid);
       } finally {
         await lever.commit();
       }
       createdOf(await replyTo(createReq, 'the create'), name, 'the create commits first');
-      editedOf(await replyTo(editReq, 'the edit'), 'sales_staff', 'view', 'the edit commits after it');
+      editedOf(await replyTo(editReq, 'the edit'), 'sales_staff', 'view', 'the edit commits after it', { version: 1 });
     });
     assert.ok(held.includes('RowShareLock'), `the create held the role row FOR SHARE: ${JSON.stringify(held)}`);
     assert.ok(editLocks.length > 0 && editLocks.every((l) => l.locktype === 'transactionid' || l.locktype === 'tuple'),
@@ -1179,8 +1229,9 @@ test('M7RLH-06: non-owner editors, a store-scope owner and another tenant\'s own
     // Only the tenant's store owner edits: every other role in the tenant, and a store-scope owner, is the generic 403 at
     // the authorizer — before any key, so no record, no audit, no completion and no level.
     let before = await counts();
+    const pre = await preOf(tenant, 'sales_staff');
     for (const [label, who] of refusedEditors) {
-      assertRefusal(await ctx.put(await signIn(ctx, who), levelBody('sales_staff', 'view')), 403, 'forbidden', label);
+      assertRefusal(await ctx.put(await signIn(ctx, who), levelBody('sales_staff', 'view', pre)), 403, 'forbidden', label);
     }
     await assertDelta(before, { ...NOTHING, L: 0 }, 'non-owner editors');
     assert.equal(await levelOf(tenant, 'sales_staff'), undefined, 'no level was written for this tenant');
@@ -1190,21 +1241,31 @@ test('M7RLH-06: non-owner editors, a store-scope owner and another tenant\'s own
       'the other tenant\'s edit stays in the other tenant');
 
     // Bodies the command's contract refuses, once the key is acquired: 400, the lease taken, nothing else written.
+    const { expectedTenant: _t, expectedVersion: _v, ...fourFields } = levelBody('sales_staff', 'view', pre);
     const bodies = [
-      ['the owner role itself', levelBody('store_owner', 'view')],
-      ['an unknown role', levelBody('cashier', 'view')],
-      ['a role in another letter case', levelBody('Sales_Staff', 'view')],
-      ['another domain', { roleId: 'sales_staff', domain: 'employees', level: 'view', reason: REASON }],
-      ['an invalid level', levelBody('sales_staff', 'owner')],
-      ['a level in another letter case', levelBody('sales_staff', 'View')],
-      ['no reason', { roleId: 'sales_staff', domain: 'customers', level: 'view' }],
-      ['a nine-scalar reason', levelBody('sales_staff', 'view', 'too short')],
-      ['a reason short once trimmed', levelBody('sales_staff', 'view', '   too short     ')],
-      ['a non-string reason', levelBody('sales_staff', 'view', 1234567890)],
-      ['an extra tenantId', { ...levelBody('sales_staff', 'view'), tenantId: elsewhere.tenant }],
-      ['an extra key', { ...levelBody('sales_staff', 'view'), note: 'x' }],
-      ['an array', [levelBody('sales_staff', 'view')]],
+      ['the owner role itself', levelBody('store_owner', 'view', pre)],
+      ['an unknown role', levelBody('cashier', 'view', pre)],
+      ['a role in another letter case', levelBody('Sales_Staff', 'view', pre)],
+      ['another domain', { ...levelBody('sales_staff', 'view', pre), domain: 'employees' }],
+      ['an invalid level', levelBody('sales_staff', 'owner', pre)],
+      ['a level in another letter case', levelBody('sales_staff', 'View', pre)],
+      ['no reason', { roleId: 'sales_staff', domain: 'customers', level: 'view', expectedTenant: tenant, expectedVersion: 0 }],
+      ['a nine-scalar reason', levelBody('sales_staff', 'view', pre, 'too short')],
+      ['a reason short once trimmed', levelBody('sales_staff', 'view', pre, '   too short     ')],
+      ['a non-string reason', levelBody('sales_staff', 'view', pre, 1234567890)],
+      ['an extra tenantId', { ...levelBody('sales_staff', 'view', pre), tenantId: elsewhere.tenant }],
+      ['an extra key', { ...levelBody('sales_staff', 'view', pre), note: 'x' }],
+      ['an array', [levelBody('sales_staff', 'view', pre)]],
       ['JSON null', 'null'],
+      // M7A-CUSTOMERS-P4: the precondition is required and well formed — the pre-P4 four-field body is refused.
+      ['the four-field body (no precondition)', fourFields],
+      ['no expected version', { ...fourFields, expectedTenant: tenant }],
+      ['no expected tenant', { ...fourFields, expectedVersion: 0 }],
+      ['an expected tenant in upper case', levelBody('sales_staff', 'view', { tenant: tenant.toUpperCase(), version: 0 })],
+      ['an expected tenant that is not a UUID', levelBody('sales_staff', 'view', { tenant: 'this store', version: 0 })],
+      ['a negative expected version', levelBody('sales_staff', 'view', { tenant, version: -1 })],
+      ['a fractional expected version', levelBody('sales_staff', 'view', { tenant, version: 0.5 })],
+      ['an expected version as text', levelBody('sales_staff', 'view', { tenant, version: '0' })],
     ];
     before = await counts();
     for (const [label, body] of bodies) {
@@ -1218,7 +1279,7 @@ test('M7RLH-06: non-owner editors, a store-scope owner and another tenant\'s own
     // Step-up: the same owner, signed in long ago by the provider's clock, is refused before the body is read.
     const stale = await signIn(ctx, boss, { token: boss.staleToken });
     before = await counts();
-    const stepUp = await ctx.put(stale, levelBody('sales_staff', 'view'));
+    const stepUp = await ctx.put(stale, levelBody('sales_staff', 'view', pre));
     assertRefusal(stepUp, 403, 'step_up_required', 'a stale sign-in');
     assert.equal(ctx.reason(stepUp), 'recent_auth_required', 'a stale sign-in');
     await assertDelta(before, { ...NOTHING, L: 0 }, 'a stale sign-in');
@@ -1226,10 +1287,10 @@ test('M7RLH-06: non-owner editors, a store-scope owner and another tenant\'s own
     // A recent sign-in edits: one record, one completion, one tenant-scope audit record naming the edit and the owner's
     // own words (trimmed), no subject tenant, no metadata, no outbox event.
     const key = randomUUID();
-    const body = levelBody('sales_staff', 'view', `  ${REASON} before the audit  `);
+    const body = levelBody('sales_staff', 'view', pre, `  ${REASON} before the audit  `);
     before = await counts();
     const first = await ctx.put(o, body, { key });
-    editedOf(first, 'sales_staff', 'view', 'the admitted edit');
+    editedOf(first, 'sales_staff', 'view', 'the admitted edit', { version: 1 });
     await assertDelta(before, { ...EDIT, L: 1 }, 'the admitted edit');
     const audits = await owner`select scope_type, tenant_id, store_id, required_permission, decision, reason_code, human_readable_reason,
         subject_tenant_id, metadata from public.audit_event where action_id = ${EDIT_ACTION} and actor_internal_user_id = ${boss.id}`;
@@ -1243,15 +1304,18 @@ test('M7RLH-06: non-owner editors, a store-scope owner and another tenant\'s own
     // The same key and body: the recorded 200, byte for byte, marked a replay; no second audit record.
     before = await counts();
     const again = await ctx.put(o, body, { key });
-    editedOf(again, 'sales_staff', 'view', 'the replay', { replayed: true });
+    editedOf(again, 'sales_staff', 'view', 'the replay', { replayed: true, version: 1 });
     assert.equal(again.body, first.body, 'the recorded body, byte for byte');
     // The same key, another body: the conflict policy, nothing written, the level as it was.
-    assertRefusal(await ctx.put(o, levelBody('sales_staff', 'none'), { key }), 422, 'idempotency_key_reused', 'the same key, another body');
+    assertRefusal(await ctx.put(o, levelBody('sales_staff', 'none', pre), { key }), 422, 'idempotency_key_reused', 'the same key, another body');
+    // The same key asserting the version its own edit moved to: another request, so another key (422), never a second edit.
+    assertRefusal(await ctx.put(o, levelBody('sales_staff', 'view', { tenant, version: 1 }, `  ${REASON} before the audit  `), { key }), 422,
+      'idempotency_key_reused', 'the same key, a newer version asserted');
     await assertDelta(before, { ...NOTHING, L: 0 }, 'replay and conflict');
     assert.equal(await levelOf(tenant, 'sales_staff'), 'view', 'the conflict changed nothing');
 
     // Refused before any key: the audience, the Host, the key itself, Origin, CSRF and the size cap.
-    const edited = JSON.stringify(levelBody('sales_staff', 'none'));
+    const edited = JSON.stringify(levelBody('sales_staff', 'none', await preOf(tenant, 'sales_staff')));
     const csrf = randomBytes(32).toString('base64url');
     before = await counts();
     for (const [label, request, status, error, reason] of [
@@ -1294,8 +1358,9 @@ test('M7RLH-07: an audit INSERT that raises rolls a create and an edit back whol
     for (const [label, when, request, retry] of [
       ['a create', CREATE_AUDIT, (key) => ctx.post(s, { name: nameOf('m7rlh07 fault create') }, { key }),
         (key) => ctx.post(s, { name: nameOf('m7rlh07 fault create') }, { key })],
-      ['an edit', EDIT_AUDIT, (key) => ctx.put(o, levelBody('sales_staff', 'none'), { key }),
-        (key) => ctx.put(o, levelBody('sales_staff', 'none'), { key })],
+      // The same body both times: nothing committed, so the version the draft asserts is still the one it read.
+      ['an edit', EDIT_AUDIT, async (key) => ctx.put(o, levelBody('sales_staff', 'none', await preOf(tenant, 'sales_staff')), { key }),
+        async (key) => ctx.put(o, levelBody('sales_staff', 'none', await preOf(tenant, 'sales_staff')), { key })],
     ]) {
       const key = randomUUID();
       const levelBefore = await levelOf(tenant, 'sales_staff');
@@ -1334,10 +1399,11 @@ test('M7RLH-07: an audit INSERT that raises rolls a create and an edit back whol
 
     // The same for an edit: the level lands with its audit record and completion, and the retry replays the 200.
     const editKey = randomUUID();
+    const editBody = levelBody('sales_staff', 'view', await preOf(tenant, 'sales_staff'));
     before = await counts();
     trap = loseCommitAnswer(ctx.relay);
     try {
-      reply = await ctx.put(o, levelBody('sales_staff', 'view'), { key: editKey });
+      reply = await ctx.put(o, editBody, { key: editKey });
     } finally {
       trap.release();
     }
@@ -1347,7 +1413,8 @@ test('M7RLH-07: an audit INSERT that raises rolls a create and an edit back whol
     let level;
     for (const until = Date.now() + 5_000; level !== 'view' && Date.now() < until; await delay(50)) level = await levelOf(tenant, 'sales_staff');
     assert.equal(level, 'view', 'what committed becomes visible');
-    editedOf(await ctx.put(o, levelBody('sales_staff', 'view'), { key: editKey }), 'sales_staff', 'view', 'the edit\'s retry', { replayed: true });
+    editedOf(await ctx.put(o, editBody, { key: editKey }), 'sales_staff', 'view', 'the edit\'s retry', { replayed: true, version: 1 });
+    assert.equal(await versionOf(tenant, 'sales_staff'), 1, 'the version moved once');
     await assertDelta(before, { ...EDIT, L: 1 }, 'the edit landed whole, once');
   });
 });
@@ -1356,10 +1423,12 @@ test('M7RLH-07: an audit INSERT that raises rolls a create and an edit back whol
 // M7RLH-08: the runtime login directly — the residuals, witnessed
 // ===========================================================================
 
-test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff key creates on 020\'s routine with NO audit, completion or outbox row and is refused once the owner narrows; an owner key changes a level on 020\'s set routine with NO audit or completion; 019\'s create and 018\'s page_v2 are 42501; neither the customer table nor the role table takes a direct write', async () => {
+test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff key creates on 020\'s routine with NO audit, completion or outbox row and is refused once the owner narrows; an owner key changes a level on 021\'s set routine, given the tenant and version, with NO audit or completion; 020\'s set, 019\'s create and 018\'s page_v2 are 42501; neither the customer table nor the role table takes a direct write', async () => {
   // The residuals (design R10), recorded with their counts, not closed: the session key is the ONLY authority either
   // definer routine takes, and the runtime role (tmpos_app) can call both. The HTTP route adds the audit record, the
-  // idempotency record and its completion, the step-up and the reason; a direct call bypasses every one of them.
+  // idempotency record and its completion, the step-up and the reason; a direct call bypasses every one of them. Since
+  // M7A-CUSTOMERS-P4 the edit routine the runtime role reaches is 021's, conditional on the tenant and version (DA-119,
+  // now preconditioned); 020's unconditional set is revoked from it.
   const { tenant, boss } = await shop('m7rlh08');
   const sales = await actor('m7rlh08-sales', [tenantGrant(tenant, 'sales_staff')]);
   const [{ membership_id: salesGrant }] = await owner`select membership_id from user_membership where internal_user_id = ${sales.id}`;
@@ -1385,21 +1454,37 @@ test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff ke
       assert.equal(none.length, 0, 'the narrowed key: no row');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'the narrowed key');
 
-      // (3) A live OWNER key on 020's set routine changes the level with no audit record, reason, step-up or completion.
+      // (3) A live OWNER key on 021's set routine, given the tenant and the current version, changes the level with no audit
+      //     record, reason, step-up or completion; the version moves as for any edit.
       before = await counts();
-      const set = await runtime`select * from tmpos_role.m7a_role_level_set(${o.key}::text, 'sales_staff'::text, 'customers'::text, 'create'::text)`;
-      assert.deepEqual(set.map((r) => ({ ...r })), [{ o_tenant_id: tenant, o_actor_id: boss.id, o_membership_id: bossGrant, o_level: 'create' }],
-        'the owner key\'s own tenant, actor and grant');
-      assert.equal(await levelOf(tenant, 'sales_staff'), 'create', 'the level changed');
+      const version = await versionOf(tenant, 'sales_staff');
+      const set = await runtime`select * from tmpos_role_edit.m7a_role_level_set_v2(${o.key}::text, 'sales_staff'::text, 'customers'::text,
+        'create'::text, ${tenant}::uuid, ${String(version)}::bigint)`;
+      assert.deepEqual(set.map((r) => ({ ...r })), [{
+        o_outcome: 'applied', o_tenant_id: tenant, o_actor_id: boss.id, o_membership_id: bossGrant, o_level: 'create', o_version: String(version + 1),
+      }], 'the owner key\'s own tenant, actor and grant, at the next version');
+      assert.deepEqual([await levelOf(tenant, 'sales_staff'), await versionOf(tenant, 'sales_staff')], ['create', version + 1], 'the level changed');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'RESIDUAL: a direct edit writes no audit record and no completion');
+      // The same key asserting a stale version, or another tenant: a precondition row, nothing written.
+      for (const [label, assertedTenant, assertedVersion, outcome] of [
+        ['a stale version', tenant, version, 'version_conflict'], ['another tenant', randomUUID(), version + 1, 'tenant_mismatch'],
+      ]) {
+        const refused = await runtime`select * from tmpos_role_edit.m7a_role_level_set_v2(${o.key}::text, 'sales_staff'::text, 'customers'::text,
+          'full'::text, ${assertedTenant}::uuid, ${String(assertedVersion)}::bigint)`;
+        assert.deepEqual(refused.map((r) => r.o_outcome), [outcome], label);
+        assert.deepEqual([await levelOf(tenant, 'sales_staff'), await versionOf(tenant, 'sales_staff')], ['create', version + 1], `${label}: unchanged`);
+      }
       // A non-owner key on the same routine: no row, the level unchanged.
-      const notOwner = await runtime`select * from tmpos_role.m7a_role_level_set(${s.key}::text, 'sales_staff'::text, 'customers'::text, 'full'::text)`;
+      const notOwner = await runtime`select * from tmpos_role_edit.m7a_role_level_set_v2(${s.key}::text, 'sales_staff'::text, 'customers'::text,
+        'full'::text, ${tenant}::uuid, ${String(version + 1)}::bigint)`;
       assert.equal(notOwner.length, 0, 'a sales_staff key edits nothing');
       assert.equal(await levelOf(tenant, 'sales_staff'), 'create', 'the level unchanged');
 
       // (4) The routines that decided from the role NAME are out of the runtime role's reach, and so is every table.
       before = await counts();
       for (const [label, query] of [
+        // M7A-CUSTOMERS-P4: 020's unconditional set is revoked from the runtime role by 021.
+        ['020\'s set', runtime`select * from tmpos_role.m7a_role_level_set(${o.key}::text, 'sales_staff'::text, 'customers'::text, 'full'::text)`],
         ['019\'s create', runtime`select * from tmpos_customer_write.m7a_customer_create(${s.key}::text, ${randomUUID()}::uuid, ${name}::text)`],
         ['018\'s page_v2', runtime`select * from tmpos_mint.m7a_customer_page_v2(${s.key}::text, null::uuid, 10)`],
         ['INSERT on the customer table', runtime`insert into tmpos_customer.customer (customer_id, tenant_id, name) values (${randomUUID()}, ${tenant}, ${name})`],
@@ -1407,7 +1492,10 @@ test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff ke
         ['UPDATE on the role table', runtime`update tmpos_role.tenant_role_level set level = 'full' where tenant_id = ${tenant}`],
         ['INSERT on the role table', runtime`insert into tmpos_role.tenant_role_level (tenant_id, role_id, domain, level, updated_at)
           values (${tenant}, 'technician', 'customers', 'full', pg_catalog.now())`],
+        ['SELECT on the version table', runtime`select * from tmpos_role_edit.role_level_version`],
+        ['UPDATE on the version table', runtime`update tmpos_role_edit.role_level_version set version = 1 where tenant_id = ${tenant}`],
       ]) assert.equal(await codeOf(query), '42501', label);
+      assert.equal(await levelOf(tenant, 'sales_staff'), 'create', 'the level unchanged by 020\'s refused set');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'nothing written by a refused call');
       assert.equal(await levelOf(tenant, 'technician'), undefined, 'no role row written directly');
     } finally {
@@ -1429,11 +1517,11 @@ const LAPSE = Object.freeze({ park: 900, send: 600, release: 150 });
 
 /**
  * M7RLH-05's shape on LAPSE's schedule: a sales_staff create (instance A, session `s`) parks at its customer INSERT holding
- * the role row FOR SHARE; the owner's edit to View (instance B, session `o`, Idempotency-Key `key`) is observed waiting on the
- * create INSIDE 020's set routine; at at + release the database clock is read and the lever released. Answers both replies,
+ * the role row FOR SHARE; the owner's edit to View (instance B, session `o`, Idempotency-Key `key`, asserting `pre`) is
+ * observed waiting on the create INSIDE 021's set routine; at at + release the database clock is read and the lever released. Answers both replies,
  * the create's name, the locks observed and the moments (epoch ms) each step happened.
  */
-async function editWaitsOnParkedCreate(a, b, s, o, label, at, key) {
+async function editWaitsOnParkedCreate(a, b, s, o, label, at, key, pre) {
   const name = nameOf(`park ${label}`);
   const out = { name };
   await withTrigger('tmpos_customer.customer', namedLike(`park ${label}`), 'park', async () => {
@@ -1447,10 +1535,10 @@ async function editWaitsOnParkedCreate(a, b, s, o, label, at, key) {
       out.held = await roleTableLocks(createPid);
       await delay(Math.max(0, at - LAPSE.send - Date.now()));
       out.sentAt = Date.now();
-      editReq = quietly(b.put(o, levelBody('sales_staff', 'view'), { key }));
+      editReq = quietly(b.put(o, levelBody('sales_staff', 'view', pre), { key }));
       editReq.then(() => { out.repliedAt = Date.now(); }, () => {});
-      const editPid = waitingPid(await blockedOrSettled(editReq, { by: createPid, query: /tmpos_role\.m7a_role_level_set/ }),
-        `${label}: the edit waiting on the create inside 020's set routine`);
+      const editPid = waitingPid(await blockedOrSettled(editReq, { by: createPid, query: /tmpos_role_edit\.m7a_role_level_set_v2/ }),
+        `${label}: the edit waiting on the create inside 021's set routine`);
       out.observedAt = Date.now();
       out.editLocks = await waitingLocks(editPid);
       await delay(Math.max(0, at + LAPSE.release - Date.now()));
@@ -1471,7 +1559,7 @@ const timelineOf = (r, at) => `relative to ${at}: edit sent ${r.sentAt - at} ms,
 /** The stored level for display: the catalog default when the lock row holds NULL, 'no row' when there is none. */
 const shownLevel = (level) => (level === null ? 'default' : level === undefined ? 'no row' : level);
 
-test('M7RLH-09: two entries on one database — the owner\'s recent sign-in goes stale WHILE its edit waits inside 020\'s set routine for a create holding the role row; the create commits (201) and the edit is refused after the routine answered (503): level still the default, no edit audit record, no completion, its lease kept (409 for the same key within it)', async () => {
+test('M7RLH-09: two entries on one database — the owner\'s recent sign-in goes stale WHILE its edit waits inside 021\'s set routine for a create holding the role row; the create commits (201) and the edit is refused after the routine answered (503): level still the default, no edit audit record, no completion, its lease kept (409 for the same key within it)', async () => {
   const { tenant, boss } = await shop('m7rlh09');
   const sales = await actor('m7rlh09-sales', [tenantGrant(tenant, 'sales_staff')]);
   await withEntry({ kernelModule: SMALL_KERNEL }, (a) => withEntry({ kernelModule: SMALL_KERNEL }, async (b) => {
@@ -1493,9 +1581,10 @@ test('M7RLH-09: two entries on one database — the owner\'s recent sign-in goes
     assert.equal(Number(bound), authTimeSec * 1000, 'the session binds the provider\'s authentication time');
 
     const key = randomUUID();
+    const pre = await preOf(tenant, 'sales_staff');
     const leasesBefore = await openLeases();
     const before = await counts();
-    const r = await editWaitsOnParkedCreate(a, b, s, o, 'm7rlh09', deadline, key);
+    const r = await editWaitsOnParkedCreate(a, b, s, o, 'm7rlh09', deadline, key, pre);
     const timeline = timelineOf(r, deadline);
     // The schedule held: the edit was sent before the deadline and reached 020's routine (so the authorizer and the
     // revalidator both judged the sign-in recent); the deadline had passed on the DATABASE clock before the wait ended.
@@ -1523,16 +1612,17 @@ test('M7RLH-09: two entries on one database — the owner\'s recent sign-in goes
 
     // The same key from the stale session: the step-up check refuses before the key is touched.
     let after = await counts();
-    const stale = await b.put(o, levelBody('sales_staff', 'view'), { key });
+    const stale = await b.put(o, levelBody('sales_staff', 'view', pre), { key });
     assertRefusal(stale, 403, 'step_up_required', `the same key from the stale session (${stale.status})`);
     await assertDelta(after, { ...NOTHING, L: 0 }, 'the same key from the stale session');
     // The same key and body from a recent sign-in of the same owner, within the lease: in progress, never planned twice.
     const fresh = await signIn(b, boss);
     after = await counts();
-    const retry = await b.put(fresh, levelBody('sales_staff', 'view'), { key });
+    const retry = await b.put(fresh, levelBody('sales_staff', 'view', pre), { key });
     assertRefusal(retry, 409, 'request_in_progress', `the same key within its lease (${retry.status})`);
     await assertDelta(after, { ...NOTHING, L: 0 }, 'the same key within its lease');
     assert.equal(shownLevel(await levelOf(tenant, 'sales_staff')), 'default', 'the level is still the default');
+    assert.equal(await versionOf(tenant, 'sales_staff'), 0, 'and its version never moved');
   }));
 });
 
@@ -1546,13 +1636,13 @@ test('M7RLH-09b: the control — the same race with the owner\'s recent sign-in 
     const o = await signIn(b, boss); // authenticated now: the deadline is RECENT_AUTH_MAX_AGE_MS away
     const at = Date.now() + 1_500;
     const before = await counts();
-    const r = await editWaitsOnParkedCreate(a, b, s, o, 'm7rlh09b', at, randomUUID());
+    const r = await editWaitsOnParkedCreate(a, b, s, o, 'm7rlh09b', at, randomUUID(), await preOf(tenant, 'sales_staff'));
     const delta = await deltaSince(before);
     const observed = { create: r.created.status, edit: r.edited.status, level: shownLevel(await levelOf(tenant, 'sales_staff')), delta };
     assert.deepEqual(observed, { create: 201, edit: 200, level: 'view', delta: { C: 1, A: 1, E: 1, K: 2, O: 0, L: 2 } },
       `observed ${JSON.stringify(observed)}; edit answered ${r.edited.body} — ${timelineOf(r, at)}`);
     createdOf(r.created, r.name, 'the create commits first');
-    editedOf(r.edited, 'sales_staff', 'view', 'the edit commits after it');
+    editedOf(r.edited, 'sales_staff', 'view', 'the edit commits after it', { version: 1 });
   }));
 });
 
@@ -1579,12 +1669,14 @@ test('M7RL-G01: the owner reads the built-in Customers levels back — every cat
     await edit(ctx, o, 'technician', 'create');
     await edit(ctx, o, 'manager', 'full');
     const edited = { sales_staff: 'view', technician: 'create', manager: 'full' };
-    readBackOf(await ctx.levels(o), tenant, edited, 'after the edits');
-    readBackOf(await ctx.levels(await signIn(ctx, boss)), tenant, edited, 'a second session of the owner');
+    // M7A-CUSTOMERS-P4: each role edited once is at version 1; the owner's record carries none.
+    const versions = { sales_staff: 1, technician: 1, manager: 1 };
+    readBackOf(await ctx.levels(o), tenant, edited, 'after the edits', versions);
+    readBackOf(await ctx.levels(await signIn(ctx, boss)), tenant, edited, 'a second session of the owner', versions);
     // Reading is not the sensitive change: a sign-in the edit would refuse as stale still reads.
-    readBackOf(await ctx.levels(await signIn(ctx, boss, { token: boss.staleToken })), tenant, edited, 'a stale sign-in reads');
+    readBackOf(await ctx.levels(await signIn(ctx, boss, { token: boss.staleToken })), tenant, edited, 'a stale sign-in reads', versions);
     const before = await counts();
-    readBackOf(await ctx.levels(o), tenant, edited, 'once more');
+    readBackOf(await ctx.levels(o), tenant, edited, 'once more', versions);
     await assertDelta(before, { ...NOTHING, L: 0 }, 'a read writes no customer, audit record, key or event');
   });
 });
@@ -1633,10 +1725,10 @@ test('M7RL-G03: each owner reads its own tenant alone — tenant A\'s edit never
     await edit(ctx, ob, 'technician', 'edit');
     const ra = await ctx.levels(oa);
     const rb = await ctx.levels(ob);
-    readBackOf(ra, a.tenant, { sales_staff: 'none' }, 'tenant A');
-    readBackOf(rb, b.tenant, { technician: 'edit' }, 'tenant B');
+    readBackOf(ra, a.tenant, { sales_staff: 'none' }, 'tenant A', { sales_staff: 1 });
+    readBackOf(rb, b.tenant, { technician: 'edit' }, 'tenant B', { technician: 1 });
     assert.ok(!ra.body.includes(b.tenant) && !rb.body.includes(a.tenant), 'neither answer names the other tenant');
-    readBackOf(await ctx.levels(oa, { headers: { 'x-tenant-id': b.tenant } }), a.tenant, { sales_staff: 'none' }, 'a header is no authority');
+    readBackOf(await ctx.levels(oa, { headers: { 'x-tenant-id': b.tenant } }), a.tenant, { sales_staff: 'none' }, 'a header is no authority', { sales_staff: 1 });
   });
 });
 
@@ -1649,13 +1741,13 @@ test('M7RL-G04: a live owner session demoted (or its grant suspended) after logi
     // A level the edit accepts but the shop's grid never offers: stored, and read back as stored.
     await edit(ctx, o, 'manager', 'manage');
     assert.equal(await levelOf(tenant, 'manager'), 'manage', 'stored as manage (control)');
-    readBackOf(await ctx.levels(o), tenant, { manager: 'manage' }, 'a stored manage round-trips');
+    readBackOf(await ctx.levels(o), tenant, { manager: 'manage' }, 'a stored manage round-trips', { manager: 1 });
     const before = await counts();
     for (const [label, who, session, change] of [
       ['the owner demoted to manager', boss, o, () => owner`update user_membership set role_id = 'manager' where internal_user_id = ${boss.id}`],
       ['the owner grant suspended', suspended, await signIn(ctx, suspended), () => owner`update user_membership set status = 'suspended' where internal_user_id = ${suspended.id}`],
     ]) {
-      readBackOf(await ctx.levels(session), tenant, { manager: 'manage' }, `${label}: the live owner session reads (control)`);
+      readBackOf(await ctx.levels(session), tenant, { manager: 'manage' }, `${label}: the live owner session reads (control)`, { manager: 1 });
       await change();
       const after = await ctx.levels(session);
       // The chain ends a session whose standing changed after login (401), as M7CC-03 proves for the create.
@@ -1673,6 +1765,89 @@ test('M7RL-G04: a live owner session demoted (or its grant suspended) after logi
     noStore(anonymous, 'no session');
     await assertDelta(before, { ...NOTHING, L: 0 }, 'refused reads write nothing');
     assert.equal(await levelOf(tenant, 'manager'), 'manage', 'the stored level is untouched by the refusals');
+  });
+});
+
+// ===========================================================================
+// M7RLH-10 (M7A-CUSTOMERS-P4): the precondition through the route
+// ===========================================================================
+
+test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write_conflict — nothing written, the lease kept, the same key decided afresh once it lapses; a committed key replays after a later edit; default -> None -> Create moves the version twice, so the first read\'s draft stays refused', async () => {
+  const { tenant, boss } = await shop('m7rlh10');
+  const elsewhere = await shop('m7rlh10-elsewhere');
+  const sales = await actor('m7rlh10-sales', [tenantGrant(tenant, 'sales_staff')]);
+  await withEntry({}, async (ctx) => {
+    const o = await signIn(ctx, boss);
+    const s = await signIn(ctx, sales);
+    /** A precondition refusal: the chain's own 409, logged as the store's answer, never a recorded body or a replay. */
+    const conflictOf = (reply, label) => {
+      assertRefusal(reply, 409, 'write_conflict', label);
+      assert.equal(ctx.reason(reply), 'transaction_precondition_failed', label);
+      assert.equal(reply.headers['idempotent-replayed'], undefined, `${label}: a decision, not a replay`);
+    };
+    const [{ n: elsewhereEditsBefore }] = await owner`select count(*)::int as n from public.audit_event where action_id = ${EDIT_ACTION} and tenant_id = ${elsewhere.tenant}`;
+
+    // (a) The first read's draft (version 0), sent after another edit moved the role to version 1: refused, nothing written.
+    const firstRead = JSON.parse((await ctx.levels(o)).body);
+    const stalePre = { tenant: firstRead.tenant, version: firstRead.roles.find((r) => r.roleId === 'sales_staff').version };
+    assert.deepEqual(stalePre, { tenant, version: 0 }, 'a never-edited role reads version 0');
+    const keyA = randomUUID();
+    const bodyA = levelBody('sales_staff', 'none', stalePre);
+    const committed = await ctx.put(o, bodyA, { key: keyA });
+    editedOf(committed, 'sales_staff', 'none', 'the first edit commits at version 1', { version: 1 });
+    const staleBody = levelBody('sales_staff', 'create', stalePre);
+    const staleKey = randomUUID();
+    const leasesBefore = await openLeases();
+    let before = await counts();
+    conflictOf(await ctx.put(o, staleBody, { key: staleKey }), 'the older draft');
+    await assertDelta(before, { ...NOTHING, L: 1 }, 'the older draft: no level, audit record or completion — only its lease');
+    assert.deepEqual([await levelOf(tenant, 'sales_staff'), await versionOf(tenant, 'sales_staff')], ['none', 1], 'None stands at version 1');
+    assertRefusal(await ctx.post(s, { name: nameOf('m7rlh10 after the stale draft') }), 403, 'forbidden', 'Create was not restored');
+    const lease = [...(await openLeases())].filter((scope) => !leasesBefore.has(scope));
+    assert.equal(lease.length, 1, 'the refused draft left exactly its lease: unsealed, so the key is not terminal');
+    // The same key and body within the lease: in progress, never planned twice.
+    before = await counts();
+    assertRefusal(await ctx.put(o, staleBody, { key: staleKey }), 409, 'request_in_progress', 'the same key within its lease');
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'the same key within its lease');
+    // The lease lapsed (moved into the past, as time would): the key is reclaimed and decided afresh — still stale, still 409.
+    await owner`update tmpos_internal.idempotency_record set lease_expires_at = pg_catalog.clock_timestamp() - interval '1 second'
+      where scope = ${lease[0]}`;
+    before = await counts();
+    const reclaimed = await ctx.put(o, staleBody, { key: staleKey });
+    conflictOf(reclaimed, 'the same key once its lease lapsed');
+    assert.equal(ctx.records(reclaimed).filter((r) => r.event === 'idempotency_reclaimed').length, 1, 'the runtime reclaimed the lapsed lease');
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'decided afresh on its existing record: nothing written');
+
+    // (b) A draft asserting ANOTHER tenant (well formed: the other store's id) at the current version: refused, and neither
+    //     tenant changes — the session's own tenant is never swapped for the asserted one, nor the asserted one written.
+    const foreign = levelBody('sales_staff', 'create', { tenant: elsewhere.tenant, version: 1 });
+    before = await counts();
+    conflictOf(await ctx.put(o, foreign), 'another tenant asserted');
+    await assertDelta(before, { ...NOTHING, L: 1 }, 'another tenant asserted: its lease only');
+    assert.deepEqual([await levelOf(tenant, 'sales_staff'), await versionOf(tenant, 'sales_staff')], ['none', 1], 'this tenant unchanged');
+    assert.deepEqual([await levelOf(elsewhere.tenant, 'sales_staff'), await versionOf(elsewhere.tenant, 'sales_staff')], [undefined, 0], 'the other tenant unchanged');
+    const [{ n: elsewhereEdits }] = await owner`select count(*)::int as n from public.audit_event where action_id = ${EDIT_ACTION} and tenant_id = ${elsewhere.tenant}`;
+    assert.equal(elsewhereEdits, elsewhereEditsBefore, 'no edit audit record in the other tenant');
+
+    // (c) Restoring the catalog default is an edit like any other: None (1) -> Create (2). The version-1 draft of View, made
+    //     before the restore, is refused, and Create — the level the owner restored — stands.
+    const beforeRestore = await preOf(tenant, 'sales_staff');
+    await edit(ctx, o, 'sales_staff', 'create', 'the owner restores the default');
+    assert.deepEqual([await levelOf(tenant, 'sales_staff'), await versionOf(tenant, 'sales_staff')], ['create', 2], 'the default word stored, at version 2');
+    before = await counts();
+    conflictOf(await ctx.put(o, levelBody('sales_staff', 'view', beforeRestore)), 'the draft from before the restore');
+    conflictOf(await ctx.put(o, levelBody('sales_staff', 'view', stalePre)), 'the first read\'s draft, once more');
+    await assertDelta(before, { ...NOTHING, L: 2 }, 'the old drafts: their leases only');
+    readBackOf(await ctx.levels(o), tenant, { sales_staff: 'create' }, 'Create stands, stored, at version 2', { sales_staff: 2 });
+    // The first edit's key, once a later edit superseded it: it replays its own sealed 200 — None at version 1, byte for
+    // byte, writing nothing — while the directory shows Create at version 2.
+    before = await counts();
+    const replay = await ctx.put(o, bodyA, { key: keyA });
+    editedOf(replay, 'sales_staff', 'none', 'the committed key replays after the version-2 edit', { replayed: true, version: 1 });
+    assert.equal(replay.body, committed.body, 'byte for byte');
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'a replay writes nothing');
+    readBackOf(await ctx.levels(o), tenant, { sales_staff: 'create' }, 'the directory after the replay: Create at version 2', { sales_staff: 2 });
+    createdOf(await ctx.post(s, { name: nameOf('m7rlh10 restored') }), nameOf('m7rlh10 restored'), 'sales_staff creates again');
   });
 });
 
@@ -1721,7 +1896,7 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its nine routes — the
       let before = await counts();
       await edit(ctx, o, 'sales_staff', 'view', 'compiled: the owner\'s edit');
       await assertDelta(before, { ...EDIT, L: 1 }, 'compiled: the edit');
-      readBackOf(await ctx.levels(o), tenant, { sales_staff: 'view' }, 'compiled: the owner reads the edit back');
+      readBackOf(await ctx.levels(o), tenant, { sales_staff: 'view' }, 'compiled: the owner reads the edit back', { sales_staff: 1 });
       before = await counts();
       assertRefusal(await ctx.post(s, { name: nameOf('m7rlh-c1 narrowed') }), 403, 'forbidden', 'compiled: the narrowed role');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'compiled: the narrowed role');

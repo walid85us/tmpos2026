@@ -1,8 +1,9 @@
 // M7A-CUSTOMERS-P3-R2 — the shop's role-levels client against a scripted fetch: the exact read contract, the PUT it
-// sends, and the one outcome each answer maps to.
+// sends, and the one outcome each answer maps to. M7A-CUSTOMERS-P4: each editable level's version, the six-field PUT
+// with its tenant and version preconditions, the committed version in the 200, and the one 409 decoder.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ROLE_LEVELS_PATH, createRoleLevelsClient, parseRoleLevels } from './roleLevelsClient';
+import { ROLE_LEVELS_PATH, conflictKind, createRoleLevelsClient, parseRoleLevels } from './roleLevelsClient';
 
 const TENANT = '0b6f1d2e-3c4a-4b5c-8d6e-7f8091a2b3c4';
 // A synthetic v4 Idempotency-Key, assembled at run time so no key-shaped literal sits in the source (secret scanning).
@@ -16,10 +17,10 @@ const LEVELS = () => ({
   tenant: TENANT,
   domain: 'customers',
   roles: [
-    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
-    { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true },
-    { roleId: 'technician', level: 'view', defaultLevel: 'view', source: 'default', editable: true },
-    { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true },
+    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
+    { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true, version: 0 },
+    { roleId: 'technician', level: 'view', defaultLevel: 'view', source: 'default', editable: true, version: 2 },
+    { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true, version: 7 },
   ],
 });
 
@@ -40,6 +41,7 @@ test('RLC-01. the read contract is accepted exactly, in display order, and froze
   assert.ok(parsed !== null);
   assert.equal(parsed.tenant, TENANT);
   assert.deepEqual(parsed.roles.map((r) => r.roleId), ['store_owner', 'manager', 'technician', 'sales_staff']);
+  assert.deepEqual(parsed.roles.map((r) => r.version), [null, 0, 2, 7]);
   assert.ok(Object.isFrozen(parsed.roles) && Object.isFrozen(parsed.roles[0]));
 });
 
@@ -56,6 +58,14 @@ test('RLC-02. anything but the exact contract is refused', () => {
     (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], source: 'default' }] }), // default must equal its level
     (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], secret: 'x' }] }),
     (b) => ({ ...b, roles: [{ ...b.roles[0], level: 'view' }, ...b.roles.slice(1)] }), // store_owner is fixed Full
+    // M7A-CUSTOMERS-P4: an editable version is a safe integer >= 0; store_owner's is null; the key is required.
+    (b) => ({ ...b, roles: [{ ...b.roles[0], version: 0 }, ...b.roles.slice(1)] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], version: null }] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], version: -1 }] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], version: 1.5 }] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], version: '7' }] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), { ...b.roles[3], version: Number.MAX_SAFE_INTEGER + 1 }] }),
+    (b) => ({ ...b, roles: [...b.roles.slice(0, 3), (({ version: _v, ...rest }) => rest)(b.roles[3])] }),
     () => null,
     () => [],
   ];
@@ -84,14 +94,14 @@ test('RLC-03. read maps 200/401/403 and everything else to unavailable; same-ori
   for (const [reply, kind] of cases) assert.equal((await once(reply).client.read()).kind, kind);
 });
 
-test('RLC-04. put sends exactly the four-field body with the CSRF, intent and Idempotency-Key headers', async () => {
-  const net = once(json(200, { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view' } }));
-  const answer = await net.client.put({ roleId: 'sales_staff', level: 'view', reason: 'Narrowing access for audit' }, KEY, CSRF);
-  assert.deepEqual(answer, { kind: 'ok', level: 'view' });
+test('RLC-04. put sends exactly the six-field body (tenant and version preconditions last) with the CSRF, intent and Idempotency-Key headers', async () => {
+  const net = once(json(200, { roleLevel: { roleId: 'sales_staff', domain: 'customers', level: 'view', version: 8 } }));
+  const answer = await net.client.put({ roleId: 'sales_staff', level: 'view', reason: 'Narrowing access for audit', expectedTenant: TENANT, expectedVersion: 7 }, KEY, CSRF);
+  assert.deepEqual(answer, { kind: 'ok', level: 'view', version: 8 });
   const { init, headers, url } = net.sent[0];
   assert.equal(url, ROLE_LEVELS_PATH);
   assert.equal(init.method, 'PUT');
-  assert.equal(init.body, '{"roleId":"sales_staff","domain":"customers","level":"view","reason":"Narrowing access for audit"}');
+  assert.equal(init.body, `{"roleId":"sales_staff","domain":"customers","level":"view","reason":"Narrowing access for audit","expectedTenant":"${TENANT}","expectedVersion":7}`);
   assert.equal(headers.get('content-type'), 'application/json');
   assert.equal(headers.get('x-tmpos-csrf'), '1');
   assert.equal(headers.get('x-tmpos-session-csrf'), CSRF);
@@ -100,22 +110,34 @@ test('RLC-04. put sends exactly the four-field body with the CSRF, intent and Id
   assert.equal(init.credentials, 'include');
 });
 
-test('RLC-05. each answer maps to one outcome; only an exact 200 for this change is ok', async () => {
-  const change = { roleId: 'technician', level: 'none', reason: 'Technicians no longer see customers' } as const;
+test('RLC-05. each answer maps to one outcome; only an exact 200 for this change at expectedVersion + 1 is ok', async () => {
+  const change = { roleId: 'technician', level: 'none', reason: 'Technicians no longer see customers', expectedTenant: TENANT, expectedVersion: 2 } as const;
+  const done = { roleId: 'technician', domain: 'customers', level: 'none', version: 3 };
   const cases: Array<[Response | Error, unknown]> = [
-    [json(200, { roleLevel: { roleId: 'technician', domain: 'customers', level: 'view' } }), { kind: 'unknown', responded: true }],
-    [json(200, { roleLevel: { roleId: 'technician', domain: 'customers', level: 'none' }, extra: 1 }), { kind: 'unknown', responded: true }],
-    [json(200, { roleLevel: { roleId: 'manager', domain: 'customers', level: 'none' } }), { kind: 'unknown', responded: true }], // another role
-    [json(200, { roleLevel: { roleId: 'technician', domain: 'inventory', level: 'none' } }), { kind: 'unknown', responded: true }], // another domain
-    [json(200, { roleLevel: { roleId: 'technician', domain: 'customers', level: 'none', tenant: 'x' } }), { kind: 'unknown', responded: true }],
-    [json(200, { roleId: 'technician', domain: 'customers', level: 'none' }), { kind: 'unknown', responded: true }], // not wrapped
-    [json(200, { roleLevel: { roleId: 'technician', domain: 'customers', level: 'none' } }, 'text/plain'), { kind: 'unknown', responded: true }],
+    [json(200, { roleLevel: done }), { kind: 'ok', level: 'none', version: 3 }],
+    [json(200, { roleLevel: { ...done, level: 'view' } }), { kind: 'unknown', responded: true }],
+    [json(200, { roleLevel: done, extra: 1 }), { kind: 'unknown', responded: true }],
+    [json(200, { roleLevel: { ...done, roleId: 'manager' } }), { kind: 'unknown', responded: true }], // another role
+    [json(200, { roleLevel: { ...done, domain: 'inventory' } }), { kind: 'unknown', responded: true }], // another domain
+    [json(200, { roleLevel: { ...done, tenant: 'x' } }), { kind: 'unknown', responded: true }],
+    [json(200, { roleLevel: { roleId: 'technician', domain: 'customers', level: 'none' } }), { kind: 'unknown', responded: true }], // no version
+    [json(200, { roleLevel: { ...done, version: 2 } }), { kind: 'unknown', responded: true }], // not the committed version
+    [json(200, { roleLevel: { ...done, version: 4 } }), { kind: 'unknown', responded: true }],
+    [json(200, { roleLevel: { ...done, version: '3' } }), { kind: 'unknown', responded: true }],
+    [json(200, done), { kind: 'unknown', responded: true }], // not wrapped
+    [json(200, { roleLevel: done }, 'text/plain'), { kind: 'unknown', responded: true }],
     [json(400, { error: 'invalid_request' }), { kind: 'invalid' }],
     [json(413, { error: 'content_too_large' }), { kind: 'invalid' }],
     [json(401, { error: 'unauthenticated' }), { kind: 'signed-out' }],
     [json(403, { error: 'step_up_required' }), { kind: 'step-up-required' }],
     [json(403, { error: 'forbidden' }), { kind: 'denied' }],
     [json(409, { error: 'request_in_progress' }), { kind: 'in-progress' }],
+    [json(409, { error: 'write_conflict' }), { kind: 'conflict' }], // the sealed shape
+    [json(409, { error: 'write_conflict', requestId: 'r-1' }), { kind: 'conflict' }], // the runtime shape
+    [json(409, { error: 'write_conflict', requestId: 1 }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'write_conflict', detail: 'x' }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'invalid_state' }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'write_conflict' }, 'text/plain'), { kind: 'unknown', responded: true }],
     [json(422, { error: 'idempotency_key_reused' }), { kind: 'key-reused' }],
     [json(503, { error: 'service_unavailable' }), { kind: 'unknown', responded: true }],
     [json(429, { error: 'rate_limited' }), { kind: 'unknown', responded: true }],
@@ -128,8 +150,39 @@ test('RLC-06. a timeout or an aborted signal is an unknown outcome with no answe
   const hang = (_: RequestInfo | URL, init: RequestInit = {}): Promise<Response> =>
     new Promise((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
   const client = createRoleLevelsClient({ fetch: hang as typeof globalThis.fetch, timeoutMs: 5 });
-  assert.deepEqual(await client.put({ roleId: 'manager', level: 'edit', reason: 'Managers edit only now' }, KEY, CSRF), { kind: 'unknown', responded: false });
+  assert.deepEqual(await client.put({ roleId: 'manager', level: 'edit', reason: 'Managers edit only now', expectedTenant: TENANT, expectedVersion: 0 }, KEY, CSRF), { kind: 'unknown', responded: false });
   const aborted = new AbortController();
   aborted.abort();
   assert.equal((await client.read(aborted.signal)).kind, 'unavailable');
+});
+
+test('RLC-07. the one 409 decoder: write_conflict in the sealed or the runtime shape is a conflict; request_in_progress is in progress', () => {
+  assert.equal(conflictKind({ error: 'write_conflict' }), 'conflict');
+  assert.equal(conflictKind({ error: 'write_conflict', requestId: 'r-1' }), 'conflict');
+  assert.equal(conflictKind(JSON.parse('{"requestId":"r-2","error":"write_conflict"}')), 'conflict'); // key order is free
+  assert.equal(conflictKind({ error: 'request_in_progress' }), 'in-progress');
+  for (const body of [
+    { error: 'write_conflict', requestId: null }, { error: 'write_conflict', requestId: 7 }, { error: 'write_conflict', extra: true },
+    { error: 'idempotency_key_reused' }, { error: 'WRITE_CONFLICT' }, {}, null, 'write_conflict', ['write_conflict'],
+  ]) {
+    assert.equal(conflictKind(body), null, JSON.stringify(body));
+  }
+});
+
+test('RLC-08. the tenant is any canonical lowercase UUID, as the server accepts it — never another form', () => {
+  const nil = '00000000-0000-0000-0000-000000000000';
+  const anyVariant = '0b6f1d2e-3c4a-0b5c-cd6e-7f8091a2b3c4'; // version nibble 0, variant c: the server's rule accepts it
+  for (const tenant of [nil, anyVariant]) assert.equal(parseRoleLevels({ ...LEVELS(), tenant })?.tenant, tenant);
+  for (const tenant of [TENANT.toUpperCase(), `{${TENANT}}`, TENANT.replace(/-/g, ''), ` ${TENANT}`]) {
+    assert.equal(parseRoleLevels({ ...LEVELS(), tenant }), null, tenant);
+  }
+});
+
+test('RLC-09. request_in_progress passes the same key check as write_conflict: keys within {error, requestId}, requestId a string', () => {
+  assert.equal(conflictKind({ error: 'request_in_progress', requestId: 'r-3' }), 'in-progress');
+  for (const body of [
+    { error: 'request_in_progress', detail: 'x' }, { error: 'request_in_progress', requestId: 7 }, { error: 'request_in_progress', requestId: null },
+  ]) {
+    assert.equal(conflictKind(body), null, JSON.stringify(body));
+  }
 });

@@ -1,6 +1,6 @@
 // Phase 4.0 M7a — the PostgreSQL tenant role levels: the owner's durable edits of a built-in tenant role, read for every
 // tenant route decision and written by the one command that edits them (M7A-CUSTOMERS-P3-R1; G-IAM, G-PERSIST, DA-85;
-// migration 020, schema tmpos_role).
+// migration 020, schema tmpos_role — and since M7A-CUSTOMERS-P4 migration 021, schema tmpos_role_edit; DA-125).
 //
 // THE READ (readRoleLevels, createPostgresRoleLevels). For one tenant and one role, migration 020's SECURITY DEFINER
 // routine tmpos_role.m7a_role_levels answers the levels stored for it by domain — {} when nothing is stored, and then the
@@ -13,38 +13,48 @@
 // else — no row, two rows, a null, an array, another domain, a level outside the seven — is a FAULT, a throw the route
 // answers as a bounded 503, never a decision and never "no edits". The canonical decision then judges the value again.
 //
-// THE DIRECTORY READ (readRoleLevelDirectory, createPostgresRoleLevelDirectory; M7A-CUSTOMERS-P3-R2). For GET
-// /api/v1/roles/levels (server/runtime/roleLevelDirectory.ts): the stored Customers level of every editable role of one tenant
-// — the trusted scope's, never the request's — in ONE statement that calls 020's read once per role. The routine is STABLE, so
-// every call runs on that one statement's snapshot: the three levels are one moment's, never a mix of before and after an edit
-// (three statements in one READ COMMITTED transaction would each take their own). Each answer is judged exactly as above; a
-// role with nothing stored (or only 020's NULL lock row) is `stored: null`, and then it holds its catalog default, which the
-// tenant root adds (tenantTransactions.ts). Anything out of shape is the same bounded fault.
+// THE DIRECTORY READ (readRoleLevelDirectory, createPostgresRoleLevelDirectory; M7A-CUSTOMERS-P3-R2, P4). For GET
+// /api/v1/roles/levels (server/runtime/roleLevelDirectory.ts): the stored Customers level AND the version of every editable
+// role of one tenant — the trusted scope's, never the request's — in ONE statement: migration 021's STABLE definer routine
+// tmpos_role_edit.m7a_role_level_states, which reads 020's levels and 021's counters on that one statement's snapshot, so
+// the three levels and their versions are one moment's, never a mix of before and after an edit. Its answer must be exactly
+// a JSON array of three plain objects of exactly { roleId, level, version }, in EDITABLE_TENANT_ROLES order: roleId that
+// role, level null (nothing stored, or only 020's NULL lock row) or one of the seven level words, version a safe integer of
+// at least 0 (0: never edited since 021). Anything else is the same bounded fault. A role with nothing stored is
+// `stored: null`, and then it holds its catalog default, which the tenant root adds (tenantTransactions.ts).
 //
 // THE WRITE (ROLE_LEVEL_UPDATE_MUTATOR). The one business mutation the tenant store commits for PUT /api/v1/roles/levels
 // (server/runtime/roleLevelUpdate.ts), handed to the store in trusted source by the tenant transaction root alone. It runs
 // inside the command's transaction, after the idempotency fence and the tenant revalidator, and before the audit record and
-// the completion (postgresTransactionalStore.ts commit). ONE FIXED CALL to 020's definer routine tmpos_role.m7a_role_level_set,
-// whose ONE authority input is the presenting session's key — the key the revalidator just held on this transaction — from
-// which the routine derives the owner, their one tenant grant and the tenant, requires that grant to be the owner role's,
-// inserts the target role's lock row if it has none (a NULL level, deciding as the default), locks it FOR UPDATE and only
-// then writes the level (020's ordering against a racing customer command). The role, domain and level are the planner's
-// validated values; every value is bound as a parameter.
+// the completion (postgresTransactionalStore.ts commit). ONE FIXED CALL to 021's definer routine
+// tmpos_role_edit.m7a_role_level_set_v2 — 020's m7a_role_level_set with two preconditions — whose ONE authority input is the
+// presenting session's key — the key the revalidator just held on this transaction — from which the routine derives the
+// owner, their one tenant grant and the tenant, requires that grant to be the owner role's, and then: answers
+// 'tenant_mismatch' when that tenant is not the asserted one (before it inserts or locks anything, in either tenant); answers
+// 'version_conflict' when the role's version is not the asserted one (checked unlocked, then again under the role row FOR
+// UPDATE — the lock every edit and create of that role in that tenant takes); and otherwise writes the level and moves the
+// version one step on. The role, domain, level, asserted tenant and asserted version are the planner's validated values;
+// every value is bound as a parameter. The runtime role no longer holds EXECUTE on 020's unconditional set (021 revoked it).
 //
-// ANSWERS. 'applied' only when the routine answered exactly one row naming the tenant, the actor and the grant this
-// transaction revalidated, and the level it was asked to store — so every identity the audit record carries is also the one
-// the database derived. No row (the routine refused the session's authority) is 'refused'; anything else is 'mismatch'.
-// Neither is 'conflict' (whose sealed 409 the store would commit): both roll the whole transaction back, and the client
-// gets the generic 503. A raise is not caught: the kernel rolls back, a 503 again. No row, value or driver message is logged.
+// ANSWERS. 'applied' only when the routine answered exactly one row, outcome 'applied', naming the tenant, the actor and the
+// grant this transaction revalidated, the level it was asked to store and the version exactly one past the asserted one —
+// so every identity the audit record carries is also the one the database derived, and the sealed 200's version is the one
+// stored. One row answering 'tenant_mismatch' or 'version_conflict' with every other column null is
+// 'precondition_failed' — this mutator is the ONLY one that answers it — which the store rolls back WITHOUT a completion
+// (unlike the sealed 'conflict', which commits one) and the runtime answers 409 write_conflict. No row (the routine refused
+// the session's authority) is 'refused'; anything else is 'mismatch'. Neither of those is 'conflict' or
+// 'precondition_failed': both roll the whole transaction back, and the client gets the generic 503. A raise is not caught:
+// the kernel rolls back, a 503 again. No row, value or driver message is logged.
 //
 // THE RECENT SIGN-IN, AGAIN. The edit requires one (edit_role_levels is sensitive), and the revalidator judges its deadline
 // on the database clock before this mutator runs — but the routine's FOR UPDATE on the role row can then wait for a
 // customer command holding it FOR SHARE. So the deadline the store handed over is judged once more, on the database clock,
-// after the routine answered and before the audit record and the completion: a sign-in that went stale during the wait is
-// 'refused', and the edit rolls back with everything else. A command without a deadline never reaches the routine. That is
-// the whole guarantee: fresh when judged after the set routine answered, so after that routine's own lock waits; the audit
-// record, the completion and COMMIT then follow with no further freshness check, so they may complete after the sign-in
-// deadline (within the command's own transaction deadline).
+// after the routine answered 'applied' and before the audit record and the completion: a sign-in that went stale during the
+// wait is 'refused', and the edit rolls back with everything else. A command without a deadline never reaches the routine.
+// That is the whole guarantee: fresh when judged after the set routine answered, so after that routine's own lock waits; the
+// audit record, the completion and COMMIT then follow with no further freshness check, so they may complete after the
+// sign-in deadline (within the command's own transaction deadline). A precondition that failed writes nothing, so it is
+// answered as it is, stale or not.
 import { authenticationFresh } from './postgresSessionStore.js';
 import type { AggregateMutator, MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
@@ -110,29 +120,35 @@ export function createPostgresRoleLevels(deps: { readonly client: SupervisedPgCl
     client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevels(sql, tenantId, roleId));
 }
 
-/** One editable role's stored Customers level: null when nothing is stored, and then it holds its catalog default. */
+/** One editable role's stored Customers level — null when nothing is stored, and then it holds its catalog default — and its version. */
 export interface StoredRoleLevel {
   readonly roleId: string;
   readonly stored: string | null;
+  /** 021's per-row edit counter: 0 until the first edit since 021, then one more per effective edit. */
+  readonly version: number;
 }
 
+const STATE_KEYS: readonly string[] = ['roleId', 'level', 'version'];
+
 /**
- * The stored Customers level of every editable role of `tenantId`, in EDITABLE_TENANT_ROLES order, from ONE statement (one
- * snapshot, header). The tenant is a canonical lowercase UUID or this throws before any statement; any doubt about the
- * answer throws.
+ * The stored Customers level and version of every editable role of `tenantId`, in EDITABLE_TENANT_ROLES order, from ONE
+ * statement (one snapshot, header). The tenant is a canonical lowercase UUID or this throws before any statement; any doubt
+ * about the answer throws.
  */
 export async function readRoleLevelDirectory(sql: PgTransactionScope, tenantId: string): Promise<readonly StoredRoleLevel[]> {
   if (typeof tenantId !== 'string' || !UUID_RE.test(tenantId)) throw fault();
-  // Three roles, three calls, one statement: the list is 020's CHECK, and a longer or shorter one fails closed (an unbound
-  // role is a refused parameter; an unread one leaves the route's answer out of shape).
-  const [first, second, third] = EDITABLE_TENANT_ROLES;
-  const row = onlyRow(await sql`select tmpos_role.m7a_role_levels(${tenantId}::uuid, ${first}::text) as r0,
-    tmpos_role.m7a_role_levels(${tenantId}::uuid, ${second}::text) as r1,
-    tmpos_role.m7a_role_levels(${tenantId}::uuid, ${third}::text) as r2`, ['r0', 'r1', 'r2']);
-  const [domain] = ROLE_LEVEL_DOMAINS;
-  return Object.freeze([first, second, third].map((roleId, i) => {
-    const levels = levelMapOf(row[`r${i}`]);
-    return Object.freeze({ roleId, stored: Object.prototype.hasOwnProperty.call(levels, domain) ? levels[domain] : null });
+  const states: unknown = onlyRow(await sql`select tmpos_role_edit.m7a_role_level_states(${tenantId}::uuid) as states`, ['states']).states;
+  // Exactly 021's three roles — 020's CHECK — in order: a longer, shorter or reordered answer fails closed.
+  if (!Array.isArray(states) || states.length !== EDITABLE_TENANT_ROLES.length) throw fault();
+  return Object.freeze(EDITABLE_TENANT_ROLES.map((roleId, i) => {
+    const entry: unknown = states[i];
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry) || Object.getPrototypeOf(entry) !== Object.prototype) throw fault();
+    const keys = Object.keys(entry);
+    if (keys.length !== STATE_KEYS.length || !STATE_KEYS.every((key) => keys.includes(key))) throw fault();
+    const { roleId: named, level, version } = entry as Record<string, unknown>;
+    if (named !== roleId || (level !== null && (typeof level !== 'string' || !ROLE_LEVELS.includes(level)))) throw fault();
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) throw fault();
+    return Object.freeze({ roleId, stored: level as string | null, version });
   }));
 }
 
@@ -147,18 +163,29 @@ async function applyRoleLevelUpdate(sql: PgStatement, mutation: TransactionMutat
   const context = authority?.context ?? null;
   const sessionKey = authority?.sessionKey ?? null;
   const authNotAfter = authority?.authNotAfter ?? null;
-  const { roleId, domain, level } = mutation.changes;
+  const { roleId, domain, level, expectedTenant, expectedVersion } = mutation.changes;
   // Never a call without the revalidated tenant context, the key that presented it and the recent sign-in's deadline the
-  // revalidator judged: the store proved all three.
+  // revalidator judged: the store proved all three. The planner validated the preconditions; they are checked again here.
   if (context === null || context.scope !== 'tenant' || typeof sessionKey !== 'string'
     || typeof authNotAfter !== 'number' || !Number.isSafeInteger(authNotAfter) || authNotAfter < 1
-    || typeof roleId !== 'string' || typeof domain !== 'string' || typeof level !== 'string') return 'unavailable';
-  const rows = await sql`select o_tenant_id, o_actor_id, o_membership_id, o_level
-    from tmpos_role.m7a_role_level_set(${sessionKey}::text, ${roleId}::text, ${domain}::text, ${level}::text)`;
+    || typeof roleId !== 'string' || typeof domain !== 'string' || typeof level !== 'string'
+    || typeof expectedTenant !== 'string' || !UUID_RE.test(expectedTenant)
+    || typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
+    || !Number.isSafeInteger(expectedVersion + 1)) return 'unavailable';
+  const rows = await sql`select o_outcome, o_tenant_id, o_actor_id, o_membership_id, o_level, o_version
+    from tmpos_role_edit.m7a_role_level_set_v2(${sessionKey}::text, ${roleId}::text, ${domain}::text, ${level}::text,
+      ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint)`;
   if (rows.length === 0) return 'refused';
   if (rows.length !== 1) return 'mismatch';
-  const { o_tenant_id: tenant, o_actor_id: actor, o_membership_id: membership, o_level: stored } = rows[0];
-  if (tenant !== context.tenant || actor !== context.actor || membership !== context.membershipId || stored !== level) return 'mismatch';
+  const {
+    o_outcome: outcome, o_tenant_id: tenant, o_actor_id: actor, o_membership_id: membership, o_level: stored, o_version: version,
+  } = rows[0];
+  // A precondition that no longer holds: nothing was written, and every other column says so.
+  if ((outcome === 'tenant_mismatch' || outcome === 'version_conflict')
+    && tenant === null && actor === null && membership === null && stored === null && version === null) return 'precondition_failed';
+  // bigint arrives as its decimal text: compared exactly, never through a float.
+  if (outcome !== 'applied' || tenant !== context.tenant || actor !== context.actor || membership !== context.membershipId
+    || stored !== level || version !== String(expectedVersion + 1)) return 'mismatch';
   // The recent sign-in, judged again now that the routine's lock wait is over (see the header).
   return (await authenticationFresh(sql, authNotAfter)) ? 'applied' : 'refused';
 }

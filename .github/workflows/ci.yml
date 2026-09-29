@@ -279,6 +279,21 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/roleLevels.integration.test.mjs
+      # M7A-CUSTOMERS-P4 — migration 021's conditional role-level edit as the runtime login (apply, postcondition, the
+      # tenant and version preconditions, the reset-to-default ABA, the edit/edit and edit/create lock ordering, rollback
+      # refused while a version row exists and giving nothing back, re-apply), then the DA-125 witnesses (tenant switch,
+      # two tabs on two instances, default-reset ABA) over real loopback sockets, against the SAME disposable service.
+      # Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Conditional role level edit routines against disposable PostgreSQL (M7A-CUSTOMERS-P4)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/roleLevelVersionRoutine.integration.test.mjs
+      - name: Role level save preconditions over HTTP against disposable PostgreSQL (M7A-CUSTOMERS-P4)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/roleLevelPrecondition.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

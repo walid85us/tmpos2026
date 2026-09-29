@@ -1,38 +1,56 @@
 // M7A-CUSTOMERS-P3-R2 — the shop's server-backed editor for the built-in roles' Customers levels.
+// M7A-CUSTOMERS-P4 (DA-125) — every save asserts the tenant and version the owner reviewed; the server refuses a
+// mismatch with nothing written, and this panel never carries a draft across a tenant or a version it did not review.
 //
 // This is the only part of the Employees permissions screen whose changes reach the tenant server: the three editable
 // built-in roles' Customers level (store_owner is fixed Full), read from GET /api/v1/roles/levels and changed through
-// R1's PUT /api/v1/roles/levels. Custom roles and every other domain stay in the local-only grid below it.
+// PUT /api/v1/roles/levels. Custom roles and every other domain stay in the local-only grid below it.
 //
 //   - The server decides everything: who may read (the store owner), who may edit, the tenant, the level that stands.
 //     A manager or any other role sees the server's refusal as the "denied" state; nothing here decides authority.
-//   - An edit is "Saved" ONLY when a PUT answered exactly 200 (a fresh execution or the idempotent replay of the same
-//     key) AND the read-back that follows, for the same tenant, shows the requested level. Nothing else is ever
-//     "Saved" (AM1): a 409, a 5xx, an unexpected body or no answer at all is read back and reported as what the server
-//     now has. Every refusal keeps the draft visible with a way to retry. Nothing is optimistic.
-//   - One Idempotency-Key per change. No answer at all → one automatic retry of the identical payload under the same
-//     key (idempotent: it replays or executes once). A 409 (that key still in progress) or a second silence keeps the
-//     key, so pressing Save again replays it — even when the server already shows the level, Save stays usable to
-//     confirm the held payload. Any other answer settles the key; any other payload gets its own key.
-//   - Each row status records the server level it describes: a later read that changes that level replaces a former
-//     "Saved" with "Changed elsewhere", clears an idle note, and turns a failed, stale or unconfirmed save into "The
-//     server now has X. Your change is not saved." (AM2); a status that carries an action is left alone.
-//   - Staleness: every async result — including each continuation after an awaited helper — is applied only under the
-//     generation that started it (a user switch, sign-out or unmount abandons everything), and only for the tenant the
-//     first read of that generation named — a save whose read-back names another tenant restarts the panel and leaves
-//     a notice until the next user switch (AM5; R1's PUT has no tenant precondition). A read that started before a
-//     later-applied read never overwrites it. Focus/visibility refreshes run one at a time, wait while a save or a
-//     sign-in confirmation is under way (AM3), and speak only while no later read has started. Two tabs: last writer
-//     wins on the server (R1 has no version precondition); each tab shows its own read-back and never says "Saved"
-//     unless that read-back matches.
+//   - A draft is {level, baseTenant, baseVersion}: the choice and the read it was made against. A save sends exactly
+//     that tenant and version as preconditions (never as a selector). Nothing is optimistic: the row shows the server's
+//     level, and a draft is marked unsaved until the server confirms it.
+//   - An edit is "Saved" ONLY when a PUT answered exactly 200 with the version committed at baseVersion + 1 (a fresh
+//     execution or the idempotent replay of the same key) AND the read-back that follows, for the same tenant, shows the
+//     requested level at exactly that version. A read-back at a greater version says the change was acknowledged, then
+//     changed elsewhere — never "Saved". Nothing else is ever "Saved": a conflict, a 409 in progress, a 5xx, an
+//     unexpected body, a 401/403 or no answer at all is read back and reported as what the server now has. A 200 whose
+//     read-back shows anything else is "Not confirmed". A row whose level no successful read has established since
+//     (a failed read-back) shows it as the LAST KNOWN level; a conflict there offers only Discard.
+//   - Conflict: a read (or a 409 write_conflict) showing a version other than a draft's baseVersion turns that draft
+//     into a CONFLICT — the server's current level and the unsaved choice, with Discard (drop it) and Reapply (rebase it
+//     onto the version just read; the owner must then press Save, under a new key). It is never resubmitted silently.
+//   - One Idempotency-Key per attempt. No answer at all → one automatic retry of the identical bytes under the same key.
+//     An attempt whose outcome stays unknown is HELD explicitly (per role: its key and the exact change it sent — tenant,
+//     base version, level, reason): a 409 request_in_progress, a 5xx, a body it cannot name, a second silence, or — once
+//     the key may already have committed (a lost attempt, a held one) — any refusal or session failure that does not say
+//     what that key did. A held row keeps its draft and says "Not confirmed yet", never "Not saved"; Save re-sends the
+//     same key and body (the original expectedVersion). Only an answer that decides the key (a 200, a write_conflict)
+//     ends it — or the owner changing the level or the reason, which ends the confirmation at once (the draft then
+//     turns into a conflict if its version moved, or an ordinary unsaved draft). A read alone never proves the save.
+//   - One reducer holds the context: a generation (bumped on a tenant change) and a per-role attempt id. Every async
+//     result is applied only under the generation and attempt that started it; background refreshes never move a role
+//     with an attempt in flight (that role is read again once the attempt ends without its own read-back), and a read
+//     that started before a later-applied read never overwrites it.
+//   - A read naming another tenant than this generation's first read clears every draft, key and status, cancels
+//     pending reads and unsent saves, and leaves a persistent notice (until a user switch) that the store changed and
+//     no change was sent to the newly connected store. A save already sent is harmless to the new store (the server checks its asserted tenant);
+//     its eventual answer is shown only as a detached notice that names no store (the panel cannot know which store it
+//     reaches now — A, then B, then A again) and claims no more than the server's answer, never as the new store's save.
+//   - One panel per signed-in user (keyed by UID): a user switch or sign-out mounts a fresh panel, so the first render
+//     after it shows nothing of the previous user, and no answer to that user's work — detached notices included — is
+//     ever applied to the next one (A, then B, then A again is three panels).
+//   - Focus/visibility refreshes run one at a time, wait while a save or a sign-in confirmation is under way, and speak
+//     only while no later read has started.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { EmailAuthProvider, GoogleAuthProvider, reauthenticateWithCredential, reauthenticateWithPopup } from 'firebase/auth';
 import { auth } from '../firebase';
 import { PERMISSION_DOMAINS, PERMISSION_HIERARCHY, tenantRoles } from '../context/accessConfig';
-import { checkReason, createIntentKeys, REASON_MAX, REASON_MIN, type IntentKeys } from '../backend-control-plane/console/tenantManagementClient';
+import { checkReason, REASON_MAX, REASON_MIN } from '../backend-control-plane/console/tenantManagementClient';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
-import { EDITABLE_ROLE_IDS, roleLevels, type EditableRoleId, type ReadResult, type RoleLevel, type RoleLevelEntry, type RoleLevelsClient } from './roleLevelsClient';
+import { EDITABLE_ROLE_IDS, roleLevels, type EditableRoleId, type LevelChange, type PutResult, type ReadResult, type RoleLevel, type RoleLevelEntry, type RoleLevelsClient } from './roleLevelsClient';
 
 /** The signed-in shop user's provider identity: ID tokens and a real re-authentication. */
 export interface ShopIdentity {
@@ -85,11 +103,234 @@ const PHASE_LABELS: Record<Phase, string> = {
 export const DENIED_NOTE =
   'Server-enforced Customers access can only be viewed and changed by the store owner. Changes in the table below affect this browser only.';
 export const REFRESH_FAILED_NOTE = 'Could not refresh from the server; values may be out of date.';
-export const DIFFERENT_STORE_NOTICE = 'Your last change may have been applied to a different store. Review the levels below.';
+export const STORE_CHANGED_NOTICE =
+  'The store server now answers for a different store. Unsent changes were cleared. No change was sent to the newly connected store.';
+/** The detached notices for a save whose store connection changed while it was out: its answer, never a read-back. */
+export const PREVIOUS_STORE = Object.freeze({
+  acknowledged: 'A change sent before the store connection changed was acknowledged by the server; it could not be read back here.',
+  notSaved: 'A change sent before the store connection changed was not saved.',
+  unconfirmed: 'A change sent before the store connection changed could not be confirmed.',
+});
 
-type Tone = 'idle' | 'saving' | 'saved' | 'confirm' | 'failed' | 'stale' | 'step-up' | 'signed-out' | 'denied';
-/** A row's status line and the server level it describes (null: none). */
-interface RowStatus { readonly tone: Tone; readonly text: string; readonly level: RoleLevel | null }
+/** A held row's line when an attempt did not say what its key did: never "Not saved" (the key may have committed). */
+const CONFIRM_AGAIN = Object.freeze({
+  sessionEnded: 'Not confirmed yet — your server session ended. Reconnect, then press Save again to check.',
+  unreachable: 'Not confirmed yet — the store server could not be reached. Press Save again to check.',
+  stepUp: 'Not confirmed yet — sign in again, then press Save again to check.',
+  denied: 'Not confirmed yet — the server refused the check. Only the store owner can change these levels.',
+  unmatched: 'Not confirmed yet — the server could not match the check. Press Save again to check.',
+});
+
+type Tone = 'idle' | 'saving' | 'saved' | 'confirm' | 'conflict' | 'failed' | 'stale' | 'step-up' | 'signed-out' | 'denied';
+/** A row's status line and the server version it describes (null: none). */
+interface RowStatus { readonly tone: Tone; readonly text: string; readonly version: number | null }
+/** An unsaved choice and the read it was made against: the tenant and version its save asserts. */
+interface Draft { readonly level: RoleLevel; readonly baseTenant: string; readonly baseVersion: number }
+type Rows<T> = Partial<Record<EditableRoleId, T>>;
+interface Attempt { readonly roleId: EditableRoleId; readonly id: number }
+/** An attempt whose outcome is unknown: its key and the exact change (so the exact body) a confirmation re-sends. */
+interface Held { readonly key: string; readonly change: LevelChange }
+
+/** Everything tenant-specific, owned by one reducer and stamped with the generation it belongs to. */
+interface PanelState {
+  readonly gen: number;
+  readonly tenant: string | null; // the tenant the first read of this generation named
+  readonly appliedSeq: number; // the start order of the read last applied
+  readonly roles: readonly RoleLevelEntry[];
+  readonly drafts: Rows<Draft>;
+  readonly reasons: Rows<string>;
+  readonly statuses: Rows<RowStatus>;
+  readonly attempts: Rows<number>; // the attempt in flight, per role
+  readonly held: Rows<Held>; // the unresolved attempt, per role: the proof a confirmation is owed (never the tone)
+  readonly unread: Rows<true>; // the role's shown level is not established by a successful read since (last known)
+  readonly deferred: Rows<true>; // a newer read left this role alone while its attempt was in flight
+  readonly deferrals: number; // how many reads have deferred a role (the panel re-reads once per deferral)
+  readonly storeChanged: boolean; // survives a tenant restart; cleared only by a user switch
+  readonly previous: readonly string[]; // detached notices about saves sent to the previous store
+}
+
+type Action =
+  | { readonly type: 'reset'; readonly gen: number; readonly user: boolean }
+  | { readonly type: 'read'; readonly gen: number; readonly seq: number; readonly tenant: string; readonly roles: readonly RoleLevelEntry[]; readonly attempt?: Attempt }
+  | { readonly type: 'draft'; readonly gen: number; readonly roleId: EditableRoleId; readonly level: RoleLevel }
+  | { readonly type: 'reason'; readonly gen: number; readonly roleId: EditableRoleId; readonly text: string }
+  | { readonly type: 'discard' | 'reapply'; readonly gen: number; readonly roleId: EditableRoleId }
+  | { readonly type: 'status'; readonly gen: number; readonly roleId: EditableRoleId; readonly status: RowStatus }
+  | { readonly type: 'start'; readonly gen: number; readonly attempt: Attempt }
+  | { readonly type: 'finish'; readonly gen: number; readonly attempt: Attempt; readonly status?: RowStatus; readonly draft?: 'keep' | 'clear'; readonly hold?: Held | null; readonly unread?: boolean }
+  | { readonly type: 'previous'; readonly gen: number; readonly text: string };
+
+const INITIAL: PanelState = Object.freeze({
+  gen: 0, tenant: null, appliedSeq: 0, roles: [], drafts: {}, reasons: {}, statuses: {}, attempts: {}, held: {}, unread: {}, deferred: {}, deferrals: 0,
+  storeChanged: false, previous: [],
+});
+
+const changedElsewhere = (level: RoleLevel): string => `Changed elsewhere — the server now has ${LEVEL_LABELS[level]}.`;
+const conflictText = (level: RoleLevel): string => `Changed elsewhere — the server now has ${LEVEL_LABELS[level]}. Your change is not saved.`;
+const without = <T,>(rows: Rows<T>, roleId: EditableRoleId): Rows<T> => {
+  const out = { ...rows };
+  delete out[roleId];
+  return out;
+};
+
+/**
+ * Apply a read to the rows it may move. A role with an attempt in flight keeps its entry and row unless this is that
+ * attempt's own CONSISTENT read-back (its continuation then decides the row); it is marked deferred, to be read again
+ * once the attempt ends, and "last known" until a later read succeeds — the attempt may have moved it (R3-3, R4-1). A role
+ * this read moves is established (no longer "last known"). A conflict is restated from every read that moves its role,
+ * so one whose level could not be read learns it, whatever version the read shows (R3-5). For every
+ * other role: a draft whose baseVersion is not the version just read becomes a conflict — or is dropped when the server
+ * already has its level — unless its attempt is held for the confirming replay (A2.6). A status without a draft whose version moved: a former
+ * "Saved" (or other settled line) says the level changed elsewhere, an idle note is cleared; an action is left alone.
+ */
+function applyRead(state: PanelState, next: readonly RoleLevelEntry[], own: Attempt | undefined): PanelState {
+  const moving = (id: EditableRoleId): boolean => state.attempts[id] === undefined || (own?.roleId === id && own.id === state.attempts[id]);
+  let deferred = state.deferred;
+  let deferrals = state.deferrals;
+  let unread = state.unread;
+  const roles = next.map((entry) => {
+    const id = entry.roleId as EditableRoleId;
+    if (!entry.editable) return entry;
+    if (moving(id)) {
+      deferred = without(deferred, id);
+      unread = without(unread, id);
+      return entry;
+    }
+    const shown = state.roles.find((r) => r.roleId === id) ?? entry;
+    deferred = { ...deferred, [id]: true };
+    deferrals += 1;
+    unread = { ...unread, [id]: true }; // the attempt in flight may have moved it: no longer known to be current
+    return shown;
+  });
+  let drafts = state.drafts;
+  let statuses = state.statuses;
+  for (const id of EDITABLE_ROLE_IDS) {
+    const entry = roles.find((r) => r.roleId === id);
+    if (entry === undefined || entry.version === null || state.attempts[id] !== undefined) continue;
+    const draft = drafts[id];
+    const status = statuses[id];
+    if (draft !== undefined) {
+      if (state.held[id] === undefined && status?.tone === 'conflict' && status.version !== entry.version) {
+        statuses = { ...statuses, [id]: { tone: 'conflict', text: conflictText(entry.level), version: entry.version } };
+        continue;
+      }
+      if (state.held[id] !== undefined || draft.baseVersion === entry.version) continue;
+      if (draft.level === entry.level) {
+        drafts = without(drafts, id);
+        statuses = { ...statuses, [id]: { tone: 'stale', text: changedElsewhere(entry.level), version: entry.version } };
+      } else if (status?.tone !== 'conflict' || status.version !== entry.version) {
+        statuses = { ...statuses, [id]: { tone: 'conflict', text: conflictText(entry.level), version: entry.version } };
+      }
+    } else if (status !== undefined && status.version !== null && status.version !== entry.version) {
+      if (status.tone === 'idle') statuses = without(statuses, id);
+      else if (status.tone === 'saved' || status.tone === 'stale' || status.tone === 'failed' || status.tone === 'conflict') {
+        statuses = { ...statuses, [id]: { tone: 'stale', text: changedElsewhere(entry.level), version: entry.version } };
+      }
+    }
+  }
+  return { ...state, roles, drafts, statuses, deferred, deferrals, unread };
+}
+
+function reduce(state: PanelState, action: Action): PanelState {
+  if (action.type === 'reset') {
+    return { ...INITIAL, gen: action.gen, storeChanged: !action.user, previous: action.user ? [] : state.previous };
+  }
+  if (action.gen !== state.gen) return state; // a stale callback: its context was replaced
+  const entryOf = (id: EditableRoleId): RoleLevelEntry | undefined => state.roles.find((r) => r.roleId === id);
+  switch (action.type) {
+    case 'read': {
+      if ((state.tenant !== null && action.tenant !== state.tenant) || action.seq <= state.appliedSeq) return state;
+      return applyRead({ ...state, tenant: action.tenant, appliedSeq: action.seq }, action.roles, action.attempt);
+    }
+    case 'draft': {
+      const entry = entryOf(action.roleId);
+      const tone = state.statuses[action.roleId]?.tone;
+      if (state.tenant === null || entry?.version == null || state.attempts[action.roleId] !== undefined || tone === 'conflict') return state;
+      const held = without(state.held, action.roleId); // a changed level is a new request: a held attempt ends here
+      if (action.level === entry.level) {
+        return { ...state, held, drafts: without(state.drafts, action.roleId), statuses: { ...state.statuses, [action.roleId]: { tone: 'idle', text: '', version: entry.version } } };
+      }
+      return {
+        ...state,
+        held,
+        drafts: { ...state.drafts, [action.roleId]: { level: action.level, baseTenant: state.tenant, baseVersion: entry.version } },
+        statuses: { ...state.statuses, [action.roleId]: { tone: 'idle', text: 'Not saved yet.', version: entry.version } },
+      };
+    }
+    case 'reason': {
+      const reasons = { ...state.reasons, [action.roleId]: action.text };
+      const entry = entryOf(action.roleId);
+      const draft = state.drafts[action.roleId];
+      if (state.held[action.roleId] === undefined || draft === undefined || entry?.version == null) return { ...state, reasons };
+      // A changed reason is a new request: the held confirmation ends at once, and the draft is judged like any other.
+      const status: RowStatus = draft.baseVersion !== entry.version
+        ? { tone: 'conflict', text: conflictText(entry.level), version: entry.version }
+        : { tone: 'idle', text: 'Not saved yet.', version: entry.version };
+      return { ...state, reasons, held: without(state.held, action.roleId), statuses: { ...state.statuses, [action.roleId]: status } };
+    }
+    case 'discard':
+    case 'reapply': {
+      const entry = entryOf(action.roleId);
+      const draft = state.drafts[action.roleId];
+      if (state.tenant === null || entry?.version == null || draft === undefined || state.attempts[action.roleId] !== undefined) return state;
+      // Reapply rebases only onto a level this panel read for this conflict — never onto a cached one (a failed read-back).
+      if (action.type === 'reapply' && (state.unread[action.roleId] || state.statuses[action.roleId]?.version !== entry.version)) return state;
+      if (action.type === 'discard' || draft.level === entry.level) {
+        return {
+          ...state,
+          drafts: without(state.drafts, action.roleId),
+          reasons: without(state.reasons, action.roleId),
+          statuses: without(state.statuses, action.roleId),
+        };
+      }
+      return {
+        ...state,
+        drafts: { ...state.drafts, [action.roleId]: { level: draft.level, baseTenant: state.tenant, baseVersion: entry.version } },
+        statuses: { ...state.statuses, [action.roleId]: { tone: 'idle', text: 'Reapplied to the current server level. Not saved yet.', version: entry.version } },
+      };
+    }
+    case 'status':
+      // An attempt owns its row; a conflict stays until Discard or Reapply (a sign-in answer never unlocks it).
+      if (state.attempts[action.roleId] !== undefined) return state;
+      if (state.statuses[action.roleId]?.tone === 'conflict' && state.drafts[action.roleId] !== undefined) return state;
+      return { ...state, statuses: { ...state.statuses, [action.roleId]: action.status } };
+    case 'start': {
+      const { roleId, id } = action.attempt;
+      return {
+        ...state,
+        attempts: { ...state.attempts, [roleId]: id },
+        statuses: { ...state.statuses, [roleId]: { tone: 'saving', text: 'Saving to the server…', version: entryOf(roleId)?.version ?? null } },
+      };
+    }
+    case 'finish': {
+      const { roleId, id } = action.attempt;
+      if (state.attempts[roleId] !== id) return state; // not this attempt's row any more
+      const clear = action.draft === 'clear';
+      return {
+        ...state,
+        attempts: without(state.attempts, roleId),
+        drafts: clear ? without(state.drafts, roleId) : state.drafts,
+        reasons: clear ? without(state.reasons, roleId) : state.reasons,
+        statuses: action.status === undefined ? state.statuses : { ...state.statuses, [roleId]: action.status },
+        held: action.hold ? { ...state.held, [roleId]: action.hold } : clear || action.hold === null ? without(state.held, roleId) : state.held,
+        unread: action.unread === undefined ? state.unread : action.unread ? { ...state.unread, [roleId]: true } : without(state.unread, roleId),
+      };
+    }
+    case 'previous':
+      return { ...state, previous: [...state.previous, action.text] };
+  }
+}
+
+/**
+ * What an answer to a save whose store connection changed while it was out says — and no more (A2.5). For a key that
+ * may already have committed (`unresolved`: held, or its first attempt lost) only a 200 acknowledges and only a
+ * write_conflict says not saved; any other answer leaves it unconfirmed (R3-1).
+ */
+const previousStoreText = (answer: PutResult, unresolved: boolean): string =>
+  answer.kind === 'ok' ? PREVIOUS_STORE.acknowledged
+    : answer.kind === 'conflict' ? PREVIOUS_STORE.notSaved
+      : unresolved || answer.kind === 'unknown' || answer.kind === 'in-progress' ? PREVIOUS_STORE.unconfirmed
+        : PREVIOUS_STORE.notSaved;
 
 export interface ServerCustomerLevelsProps {
   /** The signed-in shop user's UID (the Firebase UID), or null when nobody is signed in. */
@@ -100,16 +341,20 @@ export interface ServerCustomerLevelsProps {
   readonly newKey?: () => string;
 }
 
-export default function ServerCustomerLevels({
+/**
+ * One panel per signed-in user: a user switch or sign-out mounts a fresh panel (keyed by UID), so its first render shows
+ * nothing of the previous user, and nothing that user's work answers later ever reaches it (R2-3).
+ */
+export default function ServerCustomerLevels(props: ServerCustomerLevelsProps) {
+  return <UserPanel key={props.uid ?? ''} {...props} />;
+}
+
+function UserPanel({
   uid, session = tenantSession, levels = roleLevels, identity = firebaseShopIdentity, newKey,
 }: ServerCustomerLevelsProps) {
+  const [st, dispatch] = useReducer(reduce, INITIAL);
   const [phase, setPhase] = useState<Phase>('loading');
   const [note, setNote] = useState('');
-  const [notice, setNotice] = useState(''); // survives a tenant restart and later saves; cleared only by a user switch
-  const [roles, setRoles] = useState<readonly RoleLevelEntry[]>([]);
-  const [drafts, setDrafts] = useState<Partial<Record<EditableRoleId, RoleLevel>>>({});
-  const [reasons, setReasons] = useState<Partial<Record<EditableRoleId, string>>>({});
-  const [statuses, setStatuses] = useState<Partial<Record<EditableRoleId, RowStatus>>>({});
   const [saving, setSaving] = useState<EditableRoleId | null>(null);
   const [reconnect, setReconnect] = useState(false);
   const [stepUp, setStepUp] = useState<{ readonly roleId: EditableRoleId; readonly method: 'password' | 'google' | null } | null>(null);
@@ -117,37 +362,46 @@ export default function ServerCustomerLevels({
   const [confirming, setConfirming] = useState(false);
 
   const gen = useRef(0);
-  const controller = useRef<AbortController | null>(null);
+  const controller = useRef<AbortController | null>(null); // this generation's reads (and unsent saves)
+  const sends = useRef<AbortController | null>(null); // saves already sent: aborted only by a user switch or unmount
   const tenant = useRef<string | null>(null); // the tenant the first read of this generation named
   const readSeq = useRef(0); // the start order of reads
-  const appliedSeq = useRef(0); // the start order of the read last applied
+  const attemptSeq = useRef(0);
   const savingRef = useRef(false);
   const refreshingRef = useRef(false); // a focus/visibility refresh is in flight
   const stepUpRef = useRef(false); // a sign-in prompt is showing
   const confirmingRef = useRef(false); // a sign-in confirmation is under way
   const phaseRef = useRef<Phase>('loading');
-  const statusesRef = useRef(statuses);
-  const keys = useRef(new Map<EditableRoleId, IntentKeys>());
   const passwordRef = useRef<HTMLInputElement | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const focusNext = useRef<string | null>(null); // the control to focus after the next render (Discard, Reapply)
+  const reread = useRef(0); // the deferral count the panel last re-read for
   phaseRef.current = phase;
-  statusesRef.current = statuses;
 
-  const setStatus = (roleId: EditableRoleId, tone: Tone, text: string, level: RoleLevel | null): void =>
-    setStatuses((prev) => ({ ...prev, [roleId]: { tone, text, level } }));
+  const setStatus = (roleId: EditableRoleId, tone: Tone, text: string, version: number | null): void =>
+    dispatch({ type: 'status', gen: gen.current, roleId, status: { tone, text, version } });
   const promptStepUp = (next: { readonly roleId: EditableRoleId; readonly method: 'password' | 'google' | null } | null): void => {
     stepUpRef.current = next !== null;
     setStepUp(next);
   };
-  const keysFor = (roleId: EditableRoleId): IntentKeys => {
-    let held = keys.current.get(roleId);
-    if (held === undefined) {
-      held = createIntentKeys(newKey);
-      keys.current.set(roleId, held);
-    }
-    return held;
-  };
+  const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
   const ensure = (who: string): Promise<SessionResult> => session.ensure(who, () => identity.idToken(who));
+
+  useEffect(() => {
+    const id = focusNext.current;
+    focusNext.current = null;
+    if (id !== null) document.getElementById(id)?.focus();
+  });
+
+  // A read that arrived while a role's attempt was in flight left that role alone; once the attempt has ended without
+  // its own read-back, read again (once per deferral) so that newer value is not lost (R2-6). The marker clears only
+  // when a read of that role succeeds; until then the row stays "last known" (R3-3).
+  useEffect(() => {
+    const waiting = EDITABLE_ROLE_IDS.some((id) => st.deferred[id] === true && st.attempts[id] === undefined);
+    if (!waiting || reread.current === st.deferrals || phase !== 'ready' || savingRef.current || confirmingRef.current || refreshingRef.current) return;
+    reread.current = st.deferrals;
+    void load('refresh');
+  });
 
   // The sign-in prompt takes focus when it appears: the password field, or the Google button (AM7).
   useEffect(() => {
@@ -156,59 +410,16 @@ export default function ServerCustomerLevels({
   }, [stepUp]);
 
   /**
-   * Adopt server values. A draft equal to the server's level is no longer a change and is dropped — unless its row
-   * holds an unconfirmed save (tone `confirm`), whose payload stays for the replay. A status whose server level this
-   * read changed is out of date (AM2): a former "Saved" becomes "Changed elsewhere", an idle note is cleared, and a
-   * failed, stale or unconfirmed save says what the server now has — an unconfirmed hold ends there, but its draft and
-   * held key stay, so a later Save of the same payload may replay it. Saving, step-up, signed-out and denied statuses
-   * carry an action and are left alone.
+   * A read answer for this generation: false when it named another tenant (the panel has restarted, clearing every
+   * draft and key, and says the store changed). `attempt` marks a save's own read-back.
    */
-  const adopt = (next: readonly RoleLevelEntry[]): void => {
-    const levelOf = (id: EditableRoleId): RoleLevel | undefined => next.find((r) => r.roleId === id)?.level;
-    setRoles(next);
-    setDrafts((prev) => {
-      const kept: Partial<Record<EditableRoleId, RoleLevel>> = {};
-      for (const id of EDITABLE_ROLE_IDS) {
-        const draft = prev[id];
-        if (draft !== undefined && (draft !== levelOf(id) || statusesRef.current[id]?.tone === 'confirm')) kept[id] = draft;
-      }
-      return kept;
-    });
-    setStatuses((prev) => {
-      const out = { ...prev };
-      let changed = false;
-      for (const id of EDITABLE_ROLE_IDS) {
-        const status = prev[id];
-        const now = levelOf(id);
-        if (status === undefined || status.level === null || now === undefined || now === status.level) continue;
-        // A former Saved (and its own later moves) describes no pending change of this tab: it only says what the server has.
-        const noPendingChange = status.tone === 'saved' || (status.tone === 'stale' && !status.text.includes('Your change'));
-        if (noPendingChange) out[id] = { tone: 'stale', text: `Changed elsewhere — the server now has ${LEVEL_LABELS[now]}.`, level: now };
-        else if (status.tone === 'idle') delete out[id];
-        else if (status.tone === 'failed' || status.tone === 'stale' || status.tone === 'confirm') {
-          out[id] = { tone: 'stale', text: `The server now has ${LEVEL_LABELS[now]}. Your change is not saved.`, level: now };
-        } else continue;
-        changed = true;
-      }
-      return changed ? out : prev;
-    });
-  };
-
-  /**
-   * A read answer for this generation: false when it named another tenant (the panel has restarted). A save's read-back
-   * that does so leaves a notice: that save may have landed in the other store (AM5).
-   */
-  const accept = (answer: Extract<ReadResult, { kind: 'ok' }>, seq: number, fromSave: boolean): boolean => {
+  const accept = (answer: Extract<ReadResult, { kind: 'ok' }>, seq: number, attempt?: Attempt): boolean => {
     if (tenant.current === null) tenant.current = answer.tenant;
     if (answer.tenant !== tenant.current) {
-      if (fromSave) setNotice(DIFFERENT_STORE_NOTICE);
       begin('tenant'); // a different tenant answered: discard everything this generation showed and start over
       return false;
     }
-    if (seq > appliedSeq.current) {
-      appliedSeq.current = seq;
-      adopt(answer.roles);
-    }
+    dispatch({ type: 'read', gen: gen.current, seq, tenant: answer.tenant, roles: answer.roles, attempt });
     return true;
   };
 
@@ -254,7 +465,7 @@ export default function ServerCustomerLevels({
       const answer = await levels.read(signal);
       if (superseded()) return;
       if (answer.kind === 'ok') {
-        if (!accept(answer, seq, false)) return;
+        if (!accept(answer, seq)) return;
         setReconnect(false);
         setNote('');
         setPhase('ready');
@@ -278,24 +489,24 @@ export default function ServerCustomerLevels({
   }
 
   /**
-   * Start a new generation: abandon everything in flight and forget every tenant-specific value. A user switch (or
-   * sign-out, or mount) also clears the different-store notice; a tenant restart keeps it.
+   * Start a new generation: cancel pending reads and unsent saves and forget every tenant-specific value. A user switch
+   * (or sign-out, or mount) also cancels saves already sent and clears every notice; a tenant restart keeps the
+   * previous-store notices and adds the store-changed notice.
    */
   function begin(kind: 'user' | 'tenant'): void {
     gen.current += 1;
     controller.current?.abort();
     controller.current = new AbortController();
+    if (kind === 'user' || sends.current === null) {
+      sends.current?.abort();
+      sends.current = new AbortController();
+    }
     tenant.current = null;
-    appliedSeq.current = readSeq.current;
     savingRef.current = false;
     refreshingRef.current = false;
     confirmingRef.current = false;
-    keys.current.clear();
-    if (kind === 'user') setNotice('');
-    setRoles([]);
-    setDrafts({});
-    setReasons({});
-    setStatuses({});
+    dispatch({ type: 'reset', gen: gen.current, user: kind === 'user' });
+    reread.current = 0; // the reset starts the deferral count again (R4-3)
     setSaving(null);
     setReconnect(false);
     promptStepUp(null);
@@ -323,118 +534,160 @@ export default function ServerCustomerLevels({
       document.removeEventListener('visibilitychange', refresh);
       gen.current += 1;
       controller.current?.abort();
+      sends.current?.abort();
     };
-    // Only a user switch (or sign-out) starts a new generation; the clients are fixed for the panel's life.
+    // A panel serves one UID (see ServerCustomerLevels); the clients are fixed for the panel's life.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
-  /** A read-back for this save: the level it shows for `roleId`, why it could not be read, or null (superseded). */
-  async function readBack(roleId: EditableRoleId, mine: number, signal: AbortSignal): Promise<{ level: RoleLevel } | { failed: 'signed-out' | 'denied' | 'unavailable' } | null> {
+  /**
+   * A read-back for this attempt: the level and version it shows for the role, why it could not be read, or null
+   * (superseded). After an acknowledged save (`acked`) it moves the role only when consistent with the acknowledgement —
+   * that level at that version, or any later version; otherwise it applies like a read taken during the attempt: the
+   * row stays "last known" and is read again (R4-2).
+   */
+  async function readBack(
+    attempt: Attempt, mine: number, signal: AbortSignal, acked?: { readonly level: RoleLevel; readonly version: number },
+  ): Promise<{ level: RoleLevel; version: number } | { failed: 'signed-out' | 'denied' | 'unavailable' } | null> {
     const seq = ++readSeq.current;
     const back = await levels.read(signal);
     if (mine !== gen.current) return null;
     if (back.kind !== 'ok') return { failed: back.kind };
-    if (!accept(back, seq, true)) return null; // another tenant answered: the panel has started over
-    const level = back.roles.find((r) => r.roleId === roleId)?.level;
-    return level === undefined ? { failed: 'unavailable' } : { level };
+    const entry = back.roles.find((r) => r.roleId === attempt.roleId);
+    const consistent = acked === undefined || (entry?.version != null
+      && (entry.version > acked.version || (entry.version === acked.version && entry.level === acked.level)));
+    if (!accept(back, seq, consistent ? attempt : undefined)) return null; // another tenant answered: the panel has started over
+    return entry?.version == null ? { failed: 'unavailable' } : { level: entry.level, version: entry.version };
   }
 
   async function save(roleId: EditableRoleId): Promise<void> {
-    const current = roles.find((r) => r.roleId === roleId);
-    const level = drafts[roleId];
-    const reason = checkReason(reasons[roleId] ?? '');
-    const confirmHeld = statuses[roleId]?.tone === 'confirm';
-    if (uid === null || controller.current === null || savingRef.current || confirmingRef.current || phase !== 'ready') return;
-    if (current === undefined || level === undefined || (level === current.level && !confirmHeld) || !('value' in reason)) return;
+    const current = st.roles.find((r) => r.roleId === roleId);
+    const draft = st.drafts[roleId];
+    const pending = st.held[roleId]; // an unresolved earlier attempt: re-send exactly its key and body (A2.6)
+    const reason = checkReason(st.reasons[roleId] ?? '');
+    if (uid === null || controller.current === null || sends.current === null || savingRef.current || confirmingRef.current || phase !== 'ready') return;
+    if (current === undefined || draft === undefined || draft.baseTenant !== tenant.current) return;
+    if (pending === undefined && (st.statuses[roleId]?.tone === 'conflict' || draft.level === current.level || draft.baseVersion !== current.version)) return;
+    const change: LevelChange | null = pending?.change ?? ('value' in reason
+      ? { roleId, level: draft.level, reason: reason.value, expectedTenant: draft.baseTenant, expectedVersion: draft.baseVersion }
+      : null);
+    if (change === null) return;
     const mine = gen.current;
     const signal = controller.current.signal;
+    const sent = sends.current.signal;
+    const attempt: Attempt = { roleId, id: ++attemptSeq.current };
     const label = (l: RoleLevel): string => LEVEL_LABELS[l];
+    const finish = (
+      tone: Tone, text: string, version: number | null, keep: 'keep' | 'clear' = 'keep',
+      more: { readonly hold?: Held | null; readonly unread?: boolean } = {},
+    ): void => dispatch({ type: 'finish', gen: mine, attempt, status: { tone, text, version }, draft: keep, ...more });
+    const replaced = (): boolean => mine !== gen.current;
+    // The tenant context this save was sent from was replaced while it was out (a user switch unmounts this panel
+    // instead): its answer is only ever a detached notice.
+    const toPrevious = (text: string): void => dispatch({ type: 'previous', gen: gen.current, text });
     savingRef.current = true;
     setSaving(roleId);
     promptStepUp(null);
-    setStatus(roleId, 'saving', 'Saving to the server…', current.level);
+    dispatch({ type: 'start', gen: mine, attempt });
     try {
       const s = await ensure(uid);
-      if (mine !== gen.current) return;
+      if (replaced()) return; // never sent: cancelled with its context
       if (s.kind !== 'ok') {
-        if (s.kind === 'refused' || s.kind === 'no-identity') {
-          setReconnect(true);
-          return setStatus(roleId, 'signed-out', 'Not saved: your server session ended. Reconnect, then save again.', current.level);
-        }
-        return setStatus(roleId, 'failed', 'Not saved: the store server could not be reached. Try again.', current.level);
+        const ended = s.kind === 'refused' || s.kind === 'no-identity';
+        if (ended) setReconnect(true);
+        // A held attempt stays held: nothing was sent, and its key may already have committed (R2-2).
+        if (pending !== undefined) return finish('confirm', ended ? CONFIRM_AGAIN.sessionEnded : CONFIRM_AGAIN.unreachable, current.version);
+        if (ended) return finish('signed-out', 'Not saved: your server session ended. Reconnect, then save again.', current.version);
+        return finish('failed', 'Not saved: the store server could not be reached. Try again.', current.version);
       }
-      const held = keysFor(roleId);
-      const change = { roleId, level, reason: reason.value };
-      const key = held.keyFor(JSON.stringify([roleId, level, reason.value]));
-      let answer = await levels.put(change, key, s.csrf, signal);
-      if (mine !== gen.current) return;
+      const key = pending?.key ?? nextKey();
+      const still: Held = { key, change };
+      let answer = await levels.put(change, key, s.csrf, sent);
+      if (replaced()) return toPrevious(previousStoreText(answer, pending !== undefined));
       const lost = answer.kind === 'unknown' && !answer.responded;
       if (lost) {
         // No answer at all: retry the identical payload once under the same key — it replays or executes once.
-        answer = await levels.put(change, key, s.csrf, signal);
-        if (mine !== gen.current) return;
+        answer = await levels.put(change, key, s.csrf, sent);
+        // a refusal of the retry says nothing about the first attempt, which may have committed
+        if (replaced()) return toPrevious(previousStoreText(answer, true));
       }
-      const unanswered = answer.kind === 'unknown' && !answer.responded;
-      const keyHeld = answer.kind === 'in-progress' || unanswered;
-      if (!keyHeld) held.settle(); // any other answer settles the key
+      // Undecided (a 409 in progress, a 5xx, a body it cannot name, silence): it may have committed, and only the same
+      // key can find out. Once the key may already have committed (a lost attempt, a held one), a refusal that does not
+      // reach the key's record says nothing about it either. Both stay held (R2-2); a 200 or a write_conflict decides.
+      const undecided = answer.kind === 'in-progress' || answer.kind === 'unknown';
+      const unsure = pending !== undefined || lost;
 
       if (answer.kind === 'ok') {
-        const back = await readBack(roleId, mine, signal);
-        if (back === null || mine !== gen.current) return; // superseded, even after the read-back returned
-        if ('level' in back) {
-          if (back.level === level) {
-            setReasons((prev) => ({ ...prev, [roleId]: '' }));
-            return setStatus(roleId, 'saved', 'Saved', back.level);
-          }
-          return setStatus(roleId, 'stale', `Changed elsewhere — the server now has ${label(back.level)}. Your change is not saved.`, back.level);
+        const back = await readBack(attempt, mine, signal, { level: change.level, version: answer.version });
+        if (back === null || replaced()) return toPrevious(PREVIOUS_STORE.acknowledged); // the store changed after this one committed
+        if ('level' in back && back.version === answer.version && back.level === change.level) return finish('saved', 'Saved', back.version, 'clear');
+        if ('level' in back && back.version > answer.version) {
+          return finish('stale', `Your change was acknowledged, then changed elsewhere: the server now has ${label(back.level)}.`, back.version, 'clear');
         }
+        // an older version, or this version with another level: the read-back does not show this save, and is not taken
+        // as the current level either — the row stays "last known" until a later read (R3-4)
+        if ('level' in back) return finish('failed', `Not confirmed: the server shows ${label(back.level)}.`, null, 'clear', { unread: true });
         if (back.failed === 'signed-out') setReconnect(true);
-        return setStatus(roleId, 'failed', 'Not confirmed: the server answered, but the level could not be read back. Refresh before relying on it.', null);
+        return finish('failed', 'Not confirmed: the server answered, but the level could not be read back. Refresh before relying on it.', answer.version, 'clear', { unread: true });
       }
 
-      // Undecided (a 409, a 5xx, an unexpected body, silence), or a refusal after a first attempt that got no answer:
-      // what the server now has is read back and said as such — never "Saved".
-      let shown: RoleLevel | null = current.level; // the server level a refusal's status describes
-      if (answer.kind === 'in-progress' || answer.kind === 'unknown' || lost) {
-        const back = await readBack(roleId, mine, signal);
-        if (back === null || mine !== gen.current) return; // superseded, even after the read-back returned
-        const now = 'level' in back ? back.level : null;
-        shown = now;
-        if (!('level' in back) && back.failed === 'signed-out') setReconnect(true);
-        if (keyHeld) {
-          if (now === level) {
-            setDrafts((prev) => ({ ...prev, [roleId]: level })); // the held payload stays for the confirming replay
-            return setStatus(roleId, 'confirm', `The server now has ${label(now)}, but this save is not confirmed yet. Press Save again to confirm.`, now);
-          }
-          return setStatus(roleId, 'failed', now === null
-            ? 'Not confirmed: the server has not confirmed this save, and the level could not be read back. Press Save again to check.'
-            : answer.kind === 'in-progress'
-              ? `Not saved yet: the server is still working on this save and has ${label(now)}. Press Save again to check.`
-              : `Not confirmed: the server did not answer, and it has ${label(now)}. Press Save again to check.`, now);
+      if (answer.kind === 'conflict') {
+        // The asserted tenant or version no longer holds: nothing was written. Show what the server has now.
+        const back = await readBack(attempt, mine, signal);
+        if (back === null || replaced()) return toPrevious(PREVIOUS_STORE.notSaved); // the store changed: that is what refused it
+        if ('failed' in back) {
+          if (back.failed === 'signed-out') setReconnect(true);
+          return finish('conflict', 'Changed elsewhere — your change is not saved, and the current level could not be read back.', null, 'keep', { hold: null, unread: true });
         }
-        if (answer.kind === 'unknown') {
-          return setStatus(roleId, 'failed', now === null
-            ? 'Not saved by this attempt, and the level could not be read back. Try again.'
-            : `Not saved by this attempt. The server has ${label(now)}${now === level ? ' — it may have been set elsewhere' : ''}.`, now);
+        if (back.level === change.level) { // perhaps this owner's own earlier save: say only what the server has
+          return finish('stale', `Not saved by this attempt: the server already has ${label(back.level)}.`, back.version, 'clear');
         }
-        // a refusal after a lost first attempt: it speaks below with its own text, whatever the read-back shows (AM6)
+        return finish('conflict', conflictText(back.level), back.version, 'keep', { hold: null });
+      }
+
+      // Undecided, or a refusal after an attempt whose key may have committed: what the server now has is read back and
+      // said as such — never "Saved", never "Not saved".
+      let shown: number | null = current.version; // the server version a refusal's status describes
+      if (undecided || unsure) {
+        const back = await readBack(attempt, mine, signal);
+        if (back === null || replaced()) return toPrevious(PREVIOUS_STORE.unconfirmed);
+        const now = 'level' in back ? back : null;
+        shown = now?.version ?? null;
+        const unread = now === null;
+        if ('failed' in back && back.failed === 'signed-out') setReconnect(true);
+        if (undecided) {
+          // A read alone never proves this save (A2.6): the draft and the key stay for the confirming replay.
+          return finish('confirm', now === null
+            ? 'Not confirmed yet — press Save again to check. The level could not be read back.'
+            : `Not confirmed yet — press Save again to check. The server has ${label(now.level)}.`, shown, 'keep', { hold: still, unread });
+        }
+        if (answer.kind === 'signed-out') {
+          setReconnect(true);
+          return finish('confirm', CONFIRM_AGAIN.sessionEnded, shown, 'keep', { hold: still, unread });
+        }
+        if (answer.kind === 'step-up-required') {
+          promptStepUp({ roleId, method: identity.reauthMethod(uid) });
+          return finish('confirm', CONFIRM_AGAIN.stepUp, shown, 'keep', { hold: still, unread });
+        }
+        return finish('confirm', answer.kind === 'denied' ? CONFIRM_AGAIN.denied : CONFIRM_AGAIN.unmatched, shown, 'keep', { hold: still, unread });
       }
       if (answer.kind === 'signed-out') {
         setReconnect(true);
-        return setStatus(roleId, 'signed-out', 'Not saved: your server session ended. Reconnect, then save again.', shown);
+        return finish('signed-out', 'Not saved: your server session ended. Reconnect, then save again.', shown);
       }
       if (answer.kind === 'step-up-required') {
         promptStepUp({ roleId, method: identity.reauthMethod(uid) });
-        return setStatus(roleId, 'step-up', 'Not saved: sign in again to save this change.', shown);
+        return finish('step-up', 'Not saved: sign in again to save this change.', shown);
       }
       if (answer.kind === 'denied') {
-        return setStatus(roleId, 'denied', 'Not saved: the server refused this change. Only the store owner can change these levels.', shown);
+        return finish('denied', 'Not saved: the server refused this change. Only the store owner can change these levels.', shown);
       }
       if (answer.kind === 'invalid') {
-        return setStatus(roleId, 'failed', `Not saved: the server refused this change. The reason must be ${REASON_MIN}–${REASON_MAX} characters.`, shown);
+        return finish('failed', `Not saved: the server refused this change. The reason must be ${REASON_MIN}–${REASON_MAX} characters.`, shown);
       }
-      return setStatus(roleId, 'failed', 'Not saved: the server could not match this attempt. Try again.', shown); // key-reused
+      return finish('failed', 'Not saved: the server could not match this attempt. Try again.', shown); // key-reused
     } finally {
+      dispatch({ type: 'finish', gen: mine, attempt }); // ends the attempt if no outcome did (a superseded path)
       if (mine === gen.current) {
         savingRef.current = false;
         setSaving(null);
@@ -446,7 +699,9 @@ export default function ServerCustomerLevels({
     if (uid === null || stepUp === null || confirmingRef.current) return;
     const mine = gen.current;
     const { roleId, method } = stepUp;
-    const shown = roles.find((r) => r.roleId === roleId)?.level ?? null;
+    const shown = st.roles.find((r) => r.roleId === roleId)?.version ?? null;
+    const held = st.held[roleId] !== undefined; // a held attempt is never "Not saved" (R2-2)
+    const failTone: Tone = held ? 'confirm' : 'step-up';
     const secret = method === 'password' ? password : null;
     setPassword('');
     confirmingRef.current = true;
@@ -459,12 +714,12 @@ export default function ServerCustomerLevels({
         fresh = null;
       }
       if (mine !== gen.current) return;
-      if (fresh === null) return setStatus(roleId, 'step-up', 'Not saved: your sign-in was not confirmed. Try again.', shown);
+      if (fresh === null) return setStatus(roleId, failTone, `${held ? 'Not confirmed yet' : 'Not saved'}: your sign-in was not confirmed. Try again.`, shown);
       const renewed = await session.reauthenticate(uid, fresh);
       if (mine !== gen.current) return;
-      if (renewed.kind !== 'ok') return setStatus(roleId, 'step-up', 'Not saved: the store server did not confirm your sign-in. Try again.', shown);
+      if (renewed.kind !== 'ok') return setStatus(roleId, failTone, `${held ? 'Not confirmed yet' : 'Not saved'}: the store server did not confirm your sign-in. Try again.`, shown);
       promptStepUp(null);
-      setStatus(roleId, 'idle', 'Signed in again. Press "Save to server" to save this change.', shown);
+      setStatus(roleId, held ? 'confirm' : 'idle', `Signed in again. Press "Save to server" to ${held ? 'check' : 'save'} this change.`, shown);
     } finally {
       if (mine === gen.current) {
         confirmingRef.current = false;
@@ -493,8 +748,13 @@ export default function ServerCustomerLevels({
       <p className="text-slate-500 text-sm font-medium mb-4">
         Stored on the store server and enforced on every customer view and create request. Covers the Customers module of the built-in roles only.
       </p>
-      {notice !== '' && (
-        <p data-testid="server-levels-notice" role="alert" className="text-sm font-bold text-amber-800 mb-4">{notice}</p>
+      {st.storeChanged && (
+        <p data-testid="server-levels-store-changed" role="alert" className="text-sm font-bold text-amber-800 mb-4">{STORE_CHANGED_NOTICE}</p>
+      )}
+      {st.previous.length > 0 && (
+        <div data-testid="server-levels-previous-store" role="alert" className="text-sm font-bold text-amber-800 mb-4 space-y-1">
+          {st.previous.map((text, n) => <p key={n}>{text}</p>)}
+        </div>
       )}
       <p role="status" aria-live="polite" className="text-sm font-bold text-slate-600 mb-4">{note}</p>
 
@@ -512,7 +772,7 @@ export default function ServerCustomerLevels({
 
       {ready && (
         <div className="space-y-3">
-          {roles.map((entry) => {
+          {st.roles.map((entry) => {
             if (!entry.editable) {
               return (
                 <div key={entry.roleId} data-testid={`server-level-row-${entry.roleId}`} className="flex flex-wrap items-center gap-3 p-4 rounded-2xl border border-slate-100 bg-slate-50/50">
@@ -522,28 +782,41 @@ export default function ServerCustomerLevels({
               );
             }
             const roleId = entry.roleId as EditableRoleId;
-            const draft = drafts[roleId] ?? entry.level;
-            const reason = reasons[roleId] ?? '';
+            const draft = st.drafts[roleId];
+            const chosen = draft?.level ?? entry.level; // the select shows the choice; the server level is shown apart
+            const reason = st.reasons[roleId] ?? '';
             const reasonOk = 'value' in checkReason(reason);
-            const options = PERMISSION_HIERARCHY.filter((l) => CUSTOMER_LEVELS.includes(l) || l === entry.level) as RoleLevel[];
-            const status = statuses[roleId];
+            const options = PERMISSION_HIERARCHY.filter((l) => CUSTOMER_LEVELS.includes(l) || l === entry.level || l === chosen) as RoleLevel[];
+            const status = st.statuses[roleId];
             const busy = saving !== null || confirming;
-            const changed = draft !== entry.level || status?.tone === 'confirm';
-            const canSave = !busy && changed && reasonOk;
+            const conflict = status?.tone === 'conflict' && draft !== undefined;
+            const unread = st.unread[roleId] === true; // no successful read has established this level since (R2-5)
+            const known = conflict && !unread && status.version === entry.version; // the server level this conflict was read at
+            const locked = busy || conflict; // a conflict needs an explicit Discard or Reapply first
+            const changed = draft !== undefined && (draft.level !== entry.level || st.held[roleId] !== undefined);
+            const canSave = !locked && changed && reasonOk;
             const selectId = `server-level-select-${roleId}`;
             const reasonId = `server-level-reason-${roleId}`;
             const hintId = `server-level-hint-${roleId}`;
             const reasonRule = `a reason of ${REASON_MIN}–${REASON_MAX} characters`;
-            const hint = busy ? '' : !changed && !reasonOk ? `To save, choose a new level and enter ${reasonRule}.`
+            const saveId = `server-level-save-${roleId}`;
+            const hint = busy ? '' : conflict ? (known ? 'To save, discard your choice or reapply it to the current server level.'
+              : 'The current server level could not be read. To continue, discard your choice.')
+              : !changed && !reasonOk ? `To save, choose a new level and enter ${reasonRule}.`
               : !changed ? 'To save, choose a new level.' : !reasonOk ? `To save, enter ${reasonRule}.` : '';
             return (
               <div key={roleId} data-testid={`server-level-row-${roleId}`} className="p-4 rounded-2xl border border-slate-100 space-y-3">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="text-sm font-bold text-slate-700 w-40">{roleName(roleId)}</span>
-                  <span className="text-xs font-bold text-slate-600">Server level: <span className="font-black">{LEVEL_LABELS[entry.level]}</span></span>
+                  <span className="text-xs font-bold text-slate-600">{unread ? 'Last known level: ' : 'Server level: '}<span className="font-black">{LEVEL_LABELS[entry.level]}</span></span>
                   <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-slate-50 text-slate-500 border-slate-200">
                     {entry.source === 'stored' ? 'Custom' : 'Default'}
                   </span>
+                  {draft !== undefined && (
+                    <span data-testid={`server-level-unsaved-${roleId}`} className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-amber-50 text-amber-800 border-amber-200">
+                      Unsaved: {LEVEL_LABELS[draft.level]}
+                    </span>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-end gap-3">
                   <div className="flex flex-col gap-1">
@@ -551,13 +824,12 @@ export default function ServerCustomerLevels({
                     <select
                       id={selectId}
                       data-testid={selectId}
-                      value={draft}
-                      disabled={busy}
+                      value={chosen}
+                      disabled={locked}
                       onChange={(e) => {
                         const value = e.target.value as RoleLevel;
                         if (!options.includes(value)) return;
-                        setDrafts((prev) => ({ ...prev, [roleId]: value }));
-                        setStatus(roleId, 'idle', value === entry.level ? '' : 'Not saved yet.', entry.level);
+                        dispatch({ type: 'draft', gen: gen.current, roleId, level: value });
                       }}
                       className="text-xs font-bold px-3 py-2 rounded-lg border border-slate-200 bg-white disabled:opacity-50"
                     >
@@ -571,14 +843,15 @@ export default function ServerCustomerLevels({
                       data-testid={reasonId}
                       type="text"
                       value={reason}
-                      disabled={busy}
-                      onChange={(e) => setReasons((prev) => ({ ...prev, [roleId]: e.target.value }))}
+                      disabled={locked}
+                      onChange={(e) => dispatch({ type: 'reason', gen: gen.current, roleId, text: e.target.value })}
                       className="text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white disabled:opacity-50"
                     />
                   </div>
                   <button
                     type="button"
-                    data-testid={`server-level-save-${roleId}`}
+                    id={saveId}
+                    data-testid={saveId}
                     disabled={!canSave}
                     aria-describedby={hintId}
                     onClick={() => { void save(roleId); }}
@@ -596,6 +869,45 @@ export default function ServerCustomerLevels({
                 >
                   {status?.text ?? ''}
                 </p>
+                {conflict && (
+                  <div
+                    role="group"
+                    aria-label={`Resolve the conflict for ${roleName(roleId)}`}
+                    data-testid={`server-level-conflict-${roleId}`}
+                    className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100"
+                  >
+                    <p className="w-full text-xs font-bold text-amber-900">
+                      {known ? <>The server now has <span className="font-black">{LEVEL_LABELS[entry.level]}</span>.</> : 'The current server level could not be read.'} Your unsaved choice: <span className="font-black">{LEVEL_LABELS[draft.level]}</span>.
+                    </p>
+                    <button
+                      type="button"
+                      data-testid={`server-level-discard-${roleId}`}
+                      aria-label={`Discard my choice for ${roleName(roleId)}`}
+                      disabled={busy}
+                      onClick={() => {
+                        focusNext.current = selectId;
+                        dispatch({ type: 'discard', gen: gen.current, roleId });
+                      }}
+                      className="px-4 py-2 bg-white text-amber-900 border border-amber-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50"
+                    >
+                      Discard my choice
+                    </button>
+                    <button
+                      type="button"
+                      data-testid={`server-level-reapply-${roleId}`}
+                      aria-label={`Reapply to the current level for ${roleName(roleId)}`}
+                      disabled={busy || !known}
+                      onClick={() => {
+                        // Save when it can go, else what it still needs (a reason); a choice equal to the server's is dropped
+                        focusNext.current = draft.level === entry.level ? selectId : reasonOk ? saveId : reasonId;
+                        dispatch({ type: 'reapply', gen: gen.current, roleId });
+                      }}
+                      className="px-4 py-2 bg-amber-600 text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50"
+                    >
+                      Reapply to the current level
+                    </button>
+                  </div>
+                )}
                 {stepUp?.roleId === roleId && (
                   <div
                     role="group"

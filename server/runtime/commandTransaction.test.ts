@@ -212,6 +212,7 @@ test('only an exact commit answer is obeyed; everything else is refused for what
   assert.equal(await verdictOf(async () => COMMITTED), null);
   assert.equal(await verdictOf(() => LEASE_LOST), 'transaction_lease_lost');
   assert.equal(await verdictOf(() => CONFLICT), 'transaction_conflict');
+  assert.equal(await verdictOf(() => ({ outcome: 'precondition_failed' })), 'transaction_precondition_failed', 'M7A-CUSTOMERS-P4');
   assert.equal(await verdictOf(() => UNAVAILABLE), 'transaction_unavailable');
   assert.equal(await verdictOf(() => { throw new Error('store-secret-detail'); }), 'transaction_unavailable');
   assert.equal(await verdictOf(() => Promise.reject(new Error('x'))), 'transaction_unavailable');
@@ -510,6 +511,36 @@ test('a conflict is a sealed 409 write_conflict: it commits only its own complet
     assert.deepEqual(inspectMemoryState(state).aggregates.map((a) => [a.version, a.state.name]), [[2, 'second']]);
     assert.deepEqual(await reasons(logs, 6),
       [undefined, 'transaction_conflict', 'idempotency_replayed', 'idempotency_replayed', 'idempotency_conflict', undefined]);
+  });
+});
+
+test('a failed precondition is an UNSEALED 409 write_conflict for a create — nothing recorded, the lease left, re-decided once it expires — and a 503 for an update (M7A-CUSTOMERS-P4)', async () => {
+  let failing = true;
+  const port = (inner: CommandTransactionPort): CommandTransactionPort => ({
+    commit: (c, s) => (failing ? { outcome: 'precondition_failed' } : inner.commit(c, s)), probe: (s) => inner.probe(s),
+  });
+  await withCommands({ port }, async ({ port: p, logs, plans, state, clock }) => {
+    const key = randomUUID();
+    const refused = await post(p, { key });
+    assert.deepEqual([refused.status, errorOf(refused)], [409, 'write_conflict']);
+    const body = JSON.parse(refused.body) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], 'the chain\'s own refusal, never a recorded body');
+    assert.equal(body.requestId, refused.headers['x-request-id']);
+    assert.equal(refused.headers['idempotent-replayed'], undefined);
+    assert.deepEqual([inspectMemoryState(state).aggregates.length, inspectMemoryState(state).audit.length], [0, 0], 'nothing committed');
+    const retry = await post(p, { key });
+    assert.deepEqual([retry.status, errorOf(retry), plans.length], [409, 'request_in_progress', 1], 'not terminal: the retry waits on the lease');
+    clock.t += IDEMPOTENCY_POLICY.leaseMs;
+    failing = false;
+    const later = await post(p, { key });
+    assert.deepEqual([later.status, later.headers['idempotent-replayed'], plans.length], [201, undefined, 2], 'past the lease it is planned and decided again');
+    assert.deepEqual((await reasons(logs, 3)).slice(0, 2), ['transaction_precondition_failed', 'idempotency_in_progress']);
+  });
+  failing = true;
+  await withCommands({ port }, async ({ port: p, logs }) => {
+    const renamed = await post(p, { key: randomUUID(), path: '/v1/items/rename', body: JSON.stringify({ id: randomUUID(), version: 1, name: 'x' }) });
+    assert.deepEqual([renamed.status, errorOf(renamed)], [503, 'service_unavailable'], 'an update has its sealed conflict; this answer is out of its contract');
+    assert.deepEqual(await reasons(logs, 1), ['transaction_precondition_failed']);
   });
 });
 

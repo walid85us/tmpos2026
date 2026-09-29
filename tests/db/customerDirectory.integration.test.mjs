@@ -81,6 +81,9 @@ const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
 /** 020's postcondition, run again on its own. */
 const POSTCONDITION_020 = UP_020.slice(UP_020.lastIndexOf('do $$'));
+const UP_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.up.sql`, 'utf8');
+const DOWN_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.down.sql`, 'utf8');
+const SET_020 = 'tmpos_role.m7a_role_level_set(text, text, text, text)';
 const CREATE_011 = 'tmpos_session.m5_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint)';
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm7c-migrator', runtimeRef: 'm7c-runtime' };
 const LOCK_KEY = 528_521;
@@ -497,11 +500,11 @@ const routineAsLogin = routineAs(runtime);
 // M7C-01..02: the composition and migration 017 as applied
 // ---------------------------------------------------------------------------
 
-test('M7C-01: 001-020 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
+test('M7C-01: 001-021 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021']
       .map((v) => [v, false]));
   // 005-016 up checksums are postgresStartupPreflight.ts REQUIRED_MIGRATIONS; down checksums are the committed pins of
   // the earlier suites (tenantDirectory, migration-files-contract). 017's are M7A-CUSTOMERS-P1's; 018's are pinned by the
@@ -604,12 +607,18 @@ test('M7C-02: the runtime login cannot touch the table, 017\'s routine or 018\'s
   // 017's proves the EXECUTE 018 revoked, so it holds only over 017's own state, restored inside that transaction.
   const ROLLBACK = new Error('m7c: roll the proof back');
   // Since 020 the applied state is 020's, which also revoked 018's page_v2: 018's postcondition holds only over 018's own
-  // end state, so its grant is given back inside the same rolled-back transaction (restoreV2), as 017's is for 017's.
-  const postcondition = async (widen, proof = POSTCONDITION_017, restore017 = true, restoreV2 = proof === POSTCONDITION_018) => {
+  // end state, so its grant is given back inside the same rolled-back transaction (restoreV2), as 017's is for 017's. Since
+  // 021 (M7A-CUSTOMERS-P4), which revoked 020's unconditional edit and placed its version trigger on 020's table (020's
+  // postcondition admits no trigger there), 020's holds only with that grant given back and that trigger dropped
+  // (restoreSet).
+  const postcondition = async (widen, proof = POSTCONDITION_017, restore017 = true, restoreV2 = proof === POSTCONDITION_018,
+    restoreSet = proof === POSTCONDITION_020) => {
     let code = 'unset';
     await assert.rejects(owner.begin(async (tx) => {
       if (restore017) await tx.unsafe(`grant execute on function ${ROUTINE} to tmpos_app`);
       if (restoreV2) await tx.unsafe(`grant execute on function ${ROUTINE_V2} to tmpos_app`);
+      if (restoreSet) await tx.unsafe(`grant execute on function ${SET_020} to tmpos_app`);
+      if (restoreSet) await tx.unsafe('drop trigger trg_tenant_role_level_version_advance on tmpos_role.tenant_role_level');
       if (widen !== null) await tx.unsafe(widen);
       code = await tx.savepoint((sp) => sp.unsafe(proof).simple()).then(() => null, (err) => err.code);
       throw ROLLBACK;
@@ -625,7 +634,8 @@ test('M7C-02: the runtime login cannot touch the table, 017\'s routine or 018\'s
   assert.equal(await postcondition(null, POSTCONDITION_018, false), null, '018\'s own postcondition holds over it');
   assert.equal(await postcondition(null, POSTCONDITION_018), '55000', 'and refuses 017\'s EXECUTE given back');
   assert.equal(await postcondition(null, POSTCONDITION_018, false, false), '55000', 'the state 020 leaves does not: the login lost page_v2');
-  assert.equal(await postcondition(null, POSTCONDITION_020, false), null, '020\'s own postcondition holds over the applied state');
+  assert.equal(await postcondition(null, POSTCONDITION_020, false, false, false), '55000', 'the state 021 leaves does not: the login lost 020\'s edit, and 020\'s table carries 021\'s trigger');
+  assert.equal(await postcondition(null, POSTCONDITION_020, false), null, '020\'s own postcondition holds over its own end state');
   assert.equal(await postcondition(null, POSTCONDITION_020, false, true), '55000', 'and refuses 018\'s page_v2 given back');
   const [after] = await owner`select pg_catalog.has_table_privilege('tmpos_app', 'tmpos_customer.customer', 'SELECT') as granted,
     (select count(*)::int from pg_catalog.pg_policy where polrelid = 'tmpos_customer.customer'::regclass) as policies,
@@ -1140,7 +1150,10 @@ test('M7C-13: listing writes no audit record and no event', async () => {
 // create from the login), so 020's down runs first — it restores exactly 019's grants, and refuses while an owner edit
 // differs from its default (none here) — and 020 is re-applied LAST in the same restoring transaction: 018 re-applied
 // alone would give the login page_v2 back. 019 stays applied throughout, as it did under P3.
-test('M7C-14: 017 down refuses while a customer exists; under 018 and 020 the rollback runs 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018 then 020 leave a fresh apply\'s grants', async () => {
+// SINCE M7A-CUSTOMERS-P4: 021 sits above 020 (it revoked 020's unconditional edit from the login), so 021's down runs
+// before 020's — it refuses while a version row exists (none here) and gives nothing back — and 021 is re-applied after
+// 020 in the same restoring transaction: 020 re-applied alone would give the login that edit back.
+test('M7C-14: 017 down refuses while a customer exists; under 018, 020 and 021 the rollback runs 021\'s, 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018, 020 then 021 leave a fresh apply\'s grants', async () => {
   const down = (file, isolation) => owner.begin(isolation, (tx) => tx.unsafe(file).simple())
     .then(() => null, (err) => ({ code: err.code, message: String(err.message) }));
   const present = async () => (await owner`select pg_catalog.to_regnamespace('tmpos_customer') is not null as present`)[0].present;
@@ -1156,6 +1169,7 @@ test('M7C-14: 017 down refuses while a customer exists; under 018 and 020 the ro
     await owner`delete from tmpos_mint.issuer_key`;
     await owner`delete from tmpos_mint.tenant_session`;
     try {
+      assert.equal(await down(DOWN_021, 'isolation level read committed'), null, '021 rolls back: no version row');
       assert.equal(await down(DOWN_020, 'isolation level read committed'), null, '020 rolls back: no role level differs from its default');
       assert.equal(await down(DOWN_018, 'isolation level read committed'), null, '018 rolls back once the key and the ledger are empty');
       // With no row left, a snapshot older than the check could still hide a committed insert: only READ COMMITTED runs.
@@ -1169,19 +1183,22 @@ test('M7C-14: 017 down refuses while a customer exists; under 018 and 020 the ro
       const [gone] = await owner`select pg_catalog.to_regnamespace('tmpos_customer') is null as schema_gone,
         pg_catalog.to_regnamespace('tmpos_mint') is null as mint_gone,
         pg_catalog.to_regnamespace('tmpos_role') is null as role_gone,
+        pg_catalog.to_regnamespace('tmpos_role_edit') is null as role_edit_gone,
         pg_catalog.to_regprocedure('tmpos_session.m5_admit_tenant_session_v2(text, text)') is not null as s016,
         pg_catalog.to_regprocedure('tmpos_session.m5_hold_tenant_standing(text, text)') is not null as s016_hold,
         pg_catalog.to_regprocedure('tmpos_directory.m5_tenant_directory_page(uuid, text, uuid, text, uuid, integer)') is not null as s012,
         pg_catalog.to_regprocedure('tmpos_identity.m5_security_version(uuid)') is not null as s007`;
-      assert.deepEqual({ ...gone }, { schema_gone: true, mint_gone: true, role_gone: true, s016: true, s016_hold: true, s012: true, s007: true });
+      assert.deepEqual({ ...gone }, { schema_gone: true, mint_gone: true, role_gone: true, role_edit_gone: true, s016: true, s016_hold: true, s012: true, s007: true });
       // Without its routine the listing is an outage, never a page.
       assertRefusal(await list(a), 503, 'service_unavailable', 'rolled back');
     } finally {
-      // 017, 018 then 020, together: never a committed moment with 017's grant, or 018's page_v2, given back. Then the key.
+      // 017, 018, 020 then 021, together: never a committed moment with 017's grant, 018's page_v2 or 020's edit given back.
+      // Then the key.
       await owner.begin(async (tx) => {
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_customer') is null as absent`)[0].absent) await tx.unsafe(UP_017).simple();
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_mint') is null as absent`)[0].absent) await tx.unsafe(UP_018).simple();
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_role') is null as absent`)[0].absent) await tx.unsafe(UP_020).simple();
+        if ((await tx`select pg_catalog.to_regnamespace('tmpos_role_edit') is null as absent`)[0].absent) await tx.unsafe(UP_021).simple();
       });
       await installTestIssuerKey(owner, ISSUER_KEY);
     }
@@ -1189,14 +1206,15 @@ test('M7C-14: 017 down refuses while a customer exists; under 018 and 020 the ro
     const [back] = await owner`select pg_catalog.has_function_privilege('tmpos_app', ${ROUTINE}, 'EXECUTE') as app,
       pg_catalog.has_function_privilege('tmpos_app', ${ROUTINE_V2}, 'EXECUTE') as app_v2,
       pg_catalog.has_function_privilege('tmpos_app', ${ROUTINE_V3}, 'EXECUTE') as app_v3,
+      pg_catalog.has_function_privilege('tmpos_app', ${SET_020}, 'EXECUTE') as app_set_020,
       pg_catalog.has_table_privilege('tmpos_app', 'tmpos_customer.customer', 'SELECT') as app_select,
       (select proacl::text from pg_catalog.pg_proc where oid = ${ROUTINE}::regprocedure) as acl_017,
       (select proacl::text from pg_catalog.pg_proc where oid = ${ROUTINE_V2}::regprocedure) as acl_v2,
       (select proacl::text from pg_catalog.pg_proc where oid = ${CREATE_011}::regprocedure) as acl_011`;
     assert.deepEqual({ ...back }, {
-      app: false, app_v2: false, app_v3: true, app_select: false,
+      app: false, app_v2: false, app_v3: true, app_set_020: false, app_select: false,
       acl_017: `{${me}=X/${me}}`, acl_v2: `{${me}=X/${me}}`, acl_011: `{${me}=X/${me}}`,
-    }, 'the grants a fresh 001-020 apply leaves: the login holds neither 017\'s page, 018\'s page_v2 nor 011\'s create');
+    }, 'the grants a fresh 001-021 apply leaves: the login holds neither 017\'s page, 018\'s page_v2, 011\'s create nor 020\'s edit');
     // The session minted before the rollback lost its ledger row with it and reads nothing; a fresh sign-in reads again.
     assertRefusal(await list(a), 403, 'forbidden', 'a session minted before the rollback');
     assert.deepEqual(pageOf(await list(await signIn(A_OWNER)), 're-applied'), { customers: [], nextCursor: null }, 'the same runtime reads again');

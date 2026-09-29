@@ -42,7 +42,7 @@ export const REPO_ROOT = resolve(HERE, '..');
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
 export const MIN_FRONTEND_FILES = 21; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx
-export const MIN_FRONTEND_CASES = 415; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03)
+export const MIN_FRONTEND_CASES = 442; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52)
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated

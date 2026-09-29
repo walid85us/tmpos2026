@@ -982,6 +982,10 @@ export function createApp(deps: AppDeps): Express {
           // completion there (M5-GIAM-D1-P2-R1) — so it is sent as a decided answer, and every later
           // attempt under the same key replays it rather than planning the intent again.
           if (refused === 'transaction_conflict') return sendRecorded(res, prepared.rejected.conflict, false, refused);
+          // A precondition the request asserted no longer holds (M7A-CUSTOMERS-P4; DA-125): the store rolled everything back and
+          // recorded nothing — no completion, unlike the sealed conflict above — so this 409 is the runtime's own, UNSEALED,
+          // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback.
+          if (refused === 'transaction_precondition_failed' && contract.mode === 'create') return refuse(req, res, 409, 'write_conflict', refused);
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
           // The aggregate exists at the expected version, but the change its contract asks for is not one
           // its current state allows — a lifecycle transition from the wrong state, or to the state it is

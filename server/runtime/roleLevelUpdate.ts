@@ -1,14 +1,28 @@
 // Phase 4.0 M7a — an owner's durable edit of a built-in tenant role's Customers level: the first tenant IAM command, and the
 // server-authoritative configuration the customer routes are decided on (M7A-CUSTOMERS-P3-R1; G-IAM, G-IDEMPOT, G-AUDIT,
-// DA-85; migration 020).
+// DA-85; migration 020). Since M7A-CUSTOMERS-P4 conditional on the tenant and the version the owner reviewed (DA-125;
+// migration 021).
 //
-// PUT /api/v1/roles/levels — a session route of the TENANT boundary. The path carries no tenant, and neither may the body:
-// the tenant is the one the owner's session is admitted to, derived in the database from the presenting session's key.
+// PUT /api/v1/roles/levels — a session route of the TENANT boundary. The path carries no tenant, and no body value selects
+// one: the tenant is the one the owner's session is admitted to, derived in the database from the presenting session's key.
 //
-// Request  { roleId, domain, level, reason } — exactly these four fields.
-// Response 200 { roleLevel: { roleId, domain, level } } — the level as stored. The server's authoritative read is the one
-//          every customer decision makes (tenantAuthorization.ts); since M7A-CUSTOMERS-P3-R2 the owner reads the stored
-//          levels back, each beside its catalog default, at GET on this same path (roleLevelDirectory.ts).
+// Request  { roleId, domain, level, reason, expectedTenant, expectedVersion } — exactly these six fields.
+// Response 200 { roleLevel: { roleId, domain, level, version } } — the level as stored and the version it was stored at,
+//          exactly expectedVersion + 1 (the version is a per-row counter that every effective edit moves by one, migration
+//          021). The server's authoritative read is the one every customer decision makes (tenantAuthorization.ts); since
+//          M7A-CUSTOMERS-P3-R2 the owner reads the stored levels back, each beside its catalog default and, since P4, its
+//          version, at GET on this same path (roleLevelDirectory.ts).
+//
+// THE PRECONDITION (M7A-CUSTOMERS-P4; DA-125). expectedTenant is the `tenant` and expectedVersion the role's `version` of the
+// read that produced the owner's draft. Both are PRECONDITIONS, never selectors and never authority: the edit writes only
+// when the session's own tenant IS expectedTenant and the role's version IS expectedVersion, both judged by migration 021's
+// routine inside the committing transaction, after its locks (postgresRoleLevels.ts). Otherwise NOTHING is written — in
+// either tenant — and the answer is 409 write_conflict: an owner whose account moved to another store and signed in again
+// cannot land an old store's draft on the new one, and a delayed older tab cannot overwrite a newer level (restoring its
+// catalog default included: the version still moves, so an A -> B -> A cycle never recreates the version a stale draft
+// holds). That 409 is UNSEALED: it commits nothing, no completion either (postgresTransactionalStore.ts), so the key's lease
+// waits out its time as for any rolled-back refusal. Both values are in the body the fingerprint covers, so a retry that
+// asserts another tenant or version is another request and needs another key (422 otherwise).
 //
 // WHAT CAN BE EDITED, AND WHY SO LITTLE. roleId is one of the three built-in roles an owner may edit — manager, technician,
 // sales_staff; the owner role itself is locked (Full everywhere, never edited). domain is exactly 'customers': the one
@@ -32,17 +46,19 @@
 //
 // INPUT. reason is trimmed and must then hold 10-500 Unicode scalar values with no control character (C0, NUL included, DEL,
 // C1), no line or paragraph separator, no lone surrogate and no Bidi_Control character — the tenant status command's rule
-// (tenantStatus.ts), restated rather than imported because that module is administrative and never ships here. Anything
-// else, or any other field, is a 400 invalid_request, decided once the idempotency record is acquired; it commits and
-// records nothing, and the attempt's lease waits out its time.
+// (tenantStatus.ts), restated rather than imported because that module is administrative and never ships here.
+// expectedTenant is a canonical lowercase UUID (any version: the tenant ids the database issues); expectedVersion a safe
+// integer, at least 0, whose successor is still safe. Anything else, or any other field, is a 400 invalid_request, decided
+// once the idempotency record is acquired; it commits and records nothing, and the attempt's lease waits out its time.
 //
-// WHAT IT RECORDS. The level, in migration 020's row for (tenant, role, domain), and one audit record at tenant scope: the
-// reason code role_<role>_customers_to_<level> names the edit and the reason is the owner's own words. The level before an
-// edit can be rebuilt from the audit history (the first one the catalog default) ONLY for edits made through this route: a
-// holder of the runtime role with a live store-owner key can call 020's set routine directly, which writes no audit record
-// (migration 020's residual, a G-AUDIT exception). A create-mode command: each edit is its own aggregate (a fresh
-// server id, type tenant_role_level, never the tenant — so the audit record names no subject tenant beyond its scope). No
-// outbox event: no approved contract exists, and none is invented.
+// WHAT IT RECORDS. The level, in migration 020's row for (tenant, role, domain), its version one step on in 021's, and one
+// audit record at tenant scope: the reason code role_<role>_customers_to_<level> names the edit and the reason is the
+// owner's own words. The level before an edit can be rebuilt from the audit history (the first one the catalog default) ONLY
+// for edits made through this route: a holder of the runtime role with a live store-owner key can call 021's set routine
+// directly, which writes no audit record (020's residual, now preconditioned; a G-AUDIT exception). A create-mode command:
+// each edit is its own aggregate (a fresh server id, type tenant_role_level, never the tenant — so the audit record names no
+// subject tenant beyond its scope); the role's version is 021's, never the store's aggregate version. No outbox event: no
+// approved contract exists, and none is invented.
 //
 // PURE AND PORTABLE: part of the emitted tenant runtime artifact, importing only the runtime. The planner holds no
 // infrastructure, reads nothing but the body and writes nothing.
@@ -67,8 +83,10 @@ export const ROLE_LEVELS: readonly string[] = Object.freeze(['approve', 'create'
 /** The shortest and longest reason, in Unicode scalar values. */
 export const ROLE_LEVEL_REASON_MIN_SCALARS = 10;
 export const ROLE_LEVEL_REASON_MAX_SCALARS = 500;
-/** A bounded body: four fields, a reason of at most 500 scalars in any JSON spelling, and room for padding. */
+/** A bounded body: six fields, a reason of at most 500 scalars in any JSON spelling, and room for padding. */
 const MAX_BODY_BYTES = 8_192;
+/** A tenant id as the database renders one: a canonical lowercase UUID of any version. */
+const TENANT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const enumOf = (values: readonly string[]) => Object.freeze({ type: 'enum', values } as const);
 
@@ -76,11 +94,16 @@ export const ROLE_LEVEL_UPDATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'tenant.role.level.update',
   mode: 'create',
   aggregateType: 'tenant_role_level',
-  changes: Object.freeze({ roleId: enumOf(EDITABLE_TENANT_ROLES), domain: enumOf(ROLE_LEVEL_DOMAINS), level: enumOf(ROLE_LEVELS) }),
+  changes: Object.freeze({
+    roleId: enumOf(EDITABLE_TENANT_ROLES), domain: enumOf(ROLE_LEVEL_DOMAINS), level: enumOf(ROLE_LEVELS),
+    // The two preconditions (M7A-CUSTOMERS-P4): judged by the mutator's routine, never a selector.
+    expectedTenant: Object.freeze({ type: 'string', maxLength: 36 } as const),
+    expectedVersion: Object.freeze({ type: 'integer', min: 0, max: Number.MAX_SAFE_INTEGER } as const),
+  }),
   events: Object.freeze([]),
 });
 
-const BODY_FIELDS: readonly string[] = ['roleId', 'domain', 'level', 'reason'];
+const BODY_FIELDS: readonly string[] = ['roleId', 'domain', 'level', 'reason', 'expectedTenant', 'expectedVersion'];
 // Exactly the tenant status command's refused set (tenantStatus.ts): C0 controls (NUL included), DEL, C1 controls, the line
 // and paragraph separators, a lone surrogate and every Bidi_Control character.
 const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
@@ -94,25 +117,32 @@ export function normalizeRoleLevelReason(raw: unknown): string | null {
   return scalars >= ROLE_LEVEL_REASON_MIN_SCALARS && scalars <= ROLE_LEVEL_REASON_MAX_SCALARS ? trimmed : null;
 }
 
-/** The command's plan from the body alone, or COMMAND_REQUEST_INVALID: the runtime's new id, the edit, its audit annex. */
+/**
+ * The command's plan from the body alone, or COMMAND_REQUEST_INVALID: the runtime's new id, the edit and its two
+ * preconditions, the 200 naming the version the edit commits at, its audit annex.
+ */
 export function planRoleLevelUpdate(ctx: CommandContext): CommandPlan | typeof COMMAND_REQUEST_INVALID {
   const body: unknown = ctx.body;
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return COMMAND_REQUEST_INVALID;
   // A parsed JSON object: own enumerable data properties only, so its keys are exactly what was sent.
   const keys = Object.keys(body);
   if (keys.length !== BODY_FIELDS.length || !BODY_FIELDS.every((field) => keys.includes(field))) return COMMAND_REQUEST_INVALID;
-  const { roleId, domain, level, reason } = body as Record<string, unknown>;
+  const { roleId, domain, level, reason, expectedTenant, expectedVersion } = body as Record<string, unknown>;
   if (typeof roleId !== 'string' || !EDITABLE_TENANT_ROLES.includes(roleId)) return COMMAND_REQUEST_INVALID;
   if (typeof domain !== 'string' || !ROLE_LEVEL_DOMAINS.includes(domain)) return COMMAND_REQUEST_INVALID;
   if (typeof level !== 'string' || !ROLE_LEVELS.includes(level)) return COMMAND_REQUEST_INVALID;
   const text = normalizeRoleLevelReason(reason);
   if (text === null) return COMMAND_REQUEST_INVALID;
+  if (typeof expectedTenant !== 'string' || !TENANT_ID_RE.test(expectedTenant)) return COMMAND_REQUEST_INVALID;
+  // The version committed is exactly one step on, so both it and its successor must be safe integers.
+  if (typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
+    || !Number.isSafeInteger(expectedVersion + 1)) return COMMAND_REQUEST_INVALID;
   return {
     aggregateId: ctx.newAggregateId,
     expectedVersion: null,
-    changes: { roleId, domain, level },
+    changes: { roleId, domain, level, expectedTenant, expectedVersion },
     events: [],
-    response: { status: 200, body: { roleLevel: { roleId, domain, level } } },
+    response: { status: 200, body: { roleLevel: { roleId, domain, level, version: expectedVersion + 1 } } },
     audit: { reasonCode: `role_${roleId}_${domain}_to_${level}`, reason: text },
   };
 }

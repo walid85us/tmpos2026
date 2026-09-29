@@ -1260,7 +1260,8 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
-    : text.includes(' as r0') ? [{ r0: {}, r1: { customers: 'none' }, r2: { customers: 'view' } }]
+    : text.includes('m7a_role_level_states') ? [{ states: [{ roleId: 'manager', level: null, version: 0 }, { roleId: 'technician', level: 'none', version: 2 },
+      { roleId: 'sales_staff', level: 'view', version: 5 }] }]
       : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
   let calls = 0;
   let seen: unknown;
@@ -1306,6 +1307,7 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   assert.match(kernel.statements[0].text, /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as levels$/);
   // M7A-CUSTOMERS-P3-R2: the owner's read-back over this same kernel — ONE statement reading the three editable roles of the
   // trusted scope's tenant (one snapshot), each beside the catalog default the tenant root adds, the owner first and fixed.
+  // M7A-CUSTOMERS-P4: that statement is 021's states routine, and each editable role carries its version; the owner none.
   kernel.statements.length = 0;
   const readBack = ttx.routes[1];
   assert.ok(readBack.path === '/api/v1/roles/levels' && readBack.idempotency === 'none' && typeof readBack.handler === 'function');
@@ -1313,16 +1315,14 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   const levelsRes = { locals: {}, status(code: number) { levelsReply.status = code; return levelsRes; }, json(body: unknown) { levelsReply.body = body; return levelsRes; } };
   await readBack.handler({ url: '/api/v1/roles/levels' } as never, levelsRes as never,
     { requestId: 'req-m7tk03-levels', principal: null, session: null, authenticatedAt: null, trusted: { ...scope, roleId: 'store_owner' }, sessionKey: null } as never);
-  assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT, 'manager', REVAL_TENANT, 'technician', REVAL_TENANT, 'sales_staff']],
-    'one statement: the trusted tenant and each editable role');
-  assert.match(kernel.statements[0].text.replace(/\s+/g, ' '),
-    /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r0, tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r1, tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r2$/);
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT]], 'one statement: the trusted tenant alone');
+  assert.match(kernel.statements[0].text, /^select tmpos_role_edit\.m7a_role_level_states\(\?::uuid\) as states$/);
   assert.deepEqual([levelsReply.status, levelsReply.body], [200, { tenant: REVAL_TENANT, domain: 'customers', roles: [
-    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
-    { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true },
-    { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true },
-    { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true },
-  ] }], 'the catalog defaults (manager Full, technician View, sales_staff Create) and the stored overrides');
+    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
+    { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true, version: 0 },
+    { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true, version: 2 },
+    { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true, version: 5 },
+  ] }], 'the catalog defaults (manager Full, technician View, sales_staff Create), the stored overrides and their versions');
   await ttx.close();
   assert.equal(kernel.ended(), 1);
 });
@@ -1532,7 +1532,7 @@ const tenantStanding = (roleId: string) => ({
 });
 
 /** The composed tenant store over a kernel answering by statement text, the standing `roleId`'s, the stored levels and the clock as given. */
-function tenantCommandKernel(roleId: string, over: { levels?: unknown; fresh?: boolean | readonly boolean[] } = {}) {
+function tenantCommandKernel(roleId: string, over: { levels?: unknown; fresh?: boolean | readonly boolean[]; setOutcome?: string } = {}) {
   const standing = tenantStanding(roleId);
   // `fresh` as a list answers the database clock's successive judgements in order (the last one repeats).
   let clocks = 0;
@@ -1546,7 +1546,10 @@ function tenantCommandKernel(roleId: string, over: { levels?: unknown; fresh?: b
     if (text.includes('m5_admit_tenant_session_v2')) return [standing.row];
     if (text.includes('clock_timestamp')) return [{ fresh: freshNow() }];
     if (text.includes('m7a_role_levels')) return [{ levels: over.levels ?? {} }];
-    if (text.includes('m7a_role_level_set')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP, o_level: 'view' }];
+    if (text.includes('m7a_role_level_set_v2')) {
+      if (over.setOutcome !== undefined) return [{ o_outcome: over.setOutcome, o_tenant_id: null, o_actor_id: null, o_membership_id: null, o_level: null, o_version: null }];
+      return [{ o_outcome: 'applied', o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP, o_level: 'view', o_version: '3' }];
+    }
     if (text.includes('m7a_customer_create')) return [{ o_tenant_id: REVAL_TENANT, o_actor_id: REVAL_ACTOR, o_membership_id: REVAL_MEMBERSHIP }];
     if (/insert into public\.audit_event/.test(text)) return Object.assign([], { count: 1, command: 'INSERT' });
     if (text.includes('m6_idempotency_complete')) return [{ outcome: 'completed' }];
@@ -1584,7 +1587,9 @@ function preparedTenantCommand(contract: typeof CUSTOMER_CREATE_CONTRACT, plan: 
   return command.command;
 }
 
-const EDIT_BODY = Object.freeze({ roleId: 'sales_staff', domain: 'customers', level: 'view', reason: 'Sales staff no longer onboard customers.' });
+const EDIT_BODY = Object.freeze({
+  roleId: 'sales_staff', domain: 'customers', level: 'view', reason: 'Sales staff no longer onboard customers.', expectedTenant: REVAL_TENANT, expectedVersion: 2,
+});
 
 test('M7TK-09 the composed tenant store commits the owner\'s role-level edit — the standing held, the deadline judged on the database clock, the owner re-decided, 020 on the session key alone — and a stale deadline commits nothing', async () => {
   const { kernel, ttx, step, context } = tenantCommandKernel('store_owner');
@@ -1598,8 +1603,9 @@ test('M7TK-09 the composed tenant store commits the owner\'s role-level edit —
     'exactly one statement between 020\'s set and the audit record: the deadline judged again on the database clock');
   assert.deepEqual(kernel.statements.filter((st) => step(st.text) === 'clock').map((st) => st.values), [[String(deadline)], [String(deadline)]],
     'the same deadline, judged by the database before and after 020\'s lock wait');
-  assert.deepEqual(kernel.statements.find((st) => step(st.text) === '020 set')?.values, [REVAL_SESSION_KEY, 'sales_staff', 'customers', 'view'],
-    'the presenting session\'s key as the only authority input, then the edit');
+  assert.deepEqual(kernel.statements.find((st) => step(st.text) === '020 set')?.values, [REVAL_SESSION_KEY, 'sales_staff', 'customers', 'view', REVAL_TENANT, '2'],
+    'the presenting session\'s key as the only authority input, then the edit and its two preconditions (M7A-CUSTOMERS-P4: 021\'s set)');
+  assert.match(kernel.statements.find((st) => step(st.text) === '020 set')?.text ?? '', /tmpos_role_edit\.m7a_role_level_set_v2\(/);
   const audit = kernel.statements.find((st) => step(st.text) === 'audit');
   assert.ok(JSON.stringify(audit?.values).includes('role_sales_staff_customers_to_view'), 'the audited reason code');
   // Past its deadline on the database's clock: nothing after the clock, nothing written.
@@ -1614,6 +1620,15 @@ test('M7TK-09 the composed tenant store commits the owner\'s role-level edit —
   assert.deepEqual(lapsed.kernel.statements.map((st) => lapsed.step(st.text)),
     ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'clock', 'levels', '020 set', 'clock']);
   await lapsed.ttx.close();
+  // M7A-CUSTOMERS-P4: a precondition 021 found no longer holding — another tenant, or another version — is its own answer,
+  // decided under the whole revalidation, with nothing after it: no clock, no audit record, no completion.
+  for (const setOutcome of ['tenant_mismatch', 'version_conflict']) {
+    const failed = tenantCommandKernel('store_owner', { setOutcome });
+    assert.deepEqual(await failed.ttx.transactions!.port.commit(edit(deadline), new AbortController().signal), { outcome: 'precondition_failed' }, setOutcome);
+    assert.deepEqual(failed.kernel.statements.map((st) => failed.step(st.text)),
+      ['fence', 'session get', '016 hold', 'session get', 'touch', '016 v2', 'clock', 'levels', '020 set'], setOutcome);
+    await failed.ttx.close();
+  }
   // No deadline at all: refused before anything but the fence.
   assert.deepEqual(await stale.ttx.transactions!.port.commit(edit(null), new AbortController().signal), { outcome: 'unavailable' });
   await ttx.close();

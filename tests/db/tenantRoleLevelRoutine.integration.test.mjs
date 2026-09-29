@@ -25,10 +25,18 @@
 // default, restoring exactly 019's end state, then a clean re-apply (M7RL-16); and a session that expires while its create
 // or edit waits on the role row refused, the clock being read after that wait (M7RL-17).
 //
+// THE CHAIN THROUGH 020 (M7A-CUSTOMERS-P4). Migration 021 revokes the login's EXECUTE on 020's m7a_role_level_set,
+// replacing it with tmpos_role_edit.m7a_role_level_set_v2 (the edit conditional on the tenant and version reviewed), so
+// this file — 020's own behaviour — applies 001-020 only: the migration file port the trusted executor reads hides every
+// later file (tests/db/migrationsThrough.mjs). On a shared service where 021 is already applied, 021's own down file rolls
+// it back first (with its ledger row; it refuses while a version row exists, which every suite that writes one deletes),
+// and it is re-applied, with its exact ledger row, when this file ends; so M7RL-16's rollback and re-apply of 020 never
+// run under an applied 021. 021's routines are proved by tests/db/roleLevelVersionRoutine.integration.test.mjs.
+//
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a
 // cluster this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every
 // fixture is synthetic and randomly suffixed, and every issuer key is random bytes made here. It leaves the shared service
-// as it found it: 020 applied, the issuer key row it found, no ledger, session, customer or role-level row of its own, and
+// as it found it: 020 applied (and 021, if it was), the issuer key row it found, no ledger, session, customer or role-level row of its own, and
 // its login dropped.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +45,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { installTestIssuerKey, resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
+import { portThrough, rollBackAbove } from './migrationsThrough.mjs';
 import * as catalog from '../../server/platform-identity/permissionCatalog.ts';
 import { TENANT_ROLE_IDS } from '../../server/platform-identity/authorizationConstants.ts';
 import { principalKeyOf } from '../../server/runtime/sessions.ts';
@@ -121,6 +130,8 @@ const UIDS = [];
 const TENANTS = [];
 const KEYS = new Set();
 let keyBeforeSuite;
+/** The later migrations (021) this file rolled back to run on 001-020, re-applied at the end. */
+let later = null;
 
 test.after(async () => {
   const quietly = async (fn) => { try { await fn(); } catch { /* an earlier failure left less to clean */ } };
@@ -134,6 +145,8 @@ test.after(async () => {
   if (KEYS.size > 0) await quietly(() => owner`delete from tmpos_mint.tenant_session where session_key = any(${[...KEYS]}::text[])`);
   if (UIDS.length > 0) await owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`;
   if (TENANTS.length > 0) await owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`;
+  // The shared service is left with the later migrations it had (021), each with its exact ledger row.
+  if (later !== null) await later.restore();
   if (keyBeforeSuite !== undefined) {
     await quietly(async () => {
       await owner`delete from tmpos_mint.issuer_key`;
@@ -149,7 +162,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-020, a real non-owner runtime login, the key installed by the owner
+// setup: real migrations 001-020 (021 rolled back if applied), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -159,12 +172,18 @@ end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
 
+later = await rollBackAbove(owner, MIG_DIR, '020');
+// 021's down is forward-only and never gives 020's edit back to tmpos_app (DA-122): on a shared service where 021 was
+// applied, restore 020's own grant here so this suite proves 020 as 020 left it; 021's up (restore) revokes it again.
+if (later.rolledBack.includes('021')) {
+  await owner.unsafe('grant execute on function tmpos_role.m7a_role_level_set(text, text, text, text) to tmpos_app');
+}
 let applyReport;
 {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     applyReport = await runTrustedApply({
-      fsPort: createNodeFsPort(MIG_DIR, MIG_REL), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
+      fsPort: portThrough(createNodeFsPort(MIG_DIR, MIG_REL), '020'), adapter: handle.adapter, ledger: handle.ledger, connectionMode: 'session',
       credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 180_000,
     });
   } finally {

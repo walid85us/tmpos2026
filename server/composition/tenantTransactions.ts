@@ -29,6 +29,11 @@
 // although it is classified as a read. It adds no dependency to readiness: 020's read is the one every tenant route decision
 // already makes.
 //
+// M7A-CUSTOMERS-P4 UPDATE. The edit is conditional (DA-125): its mutator calls migration 021's set, which writes only while the
+// session's tenant and the role's version are the ones the owner's draft asserts, and the read-back hands each editable
+// role's version (021's one-snapshot read) beside its level — the owner's record carries none. Nothing is added to the
+// inventory: the same routes, mutators and reads, over 021's routines.
+//
 // Its readiness is the adapter's own probe (probeCustomerDirectory), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
@@ -64,12 +69,14 @@ const INERT: TenantReadPorts = Object.freeze({
 /** A role's catalog default on the one decided domain: the tenant authorizer's own materializer, with no edit, unlimited. */
 const catalogDefault = (roleId: string): string | undefined => materializeTenantPermissions(roleId, {}, false)[ROLE_LEVEL_DOMAINS[0]];
 
-/** The read-back's port: the stored levels, each beside its catalog default, the owner role first at its fixed level. */
+/** The read-back's port: the stored levels and versions, each beside its catalog default, the owner first at its fixed level, unversioned. */
 function withCatalogDefaults(stored: (tenant: string, signal: AbortSignal) => Promise<readonly StoredRoleLevel[]>): RoleLevelDirectoryPort {
   return Object.freeze({
     levels: async (tenant: string, signal: AbortSignal): Promise<unknown> => [
-      { roleId: TENANT_OWNER_ROLE_ID, stored: null, defaultLevel: catalogDefault(TENANT_OWNER_ROLE_ID) },
-      ...(await stored(tenant, signal)).map((entry) => ({ roleId: entry.roleId, stored: entry.stored, defaultLevel: catalogDefault(entry.roleId) })),
+      { roleId: TENANT_OWNER_ROLE_ID, stored: null, defaultLevel: catalogDefault(TENANT_OWNER_ROLE_ID), version: null },
+      ...(await stored(tenant, signal)).map((entry) => ({
+        roleId: entry.roleId, stored: entry.stored, defaultLevel: catalogDefault(entry.roleId), version: entry.version,
+      })),
     ],
   });
 }

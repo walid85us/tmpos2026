@@ -1,6 +1,8 @@
 // M7A-CUSTOMERS-P3-R2 — THE SHOP'S BUILT-IN CUSTOMERS LEVELS, END TO END IN A REAL BROWSER: a PRODUCTION build of the shop
 // SPA in Chromium, signed in through a synthetic Firebase identity provider, talking to the REAL tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over loopback HTTP, over a disposable PostgreSQL holding every migration.
+// M7A-CUSTOMERS-P4 (DA-125) — TWO tenant entries share that database: a scenario routes a page or tab to the second one
+// (st.second), so the stale-draft cases cross instances. Every save asserts the tenant and version its draft was read at.
 //
 // WHAT IS SUBSTITUTED, STATED EXACTLY:
 //   - The network. Chromium resolves nothing (cdp.mjs HERMETIC_ARGS); CDP Fetch interception answers every request. The
@@ -18,7 +20,8 @@
 //     run may not leave loopback), P3R2_FIRESTORE=stub answers the Listen channel for users/{uid} to that user alone —
 //     the rules' single allow — and nothing else. The evidence names the mode.
 // The tenant entry's host lock, Origin/CSRF checks, limiter, session boundary, authorizer, step-up rule, idempotency store,
-// command transaction, migration 020's routines, audit writer and read-back route are production's own code, unmodified.
+// command transaction, migrations 020/021's routines, audit writer and read-back route are production's own code,
+// unmodified (each entry's pool is smaller than production's MAX_POOLS, so two fit a disposable cluster's connections).
 //
 // WHAT IS PROVEN (CP5 of the stage brief), each case in tenants of its own, with counts the database owner reads:
 //   SRL-W  THE ENTRY WITNESS: an owner narrows Sales Associate's Customers level from Create to View in the shop screen; one
@@ -42,13 +45,25 @@
 //          its variants (another domain, Manage, an extra field) included — with nothing written, not even an audit record.
 //   SRL-07 the local grid is labelled local-only; a grid change — a built-in role's Customers cell (which points to the
 //          server panel) or a custom role's — sends nothing to any server and moves no server level; no global Save.
-//   SRL-08 two browsers editing one role: the later writer's value stands, and the tab whose read-back shows another value
-//          reports it instead of "Saved" (last writer wins — R1 has no version precondition; recorded, unresolved); a
-//          later change made elsewhere turns the winner's "Saved" into "Changed elsewhere" on its next refresh (AM2).
-//   SRL-08T the same with two TABS of one browser (one cookie jar, one sign-in).
+//   SRL-08 two browsers on two tenant entries read one role at the same version: the first narrows it (Saved); the
+//          second's older, permissive draft is refused by the version precondition (409 write_conflict, nothing written,
+//          no edit audit, the restrictive level and its authority stand) and shown as a conflict (the server's level and
+//          the unsaved choice, Discard/Reapply, Save off); Reapply and a new Save (new version, new key) land it; the
+//          first browser's "Saved" then says "Changed elsewhere" on its next refresh (AM2). A sales_staff session's
+//          create and read answer each committed level.
+//   SRL-08T the same with two TABS of one browser (one cookie jar, one sign-in), each tab on its own entry.
 //   SRL-09 a user switch in one browser (a second tab signs in as another owner) ends the first user's tenant session
 //          BEFORE the next user's login leaves the page (AM4: while that login is held, the old cookie reads 401); signing
 //          out (the persisted sign-in cleared, as a sign-out in another tab leaves it) ends the next user's session too.
+//   SRL-10 a draft made in tenant A, saved after the SAME owner's session moved to tenant B (grant swapped, re-login on
+//          save): the PUT asserting A is refused (409) with nothing written in A or B — no level, version, edit audit or
+//          completion — and the shop says the store changed and that the change to the previous store was not saved.
+//   SRL-11 a save PARKED INSIDE THE DATABASE (a side transaction holds A's role row FOR UPDATE; the PUT's backend waits
+//          on it) while the owner's session moves to B (another tab of the browser signs in again): B is untouched, A
+//          holds whatever the server decided, and the panel — now B's — reports it only as a detached notice, never as
+//          B's save.
+//   SRL-12 reset to the default, then an older draft: View, then Create restored (the default word, a newer version); a
+//          draft made at the first version is refused though the level it saw is back (no ABA); Discard drops it.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -56,7 +71,8 @@
 //   firebase emulators:exec --only firestore --project demo-tmpos-shop 'tsx --test tests/browser/shopRoleLevels.browser.test.mjs'
 //   P3R2_FIRESTORE=stub tsx --test tests/browser/shopRoleLevels.browser.test.mjs          (no emulator: stub, stated)
 // DISPOSABLE ONLY: the database target is tests/db/localPostgres.harness.mjs's (a supplied CI service or a cluster made and
-// destroyed here). On a shared service this file removes its customers, role levels, sessions and mint rows, restores the
+// destroyed here). On a shared service this file removes its customers, role levels and their 021 versions (or 021's
+// rollback would refuse), sessions and mint rows, restores the
 // limiter fingerprint and issuer key row it found, and drops its login. What it leaves is what every suite leaves: its
 // synthetically named identities, tenants and grants, their audit records and idempotency records.
 import { after, before, test } from 'node:test';
@@ -205,6 +221,10 @@ async function teardownDatabase() {
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
     if (TENANTS.length > 0) {
+      await step(async () => { // 021's version rows first (an entry commit before 021 has no such table)
+        const [{ present }] = await owner`select to_regclass('tmpos_role_edit.role_level_version') is not null as present`;
+        if (present) await owner`delete from tmpos_role_edit.role_level_version where tenant_id = any(${TENANTS}::uuid[])`;
+      });
       await step(() => owner`delete from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[])`);
       await step(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
     }
@@ -270,6 +290,15 @@ const EDIT = Object.freeze({ C: 0, A: 0, E: 1, K: 1, L: 1 });
 async function levelOf(tenant, roleId) {
   const rows = await owner`select level from tmpos_role.tenant_role_level where tenant_id = ${tenant} and role_id = ${roleId} and domain = 'customers'`;
   return rows.length === 0 ? undefined : rows[0].level;
+}
+
+/** One tenant's whole role-level footprint: its edit audits, stored levels (020's lock row: 'lock') and 021 versions. */
+async function tenantState(tenant) {
+  const [r] = await owner`select
+    (select count(*) from public.audit_event where action_id = ${EDIT_ACTION} and tenant_id = ${tenant})::int as edits,
+    (select coalesce(jsonb_object_agg(role_id, coalesce(level, 'lock')), '{}') from tmpos_role.tenant_role_level where tenant_id = ${tenant}) as levels,
+    (select coalesce(jsonb_object_agg(role_id, version), '{}') from tmpos_role_edit.role_level_version where tenant_id = ${tenant}) as versions`;
+  return r;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -495,12 +524,19 @@ const ENV = Object.freeze({
 });
 
 let entry = null; // { port, cap } while the tenant entry listens
+let entry2 = null; // the second tenant entry over the same database (P4): pages and tabs in st.second reach it
+/** Each entry's pool: two, the owner's client and the cluster's reserved slots fit a disposable cluster's 20 connections. */
+const POOLS = Math.min(5, MAX_POOLS);
 
 async function startEntry() {
+  entry = await listenEntry();
+}
+
+async function listenEntry() {
   const cap = { codes: [], lines: [], proc: new EventEmitter() };
   const construction = {
     databaseClient: () => createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
-      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: MAX_POOLS, idle_timeout: 0, user: RUNTIME_LOGIN,
+      ...runtimeClientOptions(TARGET_DSN), ssl: false, max: POOLS, idle_timeout: 0, user: RUNTIME_LOGIN,
     }),
     tokenVerifier: VERIFIER,
     listen: () => ({ port: 0, host: '127.0.0.1' }),
@@ -509,13 +545,18 @@ async function startEntry() {
     env: ENV, construction, proc: cap.proc, exit: (code) => { cap.codes.push(code); }, log: { log: (line) => { cap.lines.push(line); } },
   });
   assert.equal(result.outcome, 'listening', JSON.stringify(result));
-  entry = { port: result.address.port, cap };
+  return { port: result.address.port, cap };
 }
 
 async function stopEntry() {
-  if (entry === null) return;
-  const { cap } = entry;
+  const stopping = entry;
   entry = null;
+  await stopped(stopping);
+}
+
+async function stopped(listening) {
+  if (listening === null) return;
+  const { cap } = listening;
   cap.proc.emit('SIGTERM');
   for (const until = Date.now() + 10_000; cap.codes.length === 0 && Date.now() < until;) await delay(20);
   assert.ok(cap.codes.length > 0, 'the tenant entry stopped: an outage case is a real one');
@@ -589,12 +630,47 @@ async function actor(label, memberships, { role = null } = {}) {
 }
 const grant = (tenant, role) => ({ tenant, role });
 
-/** A tenant of its own with its store owner, who can sign in to the shop. */
-async function shop(label) {
+async function newTenant(label) {
   const [{ tenant_id: tenant }] = await owner`insert into tenant (display_name, status) values (${`m7srl-${label}-${SUFFIX}`}, 'active') returning tenant_id`;
   TENANTS.push(tenant);
+  return tenant;
+}
+
+/** A tenant of its own with its store owner, who can sign in to the shop. */
+async function shop(label) {
+  const tenant = await newTenant(label);
   const boss = await actor(`${label}-owner`, [grant(tenant, 'store_owner')], { role: 'store_owner' });
   return { tenant, boss };
+}
+
+/**
+ * The same account's store moves from `from` to `to`: its grant is swapped in one transaction (two tenant grants at once
+ * are refused), which ends its sessions (their admission no longer holds); its next login is scoped to `to`.
+ */
+async function moveOwner(who, from, to) {
+  await owner.begin(async (sql) => {
+    await sql`delete from user_membership where internal_user_id = ${who.id} and tenant_id = ${from}`;
+    await sql`insert into user_membership (internal_user_id, tenant_id, store_id, scope_type, role_id, status)
+      values (${who.id}, ${to}, null, 'tenant', 'store_owner', 'active')`;
+  });
+}
+
+/** A level set outside the browser the way the shop sets it: read the tenant and version, then PUT asserting both. */
+async function directSet(session, roleId, level) {
+  const read = await call('GET', ROLE_LEVELS, { session });
+  assert.equal(read.status, 200, read.text);
+  const { tenant, roles } = JSON.parse(read.text);
+  const expectedVersion = roles.find((r) => r.roleId === roleId).version;
+  return call('PUT', ROLE_LEVELS, { session, body: { roleId, domain: 'customers', level, reason: REASON, expectedTenant: tenant, expectedVersion }, key: randomUUID() });
+}
+
+/** What a sales_staff session may do under each committed Customers level: [POST create, GET list] statuses. */
+const AUTHORITY = Object.freeze({ none: [403, 403], view: [403, 200], create: [201, 200], edit: [201, 200] });
+async function assertAuthority(staffSession, level, label) {
+  const post = await call('POST', CUSTOMERS, { session: staffSession, body: { name: `M7SRL ${label} ${randomUUID().slice(0, 8)}` }, key: randomUUID() });
+  const list = await call('GET', `${CUSTOMERS}?limit=10`, { session: staffSession });
+  note(`authority: ${label}`, [post.status, list.status]);
+  assert.deepEqual([post.status, list.status], AUTHORITY[level], `${label}: a sales_staff session's create and read under ${level}`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -638,13 +714,15 @@ async function shopApi(ev, u) {
   const { request } = ev;
   const headers = lower(request.headers);
   // at: when the page sent it; doneAt: when the entry had answered it; cookie: the session cookie it set, name=value.
-  const rec = { method: request.method, path: u.pathname, query: u.search, frameId: ev.frameId, headers, body: postBody(request), status: null, at: performance.now(), doneAt: null, cookie: null };
+  // via: the tenant entry it was forwarded to (2: the page or tab is in st.second).
+  const rec = { method: request.method, path: u.pathname, query: u.search, frameId: ev.frameId, via: s.second.has(ev.frameId) ? 2 : 1, headers, body: postBody(request), status: null, at: performance.now(), doneAt: null, cookie: null };
   s.api.push(rec);
   await passGates(s, rec, 'request');
   const out = { ...Object.fromEntries(Object.entries(headers).filter(([k]) => !HOP.has(k))), host: SHOP_HOST };
   if (s.tamper) await s.tamper(rec, out);
   let res = null;
-  if (entry !== null) res = await send(entry.port, rec.method, `${u.pathname}${u.search}`, out, rec.body === '' && rec.method === 'GET' ? undefined : rec.body).catch(() => null);
+  const target = rec.via === 2 ? entry2 : entry;
+  if (target !== null) res = await send(target.port, rec.method, `${u.pathname}${u.search}`, out, rec.body === '' && rec.method === 'GET' ? undefined : rec.body).catch(() => null);
   if (res === null) res = { status: 502, pairs: [['content-type', 'text/plain'], ['cache-control', 'no-store']], body: Buffer.from('Bad Gateway') };
   rec.doneAt = performance.now();
   rec.status = res.status;
@@ -683,7 +761,9 @@ function gate(match, phase) {
   return { reached, release };
 }
 
-const apiLine = (r) => `${r.method} ${r.path}${r.query} -> ${r.status ?? 'held'}${r.error ? ` ${r.error}` : ''}`;
+const apiLine = (r) => `${r.via === 2 ? '[entry2] ' : ''}${r.method} ${r.path}${r.query} -> ${r.status ?? 'held'}${r.error ? ` ${r.error}` : ''}`;
+/** An answer's status and error, e.g. "409 write_conflict". */
+const answered = (r) => `${r.status}${r.error ? ` ${r.error}` : ''}`;
 const isPut = (r) => r.method === 'PUT' && r.path === ROLE_LEVELS;
 const isRead = (r) => r.method === 'GET' && r.path === ROLE_LEVELS;
 const isLogout = (r) => r.method === 'POST' && r.path === '/api/v1/session/logout';
@@ -743,8 +823,9 @@ const waitState = (page, state, timeout = 30_000) =>
 async function rowOf(page, roleId) {
   const text = await page.evaluate(`document.querySelector('[data-testid="server-level-row-${roleId}"]')?.textContent ?? null`);
   if (text === null) return null;
-  const m = /Server level:\s*(None|View Only|Create|Edit|Manage|Approve|Full Access)\s*(Custom|Default)/.exec(text);
-  return m ? { level: m[1], badge: m[2] } : { text };
+  // "Last known level" is the same level not established by a read since (a failed read-back): `known` says which.
+  const m = /(Server|Last known) level:\s*(None|View Only|Create|Edit|Manage|Approve|Full Access)\s*(Custom|Default)/.exec(text);
+  return m ? { level: m[2], badge: m[3], known: m[1] === 'Server' } : { text };
 }
 async function waitRow(page, roleId, level, badge) {
   await page.waitFor(async () => {
@@ -785,7 +866,9 @@ function settle(page, roleId, from) {
     const sent = st.api.slice(from).filter(mine);
     if (sent.length === 0 || sent.some((r) => r.status === null)) return null;
     const text = await statusOf(page, roleId);
-    const busy = await page.evaluate(`document.querySelector('[data-testid="server-level-select-${roleId}"]')?.disabled ?? false`);
+    // A disabled select is a save still finishing — or a settled conflict, which locks the row until Discard or Reapply.
+    const busy = await page.evaluate(`(document.querySelector('[data-testid="server-level-select-${roleId}"]')?.disabled ?? false)
+      && document.querySelector('[data-testid="server-level-status-${roleId}"]')?.dataset.status !== 'conflict'`);
     return !busy && text && text !== 'Not saved yet.' && !text.startsWith('Saving') ? text : null;
   }, 45_000, `the save of ${roleId} settled`);
 }
@@ -804,11 +887,47 @@ const SAY = Object.freeze({
   unreachable: 'Not saved: the store server could not be reached. Try again.',
   stepUp: 'Not saved: sign in again to save this change.',
   signedInAgain: 'Signed in again. Press "Save to server" to save this change.',
-  notThisAttempt: (level) => `Not saved by this attempt. The server has ${LABELS[level]}.`,
+  notConfirmed: (level) => `Not confirmed yet — press Save again to check. The server has ${LABELS[level]}.`,
+  // a held attempt (its key may have committed) refused or unsent: never "Not saved" (R2-2)
+  confirmDenied: 'Not confirmed yet — the server refused the check. Only the store owner can change these levels.',
+  confirmUnreachable: 'Not confirmed yet — the store server could not be reached. Press Save again to check.',
   lostRace: (level) => `Changed elsewhere — the server now has ${LABELS[level]}. Your change is not saved.`,
   changedElsewhere: (level) => `Changed elsewhere — the server now has ${LABELS[level]}.`,
+  reapplied: 'Reapplied to the current server level. Not saved yet.',
 });
 const REFRESH_FAILED = 'Could not refresh from the server; values may be out of date.';
+/** The panel's notices after a same-account tenant switch (STORE_CHANGED_NOTICE and PREVIOUS_STORE there). */
+const STORE_CHANGED = 'The store server now answers for a different store. Unsent changes were cleared. No change was sent to the newly connected store.';
+const PREVIOUS_STORE = Object.freeze({
+  acknowledged: 'A change sent before the store connection changed was acknowledged by the server; it could not be read back here.',
+  notSaved: 'A change sent before the store connection changed was not saved.',
+  unconfirmed: 'A change sent before the store connection changed could not be confirmed.',
+});
+
+/** The backends waiting on `pid` (pg_blocking_pids), with what they run. */
+const blockedBy = (pid) => owner`select pid, usename, wait_event_type, left(query, 200) as query
+  from pg_catalog.pg_stat_activity where ${pid}::int = any(pg_catalog.pg_blocking_pids(pid))`;
+/** Poll `fn` until it answers something truthy (that answer), or fail after `timeout` ms. */
+async function until(fn, timeout, label) {
+  const end = performance.now() + timeout;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (performance.now() > end) throw new Error(`timed out after ${timeout} ms: ${label}`);
+    await delay(100);
+  }
+}
+/** { changed: the store-changed notice or null, previous: the previous-store notices }. */
+const noticesOf = (page) => page.evaluate(`({
+  changed: document.querySelector('[data-testid="server-levels-store-changed"]')?.textContent.trim() ?? null,
+  previous: [...document.querySelectorAll('[data-testid="server-levels-previous-store"] p')].map((p) => p.textContent.trim()),
+})`);
+/** A role's conflict group: "The server now has X. Your unsaved choice: Y." or null. */
+const conflictOf = (page, roleId) => page.evaluate(`document.querySelector('[data-testid="server-level-conflict-${roleId}"] p')?.textContent.trim() ?? null`);
+const saveEnabled = (page, roleId) => page.evaluate(`document.querySelector('[data-testid="server-level-save-${roleId}"]')?.disabled === false`);
+const hasDraft = (page, roleId) => page.evaluate(`!!document.querySelector('[data-testid="server-level-unsaved-${roleId}"]')`);
+/** Route a page's (or tab's) API requests to the second tenant entry; answers the page. */
+const viaSecond = (page) => { st.second.add(page.frameId); return page; };
 
 /** The entry build's only control: the Permissions grid's cell for (role column, domain row). */
 async function setGridLevel(page, roleName, domainLabel, level) {
@@ -873,7 +992,7 @@ async function assertNoLeak(page) {
 
 function scenario(id, title, fn) {
   test(`${id}: ${title}`, { timeout: 180_000 }, async () => {
-    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, pages: [], tabs: [], secrets: new Set(), notes: {} };
+    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
     const errorsBefore = browser.interceptErrors.length;
     let outcome = 'fail';
@@ -920,6 +1039,7 @@ before(async () => {
   await setupDatabase();
   if (FIRESTORE_MODE === 'emulator') await loadEmulatorRules();
   await startEntry();
+  entry2 = await listenEntry();
   browser = await launch({ executable: CHROMIUM });
   await browser.intercept(route);
 }, { timeout: 900_000 });
@@ -928,6 +1048,8 @@ after(async () => {
   try { writeFileSync(join(EVIDENCE, 'shop-role-levels.json'), `${JSON.stringify(evidence, null, 2)}\n`); } catch { /* evidence is best effort */ }
   await browser?.close().catch((e) => console.warn(redact(`browser teardown: ${e.message}`)));
   await stopEntry();
+  await stopped(entry2).catch((e) => console.warn(redact(`second entry teardown: ${e.message}`)));
+  entry2 = null;
   await teardownDatabase();
 });
 
@@ -1038,7 +1160,7 @@ scenario('SRL-02', 'two tenants stay independent; a tenant-A read held past a sa
   const a = await shop('s2a');
   const b = await shop('s2b');
   const direct = await directLogin(a.boss);
-  const put = await call('PUT', ROLE_LEVELS, { session: direct, body: { roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON }, key: randomUUID() });
+  const put = await directSet(direct, 'sales_staff', 'view');
   assert.equal(put.status, 200, put.text);
   const page = await ownerPanel(a.boss);
   await waitRow(page, 'sales_staff', 'view', 'Custom');
@@ -1067,7 +1189,8 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
   const page = await ownerPanel(boss);
   await draft(page, 'sales_staff', 'view');
   // [label, tamper, the PUT's status, the row's status line (AM1: a 404 is an answer that decides nothing: the key is
-  // settled and the server's level read back; AM6: any 403 other than step_up_required is the owner-only refusal)]
+  // held — it may have committed — and the server's level read back; AM6: any 403 other than step_up_required is the
+  // owner-only refusal)]
   const cases = [
     ['no session on the write', async (rec, out) => { if (isPut(rec)) delete out.cookie; }, 401, SAY.signedOut],
     ['the session ended in the store', async (rec) => {
@@ -1078,7 +1201,7 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     }, 401, SAY.signedOut],
     ['the session CSRF stripped', async (rec, out) => { if (isPut(rec)) delete out[SESSION_CSRF_HEADER]; }, 403, SAY.refused],
     ['a foreign Origin', async (rec, out) => { if (isPut(rec)) out.origin = ADMIN; }, 403, SAY.refused],
-    ['a wrong Host', async (rec, out) => { if (isPut(rec)) out.host = 'admin.tmpos.test'; }, 404, SAY.notThisAttempt('create')],
+    ['a wrong Host', async (rec, out) => { if (isPut(rec)) out.host = 'admin.tmpos.test'; }, 404, SAY.notConfirmed('create')],
   ];
   for (const [label, tamper, expected, says] of cases) {
     const before = await counts();
@@ -1092,6 +1215,8 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     await assertDelta(before, NOTHING, label);
     assert.equal(await levelOf(tenant, 'sales_staff'), undefined, `${label}: nothing stored`);
   }
+  // The 404 left the key HELD (it may have committed), so the next two saves re-send that key: a refusal of it, or a
+  // save that never reaches the server, does not say what it did — "Not confirmed yet", never "Not saved" (R2-2).
   {
     const before = await counts();
     await owner`update user_membership set role_id = 'technician' where internal_user_id = ${boss.id}`;
@@ -1099,7 +1224,7 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     const status = await save(page, 'sales_staff');
     await owner`update user_membership set role_id = 'store_owner' where internal_user_id = ${boss.id}`;
     note('the owner grant revoked', status);
-    assert.equal(status, SAY.refused);
+    assert.equal(status, SAY.confirmDenied);
     assert.deepEqual(st.api.slice(from).filter(isPut).map((r) => r.status), [403], 'the server refused the former owner\'s PUT');
     await assertDelta(before, NOTHING, 'the owner grant revoked');
   }
@@ -1115,7 +1240,7 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     const status = await save(page, 'sales_staff');
     await startEntry();
     note('the tenant server down', status);
-    assert.equal(status, SAY.unreachable);
+    assert.equal(status, SAY.confirmUnreachable);
     assert.deepEqual(st.api.slice(from).map((r) => r.status), [502], 'the one request made was answered by the front alone');
     await assertDelta(before, NOTHING, 'the tenant server down');
   }
@@ -1187,15 +1312,18 @@ scenario('SRL-06', 'a manager sees the panel denied, and the server refuses the 
   const direct = await directLogin(manager);
   const before = await counts();
   const read = await call('GET', ROLE_LEVELS, { session: direct });
-  const put = (body) => call('PUT', ROLE_LEVELS, { session: direct, body, key: randomUUID() });
-  const narrow = await put({ roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON });
-  const self = await put({ roleId: 'manager', domain: 'customers', level: 'full', reason: REASON });
+  // Well-formed bodies (the manager's own tenant and version 0 asserted), so the owner rule is what refuses them.
+  const put = (roleId, domain, level, extra = {}) => call('PUT', ROLE_LEVELS, {
+    session: direct, body: { roleId, domain, level, reason: REASON, expectedTenant: tenant, expectedVersion: 0, ...extra }, key: randomUUID(),
+  });
+  const narrow = await put('sales_staff', 'customers', 'view');
+  const self = await put('manager', 'customers', 'full');
   // The self-grant in other shapes: another domain (where manage_role_permissions would live), Manage, and an extra
   // field naming the grant. Whether the body rule (400) or the owner rule (403) answers first, none may write.
   const variants = {
-    'another domain': await put({ roleId: 'manager', domain: 'employees', level: 'full', reason: REASON }),
-    'Manage for manager': await put({ roleId: 'manager', domain: 'customers', level: 'manage', reason: REASON }),
-    'an extra field': await put({ roleId: 'manager', domain: 'customers', level: 'full', reason: REASON, permission: 'manage_role_permissions' }),
+    'another domain': await put('manager', 'employees', 'full'),
+    'Manage for manager': await put('manager', 'customers', 'manage'),
+    'an extra field': await put('manager', 'customers', 'full', { permission: 'manage_role_permissions' }),
   };
   note('manager direct', { read: read.status, narrow: narrow.status, self: self.status, ...Object.fromEntries(Object.entries(variants).map(([k, v]) => [k, v.status])) });
   assert.deepEqual([read.status, narrow.status, self.status], [403, 403, 403]);
@@ -1232,7 +1360,7 @@ scenario('SRL-07', 'the local grid is labelled local-only; a grid change — a b
   assert.deepEqual(st.firestore.slice(fsFrom).filter((f) => f.includes('/Write/')), [], 'nor writes to Firestore');
   await assertDelta(before, REFUSED, 'the grid changes');
   assert.equal(await levelOf(tenant, 'sales_staff'), undefined, 'the server level of sales_staff did not move');
-  assert.deepEqual(await rowOf(page, 'sales_staff'), { level: LABELS.create, badge: 'Default' }, 'the server panel still shows the server\'s level');
+  assert.deepEqual(await rowOf(page, 'sales_staff'), { level: LABELS.create, badge: 'Default', known: true }, 'the server panel still shows the server\'s level');
   const rows = await page.evaluate(`[...document.querySelectorAll('[data-testid^="server-level-row-"]')].map((r) => r.dataset.testid.slice('server-level-row-'.length))`);
   assert.deepEqual(rows, ['store_owner', 'manager', 'technician', 'sales_staff'], 'the server panel lists the built-in roles only, never the custom role');
   const saves = await page.evaluate(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /save/i.test(t))`);
@@ -1241,51 +1369,255 @@ scenario('SRL-07', 'the local grid is labelled local-only; a grid change — a b
 });
 
 /**
- * Two editors of one role: `two` writes None and its read-back is held; `one` then writes Edit and reads it back; `two`'s
- * read-back, released, shows Edit. The later writer stands, and the earlier one says it lost instead of "Saved".
+ * Two editors read one role at the same version (Create, the default: version 0). `one` narrows it to View; `two`'s older,
+ * permissive draft (Edit) is then refused by the version precondition — nothing written, no edit audit, View and its
+ * authority stand — and shown as a conflict; only an explicit Reapply and a new Save (the new version, a new key) land it.
+ * `two` is on the second tenant entry; a sales_staff session's create and read answer every committed level.
  */
-async function lastWriterWins(tenant, one, two, where) {
-  const held = gate((r) => isRead(r) && r.frameId === two.frameId, 'request');
-  await draft(two, 'sales_staff', 'none');
-  const twoSaving = save(two, 'sales_staff');
-  const heldRead = await Promise.race([held.reached, delay(15_000).then(() => null)]);
-  assert.ok(heldRead, `the second ${where}'s read-back is held after its PUT`);
-  assert.equal(await levelOf(tenant, 'sales_staff'), 'none', `the second ${where}'s write committed`);
-  await draft(one, 'sales_staff', 'edit');
-  const oneStatus = await save(one, 'sales_staff');
-  held.release();
-  const twoStatus = await twoSaving;
-  note(`first ${where}`, oneStatus);
-  note(`second ${where}`, twoStatus);
-  assert.ok(saved(oneStatus), oneStatus);
-  assert.equal(twoStatus, SAY.lostRace('edit'), `the stale ${where} does not say Saved and shows the server's value`);
-  assert.equal(await levelOf(tenant, 'sales_staff'), 'edit', 'the later writer stands');
-  assert.deepEqual(st.api.filter(isPut).map((r) => r.status), [200, 200], 'both writes committed: last writer wins (R1 has no version precondition)');
+async function staleDraftRefused(tenant, one, two, staffSession, where) {
+  await waitRow(one, 'sales_staff', 'create', 'Default');
+  await waitRow(two, 'sales_staff', 'create', 'Default');
+  await assertAuthority(staffSession, 'create', 'the default');
+  await draft(one, 'sales_staff', 'view');
+  let before = await counts();
+  const first = note(`first ${where}`, await save(one, 'sales_staff'));
+  assert.ok(saved(first), first);
+  await assertDelta(before, EDIT, `the first ${where}'s View`);
+  await assertAuthority(staffSession, 'view', `the first ${where}'s View`);
+
+  await draft(two, 'sales_staff', 'edit'); // against what `two` read: Create at version 0
+  before = await counts();
+  const stale = note(`second ${where}`, await save(two, 'sales_staff'));
+  assert.equal(stale, SAY.lostRace('view'), `the stale ${where} is a conflict, never "Saved"`);
+  await assertDelta(before, { ...REFUSED, L: 1 }, `the stale ${where}'s save wrote nothing but its lease`);
+  assert.equal(await levelOf(tenant, 'sales_staff'), 'view', 'View stands: the older draft restored nothing');
+  const puts = st.api.filter(isPut);
+  assert.deepEqual(puts.map((r) => `entry${r.via} ${answered(r)}`), ['entry1 200', 'entry2 409 write_conflict'], `the stale save was refused on the other entry: ${st.api.map(apiLine).join('; ')}`);
+  const staleBody = JSON.parse(puts[1].body);
+  assert.deepEqual([staleBody.level, staleBody.expectedTenant, staleBody.expectedVersion], ['edit', tenant, 0], 'it asserted the version it was drafted at');
+  await assertAuthority(staffSession, 'view', `View after the stale ${where}`);
+  // The conflict: the server's level and the unsaved choice; Save stays off until Discard or Reapply.
+  await waitRow(two, 'sales_staff', 'view', 'Custom');
+  assert.equal(await conflictOf(two, 'sales_staff'), 'The server now has View Only. Your unsaved choice: Edit.');
+  assert.equal(await saveEnabled(two, 'sales_staff'), false, 'no Save while the conflict stands');
+  assert.equal(await two.evaluate(`!!document.querySelector('[data-testid="server-level-discard-sales_staff"]')`), true, 'Discard is offered');
+
+  await two.click('[data-testid="server-level-reapply-sales_staff"]');
+  await two.waitFor(async () => (await statusOf(two, 'sales_staff')) === SAY.reapplied, 10_000, 'the draft reapplied to the version just read');
+  assert.equal(await conflictOf(two, 'sales_staff'), null, 'the conflict is resolved by the choice');
+  assert.equal(st.api.filter(isPut).length, 2, 'Reapply sends nothing');
+  before = await counts();
+  const again = note(`second ${where} after Reapply`, await save(two, 'sales_staff'));
+  assert.ok(saved(again), again);
+  await assertDelta(before, EDIT, `the deliberate save after Reapply`);
+  const last = st.api.filter(isPut).at(-1);
+  assert.equal(answered(last), '200');
+  assert.equal(JSON.parse(last.body).expectedVersion, 1, 'asserting the version it was reapplied to');
+  assert.notEqual(last.headers['idempotency-key'], puts[1].headers['idempotency-key'], 'under a new key');
+  assert.equal(await levelOf(tenant, 'sales_staff'), 'edit');
+  await assertAuthority(staffSession, 'edit', `the second ${where}'s Edit`);
 }
 
-scenario('SRL-08', 'two browsers edit one role: the later writer\'s value stands, and the tab whose read-back shows another value says so instead of "Saved" (last writer wins, recorded); a later change elsewhere turns "Saved" into "Changed elsewhere"', async () => {
+scenario('SRL-08', 'two browsers on two tenant entries read one role at one version: the first narrows it; the second\'s older, permissive draft is refused (409, nothing written, View and its authority stand) and shown as a conflict; Reapply and a new Save land it; the first browser\'s "Saved" then says "Changed elsewhere"', async () => {
   const { tenant, boss } = await shop('s8');
+  const staff = await actor('s8-staff', [grant(tenant, 'sales_staff')]);
+  const staffSession = await directLogin(staff);
   const one = await ownerPanel(boss);
-  const two = await ownerPanel(boss);
-  await lastWriterWins(tenant, one, two, 'browser');
-  // AM2: a change made elsewhere afterwards — seen by the first browser's next refresh — ends its "Saved".
-  const direct = await directLogin(boss);
-  const put = await call('PUT', ROLE_LEVELS, { session: direct, body: { roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON }, key: randomUUID() });
-  assert.equal(put.status, 200, put.text);
+  const two = await ownerPanel(boss, viaSecond(await openPage()));
+  await staleDraftRefused(tenant, one, two, staffSession, 'browser');
+  // AM2: the second browser's save — seen by the first browser's next refresh — ends the first one's "Saved".
   await one.evaluate(`dispatchEvent(new Event('focus'))`);
-  await one.waitFor(async () => (await statusOf(one, 'sales_staff')) === SAY.changedElsewhere('view'), 20_000, 'the former "Saved" says the level changed elsewhere');
-  await waitRow(one, 'sales_staff', 'view', 'Custom');
+  await one.waitFor(async () => (await statusOf(one, 'sales_staff')) === SAY.changedElsewhere('edit'), 20_000, 'the former "Saved" says the level changed elsewhere');
+  await waitRow(one, 'sales_staff', 'edit', 'Custom');
 });
 
-scenario('SRL-08T', 'two TABS of one browser (one cookie jar, one sign-in) edit one role: the later writer\'s value stands, and the tab whose read-back shows another value says so instead of "Saved"', async () => {
+scenario('SRL-08T', 'two TABS of one browser (one cookie jar, one sign-in), each on its own tenant entry: the stale tab\'s older draft is refused and shown as a conflict, and only Reapply and a new Save land it', async () => {
   const { tenant, boss } = await shop('s8t');
+  const staff = await actor('s8t-staff', [grant(tenant, 'sales_staff')]);
+  const staffSession = await directLogin(staff);
   const one = await ownerPanel(boss);
-  const two = await sameContextTab(one);
+  const two = viaSecond(await sameContextTab(one));
   await two.goto(`${SHOP}/employees`, 30_000); // signed in already: the tabs share the browser's persisted sign-in
   await openPermissions(two);
   await waitState(two, 'Ready');
+  await staleDraftRefused(tenant, one, two, staffSession, 'tab');
+});
+
+scenario('SRL-10', 'TENANT SWITCH BEFORE THE SAVE — a draft made in tenant A, saved after the same owner\'s session moved to tenant B, writes nothing in A or B (no level, version, edit audit or completion); the shop says the store changed and the change was not saved', async () => {
+  const a = await shop('s10a');
+  const b = await newTenant('s10b');
+  const page = await ownerPanel(a.boss);
+  await waitRow(page, 'sales_staff', 'create', 'Default');
+  await draft(page, 'sales_staff', 'view');
+  const aLogin = st.api.filter(acceptedLogin(a.boss)).at(-1);
+  assert.ok(aLogin, 'the page holds a tenant-A session');
+  await moveOwner(a.boss, a.tenant, b);
+  assert.equal((await readWith(aLogin.cookie)).status, 401, 'the switch ended the tenant-A session');
+  const was = { a: await tenantState(a.tenant), b: await tenantState(b) };
+  const before = await counts();
+  const from = await clickSave(page, 'sales_staff');
+  // The save signs in again (its A session is over) — now scoped to B — and sends the A draft, asserting tenant A.
+  await page.waitFor(async () => {
+    const n = await noticesOf(page);
+    return n.changed === STORE_CHANGED && n.previous.includes(PREVIOUS_STORE.notSaved);
+  }, 30_000, 'the store-changed and previous-store notices');
+  await waitState(page, 'Ready');
+  await waitRow(page, 'sales_staff', 'create', 'Default');
+  await page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 10_000, 'every request answered');
+  const sent = note('requests', st.api.slice(from).map(apiLine));
+  const puts = st.api.slice(from).filter(isPut);
+  assert.deepEqual(puts.map(answered), ['409 write_conflict'], `one PUT, refused: ${sent.join('; ')}`);
+  const body = JSON.parse(puts[0].body);
+  assert.deepEqual([body.level, body.expectedTenant, body.expectedVersion], ['view', a.tenant, 0], 'the A draft, asserting A');
+  const relogin = st.api.slice(from).filter(acceptedLogin(a.boss));
+  assert.ok(relogin.length >= 1 && relogin[0].doneAt <= puts[0].at, 'it was sent on the new session (scoped to B)');
+  await assertDelta(before, { C: 0, A: 0, E: 0, K: 0, L: 1 }, 'the A draft after the switch (T: the re-login)');
+  assert.deepEqual({ a: await tenantState(a.tenant), b: await tenantState(b) }, was, 'neither A nor B changed: no level, version or edit audit');
+  assert.equal(await statusOf(page, 'sales_staff'), '', 'B\'s row says nothing of A\'s draft');
+  assert.equal(await hasDraft(page, 'sales_staff'), false, 'no draft survives the switch');
+  await assertNoLeak(page);
+});
+
+scenario('SRL-11', 'IN FLIGHT ACROSS A SWITCH — a save parked INSIDE the database (its role row held FOR UPDATE by a side transaction) while the same owner\'s session moves to B: B is untouched, A holds whatever the server decided, and the panel (now B\'s) reports it only as a detached notice, never as B\'s save', async () => {
+  const a = await shop('s11a');
+  const b = await newTenant('s11b');
+  const page = await ownerPanel(a.boss);
+  await waitRow(page, 'sales_staff', 'create', 'Default');
+  await draft(page, 'sales_staff', 'view');
+  // The row the PUT locks (set_v2 step 8), made now so it can be held: 020's NULL lock row — still the catalog default at
+  // version 0, so the draft read before it stays current.
+  await owner`insert into tmpos_role.tenant_role_level (tenant_id, role_id, domain, level, updated_at)
+    values (${a.tenant}, 'sales_staff', 'customers', null, now()) on conflict do nothing`;
+  const wasA = await tenantState(a.tenant);
+  const wasB = await tenantState(b);
+  const before = await counts();
+  // LOCK ORDERING (why this cannot deadlock). The side transaction holds ONLY A's sales_staff role row and waits on
+  // nothing. set_v2 takes the standing hold (016), the session and mint rows and the issuer FOR SHARE and checks the
+  // grant BEFORE step 8, then waits on that row. The switch — moveOwner's grant swap (015's standing-serialize triggers)
+  // and the other tab's login (its establish takes the standing hold; it may replace the shared cookie's session row) —
+  // can wait only on what set_v2 holds, never on the side transaction: a chain (switch → set_v2 → side), no cycle. So the
+  // switch is never awaited while parked: it runs alongside, and the park is released once the switch has either
+  // finished or is itself waiting on the parked PUT. set_v2 then finishes and commits; its answer is held at the front
+  // until the switch has finished, so the page's read-back runs on the B session. Should the database still find a
+  // cycle, it aborts one side and a bounded wait below fails the case — it never hangs. The owner pool (3) covers the
+  // side transaction, the grant swap and the polling at once.
+  let unpark;
+  const parkedUntil = new Promise((r) => { unpark = r; });
+  st.releases.push(unpark);
+  let holds;
+  const holding = new Promise((r) => { holds = r; });
+  const side = owner.begin(async (tx) => {
+    const [{ pid }] = await tx`select pg_catalog.pg_backend_pid() as pid`;
+    await tx`select 1 from tmpos_role.tenant_role_level where tenant_id = ${a.tenant} and role_id = 'sales_staff' and domain = 'customers' for update`;
+    holds(pid);
+    await Promise.race([parkedUntil, delay(90_000)]); // a bound, never a result
+  });
+  const sidePid = await Promise.race([holding, side.then(() => { throw new Error('the side transaction ended before it held the row'); })]);
+  const answer = gate((r) => isPut(r) && r.frameId === page.frameId, 'response');
+  // Every status line the page renders from here on, recorded in the page as it changes (a node's old text included), so
+  // a transient "Saved" cannot slip between two polls.
+  await page.evaluate(`(() => {
+    const lines = window.__srlStatusLines = [];
+    const isStatus = (node) => node?.closest?.('[data-testid^="server-level-status-"]') ?? node?.parentElement?.closest('[data-testid^="server-level-status-"]');
+    new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.type === 'characterData' && isStatus(r.target) && r.oldValue) lines.push(r.oldValue.trim());
+        if (r.type === 'childList' && isStatus(r.target)) for (const gone of r.removedNodes) lines.push((gone.textContent ?? '').trim());
+      }
+      for (const el of document.querySelectorAll('[data-testid^="server-level-status-"]')) lines.push(el.textContent.trim());
+    }).observe(document.body, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true });
+  })()`);
+  const from = await clickSave(page, 'sales_staff');
+  const parked = await until(async () => (await blockedBy(sidePid)).find((r) => r.usename === RUNTIME_LOGIN), 20_000, 'the PUT waiting on the held role row');
+  note('parked', { wait: parked.wait_event_type, query: parked.query });
+  assert.match(parked.query, /m7a_role_level_set_v2|<insufficient privilege>/, 'the waiting statement is the versioned edit');
+  assert.equal(st.api.slice(from).filter(isPut).length, 1, 'one PUT, in the database');
+  // The switch while parked: the grant moves, and another tab of this browser signs the same account in again (on the
+  // second entry), so the shared cookie jar will hold the B session.
+  let switched = false;
+  const switching = (async () => {
+    await moveOwner(a.boss, a.tenant, b);
+    const tab = viaSecond(await sameContextTab(page));
+    await tab.goto(`${SHOP}/employees`, 30_000);
+    await openPermissions(tab);
+    await waitState(tab, 'Ready', 60_000);
+  })().finally(() => { switched = true; });
+  switching.catch(() => {}); // awaited below; a failure there fails the case
+  const waitingOnPark = async () => [...await blockedBy(parked.pid), ...(await blockedBy(sidePid)).filter((r) => r.pid !== parked.pid)];
+  const during = await until(async () => (switched ? 'finished while parked' : (await waitingOnPark()).length > 0 ? 'waiting on the parked PUT' : null), 60_000, 'the switch finished or waits on the parked PUT');
+  note('the switch while the PUT was parked', during);
+  unpark(); // commit the side transaction (it wrote nothing): set_v2 goes on
+  await side;
+  const put = await Promise.race([answer.reached, delay(30_000).then(() => null)]);
+  assert.ok(put, 'the PUT was answered once released; its answer is held at the front');
+  await Promise.race([switching, delay(90_000).then(() => { throw new Error('the switch did not finish after the release'); })]);
+  const decided = note('the server decided', answered(put));
+  answer.release();
+  // The page's outcome. A refusal of this first attempt (400/401/403/413/422) reads nothing back: the row's own
+  // "Not saved" line. Every other answer is read back on the B session, so it surfaces only as a detached notice: a 200
+  // as the acknowledgement, a write_conflict as not saved, anything undecided (a 5xx, a 409 in progress, a body the
+  // page cannot name) as unconfirmed.
+  const refusal = /^(400|401|403|413|422)\b/.test(decided);
+  const notice = decided === '200' ? PREVIOUS_STORE.acknowledged
+    : decided === '409 write_conflict' ? PREVIOUS_STORE.notSaved : PREVIOUS_STORE.unconfirmed;
+  await page.waitFor(async () => {
+    const n = await noticesOf(page);
+    return refusal ? /^Not saved/.test((await statusOf(page, 'sales_staff')) ?? '') : n.changed === STORE_CHANGED && n.previous.length > 0;
+  }, 30_000, 'the A outcome surfaced');
+  await page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 10_000, 'every request answered');
+  note('requests', st.api.map(apiLine));
+  const lines = note('status lines seen', [...new Set(await page.evaluate('window.__srlStatusLines'))]);
+  assert.ok(!lines.some((t) => /^Saved\b/.test(t)), `the page never said Saved: ${lines.join(' | ')}`);
+  if (!refusal) assert.deepEqual((await noticesOf(page)).previous, [notice], `the A answer (${decided}), only as a detached notice`);
+  assert.deepEqual(st.api.filter(isPut).map(answered), [decided], 'one PUT: nothing was retried or sent to B');
+  assert.deepEqual(await tenantState(b), wasB, 'B is untouched: no level, version or edit audit');
+  if (decided === '200') {
+    await waitState(page, 'Ready');
+    await waitRow(page, 'sales_staff', 'create', 'Default'); // B's level: never A's save
+    assert.equal(await statusOf(page, 'sales_staff'), '', 'B\'s row says nothing of A\'s save');
+    assert.equal(await hasDraft(page, 'sales_staff'), false);
+    await assertDelta(before, { C: 0, A: 0, E: 1, K: 1, L: 1 }, 'the one edit (T: the other tab\'s login)');
+    assert.deepEqual(await tenantState(a.tenant), { edits: wasA.edits + 1, levels: { sales_staff: 'view' }, versions: { sales_staff: 1 } }, 'A holds the edit');
+  } else {
+    await assertDelta(before, { C: 0, A: 0, E: 0, K: 0 }, `refused (${decided}): no edit`);
+    assert.deepEqual(await tenantState(a.tenant), wasA, `refused (${decided}): A unchanged`);
+  }
+});
+
+scenario('SRL-12', 'RESET TO THE DEFAULT, THEN AN OLDER DRAFT — View, then Create restored (the default level at a newer version): a draft made at the first version is refused though the level it saw is back; Discard drops it; authority follows each committed level', async () => {
+  const { tenant, boss } = await shop('s12');
+  const staff = await actor('s12-staff', [grant(tenant, 'sales_staff')]);
+  const staffSession = await directLogin(staff);
+  const one = await ownerPanel(boss);
+  const two = await ownerPanel(boss, viaSecond(await openPage()));
   await waitRow(two, 'sales_staff', 'create', 'Default');
-  await lastWriterWins(tenant, one, two, 'tab');
+  await assertAuthority(staffSession, 'create', 'the default');
+  await draft(two, 'sales_staff', 'edit'); // against version 0
+  for (const level of ['view', 'create']) {
+    await draft(one, 'sales_staff', level);
+    const status = note(`first browser ${level}`, await save(one, 'sales_staff'));
+    assert.ok(saved(status), status);
+    await assertAuthority(staffSession, level, `after ${level}`);
+  }
+  await waitRow(one, 'sales_staff', 'create', 'Custom');
+  assert.deepEqual(await tenantState(tenant), { edits: 2, levels: { sales_staff: 'create' }, versions: { sales_staff: 2 } }, 'Create restored at version 2');
+  assert.deepEqual(await rowOf(two, 'sales_staff'), { level: LABELS.create, badge: 'Default', known: true }, 'the older browser still shows the level it read');
+  const before = await counts();
+  const stale = note('older draft', await save(two, 'sales_staff'));
+  assert.equal(stale, SAY.lostRace('create'), 'refused, though the level it read is back');
+  await assertDelta(before, { ...REFUSED, L: 1 }, 'the older draft wrote nothing but its lease');
+  const last = st.api.filter(isPut).at(-1);
+  assert.equal(`entry${last.via} ${answered(last)}`, 'entry2 409 write_conflict');
+  assert.equal(JSON.parse(last.body).expectedVersion, 0);
+  assert.deepEqual(await tenantState(tenant), { edits: 2, levels: { sales_staff: 'create' }, versions: { sales_staff: 2 } }, 'unchanged');
+  await assertAuthority(staffSession, 'create', 'after the refused older draft');
+  assert.equal(await conflictOf(two, 'sales_staff'), 'The server now has Create. Your unsaved choice: Edit.');
+  await two.click('[data-testid="server-level-discard-sales_staff"]');
+  await two.waitFor(async () => (await conflictOf(two, 'sales_staff')) === null && !(await hasDraft(two, 'sales_staff')), 10_000, 'Discard dropped the draft');
+  assert.equal(await statusOf(two, 'sales_staff'), '');
+  await waitRow(two, 'sales_staff', 'create', 'Custom');
+  assert.equal(await saveEnabled(two, 'sales_staff'), false, 'nothing left to save');
+  assert.equal(st.api.filter(isPut).length, 3, 'Discard sends nothing');
 });
 
 scenario('SRL-09', 'a user switch in one browser ends the previous user\'s tenant session before the next user\'s login leaves the page, and signing out ends the next one\'s (AM4)', async () => {
@@ -1293,7 +1625,7 @@ scenario('SRL-09', 'a user switch in one browser ends the previous user\'s tenan
   const b = await shop('s9b');
   // The two stores' panels differ: A's sales_staff is stored View, B's is the default Create.
   const direct = await directLogin(a.boss);
-  const put = await call('PUT', ROLE_LEVELS, { session: direct, body: { roleId: 'sales_staff', domain: 'customers', level: 'view', reason: REASON }, key: randomUUID() });
+  const put = await directSet(direct, 'sales_staff', 'view');
   assert.equal(put.status, 200, put.text);
   const page = await ownerPanel(a.boss);
   await waitRow(page, 'sales_staff', 'view', 'Custom');

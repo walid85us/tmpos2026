@@ -98,7 +98,10 @@ export interface AggregateMutator {
    * — its changes already hold at expectedVersion, so it wrote nothing,
    * and it holds the aggregate's row locked until the transaction ends, so the store's completion of the
    * no-op is recorded at the moment it was decided (M5-GIAM-D1-P1-R1). Anything else — another answer, a
-   * throw — commits nothing. `authority` is what this transaction revalidated before the mutator runs
+   * throw — commits nothing. A create in a tenant store may also answer 'precondition_failed' (M7A-CUSTOMERS-P4): a
+   * precondition its caller asserted — the tenant or the version it reviewed — no longer holds, so it wrote nothing; unlike
+   * 'conflict', that commits nothing at all, no completion either (commit, step 2a'). Only the role-level edit's mutator
+   * answers it (postgresRoleLevels.ts). `authority` is what this transaction revalidated before the mutator runs
    * (M7A-CUSTOMERS-P3): the store always hands it; a mutator that needs neither of its values ignores it, and one that
    * does treats its absence as a fault.
    */
@@ -178,6 +181,8 @@ const ACQUIRED = Object.freeze({ outcome: 'acquired', reclaimed: false });
 const RECLAIMED = Object.freeze({ outcome: 'acquired', reclaimed: true });
 const IN_PROGRESS = answer('in_progress');
 const CONFLICT = answer('conflict');
+/** A precondition the command asserted no longer holds: rolled back, nothing recorded (M7A-CUSTOMERS-P4). */
+const PRECONDITION_FAILED = answer('precondition_failed');
 const NOT_FOUND = answer('not_found');
 /** The aggregate is there at the expected version, but its current state does not allow this change. */
 const INVALID_STATE = answer('invalid_state');
@@ -577,6 +582,20 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   //     reclaimed, or a retention that ended while this transaction ran — rolls the whole thing back to
   //     'unavailable', which records nothing and leaves the lease to expire as it did before.
   if (applied === 'conflict') return (await completed(sql, c.scope, c.lease, c.rejected.conflict)) ? CONFLICT : refuse(UNAVAILABLE);
+  // 2a'. A precondition the client asserted no longer holds (M7A-CUSTOMERS-P4; DA-125): the owner's role-level edit named a
+  //     tenant the session is no longer admitted to, or a version another edit has since moved. The mutator wrote nothing
+  //     that survives — the whole transaction is ROLLED BACK here, and the idempotency record stays as its own acquisition
+  //     left it, in progress under this lease — so unlike the sealed conflict above NOTHING is recorded: no mutation, no
+  //     audit record, no event and NO completion (the brief: "a refused precondition writes no role edit or
+  //     audit/completion"). The key is therefore not terminal: its lease,
+  //     acquired in its own transaction before this one, waits out its time as it does for every rolled-back refusal, so an
+  //     identical retry is 409 request_in_progress until it expires and is then planned and decided again — against the
+  //     state it finds then. A retry asserting another tenant or version is another body, so another fingerprint: 422 under
+  //     this key. Admitted only from a create in a tenant store with its revalidated context — the one shape the role-level
+  //     edit has — and anything else answering it is the fault below.
+  if (applied === 'precondition_failed' && c.mutator.mode === 'create' && c.context !== null && c.context.scope === 'tenant') {
+    return refuse(PRECONDITION_FAILED);
+  }
   if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
   // 2b. The aggregate is there at the expected version, but its current state does not admit this change —
   //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2).

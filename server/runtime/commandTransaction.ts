@@ -62,6 +62,11 @@
 // never holds the idempotency row; and stamps the audit record and every event with the one transaction
 // timestamp — the transaction's start time (audit_event.occurred_at's default), not its commit order.
 //
+// A create may also answer 'precondition_failed' (M7A-CUSTOMERS-P4): a precondition the request asserted — for the owner's
+// role-level edit, the tenant and the version the owner reviewed — no longer holds. The store rolled everything back, so
+// nothing committed and nothing was recorded, no completion either: the runtime answers an UNSEALED 409 write_conflict and
+// the attempt's lease waits out its time, exactly as for the other rollbacks below.
+//
 // The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
 // 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
 // attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
@@ -307,11 +312,14 @@ export interface PreparedCommand {
  * key could later be replanned and could mutate. An adapter that cannot record the sealed refusal rolls
  * its transaction back and answers 'transaction_unavailable' instead, which changes nothing at all.
  *
- * Every other member is a rollback or an unknown, and none of them releases the lease.
+ * Every other member is a rollback or an unknown, and none of them releases the lease — among them, since
+ * M7A-CUSTOMERS-P4, 'transaction_precondition_failed': a create's asserted precondition no longer held, and the store rolled
+ * it all back, recording nothing (no completion, unlike 'transaction_conflict').
  */
 export type CommandRefusal =
   | 'transaction_lease_lost'
   | 'transaction_conflict'
+  | 'transaction_precondition_failed'
   | 'transaction_not_found'
   | 'transaction_invalid_state'
   | 'transaction_unchanged'
@@ -520,6 +528,7 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'committed') return null;
     if (outcome === 'lease_lost') return 'transaction_lease_lost';
     if (outcome === 'conflict') return 'transaction_conflict';
+    if (outcome === 'precondition_failed') return 'transaction_precondition_failed';
     if (outcome === 'not_found') return 'transaction_not_found';
     if (outcome === 'invalid_state') return 'transaction_invalid_state';
     if (outcome === 'unchanged') return 'transaction_unchanged';

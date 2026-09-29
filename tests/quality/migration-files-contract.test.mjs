@@ -220,19 +220,31 @@ const PINNED = {
   // chain through 020; the exact-[005] gate is unchanged and still refuses.
   '020_m7a_tenant_role_levels.up.sql': '0a289ad4dcefdb4a5a260aed7a2121d93e23c5efe4f3550eb9fdc39094d9acfe',
   '020_m7a_tenant_role_levels.down.sql': '182718aaf001567531ed9b3737e1cd723e040c4d9305f76a60e9c1c99f8185fc',
+  // Phase 4.0 M7A-CUSTOMERS-P4 — the owner's Customers level edit made conditional (DA-125), in its OWN schema
+  // tmpos_role_edit: a per-row edit counter (no row is version 0; every effective edit exactly +1, a restored default
+  // included, so no ABA; no foreign key, no seed, no clock), the owner's one-snapshot read-back of level and version, and
+  // 020's edit copied with two preconditions — the session's tenant must be the one the owner reviewed, and the version the
+  // one read (checked unlocked, then under the role row FOR UPDATE) — else nothing is written. It revokes tmpos_app's
+  // EXECUTE on 020's unconditional m7a_role_level_set: that ACL change is its only effect on earlier objects, and
+  // migrations 001-020 are untouched, byte for byte. Its rollback refuses while a version row exists and does not give that
+  // EXECUTE back (forward-only in effect, fail closed). Proved against disposable PostgreSQL only; applied to no managed,
+  // persistent or application database. D4 now names the contiguous chain through 021; the exact-[005] gate is unchanged
+  // and still refuses.
+  '021_m7a_role_level_precondition.up.sql': '139a63b193e7c17c0b6770766eee6c3e70ba8b7bd0e65937cf3d7d05bd7b7876',
+  '021_m7a_role_level_precondition.down.sql': 'dcde77eb338d09142dc3a0eb5df5257314ce48c9f7eb94e472856a26ff71ec27',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the forty expected files', () => {
+test('the migrations directory holds exactly the forty-two expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');
