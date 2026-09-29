@@ -755,6 +755,51 @@ So a role narrowed to View still created, and a role narrowed to None still read
 
   001–019 are byte-identical to the entry commit. Code-only: nothing is deployed, and no managed database was touched.
 
+**Amended (M7A-CUSTOMERS-P3-R2, ADR-36).** Decision 1's statements that the shop app's editor stays client-only and calls no route and that there is no owner-visible read route, alternative (g), and the Consequences' "The shop app does not use that route" are superseded for built-in Customers levels: the shop app's role screen now reads them through `GET /api/v1/roles/levels` and changes `manager`, `technician` and `sales_staff` through this ADR's PUT, over a tenant session. Custom roles, other domains, deletion and delegated editing stay client-only, and owner-only editing stays flagged (doc 08 DA-85, DA-124).
+
+## ADR-36 — The shop edits built-in Customers levels through a tenant session, and "Saved" means server-confirmed (DECIDED — M7A-CUSTOMERS-P3-R2)
+
+**Context.** After R1 the server stored and enforced an owner's Customers level for each editable built-in role, but the shop app's role editor still changed only the tab it ran in: it made no server call, and the SPA held no tenant-server session. So the shop showed a local change the server never received: an owner could narrow a role on screen while the tenant server went on deciding customer requests on the stored level (ADR-35; doc 08 DA-124 (2)). The owner brief for M7A-CUSTOMERS-P3-R2 asks for that browser-to-server path to be made real for the built-in roles' Customers level, without describing the rest of the role matrix as server-enforced.
+
+**Decision.**
+1. **The session.** The shop app signs in to the tenant boundary through the M5 tenant-session contract (ADR-31): `POST /api/v1/session/login` with the signed-in user's Firebase ID token as `Authorization: Bearer` and `X-TMPOS-CSRF: 1`; the server verifies the token and mints the session (ADR-33), and `GET /api/v1/session` confirms it (`src/tenant/tenantSessionClient.ts`).
+   - The session is the browser-managed HttpOnly `__Host-tmpos_tenant_session` cookie. The page holds only the session CSRF token, in memory, beside the UID it was issued for, and sends it as `X-TMPOS-Session-CSRF` on the PUT and on `POST /api/v1/session/logout`. The browser never receives or builds an issuer key, a mint proof or a database session key.
+   - A session is reused only for the UID that established it. On a Firebase user switch the previous user's session is logged out before the next user's session is read or established (`ensure()` awaits any in-flight logout before it reads or establishes the next user's session), and every signed-out auth state, the first callback of a page load included, attempts a logout (`src/context/AccessContext.tsx`).
+2. **The read-back route.** `GET /api/v1/roles/levels` (`server/runtime/roleLevelDirectory.ts`) sits on the edit's path, under the edit's owner rule `edit_role_levels`, with `trustedContext: 'required'`, `recentAuth: 'none'`, no body and no idempotency. Its tenant is the authorizer-selected trusted scope from the session's admission, passed as a parameter to 020's definer read `tmpos_role.m7a_role_levels(uuid, text)`, the three roles in one statement; unlike the customer read, it is not bound to the session key in the database (doc 08 DA-121). It answers the four built-in roles in the fixed order `store_owner`, `manager`, `technician`, `sales_staff`, each with `level`, `defaultLevel`, `source` (`fixed`; `stored`; `default` for no row or a NULL lock row) and `editable` (true for the three non-owner roles, whatever the source). The runtime handler (`roleLevelDirectoryOf`) validates the port's answer, and anything out of shape is a bounded 503. It writes no audit record and is `Cache-Control: no-store`. `TENANT_SHIPPING_ROUTES` adds it (session, no body, no idempotency): nine routes, beside ADR-34 decision 8's eight as ADR-35 amended it. Doc 05 §2 holds the contract.
+3. **The panel.** The Employees permissions screen gains "Server-enforced Customers access" (`src/tenant/ServerCustomerLevels.tsx`), the only part of the screen that reaches the server: `store_owner` as "Full — fixed", and a level, a reason and "Save to server" for `manager`, `technician` and `sales_staff`. It reads on load, on a focus or visibility refresh (one at a time, skipped while a save or a sign-in confirmation is under way) and once per save's read-back. Grid changes to custom roles and other domains make no server call; the grid carries the banner "Changes in this table apply to this browser tab only. They are not saved to the server and are not enforced by it."
+4. **"Saved" means server-confirmed.** A row says "Saved" only after an exact PUT 200 (a fresh execution or an idempotent replay of the same key) followed by a same-tenant read-back equal to the requested level. The key rules:
+   - one `Idempotency-Key` per payload (role, level and reason);
+   - no response: one automatic retry under the same key;
+   - 409: the key is held and the level read back; when it already equals the draft, "The server now has X, but this save is not confirmed yet. Press Save again to confirm.", and that retry replays the key;
+   - a 5xx or a body out of contract: the key is settled and the level read back: "Not saved by this attempt. The server has X." (with " — it may have been set elsewhere" when X is the requested level, and "Not saved by this attempt, and the level could not be read back. Try again." when the read-back fails);
+   - a 401, a step-up 403, any other 403, a 400 and a 422 each have their own text; the 403 is "Not saved: the server refused this change. Only the store owner can change these levels."
+
+   A later read that moves a Saved level replaces it with "Changed elsewhere — the server now has X." Every asynchronous result applies only under the user and tenant that started it; a read-back naming another tenant restarts the panel and keeps "Your last change may have been applied to a different store. Review the levels below." until the next user change.
+5. **Authority is unchanged.** The owner rule stays as R1 made it, and owner-only editing stays **flagged for owner confirmation**, contested and unresolved (DA-124). The brief lets a manager edit only with a durable, server-verifiable `manage_role_permissions` grant, and none exists. So a manager's read is refused 403 and the panel shows no levels, with the note "Server-enforced Customers access can only be viewed and changed by the store owner. Changes in the table below affect this browser only."; the PUT refuses a manager at the authorizer (403), whatever the body.
+
+**Alternatives not taken.**
+- (a) *Manager editing without a durable grant.* A role name or a client-side flag is not authority, and doc 04's server-side parity and cap rules are undefined (DA-124).
+- (b) *A tenant or version precondition on the PUT.* R1's contract is unchanged in this stage; a precondition is a later contract decision (DA-125). Until then the last writer wins, and each tab shows its own read-back.
+- (c) *One global Save for the whole matrix.* Sending custom roles or other domains with the Customers PUT, or calling them saved, would imply enforcement the server does not do.
+- (d) *A client-built session.* An issuer key, a proof or a database key in the browser, or a session made from client claims, is refused.
+- (e) *A sign-out control in the shop.* Not added; a logout follows a Firebase sign-out or a user switch only (DA-127).
+
+**Consequences.**
+- **Nothing closes.** G-IAM, G-PERSIST, G-AUDIT, G-IDEMPOT, G-DBROLE, G-MIGRATE, G-CPLOGIN, G-STATUS and G-ISOLATION stay OPEN, and DA-118 and DA-119 remain pre-deployment blockers and G-AUDIT exceptions.
+  - The existing customer list and create, `GET` and `POST /api/v1/customers`, decide on the stored level (ADR-35); the shop app does not call them, and `GET /api/v1/customers/{id}` does not exist yet.
+  - The tenant entry is not deployed, and the shop build and `/api/v1/*` must be served on one origin, the tenant host (DA-107).
+- **Supersedes.** ADR-35's and doc 09's R1 statements that the shop editor is unchanged and calls no route are superseded for built-in Customers levels (ADR-35 amendment above).
+- **Register.** DA-85 is narrowed again, not closed. DA-43, DA-107, DA-121 and DA-124 are amended. DA-125 to DA-127 are new:
+  - R1's PUT has no tenant or version precondition (DA-125);
+  - shop users need a PostgreSQL identity and one tenant grant, and no production provisioning exists (DA-126);
+  - the shop has no sign-out control (DA-127).
+- **Evidence.** Disposable PostgreSQL and local sockets only:
+  - the unit suites at the network boundary: `src/tenant/tenantSessionClient.test.ts`, `src/tenant/roleLevelsClient.test.ts`, `src/tenant/ServerCustomerLevels.test.tsx`, `src/context/AccessContext.tenantSession.test.tsx` and `server/runtime/roleLevelDirectory.test.ts`;
+  - `tests/db/roleLevels.integration.test.mjs` (M7RL-G01 to M7RL-G04 and M7RLH-C1, the compiled entry's nine routes) over the tenant entry;
+  - `tests/browser/shopRoleLevels.browser.test.mjs`: the production shop build in a real browser on `https://shop.tmpos.test` through CDP interception, with a synthetic identity provider faked at the browser boundary plus the Firestore emulator, and the real tenant entry over disposable PostgreSQL. In CI it is the step "Shop role levels in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2)", in the runner's Chrome; local runs use Chromium.
+
+  The customer and role-level route contracts are preserved; evidence counts belong in the stage report. 001–020 and the four frozen operator paths are byte-identical, with no new migration. Code-only: nothing is deployed, and no managed database was touched.
+
 ---
 
 **Reconciliation note:** the legacy Backend Control Plane numbering (phase-1.6 M21+ / phase-2.0 M24–M58) is **superseded** by the M0–M9 roadmap; the read-only CP is absorbed into M4+M8 and controlled write actions into M7 verticals ([09](./09-roadmap-m0-m9.md) §3).
