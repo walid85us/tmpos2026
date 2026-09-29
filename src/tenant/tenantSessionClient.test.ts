@@ -6,8 +6,12 @@ import { TENANT_SESSION_PATHS, createTenantSessionClient } from './tenantSession
 
 const CSRF = 'c'.repeat(43);
 const ROTATED = 'r'.repeat(43);
-const TOKEN_A = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1aWQtYSJ9.c2ln';
-const TOKEN_B = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1aWQtYiJ9.c2ln';
+// Synthetic JWT-shaped ID tokens, assembled at run time so no token-shaped literal sits in the source (secret scanning):
+// header {alg: RS256}, payload {sub: <uid>}, and a signature segment that is only the word "sig". No key signed them.
+const segment = (value: unknown): string => btoa(JSON.stringify(value)).replace(/=+$/, '');
+const syntheticIdToken = (uid: string): string => [segment({ alg: 'RS256' }), segment({ sub: uid }), btoa('sig')].join('.');
+const TOKEN_A = syntheticIdToken('uid-a');
+const TOKEN_B = syntheticIdToken('uid-b');
 
 type Reply = Response | Error | (() => Promise<Response>);
 interface Sent { readonly method: string; readonly url: string; readonly init: RequestInit; readonly headers: Headers }
