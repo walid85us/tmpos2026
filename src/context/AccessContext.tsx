@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { tenantSession } from '../tenant/tenantSessionClient';
 import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_DOMAINS } from './accessConfig';
 import { isPermissionLevel, meetsFamilyLevel } from '../authorization/permissionFamilies';
 import {
@@ -164,9 +165,18 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   // routing/AccessGuard. Firebase remains the sole authoritative session source.
   const supabaseAwarenessRef = useRef<AccessAwarenessRecord | null>(null);
 
+  // M7A-CUSTOMERS-P3-R2 — the Firebase UID last signed in here, so the tenant-server session (tenantSessionClient.ts)
+  // follows it. A different user (A→B without a sign-out) ends A's session first, and every signed-out state — the
+  // first callback of a page load included — ends whatever session this browser still holds. Both are best effort
+  // (logout reads the session first; none → nothing is sent), and the client's later session steps wait for them, so
+  // a late logout can never end the next user's session. Nothing here waits on or depends on the outcome.
+  const signedInUidRef = useRef<string | null>(null);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        if (signedInUidRef.current !== null && signedInUidRef.current !== user.uid) void tenantSession.logout();
+        signedInUidRef.current = user.uid;
         try {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
 
@@ -206,6 +216,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
           setAuthError('firestore_error');
         }
       } else {
+        void tenantSession.logout();
+        signedInUidRef.current = null;
         setRealSession(null);
         setRealTenant(null);
         setAuthError(null);

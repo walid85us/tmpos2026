@@ -6,9 +6,9 @@
 // the tenant is the one the owner's session is admitted to, derived in the database from the presenting session's key.
 //
 // Request  { roleId, domain, level, reason } — exactly these four fields.
-// Response 200 { roleLevel: { roleId, domain, level } } — the level as stored. There is no read route: the server's
-//          authoritative read is the one every customer decision makes (tenantAuthorization.ts), and this answer is the
-//          only place the stored value is shown back.
+// Response 200 { roleLevel: { roleId, domain, level } } — the level as stored. The server's authoritative read is the one
+//          every customer decision makes (tenantAuthorization.ts); since M7A-CUSTOMERS-P3-R2 the owner reads the stored
+//          levels back, each beside its catalog default, at GET on this same path (roleLevelDirectory.ts).
 //
 // WHAT CAN BE EDITED, AND WHY SO LITTLE. roleId is one of the three built-in roles an owner may edit — manager, technician,
 // sales_staff; the owner role itself is locked (Full everywhere, never edited). domain is exactly 'customers': the one

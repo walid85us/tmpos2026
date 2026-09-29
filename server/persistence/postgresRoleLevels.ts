@@ -13,6 +13,14 @@
 // else — no row, two rows, a null, an array, another domain, a level outside the seven — is a FAULT, a throw the route
 // answers as a bounded 503, never a decision and never "no edits". The canonical decision then judges the value again.
 //
+// THE DIRECTORY READ (readRoleLevelDirectory, createPostgresRoleLevelDirectory; M7A-CUSTOMERS-P3-R2). For GET
+// /api/v1/roles/levels (server/runtime/roleLevelDirectory.ts): the stored Customers level of every editable role of one tenant
+// — the trusted scope's, never the request's — in ONE statement that calls 020's read once per role. The routine is STABLE, so
+// every call runs on that one statement's snapshot: the three levels are one moment's, never a mix of before and after an edit
+// (three statements in one READ COMMITTED transaction would each take their own). Each answer is judged exactly as above; a
+// role with nothing stored (or only 020's NULL lock row) is `stored: null`, and then it holds its catalog default, which the
+// tenant root adds (tenantTransactions.ts). Anything out of shape is the same bounded fault.
+//
 // THE WRITE (ROLE_LEVEL_UPDATE_MUTATOR). The one business mutation the tenant store commits for PUT /api/v1/roles/levels
 // (server/runtime/roleLevelUpdate.ts), handed to the store in trusted source by the tenant transaction root alone. It runs
 // inside the command's transaction, after the idempotency fence and the tenant revalidator, and before the audit record and
@@ -41,7 +49,7 @@ import { authenticationFresh } from './postgresSessionStore.js';
 import type { AggregateMutator, MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
-import { ROLE_LEVELS, ROLE_LEVEL_DOMAINS, ROLE_LEVEL_UPDATE_CONTRACT } from '../runtime/roleLevelUpdate.js';
+import { EDITABLE_TENANT_ROLES, ROLE_LEVELS, ROLE_LEVEL_DOMAINS, ROLE_LEVEL_UPDATE_CONTRACT } from '../runtime/roleLevelUpdate.js';
 
 /** One short read on every decided tenant request, cancelled by PostgreSQL itself if it overruns, like the other runtime reads. */
 export const ROLE_LEVELS_DEADLINE_MS = 3_000;
@@ -58,14 +66,23 @@ const ROLE_ID_RE = /^[a-z_]{1,64}$/;
 /** Every fault is the same bounded message: nothing about the row, the value or the driver. */
 const fault = (): Error => new Error('role levels answer invalid');
 
-/** The routine's one jsonb answer as a frozen copy — only 020's domains, each at a canonical level — or a throw. */
-function levelsOf(rows: unknown): Readonly<Record<string, string>> {
+/** The one row of a one-row answer holding exactly `columns`, or a throw. */
+function onlyRow(rows: unknown, columns: readonly string[]): Record<string, unknown> {
   if (!Array.isArray(rows) || rows.length !== 1) throw fault();
   const row: unknown = rows[0];
   if (typeof row !== 'object' || row === null) throw fault();
   const keys = Object.keys(row as Record<string, unknown>);
-  if (keys.length !== 1 || keys[0] !== 'levels') throw fault();
-  const levels: unknown = (row as Record<string, unknown>).levels;
+  if (keys.length !== columns.length || !columns.every((column) => keys.includes(column))) throw fault();
+  return row as Record<string, unknown>;
+}
+
+/** The routine's one jsonb answer as a frozen copy — only 020's domains, each at a canonical level — or a throw. */
+function levelsOf(rows: unknown): Readonly<Record<string, string>> {
+  return levelMapOf(onlyRow(rows, ['levels']).levels);
+}
+
+/** One jsonb value of 020's read as a frozen copy — only 020's domains, each at a canonical level — or a throw. */
+function levelMapOf(levels: unknown): Readonly<Record<string, string>> {
   if (typeof levels !== 'object' || levels === null || Array.isArray(levels) || Object.getPrototypeOf(levels) !== Object.prototype) throw fault();
   const copy: Record<string, string> = {};
   for (const domain of Reflect.ownKeys(levels)) {
@@ -91,6 +108,39 @@ export function createPostgresRoleLevels(deps: { readonly client: SupervisedPgCl
   const { client } = deps;
   return (tenantId: string, roleId: string, signal: AbortSignal): Promise<unknown> =>
     client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevels(sql, tenantId, roleId));
+}
+
+/** One editable role's stored Customers level: null when nothing is stored, and then it holds its catalog default. */
+export interface StoredRoleLevel {
+  readonly roleId: string;
+  readonly stored: string | null;
+}
+
+/**
+ * The stored Customers level of every editable role of `tenantId`, in EDITABLE_TENANT_ROLES order, from ONE statement (one
+ * snapshot, header). The tenant is a canonical lowercase UUID or this throws before any statement; any doubt about the
+ * answer throws.
+ */
+export async function readRoleLevelDirectory(sql: PgTransactionScope, tenantId: string): Promise<readonly StoredRoleLevel[]> {
+  if (typeof tenantId !== 'string' || !UUID_RE.test(tenantId)) throw fault();
+  // Three roles, three calls, one statement: the list is 020's CHECK, and a longer or shorter one fails closed (an unbound
+  // role is a refused parameter; an unread one leaves the route's answer out of shape).
+  const [first, second, third] = EDITABLE_TENANT_ROLES;
+  const row = onlyRow(await sql`select tmpos_role.m7a_role_levels(${tenantId}::uuid, ${first}::text) as r0,
+    tmpos_role.m7a_role_levels(${tenantId}::uuid, ${second}::text) as r1,
+    tmpos_role.m7a_role_levels(${tenantId}::uuid, ${third}::text) as r2`, ['r0', 'r1', 'r2']);
+  const [domain] = ROLE_LEVEL_DOMAINS;
+  return Object.freeze([first, second, third].map((roleId, i) => {
+    const levels = levelMapOf(row[`r${i}`]);
+    return Object.freeze({ roleId, stored: Object.prototype.hasOwnProperty.call(levels, domain) ? levels[domain] : null });
+  }));
+}
+
+/** The read GET /api/v1/roles/levels makes, over the M6 runtime client the composition root already built. */
+export function createPostgresRoleLevelDirectory(deps: { readonly client: SupervisedPgClient }): (tenantId: string, signal: AbortSignal) => Promise<readonly StoredRoleLevel[]> {
+  const { client } = deps;
+  return (tenantId: string, signal: AbortSignal): Promise<readonly StoredRoleLevel[]> =>
+    client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevelDirectory(sql, tenantId));
 }
 
 async function applyRoleLevelUpdate(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<string> {

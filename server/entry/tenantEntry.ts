@@ -34,7 +34,8 @@
 // WHAT IT SERVES. TENANT_SHIPPING_ROUTES and nothing else: the two operational probes, the tenant boundary's login,
 // current-session and logout, GET /api/v1/customers over the production customer directory, — M7A-CUSTOMERS-P3 —
 // POST /api/v1/customers, the customer create, and — M7A-CUSTOMERS-P3-R1 — PUT /api/v1/roles/levels, an owner's durable
-// edit of a built-in role's Customers level, each idempotent and committed through the tenant store — then the bounded 404.
+// edit of a built-in role's Customers level, each idempotent and committed through the tenant store; — M7A-CUSTOMERS-P3-R2 —
+// GET /api/v1/roles/levels, the owner's read-back of those levels beside their catalog defaults — then the bounded 404.
 // No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -77,6 +78,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 

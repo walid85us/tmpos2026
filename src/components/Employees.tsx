@@ -10,6 +10,7 @@ import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS
 import { subPermissionMatrixStatus } from '../context/tenantAccessDecisions';
 import { isTenantMoneyCapability } from '../authorization/moneyCapabilities';
 import PendingApproval from './PendingApproval';
+import ServerCustomerLevels from '../tenant/ServerCustomerLevels';
 
 const MOCK_EMPLOYEES: Employee[] = [
   {
@@ -806,9 +807,16 @@ export default function Employees() {
 
     return (
       <div className="space-y-8 mt-8">
+        {/* M7A-CUSTOMERS-P3-R2: the only server-backed part of this screen — built-in roles' Customers level. */}
+        <ServerCustomerLevels uid={session?.user.id ?? null} />
+
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
           <h2 className="text-2xl font-black text-primary tracking-tight mb-2">Store Permissions Matrix</h2>
           <p className="text-slate-500 text-sm font-medium mb-6">Configure module access and sensitive sub-actions per role. Module Access controls entry; Sub-Permissions control specific actions within each module and can be independently denied.</p>
+          <div data-testid="local-only-banner" role="note" className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-[12px] font-bold text-amber-800 flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm" aria-hidden="true">warning</span>
+            Changes in this table apply to this browser tab only. They are not saved to the server and are not enforced by it.
+          </div>
 
           <div className="flex flex-wrap gap-1.5 mb-6 p-3 bg-slate-50 rounded-2xl border border-slate-100">
             {PERMISSION_HIERARCHY.map((level, i) => (
@@ -863,6 +871,9 @@ export default function Employees() {
                             }}
                           >
                             {domain.label}
+                            {domain.id === 'customers' && (
+                              <span className="block text-[9px] font-medium text-slate-400">Built-in roles: set in Server-enforced Customers access above</span>
+                            )}
                             {hasSubs && (
                               <span className="inline-flex items-center gap-1 text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
                                 <span className="material-symbols-outlined text-[10px] transition-transform" style={{ transform: expandedMatrixDomains.has(domain.id) ? 'rotate(90deg)' : 'rotate(0deg)' }}>chevron_right</span>

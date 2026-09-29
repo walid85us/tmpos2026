@@ -79,7 +79,8 @@ const ARTIFACT = [
 // adapter. M7A-CUSTOMERS-P3: plus the customer create (its route module and its mutator) and the transactional store the
 // tenant root's write slot composes it through — the store alone, never an administrative mutator. M7A-CUSTOMERS-P3-R1:
 // plus the owner's role-level edit (its route module) and the role levels' adapter (the read every tenant route decision
-// makes, and the edit's mutator) — never in the administrative artifact.
+// makes, and the edit's mutator) — never in the administrative artifact. M7A-CUSTOMERS-P3-R2: plus the owner's read-back of
+// those levels (its route module; its read is the same adapter's).
 const TENANT_ARTIFACT = [
   ...['platformAuthorization', 'productionSessions', 'tenantAuthorization', 'tenantTransactions', 'transactionKernel'].map((m) => `server/composition/${m}.js`),
   ...['entryStartup', 'tenantEntry', 'tenantMain'].map((m) => `server/entry/${m}.js`),
@@ -88,15 +89,16 @@ const TENANT_ARTIFACT = [
   ...['auditEventContract', 'auditEventWriter', 'authorizationConstants', 'authorizationContract', 'config', 'databaseEndpoint', 'db',
     'firebaseAdminAuthAdapter', 'm5CanonicalPermissions', 'permissionCatalog'].map((m) => `server/platform-identity/${m}.js`),
   ...['access', 'app', 'clientAddress', 'commandTransaction', 'config', 'correlation', 'customerCreate', 'customerDirectory', 'deadline', 'idempotency',
-    'keyMaterial', 'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'roleLevelUpdate', 'routes', 'securityHeaders', 'sessions',
-    'tenantState'].map((m) => `server/runtime/${m}.js`),
+    'keyMaterial', 'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'roleLevelDirectory', 'roleLevelUpdate', 'routes',
+    'securityHeaders', 'sessions', 'tenantState'].map((m) => `server/runtime/${m}.js`),
   'src/authorization/moneyCapabilities.js', 'src/authorization/permissionFamilies.js', 'src/types.js',
 ].sort();
 // A module that declares a servable route: a `create…Route` factory or a `…_ROUTE` constant. Each artifact ships exactly
-// its own: the tenant's the customer directory, the customer create (M7A-CUSTOMERS-P3) and the role-level edit
-// (M7A-CUSTOMERS-P3-R1), the administrative one its three tenant-management routes.
+// its own: the tenant's the customer directory, the customer create (M7A-CUSTOMERS-P3), the role-level edit
+// (M7A-CUSTOMERS-P3-R1) and its read-back (M7A-CUSTOMERS-P3-R2), the administrative one its three tenant-management routes.
 const ROUTE_DEFINITION = /^export (?:async )?function create\w*Route\(|^export const [A-Z0-9_]*_ROUTE\b/m;
-const TENANT_ROUTE_MODULES = ['server/runtime/customerCreate.js', 'server/runtime/customerDirectory.js', 'server/runtime/roleLevelUpdate.js'];
+const TENANT_ROUTE_MODULES = ['server/runtime/customerCreate.js', 'server/runtime/customerDirectory.js', 'server/runtime/roleLevelDirectory.js',
+  'server/runtime/roleLevelUpdate.js'];
 const ADMIN_ROUTE_MODULES = ['server/runtime/tenantDirectory.js', 'server/runtime/tenantDisplayName.js', 'server/runtime/tenantStatus.js'];
 // Its only bare (package) imports, each from exactly one module: the web framework, the database driver, the identity
 // provider's admin SDK and one built-in. Any other — the Firebase client SDK, @supabase, pg — fails.
@@ -279,7 +281,8 @@ test('the compiled tenant artifact is exactly its executable\'s closure: the cus
     assert.deepEqual(emitted, TENANT_ARTIFACT, 'the tenant artifact is exactly the tenant executable\'s import closure');
     for (const m of ['server/entry/tenantMain.js', 'server/composition/tenantTransactions.js', 'server/runtime/customerDirectory.js',
       'server/persistence/postgresCustomerDirectory.js', 'server/runtime/customerCreate.js', 'server/persistence/postgresCustomerCreate.js',
-      'server/persistence/postgresTransactionalStore.js', 'server/runtime/roleLevelUpdate.js', 'server/persistence/postgresRoleLevels.js']) {
+      'server/persistence/postgresTransactionalStore.js', 'server/runtime/roleLevelUpdate.js', 'server/persistence/postgresRoleLevels.js',
+      'server/runtime/roleLevelDirectory.js']) {
       assert.ok(emitted.includes(m), `the tenant artifact ships ${m}`);
     }
     for (const m of [...ADMIN_ROUTE_MODULES, 'server/persistence/tenantDisplayNameMutator.js', 'server/persistence/tenantStatusMutator.js',
@@ -290,7 +293,7 @@ test('the compiled tenant artifact is exactly its executable\'s closure: the cus
     assert.ok(!emitted.some((f) => /\.test\.js$|\.testkit\.js$/.test(f)), 'no test or test support module is compiled into the tenant artifact');
     assert.deepEqual(scanArtifact(out, emitted), ARTIFACT_BARE_IMPORTS, 'the tenant artifact imports exactly the administrative artifact\'s packages');
     assert.deepEqual(routeModulesOf(out, emitted), TENANT_ROUTE_MODULES,
-      'the tenant artifact declares exactly three route modules: the customer directory, the customer create and the role-level edit');
+      'the tenant artifact declares exactly four route modules: the customer directory, the customer create, the role-level edit and its read-back');
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
@@ -382,6 +385,7 @@ test('the compiled tenant executable runs under node and fails closed on missing
     const compiled = JSON.parse(read.stdout);
     assert.deepEqual(compiled.declarations, [
       ['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required', 'required', 'none', 'none', 'none'],
+      ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required', 'none', 'none', 'none'],
       ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required', 'none', 'json', 'required'],
       ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required', 'required', 'json', 'required'],
     ], 'the compiled tenant routes are exactly the pinned declarations');
@@ -593,9 +597,10 @@ test('the tenant-admission witness is harness-only: no production source declare
   assert.deepEqual(tenantRouteDeclarations().map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization.scope,
     r.policy.authorization.permission, r.sessionBinding ?? 'none', r.idempotency]), [
     ['GET', '/api/v1/customers', 'session', 'tenant', 'tenant', 'view_customers', 'required', 'none'],
+    ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required'],
-  ], 'the tenant inventory is the customer routes and the owner\'s role-level edit alone');
+  ], 'the tenant inventory is the customer routes and the owner\'s role-level edit and read-back alone');
 });
 
 test('no per-process limiter, fallback or second proxy contract exists in the production runtime or composition', () => {
@@ -911,7 +916,8 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     ['server/composition/tenantTransactions.ts', 'server/persistence/postgresCustomerCreate.ts'], 'the customer create\'s mutator is registered by the tenant root alone');
   // M7A-CUSTOMERS-P3-R1: the role-level edit's mutator and the role levels' reads likewise — never the shared kernel, so the
   // administrative artifact carries none of them.
-  for (const name of ['ROLE_LEVEL_UPDATE_MUTATOR', 'createPostgresRoleLevels', 'readRoleLevels']) {
+  // M7A-CUSTOMERS-P3-R2: and the read-back's one-snapshot read.
+  for (const name of ['ROLE_LEVEL_UPDATE_MUTATOR', 'createPostgresRoleLevels', 'readRoleLevels', 'createPostgresRoleLevelDirectory']) {
     assert.deepEqual(names(name, `mutators: [${name}]`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresRoleLevels.ts'],
       `${name} is bound by the tenant root alone`);
   }
@@ -940,21 +946,26 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
       `${name} is bound by the tenant root alone`);
   }
   // The tenant inventory, exactly (as PRODUCTION_INVENTORY is pinned above): the customer list over its production adapter
-  // and probe, and (M7A-CUSTOMERS-P3) the customer create over its one mutator. A route added, or the adapter, mutator or
-  // probe swapped for another, fails here.
-  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute\]\),\n {2}writes: Object\.freeze\(\{ routes: Object\.freeze\(\[CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE\]\), mutators: Object\.freeze\(\[CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR\]\) \}\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\) \}\),\n {2}inert: INERT,\n {2}probe: probeCustomerDirectory,\n {2}roleLevels: Object\.freeze\(\{ read: \(client: SupervisedPgClient\) => createPostgresRoleLevels\(\{ client \}\), held: readRoleLevels \}\),\n\}\);$/m;
-  const tenantInventory = (reads, adapter, writes = 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE', mutators = 'CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR', levels = 'createPostgresRoleLevels') => `export const TENANT_INVENTORY: ReadInventory<CustomerDirectoryPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  writes: Object.freeze({ routes: Object.freeze([${writes}]), mutators: Object.freeze([${mutators}]) }),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }) }),\n  inert: INERT,\n  probe: probeCustomerDirectory,\n  roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => ${levels}({ client }), held: readRoleLevels }),\n});`;
-  assert.match(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the pin reads the real shape');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createOrdersRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a route added');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createMemoryCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a swapped adapter');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, ORDER_CREATE_ROUTE'),
+  // and probe, and (M7A-CUSTOMERS-P3) the customer create over its one mutator; (M7A-CUSTOMERS-P3-R2) the owner's read-back
+  // over the role levels' one-snapshot read, with the catalog defaults the root adds. A route added, or the adapter, mutator
+  // or probe swapped for another, fails here.
+  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute, createRoleLevelDirectoryRoute\]\),\n {2}writes: Object\.freeze\(\{ routes: Object\.freeze\(\[CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE\]\), mutators: Object\.freeze\(\[CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR\]\) \}\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\), roleLevels: withCatalogDefaults\(createPostgresRoleLevelDirectory\(\{ client \}\)\) \}\),\n {2}inert: INERT,\n {2}probe: probeCustomerDirectory,\n {2}roleLevels: Object\.freeze\(\{ read: \(client: SupervisedPgClient\) => createPostgresRoleLevels\(\{ client \}\), held: readRoleLevels \}\),\n\}\);$/m;
+  const READS = 'createCustomerDirectoryRoute, createRoleLevelDirectoryRoute';
+  const tenantInventory = (reads, adapter, writes = 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE', mutators = 'CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR', levels = 'createPostgresRoleLevels', directory = 'createPostgresRoleLevelDirectory') => `export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  writes: Object.freeze({ routes: Object.freeze([${writes}]), mutators: Object.freeze([${mutators}]) }),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }), roleLevels: withCatalogDefaults(${directory}({ client })) }),\n  inert: INERT,\n  probe: probeCustomerDirectory,\n  roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => ${levels}({ client }), held: readRoleLevels }),\n});`;
+  assert.match(tenantInventory(READS, 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the pin reads the real shape');
+  assert.doesNotMatch(tenantInventory(`${READS}, createOrdersRoute`, 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a route added');
+  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the read-back removed');
+  assert.doesNotMatch(tenantInventory(READS, 'createMemoryCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a swapped adapter');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, ORDER_CREATE_ROUTE'),
     TENANT_INVENTORY, 'the scan must catch a third write route');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE',
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE',
     'CUSTOMER_CREATE_MUTATOR, TENANT_STATUS_MUTATOR'), TENANT_INVENTORY, 'the scan must catch a swapped mutator');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute', 'createPostgresCustomerDirectory', undefined, undefined, 'createMemoryRoleLevels'),
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, 'createMemoryRoleLevels'),
     TENANT_INVENTORY, 'the scan must catch a swapped role-levels read (M7A-CUSTOMERS-P3-R1)');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, undefined, 'createMemoryRoleLevelDirectory'),
+    TENANT_INVENTORY, 'the scan must catch a swapped read-back adapter (M7A-CUSTOMERS-P3-R2)');
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'), TENANT_INVENTORY,
-    'the tenant inventory is exactly the customer list over the production customer directory, the customer create and the role-level edit over their mutators, and the production role-levels reads');
+    'the tenant inventory is exactly the customer list over the production customer directory, the role levels\' read-back over their one-snapshot read, the customer create and the role-level edit over their mutators, and the production role-levels reads');
   // A census of names cannot follow a capability re-exported under another name, so the modules allowed to hold one export an
   // exact value surface, read from the syntax tree: a new export (an alias, a wrapper, a re-export list, a default) fails here
   // until it is reviewed into the list. Interfaces and type aliases carry no capability and are not listed.

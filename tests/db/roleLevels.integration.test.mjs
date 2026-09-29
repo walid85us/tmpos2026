@@ -40,7 +40,17 @@
 //            for a create holding the role row FOR SHARE; the create commits (201), the edit is refused on the database clock
 //            after the routine answered (503, level unchanged, no edit audit record, no completion, its lease kept: 409 for
 //            the same key within it); M7RLH-09b the same shape with the deadline far off commits both (201, 200);
-//   M7RLH-C1 the compiled tenant artifact serves exactly its eight routes, the owner's PUT and the narrowed POST refusal.
+//   M7RLH-C1 the compiled tenant artifact serves exactly its nine routes, the owner's PUT, its read-back and the narrowed
+//            POST refusal.
+//   M7RL-G01..G03 (M7A-CUSTOMERS-P3-R2) the owner's read-back, GET /api/v1/roles/levels: a fresh tenant reads every catalog
+//            default, 020's NULL lock row reads as the default, an edit reads as stored — in a second session and under a
+//            stale sign-in too — with no-store and no session material, and the read writes nothing; only the tenant's store
+//            owner reads it (manager, technician, sales_staff and a store-scope owner 403; no session and an administrative
+//            session 401; the admin or an unknown Host 404; any query 400); each owner reads its own tenant alone.
+//   M7RL-G04 (M7A-CUSTOMERS-P3-R2 review, AM8) a live owner session whose grant is then demoted to manager, or suspended, is
+//            refused on its next read (the changed standing ends the session: 401 — never the old answer) and its re-login
+//            as a manager reads 403; every 401/403 answer is no-store; a stored `manage` (a level the shop's grid never
+//            offers) round-trips through the edit and the read-back as stored.
 //
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster
 // this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service
@@ -523,6 +533,26 @@ function editedOf(reply, roleId, level, label, { replayed = false } = {}) {
   assertBaseline(reply, label);
 }
 
+/** The catalog's Customers defaults, pinned here as the read-back must report them (permissionCatalog.ts). */
+const CUSTOMERS_DEFAULTS = Object.freeze({ manager: 'full', technician: 'view', sales_staff: 'create' });
+
+/**
+ * A read-back: 200, exactly { tenant, domain, roles } — the owner first and fixed, then each editable role at its stored
+ * level (`stored`, by role) or its default — no-store, no Set-Cookie, the baseline headers.
+ */
+function readBackOf(reply, tenant, stored, label) {
+  assert.equal(reply.status, 200, `${label}: ${reply.status} ${reply.body}`);
+  const roles = [{ roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
+    ...Object.entries(CUSTOMERS_DEFAULTS).map(([roleId, defaultLevel]) => {
+      const level = stored[roleId] ?? null;
+      return { roleId, level: level ?? defaultLevel, defaultLevel, source: level === null ? 'default' : 'stored', editable: true };
+    })];
+  assert.deepEqual(JSON.parse(reply.body), { tenant, domain: 'customers', roles }, label);
+  assert.equal(reply.headers['cache-control'], 'no-store', `${label}: never cached`);
+  assert.equal(reply.headers['set-cookie'], undefined, `${label}: no Set-Cookie`);
+  assertBaseline(reply, label);
+}
+
 /** The edit route's body: exactly its four fields. */
 const levelBody = (roleId, level, reason = REASON) => ({ roleId, domain: 'customers', level, reason });
 
@@ -676,6 +706,9 @@ async function withEntry(overrides, fn) {
     cap, relay, port, clientAddress, result,
     post: unsafe('POST', CUSTOMER_DIRECTORY_PATH),
     put: unsafe('PUT', ROLE_LEVELS_PATH),
+    /** The owner's read-back (M7A-CUSTOMERS-P3-R2): a safe GET presenting `s` (null: no session). */
+    levels: (s, { query = '', headers = {} } = {}) => send(port, 'GET', `${ROLE_LEVELS_PATH}${query}`,
+      { host: TENANT_HOST, ...(s === null ? {} : { cookie: s.cookie }), ...headers }, undefined, { localAddress: clientAddress }),
     /** A hand-framed request: the unsafe headers of `s`, then `lines` (each ending CRLF), then `tail` as the body bytes. */
     raw: (method, path, s, lines, tail = '') => {
       const head = Object.entries(unsafeHeaders(s, null)).map(([k, v]) => `${k}: ${v}\r\n`).join('');
@@ -835,9 +868,10 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
-/** The tenant artifact's eight intended routes, stated here once. */
-const TENANT_EIGHT = Object.freeze([
+/** The tenant artifact's nine intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back). */
+const TENANT_NINE = Object.freeze([
   'GET /api/v1/customers session none none',
+  'GET /api/v1/roles/levels session none none',
   'GET /api/v1/session session none none',
   'GET /health public none none',
   'GET /readiness public none none',
@@ -1523,11 +1557,131 @@ test('M7RLH-09b: the control — the same race with the owner\'s recent sign-in 
 });
 
 // ===========================================================================
+// M7RL-G01..G04 (M7A-CUSTOMERS-P3-R2): the owner's read-back, GET /api/v1/roles/levels
+// ===========================================================================
+
+test('M7RL-G01: the owner reads the built-in Customers levels back — every catalog default for a fresh tenant, 020\'s NULL lock row still the default, each edit as stored, in a second session and under a stale sign-in too; no-store, no session material, and the read writes nothing', async () => {
+  const { tenant, boss } = await shop('m7rlg01');
+  await withEntry({}, async (ctx) => {
+    const o = await signIn(ctx, boss);
+    const fresh = await ctx.levels(o);
+    readBackOf(fresh, tenant, {}, 'a fresh tenant: every role at its catalog default');
+    for (const [label, secret] of [['the cookie identifier', o.cookie.slice(o.cookie.indexOf('=') + 1)], ['the session CSRF token', o.csrf], ['the store key', o.key]]) {
+      assert.ok(!fresh.body.includes(secret), `the answer carries no ${label}`);
+    }
+    // A lock row (a create or an edit takes one before it locks) holds no level: it decides, and reads, as the default.
+    await owner`insert into tmpos_role.tenant_role_level (tenant_id, role_id, domain, level, updated_at)
+      values (${tenant}, 'manager', 'customers', null, now())`;
+    assert.equal(await levelOf(tenant, 'manager'), null, 'the lock row is there (control)');
+    readBackOf(await ctx.levels(o), tenant, {}, 'a NULL lock row reads as the default');
+    // Edits read back as stored — a narrowing, a widening, and a level equal to the default, which is still an override.
+    await edit(ctx, o, 'sales_staff', 'view');
+    await edit(ctx, o, 'technician', 'create');
+    await edit(ctx, o, 'manager', 'full');
+    const edited = { sales_staff: 'view', technician: 'create', manager: 'full' };
+    readBackOf(await ctx.levels(o), tenant, edited, 'after the edits');
+    readBackOf(await ctx.levels(await signIn(ctx, boss)), tenant, edited, 'a second session of the owner');
+    // Reading is not the sensitive change: a sign-in the edit would refuse as stale still reads.
+    readBackOf(await ctx.levels(await signIn(ctx, boss, { token: boss.staleToken })), tenant, edited, 'a stale sign-in reads');
+    const before = await counts();
+    readBackOf(await ctx.levels(o), tenant, edited, 'once more');
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'a read writes no customer, audit record, key or event');
+  });
+});
+
+test('M7RL-G02: only the tenant\'s store owner reads the levels back — a manager, a technician, a sales_staff and a store-scope owner are 403; no session and an administrative session 401; the admin or an unknown Host 404; any query 400; nothing is written', async () => {
+  const { tenant, boss } = await shop('m7rlg02');
+  const [{ store_id: store }] = await owner`insert into store (tenant_id, store_name, status)
+    values (${tenant}, ${`m7rlg02-store-${SUFFIX}`}, 'active') returning store_id`;
+  const refusedReaders = [
+    ['a manager', await actor('m7rlg02-manager', [tenantGrant(tenant, 'manager')])],
+    ['a technician', await actor('m7rlg02-tech', [tenantGrant(tenant, 'technician')])],
+    ['a sales_staff', await actor('m7rlg02-sales', [tenantGrant(tenant, 'sales_staff')])],
+    ['a store-scope store_owner', await actor('m7rlg02-store-owner', [{ scope: 'store', tenant, store, role: 'store_owner' }])],
+  ];
+  const admin = await actor('m7rlg02-admin', [{ scope: 'platform', role: 'system_owner' }]);
+  const adminId = await adminSessionId(admin);
+  await withEntry({}, async (ctx) => {
+    const o = await signIn(ctx, boss);
+    readBackOf(await ctx.levels(o), tenant, {}, 'the owner (control)');
+    const before = await counts();
+    for (const [label, who] of refusedReaders) assertRefusal(await ctx.levels(await signIn(ctx, who)), 403, 'forbidden', label);
+    for (const [label, request, status, error, reason] of [
+      ['no session', () => ctx.levels(null), 401, 'unauthenticated', null],
+      ['an administrative session under its own cookie', () => ctx.levels({ cookie: `${SESSION_COOKIES.admin}=${adminId}` }), 401, 'unauthenticated', 'session_missing'],
+      ['an administrative session under the tenant cookie', () => ctx.levels({ cookie: `${SESSION_COOKIES.tenant}=${adminId}` }), 401, 'unauthenticated', 'session_wrong_audience'],
+      ['the admin host', () => ctx.levels(o, { headers: { host: ADMIN_HOST } }), 404, 'not_found', null],
+      ['an unknown host', () => ctx.levels(o, { headers: { host: 'unknown.tmpos.test' } }), 404, 'not_found', null],
+      ['a tenant in the query', () => ctx.levels(o, { query: `?tenantId=${tenant}` }), 400, 'invalid_request', 'role_level_directory_query_invalid'],
+      ['an empty query', () => ctx.levels(o, { query: '?' }), 400, 'invalid_request', 'role_level_directory_query_invalid'],
+    ]) {
+      const reply = await request();
+      assertRefusal(reply, status, error, label);
+      if (reason !== null) assert.equal(ctx.reason(reply), reason, label);
+    }
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'refused reads');
+  });
+});
+
+test('M7RL-G03: each owner reads its own tenant alone — tenant A\'s edit never appears in tenant B\'s answer, neither answer names the other tenant, and a header naming the other tenant is no authority', async () => {
+  const a = await shop('m7rlg03-a');
+  const b = await shop('m7rlg03-b');
+  await withEntry({}, async (ctx) => {
+    const oa = await signIn(ctx, a.boss);
+    const ob = await signIn(ctx, b.boss);
+    await edit(ctx, oa, 'sales_staff', 'none');
+    await edit(ctx, ob, 'technician', 'edit');
+    const ra = await ctx.levels(oa);
+    const rb = await ctx.levels(ob);
+    readBackOf(ra, a.tenant, { sales_staff: 'none' }, 'tenant A');
+    readBackOf(rb, b.tenant, { technician: 'edit' }, 'tenant B');
+    assert.ok(!ra.body.includes(b.tenant) && !rb.body.includes(a.tenant), 'neither answer names the other tenant');
+    readBackOf(await ctx.levels(oa, { headers: { 'x-tenant-id': b.tenant } }), a.tenant, { sales_staff: 'none' }, 'a header is no authority');
+  });
+});
+
+test('M7RL-G04: a live owner session demoted (or its grant suspended) after login is refused on its next read — 401, never the old answer — and re-login as a manager is 403; every 401/403 is no-store; a stored `manage` round-trips through the read-back', async () => {
+  const { tenant, boss } = await shop('m7rlg04');
+  const suspended = await actor('m7rlg04-suspended', [tenantGrant(tenant, 'store_owner')]);
+  const noStore = (reply, label) => assert.equal(reply.headers['cache-control'], 'no-store', `${label}: never cached`);
+  await withEntry({}, async (ctx) => {
+    const o = await signIn(ctx, boss);
+    // A level the edit accepts but the shop's grid never offers: stored, and read back as stored.
+    await edit(ctx, o, 'manager', 'manage');
+    assert.equal(await levelOf(tenant, 'manager'), 'manage', 'stored as manage (control)');
+    readBackOf(await ctx.levels(o), tenant, { manager: 'manage' }, 'a stored manage round-trips');
+    const before = await counts();
+    for (const [label, who, session, change] of [
+      ['the owner demoted to manager', boss, o, () => owner`update user_membership set role_id = 'manager' where internal_user_id = ${boss.id}`],
+      ['the owner grant suspended', suspended, await signIn(ctx, suspended), () => owner`update user_membership set status = 'suspended' where internal_user_id = ${suspended.id}`],
+    ]) {
+      readBackOf(await ctx.levels(session), tenant, { manager: 'manage' }, `${label}: the live owner session reads (control)`);
+      await change();
+      const after = await ctx.levels(session);
+      // The chain ends a session whose standing changed after login (401), as M7CC-03 proves for the create.
+      assertRefusal(after, 401, 'unauthenticated', label);
+      assert.ok(!after.body.includes('manage') && !after.body.includes(tenant), `${label}: nothing of the old answer`);
+      noStore(after, label);
+      if (who === boss) {
+        const again = await ctx.levels(await signIn(ctx, boss));
+        assertRefusal(again, 403, 'forbidden', `${label}: re-login as a manager`);
+        noStore(again, `${label}: re-login as a manager`);
+      }
+    }
+    const anonymous = await ctx.levels(null);
+    assertRefusal(anonymous, 401, 'unauthenticated', 'no session');
+    noStore(anonymous, 'no session');
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'refused reads write nothing');
+    assert.equal(await levelOf(tenant, 'manager'), 'manage', 'the stored level is untouched by the refusals');
+  });
+});
+
+// ===========================================================================
 // M7RLH-C1: the COMPILED tenant entry
 // ===========================================================================
 
-test('M7RLH-C1: the compiled tenant entry serves exactly its eight routes — the owner\'s PUT among them — applies an owner\'s edit, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_EIGHT], 'the source tenant inventory');
+test('M7RLH-C1: the compiled tenant entry serves exactly its nine routes — the owner\'s PUT and its read-back among them — applies an owner\'s edit, reads it back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_NINE], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1553,13 +1707,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its eight routes — th
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_EIGHT], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_NINE], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_EIGHT], 'the compiled entry serves exactly the eight');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_NINE], 'the compiled entry serves exactly the nine');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');
@@ -1567,6 +1721,7 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its eight routes — th
       let before = await counts();
       await edit(ctx, o, 'sales_staff', 'view', 'compiled: the owner\'s edit');
       await assertDelta(before, { ...EDIT, L: 1 }, 'compiled: the edit');
+      readBackOf(await ctx.levels(o), tenant, { sales_staff: 'view' }, 'compiled: the owner reads the edit back');
       before = await counts();
       assertRefusal(await ctx.post(s, { name: nameOf('m7rlh-c1 narrowed') }), 403, 'forbidden', 'compiled: the narrowed role');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'compiled: the narrowed role');

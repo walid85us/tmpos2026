@@ -553,6 +553,11 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // it can say anything about migration 020's routines or their privilege containment, and applies them through the SAME
     // trusted executor. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/tenantRoleLevelRoutine.integration.test.mjs',
+    // M7A-CUSTOMERS-P3-R2: the shop's real-browser gate stands up the tenant entry over a disposable PostgreSQL and needs
+    // 001-020 applied first; it applies them through the SAME trusted executor (and validates its target with the same
+    // assertDisposableTestDsn), never a second apply path. A test suite that runs the database lane, like the tests/db/
+    // entries above; the decisive containment property asserted above is untouched.
+    'tests/browser/shopRoleLevels.browser.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { ROLE_LEVELS_BOUNDS, ROLE_LEVEL_UPDATE_MUTATOR, createPostgresRoleLevels, readRoleLevels } from './postgresRoleLevels.js';
+import {
+  ROLE_LEVELS_BOUNDS, ROLE_LEVEL_UPDATE_MUTATOR, createPostgresRoleLevelDirectory, createPostgresRoleLevels, readRoleLevelDirectory, readRoleLevels,
+} from './postgresRoleLevels.js';
 import { createPostgresTransactionalStore } from './postgresTransactionalStore.js';
 import type { MutationAuthority, PgRows, PgStatement } from './postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
@@ -102,6 +104,73 @@ test('the authorizer\'s read runs in one bounded transaction on the composition\
   assert.deepEqual(ROLE_LEVELS_BOUNDS, { lock: '2100ms', statement: '2700ms', idle: '6000ms' });
   answer = new Error('connection reset');
   await assert.rejects(read(TENANT, 'technician', signal), /connection reset/);
+});
+
+// --- the directory read (M7A-CUSTOMERS-P3-R2) -----------------------------------------------------------------------------
+
+const DIRECTORY_TEXT = /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r0,\s+tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r1,\s+tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r2$/;
+const directoryRow = (r0: unknown = {}, r1: unknown = {}, r2: unknown = {}): Record<string, unknown> => ({ r0, r1, r2 });
+
+test('the directory read is ONE statement calling 020 once per editable role on the trusted tenant, answering stored ?? null in role order, frozen', async () => {
+  const r = recording([directoryRow({ customers: 'view' }, {}, { customers: 'none' })]);
+  const answer = await readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, TENANT);
+  assert.deepEqual(answer, [{ roleId: 'manager', stored: 'view' }, { roleId: 'technician', stored: null }, { roleId: 'sales_staff', stored: 'none' }]);
+  assert.ok(Object.isFrozen(answer) && answer.every((e) => Object.isFrozen(e)));
+  assert.equal(r.texts.length, 1, 'one statement, one snapshot');
+  assert.match(r.texts[0], DIRECTORY_TEXT);
+  assert.deepEqual(r.values, [[TENANT, 'manager', TENANT, 'technician', TENANT, 'sales_staff']], 'the tenant and each role, bound');
+  for (const level of ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full']) {
+    const all = await readRoleLevelDirectory(recording([directoryRow({ customers: level }, { customers: level }, { customers: level })]).sql as unknown as PgTransactionScope, TENANT);
+    assert.deepEqual(all.map((e) => e.stored), [level, level, level], level);
+  }
+  assert.deepEqual((await readRoleLevelDirectory(recording([directoryRow()]).sql as unknown as PgTransactionScope, TENANT)).map((e) => e.stored), [null, null, null], 'nothing stored');
+});
+
+test('a directory answer out of shape — in any of the three roles — is a FAULT, never "defaults", and a malformed tenant throws before any statement', async () => {
+  // The readRoleLevels cases, each placed in every role's column in turn, then the row-level ones.
+  const values: Array<[string, unknown]> = [
+    ['a null answer', null], ['an array', []], ['text', '{}'], ['another domain', { sales: 'view' }], ['a non-canonical level', { customers: 'Full' }],
+    ['a null level', { customers: null }], ['a prototype-less object', Object.create(null)], ['a numeric level', { customers: 3 }],
+    ['a second domain beside customers', { customers: 'view', sales: 'view' }], ['a class instance', new (class L { customers = 'view'; })()],
+  ];
+  const bad: Array<[string, readonly Record<string, unknown>[]]> = [];
+  for (const [label, value] of values) {
+    for (let i = 0; i < 3; i++) bad.push([`${label} in r${i}`, [{ ...directoryRow(), [`r${i}`]: value }]]);
+  }
+  bad.push(
+    ['no row', []], ['two rows', [directoryRow(), directoryRow()]], ['another column', [{ ...directoryRow(), extra: 1 }]],
+    ['a missing column', [{ r0: {}, r1: {} }]], ['a renamed column', [{ r0: {}, r1: {}, r3: {} }]], ['a readRoleLevels row', [{ levels: {} }]],
+  );
+  for (const [label, answer] of bad) {
+    await assert.rejects(readRoleLevelDirectory(recording(answer).sql as unknown as PgTransactionScope, TENANT), /role levels answer invalid/, label);
+  }
+  for (const tenant of ['not-a-uuid', TENANT.toUpperCase(), '', ` ${TENANT}`, null, 42]) {
+    const r = recording([directoryRow()]);
+    await assert.rejects(readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, tenant as never), /role levels answer invalid/, String(tenant));
+    assert.deepEqual(r.texts, [], 'no statement');
+  }
+  // A driver error is not caught or rewritten here: it propagates, and the route answers the bounded 503.
+  await assert.rejects(readRoleLevelDirectory(recording(new Error('connection reset')).sql as unknown as PgTransactionScope, TENANT), /connection reset/);
+});
+
+test('the directory read runs in one bounded transaction on the composition\'s client, with the request\'s signal, and a fault propagates', async () => {
+  const seen: Array<[AbortSignal, TransactionBounds]> = [];
+  let answer: readonly Record<string, unknown>[] | Error = [directoryRow({}, { customers: 'edit' }, {})];
+  const client: SupervisedPgClient = Object.freeze({
+    transaction: async <T>(signal: AbortSignal, bounds: TransactionBounds, work: (scope: PgTransactionScope) => Promise<T>): Promise<T> => {
+      seen.push([signal, bounds]);
+      return work(recording(answer).sql as unknown as PgTransactionScope);
+    },
+    end: async (): Promise<void> => undefined,
+  });
+  const read = createPostgresRoleLevelDirectory({ client });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await read(TENANT, signal), [{ roleId: 'manager', stored: null }, { roleId: 'technician', stored: 'edit' }, { roleId: 'sales_staff', stored: null }]);
+  assert.deepEqual(seen, [[signal, ROLE_LEVELS_BOUNDS]]);
+  answer = [directoryRow({}, { customers: 'Edit' }, {})];
+  await assert.rejects(read(TENANT, signal), /role levels answer invalid/);
+  answer = new Error('connection reset');
+  await assert.rejects(read(TENANT, signal), /connection reset/);
 });
 
 // --- the write -----------------------------------------------------------------------------------------------------------

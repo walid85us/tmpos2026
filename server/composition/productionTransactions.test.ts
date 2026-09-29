@@ -1256,11 +1256,12 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the read session-bound and classified as a read, the two commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer read session-bound, the two reads classified as reads, the two commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
-    : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
+    : text.includes(' as r0') ? [{ r0: {}, r1: { customers: 'none' }, r2: { customers: 'view' } }]
+      : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
   let calls = 0;
   let seen: unknown;
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, (endpoint) => { calls++; seen = endpoint; return kernel.client; });
@@ -1269,11 +1270,13 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   assert.deepEqual(ttx.routes.map((r) => [r.method, r.path, r.policy.access, r.policy.access === 'session' ? r.policy.audience : null,
     r.sessionBinding, r.trustedContext, r.idempotency]), [
     ['GET', '/api/v1/customers', 'session', 'tenant', 'required', 'required', 'none'],
+    ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
-  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers'], 'the read alone is classified as a read: never a command');
-  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers', 'POST /api/v1/customers', 'PUT /api/v1/roles/levels']);
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/roles/levels'], 'the reads alone are classified as reads: never a command');
+  assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
+    ['GET /api/v1/customers', 'GET /api/v1/roles/levels', 'POST /api/v1/customers', 'PUT /api/v1/roles/levels']);
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
@@ -1301,6 +1304,25 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   assert.deepEqual(await ttx.roleLevels(REVAL_TENANT, 'sales_staff', new AbortController().signal), { customers: 'view' });
   assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT, 'sales_staff']], 'one statement: the trusted tenant and role');
   assert.match(kernel.statements[0].text, /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as levels$/);
+  // M7A-CUSTOMERS-P3-R2: the owner's read-back over this same kernel — ONE statement reading the three editable roles of the
+  // trusted scope's tenant (one snapshot), each beside the catalog default the tenant root adds, the owner first and fixed.
+  kernel.statements.length = 0;
+  const readBack = ttx.routes[1];
+  assert.ok(readBack.path === '/api/v1/roles/levels' && readBack.idempotency === 'none' && typeof readBack.handler === 'function');
+  const levelsReply: { status: number | null; body: unknown } = { status: null, body: undefined };
+  const levelsRes = { locals: {}, status(code: number) { levelsReply.status = code; return levelsRes; }, json(body: unknown) { levelsReply.body = body; return levelsRes; } };
+  await readBack.handler({ url: '/api/v1/roles/levels' } as never, levelsRes as never,
+    { requestId: 'req-m7tk03-levels', principal: null, session: null, authenticatedAt: null, trusted: { ...scope, roleId: 'store_owner' }, sessionKey: null } as never);
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT, 'manager', REVAL_TENANT, 'technician', REVAL_TENANT, 'sales_staff']],
+    'one statement: the trusted tenant and each editable role');
+  assert.match(kernel.statements[0].text.replace(/\s+/g, ' '),
+    /^select tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r0, tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r1, tmpos_role\.m7a_role_levels\(\?::uuid, \?::text\) as r2$/);
+  assert.deepEqual([levelsReply.status, levelsReply.body], [200, { tenant: REVAL_TENANT, domain: 'customers', roles: [
+    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false },
+    { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true },
+    { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true },
+    { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true },
+  ] }], 'the catalog defaults (manager Full, technician View, sales_staff Create) and the stored overrides');
   await ttx.close();
   assert.equal(kernel.ended(), 1);
 });

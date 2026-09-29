@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 19;
-export const MIN_FRONTEND_CASES = 387;
+export const MIN_FRONTEND_FILES = 21; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx
+export const MIN_FRONTEND_CASES = 415; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03)
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated
@@ -62,6 +62,8 @@ export const REQUIRED_FRONTEND_SUITES = [
   'src/backend-control-plane/console/CommandCenter.test.tsx',         // read-only command center states and refusals
   'src/backend-control-plane/console/ApiPathNotFound.test.tsx',       // an API address loads a bounded page, never the console shell
   'src/backend-control-plane/console/TenantManagement.test.tsx',      // tenant workspace: server-decided actions, one key per intent, confirmed-only changes (M5-GIAM-D1-P3)
+  'src/tenant/ServerCustomerLevels.test.tsx',                         // shop Customers levels: saved only after the server's read-back (M7A-CUSTOMERS-P3-R2)
+  'src/context/AccessContext.tenantSession.test.tsx',                 // tenant session follows the Firebase user: logout before the next user (M7A-CUSTOMERS-P3-R2)
 ];
 
 /** A case vitest actually ran. Skipped and todo cases are not executed. */

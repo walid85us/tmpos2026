@@ -31,9 +31,10 @@
 //
 // M7A-CUSTOMERS-P3-R1 UPDATE. The entry also serves PUT /api/v1/roles/levels, the owner's durable Customers-level edit
 // (tests/db/roleLevels.integration.test.mjs proves it end to end), and its tenant route authorizer reads migration 020's
-// role levels. The chain is 001-020: M7TE-01 pins the eight-route table, M7TE-08 the login's EXECUTE on 020's page_v3,
-// create, level read and level set at startup — and refuses 019's create or 018's page_v2 given back —, M7TE-10 the
-// 001-020 ledger (a fake next row is '021'), and M7TE-11 withdraws page_v3 after startup.
+// role levels. The chain is 001-020: M7TE-01 pins the route table (nine since M7A-CUSTOMERS-P3-R2: the levels' read-back),
+// M7TE-08 the login's EXECUTE on 020's page_v3, create, level read and level set at startup — and refuses 019's create or
+// 018's page_v2 given back —, M7TE-10 the 001-020 ledger (a fake next row is '021'), and M7TE-11 withdraws page_v3 after
+// startup.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -784,9 +785,11 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     assert.equal(ctx.result.address.address, '127.0.0.1');
     assert.deepEqual(canonical(ctx.result.routes), canonical(TENANT_SHIPPING_ROUTES));
     // The table itself, pinned here rather than read from the module: the customer create (M7A-CUSTOMERS-P3) and the
-    // owner's role-level edit (M7A-CUSTOMERS-P3-R1) are its two body-bearing, idempotent routes.
+    // owner's role-level edit (M7A-CUSTOMERS-P3-R1) are its two body-bearing, idempotent routes; the edit's read-back
+    // (M7A-CUSTOMERS-P3-R2) is a bodiless session read.
     assert.deepEqual(canonical(ctx.result.routes), [
       'GET /api/v1/customers session none none',
+      'GET /api/v1/roles/levels session none none',
       'GET /api/v1/session session none none',
       'GET /health public none none',
       'GET /readiness public none none',
