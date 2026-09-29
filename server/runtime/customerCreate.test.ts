@@ -19,8 +19,8 @@ import {
   CUSTOMER_CREATE_CONTRACT, CUSTOMER_CREATE_PERMISSION, CUSTOMER_CREATE_ROUTE, normalizeCustomerName, planCustomerCreate,
 } from './customerCreate.js';
 import { CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS, createCustomerDirectoryRoute } from './customerDirectory.js';
-import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
-import { createIdempotencyKeyring } from './idempotency.js';
+import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyState, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
+import { IDEMPOTENCY_POLICY, createIdempotencyKeyring, envelopeFromOutcome } from './idempotency.js';
 import { createMemorySessionStore } from './memorySessionStore.testkit.js';
 import { UUID_V4_RE, defineOutboxEvents } from './outbox.js';
 import type { TrustedScope } from './principals.js';
@@ -166,9 +166,10 @@ test('the plan: the runtime\'s new id as the aggregate, no version, the stored n
   const p = planCustomerCreate({ audience: 'tenant', body: { name: '  Ada  Lovelace ' }, newAggregateId });
   assert.deepEqual(p, {
     aggregateId: newAggregateId, expectedVersion: null, changes: { name: 'Ada  Lovelace' }, events: [],
-    response: { status: 201, body: { customer: { id: newAggregateId, name: 'Ada  Lovelace' } } },
+    response: { status: 201, body: { customer: { id: newAggregateId, name: 'Ada  Lovelace' } }, headers: { location: `/api/v1/customers/${newAggregateId}` } },
   });
-  assert.ok(!('headers' in (p as CommandPlan).response), 'no Location header: no customer-detail route exists');
+  // M7A-CUSTOMERS-P4: the detail route exists, so the 201 names it — the one allowlisted, sealed header, and nothing else.
+  assert.deepEqual(Object.keys((p as CommandPlan).response.headers ?? {}), ['location']);
   // The planner reads the body alone: the same body under another audience plans the same command.
   assert.deepEqual(planCustomerCreate({ audience: null, body: { name: 'Ada' }, newAggregateId }), planCustomerCreate({ audience: 'tenant', body: { name: 'Ada' }, newAggregateId }));
 });
@@ -248,6 +249,8 @@ interface Harness {
   /** What the authorizer answers from now on; the default is SCOPE, granted. */
   setScope(scope: TrustedScope | false): void;
   setAnswer(answer: 'committed' | 'unavailable'): void;
+  /** Preseed a COMPLETED idempotency record for this key and body, holding `sealed` as its response — as an earlier build left it. */
+  seedCompleted(key: string, body: string, sealed: (operation: { scope: string; fingerprint: string }) => string): void;
   post(over?: { body?: string; key?: string | null; headers?: Record<string, string> }): Promise<Reply>;
 }
 
@@ -257,7 +260,19 @@ async function withChain(fn: (h: Harness) => Promise<void>): Promise<void> {
   const logs: string[] = [];
   let scope: TrustedScope | false = SCOPE;
   let answer: 'committed' | 'unavailable' = 'committed';
-  const inner = createMemoryIdempotencyStore();
+  const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+  const state = createMemoryIdempotencyState();
+  const inner = createMemoryIdempotencyStore(state);
+  const seedCompleted: Harness['seedCompleted'] = (key, body, sealed) => {
+    // The operation this chain derives for the key, principal, trusted scope and exact body bytes (app.ts).
+    const operation = keyring.operationOf(key, { authProvider: 'synthetic', authProviderUid: 'uid-customers' }, {
+      method: 'POST', path: CUSTOMER_DIRECTORY_PATH, audience: 'tenant', tenant: SCOPE.tenant, store: null, actor: ACTOR, body: Buffer.from(body),
+    });
+    const t = Date.now();
+    state.records.set(operation.scope, {
+      fingerprint: operation.fingerprint, lease: 'l'.repeat(43), leaseExpiresAt: t, expiresAt: t + IDEMPOTENCY_POLICY.retentionMs, response: sealed(operation),
+    });
+  };
   // Commits through the idempotency store's own lease check, as the one-database adapter does.
   const port: CommandTransactionPort = {
     async commit(c, s) {
@@ -306,7 +321,7 @@ async function withChain(fn: (h: Harness) => Promise<void>): Promise<void> {
       cookie: `${SESSION_COOKIES.tenant}=${id}`, [SESSION_CSRF_HEADER]: csrf, 'content-length': String(Buffer.byteLength(body)),
       ...(key === null ? {} : { 'idempotency-key': key }), ...headers,
     }, body);
-    await fn({ commits, authorizations, logs, id, storeKey, post, setScope: (s) => { scope = s; }, setAnswer: (a) => { answer = a; } });
+    await fn({ commits, authorizations, logs, id, storeKey, post, setScope: (s) => { scope = s; }, setAnswer: (a) => { answer = a; }, seedCompleted });
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -323,7 +338,7 @@ test('a committed create answers 201 { customer: { id, name } }, and the port re
     assert.deepEqual(Object.keys(customer), ['id', 'name']);
     assert.match(customer.id, UUID_V4_RE, 'a server-generated v4 id');
     assert.equal(customer.name, 'Ada  Lovelace', 'the name as stored');
-    assert.equal(r.headers.location, undefined, 'no Location: no detail route exists');
+    assert.equal(r.headers.location, `/api/v1/customers/${customer.id}`, 'Location names the detail route of the new id (M7A-CUSTOMERS-P4)');
     assert.equal(r.headers['idempotent-replayed'], undefined);
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) assert.equal(r.headers[name.toLowerCase()], value, name);
     assert.deepEqual(h.authorizations.map((a) => a[1]), [{ scope: 'tenant', permission: 'create_customers' }], 'the declared requirement, never one the request names');
@@ -346,6 +361,8 @@ test('the key is bound to the trusted tenant and actor: a same-principal retry r
     assert.equal(first.status, 201, first.body);
     const replay = await h.post({ key, body });
     assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed']], [201, first.body, 'true'], 'replayed byte for byte');
+    assert.equal(replay.headers.location, first.headers.location, 'the sealed Location replays with it');
+    assert.equal(first.headers.location, `/api/v1/customers/${(JSON.parse(first.body) as { customer: { id: string } }).customer.id}`);
     // The same principal, key and body, after the principal's one tenant grant moved from T1 to T2 — never T1's customer.
     h.setScope({ ...SCOPE, tenant: T2 });
     const moved = await h.post({ key, body });
@@ -407,5 +424,40 @@ test('a refusal inside the transaction is a bounded 503 that is never replayed, 
     for (const line of h.logs) {
       for (const secret of [name, key, h.id, h.storeKey]) assert.ok(!line.includes(secret), `a log line carries ${secret.slice(0, 6)}...`);
     }
+  });
+});
+
+test('a completion sealed BEFORE M7A-CUSTOMERS-P4 replays on its first request with this build: 201, the sealed body, no Location, nothing committed', async () => {
+  await withChain(async (h) => {
+    const key = randomUUID();
+    const body = JSON.stringify({ name: 'Legacy Customer' });
+    const id = randomUUID();
+    const sealedBody = JSON.stringify({ customer: { id, name: 'Legacy Customer' } });
+    // EXACTLY what the pre-change build sealed for a create, written out as a literal — not derived from this build's plan.
+    // Before M7A-CUSTOMERS-P4 the plan's response was { status: 201, body } with no `headers`, and idempotency.ts (unchanged
+    // by this change) recorded it as the four fields { status, contentType, headers, body } with `headers` the EMPTY object
+    // (envelopeFromOutcome: `headers === undefined ? {} : headers`). A sealed envelope with no `headers` member at all was
+    // never written by any build: envelopeOf refuses one on read, so it could not replay (asserted below).
+    const preChange = { status: 201, contentType: 'application/json; charset=utf-8', headers: {}, body: sealedBody };
+    assert.deepEqual(envelopeFromOutcome({ status: 201, body: { customer: { id, name: 'Legacy Customer' } } }), preChange,
+      'the literal is the pre-change plan\'s envelope, byte for byte');
+    const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+    let operation: { scope: string; fingerprint: string } | null = null;
+    h.seedCompleted(key, body, (op) => { operation = op; return keyring.seal(preChange, op); });
+    assert.ok(operation !== null);
+    assert.equal(keyring.unseal(keyring.seal({ status: 201, contentType: preChange.contentType, body: sealedBody } as never, operation), operation), null,
+      'an envelope lacking `headers` does not unseal: no build could have left one to replay');
+    // The FIRST request with the key is a replay: the sealed 201, no Location, no commit, no port call.
+    const first = await h.post({ key, body });
+    assert.deepEqual([first.status, first.body, first.headers['idempotent-replayed']], [201, sealedBody, 'true'], first.body);
+    assert.equal(first.headers.location, undefined, 'a pre-change completion replays without Location, exactly as committed');
+    assert.equal(h.commits.length, 0, 'nothing planned, committed or sent to the port');
+    // A key sealed by this build replays its Location.
+    const newKey = randomUUID();
+    const fresh = await h.post({ key: newKey, body });
+    const again = await h.post({ key: newKey, body });
+    assert.equal(fresh.headers.location, `/api/v1/customers/${(JSON.parse(fresh.body) as { customer: { id: string } }).customer.id}`);
+    assert.deepEqual([again.headers['idempotent-replayed'], again.headers.location, again.body], ['true', fresh.headers.location, fresh.body]);
+    assert.equal(h.commits.length, 1, 'one commit: the new key\'s first request');
   });
 });

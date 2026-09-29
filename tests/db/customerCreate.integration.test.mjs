@@ -18,7 +18,7 @@
 //
 // WHAT IS PROVEN. C/A/K/O are the customer rows, the audit rows of action tenant.customer.create, the sealed idempotency
 // completions and the outbox rows (L: every idempotency row, leases included), each a delta the OWNER reads around a case:
-//   M7CC-01 a sales_staff, store_owner or manager creates in its own tenant: 201 {customer:{id,name}}, no Location,
+//   M7CC-01 a sales_staff, store_owner or manager creates in its own tenant: 201 {customer:{id,name}} with Location /api/v1/customers/<id>,
 //           1/1/1/0, the row and the audit record in that tenant, found by that tenant's read and not by another's;
 //   M7CC-02 no, forged, idle-expired, absolute-expired, logged-out and administrative sessions, a store-only actor and a
 //           host that is not the tenant host create nothing, and acquire no key (0/0/0/0, L 0);
@@ -480,7 +480,7 @@ function assertRefusal(reply, status, error, label) {
   assertBaseline(reply, label);
 }
 
-/** A created customer: 201, exactly { customer: { id, name } }, a version-4 id, no Location. Answers { id, name }. */
+/** A created customer: 201, exactly { customer: { id, name } }, a version-4 id, Location its detail path (M7A-CUSTOMERS-P4). Answers { id, name }. */
 function createdOf(reply, name, label, { replayed = false } = {}) {
   assert.equal(reply.status, 201, `${label}: ${reply.body}`);
   const body = JSON.parse(reply.body);
@@ -488,7 +488,8 @@ function createdOf(reply, name, label, { replayed = false } = {}) {
   assert.deepEqual(Object.keys(body.customer), ['id', 'name'], label);
   assert.match(body.customer.id, V4, `${label}: a server-generated version-4 id`);
   assert.equal(body.customer.name, name, label);
-  assert.equal(reply.headers.location, undefined, `${label}: no Location (no customer-detail route exists)`);
+  // M7A-CUSTOMERS-P4: Location names the detail route of the new id — sealed with the response, so a replay carries it too.
+  assert.equal(reply.headers.location, `/api/v1/customers/${body.customer.id}`, `${label}: Location names the new customer's detail route`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assert.equal(reply.headers['set-cookie'], undefined, `${label}: no Set-Cookie`);
   assertBaseline(reply, label);
@@ -825,7 +826,7 @@ const CREATE_AUDIT = `new.action_id = '${ACTION}'`;
 // M7CC-01: create in the session's own tenant; isolation
 // ===========================================================================
 
-test('M7CC-01: sales_staff, store_owner and manager each create in their own tenant — 201 {customer:{id,name}}, no Location, one row, one tenant-scoped audit record, one completion, no outbox event — and only their own tenant reads it', async () => {
+test('M7CC-01: sales_staff, store_owner and manager each create in their own tenant — 201 {customer:{id,name}} with Location its detail path, one row, one tenant-scoped audit record, one completion, no outbox event — and only their own tenant reads it', async () => {
   const makers = [
     await actor('m7cc01-sales', [tenantGrant(T_A, 'sales_staff')]),
     await actor('m7cc01-owner', [tenantGrant(T_A, 'store_owner')]),

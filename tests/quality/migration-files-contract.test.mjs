@@ -232,19 +232,30 @@ const PINNED = {
   // and still refuses.
   '021_m7a_role_level_precondition.up.sql': '139a63b193e7c17c0b6770766eee6c3e70ba8b7bd0e65937cf3d7d05bd7b7876',
   '021_m7a_role_level_precondition.down.sql': 'dcde77eb338d09142dc3a0eb5df5257314ce48c9f7eb94e472856a26ff71ec27',
+  // Phase 4.0 M7A-CUSTOMERS-P4 — the tenant customer detail read, in its OWN schema tmpos_customer_detail: ONE STABLE
+  // SECURITY DEFINER routine, m7a_customer_get(session key, customer id, expected tenant), which derives the tenant from the
+  // minted session exactly as 020's page_v3 does (the role's current Customers level included), requires it to equal the
+  // runtime's trusted tenant (a precondition, never a selector), re-checks 017's authority on the same snapshot, and reads one
+  // customer by primary key within that tenant — a missing and a foreign id answer the same 'not_found'. tmpos_app gains
+  // EXECUTE on it and USAGE on its schema, nothing else: no table privilege, no ACL change on any earlier object; migrations
+  // 001-021 are untouched, byte for byte. Its rollback removes exactly that. Proved against disposable PostgreSQL only;
+  // applied to no managed, persistent or application database. D4 now names the contiguous chain through 022; the
+  // exact-[005] gate is unchanged and still refuses.
+  '022_m7a_customer_detail.up.sql': '0782d04f32e489611ab5e04e592fc7ded6d2a8cfd8b3ba0f824f5bae4dbc59e4',
+  '022_m7a_customer_detail.down.sql': '2d031c83cd432b70ff53818dd443f8ca278f50b11e2a7c3a625a1513feeb26e8',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the forty-two expected files', () => {
+test('the migrations directory holds exactly the forty-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

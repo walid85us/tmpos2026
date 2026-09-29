@@ -723,11 +723,15 @@ test('M6EP-09: test, DEV and witness routes are absent, and never appear in the 
       '/admin/v1/witness', '/diagnostics', '/bootstrap', '/migrations',
       // M7A-CUSTOMERS-P2: the customer list is the tenant executable's alone.
       '/api/v1/customers',
+      // M7A-CUSTOMERS-P4: so is the customer detail read, under any segment.
+      `/api/v1/customers/${randomUUID()}`, '/api/v1/customers/{id}',
     ];
     for (const path of absent) {
       assertBounded404(await ctx.req('GET', path));
       assert.ok(!ctx.result.routes.some((r) => r.path === path), `${path} is not in the served inventory`);
     }
+    // The administrative table declares no template at all: no served path carries a parameter.
+    assert.ok(!ctx.result.routes.some((r) => r.path.includes('{')), 'no templated path on the administrative entry');
   });
 });
 

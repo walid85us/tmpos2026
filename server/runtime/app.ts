@@ -774,7 +774,9 @@ export function createApp(deps: AppDeps): Express {
       return evaluateRequestSecurity(req.headers, boundary.trustedOrigins) === null ? boundary.clearingCookie : null;
     };
     try {
-      const route = table.lookup(req.method, req.path); // a map lookup: nothing is read or parsed
+      // Map lookups: nothing is read or parsed. The one template (routes.ts) matches its prefix and one raw segment; the
+      // route's view, fingerprint and log class carry the template's path, never the segment.
+      const route = table.lookup(req.method, req.path);
       // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
       // a served authority exactly (DNS names compare case-insensitively). The probes answer on any host.
       if (hosts !== null && (route === undefined || !isProbe(route))) {

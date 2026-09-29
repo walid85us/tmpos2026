@@ -22,10 +22,11 @@ import { SESSION_COOKIES } from './sessions.js';
 import type { SessionBoundaryDeps } from './sessions.js';
 import { decodeTenantCursor, encodeTenantCursor } from './tenantDirectory.js';
 import {
-  CUSTOMER_DIRECTORY_DEFAULT_LIMIT, CUSTOMER_DIRECTORY_MAX_LIMIT, CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS,
-  createCustomerDirectoryRoute, customerDirectoryPageOf, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, parseCustomerDirectoryQuery,
+  CUSTOMER_DETAIL_PATH, CUSTOMER_DIRECTORY_DEFAULT_LIMIT, CUSTOMER_DIRECTORY_MAX_LIMIT, CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS,
+  createCustomerDetailRoute, createCustomerDirectoryRoute, customerDetailOf, customerDirectoryPageOf, decodeCustomerCursor, encodeCustomerCursor,
+  inCustomerPageOrder, parseCustomerDirectoryQuery,
 } from './customerDirectory.js';
-import type { CustomerDirectoryPort, CustomerDirectoryQuery } from './customerDirectory.js';
+import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery } from './customerDirectory.js';
 
 const ACTOR = '7b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d';
 const MEMBERSHIP = '5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d';
@@ -519,4 +520,261 @@ test('over the enforced chain: the authorizer is asked for view_customers at ten
       assert.equal(h.calls.length, 0, `${label}: the port was never asked`);
     });
   }
+});
+
+// --- 5. the customer detail read, GET /api/v1/customers/{id} (M7A-CUSTOMERS-P4) --------------------------------------------
+
+const CID = idOf(42);
+/** Segments the template reaches but the handler refuses after authentication: anything but one canonical lowercase uuid. */
+const MALFORMED_IDS: readonly string[] = [
+  CID.toUpperCase(), CID.replace(/-/g, '%2d'), CID.replace('-', '%2D'), '{id}', 'x', '..', CID.slice(1), `${CID}0`, CID.replace(/-/g, ''),
+  'a'.repeat(128), `%7B${CID}%7D`,
+];
+
+test('the detail route is a GET of the one template, the list\'s permission, trusted context and session binding, no body and no key', () => {
+  const route = createCustomerDetailRoute({ customerDetail: { get: () => ({ outcome: 'not_found' }) } });
+  assert.equal(CUSTOMER_DETAIL_PATH, '/api/v1/customers/{id}');
+  assert.equal(route.method, 'GET');
+  assert.equal(route.path, '/api/v1/customers/{id}');
+  assert.deepEqual(route.policy, { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'view_customers' } });
+  assert.deepEqual([route.body, route.idempotency, route.trustedContext, route.recentAuth, route.sessionBinding], [{ kind: 'none' }, 'none', 'required', 'none', 'required']);
+  assert.deepEqual(Object.keys(route).sort(), ['body', 'handler', 'idempotency', 'method', 'path', 'policy', 'recentAuth', 'sessionBinding', 'trustedContext']);
+  assert.ok(Object.isFrozen(route) && Object.isFrozen(route.policy) && Object.isFrozen(route.body));
+  const list = createCustomerDirectoryRoute({ customers: { page: () => null } });
+  assert.equal(defineRoutes([list, route]).list().length, 2, 'the runtime\'s own table accepts it beside the list');
+  for (const ports of [undefined, null, {}, { customerDetail: null }, { customerDetail: {} }, { customerDetail: { get: 'yes' } }, { customers: { page: () => null } }]) {
+    assert.throws(() => createCustomerDetailRoute(ports as never), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'route_handler_invalid', JSON.stringify(ports));
+  }
+  for (const deadlineMs of [0, -1, 1.5, 3_001, Number.NaN, '100']) {
+    assert.throws(() => createCustomerDetailRoute({ customerDetail: { get: () => null } }, { deadlineMs: deadlineMs as never }),
+      (e: unknown) => e instanceof EnforcementSetupError && e.code === 'port_deadline_invalid', String(deadlineMs));
+  }
+  for (const deadlineMs of [1, 3_000]) assert.ok(createCustomerDetailRoute({ customerDetail: { get: () => null } }, { deadlineMs }), `${deadlineMs} (control)`);
+});
+
+test('customerDetailOf: only an exactly shaped answer for the id asked is a customer; refusals carry nothing; anything else is null', () => {
+  assert.deepEqual(customerDetailOf({ outcome: 'customer', id: CID, name: 'Ada' }, CID), { id: CID, name: 'Ada' });
+  assert.ok(Object.isFrozen(customerDetailOf({ outcome: 'customer', id: CID, name: 'Ada' }, CID)));
+  assert.equal(customerDetailOf({ outcome: 'not_found' }, CID), 'not_found');
+  assert.equal(customerDetailOf({ outcome: 'denied' }, CID), 'denied');
+  const hostile = new Proxy({}, { ownKeys: () => { throw new Error('trap'); } });
+  for (const [label, raw] of [
+    ['another id', { outcome: 'customer', id: idOf(43), name: 'Ada' }],
+    ['an uppercase id', { outcome: 'customer', id: CID.toUpperCase(), name: 'Ada' }],
+    ['an extra key', { outcome: 'customer', id: CID, name: 'Ada', email: 'a@x.test' }],
+    ['a tenant beside it', { outcome: 'customer', id: CID, name: 'Ada', tenant: T1 }],
+    ['no name', { outcome: 'customer', id: CID }],
+    ['an empty name', { outcome: 'customer', id: CID, name: '' }],
+    ['a 201-character name', { outcome: 'customer', id: CID, name: 'x'.repeat(CUSTOMER_NAME_MAX_CHARACTERS + 1) }],
+    ['a lone surrogate', { outcome: 'customer', id: CID, name: 'a\ud800' }],
+    ['not_found with a field', { outcome: 'not_found', id: CID }],
+    ['denied with a field', { outcome: 'denied', name: 'x' }],
+    ['a page', { outcome: 'page', customers: [], hasMore: false }],
+    ['invalid', { outcome: 'invalid' }],
+    ['an array', [{ outcome: 'customer', id: CID, name: 'Ada' }]],
+    ['a class instance', Object.assign(new (class X {})(), { outcome: 'not_found' })],
+    ['a string', 'not_found'], ['null', null], ['undefined', undefined], ['a hostile proxy', hostile],
+  ] as const) {
+    assert.equal(customerDetailOf(raw, CID), null, label);
+  }
+});
+
+/** Run the detail handler once over a minimal request, response and context, recording what the port was handed. */
+async function runDetail(opts: { path?: string; url?: unknown; trusted?: unknown; sessionKey?: unknown; answer?: (id: string, signal: AbortSignal) => unknown; deadlineMs?: number } = {}) {
+  const calls: Array<{ scope: TrustedScope; sessionKey: string; id: string; signal: AbortSignal }> = [];
+  const port: CustomerDetailPort = {
+    get(scope, sessionKey, id, signal) {
+      calls.push({ scope, sessionKey, id, signal });
+      return (opts.answer ?? ((asked) => ({ outcome: 'customer', id: asked, name: 'Customer 42' })))(id, signal);
+    },
+  };
+  const route = createCustomerDetailRoute({ customerDetail: port }, opts.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs });
+  const out: Captured = { status: null, body: undefined, locals: {} };
+  const res = {
+    locals: out.locals,
+    status(code: number) { out.status = code; return res; },
+    json(body: unknown) { out.body = body; return res; },
+  };
+  const ctx = {
+    requestId: 'req-7', principal: null, session: null, authenticatedAt: null, body: undefined,
+    trusted: 'trusted' in opts ? opts.trusted : SCOPE,
+    sessionKey: 'sessionKey' in opts ? opts.sessionKey : SESSION_KEY,
+  } as unknown as RouteContext;
+  assert.ok(route.idempotency === 'none', 'a handler route');
+  const path = opts.path ?? `${CUSTOMER_DIRECTORY_PATH}/${CID}`;
+  await route.handler({ path, url: 'url' in opts ? opts.url : path } as unknown as Request, res as unknown as Response, ctx);
+  return { out, calls, ctx };
+}
+
+test('detail handler: any query — a bare ? included — and any non-canonical id are 400 invalid_request before the port is asked', async () => {
+  for (const url of [`${CUSTOMER_DIRECTORY_PATH}/${CID}?`, `${CUSTOMER_DIRECTORY_PATH}/${CID}?x=1`, `${CUSTOMER_DIRECTORY_PATH}/${CID}?tenantId=${T1}`]) {
+    const { out, calls } = await runDetail({ url });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_detail_query_invalid', url);
+    assert.equal(calls.length, 0, `${url}: the port was never asked`);
+  }
+  for (const segment of MALFORMED_IDS) {
+    const { out, calls } = await runDetail({ path: `${CUSTOMER_DIRECTORY_PATH}/${segment}` });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_detail_id_invalid', segment);
+    assert.equal(calls.length, 0, `${segment}: the port was never asked`);
+  }
+});
+
+test('detail handler: without a resolved tenant scope or the session key it refuses 403 and never asks the port', async () => {
+  for (const [label, opts] of [
+    ['no trusted scope', { trusted: null }],
+    ['a platform scope', { trusted: { ...SCOPE, scope: 'platform', tenant: null, roleId: 'system_owner' } }],
+    ['a store scope', { trusted: { ...SCOPE, scope: 'store', store: STORE } }],
+    ['a tenant scope with no tenant', { trusted: { ...SCOPE, tenant: null } }],
+    ['no session key', { sessionKey: null }],
+  ] as const) {
+    const { out, calls } = await runDetail(opts);
+    assertHandlerRefusal(out, 403, 'forbidden', 'authz_context_missing', label);
+    assert.equal(calls.length, 0, `${label}: the port was never asked`);
+  }
+});
+
+test('detail handler: a canonical id makes exactly one port call with (scope, key, id), and 200 carries exactly {customer:{id,name}}', async () => {
+  for (const id of [CID, '00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-8fff-bfff-ffffffffffff']) {
+    const { out, calls, ctx } = await runDetail({ path: `${CUSTOMER_DIRECTORY_PATH}/${id}` });
+    assert.equal(calls.length, 1, id);
+    assert.equal(calls[0].scope, ctx.trusted, 'the very scope the chain resolved');
+    assert.equal(calls[0].sessionKey, SESSION_KEY);
+    assert.equal(calls[0].id, id);
+    assert.ok(calls[0].signal instanceof AbortSignal && !calls[0].signal.aborted);
+    assert.equal(out.status, 200);
+    assert.deepEqual(out.body, { customer: { id, name: 'Customer 42' } });
+    assert.deepEqual(Object.keys(out.body as object), ['customer']);
+    assert.deepEqual(Object.keys((out.body as { customer: object }).customer), ['id', 'name']);
+    assert.equal(out.locals.refusal, undefined);
+  }
+});
+
+test('detail handler: denied is the list\'s 403, not_found one bounded 404, and a throw, an overrun or an out-of-shape answer a 503', async () => {
+  const cases: Array<[string, (id: string, s: AbortSignal) => unknown, number, string, string]> = [
+    ['denied', () => ({ outcome: 'denied' }), 403, 'forbidden', 'customer_detail_denied'],
+    ['not_found', () => ({ outcome: 'not_found' }), 404, 'not_found', 'customer_not_found'],
+    ['a throw', () => { throw new Error('connection to db-secret.internal refused'); }, 503, 'service_unavailable', 'customer_detail_unavailable'],
+    ['a rejection', () => Promise.reject(new Error('password authentication failed for user secret')), 503, 'service_unavailable', 'customer_detail_unavailable'],
+    ['an overrun', (_id, signal) => new Promise((resolve) => { signal.addEventListener('abort', () => resolve({ outcome: 'not_found' })); }),
+      503, 'service_unavailable', 'customer_detail_timeout'],
+    ['another id', () => ({ outcome: 'customer', id: idOf(43), name: 'secret other' }), 503, 'service_unavailable', 'customer_detail_answer_invalid'],
+    ['an extra key', (id) => ({ outcome: 'customer', id, name: 'Ada', email: 'secret@x.test' }), 503, 'service_unavailable', 'customer_detail_answer_invalid'],
+    ['a 201-character name', (id) => ({ outcome: 'customer', id, name: 'x'.repeat(201) }), 503, 'service_unavailable', 'customer_detail_answer_invalid'],
+    ['no answer', () => undefined, 503, 'service_unavailable', 'customer_detail_answer_invalid'],
+    ['invalid', () => ({ outcome: 'invalid' }), 503, 'service_unavailable', 'customer_detail_answer_invalid'],
+  ];
+  for (const [label, answer, status, error, reason] of cases) {
+    const { out, calls } = await runDetail({ answer, deadlineMs: 1_000 });
+    assert.equal(calls.length, 1, `${label}: asked once`);
+    assertHandlerRefusal(out, status, error, reason, label);
+    assert.ok(!/secret|password|customer_detail/.test(JSON.stringify(out.body)), `${label}: nothing about the port crosses the boundary`);
+  }
+});
+
+async function withDetailChain(
+  answer: (id: string) => unknown,
+  fn: (h: { calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>; authorizations: unknown[][]; logs: string[]; storeKey: string;
+    get: (target: string, headers?: Record<string, string>, method?: string) => Promise<Reply>; anon: (target: string, method?: string) => Promise<Reply> }) => Promise<void>,
+): Promise<void> {
+  const calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }> = [];
+  const authorizations: unknown[][] = [];
+  const logs: string[] = [];
+  const readiness = createReadinessState();
+  readiness.setReady();
+  const app = createApp({
+    readiness, log: { log: (line: string) => { logs.push(line); } },
+    sessions: { tenant: tenantBoundary(authorizations, () => GRANTED) },
+    routes: [
+      createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } }),
+      createCustomerDetailRoute({ customerDetail: { get: (scope, sessionKey, id) => { calls.push({ scope, sessionKey, id }); return answer(id); } } }),
+    ],
+    limits: testRequestLimits(),
+  });
+  const server = createBoundedServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const p = (server.address() as AddressInfo).port;
+    const login = await request(p, 'POST', sessionPaths('tenant').login, {
+      origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${BEARER}`, 'content-length': '0',
+    });
+    assert.equal(login.status, 200, `tenant login: ${login.body}`);
+    const pair = (login.headers['set-cookie'] ?? [''])[0].split('; ')[0];
+    const sid = pair.slice(pair.indexOf('=') + 1);
+    const cookie = `${SESSION_COOKIES.tenant}=${sid}`;
+    authorizations.length = 0;
+    const storeKey = createHash('sha256').update(sid).digest('base64url');
+    await fn({
+      calls, authorizations, logs, storeKey,
+      get: (target, headers = {}, method = 'GET') => request(p, method, target, { cookie, ...headers }),
+      anon: (target, method = 'GET') => request(p, method, target, {}),
+    });
+  } finally {
+    await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
+  }
+}
+
+test('detail over the enforced chain: 401 before any id is judged; after authorization a malformed id is 400 and a canonical one reaches the port once', async () => {
+  const FOREIGN = idOf(77);
+  const names = new Map([[CID, 'Grace Hopper']]);
+  await withDetailChain((id) => (names.has(id) ? { outcome: 'customer', id, name: names.get(id) } : { outcome: 'not_found' }), async (h) => {
+    // No session: the chain's 401 for every segment the template reaches, well-formed or not — no id-shape oracle.
+    for (const segment of [CID, ...MALFORMED_IDS]) {
+      const r = await h.anon(`${CUSTOMER_DIRECTORY_PATH}/${segment}`);
+      assert.equal(r.status, 401, `${segment}: ${r.body}`);
+    }
+    assert.equal(h.calls.length, 0, 'no unauthenticated request reached the port');
+    assert.equal(h.authorizations.length, 0, 'nor the authorizer');
+    // Own customer: 200, the authorizer asked for view_customers on the TEMPLATE's view, never the id.
+    const own = await h.get(`${CUSTOMER_DIRECTORY_PATH}/${CID}`, { 'x-tenant-id': '44444444-4444-4444-8444-444444444444' });
+    assert.equal(own.status, 200, own.body);
+    assert.equal(own.headers['cache-control'], 'no-store');
+    assert.deepEqual(JSON.parse(own.body), { customer: { id: CID, name: 'Grace Hopper' } });
+    assert.equal(h.authorizations.length, 1);
+    assert.deepEqual(h.authorizations[0][1], { scope: 'tenant', permission: 'view_customers' });
+    assert.deepEqual(h.authorizations[0][2], { method: 'GET', path: '/api/v1/customers/{id}', audience: 'tenant' }, 'the template path, never the id');
+    assert.deepEqual(h.calls, [{ scope: SCOPE, sessionKey: h.storeKey, id: CID }]);
+    // Malformed ids after authorization: the list's 400, the port never asked.
+    for (const segment of MALFORMED_IDS) {
+      const r = await h.get(`${CUSTOMER_DIRECTORY_PATH}/${segment}`);
+      assert.equal(r.status, 400, `${segment}: ${r.body}`);
+      assert.deepEqual(Object.keys(JSON.parse(r.body)), ['error', 'requestId']);
+      assert.equal(JSON.parse(r.body).error, 'invalid_request');
+    }
+    const query = await h.get(`${CUSTOMER_DIRECTORY_PATH}/${CID}?`);
+    assert.equal(query.status, 400, 'a bare query');
+    assert.equal(h.calls.length, 1, 'no malformed request reached the port');
+    // A foreign id and a missing id: one status, one body shape, one header set, one log reason.
+    const foreign = await h.get(`${CUSTOMER_DIRECTORY_PATH}/${FOREIGN}`);
+    const missing = await h.get(`${CUSTOMER_DIRECTORY_PATH}/${randomUUID()}`);
+    for (const r of [foreign, missing]) {
+      assert.equal(r.status, 404, r.body);
+      const body = JSON.parse(r.body);
+      assert.deepEqual(Object.keys(body), ['error', 'requestId']);
+      assert.equal(body.error, 'not_found');
+    }
+    // The ETag is Express's weak hash of the body, which differs only in its request id: its presence is compared, not its value.
+    const headersOf = (r: Reply): Record<string, unknown> => Object.fromEntries(Object.entries(r.headers)
+      .map(([k, v]) => [k, k === 'etag' ? typeof v : v]).filter(([k]) => k !== 'x-request-id' && k !== 'date'));
+    assert.deepEqual(headersOf(foreign), headersOf(missing), 'identical header names and values modulo the request id, date and body hash');
+    assert.equal(h.calls.length, 3, 'each canonical id made exactly one port call');
+    // The terminal 404 (no route) is the same body shape, before any session: empty, too long, extra and trailing segments, HEAD.
+    for (const [target, method] of [
+      [`${CUSTOMER_DIRECTORY_PATH}/`, 'GET'], [`${CUSTOMER_DIRECTORY_PATH}/${'a'.repeat(129)}`, 'GET'], [`${CUSTOMER_DIRECTORY_PATH}/${CID}/`, 'GET'],
+      [`${CUSTOMER_DIRECTORY_PATH}/${CID}/x`, 'GET'], [`${CUSTOMER_DIRECTORY_PATH}//${CID}`, 'GET'], [`/API/v1/customers/${CID}`, 'GET'],
+      [`${CUSTOMER_DIRECTORY_PATH}/${CID}`, 'HEAD'], [`${CUSTOMER_DIRECTORY_PATH}/${CID}`, 'DELETE'],
+    ] as const) {
+      const r = await h.anon(target, method);
+      assert.equal(r.status, 404, `${method} ${target}`);
+      if (method !== 'HEAD') assert.deepEqual(Object.keys(JSON.parse(r.body)), ['error', 'requestId']);
+    }
+    assert.equal(h.calls.length, 3);
+    // The request log: the route class 'other' and the one reason for both 404s; never an id, a name or the key.
+    const lines = h.logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((l) => l.event === 'request');
+    const notFound = lines.filter((l) => l.status === 404 && l.reason === 'customer_not_found');
+    assert.equal(notFound.length, 2, 'the foreign and the missing 404 logged alike');
+    for (const l of notFound) assert.equal(l.route, 'other');
+    for (const line of h.logs) {
+      for (const secret of [CID, FOREIGN, 'Grace Hopper', h.storeKey]) assert.ok(!line.includes(secret), `no log line carries ${secret}`);
+    }
+  });
 });

@@ -28,7 +28,13 @@
 // semantics and is a smuggling vector (RFC 9110 §9.3.1, §9.3.5). Paths are literal
 // lowercase segments with no parameter, wildcard, encoding, dot segment, empty segment or
 // trailing slash, and lookup is an exact METHOD + path string match, so no prefix, case,
-// slash or encoding variant can inherit another route's policy. Definitions are copied and
+// slash or encoding variant can inherit another route's policy. ONE exception, closed
+// (M7A-CUSTOMERS-P4): the single declared template GET /api/v1/customers/{id} — no other
+// method, path or template registers — matches exactly one further raw, undecoded, non-empty
+// segment of at most 128 characters without '/', and nothing else (no empty segment, trailing
+// slash or extra segment). The route's own handler judges that segment only after the chain
+// has authenticated and authorized the request, so an unauthenticated caller learns nothing
+// about an id's shape; no literal route may sit beside the template's segment. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
 // handler only as the parsed ctx.body. A `perform` or a planner receives no request or response at all.
@@ -349,6 +355,26 @@ const NO_BODY: BodyPolicy = Object.freeze({ kind: 'none' });
 // One or more `/segment`, each starting [a-z0-9] then [a-z0-9_-]*.
 const PATH_RE = /^(?:\/[a-z0-9][a-z0-9_-]*)+$/;
 const MAX_PATH_LENGTH = 256;
+
+/** The one path parameter: a final `/{id}`, on a template the table admits by name (M7A-CUSTOMERS-P4). */
+export const PATH_ID_SEGMENT = '/{id}';
+/** The ONLY templated route, as `METHOD path`: any other template is refused at registration. */
+const TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['GET /api/v1/customers/{id}']);
+/** Every template's path without its `/{id}`: no literal path may name a segment directly below one. */
+const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, -PATH_ID_SEGMENT.length)));
+/** The longest raw segment a template matches; a longer one is no route (the terminal 404). */
+export const MAX_PATH_ID_SEGMENT_LENGTH = 128;
+/** Any uuid in PostgreSQL's canonical lowercase text form (customerDirectory.ts: 017 accepts every uuid). */
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The canonical lowercase uuid a path ends with as its own final segment, or null. Fixed-length slices, no backtracking.
+ * A templated route's handler asks this of the same req.path the table matched: null is a malformed id.
+ */
+export function pathIdOf(path: string): string | null {
+  return typeof path === 'string' && path.startsWith('/') && path.length > 37 && path[path.length - 37] === '/'
+    && CANONICAL_UUID_RE.test(path.slice(-36)) ? path.slice(-36) : null;
+}
 // Lowercase tokens joined by `.`, `:` or `-`, e.g. `bcp.readiness:read`.
 const PERMISSION_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
 const MAX_PERMISSION_LENGTH = 64;
@@ -510,7 +536,11 @@ function parseDefinition(raw: unknown): RouteDefinition {
   }
   const { method, path, handler, perform, command } = raw;
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
-  if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH || !PATH_RE.test(path)) {
+  if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
+  // A template registers only as itself — the one declared (method, path) — and a literal path never directly below one.
+  const templated = path.endsWith(PATH_ID_SEGMENT);
+  if (templated ? !TEMPLATED_ROUTES.has(`${method} ${path}`) || !PATH_RE.test(path.slice(0, -PATH_ID_SEGMENT.length))
+    : !PATH_RE.test(path) || TEMPLATE_PREFIXES.has(path.slice(0, path.lastIndexOf('/')))) {
     throw new EnforcementSetupError('route_path_invalid');
   }
   const policy = parsePolicy(raw.policy);
@@ -518,6 +548,8 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
   const idempotency = parseIdempotency(raw.idempotency, method, policy, 'command' in raw);
+  // A templated path never reaches an idempotency fingerprint (app.ts binds route.path, never the id).
+  if (templated && idempotency !== 'none') throw new EnforcementSetupError('route_path_invalid');
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
   const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency);
@@ -533,18 +565,34 @@ function parseDefinition(raw: unknown): RouteDefinition {
   return Object.freeze({ ...declared, idempotency, perform: perform as IdempotentOperation });
 }
 
-/** Validate every definition and build the closed, frozen table (key: `METHOD path`). */
+/**
+ * Validate every definition and build the closed, frozen table: literal routes keyed `METHOD path`, the template keyed
+ * `METHOD prefix` (its path without `/{id}`). A literal path always matches exactly; a request path matches the template
+ * only when it is that prefix, '/', and one raw segment of 1-128 characters with no '/'. A request literally spelling a
+ * template's path is such a segment ('{id}'), never the template itself.
+ */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
+  const templates = new Map<string, RouteDefinition>();
+  const ordered: RouteDefinition[] = [];
   for (const raw of defs) {
     const def = parseDefinition(raw);
-    const key = `${def.method} ${def.path}`;
-    if (table.has(key)) throw new EnforcementSetupError('route_duplicate');
-    table.set(key, def);
+    const templated = def.path.endsWith(PATH_ID_SEGMENT);
+    const map = templated ? templates : table;
+    const key = `${def.method} ${templated ? def.path.slice(0, -PATH_ID_SEGMENT.length) : def.path}`;
+    if (map.has(key)) throw new EnforcementSetupError('route_duplicate');
+    map.set(key, def);
+    ordered.push(def);
   }
-  const list = Object.freeze([...table.values()]);
+  const list = Object.freeze(ordered);
   return Object.freeze({
-    lookup: (method: string, path: string) => table.get(`${method} ${path}`),
+    lookup: (method: string, path: string) => {
+      const exact = table.get(`${method} ${path}`);
+      if (exact !== undefined || templates.size === 0 || typeof path !== 'string') return exact;
+      const cut = path.lastIndexOf('/');
+      const segment = path.length - cut - 1;
+      return cut > 0 && segment >= 1 && segment <= MAX_PATH_ID_SEGMENT_LENGTH ? templates.get(`${method} ${path.slice(0, cut)}`) : undefined;
+    },
     list: () => list,
   });
 }

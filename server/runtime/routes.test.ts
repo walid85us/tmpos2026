@@ -9,7 +9,7 @@
 // the reserved /api and /admin namespaces.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, sessionPaths } from './routes.js';
+import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, pathIdOf, sessionPaths } from './routes.js';
 
 const handler = (): void => {};
 const PUBLIC = { access: 'public' };
@@ -388,5 +388,88 @@ test('the session binding is optional, and required only on a session route with
     ['an object', bound({ sessionBinding: { kind: 'required' } })],
   ] as const) {
     assert.equal(setupCode([def]), 'route_session_binding_invalid', label);
+  }
+});
+
+// --- the one path template (M7A-CUSTOMERS-P4, docs/phase-4 C1/C2.5) --------------------------------
+
+const VIEW = { scope: 'tenant', permission: 'view_customers' };
+const detail = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+  route({ path: '/api/v1/customers/{id}', policy: SESSION('tenant', VIEW), trustedContext: 'required', sessionBinding: 'required', ...over });
+const list = (over: Record<string, unknown> = {}): Record<string, unknown> => detail({ path: '/api/v1/customers', ...over });
+const ID = '0f8e2a4c-9b1d-4e3f-8a2b-6c7d8e9f0a1b';
+
+test('the {id} template registers only as GET /api/v1/customers/{id} without idempotency; every other template is refused', () => {
+  assert.equal(setupCode([detail()]), undefined);
+  for (const [label, def] of [
+    ['a template elsewhere', route({ path: '/v1/{id}' })],
+    ['a middle parameter', route({ path: '/v1/{id}/x' })],
+    ['two parameters', route({ path: '/v1/{id}/{id}' })],
+    ['a bare parameter', route({ path: '/{id}' })],
+    ['an uppercase parameter', detail({ path: '/api/v1/customers/{ID}' })],
+    ['a trailing slash', route({ path: '/v1/probe/{id}/' })],
+    ['a sibling tenant template', detail({ path: '/api/v1/roles/{id}' })],
+    ['a deeper template', detail({ path: '/api/v1/customers/x/{id}' })],
+    ['an admin template', detail({ path: '/admin/v1/customers/{id}', policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }) })],
+    ['a colon parameter', detail({ path: '/api/v1/customers/:id' })],
+    ['a literal uuid below the template', detail({ path: `/api/v1/customers/${ID}` })],
+    ['a literal word below the template', detail({ path: '/api/v1/customers/search' })],
+    ['a literal uuid below the template, POST', required({ path: `/api/v1/customers/${ID}`, policy: SESSION('tenant', { scope: 'tenant', permission: 'create_customers' }), trustedContext: 'required' })],
+    ...(['POST', 'PUT', 'PATCH', 'DELETE'] as const).map((method) => [`${method} on the template`, detail({ method })] as const),
+    ['the template requiring idempotency', required({ path: '/api/v1/customers/{id}', policy: SESSION('tenant', VIEW), trustedContext: 'required' })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  // A template on a non-session policy is refused by the boundary rule, as any /api path would be.
+  assert.notEqual(setupCode([route({ path: '/api/v1/customers/{id}' })]), undefined);
+  assert.equal(setupCode([detail(), detail()]), 'route_duplicate', 'a duplicate template');
+});
+
+test('the template and its literal prefix coexist; list() keeps declaration order; literal session and admin routes still match exactly', () => {
+  const admin = route({ path: '/admin/v1/tenants', policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }), trustedContext: 'required' });
+  const defs = [list(), detail(), route({}), admin];
+  const table = defineRoutes(defs);
+  assert.deepEqual(table.list().map((r) => `${r.method} ${r.path}`), ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /v1/probe', 'GET /admin/v1/tenants']);
+  assert.equal(table.lookup('GET', '/api/v1/customers')?.path, '/api/v1/customers', 'the literal list');
+  assert.equal(table.lookup('GET', '/v1/probe')?.path, '/v1/probe');
+  assert.equal(table.lookup('GET', '/admin/v1/tenants')?.path, '/admin/v1/tenants');
+  for (const miss of ['/admin/v1/tenants/x', `/admin/v1/tenants/${ID}`, '/v1/probe/x', '/api/v1/customers/x/y']) {
+    assert.equal(table.lookup('GET', miss), undefined, miss);
+  }
+});
+
+test('lookup: /api/v1/customers/ plus ONE raw segment of 1-128 characters without \'/\' reaches the template, and nothing else does', () => {
+  const table = defineRoutes([list(), detail()]);
+  const hit = (path: string): string | undefined => table.lookup('GET', path)?.path;
+  // Canonical ids of every version and variant, and every other raw segment the handler judges after authentication.
+  for (const segment of [
+    ID, '00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-8fff-bfff-ffffffffffff', 'aaaaaaaa-aaaa-1aaa-caaa-aaaaaaaaaaaa',
+    ID.toUpperCase(), ID.replace(/-/g, '%2d'), '{id}', '..', '.', 'x', '%2F', 'a'.repeat(128), ID.slice(1), `${ID}0`,
+  ]) {
+    assert.equal(hit(`/api/v1/customers/${segment}`), '/api/v1/customers/{id}', segment);
+  }
+  for (const miss of [
+    '/api/v1/customers/', `/api/v1/customers/${'a'.repeat(129)}`, `/api/v1/customers/${ID}/`, `/api/v1/customers//${ID}`,
+    `/api/v1/customers/${ID}/x`, `/API/v1/customers/${ID}`, `/api/v1/Customers/${ID}`, `/api/v1/customersx/${ID}`, `/api/v1/${ID}`,
+  ]) {
+    assert.equal(hit(miss), undefined, miss);
+  }
+  for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'get']) {
+    assert.equal(table.lookup(method, `/api/v1/customers/${ID}`), undefined, method);
+  }
+  // A table with no template matches literally only.
+  assert.equal(defineRoutes([list()]).lookup('GET', `/api/v1/customers/${ID}`), undefined);
+});
+
+test('pathIdOf: the final segment as a canonical lowercase uuid, or null', () => {
+  assert.equal(pathIdOf(`/api/v1/customers/${ID}`), ID);
+  assert.equal(pathIdOf(`/x/${ID}`), ID);
+  assert.equal(pathIdOf(`/${ID}`), null, 'a prefix is required');
+  for (const path of [
+    ID, `/api/v1/customers/${ID.toUpperCase()}`, `/api/v1/customers/${ID.slice(1)}`, `/api/v1/customers/x${ID}`,
+    `/api/v1/customers/${ID}/`, `/api/v1/customers/${ID}x`, `/api/v1/customers/${ID.replace(/-/g, '')}`, '/api/v1/customers/{id}',
+    `/api/v1/customers/${ID.replace('-', '%2d')}`, '', '/', 42 as unknown as string,
+  ]) {
+    assert.equal(pathIdOf(path), null, String(path));
   }
 });

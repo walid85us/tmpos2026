@@ -6,7 +6,9 @@
 // (customerDirectory.ts). The path carries no tenant, and neither may the body.
 //
 // Request  { name } — exactly this one field.
-// Response 201 { customer: { id, name } } — the new id and the name as stored; no Location header (no detail route).
+// Response 201 { customer: { id, name } } — the new id and the name as stored — with Location: /api/v1/customers/<id>, the
+// detail route's path (M7A-CUSTOMERS-P4). The header is part of the sealed idempotent response: a same-key replay sends
+// the same Location, and a response sealed before this build replays without one, exactly as it was committed.
 //
 // AUTHORITY. The route requires create_customers — the canonical Customers domain at Create or above
 // (m5CanonicalPermissions.ts): store_owner, manager and sales_staff hold it; a technician, a read_only limitation, a store
@@ -90,7 +92,7 @@ export function planCustomerCreate(ctx: CommandContext): CommandPlan | typeof CO
     expectedVersion: null,
     changes: { name },
     events: [],
-    response: { status: 201, body: { customer: { id: ctx.newAggregateId, name } } },
+    response: { status: 201, body: { customer: { id: ctx.newAggregateId, name } }, headers: { location: `${CUSTOMER_DIRECTORY_PATH}/${ctx.newAggregateId}` } },
   };
 }
 

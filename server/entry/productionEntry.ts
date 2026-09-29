@@ -14,7 +14,7 @@
 //    4. the runtime login — its standing against the approved runtime boundary (postgresStartupPreflight.ts): no superuser,
 //       BYPASSRLS, CREATEROLE, CREATEDB or replication; exactly the two migration privilege roles, by no other path; nothing
 //       owned; no privilege beyond the migrations' and the ledger read;
-//    5. the migration ledger — exactly 001–020, clean, checksums pinned. Nothing is applied, rolled back or repaired;
+//    5. the migration ledger — exactly 001–022, clean, checksums pinned. Nothing is applied, rolled back or repaired;
 //    6. the composition — the session root (the administrative boundary alone), the request limits, the durable ports and
 //       the route table, validated by the runtime itself; the served inventory must equal SHIPPING_ROUTES exactly;
 //    7. dependency probes — the idempotency store and the command-transaction port answer their read-only probes;

@@ -33,11 +33,20 @@
 // routine refuses an unknown key before it reads the issuer key, 016's admission, the role's level or 017's page, so those
 // are not re-proved here: the issuer key and the admission are readiness checks of their own, and 017's page and 020's
 // level read are pinned by the startup ledger's checksums (docs/phase-4/08 DA-108).
-import { randomBytes } from 'node:crypto';
+//
+// M7A-CUSTOMERS-P4 UPDATE — THE DETAIL READ (createPostgresCustomerDetail). For the presenting session's store key, a
+// canonical customer id and the authorizer's tenant, it calls migration 022's tmpos_customer_detail.m7a_customer_get once,
+// in one statement: the routine derives the tenant from the session (the scope's tenant is a precondition it compares, never
+// a selector), re-decides the list's authority on one snapshot, and answers exactly one row. Only an exactly shaped row
+// is an answer: 'customer' naming the authorizer's tenant, the id asked for and a storable name; 'not_found' or 'denied' with
+// every other column null. Anything else — 'invalid', no row, two rows, another tenant, another id — is a throw (503). Its
+// readiness (probeCustomerDetail) asks the routine for a random key no session holds and requires its one 'denied'; the
+// tenant entry's one reads probe asks the directory's and then this one.
+import { randomBytes, randomUUID } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import { CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isStorableName } from '../runtime/customerDirectory.js';
-import type { CustomerDirectoryPort, CustomerDirectoryQuery } from '../runtime/customerDirectory.js';
+import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery } from '../runtime/customerDirectory.js';
 import type { SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
 /** One short read, cancelled by PostgreSQL itself if it overruns, like the other runtime reads. */
@@ -128,6 +137,55 @@ export async function probeCustomerDirectory(client: SupervisedPgClient, signal:
     return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
       const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
         from tmpos_role.m7a_customer_page_v3(${absentKey}::text, null::uuid, 1::integer)`;
+      if (!Array.isArray(rows) || rows.length !== 1) return false;
+      const row = rowOf(rows[0]);
+      return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;
+    });
+  } catch {
+    return false; // an outage, an abort, an overrun, a driver fault or a row out of shape: nothing is disclosed
+  }
+}
+
+/** The detail routine's one row as the port's answer for `tenant` and `customerId`; a throw for anything out of shape. */
+function detailOf(rows: unknown, tenant: string, customerId: string): unknown {
+  if (!Array.isArray(rows) || rows.length !== 1) throw fault();
+  const { o_outcome: outcome, o_tenant_id: owner, o_customer_id: id, o_name: name } = rowOf(rows[0]);
+  if (outcome === 'not_found' || outcome === 'denied') {
+    if (owner !== null || id !== null || name !== null) throw fault();
+    return Object.freeze({ outcome });
+  }
+  if (outcome !== 'customer' || owner !== tenant || id !== customerId || !isStorableName(name)) throw fault();
+  return Object.freeze({ outcome: 'customer', id, name });
+}
+
+/** The production customer detail read over the M6 runtime client — the kernel the composition root already built. */
+export function createPostgresCustomerDetail(deps: { readonly client: SupervisedPgClient }): CustomerDetailPort {
+  const { client } = deps;
+  return Object.freeze({
+    async get(scope: TrustedScope, sessionKey: string, customerId: string, signal: AbortSignal): Promise<unknown> {
+      // Refused before a statement runs, as the page's: only a selected tenant scope, a store-key-shaped key and a
+      // canonical id reach the database.
+      if (!isTrustedScope(scope) || scope.scope !== 'tenant' || scope.tenant === null || !UUID_RE.test(scope.tenant)) throw fault();
+      if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) throw fault();
+      if (typeof customerId !== 'string' || !UUID_RE.test(customerId)) throw fault();
+      const tenant = scope.tenant;
+      return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+        const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+          from tmpos_customer_detail.m7a_customer_get(${sessionKey}::text, ${customerId}::uuid, ${tenant}::uuid)`;
+        return detailOf(rows, tenant, customerId);
+      });
+    },
+  });
+}
+
+/** Readiness: true only for the detail routine's one refusal of a random key no session holds; anything else is false. */
+export async function probeCustomerDetail(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  const absentKey = randomBytes(32).toString('base64url');
+  try {
+    return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+        from tmpos_customer_detail.m7a_customer_get(${absentKey}::text, ${randomUUID()}::uuid, ${randomUUID()}::uuid)`;
       if (!Array.isArray(rows) || rows.length !== 1) return false;
       const row = rowOf(rows[0]);
       return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;

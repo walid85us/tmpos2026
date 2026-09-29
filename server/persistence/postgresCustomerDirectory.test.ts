@@ -5,7 +5,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDirectory, probeCustomerDirectory } from './postgresCustomerDirectory.js';
+import {
+  CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDetail, createPostgresCustomerDirectory, probeCustomerDetail,
+  probeCustomerDirectory,
+} from './postgresCustomerDirectory.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
 
@@ -269,5 +272,99 @@ test('M7TP-02 probeCustomerDirectory: any other answer, a fault or an abort is f
   aborted.abort();
   const idle = fakeClient([refusalRow('denied')]);
   assert.equal(await probeCustomerDirectory(idle, aborted.signal), false, 'an aborted probe');
+  assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
+});
+
+// --- the detail read (M7A-CUSTOMERS-P4): migration 022's m7a_customer_get ------------------------------------------------
+
+const DETAIL_STATEMENT = /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_customer_detail\.m7a_customer_get\(\?::text, \?::uuid, \?::uuid\)$/;
+const getOne = (rows: unknown, id = C(1), scope: TrustedScope = SCOPE, key: unknown = SESSION_KEY) => {
+  const client = fakeClient(rows);
+  return { client, answer: createPostgresCustomerDetail({ client }).get(scope, key as string, id, live()) as Promise<unknown> };
+};
+const faults = (p: Promise<unknown>, label: string) =>
+  assert.rejects(p, (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid', label);
+
+test('M7CDP-01 detail: one fixed call to 022\'s routine — the store key, the id and the authorizer\'s tenant as a precondition — under the adapter\'s bounds', async () => {
+  const client = fakeClient([customerRow(1)]);
+  const signal = live();
+  const answer = await createPostgresCustomerDetail({ client }).get(SCOPE, SESSION_KEY, C(1), signal);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], DETAIL_STATEMENT);
+  assert.deepEqual(client.values[0], [SESSION_KEY, C(1), TENANT], 'key, id, expected tenant — in that order');
+  for (const fact of [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician']) assert.ok(!client.values[0].includes(fact), `${fact} is not sent`);
+  assert.ok(!client.statements[0].includes('tmpos_customer.'), '017\'s table and page are never named');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  assert.deepEqual(answer, { outcome: 'customer', id: C(1), name: 'Customer 1' });
+  assert.ok(Object.isFrozen(answer));
+  for (const outcome of ['not_found', 'denied']) {
+    const { answer: refusal } = getOne([refusalRow(outcome)]);
+    assert.deepEqual(await refusal, { outcome }, outcome);
+  }
+});
+
+test('M7CDP-02 detail: every answer out of shape is a throw — never a customer, never a refusal', async () => {
+  const cases: Array<[string, unknown]> = [
+    ['no row', []], ['two rows', [customerRow(1), customerRow(1)]], ['two refusals', [refusalRow('not_found'), refusalRow('not_found')]],
+    ['invalid', [refusalRow('invalid')]], ['cursor_unknown', [refusalRow('cursor_unknown')]],
+    ['another tenant', [customerRow(1, { o_tenant_id: OTHER_TENANT })]], ['no tenant', [customerRow(1, { o_tenant_id: null })]],
+    ['another id', [customerRow(2)]], ['an uppercase id', [customerRow(1, { o_customer_id: C(1).toUpperCase() })]],
+    ['an empty name', [customerRow(1, { o_name: '' })]], ['a 201-character name', [customerRow(1, { o_name: 'x'.repeat(201) })]],
+    ['a null name', [customerRow(1, { o_name: null })]], ['an extra column', [{ ...customerRow(1), o_email: 'a@x.test' }]],
+    ['a missing column', [{ o_outcome: 'customer', o_tenant_id: TENANT, o_customer_id: C(1) }]],
+    ['not_found naming a tenant', [refusalRow('not_found', { o_tenant_id: TENANT })]], ['denied naming a customer', [refusalRow('denied', { o_customer_id: C(1) })]],
+    ['not_found naming a name', [refusalRow('not_found', { o_name: 'x' })]], ['not rows', { rows: 1 }], ['null', null],
+  ];
+  for (const [label, rows] of cases) await faults(getOne(rows).answer, label);
+  // A driver error propagates as itself (the route discards it): still a throw, never an answer.
+  await assert.rejects(createPostgresCustomerDetail({ client: fakeClient(null, new Error('M7CDP-CANARY')) }).get(SCOPE, SESSION_KEY, C(1), live()) as Promise<unknown>,
+    /M7CDP-CANARY/, 'a driver error');
+});
+
+test('M7CDP-03 detail: only a selected tenant scope, a store-key-shaped key and a canonical id reach the database', async () => {
+  const cases: Array<[string, unknown, unknown, unknown]> = [
+    ['a platform scope', { ...SCOPE, scope: 'platform', tenant: null }, SESSION_KEY, C(1)],
+    ['a store scope', { ...SCOPE, scope: 'store', store: STORE }, SESSION_KEY, C(1)],
+    ['a tenant scope with no tenant', { ...SCOPE, tenant: null }, SESSION_KEY, C(1)],
+    ['a non-uuid tenant', { ...SCOPE, tenant: 'tenant-a' }, SESSION_KEY, C(1)],
+    ['no scope', null, SESSION_KEY, C(1)],
+    ['no key', SCOPE, null, C(1)], ['a short key', SCOPE, 'k'.repeat(42), C(1)], ['a padded key', SCOPE, `${'k'.repeat(42)}=`, C(1)],
+    ['no id', SCOPE, SESSION_KEY, null], ['an uppercase id', SCOPE, SESSION_KEY, C(1).toUpperCase()], ['a braced id', SCOPE, SESSION_KEY, '{id}'],
+    ['an id with a suffix', SCOPE, SESSION_KEY, `${C(1)}x`], ['a numeric id', SCOPE, SESSION_KEY, 7],
+  ];
+  for (const [label, scope, key, id] of cases) {
+    const client = fakeClient([customerRow(1)]);
+    await faults(createPostgresCustomerDetail({ client }).get(scope as TrustedScope, key as string, id as string, live()) as Promise<unknown>, label);
+    assert.equal(client.statements.length, 0, `${label}: nothing reached the database`);
+    assert.equal(client.bounds.length, 0, `${label}: no transaction was opened`);
+  }
+});
+
+test('M7CDP-04 probeCustomerDetail: true only for the routine\'s one denial of a random key; anything else, a fault or an abort is false', async () => {
+  const client = fakeClient([refusalRow('denied')]);
+  const signal = live();
+  assert.equal(await probeCustomerDetail(client, signal), true);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], DETAIL_STATEMENT);
+  assert.equal(client.values[0].length, 3);
+  assert.match(client.values[0][0] as string, /^[A-Za-z0-9_-]{43}$/, 'a store-key-shaped key');
+  for (const v of client.values[0].slice(1)) assert.match(v as string, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'random ids');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  await probeCustomerDetail(client, live());
+  assert.notEqual(client.values[1][0], client.values[0][0], 'a fresh random key per call');
+  for (const [label, rows] of [
+    ['no row', []], ['two denials', [refusalRow('denied'), refusalRow('denied')]], ['not_found', [refusalRow('not_found')]],
+    ['invalid', [refusalRow('invalid')]], ['a customer row', [customerRow(1)]], ['a denial naming a tenant', [refusalRow('denied', { o_tenant_id: TENANT })]],
+    ['an extra column', [{ ...refusalRow('denied'), extra: 1 }]], ['not rows', { rows: 1 }],
+  ] as const) {
+    assert.equal(await probeCustomerDetail(fakeClient(rows), live()), false, label);
+  }
+  assert.equal(await probeCustomerDetail(fakeClient(null, Object.assign(new Error('M7CDP-CANARY'), { code: '42501' })), live()), false, 'a driver error');
+  const aborted = new AbortController();
+  aborted.abort();
+  const idle = fakeClient([refusalRow('denied')]);
+  assert.equal(await probeCustomerDetail(idle, aborted.signal), false, 'an aborted probe');
   assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
 });

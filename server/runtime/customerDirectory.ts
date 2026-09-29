@@ -42,16 +42,32 @@
 // deadline or answers out of shape is a 503 whose reason goes to the request log alone — never a cached, partial or
 // synthetic page.
 //
+// M7A-CUSTOMERS-P4 UPDATE — THE DETAIL READ. GET /api/v1/customers/{id}: one customer by id, under the list's permission
+// (view_customers), trusted context and session binding, over the same module's conventions. It is the route table's one
+// template (routes.ts): /api/v1/customers/ plus one raw segment of 1-128 characters without '/' reaches this handler only
+// after the chain has proved the session and decided the permission, so an unauthenticated caller gets the chain's 401 or
+// 403 whatever the segment. Then, as the list's query: any query at all, or a segment that is not a canonical lowercase
+// uuid (uppercase, %-encoded, braces, anything else), is a 400 invalid_request before the port is asked. A canonical id
+// makes EXACTLY ONE port call — no cache, no early answer: the runtime cannot tell another tenant's id from a missing one
+// and never tries. The port asks migration 022's session-bound routine, which derives the tenant from the presenting
+// session, asserts it equals the trusted scope's (a precondition, never a selector), re-decides the role's current
+// Customers level and 017's rechecks on one snapshot, and reads the one row. A missing id and another tenant's id are the
+// same 404 {error:'not_found', requestId} — the terminal 404's body shape — with the same headers and one log reason; a
+// withdrawn authority is the list's 403; an outage or an out-of-shape answer a 503. 200 { customer: { id, name } } — the
+// create's 201 body shape, the list entry's two fields, nothing else. No audit record (the list's owner decision).
+//
 // PURE AND PORTABLE: part of the emitted runtime artifact, importing only the runtime. It holds no infrastructure; the
 // port is handed to it by the composition root.
 import { Buffer } from 'node:buffer';
 import type { Response } from 'express';
 import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
 import type { TrustedScope } from './principals.js';
-import { EnforcementSetupError } from './routes.js';
+import { EnforcementSetupError, PATH_ID_SEGMENT, pathIdOf } from './routes.js';
 import type { AuthorizationRequirement, RouteContext, RouteDefinition, RouteHandler } from './routes.js';
 
 export const CUSTOMER_DIRECTORY_PATH = '/api/v1/customers';
+/** The detail read's path: the route table's one template, '/api/v1/customers/{id}'. */
+export const CUSTOMER_DETAIL_PATH = `${CUSTOMER_DIRECTORY_PATH}${PATH_ID_SEGMENT}`;
 /** The canonical tenant route permission: the Customers domain at View or above. */
 export const CUSTOMER_DIRECTORY_PERMISSION = 'view_customers';
 export const CUSTOMER_DIRECTORY_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: CUSTOMER_DIRECTORY_PERMISSION });
@@ -278,6 +294,88 @@ export function createCustomerDirectoryRoute(ports: CustomerDirectoryPorts, opti
     trustedContext: 'required',
     recentAuth: 'none',
     // The database binds the read to the presenting minted session, so the handler is handed its store key.
+    sessionBinding: 'required',
+    handler,
+  };
+  return Object.freeze(route);
+}
+
+/**
+ * The port to migration 022's session-bound detail read, handed the trusted scope, the presenting session's store key (a
+ * SQL parameter it never logs, echoes or stores) and a canonical customer id. Its answer is untrusted input, expected to be
+ *   { outcome: 'customer', id, name } — id exactly the one asked for;
+ *   { outcome: 'not_found' }         — no customer of the session's tenant has that id (missing and foreign alike);
+ *   { outcome: 'denied' }            — the authority no longer holds.
+ * A throw is an outage.
+ */
+export interface CustomerDetailPort {
+  get(scope: TrustedScope, sessionKey: string, customerId: string, signal: AbortSignal): unknown;
+}
+
+/** What the detail route is built from. */
+export interface CustomerDetailPorts {
+  readonly customerDetail: CustomerDetailPort;
+}
+
+const DETAIL_KEYS: readonly string[] = ['outcome', 'id', 'name'];
+
+/** The port's answer as {id, name}, 'not_found' or 'denied' — or null for anything out of shape. Never throws. */
+export function customerDetailOf(raw: unknown, customerId: string): CustomerDirectoryEntry | 'not_found' | 'denied' | null {
+  try {
+    if (!isPlain(raw)) return null;
+    const { outcome } = raw;
+    if (outcome === 'denied' || outcome === 'not_found') return hasExactly(raw, ['outcome']) ? outcome : null;
+    if (outcome !== 'customer' || !hasExactly(raw, DETAIL_KEYS)) return null;
+    // Read once each, so a value validated is the value copied.
+    const { id, name } = raw;
+    if (typeof id !== 'string' || id !== customerId || !UUID_RE.test(id) || !isStorableName(name)) return null;
+    return Object.freeze({ id, name });
+  } catch {
+    return null; // a throwing getter or proxy trap is never a customer
+  }
+}
+
+/** The customer detail route over `ports`, for a route table; refused at construction without its port. */
+export function createCustomerDetailRoute(ports: CustomerDetailPorts, options: { deadlineMs?: number } = {}): RouteDefinition {
+  const reader = ports?.customerDetail;
+  if (typeof reader?.get !== 'function') throw new EnforcementSetupError('route_handler_invalid');
+  const deadlineMs = options.deadlineMs ?? PORT_DEADLINE_MS;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > PORT_DEADLINE_MS) {
+    throw new EnforcementSetupError('port_deadline_invalid');
+  }
+  const handler: RouteHandler = async (req, res, ctx) => {
+    // No query is part of this contract: any at all, an empty one included, is refused.
+    if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'customer_detail_query_invalid');
+    const scope = ctx.trusted;
+    if (scope === null || scope.scope !== 'tenant' || scope.tenant === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    const { sessionKey } = ctx;
+    if (sessionKey === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    // The same req.path the table matched. Anything but one canonical lowercase uuid is the list's bounded 400.
+    const id = pathIdOf(typeof req.path === 'string' ? req.path : '');
+    if (id === null) return refuse(res, ctx, 400, 'invalid_request', 'customer_detail_id_invalid');
+    let raw: unknown;
+    try {
+      raw = await withDeadline(deadlineMs, (signal) => reader.get(scope, sessionKey, id, signal));
+    } catch (err) {
+      return refuse(res, ctx, 503, 'service_unavailable', outage('customer_detail', err));
+    }
+    const answer = customerDetailOf(raw, id);
+    if (answer === 'denied') return refuse(res, ctx, 403, 'forbidden', 'customer_detail_denied');
+    // Missing and foreign alike: one status, one body shape (the terminal 404's), one log reason.
+    if (answer === 'not_found') return refuse(res, ctx, 404, 'not_found', 'customer_not_found');
+    if (answer === null) return refuse(res, ctx, 503, 'service_unavailable', 'customer_detail_answer_invalid');
+    res.status(200).json({ customer: { id: answer.id, name: answer.name } });
+  };
+  const route: RouteDefinition = {
+    method: 'GET',
+    path: CUSTOMER_DETAIL_PATH,
+    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: CUSTOMER_DIRECTORY_REQUIREMENT }),
+    body: Object.freeze({ kind: 'none' }),
+    idempotency: 'none',
+    // The list's reasons: the routine re-confirms that exact grant and reads only its tenant, bound to the presenting
+    // minted session. No recent sign-in.
+    trustedContext: 'required',
+    recentAuth: 'none',
     sessionBinding: 'required',
     handler,
   };

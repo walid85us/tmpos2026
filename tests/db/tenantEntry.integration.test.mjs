@@ -40,6 +40,13 @@
 // 021's schema tmpos_role_edit holds the set the runtime calls and the one-snapshot read-back, and 021 revokes 020's
 // unconditional set from the runtime role. The chain is 001-021: M7TE-08 requires the login's EXECUTE on 021's set and read
 // instead of 020's set — and refuses 020's set given back —, and M7TE-10 pins the 001-021 ledger (a fake next row is '022').
+//
+// M7A-CUSTOMERS-P4 UPDATE (detail). The entry also serves GET /api/v1/customers/{id} over migration 022's session-bound
+// routine (tests/db/customerDetail.integration.test.mjs proves the routine). The chain is 001-022: M7TE-01 pins ten routes,
+// M7TE-08 the login's EXECUTE on 022's read, M7TE-10 the 001-022 ledger (a fake next row is '023'), M7TE-11 withdraws 022's
+// read after startup, M7TE-14 drives the detail read end to end on the source entry — own 200, foreign and missing 404s
+// alike, malformed ids 400 only after authentication, a narrowed role, a revoked and a parked-then-revoked session, the admin
+// cookie, the wrong Host, the store down, a read-only tenant — and M7TE-C1 follows the compiled create's Location.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -101,6 +108,8 @@ const LEVEL_STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
 /** 020's unconditional set: revoked from the login by 021, and a grant too many if given back. */
 const LEVEL_SET_020 = 'tmpos_role.m7a_role_level_set(text, text, text, text)';
 const STORE_PROBE = 'tmpos_internal.m6_store_probe()';
+/** 022's customer detail read (M7A-CUSTOMERS-P4). */
+const DETAIL_GET = 'tmpos_customer_detail.m7a_customer_get(text, uuid, uuid)';
 
 // ---------------------------------------------------------------------------
 // cluster lifecycle (mirrors tests/db/productionEntry.integration.test.mjs)
@@ -798,6 +807,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     // (M7A-CUSTOMERS-P3-R2) is a bodiless session read.
     assert.deepEqual(canonical(ctx.result.routes), [
       'GET /api/v1/customers session none none',
+      'GET /api/v1/customers/{id} session none none',
       'GET /api/v1/roles/levels session none none',
       'GET /api/v1/session session none none',
       'GET /health public none none',
@@ -902,10 +912,18 @@ test('M7TE-04: an administrative session is no tenant session; no administrative
       ['GET', '/__witness'], ['GET', '/admin/v1/witness'], ['GET', '/dev'], ['GET', '/identity/whoami'], ['GET', '/diagnostics'],
       // M7A-CUSTOMERS-P3: POST on the customer path is now the create (M7TE-01); no other write method is.
       ['GET', '/bootstrap'], ['GET', '/migrations'], ['PUT', CUSTOMER_DIRECTORY_PATH], ['PATCH', CUSTOMER_DIRECTORY_PATH],
-      ['DELETE', CUSTOMER_DIRECTORY_PATH], ['GET', `${CUSTOMER_DIRECTORY_PATH}/x`]]) {
+      // M7A-CUSTOMERS-P4: GET /api/v1/customers/<one segment> is now the detail template (below); deeper paths and other
+      // methods on it are still no route.
+      ['DELETE', CUSTOMER_DIRECTORY_PATH], ['GET', `${CUSTOMER_DIRECTORY_PATH}/x/y`], ['DELETE', `${CUSTOMER_DIRECTORY_PATH}/x`],
+      ['GET', `${CUSTOMER_DIRECTORY_PATH}/`]]) {
       assertBounded404(await ctx.req(method, path, { cookie: `${SESSION_COOKIES.admin}=${id}` }), `${method} ${path}`);
       assert.ok(!ctx.result.routes.some((r) => r.method === method && r.path === path), `${method} ${path} is not in the served inventory`);
     }
+    // C2.5, documented: any one segment below /api/v1/customers is now an AUTHENTICATED route — the administrative cookie is
+    // no tenant session there either (401), and nothing about the segment is judged before that.
+    const detailUnderAdmin = await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/x`, { cookie: `${SESSION_COOKIES.admin}=${id}` });
+    assertRefusal(detailUnderAdmin, 401, 'unauthenticated', 'the detail template under the administrative cookie');
+    assert.equal(reasonOf(ctx, detailUnderAdmin), 'session_missing');
   });
 });
 
@@ -1030,6 +1048,9 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
     'the role-level set withdrawn')));
   await withoutExecute(LEVEL_STATES, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the role-level states read withdrawn')));
+  // M7A-CUSTOMERS-P4: 022's customer detail read.
+  await withoutExecute(DETAIL_GET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the customer detail read withdrawn')));
   // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many; so is
   // 020's unconditional set (M7A-CUSTOMERS-P4: an edit that asserts neither the tenant nor the version).
   for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)'],
@@ -1077,26 +1098,26 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-021 refuses startup migration_state_invalid', async () => {
-  // M7A-CUSTOMERS-P4: the newest required migration is 021, and the fake "next migration" row is '022'.
+test('M7TE-10: a migration ledger that is not exactly 001-022 refuses startup migration_state_invalid', async () => {
+  // M7A-CUSTOMERS-P4: the newest required migration is 022 (the detail read), and the fake "next migration" row is '023'.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '021'`;
-  assert.ok(row !== undefined, '021 is recorded');
+    from public.schema_migrations where version = '022'`;
+  assert.ok(row !== undefined, '022 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('021', '022')`;
+    await sql`delete from public.schema_migrations where version in ('022', '023')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '021'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 020'));
+    await owner`delete from public.schema_migrations where version = '022'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 021'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 021').digest('hex')} where version = '021'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '021 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 022').digest('hex')} where version = '022'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '022 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('022', ${createHash('sha256').update('022').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 022'));
+      values ('023', ${createHash('sha256').update('023').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 023'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1106,7 +1127,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-021 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '021'`;
+    from public.schema_migrations where version = '022'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 
@@ -1157,6 +1178,15 @@ test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted o
       await owner.unsafe(`grant execute on function ${V3} to tmpos_app`);
     }
     assert.ok(await readinessUntil(ctx, 200), 'the read restored: ready');
+
+    // M7A-CUSTOMERS-P4: the customer detail read withdrawn from the login — the second half of the reads' probe.
+    await withoutExecute(DETAIL_GET, async () => {
+      await readinessHolds(ctx, 503);
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}`, { cookie: session.cookie }), 503, 'service_unavailable',
+        'the detail read withdrawn');
+      assert.deepEqual(pageOf(await list(ctx, session.cookie), 'the list still reads').customers, SEED_A);
+    });
+    assert.ok(await readinessUntil(ctx, 200), 'the detail read restored: ready');
 
     // The mint probe writes nothing: readiness asked it across three reuse windows, and every mint-ledger and session row is
     // exactly as it was — counted, and digested whole on the server (a digest, never a row, leaves the database).
@@ -1238,6 +1268,151 @@ test('M7TE-12: shutdown closes the listener and ends the database client exactly
 });
 
 // ===========================================================================
+// M7TE-14: the customer detail read, GET /api/v1/customers/{id} (M7A-CUSTOMERS-P4), on the source entry
+// ===========================================================================
+
+/** The detail read of `segment`, with `cookie` (or none). */
+const detail = (ctx, cookie, segment, headers = {}) =>
+  ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${segment}`, { ...(cookie === null ? {} : { cookie }), ...headers });
+/** A 200 detail body: exactly { customer: { id, name } }. */
+function customerOf(reply, label) {
+  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
+  const body = JSON.parse(reply.body);
+  assert.deepEqual(Object.keys(body), ['customer'], label);
+  assert.deepEqual(Object.keys(body.customer), ['id', 'name'], label);
+  return body.customer;
+}
+/** Headers compared across two replies: everything but the request id, the date and the body hash's value. */
+const headerShape = (reply) => Object.fromEntries(Object.entries(reply.headers)
+  .filter(([k]) => k !== 'x-request-id' && k !== 'date').map(([k, v]) => [k, k === 'etag' ? typeof v : v]));
+const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+
+/**
+ * The production kernel, with one lever: before a statement naming 022's routine is sent, `gate.park` (when set) is awaited
+ * once — the chain has already authenticated and authorized the request, so whatever `park` commits lands between the
+ * chain's decision and the routine's snapshot.
+ */
+function parkingKernel(gate) {
+  return {
+    MAX_POOLS, runtimeClientOptions,
+    createSupervisedPgClient: (...args) => {
+      const real = createSupervisedPgClient(...args);
+      return {
+        end: () => real.end(),
+        transaction: (signal, bounds, work) => real.transaction(signal, bounds, (sql) => work(new Proxy(sql, {
+          apply: (target, self, argv) => {
+            const text = Array.isArray(argv[0]) ? argv[0].join('?') : '';
+            const park = gate.park;
+            if (park === null || !text.includes('m7a_customer_get')) return Reflect.apply(target, self, argv);
+            gate.park = null;
+            return park().then(() => Reflect.apply(target, self, argv));
+          },
+        }))),
+      };
+    },
+  };
+}
+
+test('M7TE-14: the customer detail read — own 200, foreign and missing 404s alike, malformed ids 400 only after authentication, a narrowed role, a logged-out or parked-then-revoked session, the admin cookie, the wrong Host, the store down and a read-only tenant', async () => {
+  const T_N = await newTenant('m7te14-narrow');
+  const [seedN] = await seed(T_N, [`Narrow ${SUFFIX}`]);
+  const aUser = await actor('m7te14-a', [tenantGrant(T_A, 'manager')]);
+  const nUser = await actor('m7te14-n', [tenantGrant(T_N, 'manager')]);
+  const roUser = await actor('m7te14-ro', [tenantGrant(T_RO, 'technician')]);
+  const admin = await actor('m7te14-admin', [{ scope: 'platform', role: 'system_owner' }]);
+  const adminId = await adminSessionId(admin);
+  const gate = { park: null };
+  const missing = randomUUID();
+  SECRETS.add(missing);
+  try {
+    await withEntry({ kernelModule: parkingKernel(gate) }, async (ctx) => {
+      assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
+      const a = await signIn(ctx, aUser);
+      // Own: 200, exactly the id and the name.
+      const own = SEED_A[0];
+      assert.deepEqual(customerOf(await detail(ctx, a.cookie, own.id), 'own'), own);
+      // Another tenant's id and a random id: one status, one body shape, one header set, one log reason.
+      const foreign = await detail(ctx, a.cookie, SEED_B[0].id);
+      const absent = await detail(ctx, a.cookie, missing);
+      for (const [label, reply] of [['foreign', foreign], ['missing', absent]]) {
+        assertBounded404(reply, label);
+        assert.equal(reasonOf(ctx, reply), 'customer_not_found', label);
+        assert.ok(!reply.body.includes(SEED_B[0].name) && !reply.body.includes(SEED_B[0].id), `${label}: nothing of B`);
+      }
+      assert.deepEqual(headerShape(foreign), headerShape(absent), 'foreign and missing: identical headers modulo request id, date and body hash');
+      // Timing SANITY bound, not a constant-time claim (doc 08 residual): interleaved, medians within max(10 ms, 50%).
+      const times = { f: [], m: [] };
+      for (let i = 0; i < 20; i++) {
+        const pair = [['f', SEED_B[1].id], ['m', randomUUID()]];
+        for (const [k, id] of (i % 2 === 0 ? pair : pair.reverse())) {
+          const t0 = process.hrtime.bigint();
+          const r = await detail(ctx, a.cookie, id);
+          times[k].push(Number(process.hrtime.bigint() - t0) / 1e6);
+          assert.equal(r.status, 404);
+        }
+      }
+      const [mf, mm] = [median(times.f), median(times.m)];
+      assert.ok(Math.abs(mf - mm) <= Math.max(10, 0.5 * Math.max(mf, mm)), `timing sanity: foreign ${mf.toFixed(2)} ms, missing ${mm.toFixed(2)} ms`);
+      // Malformed segments: the chain's 401 without a session — no id-shape oracle — and the list's 400 after authentication.
+      for (const segment of [own.id.toUpperCase(), own.id.replace(/-/g, '%2d'), '{id}', `%7B${own.id}%7D`, 'x', 'a'.repeat(128)]) {
+        assertRefusal(await detail(ctx, null, segment), 401, 'unauthenticated', `${segment}: no session`);
+        const bad = await detail(ctx, a.cookie, segment);
+        assertRefusal(bad, 400, 'invalid_request', `${segment}: authenticated`);
+        assert.equal(reasonOf(ctx, bad), 'customer_detail_id_invalid');
+      }
+      assertRefusal(await detail(ctx, null, `${own.id}?`), 401, 'unauthenticated', 'a query, no session');
+      assertRefusal(await detail(ctx, a.cookie, `${own.id}?`), 400, 'invalid_request', 'a query, authenticated');
+      for (const [label, path] of [['a trailing slash', `${own.id}/`], ['an extra segment', `${own.id}/x`], ['129 characters', 'a'.repeat(129)], ['empty', '']]) {
+        assertBounded404(await detail(ctx, a.cookie, path), label);
+      }
+      assert.equal((await ctx.req('HEAD', `${CUSTOMER_DIRECTORY_PATH}/${own.id}`, { cookie: a.cookie })).status, 404, 'HEAD is no route');
+      // The wrong Host: the bounded 404 before anything else.
+      assertBounded404(await detail(ctx, a.cookie, own.id, { host: ADMIN_HOST }), 'the admin host');
+      // The administrative cookie on the tenant host is no tenant session.
+      assertRefusal(await detail(ctx, `${SESSION_COOKIES.admin}=${adminId}`, own.id), 401, 'unauthenticated', 'the admin cookie');
+      assertRefusal(await detail(ctx, `${SESSION_COOKIES.tenant}=${adminId}`, own.id), 401, 'unauthenticated', 'an admin session as a tenant one');
+      // A read-only tenant reads (a read is admitted there, as the list is).
+      const ro = await signIn(ctx, roUser);
+      assert.deepEqual(customerOf(await detail(ctx, ro.cookie, SEED_RO[0].id), 'read-only tenant'), SEED_RO[0]);
+      // A role narrowed to None after sign-in: the formerly visible customer is the list's 403.
+      const n = await signIn(ctx, nUser);
+      assert.deepEqual(customerOf(await detail(ctx, n.cookie, seedN.id), 'before the narrowing'), seedN);
+      await owner`insert into tmpos_role.tenant_role_level (tenant_id, role_id, domain, level, updated_at)
+        values (${T_N}, 'manager', 'customers', 'none', now())`;
+      assertRefusal(await detail(ctx, n.cookie, seedN.id), 403, 'forbidden', 'narrowed to None');
+      // Logged out: the session row is gone, 401.
+      const out = await signIn(ctx, aUser);
+      const bye = await ctx.req('POST', sessionPaths('tenant').logout, {
+        origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: out.cookie, [SESSION_CSRF_HEADER]: out.csrf,
+      });
+      assert.equal(bye.status, 204, bye.body);
+      assertRefusal(await detail(ctx, out.cookie, own.id), 401, 'unauthenticated', 'logged out');
+      // PARKED (C2.2): the chain authenticates and authorizes, then — before 022's statement is sent — the session is revoked
+      // and that commits. The routine finds no session row: never a 200.
+      const parked = await signIn(ctx, aUser);
+      let revoked = false;
+      gate.park = async () => {
+        await owner`select tmpos_session.m5_session_revoke(${keyOf(parked.cookie)}::text)`;
+        revoked = true;
+      };
+      const late = await detail(ctx, parked.cookie, own.id);
+      assert.ok(revoked && gate.park === null, 'the lever engaged and the revocation committed');
+      assertRefusal(late, 403, 'forbidden', 'revoked between the decision and the read');
+      assert.equal(reasonOf(ctx, late), 'customer_detail_denied', 'the routine refused it');
+      // The store down: a bounded 503, then recovery.
+      await storeDown(ctx.relay);
+      assertRefusal(await detail(ctx, a.cookie, own.id), 503, 'service_unavailable', 'the store down');
+      await ctx.relay.restore();
+      assert.ok(await readinessUntil(ctx, 200), 'the store restored: ready');
+      assert.deepEqual(customerOf(await detail(ctx, a.cookie, own.id), 'after recovery'), own);
+    });
+  } finally {
+    await owner`delete from tmpos_role_edit.role_level_version where tenant_id = ${T_N}`;
+    await owner`delete from tmpos_role.tenant_role_level where tenant_id = ${T_N}`;
+  }
+});
+
+// ===========================================================================
 // M7TE-C1: the COMPILED tenant entry over the same disposable database and real sockets
 // ===========================================================================
 
@@ -1314,6 +1489,25 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       const [{ n }] = await owner`select count(*)::int as n from public.audit_event
         where action_id = 'tenant.customer.create' and actor_internal_user_id = ${who.id}`;
       assert.equal(n, 1, 'compiled create: one audit record');
+      // M7A-CUSTOMERS-P4: the 201's Location is the detail route of the new id; following it reads the same customer. A
+      // same-key replay carries the same Location; another tenant's id and a random id are one 404; uppercase is a 400.
+      assert.equal(created.headers.location, `${CUSTOMER_DIRECTORY_PATH}/${customer.id}`, 'compiled create: Location');
+      const followed = await ctx.req('GET', created.headers.location, { cookie: session.cookie });
+      assert.equal(followed.status, 200, followed.body);
+      assert.deepEqual(JSON.parse(followed.body), { customer }, 'compiled: Location reads the created customer');
+      const replay = await ctx.req('POST', CUSTOMER_DIRECTORY_PATH, {
+        origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: session.cookie,
+        [SESSION_CSRF_HEADER]: session.csrf, 'content-type': 'application/json', 'idempotency-key': key,
+      }, JSON.stringify({ name }));
+      assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed'], replay.headers.location],
+        [201, created.body, 'true', created.headers.location], 'compiled: the same-key replay carries the same Location');
+      const randomId = randomUUID();
+      SECRETS.add(randomId);
+      for (const [label, id] of [['foreign', SEED_B[0].id], ['random', randomId]]) {
+        assertBounded404(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${id}`, { cookie: session.cookie }), `compiled: ${label}`);
+      }
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id.toUpperCase()}`, { cookie: session.cookie }), 400,
+        'invalid_request', 'compiled: an uppercase id');
 
       ctx.cap.proc.emit('SIGTERM');
       await waitFor(() => ctx.cap.codes.length > 0, 5_000);
@@ -1325,7 +1519,7 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
   }
 });
 
-test('M7TE-13: no captured log line carries a configuration value, a key, a proof, a session identifier or key, a token, a customer name or id, or a cursor', () => {
+test('M7TE-13: no captured log line carries a configuration value, a key, a proof, a session identifier or key, a token, a customer name or id (the detail reads\' own and foreign ids included), or a cursor', () => {
   const forbidden = [
     'synthetic-pw',
     ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e), IDEMPOTENCY_KEY.toString(e)]),
