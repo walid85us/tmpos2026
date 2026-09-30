@@ -45,7 +45,7 @@ TM POS2026 has two parts:
 
 | Part | Status |
 |---|---|
-| **Shop app** | **Interactive preview.** The workflows below work end to end on sample data. Entries are not yet saved to a server, and no real payments, messages or carrier purchases take place. Moving each area onto permanent, server-backed storage is planned (see [Roadmap](#roadmap)). |
+| **Shop app** | **Interactive preview.** The workflows below work end to end on sample data. Entries are not yet saved to a server (the exceptions, a customer directory that saves customer names to the server and the owner's customer-access settings on the role screen, are built and not deployed: see [With your customers](#with-your-customers)), and no real payments, messages or carrier purchases take place. Moving each area onto permanent, server-backed storage is planned (see [Roadmap](#roadmap)). |
 | **Backend Control Plane** | **Initial foundation built, not deployed.** Secure administrator access, the business-account directory, renaming, suspending and reactivating businesses, and the audit record of those events are built and tested. They are not yet available to anyone. Other console areas are previews. |
 | **Launch** | **Planned.** Launch follows a formal readiness review and is a separate, explicit decision. |
 
@@ -65,7 +65,7 @@ Status labels used below:
 - Plans that switch modules on as a shop grows: a starter plan covers checkout, customers, invoices and support, and higher plans add repairs, inventory, services, purchasing, staff, warranties, marketing, prospects, shipping and returns. *(Preview)*
 - Per-role permissions with graded levels (view, create, edit, manage, approve and full), so a team member can, for example, view repair tickets without being able to close or reassign them. *(Preview)*
 - Approving refunds and return payouts is a separate permission. The built-in owner and manager roles include it by default, custom roles start without it, and it can be granted or removed role by role. *(Preview)*
-- Server-checked shop staff sessions: removing a person's access, or suspending their business or store, refuses their next request; a sign-in never completes on access that has already been removed; an ended session is never brought back; and each sign-in, re-confirmation and sign-out is kept in a durable record. *(Built, not deployed; the shop app uses it for the owner's customer-access settings on its role screen)*
+- Server-checked shop staff sessions: removing a person's access, or suspending their business or store, refuses their next request; a sign-in never completes on access that has already been removed; an ended session is never brought back; and each sign-in, re-confirmation and sign-out is kept in a durable record. *(Built, not deployed; the shop app uses it for the owner's customer-access settings on its role screen and for its customer directory)*
 
 ### At the counter: point of sale
 - Cart-based checkout for products, services and repairs, with line-item quantity and price edits. *(Preview)*
@@ -124,8 +124,8 @@ Status labels used below:
 - Prospect tracking through new, contacted and qualified. *(Preview)*
 - Estimates and quotes (draft, sent, accepted, rejected) that convert into a sale, plus customer enquiry intake. *(Preview)*
 - Marketing campaigns and loyalty-performance views. *(Preview (sample figures))*
-- A customer list kept on the server, showing a signed-in team member only their own business's customers, by name. *(Built, not deployed; the shop app does not use it yet and still keeps customers in the browser)*
-- Adding a customer to that server-side list by name, for team members whose role allows it. Each addition made through the product is recorded in the audit trail, and retrying the same request is designed not to add the same customer twice. *(Built, not deployed; the shop app does not use it yet)*
+- A customer list kept on the server, showing a signed-in team member only their own business's customers, by name. *(Built, not deployed; the shop app's Customer Directory page reads this list and opens a single customer from it. The contact details, loyalty and history on the Customers page remain a preview: they are held only in the browser's memory, are lost when the page is reloaded, and are not linked to it)*
+- Adding a customer to that server-side list by name, for team members whose role allows it. Each addition made through the product is recorded in the audit trail, and retrying the same request is designed not to add the same customer twice. *(Built, not deployed; the shop app's Customer Directory page adds a customer by name and shows it as saved only once the server confirms it. Customers added on the Customers page are still a preview, held only in the browser's memory and lost when the page is reloaded)*
 - The business owner choosing, role by role, how much customer access the built-in staff roles have (for example, view only), kept on the server and checked whenever the customer list is viewed or a customer is added, including for team members already signed in. Each change needs a recent sign-in and a reason, and changes made through the product are recorded in the audit trail. *(Built, not deployed; the shop app's role screen shows all four built-in roles' customer access as the server holds it, changes it for the Manager, Technician and Sales Associate roles, and shows a change as saved only once the server confirms it. Only the owner can see or change these settings. Custom roles and the screen's other permissions still apply only in that browser tab)*
 
 ### Running the business
@@ -284,16 +284,16 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 **[Shop]** marks the shop app, **[Backend]** marks the Backend Control Plane and the platform server, and **[Platform]** marks work for the service provider. Every **[Shop]** item is interactive-preview work on sample data. **[Platform]** items in v0.1–v0.3 are sample-data console concepts. **[Backend]** items are built in code and not deployed. Nothing in this history is live.
 
 ### v0.8: Server-checked permissions and business-account management
-*18–28 September 2026*
+*18–30 September 2026*
 - [Backend] One unified set of permission rules, checked by the server for administrative actions.
 - [Backend] The first administrative actions running fully on the server: renaming a business account, and suspending or reactivating one with a recorded reason, each with a change record.
 - [Backend] A business-account page in the Backend Control Plane.
 - [Backend] A "recent sign-in" check before sensitive administrative actions.
 - [Backend] A durable audit record of administrator sign-ins, re-confirmations and sign-outs.
 - [Backend] Sign-outs and access removals are now ordered against administrator actions happening at the same moment: a sign-in, a recent sign-in or a business-account change either completes before the removal or does not happen at all, and an ended session is never brought back.
-- [Backend] Server-side groundwork for shop staff sign-in: shop sessions are ordered against access changes in the same way, and each sign-in and re-confirmation is recorded, as is each sign-out whose record can be written (a sign-out still ends the session when it cannot). Not yet connected to the shop app.
-- [Backend] A server-side customer list for shops, names only, that shows each business only its own customers and checks the team member's permission on the server. Not yet switched on, and not yet connected to the shop app.
-- [Backend] Adding a customer on the server by name, for shop team members whose role allows it, recorded in the audit trail and safe to retry. Not yet switched on, and not yet connected to the shop app.
+- [Backend] Server-side groundwork for shop staff sign-in: shop sessions are ordered against access changes in the same way, and each sign-in and re-confirmation is recorded, as is each sign-out whose record can be written (a sign-out still ends the session when it cannot). Now used by the shop app's role screen and customer directory. Not yet switched on.
+- [Backend] A server-side customer list for shops, names only, that shows each business only its own customers and checks the team member's permission on the server, and now read by the shop app's Customer Directory page. Not yet switched on.
+- [Backend] Adding a customer on the server by name, for shop team members whose role allows it, recorded in the audit trail, with a repeat of the same request designed not to add the customer twice, and now offered from the shop app's Customer Directory page. Not yet switched on.
 - [Backend] Owner-set customer access for each built-in shop role, stored and checked on the server when the customer list is viewed or a customer is added, and now set from the shop app's role screen. Not yet switched on.
 - [Backend] Request limits connected to durable, platform-wide storage.
 - [Backend] A start-up process that refuses to start unless its configuration checks pass.
