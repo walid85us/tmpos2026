@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, type LoyaltyTier } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
@@ -849,6 +849,14 @@ export default function Customers() {
 
   return (
     <div className="max-w-7xl mx-auto">
+      {/* M7A-CUSTOMERS-P5: everything on this screen is local; the server-backed records live in the Customer directory. */}
+      <div data-testid="customers-local-only-banner" role="note" className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-[12px] font-bold text-amber-800 flex flex-wrap items-center gap-2">
+        <span className="material-symbols-outlined text-sm" aria-hidden="true">warning</span>
+        <span>Customer records on this page are held in this browser&apos;s memory only. They are lost when the page is reloaded and are not saved to the server.</span>
+        <Link data-testid="customers-directory-link" to="/customers/directory" className="underline">
+          Open the Customer directory for customers saved on the server
+        </Link>
+      </div>
       <AnimatePresence mode="wait">
         <motion.div
           key={view}

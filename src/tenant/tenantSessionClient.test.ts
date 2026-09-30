@@ -238,3 +238,41 @@ test('TSC-12. an ensure started before a logout is abandoned; logouts run one af
     `GET ${TENANT_SESSION_PATHS.current}`, // the second logout, only after the first ended: no session left, nothing more
   ]);
 });
+
+// M7A-CUSTOMERS-P5 — a rate-limited session carries the server's delay only when the 429 named a valid one.
+const limited = (retryAfter?: string): Response =>
+  new Response(JSON.stringify({ error: 'rate_limited', requestId: 'r1' }), {
+    status: 429, headers: { 'content-type': 'application/json', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) },
+  });
+
+test('TSC-13. a 429 with a valid Retry-After is rate-limited with that delay, at every step that can be limited', async () => {
+  const at = async (replies: Reply[], act: (c: ReturnType<typeof createTenantSessionClient>) => Promise<unknown>) => {
+    const client = createTenantSessionClient({ fetch: scripted(replies).fetch });
+    return act(client);
+  };
+  const ensure = (c: ReturnType<typeof createTenantSessionClient>) => c.ensure('uid-a', async () => TOKEN_A);
+  // The login, the confirming read after it, the read of a remembered session, and a re-authentication.
+  assert.deepEqual(await at([limited('7')], ensure), { kind: 'rate-limited', retryAfterSeconds: 7 });
+  assert.deepEqual(await at([active(), limited('12')], ensure), { kind: 'rate-limited', retryAfterSeconds: 12 });
+  assert.deepEqual(await at([active(), active(), limited('30')], async (c) => { await ensure(c); return ensure(c); }), { kind: 'rate-limited', retryAfterSeconds: 30 });
+  assert.deepEqual(
+    await at([active(), active(), limited('45')], async (c) => { await ensure(c); return c.reauthenticate('uid-a', TOKEN_B); }),
+    { kind: 'rate-limited', retryAfterSeconds: 45 },
+  );
+  // Whole seconds, clamped to 1..300.
+  assert.deepEqual(await at([limited('0')], ensure), { kind: 'rate-limited', retryAfterSeconds: 1 });
+  assert.deepEqual(await at([limited('300')], ensure), { kind: 'rate-limited', retryAfterSeconds: 300 });
+  assert.deepEqual(await at([limited('86400')], ensure), { kind: 'rate-limited', retryAfterSeconds: 300 });
+  assert.ok(Object.isFrozen(await at([limited('7')], ensure)));
+});
+
+test('TSC-14. a 429 with no Retry-After, or one that is not whole seconds, carries no delay key at all', async () => {
+  for (const header of [undefined, '', 'soon', '1.5', '-1', '+5', '5s', '1e2', '1234567890', 'Wed, 21 Oct 2026 07:28:00 GMT']) {
+    const result = await createTenantSessionClient({ fetch: scripted([limited(header)]).fetch }).ensure('uid-a', async () => TOKEN_A);
+    assert.deepEqual(result, { kind: 'rate-limited' }, JSON.stringify(header)); // strict: an undefined key would differ
+    assert.equal('retryAfterSeconds' in result, false, JSON.stringify(header));
+  }
+  // A Retry-After on any other status is not a rate limit and is not carried.
+  const outage = new Response(JSON.stringify({ error: 'service_unavailable' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '9' } });
+  assert.deepEqual(await createTenantSessionClient({ fetch: scripted([outage]).fetch }).ensure('uid-a', async () => TOKEN_A), { kind: 'unavailable' });
+});

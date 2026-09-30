@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 21; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx
-export const MIN_FRONTEND_CASES = 442; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52)
+export const MIN_FRONTEND_FILES = 24; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx; M7A-CUSTOMERS-P5: +3, src/tenant/ServerCustomerDirectory.test.tsx, src/layouts/TenantLayout.customerDirectory.test.tsx, src/components/Customers.localBanner.test.tsx
+export const MIN_FRONTEND_CASES = 510; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52); M7A-CUSTOMERS-P5: +52 (SCD-00..45, NAV-01..04, LCB-01..02), fix batch 1: +10 (SCD-46..55), fix batch 2: +6 (SCD-56..61)
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated
@@ -64,6 +64,9 @@ export const REQUIRED_FRONTEND_SUITES = [
   'src/backend-control-plane/console/TenantManagement.test.tsx',      // tenant workspace: server-decided actions, one key per intent, confirmed-only changes (M5-GIAM-D1-P3)
   'src/tenant/ServerCustomerLevels.test.tsx',                         // shop Customers levels: saved only after the server's read-back (M7A-CUSTOMERS-P3-R2)
   'src/context/AccessContext.tenantSession.test.tsx',                 // tenant session follows the Firebase user: logout before the next user (M7A-CUSTOMERS-P3-R2)
+  'src/tenant/ServerCustomerDirectory.test.tsx',                      // shop Customer directory: saved only on a validated 201, an uncertain create held and never re-sent under another connection (M7A-CUSTOMERS-P5)
+  'src/layouts/TenantLayout.customerDirectory.test.tsx',              // sidebar Customer Directory entry: the customers feature gates it, exact highlight with sub-paths only for the directory (M7A-CUSTOMERS-P5)
+  'src/components/Customers.localBanner.test.tsx',                    // local Customers screen: the browser-only banner, a local create sends no request (M7A-CUSTOMERS-P5)
 ];
 
 /** A case vitest actually ran. Skipped and todo cases are not executed. */

@@ -24,7 +24,9 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # M7A-CUSTOMERS-P5 — 30, not 20: the job ran 18m56s at the stage's entry, before the customer directory scenarios
+    # were added to the shop browser step below.
+    timeout-minutes: 30
     # Phase 4.0 M3 S1b — DISPOSABLE PostgreSQL for the migration-executor proof. It is created
     # and destroyed with this job, reachable only on the runner's loopback interface, holds a
     # database named `tmpos_s1b_*`, and authenticates a synthetic bootstrap role through
@@ -309,7 +311,11 @@ jobs:
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real
       # tenant entry over the SAME disposable service. Chrome reaches no network: CDP interception answers every request.
       # Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
-      - name: Shop role levels in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2)
+      # M7A-CUSTOMERS-P5 — the same file also drives the shop's Customer directory page (create, list, paging, detail,
+      # tenant isolation, a narrowed grant, a lost reply and a moved grant) against the same tenant entries and service.
+      # The step limit stays 12: the six directory scenarios are about 12 s of a 2m49s local run (the step took 3m07s in
+      # CI at the stage's entry), so the limit is still more than three times the run.
+      - name: Shop role levels and customer directory in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2, M7A-CUSTOMERS-P5)
         timeout-minutes: 12
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci

@@ -17,6 +17,7 @@ import EmployeesInvitePage from './tenant/EmployeesInvitePage';
 import EmployeesRolesPage from './tenant/EmployeesRolesPage';
 import EmployeesPermissionsPage from './tenant/EmployeesPermissionsPage';
 import SettingsUsersAccessPage from './tenant/SettingsUsersAccessPage';
+import { CustomerDirectoryPage } from './tenant/ServerCustomerDirectory';
 import Invoices from './components/Invoices';
 import Services from './components/Services';
 import SupplyChain from './components/SupplyChain';
@@ -97,6 +98,8 @@ const router = createBrowserRouter([
       { path: '/customers', element: <AccessGuard feature="customers"><Customers /></AccessGuard> },
       { path: '/customers/new', element: <Navigate to="/customers" replace /> },
       { path: '/customers/:id', element: <Navigate to="/customers" replace /> },
+      // M7A-CUSTOMERS-P5: the server-backed directory — ONE route for the list and a customer, so the list survives the detail.
+      { path: '/customers/directory/:id?', element: <AccessGuard feature="customers"><CustomerDirectoryPage /></AccessGuard> },
       { path: '/employees', element: <AccessGuard feature="employees"><Employees /></AccessGuard> },
       { path: '/employees/new', element: <Navigate to="/employees" replace /> },
       { path: '/employees/roles', element: <Navigate to="/employees" replace /> },

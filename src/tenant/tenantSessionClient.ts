@@ -6,7 +6,10 @@
 //   - The only credential it ever sends is the signed-in user's own Firebase ID token, once, as the login Bearer; the
 //     server verifies it and decides who this is. Nothing here knows or builds an issuer key, a proof or a database key.
 //   - The session CSRF token lives in this closure only (beside the UID it was issued for) — never in React state,
-//     storage, a URL, the DOM or a log — and is handed to the caller only to ride the next unsafe request.
+//     storage, a URL, the DOM or a log — and is handed to the caller only to ride the next unsafe request. The customer
+//     directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5) is its second in-memory holder: it keeps the token
+//     it was handed in refs, and beside an unresolved create in its in-memory hold store, only to compare it with the
+//     next one and to re-send that create on the same session — under the same rule (no state, storage, URL, DOM, log).
 //   - A session is only ever reused for the UID that established it: a different UID (a user switch in this browser)
 //     always logs in again, so one person's session can never answer for another.
 //   - Every reset supersedes earlier work: an answer that arrives under an older epoch is dropped, so a slow login for a
@@ -30,15 +33,26 @@ const BEARER_RE = /^[A-Za-z0-9\-._~+/]+=*$/; // RFC 6750 b64token
 const MAX_BEARER_LENGTH = 4096; // server/runtime/access.ts MAX_TOKEN_LENGTH
 export const JSON_TYPE_RE = /^application\/json\s*(?:;|$)/i; // exact media type: `\b` would admit application/json-patch+json
 export const REQUEST_TIMEOUT_MS = 15_000;
+const RETRY_AFTER_RE = /^[0-9]{1,9}$/; // whole seconds, as the server sends them (server/runtime/app.ts); never an HTTP-date
+const RETRY_AFTER_MAX_SECONDS = 300;
+
+/** A `Retry-After` header as whole seconds, clamped to 1..300; null when it is missing or is not a whole number. */
+export function parseRetryAfter(header: string | null): number | null {
+  if (header === null || !RETRY_AFTER_RE.test(header)) return null;
+  return Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(1, Number(header)));
+}
 
 /**
  * What asking for a session for one UID ended in: `ok` with the session's CSRF token; `no-identity` — no signed-in user
  * here to present (nothing was sent); `refused` — the server did not accept the sign-in or the session it made;
- * `rate-limited`; `unavailable` — nothing could be confirmed (an outage, a timeout, a malformed answer, or superseded).
+ * `rate-limited` — with `retryAfterSeconds` ONLY when the refusal carried a valid `Retry-After` (the key is absent
+ * otherwise, M7A-CUSTOMERS-P5); `unavailable` — nothing could be confirmed (an outage, a timeout, a malformed answer, or
+ * superseded).
  */
 export type SessionResult =
   | { readonly kind: 'ok'; readonly csrf: string }
-  | { readonly kind: 'no-identity' | 'refused' | 'rate-limited' | 'unavailable' };
+  | { readonly kind: 'no-identity' | 'refused' | 'unavailable' }
+  | { readonly kind: 'rate-limited'; readonly retryAfterSeconds?: number };
 
 export interface TenantSessionClient {
   /**
@@ -65,7 +79,7 @@ export interface TenantSessionClient {
 }
 
 type Outcome =
-  | { readonly kind: 'response'; readonly status: number; readonly body: unknown }
+  | { readonly kind: 'response'; readonly status: number; readonly body: unknown; readonly retryAfter: number | null }
   | { readonly kind: 'failed' }
   | { readonly kind: 'superseded' };
 
@@ -81,7 +95,13 @@ const statusOf = (outcome: Outcome): number | null => (outcome.kind === 'respons
 const wellFormed = (token: unknown): token is string =>
   typeof token === 'string' && token.length <= MAX_BEARER_LENGTH && BEARER_RE.test(token);
 const UNAVAILABLE: SessionResult = Object.freeze({ kind: 'unavailable' });
-const result = (kind: 'no-identity' | 'refused' | 'rate-limited' | 'unavailable'): SessionResult => Object.freeze({ kind });
+const result = (kind: 'no-identity' | 'refused' | 'unavailable'): SessionResult => Object.freeze({ kind });
+/** A 429 is `rate-limited`, carrying the server's delay only when it named one; any other undecided answer is `unavailable`. */
+function undecided(outcome: Outcome): SessionResult {
+  if (statusOf(outcome) !== 429) return UNAVAILABLE;
+  const seconds = outcome.kind === 'response' ? outcome.retryAfter : null;
+  return Object.freeze(seconds === null ? { kind: 'rate-limited' } : { kind: 'rate-limited', retryAfterSeconds: seconds });
+}
 
 export function createTenantSessionClient(options: { fetch?: typeof fetch; timeoutMs?: number } = {}): TenantSessionClient {
   const send = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
@@ -117,7 +137,8 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
       });
       const json = res.status === 200 && JSON_TYPE_RE.test(res.headers.get('content-type') ?? '');
       const body: unknown = json ? await res.json().catch(() => undefined) : undefined;
-      return mine === null || mine === epoch ? { kind: 'response', status: res.status, body } : { kind: 'superseded' };
+      const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get('retry-after')) : null;
+      return mine === null || mine === epoch ? { kind: 'response', status: res.status, body, retryAfter } : { kind: 'superseded' };
     } catch {
       return mine === null || mine === epoch ? { kind: 'failed' } : { kind: 'superseded' };
     } finally {
@@ -137,7 +158,7 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
     }
     const status = statusOf(check);
     if (status === 401 || status === 403) return result('refused');
-    return result(status === 429 ? 'rate-limited' : 'unavailable');
+    return undecided(check);
   }
 
   function ensure(uid: string, idToken: () => Promise<string | null>): Promise<SessionResult> {
@@ -160,7 +181,7 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
           return Object.freeze({ kind: 'ok', csrf: token });
         }
         const status = statusOf(current);
-        if (status !== 401) return result(status === 429 ? 'rate-limited' : 'unavailable');
+        if (status !== 401) return undecided(current);
         memo = null; // the session ended (expiry, logout elsewhere, revocation): sign in again below
       }
       let token: string | null;
@@ -177,7 +198,7 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
       if (csrfOf(login) === null) {
         const status = statusOf(login);
         if (status === 401 || status === 403) return result('refused'); // one generic refusal, whatever the reason
-        return result(status === 429 ? 'rate-limited' : 'unavailable');
+        return undecided(login);
       }
       return confirm(uid, mine);
     })();
@@ -202,7 +223,7 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
     );
     if (login.kind === 'superseded' || mine !== epoch) return UNAVAILABLE;
     const status = statusOf(login);
-    if (status === 429) return result('rate-limited');
+    if (status === 429) return undecided(login);
     // Whatever the login answered, a session read says what stands now; its CSRF token is the one kept.
     const confirmed = await confirm(uid, mine);
     if (confirmed.kind !== 'ok') {
@@ -249,5 +270,5 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
   });
 }
 
-/** The shop's one tenant session client, shared by the role-levels panel and the sign-out hook in AccessContext. */
+/** The shop's one tenant session client, shared by the role-levels panel, the customer directory and the sign-out hook in AccessContext. */
 export const tenantSession: TenantSessionClient = createTenantSessionClient();

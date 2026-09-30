@@ -7,12 +7,18 @@ import { useAccess, ONBOARDING_ALLOWED_MODULES } from '../context/AccessContext'
 import { planFeatures } from '../context/accessConfig';
 import { StoreLocalStateProvider } from '../context/StoreLocalState';
 
-const navItems = [
+/** `feature` is the access feature an item is gated by when it is not its own `id` (the React key). `subpaths`: also active on `<path>/…`. */
+interface NavItem { id: string; label: string; icon: string; path: string; feature?: string; subpaths?: boolean }
+const featureOf = (item: NavItem): string => item.feature ?? item.id;
+
+const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', path: '/' },
   { id: 'sales', label: 'Sales', icon: 'payments', path: '/sales' },
   { id: 'repairs', label: 'Repairs', icon: 'build', path: '/repairs' },
   { id: 'inventory', label: 'Inventory', icon: 'inventory_2', path: '/inventory' },
   { id: 'customers', label: 'Customers', icon: 'group', path: '/customers' },
+  // M7A-CUSTOMERS-P5: the server-backed directory, gated by the same feature as the local Customers screen.
+  { id: 'customer-directory', feature: 'customers', label: 'Customer Directory', icon: 'contacts', path: '/customers/directory', subpaths: true },
   { id: 'employees', label: 'Employees', icon: 'badge', path: '/employees' },
   { id: 'warranties', label: 'Warranties', icon: 'verified_user', path: '/warranties' },
   { id: 'invoices', label: 'Invoices', icon: 'receipt_long', path: '/invoices' },
@@ -54,11 +60,14 @@ export default function TenantLayout() {
 
   const showLockedItems = isTenantUser && !activated;
 
-  const accessibleItems = navItems.filter(item => canAccess(item.id));
+  const accessibleItems = navItems.filter(item => canAccess(featureOf(item)));
+  // The item for this address: an exact match, as at entry; only an item marked `subpaths` is also active below its path.
+  const activeItem = accessibleItems.find(item =>
+    location.pathname === item.path || (item.subpaths === true && location.pathname.startsWith(`${item.path}/`))) ?? null;
 
   const lockedItems = showLockedItems
     ? navItems.filter(item =>
-        !canAccess(item.id) && !ONBOARDING_ALLOWED_MODULES.includes(item.id) && tenant && (planFeatures[tenant.plan] || []).includes(item.id)
+        !canAccess(featureOf(item)) && !ONBOARDING_ALLOWED_MODULES.includes(featureOf(item)) && tenant && (planFeatures[tenant.plan] || []).includes(featureOf(item))
       )
     : [];
 
@@ -75,8 +84,9 @@ export default function TenantLayout() {
             <Link
               key={item.id}
               to={item.path}
+              aria-current={activeItem === item ? 'page' : undefined}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                location.pathname === item.path
+                activeItem === item
                   ? 'bg-teal-900/50 text-lime-400 border-r-4 border-lime-400 font-semibold'
                   : 'text-teal-100/70 hover:text-white hover:bg-teal-900/30'
               }`}

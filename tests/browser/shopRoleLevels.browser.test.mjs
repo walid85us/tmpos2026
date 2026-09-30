@@ -65,6 +65,25 @@
 //   SRL-12 reset to the default, then an older draft: View, then Create restored (the default word, a newer version); a
 //          draft made at the first version is refused though the level it saw is back (no ABA); Discard drops it.
 //
+// M7A-CUSTOMERS-P5 — THE CUSTOMER DIRECTORY PAGE (/customers/directory, src/tenant/ServerCustomerDirectory.tsx), in the
+// same harness, driven by its test ids and judged on the wire (st.api) and in the database, each case in tenants of its
+// own. One more substitution, stated: st.lose makes the front drop ONE request before it reaches the entry, or ONE answer
+// after the entry gave it — the page sees a network failure, exactly what a cut connection leaves it.
+//   SCB-01 THE ENTRY WITNESS: an owner opens the directory from the sidebar (empty), adds a customer — exactly one POST
+//          from the page, 201, one customer, one create audit, one completion, no role edit; the row survives a reload,
+//          a second account's browser shows it, its detail opens by click and by direct URL; no request names a tenant,
+//          store, role or actor. Red on the entry SPA: no POST ever leaves the page and no row exists.
+//   SCB-02 isolation: another tenant's customer id, a well-formed unknown id and a malformed id (no request at all) show
+//          the SAME not-found text; tenant B's list holds B's customers only.
+//   SCB-03 paging: 60 rows -> 50, "Load more" -> 60, ids unique, in the server's byte order, no `limit` sent.
+//   SCB-04 a sales_staff page open while the owner narrows Customers to View: Add is refused (403), nothing written — no
+//          customer, audit, completion or lease — and the list is still shown; narrowed to None, Refresh shows the denied
+//          state and no rows.
+//   SCB-05 a reply lost after the commit: the unresolved card, never "saved"; "Check again" re-sends the SAME key and the
+//          byte-identical body (though the field was edited since), answered 201 as a replay; ONE customer of that name.
+//   SCB-06 a first send that never reached the server, then the account's grant moves to tenant B: "Check again" notices
+//          the new connection — the attempt is detached, no POST leaves under the new session, neither tenant holds the name.
+//
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
 // witness; P3R2_SPA_DIST reuses a finished build; P3R2_EVIDENCE names the evidence folder):
@@ -598,8 +617,28 @@ async function call(method, path, { session = null, body, key } = {}) {
   return { status: res.status, headers: res.headers, text: res.body.toString('utf8') };
 }
 
+/**
+ * Every tenant login attempt of the run, per account (the server allows 5 per account per 5 minutes): the evidence names
+ * the most any account made inside one such window, so a scenario that spends the budget shows before it fails.
+ */
+const LOGINS = new Map(); // uid -> [performance.now() of each attempt]
+function noteLogin(uid) {
+  if (uid !== null) LOGINS.set(uid, [...(LOGINS.get(uid) ?? []), performance.now()]);
+}
+function loginPeak() {
+  let peak = { account: null, logins: 0 };
+  for (const [uid, times] of LOGINS) {
+    for (const start of times) {
+      const logins = times.filter((t) => t >= start && t < start + 5 * 60_000).length;
+      if (logins > peak.logins) peak = { account: uid, logins };
+    }
+  }
+  return { ...peak, accounts: LOGINS.size, attempts: [...LOGINS.values()].reduce((n, times) => n + times.length, 0) };
+}
+
 /** A tenant session established outside the browser with a token this file issued: { cookie, csrf }. */
 async function directLogin(who) {
+  noteLogin(who.uid);
   const res = await send(entry.port, 'POST', LOGIN, {
     host: SHOP_HOST, origin: SHOP, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${mintToken(who.uid)}`,
   }, '');
@@ -717,7 +756,10 @@ async function shopApi(ev, u) {
   // via: the tenant entry it was forwarded to (2: the page or tab is in st.second).
   const rec = { method: request.method, path: u.pathname, query: u.search, frameId: ev.frameId, via: s.second.has(ev.frameId) ? 2 : 1, headers, body: postBody(request), status: null, at: performance.now(), doneAt: null, cookie: null };
   s.api.push(rec);
+  if (rec.method === 'POST' && rec.path === LOGIN) noteLogin(bearerUid(rec));
   await passGates(s, rec, 'request');
+  // st.lose (SCB-05/06): this request never reaches the entry; the page's fetch fails as a cut connection does.
+  if (s.lose?.(rec, 'request')) { rec.lost = 'request'; rec.status = 0; rec.doneAt = performance.now(); return null; }
   const out = { ...Object.fromEntries(Object.entries(headers).filter(([k]) => !HOP.has(k))), host: SHOP_HOST };
   if (s.tamper) await s.tamper(rec, out);
   let res = null;
@@ -737,7 +779,11 @@ async function shopApi(ev, u) {
     const value = rec.cookie.split('=').slice(1).join('=');
     if (value !== '') s.secrets.add(value); // a logout's clearing cookie carries no value
   }
+  // replied: what the entry answered (headers lower-cased, the body as text), whether or not the page receives it.
+  rec.replied = { headers: lower(Object.fromEntries(res.pairs)), text: res.body.toString('utf8') };
   await passGates(s, rec, 'response');
+  // st.lose: the entry answered (and committed whatever it committed); the answer never reaches the page.
+  if (s.lose?.(rec, 'response')) { rec.lost = 'response'; return null; }
   return { status: res.status, headers: res.pairs, body: res.body };
 }
 
@@ -761,7 +807,7 @@ function gate(match, phase) {
   return { reached, release };
 }
 
-const apiLine = (r) => `${r.via === 2 ? '[entry2] ' : ''}${r.method} ${r.path}${r.query} -> ${r.status ?? 'held'}${r.error ? ` ${r.error}` : ''}`;
+const apiLine = (r) => `${r.via === 2 ? '[entry2] ' : ''}${r.method} ${r.path}${r.query} -> ${r.status ?? 'held'}${r.error ? ` ${r.error}` : ''}${r.lost ? ` (${r.lost} lost at the front)` : ''}`;
 /** An answer's status and error, e.g. "409 write_conflict". */
 const answered = (r) => `${r.status}${r.error ? ` ${r.error}` : ''}`;
 const isPut = (r) => r.method === 'PUT' && r.path === ROLE_LEVELS;
@@ -992,7 +1038,7 @@ async function assertNoLeak(page) {
 
 function scenario(id, title, fn) {
   test(`${id}: ${title}`, { timeout: 180_000 }, async () => {
-    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
+    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
     const errorsBefore = browser.interceptErrors.length;
     let outcome = 'fail';
@@ -1026,6 +1072,7 @@ before(async () => {
   let outDir = PREBUILT;
   if (outDir === null) {
     outDir = mkdtempSync(join(tmpdir(), 'tmpos-shop-build-'));
+    const buildStarted = performance.now();
     const built = spawnSync(join(ROOT, 'node_modules', '.bin', 'vite'), ['build', '--outDir', outDir, '--emptyOutDir', '--logLevel', 'error'], {
       cwd: SOURCE,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', VITE_ADMIN_CONSOLE_ORIGINS: ADMIN }, // never inherit process.env
@@ -1033,6 +1080,8 @@ before(async () => {
     });
     assert.equal(built.status, 0, redact(`production build failed (${built.error?.message ?? `exit ${built.status}, signal ${built.signal}`}):\n${`${built.stdout ?? ''}${built.stderr ?? ''}`.slice(-3000)}`));
     process.once('exit', () => rmSync(outDir, { recursive: true, force: true }));
+    evidence.buildSeconds = Math.round((performance.now() - buildStarted) / 1000);
+    console.log(`SPA build: ${evidence.buildSeconds} s`);
   }
   for (const f of walk(outDir)) files.set(`/${relative(outDir, f).split(sep).join('/')}`, f);
   assert.ok(files.has('/index.html'), 'the build holds index.html');
@@ -1045,6 +1094,8 @@ before(async () => {
 }, { timeout: 900_000 });
 
 after(async () => {
+  evidence.logins = loginPeak();
+  console.log(`tenant logins: most by one account inside 5 minutes = ${evidence.logins.logins} (${evidence.logins.attempts} attempts by ${evidence.logins.accounts} accounts)`);
   try { writeFileSync(join(EVIDENCE, 'shop-role-levels.json'), `${JSON.stringify(evidence, null, 2)}\n`); } catch { /* evidence is best effort */ }
   await browser?.close().catch((e) => console.warn(redact(`browser teardown: ${e.message}`)));
   await stopEntry();
@@ -1676,4 +1727,366 @@ scenario('SRL-09', 'a user switch in one browser ends the previous user\'s tenan
   assert.ok(st.api.slice(out).some((r) => isLogout(r) && r.status === 204 && (r.headers.cookie ?? '').includes(bLogin.cookie)), 'a logout carrying B\'s cookie ended it');
   assert.equal(await page.evaluate(`fetch('/api/v1/session', { credentials: 'include', cache: 'no-store' }).then((r) => r.status)`), 401, 'the browser holds no tenant session');
   assert.deepEqual(st.api.slice(out).filter((r) => r.path === LOGIN).map(apiLine), [], 'nobody signed back in');
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P5 — the Customer directory page, by the test ids of the stage design (section 10)
+// ---------------------------------------------------------------------------------------------------------------------
+
+const DIRECTORY = '/customers/directory';
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** One create: its customer, its audit record, its sealed completion, its one idempotency record, no role edit. */
+const CREATED = Object.freeze({ C: 1, A: 1, E: 0, K: 1, L: 1 });
+const by = (id) => `[data-testid="${id}"]`;
+const q = (id) => `document.querySelector(${JSON.stringify(by(id))})`;
+const has = (page, id) => page.evaluate(`!!${q(id)}`);
+const textOf = (page, id) => page.evaluate(`${q(id)}?.textContent.trim() ?? null`);
+/** A control that is there and enabled. */
+const offered = (page, id) => page.evaluate(`${q(id)} !== null && ${q(id)}.disabled !== true`);
+const waitData = (page, id, key, value, timeout = 30_000) =>
+  page.waitFor(`${q(id)}?.dataset.${key} === ${JSON.stringify(value)}`, timeout, `${id} has data-${key}="${value}"`);
+const waitList = (page, phase = 'ready') => waitData(page, 'directory-state', 'phase', phase);
+/** The rows the list shows, in the order shown: [{ id, name }]. */
+const rowsOf = (page) => page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('directory-row'))})].map((li) => ({ id: li.dataset.id ?? null, name: li.querySelector('a')?.textContent.trim() ?? null }))`);
+async function waitRows(page, expected, label) {
+  let seen;
+  await page.waitFor(async () => { seen = await rowsOf(page); return JSON.stringify(seen) === JSON.stringify(expected); }, 30_000, label)
+    .catch((e) => { throw new Error(`${e.message}; rows shown: ${JSON.stringify(seen)?.slice(0, 600)}`); });
+}
+
+const isCreate = (r) => r.method === 'POST' && r.path === CUSTOMERS;
+const isList = (r) => r.method === 'GET' && r.path === CUSTOMERS;
+const isDetail = (r) => r.method === 'GET' && r.path.startsWith(`${CUSTOMERS}/`);
+/** The API requests a page (or tab) made that `match`, from record index `from`. */
+const sentBy = (page, match, from = 0) => st.api.slice(from).filter((r) => r.frameId === page.frameId && match(r));
+const quiet = (page, from) => page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 20_000, 'every request answered');
+
+/** In-app navigation (no page load, so no new tenant login). */
+const go = (page, path) => page.evaluate(`history.pushState({}, '', ${JSON.stringify(path)}); dispatchEvent(new PopStateEvent('popstate'))`);
+async function openDirectory(page, path = DIRECTORY) {
+  await go(page, path);
+  await page.waitFor(`!!${q('customer-directory')}`, 30_000, 'the Customer directory page');
+}
+/** A new browser: signs in and opens the directory in the app — ONE tenant login (the page's first connect). */
+async function directoryPage(who) {
+  const page = await openPage();
+  await signIn(page, who);
+  await openDirectory(page);
+  await waitList(page);
+  return page;
+}
+/** The sidebar's "Customer Directory" link, clicked; false when the build has no such entry (the entry commit's). */
+async function openBySidebar(page) {
+  const link = `[...document.querySelectorAll('a[href="${DIRECTORY}"]')].find((a) => a.textContent.trim().endsWith('Customer Directory'))`;
+  if (!(await page.waitFor(`!!${link}`, 15_000, 'the Customer Directory sidebar link').catch(() => false))) return false;
+  await page.evaluate(`${link}.setAttribute('data-p5', 'directory-link')`);
+  await page.click('[data-p5="directory-link"]');
+  await page.waitFor(`location.pathname === '${DIRECTORY}' && !!${q('customer-directory')}`, 30_000, 'the Customer directory page');
+  return true;
+}
+/** Type a name and press "Add customer"; answers the API record count at the click. */
+async function addCustomer(page, name) {
+  await page.fill(by('directory-name'), name);
+  await page.waitFor(() => offered(page, 'directory-add'), 15_000, 'Add customer is enabled');
+  const from = st.api.length;
+  await page.click(by('directory-add'));
+  return from;
+}
+
+/** One tenant's customers as the database owner reads them, in the server's page order (017: name in byte order, then id). */
+async function customersOf(tenant) {
+  const rows = await owner`select customer_id as id, name from tmpos_customer.customer where tenant_id = ${tenant} order by name collate "C", customer_id`;
+  return Array.from(rows, (r) => ({ id: r.id, name: r.name }));
+}
+const named = async (tenant, name) => (await customersOf(tenant)).filter((c) => c.name === name);
+/** Rows put in a tenant by the database owner (no session, audit or idempotency record): [{ id, name }] as given. */
+async function seedCustomers(tenant, names) {
+  const rows = names.map((name) => ({ customer_id: randomUUID(), tenant_id: tenant, name }));
+  await owner`insert into tmpos_customer.customer ${owner(rows, 'customer_id', 'tenant_id', 'name')}`;
+  return rows.map((r) => ({ id: r.customer_id, name: r.name }));
+}
+
+/**
+ * Customers requests select nothing: the query is empty or one cursor, a POST body is exactly { name }, a GET has no body,
+ * no header is named for a tenant, store, role or actor, and none of `values` (tenant ids, the accounts' ids) rides
+ * anywhere in the path, query, headers or body.
+ */
+function assertNoSelector(records, values) {
+  assert.ok(records.length > 0, 'customers requests were made');
+  for (const r of records) {
+    const line = apiLine(r);
+    assert.match(r.query, /^(\?cursor=[A-Za-z0-9_-]{23})?$/, `only a cursor may ride the query: ${line}`);
+    assert.deepEqual(Object.keys(r.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], `no selecting header: ${line}`);
+    if (r.method === 'POST') assert.deepEqual(Object.keys(JSON.parse(r.body)), ['name'], `the body is exactly { name }: ${line}`);
+    else assert.equal(r.body, '', `a read carries no body: ${line}`);
+    const wire = `${r.path}${r.query}\n${Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}\n${r.body}`;
+    for (const value of values) assert.ok(!wire.includes(String(value)), `a tenant or account id rides a request: ${line}`);
+  }
+}
+
+scenario('SCB-01', 'ENTRY WITNESS — an owner opens the Customer directory from the sidebar and adds a customer: ONE POST from the page commits (201; one customer, one create audit, one completion); the row survives a reload, a second account\'s browser shows it, and its detail opens by click and by direct URL; no request names a tenant, store, role or actor', async () => {
+  const { tenant, boss } = await shop('c1');
+  const manager = await actor('c1-manager', [grant(tenant, 'manager')], { role: 'manager' });
+  const name = `M7SCB c1 ${SUFFIX}`;
+  const page = await openPage();
+  await signIn(page, boss);
+  const ui = await openBySidebar(page);
+  note('ui', ui ? 'customer directory' : 'no Customer Directory entry (the entry build)');
+  const before = await counts();
+  let empty = null;
+  if (ui) {
+    await waitList(page);
+    empty = note('before the create', { text: await textOf(page, 'directory-empty'), rows: await rowsOf(page) });
+    const from = await addCustomer(page, name);
+    await page.waitFor(async () => sentBy(page, isCreate, from).some((r) => r.status !== null) && (await rowsOf(page)).some((r) => r.name === name), 30_000, 'the created row is shown')
+      .catch((e) => note('the created row was not shown', e.message));
+  } else {
+    await delay(2_000); // whatever the page would send, it has sent
+  }
+  // Everything is observed first, so the entry run records the whole "before" picture, then judged: wire, then database.
+  const posts = sentBy(page, isCreate);
+  note('POST statuses', posts.map((r) => r.status));
+  const stored = note('stored', await named(tenant, name));
+  const made = note('create delta', await deltaSince(before));
+
+  assert.deepEqual(posts.map((r) => r.status), [201], `the directory page sent exactly one POST ${CUSTOMERS}, answered 201 (API seen: ${st.api.map(apiLine).join('; ') || 'none'}; customers of that name in the tenant: ${stored.length})`);
+  assert.equal(stored.length, 1, 'the tenant holds exactly one customer of that name');
+  assert.deepEqual(made, { ...made, ...CREATED }, `one customer, one create audit, one sealed completion, no role edit ${JSON.stringify(made)}`);
+  const [{ id }] = stored;
+  const [post] = posts;
+  assert.equal(post.body, JSON.stringify({ name }), 'the body is the name and nothing else');
+  assert.match(post.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.deepEqual(JSON.parse(post.replied.text), { customer: { id, name } }, 'the answer names the stored row');
+  assert.equal(post.replied.headers.location, `${CUSTOMERS}/${id}`);
+  assert.equal(post.replied.headers['idempotent-replayed'], undefined, 'a first answer, not a replay');
+  assert.deepEqual(empty.rows, [], 'no row before the create');
+  assert.ok(empty.text, 'the empty state said so after a list answer');
+  await waitRows(page, [{ id, name }], 'the created row, once, under the id the server gave');
+  assert.equal(await page.evaluate(`${q('directory-saved-link')}?.getAttribute('href') ?? null`), `${DIRECTORY}/${id}`, 'the saved notice links to the detail');
+
+  await page.goto(`${SHOP}${DIRECTORY}`, 30_000); // a reload: a new page, a new tenant session, nothing kept but the sign-in
+  await waitList(page);
+  await waitRows(page, [{ id, name }], 'the row after a reload');
+
+  const second = await directoryPage(manager); // a second browser, a second account of the same store
+  await waitRows(second, [{ id, name }], 'the row in a second account\'s browser');
+  await second.click(`${by('directory-row')}[data-id="${id}"] a`);
+  await waitData(second, 'directory-detail', 'phase', 'ready');
+  assert.equal(await second.evaluate('location.pathname'), `${DIRECTORY}/${id}`);
+  assert.deepEqual([await textOf(second, 'directory-detail-id'), await textOf(second, 'directory-detail-name')], [id, name], 'the detail by click');
+  const reads = sentBy(second, isDetail).map((r) => `${r.path} -> ${r.status}`);
+  assert.ok(reads.length >= 1 && reads.every((line) => line === `${CUSTOMERS}/${id} -> 200`), `the detail came from its own read: ${reads.join('; ')}`);
+  await second.click(by('directory-back'));
+  await waitRows(second, [{ id, name }], 'the list is still there on the way back');
+
+  await page.goto(`${SHOP}${DIRECTORY}/${id}`, 30_000); // the address itself, loaded cold
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  assert.deepEqual([await textOf(page, 'directory-detail-id'), await textOf(page, 'directory-detail-name')], [id, name], 'the detail by direct URL');
+
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id, manager.uid, manager.id]);
+  assert.equal((await named(tenant, name)).length, 1, 'still one: nothing re-sent the create');
+  assert.equal(st.api.filter(isCreate).length, 1, 'one POST in the whole case');
+  await assertNoLeak(page);
+  await assertNoLeak(second);
+});
+
+scenario('SCB-02', 'ISOLATION — tenant B\'s owner opening tenant A\'s customer id, a well-formed unknown id and a malformed id sees the SAME not-found text (the malformed one without any request), and B\'s list holds B\'s customers only', async () => {
+  const a = await shop('c2a');
+  const b = await shop('c2b');
+  const theirs = await seedCustomers(a.tenant, [`M7SCB c2 A one ${SUFFIX}`, `M7SCB c2 A two ${SUFFIX}`]);
+  const [own] = await seedCustomers(b.tenant, [`M7SCB c2 B own ${SUFFIX}`]);
+  const page = await directoryPage(b.boss);
+  await waitRows(page, [own], 'B\'s list is exactly B\'s customer');
+  // own (a real transition to ready) first, then the malformed id (no request may leave), then the two the server answers.
+  const seen = {};
+  for (const [label, id, phase] of [['own', own.id, 'ready'], ['malformed', 'not-a-customer-id', 'not-found'], ['foreign', theirs[0].id, 'not-found'], ['unknown', randomUUID(), 'not-found']]) {
+    const from = st.api.length;
+    await go(page, `${DIRECTORY}/${id}`);
+    if (label === 'malformed') await delay(1_000); // whatever it would send, it has sent
+    else await page.waitFor(() => sentBy(page, isDetail, from).some((r) => r.path === `${CUSTOMERS}/${id}` && r.status !== null), 20_000, `the ${label} id was read`);
+    await page.settle();
+    await waitData(page, 'directory-detail', 'phase', phase);
+    seen[label] = {
+      text: await textOf(page, phase === 'ready' ? 'directory-detail-name' : 'directory-not-found'),
+      requests: sentBy(page, isDetail, from).map((r) => (r.path === `${CUSTOMERS}/${id}` ? `this id -> ${answered(r)}` : apiLine(r))),
+      page: await textOf(page, 'customer-directory'),
+    };
+    note(label, { text: seen[label].text, requests: seen[label].requests });
+  }
+  assert.equal(seen.own.text, own.name, 'B\'s own customer opens');
+  assert.ok(seen.unknown.text, 'a not-found text is shown');
+  assert.equal(seen.foreign.text, seen.unknown.text, 'another tenant\'s customer reads exactly as one that does not exist');
+  assert.equal(seen.malformed.text, seen.unknown.text, 'and as a malformed address');
+  assert.deepEqual(seen.malformed.requests, [], `a malformed id sends no ${CUSTOMERS}/ request`);
+  assert.ok(seen.foreign.requests.length >= 1 && seen.foreign.requests.every((line) => line.startsWith('this id -> 404')), `the server answered 404: ${seen.foreign.requests.join('; ')}`);
+  assert.deepEqual([...new Set(seen.foreign.requests)], [...new Set(seen.unknown.requests)], 'the same answer on the wire for foreign and unknown');
+  await go(page, DIRECTORY);
+  await waitRows(page, [own], 'B\'s list, unchanged');
+  const everything = [...Object.values(seen).map((s) => s.page), await textOf(page, 'customer-directory'), ...sentBy(page, () => true).map((r) => r.replied?.text ?? '')].join('\n');
+  for (const c of theirs) assert.ok(!everything.includes(c.name), `A's customer "${c.name}" never reached B's page or its answers`);
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [a.tenant, b.tenant, b.boss.uid, b.boss.id]);
+});
+
+scenario('SCB-03', 'PAGING — 60 customers: the page shows the first 50, "Load more" the other 10, every id once, in the server\'s byte order, and never sends a limit', async () => {
+  const { tenant, boss } = await shop('c3');
+  // Byte order is not dictionary order (A B Z a b é), and two pairs share a name (the id breaks the tie).
+  const names = Array.from({ length: 58 }, (_, i) => `${['b', 'A', 'a', 'B', 'é', 'Z'][i % 6]} M7SCB c3 ${SUFFIX} ${String(i).padStart(2, '0')}`);
+  await seedCustomers(tenant, [...names, names[0], names[1]]);
+  const expected = await customersOf(tenant);
+  assert.equal(expected.length, 60);
+  assert.notDeepEqual(expected.map((c) => c.name), expected.map((c) => c.name).sort((x, y) => x.localeCompare(y)), 'the server\'s order is not a dictionary sort: a re-sorting page would show');
+  const page = await directoryPage(boss);
+  await waitRows(page, expected.slice(0, 50), 'the first page: 50 rows in the server\'s order');
+  await page.waitFor(() => offered(page, 'directory-load-more'), 15_000, 'Load more is offered');
+  await page.click(by('directory-load-more'));
+  await waitRows(page, expected, 'all 60 rows in the server\'s order');
+  const shown = await rowsOf(page);
+  assert.equal(new Set(shown.map((r) => r.id)).size, 60, 'every id once');
+  assert.equal(await offered(page, 'directory-load-more'), false, 'nothing more to load');
+  const lists = sentBy(page, isList);
+  note('list requests', lists.map(apiLine));
+  assert.deepEqual(lists.map((r) => r.status), [200, 200], 'two reads: page one and its continuation');
+  assert.equal(lists[0].query, '', 'page one carries no limit and no cursor');
+  assert.match(lists[1].query, /^\?cursor=[A-Za-z0-9_-]{23}$/, 'the continuation carries the cursor alone');
+  const pages = lists.map((r) => JSON.parse(r.replied.text));
+  assert.equal(lists[1].query, `?cursor=${pages[0].nextCursor}`, 'the cursor is the one the server gave, verbatim');
+  assert.deepEqual(pages.map((p) => [p.customers.length, p.nextCursor === null]), [[50, false], [10, true]]);
+  assert.deepEqual(shown, pages.flatMap((p) => p.customers), 'the rows are the answers, in arrival order');
+  assertNoSelector(lists, [tenant, boss.uid, boss.id]);
+});
+
+scenario('SCB-04', 'PERMISSION NARROWED WHILE OPEN — a sales_staff page with Add available; the owner narrows Customers to View: Add is refused (403) with nothing written and the list still shown; narrowed to None, Refresh shows the denied state and no rows', async () => {
+  const { tenant, boss } = await shop('c4');
+  const staff = await actor('c4-staff', [grant(tenant, 'sales_staff')], { role: 'sales_staff' });
+  const kept = await seedCustomers(tenant, [`M7SCB c4 kept ${SUFFIX}`]);
+  const name = `M7SCB c4 refused ${SUFFIX}`;
+  const ownerSession = await directLogin(boss);
+  const page = await directoryPage(staff);
+  await waitRows(page, kept, 'the staff page lists the store\'s customer');
+  assert.equal(await has(page, 'directory-add'), true, 'Add is available to sales_staff (Create, the default)');
+
+  const view = await directSet(ownerSession, 'sales_staff', 'view');
+  assert.equal(view.status, 200, view.text);
+  const before = await counts();
+  const from = await addCustomer(page, name);
+  await page.waitFor(() => sentBy(page, isCreate, from).some((r) => r.status !== null), 20_000, 'the create was answered');
+  await page.waitFor(() => sentBy(page, isList, from).some((r) => r.status !== null), 20_000, 'the list was read again after the refusal');
+  await quiet(page, from);
+  await waitList(page);
+  const said = note('after the refused create', { status: await textOf(page, 'directory-create-status'), draft: await page.evaluate(`${q('directory-name')}?.value ?? null`) });
+  note('requests', st.api.slice(from).map(apiLine));
+  assert.deepEqual(sentBy(page, isCreate, from).map(answered).map((s) => s.slice(0, 3)), ['403'], 'one POST, refused');
+  // The authorizer refuses before the idempotency record is acquired: no lease row is left (L 0), as under SRL-01's View.
+  await assertDelta(before, NOTHING, 'the refused create: no customer, no create audit, no completion, no lease');
+  assert.deepEqual(await customersOf(tenant), kept, 'the tenant holds what it held');
+  assert.match(said.status ?? '', /refused/i, 'the page says the server refused');
+  assert.doesNotMatch(said.status ?? '', /\bsaved\b/i);
+  assert.equal(await has(page, 'directory-saved'), false, 'no saved notice');
+  assert.equal(await has(page, 'directory-hold'), false, 'a refusal is conclusive: nothing is held');
+  assert.equal(said.draft, name, 'the draft is kept');
+  assert.deepEqual(sentBy(page, isList, from).map((r) => r.status).slice(-1), [200], 'View still reads');
+  await waitRows(page, kept, 'the list is still shown after its reload');
+
+  const none = await directSet(ownerSession, 'sales_staff', 'none');
+  assert.equal(none.status, 200, none.text);
+  const refresh = st.api.length;
+  await page.click(by('directory-refresh'));
+  await waitList(page, 'denied');
+  assert.deepEqual(sentBy(page, isList, refresh).map((r) => r.status), [403], 'None refuses the read');
+  assert.deepEqual(await rowsOf(page), [], 'no rows under the denied state');
+  assert.ok(!(await textOf(page, 'customer-directory')).includes(kept[0].name), 'nor the name anywhere on the page');
+  assert.equal(await offered(page, 'directory-add'), false, 'and no Add');
+  assert.equal(sentBy(page, isCreate).length, 1, 'one POST in the whole case');
+});
+
+scenario('SCB-05', 'LOST REPLY AFTER THE COMMIT — the POST commits but its answer never reaches the page: the unresolved card, never "saved"; "Check again" re-sends the SAME key and the byte-identical body, answered 201 as a replay; ONE customer of that name', async () => {
+  const { tenant, boss } = await shop('c5');
+  const name = `M7SCB c5 ${SUFFIX}`;
+  const page = await directoryPage(boss);
+  const before = await counts();
+  let lost = 0;
+  st.lose = (rec, phase) => phase === 'response' && isCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+  const from = await addCustomer(page, name);
+  await waitData(page, 'directory-hold', 'state', 'unresolved');
+  st.lose = null;
+  const [first] = sentBy(page, isCreate, from);
+  assert.deepEqual([first.status, first.lost], [201, 'response'], 'the create committed, and its answer was lost');
+  await assertDelta(before, CREATED, 'the create whose answer was lost');
+  const stored = await named(tenant, name);
+  assert.equal(stored.length, 1);
+  const card = note('card', await textOf(page, 'directory-hold'));
+  assert.ok(card.includes(name), 'the card names what is not confirmed');
+  assert.equal(await page.evaluate(`${q('directory-hold')}.dataset.detached`), 'false');
+  assert.equal(await has(page, 'directory-saved'), false, 'never "saved" on an answer that did not arrive');
+  assert.ok(!(await rowsOf(page)).some((r) => r.name === name), 'nor shown as a row');
+
+  // The field is edited meanwhile: what is re-sent is the held attempt, never the field.
+  await page.fill(by('directory-name'), ' edited since');
+  const mid = await counts();
+  await page.waitFor(() => offered(page, 'directory-check-again'), 15_000, 'Check again is offered');
+  const again = st.api.length;
+  await page.click(by('directory-check-again'));
+  await page.waitFor(`!!${q('directory-saved')}`, 30_000, 'the saved notice');
+  await quiet(page, again);
+  const posts = sentBy(page, isCreate);
+  note('creates', posts.map(apiLine));
+  assert.equal(posts.length, 2, 'the first send and one check');
+  const second = posts[1];
+  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.match(first.headers['idempotency-key'] ?? '', UUID_V4_RE);
+  assert.equal(second.body, first.body, 'the byte-identical body');
+  assert.equal(first.body, JSON.stringify({ name }));
+  assert.deepEqual([second.status, second.replied.headers['idempotent-replayed']], [201, 'true'], 'answered as a replay');
+  assert.deepEqual(JSON.parse(second.replied.text), { customer: stored[0] }, 'the sealed answer: the row already stored');
+  await assertDelta(mid, NOTHING, 'the replay wrote nothing');
+  assert.deepEqual(await named(tenant, name), stored, 'exactly ONE customer of that name');
+  assert.equal(await page.evaluate(`${q('directory-saved-link')}?.getAttribute('href') ?? null`), `${DIRECTORY}/${stored[0].id}`);
+  await waitRows(page, stored, 'the list shows it once');
+  assert.equal(await has(page, 'directory-hold'), false, 'the card is gone');
+  await assertNoLeak(page);
+});
+
+scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reached the server is held; the account\'s grant moves to tenant B: "Check again" notices the new connection, the attempt is detached, NO POST leaves under the new session, and neither tenant holds the name', async () => {
+  const a = await shop('c6a');
+  const b = await newTenant('c6b');
+  const inA = await seedCustomers(a.tenant, [`M7SCB c6 A only ${SUFFIX}`]);
+  const name = `M7SCB c6 held ${SUFFIX}`;
+  const page = await directoryPage(a.boss);
+  await waitRows(page, inA, 'the page shows tenant A');
+  const before = await counts();
+  // The dangerous case: the server never saw this key, so a re-send under ANY session would create afresh.
+  st.lose = (rec, phase) => phase === 'request' && isCreate(rec) && rec.frameId === page.frameId;
+  const from = await addCustomer(page, name);
+  await waitData(page, 'directory-hold', 'state', 'unresolved');
+  st.lose = null;
+  const sent = sentBy(page, isCreate, from);
+  assert.deepEqual(sent.map((r) => r.lost), ['request'], 'one POST left the page and never reached the server');
+  await page.waitFor(() => offered(page, 'directory-check-again'), 15_000, 'Check again is offered while the connection is the attempt\'s');
+  assert.equal(await page.evaluate(`${q('directory-hold')}.dataset.detached`), 'false');
+
+  const aLogin = st.api.filter(acceptedLogin(a.boss)).at(-1);
+  assert.ok(aLogin, 'the page holds a tenant-A session');
+  await moveOwner(a.boss, a.tenant, b);
+  assert.equal((await readWith(aLogin.cookie)).status, 401, 'the move ended the tenant-A session');
+  const moved = st.api.length;
+  await page.click(by('directory-check-again')); // the page's next action: it must check the connection before anything is sent
+  await waitData(page, 'directory-hold', 'detached', 'true');
+  await waitList(page);
+  await waitRows(page, [], 'the list is now tenant B\'s: empty');
+  await quiet(page, moved);
+  await delay(1_000); // whatever it would still send, it has sent
+  note('after the move', st.api.slice(moved).map(apiLine));
+  const relogin = st.api.slice(moved).filter(acceptedLogin(a.boss));
+  assert.ok(relogin.length >= 1, 'the page signed in again: the new session is tenant B\'s');
+  assert.deepEqual(st.api.slice(moved).filter(isCreate).map(apiLine), [], 'NO POST left under the new session');
+  assert.equal(await offered(page, 'directory-check-again'), false, 'Check again is not offered for a detached attempt');
+  assert.match((await textOf(page, 'directory-hold-detached')) ?? '', /earlier connection/, 'the card says why it cannot be checked from here');
+  assert.equal(await has(page, 'directory-connection-changed'), true, 'the page says the store connection changed');
+  assert.equal(await has(page, 'directory-saved'), false, 'nothing is called saved');
+  assert.equal(await has(page, 'directory-empty'), true, 'tenant B\'s empty state, after its own list answer');
+  assert.deepEqual(await named(b, name), [], 'tenant B holds no customer of that name');
+  assert.deepEqual(await customersOf(b), [], 'nor any other');
+  assert.deepEqual(await customersOf(a.tenant), inA, 'tenant A holds what it held');
+  await assertDelta(before, NOTHING, 'nothing was written anywhere: no customer, audit, completion or lease');
+  await assertNoLeak(page);
 });
