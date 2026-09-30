@@ -18,6 +18,9 @@
 //   - The body of a create is the caller's exact string: the server fingerprints the raw bytes, so this module never
 //     re-serializes it.
 //   - A route id or a cursor that is not in its grammar is never put into a request path.
+//   - Reads carry the session CSRF token the caller was just handed, in a header (M7A-CUSTOMERS-P5-R1, DA-138): the
+//     server answers a read only under the session that token belongs to, and refuses (403) one whose cookie is another
+//     session's. The token is never put into a URL.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials. No
 //     method ever rejects.
 
@@ -77,10 +80,13 @@ export type CreateResult =
   | { readonly kind: 'unknown'; readonly responded: boolean };
 
 export interface CustomersClient {
-  /** One page of the session's tenant: page one (`cursor` null) or the page after a `nextCursor`. Never rejects. */
-  list(cursor: string | null, signal?: AbortSignal): Promise<ListResult>;
-  /** One customer of the session's tenant by id; a malformed id is `not-found` and nothing is sent. Never rejects. */
-  detail(id: string, signal?: AbortSignal): Promise<DetailResult>;
+  /**
+   * One page of the session's tenant: page one (`cursor` null) or the page after a `nextCursor`, on the session whose
+   * CSRF token is `csrf` (the server refuses it, 403, when the cookie is another session's). Never rejects.
+   */
+  list(cursor: string | null, csrf: string, signal?: AbortSignal): Promise<ListResult>;
+  /** One customer of the session's tenant by id, on the session whose CSRF token is `csrf`; a malformed id is `not-found` and nothing is sent. Never rejects. */
+  detail(id: string, csrf: string, signal?: AbortSignal): Promise<DetailResult>;
   /** One create attempt: `body` exactly as given, under `idempotencyKey`, on the session whose CSRF token is `csrf`. Never rejects. */
   create(body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateResult>;
 }
@@ -172,13 +178,14 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
 
   const limited = (answer: Answer): RateLimited =>
     Object.freeze({ kind: 'rate-limited', retryAfterSeconds: retryAfterSeconds(answer.header('retry-after')) });
-  const read = (path: string, signal?: AbortSignal): Promise<Answer | null> =>
-    exchange(path, { method: 'GET', headers: { Accept: 'application/json' } }, signal);
+  // A read names the session it was checked on (M7A-CUSTOMERS-P5-R1): the server answers it only under that session.
+  const read = (path: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
+    exchange(path, { method: 'GET', headers: { Accept: 'application/json', [SESSION_CSRF_HEADER]: csrf } }, signal);
 
-  async function list(cursor: string | null, signal?: AbortSignal): Promise<ListResult> {
+  async function list(cursor: string | null, csrf: string, signal?: AbortSignal): Promise<ListResult> {
     // A cursor is the server's own `nextCursor`, verbatim; one outside its grammar is never put into a request.
     if (cursor !== null && !CURSOR_RE.test(cursor)) return Object.freeze({ kind: 'bad-cursor' });
-    const answer = await read(cursor === null ? CUSTOMERS_PATH : `${CUSTOMERS_PATH}?cursor=${cursor}`, signal);
+    const answer = await read(cursor === null ? CUSTOMERS_PATH : `${CUSTOMERS_PATH}?cursor=${cursor}`, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
     if (answer.status === 200) {
       const page = pageOf(answer.body);
@@ -192,9 +199,9 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
     return Object.freeze({ kind: 'unavailable' });
   }
 
-  async function detail(id: string, signal?: AbortSignal): Promise<DetailResult> {
+  async function detail(id: string, csrf: string, signal?: AbortSignal): Promise<DetailResult> {
     if (!isCustomerId(id)) return Object.freeze({ kind: 'not-found' }); // never a path built from an unvalidated id
-    const answer = await read(`${CUSTOMERS_PATH}/${id}`, signal);
+    const answer = await read(`${CUSTOMERS_PATH}/${id}`, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
     if (answer.status === 200) {
       const customer = customerOf(answer.body);

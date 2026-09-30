@@ -666,6 +666,10 @@ async function withEntry(overrides, fn) {
   }
 }
 
+/** The session CSRF token each sign-in answered, by cookie pair: a customer read names the session it presents (M7A-CUSTOMERS-P5-R1). */
+const CSRF_OF = new Map();
+const csrfOf = (cookie) => (CSRF_OF.has(cookie) ? { [SESSION_CSRF_HEADER]: CSRF_OF.get(cookie) } : {});
+
 async function signIn(ctx, who) {
   const reply = await ctx.login(who);
   assert.equal(reply.status, 200, `login ${who.uid}: ${reply.body}`);
@@ -674,12 +678,13 @@ async function signIn(ctx, who) {
   await noteSession(cookie);
   const csrf = JSON.parse(reply.body).csrfToken;
   SECRETS.add(csrf);
+  CSRF_OF.set(cookie, csrf);
   return { cookie, setCookie, csrf };
 }
 
 const list = (ctx, cookie, query = '') => {
   for (const m of query.matchAll(/cursor=([^&]*)/g)) if (m[1].length >= 16) SECRETS.add(m[1]); // a cursor, not a malformed probe like 'abc'
-  return ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, cookie === null ? {} : { cookie });
+  return ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, cookie === null ? {} : { cookie, ...csrfOf(cookie) });
 };
 
 /** A page body: exactly { customers: [{ id, name }], nextCursor }. Answers it. */
@@ -764,20 +769,22 @@ async function withoutExecute(fn, work) {
 async function assertHostSpellings(ctx, who, rows, label) {
   const loginText = (host) => `POST ${sessionPaths('tenant').login} HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${TENANT_ORIGIN}\r\n`
     + `Sec-Fetch-Site: same-origin\r\n${CSRF_HEADER}: ${CSRF_HEADER_VALUE}\r\nAuthorization: Bearer ${who.token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`;
-  const listText = (host, cookie) => `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/1.1\r\nHost: ${host}\r\nCookie: ${cookie}\r\nConnection: close\r\n\r\n`;
+  const listText = (host, cookie, csrf) => `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/1.1\r\nHost: ${host}\r\nCookie: ${cookie}\r\nX-TMPOS-Session-CSRF: ${csrf}\r\nConnection: close\r\n\r\n`;
   let cookie = null;
+  let csrf = null;
   for (const host of [TENANT_HOST.toUpperCase(), 'Tenant.Tmpos.Test']) {
     const login = await ctx.raw(loginText(host));
     assert.equal(login.status, 200, `${label}: login on ${host}: ${login.body}`);
     cookie = login.setCookies[0].split('; ')[0];
     await noteSession(cookie);
-    SECRETS.add(JSON.parse(login.body).csrfToken);
-    const read = await ctx.raw(listText(host, cookie));
+    csrf = JSON.parse(login.body).csrfToken;
+    SECRETS.add(csrf);
+    const read = await ctx.raw(listText(host, cookie, csrf));
     assert.equal(read.status, 200, `${label}: read on ${host}: ${read.body}`);
     assert.deepEqual(JSON.parse(Buffer.from(read.body, 'latin1').toString('utf8')).customers, rows, `${label}: read on ${host}, only the caller's rows`);
   }
   assertBounded404(await ctx.raw(loginText(`${TENANT_HOST}.`)), `${label}: login on the tenant host with a trailing dot`);
-  assertBounded404(await ctx.raw(listText(`${TENANT_HOST}.`, cookie)), `${label}: read on the tenant host with a trailing dot`);
+  assertBounded404(await ctx.raw(listText(`${TENANT_HOST}.`, cookie, csrf)), `${label}: read on the tenant host with a trailing dot`);
 }
 
 /** A refused startup: its category and codes, no listener, exit 1 — and, when a client was built, that client ended. */
@@ -932,7 +939,7 @@ test('M7TE-05: the admin host, an unknown, wildcard-looking or IP host, the tena
   await withEntry({}, async (ctx) => {
     const session = await signIn(ctx, who);
     const listText = (hostLines, version = '1.1') =>
-      `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/${version}\r\n${hostLines}Cookie: ${session.cookie}\r\nConnection: close\r\n\r\n`;
+      `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/${version}\r\n${hostLines}Cookie: ${session.cookie}\r\nX-TMPOS-Session-CSRF: ${session.csrf}\r\nConnection: close\r\n\r\n`;
     const loginText = (hostLines, version = '1.1') =>
       `POST ${sessionPaths('tenant').login} HTTP/${version}\r\n${hostLines}Origin: ${TENANT_ORIGIN}\r\nSec-Fetch-Site: same-origin\r\n`
       + `${CSRF_HEADER}: ${CSRF_HEADER_VALUE}\r\nAuthorization: Bearer ${who.token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`;
@@ -1182,7 +1189,7 @@ test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted o
     // M7A-CUSTOMERS-P4: the customer detail read withdrawn from the login — the second half of the reads' probe.
     await withoutExecute(DETAIL_GET, async () => {
       await readinessHolds(ctx, 503);
-      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}`, { cookie: session.cookie }), 503, 'service_unavailable',
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}`, { cookie: session.cookie, ...csrfOf(session.cookie) }), 503, 'service_unavailable',
         'the detail read withdrawn');
       assert.deepEqual(pageOf(await list(ctx, session.cookie), 'the list still reads').customers, SEED_A);
     });
@@ -1273,7 +1280,7 @@ test('M7TE-12: shutdown closes the listener and ends the database client exactly
 
 /** The detail read of `segment`, with `cookie` (or none). */
 const detail = (ctx, cookie, segment, headers = {}) =>
-  ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${segment}`, { ...(cookie === null ? {} : { cookie }), ...headers });
+  ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${segment}`, { ...(cookie === null ? {} : { cookie, ...csrfOf(cookie) }), ...headers });
 /** A 200 detail body: exactly { customer: { id, name } }. */
 function customerOf(reply, label) {
   assert.equal(reply.status, 200, `${label}: ${reply.body}`);
@@ -1459,7 +1466,7 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       assert.match(session.setCookie, /^__Host-tmpos_tenant_session=[^;]+; Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Strict$/);
       assert.deepEqual(pageOf(await list(ctx, session.cookie, '?limit=100'), 'compiled read'), { customers: SEED_A, nextCursor: null });
       const listText = (hostLines, version = '1.1') =>
-        `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/${version}\r\n${hostLines}Cookie: ${session.cookie}\r\nConnection: close\r\n\r\n`;
+        `GET ${CUSTOMER_DIRECTORY_PATH} HTTP/${version}\r\n${hostLines}Cookie: ${session.cookie}\r\nX-TMPOS-Session-CSRF: ${session.csrf}\r\nConnection: close\r\n\r\n`;
       assertBounded404(await ctx.raw(listText(`Host: ${ADMIN_HOST}\r\n`)), 'compiled: the admin host');
       assertBounded404(await ctx.raw(listText('Host: unknown.tmpos.test\r\n')), 'compiled: an unknown host');
       assertBounded404(await ctx.raw(listText('Host: *.tmpos.test\r\n')), 'compiled: a wildcard-looking host');
@@ -1492,7 +1499,7 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       // M7A-CUSTOMERS-P4: the 201's Location is the detail route of the new id; following it reads the same customer. A
       // same-key replay carries the same Location; another tenant's id and a random id are one 404; uppercase is a 400.
       assert.equal(created.headers.location, `${CUSTOMER_DIRECTORY_PATH}/${customer.id}`, 'compiled create: Location');
-      const followed = await ctx.req('GET', created.headers.location, { cookie: session.cookie });
+      const followed = await ctx.req('GET', created.headers.location, { cookie: session.cookie, ...csrfOf(session.cookie) });
       assert.equal(followed.status, 200, followed.body);
       assert.deepEqual(JSON.parse(followed.body), { customer }, 'compiled: Location reads the created customer');
       const replay = await ctx.req('POST', CUSTOMER_DIRECTORY_PATH, {
@@ -1504,9 +1511,9 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       const randomId = randomUUID();
       SECRETS.add(randomId);
       for (const [label, id] of [['foreign', SEED_B[0].id], ['random', randomId]]) {
-        assertBounded404(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${id}`, { cookie: session.cookie }), `compiled: ${label}`);
+        assertBounded404(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${id}`, { cookie: session.cookie, ...csrfOf(session.cookie) }), `compiled: ${label}`);
       }
-      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id.toUpperCase()}`, { cookie: session.cookie }), 400,
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id.toUpperCase()}`, { cookie: session.cookie, ...csrfOf(session.cookie) }), 400,
         'invalid_request', 'compiled: an uppercase id');
 
       ctx.cap.proc.emit('SIGTERM');

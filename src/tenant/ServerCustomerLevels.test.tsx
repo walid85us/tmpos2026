@@ -14,9 +14,11 @@ vi.mock('../firebase', () => ({ auth: { currentUser: null } }));
 
 import ServerCustomerLevels, { DENIED_NOTE, PREVIOUS_STORE, REFRESH_FAILED_NOTE, STORE_CHANGED_NOTICE, type ShopIdentity } from './ServerCustomerLevels';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
+import { sessionSubjectOf } from '../../server/runtime/sessions';
 import { createRoleLevelsClient, ROLE_LEVELS_PATH, type RoleLevelsClient } from './roleLevelsClient';
 
 const CSRF = 's'.repeat(43);
+const activeBody = (uid: string) => ({ status: 'active', csrfToken: CSRF, subject: sessionSubjectOf({ authProvider: 'firebase', authProviderUid: uid }) });
 const uuid = (n: number): string => `${n.toString(16).padStart(8, '0')}-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
 const TENANT_A = uuid(0xa);
 const TENANT_B = uuid(0xb);
@@ -37,10 +39,10 @@ interface Sent { readonly method: string; readonly url: string; readonly headers
 
 /** One fake tenant server: a login decides the user (and so the tenant) of the session the browser holds. */
 function fakeServer() {
-  const users: Record<string, { tenant: string; owner: boolean }> = {
-    'tok-a': { tenant: TENANT_A, owner: true },
-    'tok-b': { tenant: TENANT_B, owner: true },
-    'tok-m': { tenant: TENANT_A, owner: false },
+  const users: Record<string, { uid: string; tenant: string; owner: boolean }> = {
+    'tok-a': { uid: 'uid-a', tenant: TENANT_A, owner: true },
+    'tok-b': { uid: 'uid-b', tenant: TENANT_B, owner: true },
+    'tok-m': { uid: 'uid-m', tenant: TENANT_A, owner: false },
   };
   const stored: Record<string, Partial<Record<Editable, string>>> = { [TENANT_A]: { sales_staff: 'view' }, [TENANT_B]: {} };
   // A per-row counter: absent ⇒ 0; every effective edit (a restore of the default included) is exactly +1.
@@ -53,7 +55,7 @@ function fakeServer() {
   };
   const server = {
     sent: [] as Sent[],
-    session: null as null | { tenant: string; owner: boolean },
+    session: null as null | { uid: string; tenant: string; owner: boolean },
     puts: [] as PutPlan[],
     held: [] as Array<{ resolve: (late?: Response) => void }>, // reads to hold, in order (released with their answer or `late`)
     holdReads: 0,
@@ -78,10 +80,10 @@ function fakeServer() {
         const user = users[(headers.get('authorization') ?? '').replace(/^Bearer /, '')];
         if (user === undefined) return reply(401, { error: 'unauthenticated' });
         server.session = user;
-        return reply(200, { status: 'active', csrfToken: CSRF });
+        return reply(200, activeBody(user.uid));
       }
       if (method === 'GET' && url === TENANT_SESSION_PATHS.current) {
-        return server.session === null ? reply(401, { error: 'unauthenticated' }) : reply(200, { status: 'active', csrfToken: CSRF });
+        return server.session === null ? reply(401, { error: 'unauthenticated' }) : reply(200, activeBody(server.session.uid));
       }
       if (method === 'POST' && url === TENANT_SESSION_PATHS.logout) {
         server.session = null;
@@ -130,7 +132,7 @@ function fakeServer() {
       if (plan === 'commit-then-503') return reply(503, { error: 'service_unavailable' });
       if (plan === 'commit-bad-body') return reply(200, { roleLevel: { roleId: change.roleId, domain: 'inventory', level: change.level, version } });
       if (plan === 'ok-then-other-writer') set(session.tenant, change.roleId, 'edit');
-      if (plan === 'ok-then-switch') server.session = users['tok-b'];
+      if (plan === 'ok-then-switch') server.session = { ...users['tok-b'], uid: session.uid }; // the same user's session, now selecting tenant B
       return reply(200, { roleLevel: { roleId: change.roleId, domain: 'customers', level: change.level, version } });
     }) as typeof globalThis.fetch,
   };
@@ -378,7 +380,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     await userEvent.setup().selectOptions(screen.getByTestId('server-level-select-manager'), 'view');
-    server.session = { tenant: TENANT_B, owner: true }; // the browser's session now answers for another tenant
+    server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true }; // the browser's session now answers for another tenant
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
     await act(async () => { window.dispatchEvent(new Event('focus')); });
     await waitFor(() => expect(row('sales_staff')).toHaveTextContent('Server level: Create'));
@@ -400,7 +402,9 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     const quiet = fakeServer();
     mount('uid-x', quiet, identityFor({}).identity);
     await waitFor(() => expect(state()).toHaveTextContent('Signed out'));
-    expect(quiet.sent).toHaveLength(0);
+    // Nobody signed in here: the one thing sent is the session read (a 401); no login, no token, nothing else.
+    expect(quiet.sent.map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(quiet.sent[0].headers.get('authorization')).toBeNull();
     cleanup();
 
     const down = fakeServer();
@@ -654,7 +658,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     expect(row('sales_staff')).toHaveTextContent('Server level: Create');
     const requests = server.sent.length;
-    server.session = { tenant: TENANT_A, owner: true }; // even if the late answer could read tenant A again
+    server.session = { uid: 'uid-a', tenant: TENANT_A, owner: true }; // even if the late answer could read tenant A again
     await act(async () => { server.heldPuts[0].resolve(); await new Promise((r) => setTimeout(r, 0)); });
     expect(server.sent.length).toBe(requests); // no read-back: the answer was dropped
     expect(status('sales_staff')).toHaveTextContent(/^$/);
@@ -968,7 +972,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     const before = JSON.stringify([server.stored, server.versions]);
-    server.session = { tenant: TENANT_B, owner: true }; // the same owner's session now selects tenant B
+    server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true }; // the same owner's session now selects tenant B
     await edit('technician', 'none');
     await waitFor(() => expect(screen.getByTestId('server-levels-store-changed')).toHaveTextContent(STORE_CHANGED_NOTICE));
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
@@ -999,7 +1003,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
       await edit('technician', 'none');
       if (variant === 'refused') await waitFor(() => expect(server.heldPuts).toHaveLength(1));
       else await waitFor(() => expect(server.stored[TENANT_A].technician).toBe('none'));
-      server.session = { tenant: TENANT_B, owner: true };
+      server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true };
       await act(async () => { server.held[0].resolve(json(200, server.levelsOf(TENANT_B))); await new Promise((r) => setTimeout(r, 0)); });
       await waitFor(() => expect(screen.getByTestId('server-levels-store-changed')).toBeInTheDocument());
       await waitFor(() => expect(state()).toHaveTextContent('Ready'));
@@ -1213,10 +1217,10 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     server.holdPuts = 1;
     await edit('technician', 'none');
     await waitFor(() => expect(server.heldPuts).toHaveLength(1));
-    server.session = { tenant: TENANT_B, owner: true }; // → B
+    server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true }; // → B
     await act(async () => { server.held[0].resolve(json(200, server.levelsOf(TENANT_B))); await new Promise((r) => setTimeout(r, 0)); });
     await waitFor(() => expect(row('sales_staff')).toHaveTextContent('Server level: Create'));
-    server.session = { tenant: TENANT_A, owner: true }; // → A again
+    server.session = { uid: 'uid-a', tenant: TENANT_A, owner: true }; // → A again
     await focusRefresh();
     await waitFor(() => expect(row('sales_staff')).toHaveTextContent('Server level: View Only'));
     await act(async () => { server.heldPuts[0].resolve(); await new Promise((r) => setTimeout(r, 0)); }); // committed on A
@@ -1258,7 +1262,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
   it('SCL-41. a held key is never reused once the draft changes: the fake refuses other bytes under a key (422), and the panel sends a new key', async () => {
     // The fake's fingerprint: the same key with another body is refused, as the server refuses it.
     const probe = fakeServer();
-    probe.session = { tenant: TENANT_A, owner: true };
+    probe.session = { uid: 'uid-a', tenant: TENANT_A, owner: true };
     const client = createRoleLevelsClient({ fetch: probe.fetch });
     const change = { roleId: 'technician', level: 'none', reason: REASON, expectedTenant: TENANT_A, expectedVersion: 0 } as const;
     const key = ['31313131', '3131', '4131', '8131', '313131313131'].join('-');
@@ -1434,7 +1438,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     server.puts.push(403);
     await click('server-level-save-technician'); // the confirmation, under the held key
     await waitFor(() => expect(server.heldPuts).toHaveLength(1));
-    server.session = { tenant: TENANT_B, owner: true };
+    server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true };
     await act(async () => { server.held[0].resolve(json(200, server.levelsOf(TENANT_B))); await new Promise((r) => setTimeout(r, 0)); });
     await waitFor(() => expect(screen.getByTestId('server-levels-store-changed')).toBeInTheDocument());
     await act(async () => { server.heldPuts[0].resolve(); await new Promise((r) => setTimeout(r, 0)); }); // 403 for the confirmation
@@ -1550,7 +1554,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await release();
     await waitFor(() => expect(row('technician')).toHaveTextContent('Server level: View Only'));
     // Store B: the panel starts over; its first deferral must be read again too.
-    server.session = { tenant: TENANT_B, owner: true };
+    server.session = { uid: 'uid-a', tenant: TENANT_B, owner: true };
     await focusRefresh();
     await waitFor(() => expect(screen.getByTestId('server-levels-store-changed')).toBeInTheDocument());
     await waitFor(() => expect(row('sales_staff')).toHaveTextContent('Server level: Create'));
@@ -1568,5 +1572,22 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await release();
     await waitFor(() => expect(levelReads(server)).toBe(reads + 1)); // the re-read
     await waitFor(() => expect(row('technician')).toHaveTextContent('Server level: View Only'));
+  });
+  // M7A-CUSTOMERS-P5-R1 (DA-143) — the panel reopened over the session this browser already holds signs nothing in.
+  it('SCL-53. a reopened panel with a new session client reuses the same user\'s session: one login overall, and the levels shown', async () => {
+    const server = fakeServer();
+    const starts: number[] = [];
+    for (let open = 0; open < 3; open++) {
+      starts.push(server.sent.length);
+      mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity); // a new session client each time
+      await waitFor(() => expect(state()).toHaveTextContent('Ready'));
+      expect(row('sales_staff')).toHaveTextContent('View Only');
+      cleanup();
+    }
+    for (const at of starts) expect(`${server.sent[at].method} ${server.sent[at].url}`).toBe(`GET ${TENANT_SESSION_PATHS.current}`);
+    expect(server.sent.filter((r) => r.url === TENANT_SESSION_PATHS.login)).toHaveLength(1);
+    expect(server.sent.slice(starts[1]).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${ROLE_LEVELS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${ROLE_LEVELS_PATH}`,
+    ]);
   });
 });

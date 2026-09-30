@@ -40,7 +40,7 @@ import { EnforcementSetupError, sessionPaths } from './routes.js';
 import type { AuthorizationRequirement, RouteContext, RouteDefinition, SessionAudience, VerifiedPrincipal } from './routes.js';
 import {
   ADMISSION_REVALIDATE_MS, LOGIN_POLICIES, RECENT_AUTH_MAX_AGE_MS, REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES,
-  SESSION_CSRF_HEADER, SESSION_TTL, principalKeyOf,
+  SESSION_CSRF_HEADER, SESSION_TTL, principalKeyOf, sessionSubjectOf,
 } from './sessions.js';
 import type { SessionBoundaryDeps, SessionRecord, SessionStore } from './sessions.js';
 import { assertSessionStoreContract, createMemorySessionStore } from './memorySessionStore.testkit.js';
@@ -942,17 +942,44 @@ test('login and current-session disclose only a status and the CSRF token, no id
       const csrf = (JSON.parse(issued.body) as { csrfToken: string }).csrfToken;
       for (const [label, reply] of [['login', issued], ['current', await current(port, audience, id)]] as const) {
         const body = JSON.parse(reply.body) as Record<string, unknown>;
-        assert.deepEqual(Object.keys(body).sort(), ['csrfToken', 'status'], `${audience} ${label}`);
+        // M7A-CUSTOMERS-P5-R1: the tenant body also names the session's subject (a digest); the admin body is unchanged.
+        assert.deepEqual(Object.keys(body).sort(), audience === 'tenant' ? ['csrfToken', 'status', 'subject'] : ['csrfToken', 'status'], `${audience} ${label}`);
         assert.equal(body.status, 'active');
         assert.equal(body.csrfToken, csrf);
+        const subject = typeof body.subject === 'string' ? body.subject : '';
         for (const detail of ['uid-owner', 'synthetic', 'platform', 'permission', 'audience', 'totp', id]) {
           assert.ok(!reply.body.includes(detail), `${audience} ${label} disclosed ${detail}`);
         }
-        // The CSRF token is random base64url and contains 'v1' about once in a hundred tokens, so that one short detail
-        // is looked for outside the token only; every other detail above is looked for in the whole body, token included.
-        assert.ok(!reply.body.split(csrf).join('').includes('v1'), `${audience} ${label} disclosed v1`);
+        // The CSRF token and the subject digest are random-looking base64url and contain 'v1' about once in a hundred, so
+        // that one short detail is looked for outside them only; every other detail above is looked for in the whole body.
+        const outside = reply.body.split(csrf).join('').split(subject === '' ? csrf : subject).join('');
+        assert.ok(!outside.includes('v1'), `${audience} ${label} disclosed v1`);
       }
     }
+  });
+});
+
+test('the tenant session 200s (login and current) carry the session\'s own subject: sessionSubjectOf(principal) = the labelled digest; users differ; the admin body has none (M7A-CUSTOMERS-P5-R1)', async () => {
+  const independent = (provider: string, uid: string): string => createHash('sha256').update(`tmpos-session-subject:v1\n${provider}\n${uid}`).digest('base64url');
+  assert.equal(sessionSubjectOf(principal('uid-owner')), independent('synthetic', 'uid-owner'));
+  assert.equal(sessionSubjectOf({ authProvider: 'firebase', authProviderUid: 'uid-x' }), independent('firebase', 'uid-x'), 'the provider is part of the digest');
+  assert.notEqual(sessionSubjectOf(principal('uid-owner')), principalKeyOf(principal('uid-owner')), 'never the storage key');
+  await withSessions({}, async ({ port }) => {
+    const seen = new Map<string, string>();
+    for (const [token, uid] of [['tok-owner', 'uid-owner'], ['tok-member', 'uid-member']] as const) {
+      const issued = await login(port, 'tenant', token);
+      const id = setCookieOf(issued).value;
+      for (const [label, reply] of [['login', issued], ['current', await current(port, 'tenant', id)]] as const) {
+        const body = JSON.parse(reply.body) as { subject?: unknown };
+        assert.equal(body.subject, independent('synthetic', uid), `${uid} ${label}`);
+        assert.match(String(body.subject), /^[A-Za-z0-9_-]{43}$/, `${uid} ${label}: 43 base64url characters`);
+      }
+      seen.set(uid, independent('synthetic', uid));
+    }
+    assert.notEqual(seen.get('uid-owner'), seen.get('uid-member'), 'distinct users, distinct subjects');
+    const admin = await login(port, 'admin', 'tok-owner');
+    assert.deepEqual(Object.keys(JSON.parse(admin.body) as object).sort(), ['csrfToken', 'status'], 'admin login: exactly status and csrfToken');
+    assert.deepEqual(Object.keys(JSON.parse((await current(port, 'admin', setCookieOf(admin).value)).body) as object).sort(), ['csrfToken', 'status'], 'admin current: same');
   });
 });
 
@@ -1652,16 +1679,22 @@ test('session refusals are bounded and never echo a credential, UID, cookie, CSR
     const canary = await signIn(port, 'tenant', 'tok-canary-uid');
     const unknownId = 'C'.repeat(43);
     const badCsrf = 'D'.repeat(43);
-    const replies = [
+    const refusals = [
       await login(port, 'tenant', CANARY_TOKEN),
       await login(port, 'admin', 'tok-member'),
       await current(port, 'tenant', unknownId),
-      await current(port, 'tenant', canary.id),
+    ];
+    const active = await current(port, 'tenant', canary.id); // the tenant 200 {status, csrfToken, subject} (DA-143)
+    refusals.push(
       await send(port, 'GET', TENANT.current, { cookie: `${SESSION_COOKIES.tenant}=canary-cookie-value` }),
       await send(port, 'POST', '/api/v1/probe', unsafe('tenant', s, badCsrf)),
       await login(port, 'tenant', CANARY_TOKEN, { origin: 'http://evil.test' }),
-    ];
-    for (const r of replies) assert.ok(r.body.length < 128, `bounded body: ${r.body}`);
+    );
+    for (const r of refusals) assert.ok(r.body.length < 128, `bounded body: ${r.body}`);
+    assert.equal(active.status, 200);
+    assert.deepEqual(Object.keys(JSON.parse(active.body) as object).sort(), ['csrfToken', 'status', 'subject']);
+    assert.ok(active.body.length < 160, `bounded body: ${active.body}`);
+    const replies = [...refusals, active];
     assert.ok(await logged(logs, 'csrf_origin_mismatch'));
     const seen = `${replies.map((r) => `${r.body}\n${JSON.stringify(r.headers)}`).join('\n')}\n${logs.join('\n')}`;
     for (const leak of [CANARY_TOKEN, CANARY_UID, 'canary-cookie-value', unknownId, badCsrf, s.id, s.csrf, 'adapter-secret-detail', 'uid-member', 'synthetic', 'Bearer tok']) {

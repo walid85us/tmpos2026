@@ -13,6 +13,10 @@
 // hands this handler the presenting session's store key, and the port asks the database with that key alone: the read is
 // bound in the database to the presenting minted session, which derives the tenant itself — a caller holding the
 // runtime's database login but no live minted session reads nothing. The key is a SQL parameter and nothing else.
+// M7A-CUSTOMERS-P5-R1 (DA-138): the same declaration makes the chain require the presenting session's CSRF token in
+// `X-TMPOS-Session-CSRF` on this GET, so the read is also bound to the session the CLIENT checked: a request whose cookie
+// is another session's than the token names (missing, repeated or foreign token) is a 403 before the authorizer, the
+// port or any cursor is asked. The detail route below declares the same.
 //
 // THE QUERY. Exactly two optional parameters, each at most once and nothing else: `limit`, a decimal 1-100 (default 50),
 // and `cursor`, the continuation a previous page returned. Any other key, a repeat, an empty pair, an encoding, a

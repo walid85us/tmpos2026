@@ -42,7 +42,7 @@ export const REPO_ROOT = resolve(HERE, '..');
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
 export const MIN_FRONTEND_FILES = 24; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx; M7A-CUSTOMERS-P5: +3, src/tenant/ServerCustomerDirectory.test.tsx, src/layouts/TenantLayout.customerDirectory.test.tsx, src/components/Customers.localBanner.test.tsx
-export const MIN_FRONTEND_CASES = 510; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52); M7A-CUSTOMERS-P5: +52 (SCD-00..45, NAV-01..04, LCB-01..02), fix batch 1: +10 (SCD-46..55), fix batch 2: +6 (SCD-56..61)
+export const MIN_FRONTEND_CASES = 522; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52); M7A-CUSTOMERS-P5: +52 (SCD-00..45, NAV-01..04, LCB-01..02), fix batch 1: +10 (SCD-46..55), fix batch 2: +6 (SCD-56..61); M7A-CUSTOMERS-P5-R1: +3 (SCD-62..64); review fixes: +8 (SCD-65..71, SCL-53); SCD-72
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated

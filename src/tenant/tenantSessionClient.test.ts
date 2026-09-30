@@ -1,8 +1,11 @@
 // M7A-CUSTOMERS-P3-R2 — the shop's tenant session client against a scripted fetch: what it sends, what it keeps for
-// which user, and which answers it believes.
+// which user, and which answers it believes. M7A-CUSTOMERS-P5-R1: every ensure reads the session first and reuses one
+// the server names as that user's (`subject`), so a page load signs in only when there is no such session.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TENANT_SESSION_PATHS, createTenantSessionClient } from './tenantSessionClient';
+import { createHash } from 'node:crypto';
+import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionSubjectOf } from './tenantSessionClient';
+import { sessionSubjectOf as serverSubjectOf } from '../../server/runtime/sessions';
 
 const CSRF = 'c'.repeat(43);
 const ROTATED = 'r'.repeat(43);
@@ -13,19 +16,28 @@ const syntheticIdToken = (uid: string): string => [segment({ alg: 'RS256' }), se
 const TOKEN_A = syntheticIdToken('uid-a');
 const TOKEN_B = syntheticIdToken('uid-b');
 
-type Reply = Response | Error | (() => Promise<Response>);
+// `deaf`: an answer that arrives even after the client abandoned the request (it ignores the abort signal), as a late
+// network answer can.
+interface Deaf { readonly deaf: () => Promise<Response> }
+type Reply = Response | Error | (() => Promise<Response>) | Deaf;
+const isDeaf = (reply: Reply | undefined): reply is Deaf => typeof reply === 'object' && 'deaf' in reply;
 interface Sent { readonly method: string; readonly url: string; readonly init: RequestInit; readonly headers: Headers }
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-const active = (csrf = CSRF): Response => json(200, { status: 'active', csrfToken: csrf });
+/** The tenant session 200 as the server writes it (M7A-CUSTOMERS-P5-R1): whose session it is rides along as `subject`. */
+const subjectOf = (uid: string): string => createHash('sha256').update(`tmpos-session-subject:v1\nfirebase\n${uid}`).digest('base64url');
+const active = (csrf = CSRF, uid = 'uid-a'): Response => json(200, { status: 'active', csrfToken: csrf, subject: subjectOf(uid) });
 const refused = (status: number): Response => json(status, { error: 'refused', requestId: 'r1' });
+const NONE = (): Response => refused(401); // the session read when this browser holds no session
+const ticks = async (n = 5): Promise<void> => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
 
 function scripted(replies: Reply[]) {
   const sent: Sent[] = [];
   const fetch = (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     sent.push({ method: init.method ?? 'GET', url: String(input), init, headers: new Headers(init.headers) });
     const reply = replies.shift();
+    if (isDeaf(reply)) return reply.deaf(); // answered whatever the signal says
     return new Promise<Response>((resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
       if (reply === undefined) return reject(new Error('unscripted request'));
@@ -43,6 +55,9 @@ function held(): { reply: () => Promise<Response>; answer: (r: Response) => void
 }
 
 const PATHS: readonly string[] = Object.values(TENANT_SESSION_PATHS);
+const lines = (sent: readonly Sent[]): string[] => sent.map((r) => `${r.method} ${r.url}`);
+const READ = `GET ${TENANT_SESSION_PATHS.current}`;
+const LOGIN = `POST ${TENANT_SESSION_PATHS.login}`;
 function assertBoundaryOnly(sent: readonly Sent[]): void {
   for (const r of sent) {
     assert.ok(PATHS.includes(r.url), `left the tenant session boundary: ${r.url}`);
@@ -54,101 +69,125 @@ function assertBoundaryOnly(sent: readonly Sent[]): void {
   }
 }
 
-test('TSC-01. a first ensure logs in with the Bearer and intent header only, then confirms by a session read', async () => {
-  const net = scripted([active('x'.repeat(43)), active()]);
+test('TSC-01. a first ensure reads the session, finds none, logs in with the Bearer and intent header only, then confirms by a session read', async () => {
+  const net = scripted([NONE(), active('x'.repeat(43)), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   const result = await client.ensure('uid-a', async () => TOKEN_A);
   assert.deepEqual(result, { kind: 'ok', csrf: CSRF }); // the confirming read's token is the one kept
-  const [login, check] = net.sent;
-  assert.equal(login.method, 'POST');
-  assert.equal(login.url, TENANT_SESSION_PATHS.login);
+  const [first, login, check] = net.sent;
+  assert.deepEqual(lines(net.sent), [READ, LOGIN, READ]);
+  assert.equal(first.headers.get('authorization'), null);
   assert.equal(login.headers.get('authorization'), `Bearer ${TOKEN_A}`);
   assert.equal(login.headers.get('x-tmpos-csrf'), '1');
   assert.equal(login.headers.get('x-tmpos-reauthenticate'), null);
   assert.equal(login.init.body, undefined); // the login has no body: no client-asserted identity
-  assert.equal(check.method, 'GET');
-  assert.equal(check.url, TENANT_SESSION_PATHS.current);
   assert.equal(check.headers.get('authorization'), null); // the bearer is sent once
+  for (const r of net.sent) assert.equal(r.headers.get('x-tmpos-session-subject'), null); // the digest is never sent
   assertBoundaryOnly(net.sent);
 });
 
-test('TSC-02. the same user reuses the session after a read confirms it; a 401 read signs in again', async () => {
-  const net = scripted([active(), active(), active(ROTATED), refused(401), active(), active()]);
+test('TSC-02. the same user reuses the session a read names as theirs; a 401 read signs in again', async () => {
+  const net = scripted([NONE(), active(), active(), active(ROTATED), NONE(), active(), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   let tokens = 0;
   const idToken = async () => { tokens += 1; return TOKEN_A; };
   await client.ensure('uid-a', idToken);
   assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: ROTATED }); // another tab rotated it
   assert.equal(tokens, 1);
-  assert.deepEqual(net.sent.slice(2).map((r) => r.url), [TENANT_SESSION_PATHS.current]);
+  assert.deepEqual(lines(net.sent.slice(3)), [READ]);
   assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: CSRF }); // expired: logged in again
   assert.equal(tokens, 2);
-  assert.deepEqual(net.sent.slice(3).map((r) => `${r.method} ${r.url}`), [
-    `GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`,
-  ]);
+  assert.deepEqual(lines(net.sent.slice(4)), [READ, LOGIN, READ]);
 });
 
-test('TSC-03. a different user never reuses the previous user session: it logs in with its own token', async () => {
-  const net = scripted([active(), active(), active(ROTATED), active(ROTATED)]);
+test('TSC-03. a different user never reuses the previous user session: the read names another identity, so it logs in with its own token', async () => {
+  const net = scripted([NONE(), active(), active(), active(CSRF, 'uid-a'), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   await client.ensure('uid-a', async () => TOKEN_A);
   const result = await client.ensure('uid-b', async () => TOKEN_B);
   assert.deepEqual(result, { kind: 'ok', csrf: ROTATED });
-  assert.equal(net.sent[2].method, 'POST'); // no session read first: that cookie is the previous user's
-  assert.equal(net.sent[2].headers.get('authorization'), `Bearer ${TOKEN_B}`);
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, LOGIN, READ]); // A's cookie was read, and never taken as B's
+  assert.equal(net.sent[4].headers.get('authorization'), `Bearer ${TOKEN_B}`);
 });
 
-test('TSC-04. no signed-in user sends nothing; refusals, rate limits, outages and malformed answers are never ok', async () => {
-  const none = scripted([]);
+test('TSC-04. no signed-in user logs nothing in; refusals, rate limits, outages and malformed answers are never ok, and a first read that decides nothing signs nothing in', async () => {
+  const none = scripted([NONE()]);
   assert.deepEqual(await createTenantSessionClient({ fetch: none.fetch }).ensure('uid-a', async () => null), { kind: 'no-identity' });
-  assert.equal(none.sent.length, 0);
-  const malformedToken = scripted([]);
+  assert.deepEqual(lines(none.sent), [READ]); // the read only: no login without the user's own token
+  const malformedToken = scripted([NONE()]);
   assert.deepEqual(await createTenantSessionClient({ fetch: malformedToken.fetch }).ensure('uid-a', async () => 'not a token'), { kind: 'refused' });
-  assert.equal(malformedToken.sent.length, 0);
-  const cases: Array<[Reply[], string]> = [
-    [[refused(401)], 'refused'],
-    [[refused(403)], 'refused'],
-    [[refused(429)], 'rate-limited'],
-    [[refused(503)], 'unavailable'],
-    [[new Error('network')], 'unavailable'],
-    [[json(200, { status: 'active', csrfToken: 'short' })], 'unavailable'],
-    [[new Response('{"status":"active"}', { status: 200, headers: { 'content-type': 'application/json-patch+json' } })], 'unavailable'],
-    [[active(), refused(401)], 'refused'], // the cookie did not stick: nothing confirmed it
+  assert.deepEqual(lines(malformedToken.sent), [READ]);
+  // The login's answers.
+  const afterLogin: Array<[Reply[], string]> = [
+    [[NONE(), refused(401)], 'refused'],
+    [[NONE(), refused(403)], 'refused'],
+    [[NONE(), refused(429)], 'rate-limited'],
+    [[NONE(), refused(503)], 'unavailable'],
+    [[NONE(), new Error('network')], 'unavailable'],
+    [[NONE(), json(200, { status: 'active', csrfToken: 'short' })], 'unavailable'],
+    [[NONE(), new Response('{"status":"active"}', { status: 200, headers: { 'content-type': 'application/json-patch+json' } })], 'unavailable'],
+    [[NONE(), active(), refused(401)], 'refused'], // the cookie did not stick: nothing confirmed it
+    [[NONE(), active(), active(CSRF, 'uid-b')], 'unavailable'], // another sign-in replaced it: nothing confirmed
+    [[NONE(), active(), json(200, { status: 'active', csrfToken: CSRF })], 'unavailable'], // a confirmation naming nobody
   ];
-  for (const [replies, kind] of cases) {
+  for (const [replies, kind] of afterLogin) {
     const net = scripted(replies);
     assert.deepEqual(await createTenantSessionClient({ fetch: net.fetch }).ensure('uid-a', async () => TOKEN_A), { kind }, kind);
+  }
+  // The first read's answers that decide nothing: an outage stays an outage, and no login is tried (no loop).
+  const firstRead: Array<[Reply, string]> = [
+    [refused(429), 'rate-limited'],
+    [refused(503), 'unavailable'],
+    [refused(403), 'unavailable'],
+    [new Error('network'), 'unavailable'],
+    [json(200, { status: 'active', csrfToken: CSRF }), 'unavailable'], // no subject
+    [json(200, { status: 'active', csrfToken: CSRF, subject: 'short' }), 'unavailable'],
+    [json(200, { status: 'active', csrfToken: CSRF, subject: 7 }), 'unavailable'],
+    [new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } }), 'unavailable'],
+  ];
+  for (const [reply, kind] of firstRead) {
+    const net = scripted([reply]);
+    let asked = 0;
+    assert.deepEqual(await createTenantSessionClient({ fetch: net.fetch }).ensure('uid-a', async () => { asked += 1; return TOKEN_A; }), { kind }, kind);
+    assert.deepEqual(lines(net.sent), [READ], kind);
+    assert.equal(asked, 0, kind); // not even an ID token was asked for
   }
 });
 
 test('TSC-05. reset supersedes a login in flight: its late answer establishes nothing', async () => {
   const late = held();
-  const net = scripted([late.reply, active(ROTATED), active(ROTATED)]);
+  const net = scripted([NONE(), late.reply, NONE(), active(ROTATED), active(ROTATED)]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   const first = client.ensure('uid-a', async () => TOKEN_A);
-  await new Promise((r) => setTimeout(r, 0));
+  await ticks();
+  assert.deepEqual(lines(net.sent), [READ, LOGIN]);
   client.reset();
   assert.deepEqual(await first, { kind: 'unavailable' });
   late.answer(active());
-  // The next ensure logs in again (no remembered session), rather than trusting the abandoned exchange.
+  // The next ensure asks again, rather than trusting the abandoned exchange.
   assert.deepEqual(await client.ensure('uid-a', async () => TOKEN_A), { kind: 'ok', csrf: ROTATED });
-  assert.equal(net.sent[1].method, 'POST');
+  assert.deepEqual(lines(net.sent.slice(2)), [READ, LOGIN, READ]);
 });
 
-test('TSC-06. concurrent ensures for one user share one login', async () => {
-  const net = scripted([active(), active()]);
+test('TSC-06. concurrent ensures for one user share one attempt: one login, or one reuse read', async () => {
+  const net = scripted([NONE(), active(), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   const [a, b] = await Promise.all([client.ensure('uid-a', async () => TOKEN_A), client.ensure('uid-a', async () => TOKEN_A)]);
   assert.deepEqual(a, b);
-  assert.equal(net.sent.length, 2);
+  assert.deepEqual(lines(net.sent), [READ, LOGIN, READ]);
+  const reuse = scripted([active()]);
+  const fresh = createTenantSessionClient({ fetch: reuse.fetch });
+  const both = await Promise.all([fresh.ensure('uid-a', async () => TOKEN_A), fresh.ensure('uid-a', async () => TOKEN_A)]);
+  assert.deepEqual(both, [{ kind: 'ok', csrf: CSRF }, { kind: 'ok', csrf: CSRF }]);
+  assert.deepEqual(lines(reuse.sent), [READ]);
 });
 
 test('TSC-07. reauthenticate sends the fresh token in re-authentication mode and keeps the rotated session token', async () => {
-  const net = scripted([active(), active(), active('n'.repeat(43)), active(ROTATED)]);
+  const net = scripted([NONE(), active(), active(), active('n'.repeat(43)), active(ROTATED)]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   await client.ensure('uid-a', async () => TOKEN_A);
   assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_B), { kind: 'ok', csrf: ROTATED });
-  const login = net.sent[2];
+  const login = net.sent[3];
   assert.equal(login.url, TENANT_SESSION_PATHS.login);
   assert.equal(login.headers.get('authorization'), `Bearer ${TOKEN_B}`);
   assert.equal(login.headers.get('x-tmpos-reauthenticate'), '1');
@@ -157,7 +196,7 @@ test('TSC-07. reauthenticate sends the fresh token in re-authentication mode and
 });
 
 test('TSC-08. a refused re-authentication is not ok even when the prior session still stands; none held sends nothing', async () => {
-  const net = scripted([active(), active(), refused(401), active()]);
+  const net = scripted([NONE(), active(), active(), refused(401), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   await client.ensure('uid-a', async () => TOKEN_A);
   assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_B), { kind: 'refused' });
@@ -167,25 +206,27 @@ test('TSC-08. a refused re-authentication is not ok even when the prior session 
 });
 
 test('TSC-09. logout sends the kept CSRF token, forgets the session whatever the answer, and never throws', async () => {
-  const net = scripted([active(), active(), refused(503), active(), active()]);
+  const net = scripted([NONE(), active(), active(), refused(503), NONE(), active(), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   await client.ensure('uid-a', async () => TOKEN_A);
   await client.logout();
-  const post = net.sent[2];
+  const post = net.sent[3];
   assert.equal(post.method, 'POST');
   assert.equal(post.url, TENANT_SESSION_PATHS.logout);
   assert.equal(post.headers.get('x-tmpos-session-csrf'), CSRF);
   assert.equal(post.headers.get('x-tmpos-csrf'), '1');
-  // Forgotten: the next ensure signs in rather than reusing the ended session.
+  // Forgotten: nothing to re-authenticate, and the next ensure asks the server again.
+  assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_B), { kind: 'refused' });
+  assert.equal(net.sent.length, 4);
   await client.ensure('uid-a', async () => TOKEN_A);
-  assert.equal(net.sent[3].method, 'POST');
+  assert.deepEqual(lines(net.sent.slice(4)), [READ, LOGIN, READ]);
   assertBoundaryOnly(net.sent);
 });
 
 test('TSC-10. logout with nothing remembered asks for a surviving session first; no session sends no logout', async () => {
   const survived = scripted([active(), new Response(null, { status: 204 })]);
   await createTenantSessionClient({ fetch: survived.fetch }).logout();
-  assert.deepEqual(survived.sent.map((r) => `${r.method} ${r.url}`), [`GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.logout}`]);
+  assert.deepEqual(lines(survived.sent), [READ, `POST ${TENANT_SESSION_PATHS.logout}`]);
   assert.equal(survived.sent[1].headers.get('x-tmpos-session-csrf'), CSRF);
   const gone = scripted([refused(401)]);
   await createTenantSessionClient({ fetch: gone.fetch }).logout();
@@ -196,46 +237,45 @@ test('TSC-10. logout with nothing remembered asks for a surviving session first;
 
 test('TSC-11. a user switch: the logout in flight finishes before the next user reads or logs in (AM4)', async () => {
   const ended = held();
-  const net = scripted([active(), active(), ended.reply, active(ROTATED), active(ROTATED)]);
+  const net = scripted([NONE(), active(), active(), ended.reply, NONE(), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   await client.ensure('uid-a', async () => TOKEN_A);
   const logout = client.logout(); // user A's session, with A's remembered CSRF token
   const next = client.ensure('uid-b', async () => TOKEN_B);
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(net.sent.slice(2).map((r) => `${r.method} ${r.url}`), [`POST ${TENANT_SESSION_PATHS.logout}`]); // B waits
+  await ticks();
+  assert.deepEqual(lines(net.sent.slice(3)), [`POST ${TENANT_SESSION_PATHS.logout}`]); // B waits, not even reading
   client.reset(); // a later reset does not abandon the running logout
   ended.answer(new Response(null, { status: 204 }));
   await logout;
   assert.deepEqual(await next, { kind: 'unavailable' }); // superseded by the reset, after the logout finished
   assert.deepEqual(await client.ensure('uid-b', async () => TOKEN_B), { kind: 'ok', csrf: ROTATED });
-  assert.deepEqual(net.sent.slice(2).map((r) => `${r.method} ${r.url}`), [
-    `POST ${TENANT_SESSION_PATHS.logout}`, `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`,
-  ]);
-  assert.equal(net.sent[2].headers.get('x-tmpos-session-csrf'), CSRF); // A's token ended A's session
-  assert.equal(net.sent[3].headers.get('authorization'), `Bearer ${TOKEN_B}`);
+  assert.deepEqual(lines(net.sent.slice(3)), [`POST ${TENANT_SESSION_PATHS.logout}`, READ, LOGIN, READ]);
+  assert.equal(net.sent[3].headers.get('x-tmpos-session-csrf'), CSRF); // A's token ended A's session
+  assert.equal(net.sent[5].headers.get('authorization'), `Bearer ${TOKEN_B}`);
   assertBoundaryOnly(net.sent);
 });
 
 test('TSC-12. an ensure started before a logout is abandoned; logouts run one after another', async () => {
-  const login = held();
+  const early = held();
   const first = held();
-  // A's login is in flight when the sign-out comes; its late answer establishes nothing.
-  const net = scripted([login.reply, first.reply, new Response(null, { status: 204 }), refused(401)]);
+  // A's first session read is in flight when the sign-out comes; its late answer establishes nothing.
+  const net = scripted([early.reply, first.reply, new Response(null, { status: 204 }), refused(401)]);
   const client = createTenantSessionClient({ fetch: net.fetch });
-  const early = client.ensure('uid-a', async () => TOKEN_A);
-  await new Promise((r) => setTimeout(r, 0));
+  const started = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
   const one = client.logout(); // nothing remembered: it reads the current session first
   const two = client.logout();
-  assert.deepEqual(await early, { kind: 'unavailable' });
-  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(await started, { kind: 'unavailable' });
+  await ticks(1);
   assert.equal(net.sent.length, 2); // the second logout has not started: the first is still reading
   first.answer(active());
   await one;
   await two;
-  login.answer(active());
-  assert.deepEqual(net.sent.map((r) => `${r.method} ${r.url}`), [
-    `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.logout}`,
-    `GET ${TENANT_SESSION_PATHS.current}`, // the second logout, only after the first ended: no session left, nothing more
+  early.answer(active());
+  assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_B), { kind: 'refused' }); // the late read kept nothing
+  assert.deepEqual(lines(net.sent), [
+    READ, READ, `POST ${TENANT_SESSION_PATHS.logout}`,
+    READ, // the second logout, only after the first ended: no session left, nothing more
   ]);
 });
 
@@ -251,12 +291,13 @@ test('TSC-13. a 429 with a valid Retry-After is rate-limited with that delay, at
     return act(client);
   };
   const ensure = (c: ReturnType<typeof createTenantSessionClient>) => c.ensure('uid-a', async () => TOKEN_A);
-  // The login, the confirming read after it, the read of a remembered session, and a re-authentication.
+  // The first session read, the login, the confirming read after it, the read of a remembered session, and a re-authentication.
   assert.deepEqual(await at([limited('7')], ensure), { kind: 'rate-limited', retryAfterSeconds: 7 });
-  assert.deepEqual(await at([active(), limited('12')], ensure), { kind: 'rate-limited', retryAfterSeconds: 12 });
-  assert.deepEqual(await at([active(), active(), limited('30')], async (c) => { await ensure(c); return ensure(c); }), { kind: 'rate-limited', retryAfterSeconds: 30 });
+  assert.deepEqual(await at([NONE(), limited('12')], ensure), { kind: 'rate-limited', retryAfterSeconds: 12 });
+  assert.deepEqual(await at([NONE(), active(), limited('20')], ensure), { kind: 'rate-limited', retryAfterSeconds: 20 });
+  assert.deepEqual(await at([NONE(), active(), active(), limited('30')], async (c) => { await ensure(c); return ensure(c); }), { kind: 'rate-limited', retryAfterSeconds: 30 });
   assert.deepEqual(
-    await at([active(), active(), limited('45')], async (c) => { await ensure(c); return c.reauthenticate('uid-a', TOKEN_B); }),
+    await at([NONE(), active(), active(), limited('45')], async (c) => { await ensure(c); return c.reauthenticate('uid-a', TOKEN_B); }),
     { kind: 'rate-limited', retryAfterSeconds: 45 },
   );
   // Whole seconds, clamped to 1..300.
@@ -275,4 +316,164 @@ test('TSC-14. a 429 with no Retry-After, or one that is not whole seconds, carri
   // A Retry-After on any other status is not a rate limit and is not carried.
   const outage = new Response(JSON.stringify({ error: 'service_unavailable' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '9' } });
   assert.deepEqual(await createTenantSessionClient({ fetch: scripted([outage]).fetch }).ensure('uid-a', async () => TOKEN_A), { kind: 'unavailable' });
+});
+
+// M7A-CUSTOMERS-P5-R1 (DA-143) — a page load reuses the signed-in user's session, and only that user's.
+test('TSC-15. the subject the client recomputes equals the server\'s for the same user, and differs between users', async () => {
+  for (const uid of ['uid-a', 'uid-b', 'Zx9_long-firebase-uid-0000000000000', 'ünïcødé-uid']) {
+    const mine = await sessionSubjectOf(uid);
+    assert.equal(mine, serverSubjectOf({ authProvider: 'firebase', authProviderUid: uid }), uid);
+    assert.equal(mine, subjectOf(uid), uid); // and an independent digest of the documented label
+    assert.match(mine, /^[A-Za-z0-9_-]{43}$/);
+  }
+  assert.notEqual(await sessionSubjectOf('uid-a'), await sessionSubjectOf('uid-b'));
+  // Labelled: never the storage key (SHA-256 over provider and UID alone).
+  assert.notEqual(await sessionSubjectOf('uid-a'), createHash('sha256').update('firebase\nuid-a').digest('base64url'));
+});
+
+test('TSC-16. every page load that finds this user\'s session reuses it: one read each, no login, no ID token asked', async () => {
+  for (let load = 1; load <= 7; load++) {
+    const net = scripted([active(`${load}`.padEnd(43, 'k'))]);
+    let asked = 0;
+    const result = await createTenantSessionClient({ fetch: net.fetch }).ensure('uid-a', async () => { asked += 1; return TOKEN_A; });
+    assert.deepEqual(result, { kind: 'ok', csrf: `${load}`.padEnd(43, 'k') }, `load ${load}`);
+    assert.deepEqual(lines(net.sent), [READ], `load ${load}`);
+    assert.equal(asked, 0, `load ${load}`);
+  }
+});
+
+test('TSC-17. a session another identity left in this browser is never reused: this user logs in, and the login must be confirmed as theirs', async () => {
+  const net = scripted([active(CSRF, 'uid-a'), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  assert.deepEqual(await client.ensure('uid-b', async () => TOKEN_B), { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(net.sent), [READ, LOGIN, READ]);
+  assert.equal(net.sent[1].headers.get('authorization'), `Bearer ${TOKEN_B}`);
+  // With no identity to present, another identity's session is not taken either: nothing is kept.
+  const stranded = scripted([active(CSRF, 'uid-a')]);
+  const other = createTenantSessionClient({ fetch: stranded.fetch });
+  assert.deepEqual(await other.ensure('uid-b', async () => null), { kind: 'no-identity' });
+  assert.deepEqual(await other.reauthenticate('uid-b', TOKEN_B), { kind: 'refused' }); // nothing remembered
+  assert.deepEqual(lines(stranded.sent), [READ]);
+});
+
+test('TSC-18. a late session read from an earlier initialization never answers for the current one', async () => {
+  const late = held();
+  const net = scripted([{ deaf: late.reply }, NONE(), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  const first = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
+  const second = client.ensure('uid-b', async () => TOKEN_B); // a user switch supersedes A's read in flight
+  assert.deepEqual(await second, { kind: 'ok', csrf: ROTATED });
+  late.answer(active(CSRF, 'uid-a')); // A's answer IS delivered, after B's session was established
+  assert.deepEqual(await first, { kind: 'unavailable' });
+  await ticks();
+  assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_A), { kind: 'refused' }); // A was never remembered
+  assert.deepEqual(lines(net.sent), [READ, READ, LOGIN, READ]);
+});
+
+test('TSC-19. a subject that cannot be computed confirms nothing and signs nothing in', async () => {
+  const net = scripted([active()]);
+  const client = createTenantSessionClient({ fetch: net.fetch, subjectOf: async () => { throw new Error('no digest'); } });
+  assert.deepEqual(await client.ensure('uid-a', async () => TOKEN_A), { kind: 'unavailable' });
+  assert.deepEqual(lines(net.sent), [READ]);
+});
+
+test('TSC-20. a fresh ensure waits for the attempt in flight for its user, then reads again; a plain ensure still shares that attempt', async () => {
+  const first = held();
+  const net = scripted([first.reply, active(ROTATED)]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  const started = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
+  const shared = client.ensure('uid-a', async () => TOKEN_A);
+  const fresh = client.ensure('uid-a', async () => TOKEN_A, { fresh: true });
+  await ticks();
+  assert.deepEqual(lines(net.sent), [READ]); // the fresh call has sent nothing while the first read is out
+  first.answer(active(CSRF));
+  assert.deepEqual(await started, { kind: 'ok', csrf: CSRF });
+  assert.deepEqual(await shared, { kind: 'ok', csrf: CSRF });
+  assert.deepEqual(await fresh, { kind: 'ok', csrf: ROTATED }); // the answer of its own read, sent after the first ended
+  assert.deepEqual(lines(net.sent), [READ, READ]);
+});
+
+test('TSC-21. a fresh ensure waiting on its user\'s attempt answers unavailable and sends nothing when another user, or a reset, comes first', async () => {
+  const first = held();
+  const net = scripted([first.reply, NONE(), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  const started = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
+  // This half guards the epoch check after the wait (a plain, shared call would answer unavailable here too); TSC-20 is the one that fails without `fresh`.
+  const fresh = client.ensure('uid-a', async () => TOKEN_A, { fresh: true });
+  const other = client.ensure('uid-b', async () => TOKEN_B);
+  assert.deepEqual(await fresh, { kind: 'unavailable' });
+  assert.deepEqual(await started, { kind: 'unavailable' });
+  assert.deepEqual(await other, { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(net.sent), [READ, READ, LOGIN, READ]); // nothing more for uid-a after the switch
+  assert.equal(net.sent[2].headers.get('authorization'), `Bearer ${TOKEN_B}`);
+  const reset = held();
+  const quiet = scripted([reset.reply]);
+  const again = createTenantSessionClient({ fetch: quiet.fetch });
+  void again.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
+  const waiting = again.ensure('uid-a', async () => TOKEN_A, { fresh: true });
+  again.reset();
+  assert.deepEqual(await waiting, { kind: 'unavailable' });
+  await ticks();
+  assert.deepEqual(lines(quiet.sent), [READ]);
+});
+
+test('TSC-22. a reset or a user switch while the subject digest is pending: the read it was made for keeps nothing', async () => {
+  let release!: (subject: string) => void;
+  const digest = new Promise<string>((resolve) => { release = resolve; });
+  const net = scripted([active()]);
+  const client = createTenantSessionClient({ fetch: net.fetch, subjectOf: () => digest });
+  const started = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks();
+  assert.deepEqual(lines(net.sent), [READ]); // answered: the digest is what is pending
+  client.reset();
+  release(subjectOf('uid-a'));
+  assert.deepEqual(await started, { kind: 'unavailable' });
+  assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_A), { kind: 'refused' }); // nothing kept, nothing sent
+  assert.deepEqual(lines(net.sent), [READ]);
+  // The same window closed by another user's ensure.
+  let releaseA!: (subject: string) => void;
+  const digestA = new Promise<string>((resolve) => { releaseA = resolve; });
+  const switched = scripted([active(CSRF, 'uid-a'), active(ROTATED, 'uid-b')]);
+  const shared = createTenantSessionClient({ fetch: switched.fetch, subjectOf: (uid) => (uid === 'uid-a' ? digestA : Promise.resolve(subjectOf(uid))) });
+  const a = shared.ensure('uid-a', async () => TOKEN_A);
+  await ticks();
+  const b = shared.ensure('uid-b', async () => TOKEN_B);
+  assert.deepEqual(await b, { kind: 'ok', csrf: ROTATED });
+  releaseA(subjectOf('uid-a')); // A's digest ends after B's session was kept
+  assert.deepEqual(await a, { kind: 'unavailable' });
+  assert.deepEqual(await shared.reauthenticate('uid-a', TOKEN_A), { kind: 'refused' }); // A was never remembered
+  assert.deepEqual(lines(switched.sent), [READ, READ]);
+});
+
+test('TSC-23. after a 401 read, a subject that cannot be computed signs nothing in: no ID token asked, no login', async () => {
+  const net = scripted([NONE()]);
+  let asked = 0;
+  const client = createTenantSessionClient({ fetch: net.fetch, subjectOf: async () => { throw new Error('no digest'); } });
+  assert.deepEqual(await client.ensure('uid-a', async () => { asked += 1; return TOKEN_A; }), { kind: 'unavailable' });
+  assert.deepEqual(lines(net.sent), [READ]);
+  assert.equal(asked, 0);
+});
+
+test('TSC-24. a fresh ensure for a user this client has moved on from answers unavailable at once, sends nothing and supersedes nothing', async () => {
+  const read = held();
+  const net = scripted([read.reply]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  const b = client.ensure('uid-b', async () => TOKEN_B);
+  await ticks(1);
+  let asked = 0;
+  assert.deepEqual(await client.ensure('uid-a', async () => { asked += 1; return TOKEN_A; }, { fresh: true }), { kind: 'unavailable' });
+  assert.deepEqual(lines(net.sent), [READ]); // B's read only: nothing for uid-a
+  read.answer(active(ROTATED, 'uid-b'));
+  assert.deepEqual(await b, { kind: 'ok', csrf: ROTATED }); // B's attempt was not superseded
+  // A session kept for uid-b: a fresh uid-a check is refused the same way, with nothing sent and B's session kept.
+  assert.deepEqual(await client.ensure('uid-a', async () => { asked += 1; return TOKEN_A; }, { fresh: true }), { kind: 'unavailable' });
+  assert.deepEqual(lines(net.sent), [READ]);
+  assert.equal(asked, 0);
+  // B is still remembered: its re-authentication is sent (unscripted here, so unavailable) rather than refused unsent.
+  assert.deepEqual(await client.reauthenticate('uid-b', TOKEN_B), { kind: 'unavailable' });
+  assert.deepEqual(lines(net.sent), [READ, LOGIN, READ]);
 });

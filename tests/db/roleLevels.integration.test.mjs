@@ -755,7 +755,7 @@ async function withEntry(overrides, fn) {
       const head = Object.entries(unsafeHeaders(s, null)).map(([k, v]) => `${k}: ${v}\r\n`).join('');
       return rawRequest(port, `${method} ${path} HTTP/1.1\r\n${head}${lines}Connection: close\r\n\r\n${tail}`, { localAddress: clientAddress });
     },
-    list: (s, query = '?limit=100') => send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, { host: TENANT_HOST, cookie: s.cookie }, undefined, { localAddress: clientAddress }),
+    list: (s, query = '?limit=100') => send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, { host: TENANT_HOST, cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf }, undefined, { localAddress: clientAddress }),
     current: (s) => send(port, 'GET', sessionPaths('tenant').current, { host: TENANT_HOST, cookie: s.cookie }, undefined, { localAddress: clientAddress }),
     /** The log records the runtime wrote for one reply, by its request id. */
     records: (reply) => cap.lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } })

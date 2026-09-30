@@ -33,7 +33,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, unreachableTestDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
@@ -44,7 +44,7 @@ import { createPostgresSessionStore, tenantMintProof } from '../../server/persis
 import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
 import { createPostgresPlatformAdmission, readPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
 import { lockPlatformAuthority } from '../../server/persistence/postgresPrincipalResolver.ts';
-import { createPostgresCustomerDirectory } from '../../server/persistence/postgresCustomerDirectory.ts';
+import { createPostgresCustomerDirectory, createPostgresCustomerDetail } from '../../server/persistence/postgresCustomerDirectory.ts';
 import { createPostgresRoleLevels } from '../../server/persistence/postgresRoleLevels.ts';
 import {
   createTenantEstablishCheck, createTenantRouteAuthorizer, createTenantSessionAdmission, readKey,
@@ -60,7 +60,7 @@ import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecu
 import { sessionPaths } from '../../server/runtime/routes.ts';
 import { SESSION_COOKIES, SESSION_TTL } from '../../server/runtime/sessions.ts';
 import {
-  CUSTOMER_DIRECTORY_PATH, createCustomerDirectoryRoute, decodeCustomerCursor, encodeCustomerCursor,
+  CUSTOMER_DETAIL_PATH, CUSTOMER_DIRECTORY_PATH, createCustomerDetailRoute, createCustomerDirectoryRoute, decodeCustomerCursor, encodeCustomerCursor,
 } from '../../server/runtime/customerDirectory.ts';
 import { encodeTenantCursor } from '../../server/runtime/tenantDirectory.ts';
 
@@ -330,6 +330,8 @@ const TRIAL_USER = await actor('trial-user', [tenantGrant(T_TRIAL, 'manager')], 
 // the real runtime, over a real local socket
 // ---------------------------------------------------------------------------
 
+/** The session CSRF token each sign-in answered, by its cookie pair. */
+const CSRF_OF = new Map();
 /** Every log line every instance emitted, across the whole suite. */
 const LOGS = [];
 
@@ -386,7 +388,10 @@ async function withApp(fn, over = {}) {
     readiness,
     log: { log: (line) => { logs.push(line); LOGS.push(line); } },
     ...(over.now === undefined ? {} : { now: over.now }),
-    routes: [createCustomerDirectoryRoute({ customers: over.customers ?? DIRECTORY }, over.deadlineMs === undefined ? {} : { deadlineMs: over.deadlineMs })],
+    routes: [
+      createCustomerDirectoryRoute({ customers: over.customers ?? DIRECTORY }, over.deadlineMs === undefined ? {} : { deadlineMs: over.deadlineMs }),
+      ...(over.detail === true ? [createCustomerDetailRoute({ customerDetail: createPostgresCustomerDetail({ client }) })] : []),
+    ],
     limits: testRequestLimits({ limiter: createMemoryRateLimiter({ now: () => (clock += 3_600_001) }) }),
     sessions: {
       tenant: {
@@ -394,7 +399,7 @@ async function withApp(fn, over = {}) {
         verifier: VERIFIER,
         admission: createTenantSessionAdmission({ admission: tenantAdmission }),
         authorizer: createTenantRouteAuthorizer({
-          admission: tenantAdmission, reads: new Set([readKey('GET', CUSTOMER_DIRECTORY_PATH)]), levels: ROLE_LEVELS,
+          admission: tenantAdmission, reads: new Set([readKey('GET', CUSTOMER_DIRECTORY_PATH), ...(over.detail === true ? [readKey('GET', CUSTOMER_DETAIL_PATH)] : [])]), levels: ROLE_LEVELS,
         }),
         store: SESSIONS,
       },
@@ -419,11 +424,13 @@ async function withApp(fn, over = {}) {
     assert.equal(reply.status, 200, `${audience} login for ${who.uid}: ${reply.body}`);
     const cookie = cookieOf(reply);
     await noteSession(cookie);
+    CSRF_OF.set(cookie, bodyOf(reply).csrfToken);
     return cookie;
   };
+  // A customer read names the session it presents (M7A-CUSTOMERS-P5-R1): the token the sign-in answered rides on the read.
   const list = (cookie, query = '') => {
     for (const m of query.matchAll(/cursor=([^&]*)/g)) CURSORS.add(m[1]);
-    return send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, cookie === null ? {} : { cookie });
+    return send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, cookie === null ? {} : { cookie, ...(CSRF_OF.has(cookie) ? { 'x-tmpos-session-csrf': CSRF_OF.get(cookie) } : {}) });
   };
   /** The refusal reason the runtime logged for one reply ('-' when none). */
   const reason = (reply) => {
@@ -1143,6 +1150,144 @@ test('M7C-13: listing writes no audit record and no event', async () => {
     assertRefusal(await list(a, `?cursor=${encodeCustomerCursor(randomUUID())}`), 400, 'invalid_request', 'unknown cursor');
     assert.deepEqual(await counts(), before);
   });
+});
+
+// ---------------------------------------------------------------------------
+// RB-01..06 (M7A-CUSTOMERS-P5-R1): the HTTP read binding. A customer read carries the session CSRF token of the session
+// whose cookie it presents; the tenant session 200s carry the session's own `subject`. When TMPOS_RB_WITNESS_DIR names a
+// folder, every observation is also appended to <folder>/http-<TMPOS_RB_WITNESS_TAG or 'run'>.jsonl BEFORE its assertion
+// (status, booleans, counts, synthetic A/B only), best effort: the assertions never depend on that write.
+// ---------------------------------------------------------------------------
+
+const RB_OUT = process.env.TMPOS_RB_WITNESS_DIR ?? null;
+const RB_TAG = process.env.TMPOS_RB_WITNESS_TAG ?? 'run';
+/** Append one observation line to the opt-in witness file; never fails a test. */
+function rbRecord(line) {
+  if (RB_OUT === null) return;
+  try {
+    mkdirSync(RB_OUT, { recursive: true });
+    appendFileSync(`${RB_OUT}/http-${RB_TAG}.jsonl`, `${JSON.stringify(line)}\n`);
+  } catch { /* evidence only */ }
+}
+const RB_IDS_A = new Set(SEED_A.map((r) => r.id));
+const RB_IDS_B = new Set(SEED_B.map((r) => r.id));
+const RB_HEADER = 'x-tmpos-session-csrf';
+const RB_SUBJECT = (uid) => createHash('sha256').update(`tmpos-session-subject:v1\nfirebase\n${uid}`).digest('base64url');
+
+/** Record one observation, then answer the reply. */
+function rbObserve(caseId, request, reply) {
+  let body = null;
+  try { body = JSON.parse(reply.body); } catch { /* not JSON */ }
+  const rows = Array.isArray(body?.customers) ? body.customers : body?.customer ? [body.customer] : [];
+  const line = {
+    case: caseId, request, status: reply.status,
+    hasCustomers: body !== null && typeof body === 'object' && ('customers' in body || 'customer' in body),
+    rowsOfA: rows.filter((c) => RB_IDS_A.has(c.id)).length, rowsOfB: rows.filter((c) => RB_IDS_B.has(c.id)).length,
+  };
+  rbRecord(line);
+  return reply;
+}
+
+test('RB-01..03, RB-05, RB-06: a customer read needs its own session CSRF token; the tenant session 200s carry the session subject', async () => {
+  const counts = async () => ({ ...(await owner`select
+      (select count(*)::int from public.audit_event) as audits,
+      (select count(*)::int from tmpos_internal.outbox_event) as events,
+      (select count(*)::int from tmpos_customer.customer) as customers`)[0] });
+  await withApp(async ({ port, login, list, reason }) => {
+    const tenantPaths = sessionPaths('tenant');
+    const loginOf = async (who) => {
+      const reply = await login(who);
+      assert.equal(reply.status, 200, reply.body);
+      const cookie = cookieOf(reply);
+      await noteSession(cookie);
+      return { cookie, reply, csrf: bodyOf(reply).csrfToken };
+    };
+    const a = await loginOf(A_OWNER);
+    const b = await loginOf(B_USER);
+    const get = (path, cookie, headers = {}) => send(port, 'GET', path, { cookie, ...headers });
+    const H = (token) => ({ [RB_HEADER]: token });
+    const before = await counts();
+
+    // RB-01: B's cookie with A's token.
+    const r01 = rbObserve('RB-01', 'list cookie=B header=A', await get(CUSTOMER_DIRECTORY_PATH, b.cookie, H(a.csrf)));
+    // RB-02: no header; two header lines; malformed (right length wrong alphabet; wrong length).
+    const r02a = rbObserve('RB-02', 'list cookie=B no-header', await get(CUSTOMER_DIRECTORY_PATH, b.cookie));
+    const r02b = rbObserve('RB-02', 'list cookie=B header=B twice', await get(CUSTOMER_DIRECTORY_PATH, b.cookie, { [RB_HEADER]: [b.csrf, b.csrf] }));
+    const r02c = rbObserve('RB-02', 'list cookie=B header=malformed-alphabet-43', await get(CUSTOMER_DIRECTORY_PATH, b.cookie, H('*'.repeat(43))));
+    const r02d = rbObserve('RB-02', 'list cookie=B header=malformed-length-5', await get(CUSTOMER_DIRECTORY_PATH, b.cookie, H('abcde')));
+    // RB-03: a cursor page (B has 250 customers; the default page is 50).
+    const first = await get(CUSTOMER_DIRECTORY_PATH, b.cookie, H(b.csrf));
+    const cursor = first.status === 200 ? bodyOf(first).nextCursor : null;
+    CURSORS.add(cursor);
+    const cq = `${CUSTOMER_DIRECTORY_PATH}?cursor=${cursor}`;
+    const r03a = rbObserve('RB-03', 'cursor-page cookie=B header=A', await get(cq, b.cookie, H(a.csrf)));
+    const r03b = rbObserve('RB-03', 'cursor-page cookie=B header=B', await get(cq, b.cookie, H(b.csrf)));
+    // RB-04: detail (composed beside the list for this case only).
+    // (a separate app instance below; recorded here in order)
+    // RB-05: sanity list.
+    const r05 = rbObserve('RB-05', 'list cookie=B header=B', await get(CUSTOMER_DIRECTORY_PATH, b.cookie, H(b.csrf)));
+    const mid = await counts();
+    // RB-06: the session 200s.
+    const s06 = {
+      a: bodyOf(rbObserve('RB-06', 'GET session cookie=A', await get(tenantPaths.current, a.cookie))),
+      b: bodyOf(rbObserve('RB-06', 'GET session cookie=B', await get(tenantPaths.current, b.cookie))),
+      la: bodyOf(a.reply), lb: bodyOf(b.reply),
+    };
+    rbRecord({
+      case: 'RB-06', request: 'subject fields', status: 200, hasCustomers: false, rowsOfA: 0, rowsOfB: 0,
+      getA: typeof s06.a.subject, getB: typeof s06.b.subject, loginA: typeof s06.la.subject, loginB: typeof s06.lb.subject,
+      getADiffersFromB: s06.a.subject !== s06.b.subject && s06.a.subject !== undefined,
+    });
+
+    // assertions, after every observation is on disk
+    for (const [label, r] of [['RB-01', r01], ['RB-02 none', r02a], ['RB-02 twice', r02b], ['RB-02 alphabet', r02c], ['RB-02 length', r02d], ['RB-03 A token', r03a]]) {
+      assertRefusal(r, 403, 'forbidden', label);
+      assert.ok(!('customers' in bodyOf(r)), `${label}: no customers key`);
+    }
+    assert.equal(reason(r01), 'csrf_session_invalid');
+    assert.equal(reason(r02a), 'csrf_session_missing');
+    assert.equal(reason(r02b), 'csrf_session_duplicate');
+    assert.equal(reason(r02c), 'csrf_session_invalid');
+    assert.equal(reason(r02d), 'csrf_session_invalid');
+    assert.equal(first.status, 200, first.body);
+    assert.equal(typeof cursor, 'string');
+    assert.equal(r03b.status, 200, r03b.body);
+    for (const c of bodyOf(r03b).customers) assert.ok(RB_IDS_B.has(c.id), 'cursor page: B rows only');
+    const p05 = pageOf(r05, 'RB-05');
+    assert.ok(p05.customers.length > 0);
+    for (const c of p05.customers) assert.ok(RB_IDS_B.has(c.id), 'RB-05: B rows only');
+    assert.deepEqual(mid, before, 'RB-05: no request wrote anything');
+    assert.equal(s06.a.status, 'active'); assert.equal(s06.b.status, 'active');
+    for (const [label, body, uid] of [['GET A', s06.a, A_OWNER.uid], ['GET B', s06.b, B_USER.uid], ['login A', s06.la, A_OWNER.uid], ['login B', s06.lb, B_USER.uid]]) {
+      assert.equal(body.subject, RB_SUBJECT(uid), `RB-06 ${label}: the session's own subject`);
+    }
+    assert.notEqual(s06.a.subject, s06.b.subject);
+  });
+});
+
+async function counts0() {
+  return { ...(await owner`select (select count(*)::int from public.audit_event) as audits, (select count(*)::int from tmpos_internal.outbox_event) as events, (select count(*)::int from tmpos_customer.customer) as customers`)[0] };
+}
+
+test('RB-04: customer detail needs its own session CSRF token; a foreign id with the right token is still a 404', async () => {
+  await withApp(async ({ port, login }) => {
+    const loginOf = async (who) => { const reply = await login(who); assert.equal(reply.status, 200, reply.body); const cookie = cookieOf(reply); await noteSession(cookie); return { cookie, csrf: bodyOf(reply).csrfToken }; };
+    const a = await loginOf(A_OWNER);
+    const b = await loginOf(B_USER);
+    const get = (path, cookie, token) => send(port, 'GET', path, { cookie, ...(token === undefined ? {} : { [RB_HEADER]: token }) });
+    const idB = SEED_B[0].id;
+    const idA = SEED_A[0].id;
+    const before = await counts0();
+    const r04a = rbObserve('RB-04', 'detail idB cookie=B header=A', await get(`${CUSTOMER_DIRECTORY_PATH}/${idB}`, b.cookie, a.csrf));
+    const r04b = rbObserve('RB-04', 'detail idB cookie=B header=B', await get(`${CUSTOMER_DIRECTORY_PATH}/${idB}`, b.cookie, b.csrf));
+    const r04c = rbObserve('RB-04', 'detail idA cookie=B header=B', await get(`${CUSTOMER_DIRECTORY_PATH}/${idA}`, b.cookie, b.csrf));
+    assertRefusal(r04a, 403, 'forbidden', 'RB-04 A token');
+    assert.ok(!('customer' in bodyOf(r04a)), 'RB-04: no customer key');
+    assert.equal(r04b.status, 200, r04b.body);
+    assert.equal(bodyOf(r04b).customer.id, idB);
+    assertRefusal(r04c, 404, 'not_found', 'RB-04 foreign id');
+    assert.deepEqual(await counts0(), before, 'RB-04: no request wrote anything');
+  }, { detail: true });
 });
 
 // REWRITTEN FOR DA-83 (M7A-CUSTOMERS-P2; judge-contract A-J2). 017 now sits under 018, whose routines call its page: a

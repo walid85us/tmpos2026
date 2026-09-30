@@ -10,8 +10,12 @@
 //     directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5) is its second in-memory holder: it keeps the token
 //     it was handed in refs, and beside an unresolved create in its in-memory hold store, only to compare it with the
 //     next one and to re-send that create on the same session — under the same rule (no state, storage, URL, DOM, log).
-//   - A session is only ever reused for the UID that established it: a different UID (a user switch in this browser)
-//     always logs in again, so one person's session can never answer for another.
+//   - A session is only ever reused for the user it belongs to. Every `ensure` first reads the session this browser
+//     already holds (M7A-CUSTOMERS-P5-R1, DA-143) and reuses it — with no login — only when the server's `subject` for it
+//     equals the digest of the UID asked for; the digest is recomputed here from that UID and never sent. No session, or
+//     another identity's, logs in (a login ends the session presented to it); an outage, a rate limit or a malformed
+//     answer logs in nothing. So a page load reuses the signed-in user's session, and one person's session can never
+//     answer for another.
 //   - Every reset supersedes earlier work: an answer that arrives under an older epoch is dropped, so a slow login for a
 //     user who has since signed out can never re-establish their session here.
 //   - A logout runs to completion and every later session step waits for it (M7A-CUSTOMERS-P3-R2 AM4): a user switch
@@ -29,6 +33,8 @@ export const INTENT_HEADER = 'X-TMPOS-CSRF'; // server/runtime/requestSecurity.t
 export const SESSION_CSRF_HEADER = 'X-TMPOS-Session-CSRF'; // server/runtime/sessions.ts SESSION_CSRF_HEADER
 const REAUTHENTICATE_HEADER = 'X-TMPOS-Reauthenticate'; // the login's re-authentication mode; value '1'
 const CSRF_RE = /^[A-Za-z0-9_-]{43}$/;
+const SUBJECT_RE = CSRF_RE; // a SHA-256 in base64url, as server/runtime/sessions.ts sessionSubjectOf writes it
+const SUBJECT_PREFIX = 'tmpos-session-subject:v1\nfirebase\n'; // sessionSubjectOf's label and the shop's one provider
 const BEARER_RE = /^[A-Za-z0-9\-._~+/]+=*$/; // RFC 6750 b64token
 const MAX_BEARER_LENGTH = 4096; // server/runtime/access.ts MAX_TOKEN_LENGTH
 export const JSON_TYPE_RE = /^application\/json\s*(?:;|$)/i; // exact media type: `\b` would admit application/json-patch+json
@@ -56,12 +62,16 @@ export type SessionResult =
 
 export interface TenantSessionClient {
   /**
-   * A confirmed tenant session for `uid`. When this page already holds one for the same UID a session read confirms it
-   * (and supplies its current CSRF token — another tab may have rotated it); otherwise, or when that read answers 401,
-   * the user's ID token (from `idToken`, null when that user is not signed in here) is exchanged at the login route and
-   * a session read confirms the new cookie. Concurrent calls for one UID share one attempt.
+   * A confirmed tenant session for `uid`. A session read comes first: a session the server names as `uid`'s is reused
+   * with its current CSRF token (another tab may have rotated it) and no login. Only when that read answers 401, or names
+   * another identity's session, is the user's ID token (from `idToken`, null when that user is not signed in here)
+   * exchanged at the login route, and a session read confirms the new cookie. Any other answer to the first read (an
+   * outage, a 429, a malformed body) ends the attempt without a login. Concurrent calls for one UID share one attempt,
+   * except a `fresh` call: it must describe the session as it stands AFTER an answer the caller already holds (a read
+   * refused 403), so it waits for an attempt in flight — which may have read before that answer — and then reads again;
+   * if another user's attempt, a logout or a reset came in between, it answers `unavailable` and sends nothing.
    */
-  ensure(uid: string, idToken: () => Promise<string | null>): Promise<SessionResult>;
+  ensure(uid: string, idToken: () => Promise<string | null>, options?: { readonly fresh?: boolean }): Promise<SessionResult>;
   /**
    * A recent sign-in by the user already signed in: `freshToken` (after a real provider re-authentication) sent once to
    * the login route in its re-authentication mode, beside this page's cookie. `ok` only when the server rotated the
@@ -91,6 +101,22 @@ function csrfOf(outcome: Outcome): string | null {
   return status === 'active' && typeof csrfToken === 'string' && CSRF_RE.test(csrfToken) ? csrfToken : null;
 }
 
+/** A session read's 200: its CSRF token and whose session it is; null for anything else, a missing subject included. */
+function heldOf(outcome: Outcome): { readonly csrf: string; readonly subject: string } | null {
+  const csrf = csrfOf(outcome);
+  if (csrf === null) return null;
+  const { subject } = (outcome as { body: { subject?: unknown } }).body;
+  return typeof subject === 'string' && SUBJECT_RE.test(subject) ? { csrf, subject } : null;
+}
+
+/** The `subject` the server names for `uid`'s session: SHA-256 over the label and the UID, in base64url. */
+export async function sessionSubjectOf(uid: string): Promise<string> {
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(SUBJECT_PREFIX + uid)));
+  let binary = '';
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 const statusOf = (outcome: Outcome): number | null => (outcome.kind === 'response' ? outcome.status : null);
 const wellFormed = (token: unknown): token is string =>
   typeof token === 'string' && token.length <= MAX_BEARER_LENGTH && BEARER_RE.test(token);
@@ -103,9 +129,12 @@ function undecided(outcome: Outcome): SessionResult {
   return Object.freeze(seconds === null ? { kind: 'rate-limited' } : { kind: 'rate-limited', retryAfterSeconds: seconds });
 }
 
-export function createTenantSessionClient(options: { fetch?: typeof fetch; timeoutMs?: number } = {}): TenantSessionClient {
+export function createTenantSessionClient(
+  options: { fetch?: typeof fetch; timeoutMs?: number; subjectOf?: (uid: string) => Promise<string> } = {},
+): TenantSessionClient {
   const send = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const subjectOf = options.subjectOf ?? sessionSubjectOf;
   const controllers = new Set<AbortController>();
   let memo: { readonly uid: string; readonly csrf: string } | null = null;
   let epoch = 0;
@@ -147,22 +176,45 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
     }
   }
 
-  /** A session read after a login: the new cookie, never the bearer, must answer for the session kept. */
+  /**
+   * Whose session a session read's 200 names: `uid`'s (its CSRF token), `other`, `failed` when the digest could not be
+   * made, or null when the answer is no such 200 (a 401, an outage, a malformed body, a 200 without a subject…).
+   */
+  async function whose(check: Outcome, uid: string): Promise<{ readonly csrf: string } | 'other' | 'failed' | null> {
+    const held = heldOf(check);
+    if (held === null) return null;
+    try {
+      return held.subject === (await subjectOf(uid)) ? { csrf: held.csrf } : 'other';
+    } catch {
+      return 'failed';
+    }
+  }
+
+  const keep = (uid: string, csrf: string): SessionResult => {
+    memo = Object.freeze({ uid, csrf });
+    return Object.freeze({ kind: 'ok', csrf });
+  };
+
+  /** A session read after a login: the new cookie, never the bearer, must answer for the session kept — and be `uid`'s. */
   async function confirm(uid: string, mine: number): Promise<SessionResult> {
     const check = await request('GET', TENANT_SESSION_PATHS.current, {}, mine);
     if (check.kind === 'superseded' || mine !== epoch) return UNAVAILABLE;
-    const token = csrfOf(check);
-    if (token !== null) {
-      memo = Object.freeze({ uid, csrf: token });
-      return Object.freeze({ kind: 'ok', csrf: token });
-    }
+    const held = await whose(check, uid);
+    if (mine !== epoch) return UNAVAILABLE;
+    if (held !== null) return typeof held === 'string' ? UNAVAILABLE : keep(uid, held.csrf); // another sign-in replaced it: nothing confirmed
     const status = statusOf(check);
     if (status === 401 || status === 403) return result('refused');
     return undecided(check);
   }
 
-  function ensure(uid: string, idToken: () => Promise<string | null>): Promise<SessionResult> {
-    if (pending !== null && pending.uid === uid) return pending.run;
+  function ensure(uid: string, idToken: () => Promise<string | null>, options: { readonly fresh?: boolean } = {}): Promise<SessionResult> {
+    // A check for a user this client has moved on from answers nothing and supersedes nothing.
+    if (options.fresh === true && ((pending !== null && pending.uid !== uid) || (memo !== null && memo.uid !== uid))) return Promise.resolve(UNAVAILABLE);
+    if (pending !== null && pending.uid === uid) {
+      if (options.fresh !== true) return pending.run;
+      const waited = epoch;
+      return pending.run.then(() => (waited === epoch ? ensure(uid, idToken, options) : UNAVAILABLE));
+    }
     // Another user's session is never reused, nor is any of their work in flight allowed to answer.
     if (pending !== null || (memo !== null && memo.uid !== uid)) supersede();
     if (memo !== null && memo.uid !== uid) memo = null;
@@ -172,18 +224,24 @@ export function createTenantSessionClient(options: { fetch?: typeof fetch; timeo
       // A logout still running finishes first: it can never end the session this call reads or makes.
       if (after !== null) await after;
       if (mine !== epoch) return UNAVAILABLE;
-      if (memo !== null && memo.uid === uid) {
-        const current = await request('GET', TENANT_SESSION_PATHS.current, {}, mine);
-        if (current.kind === 'superseded' || mine !== epoch) return UNAVAILABLE;
-        const token = csrfOf(current);
-        if (token !== null) {
-          memo = Object.freeze({ uid, csrf: token });
-          return Object.freeze({ kind: 'ok', csrf: token });
-        }
-        const status = statusOf(current);
-        if (status !== 401) return undecided(current);
-        memo = null; // the session ended (expiry, logout elsewhere, revocation): sign in again below
+      // The session this browser already holds — from this page, an earlier page load or another tab — is reused when
+      // the server names it as this user's (M7A-CUSTOMERS-P5-R1, DA-143): a reload or a reopen sends no login.
+      const current = await request('GET', TENANT_SESSION_PATHS.current, {}, mine);
+      if (current.kind === 'superseded' || mine !== epoch) return UNAVAILABLE;
+      const held = await whose(current, uid);
+      if (mine !== epoch || held === 'failed') return UNAVAILABLE;
+      if (held !== null && held !== 'other') return keep(uid, held.csrf);
+      // Only no session (expiry, logout elsewhere, revocation, none yet) or another identity's signs in; that login ends
+      // the session it is presented with. Anything else — an outage, a 429, a malformed answer — signs nothing in.
+      if (held === null && statusOf(current) !== 401) return undecided(current);
+      // The digest the confirming read is compared with is made before any login: one that cannot be made signs nothing in.
+      try {
+        await subjectOf(uid);
+      } catch {
+        return UNAVAILABLE;
       }
+      if (mine !== epoch) return UNAVAILABLE;
+      memo = null;
       let token: string | null;
       try {
         token = await idToken();

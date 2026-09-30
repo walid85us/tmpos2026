@@ -89,7 +89,9 @@ export type RecentAuthPolicy = 'none' | 'required';
  * Whether a route's handler receives the presenting session's store key (M7A-CUSTOMERS-P2): never, or always. Only a
  * session route with a declared authorization, a required trusted context and no idempotency may require it — a read
  * whose database routine binds the read to the very minted session that presented it, and derives its authority from
- * that session rather than from the scope a caller could name.
+ * that session rather than from the scope a caller could name. Since M7A-CUSTOMERS-P5-R1 such a read, though a GET,
+ * also requires the session CSRF header (app.ts), so it is bound to the session its client checked as well: a request
+ * whose cookie is another session's is refused before anything is read (DA-138).
  */
 export type SessionBindingPolicy = 'none' | 'required';
 

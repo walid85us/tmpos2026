@@ -425,6 +425,15 @@ export function principalKeyOf(principal: VerifiedPrincipal): string {
   return createHash('sha256').update(`${principal.authProvider}\n${principal.authProviderUid}`).digest('base64url');
 }
 
+/**
+ * The tenant session's `subject` (M7A-CUSTOMERS-P5-R1): SHA-256 over a fixed label, the provider and the UID, in
+ * base64url — a witness the shop recomputes from its signed-in user to tell whether a session is that user's. Labelled,
+ * so it is never equal to principalKeyOf's storage key; it names no tenant, grants nothing and is never taken as input.
+ */
+export function sessionSubjectOf(principal: VerifiedPrincipal): string {
+  return createHash('sha256').update(`tmpos-session-subject:v1\n${principal.authProvider}\n${principal.authProviderUid}`).digest('base64url');
+}
+
 /** Whether two origin lists share a host: cookies are scoped by host, never by scheme or port. */
 export function sharesHost(a: Iterable<string>, b: Iterable<string>): boolean {
   // A trailing dot spells the same host as an absolute name, so it is no separation either.
@@ -655,7 +664,12 @@ function createBoundary(
     await call((signal) => sessions.update(session.key, { lastSeenAt: Math.max(now(), session.lastSeenAt) }, signal));
   }
 
-  const active = (res: Response, csrfToken: string): void => { res.status(200).json({ status: 'active', csrfToken }); };
+  // The tenant boundary also names whose session this is (M7A-CUSTOMERS-P5-R1, DA-143), as a digest of the session's own
+  // verified principal that the shop recomputes from its signed-in user: a page load may then reuse a session it can
+  // prove is that user's, and never one another identity left in this browser. It selects and grants nothing.
+  const active = (res: Response, csrfToken: string, principal: VerifiedPrincipal): void => {
+    res.status(200).json(audience === 'tenant' ? { status: 'active', csrfToken, subject: sessionSubjectOf(principal) } : { status: 'active', csrfToken });
+  };
 
   // Reached only once the chain's login steps have all passed: ctx.principal is verified and its
   // evidence meets this boundary's policy. Admission decides, then the session is issued.
@@ -735,11 +749,11 @@ function createBoundary(
       return unavailable(res, ctx, outage('session', err));
     }
     res.setHeader('Set-Cookie', cookieHeader(cookieName, id, maxAgeSeconds));
-    active(res, csrfTokenOf(id, audience));
+    active(res, csrfTokenOf(id, audience), principal);
   };
 
   const current = (_req: Request, res: Response, ctx: RouteContext): void => {
-    active(res, (ctx.session as SessionContext).csrfToken);
+    active(res, (ctx.session as SessionContext).csrfToken, ctx.principal as VerifiedPrincipal);
   };
 
   /**

@@ -650,7 +650,7 @@ async function withEntry(overrides, fn) {
       const head = Object.entries(unsafeHeaders(s, null)).map(([k, v]) => `${k}: ${v}\r\n`).join('');
       return rawRequest(port, `POST ${CUSTOMER_DIRECTORY_PATH} HTTP/1.1\r\n${head}${lines}Connection: close\r\n\r\n${tail}`, { localAddress: clientAddress });
     },
-    list: (s, query = '?limit=100') => send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, { host: TENANT_HOST, cookie: s.cookie }, undefined, { localAddress: clientAddress }),
+    list: (s, query = '?limit=100') => send(port, 'GET', `${CUSTOMER_DIRECTORY_PATH}${query}`, { host: TENANT_HOST, cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf }, undefined, { localAddress: clientAddress }),
     logout: (s) => send(port, 'POST', sessionPaths('tenant').logout, {
       host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE,
       cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf,

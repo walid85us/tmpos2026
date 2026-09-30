@@ -28,13 +28,17 @@ vi.mock('../tenant/tenantSessionClient', async (importOriginal) => {
 });
 
 import { AccessProvider } from './AccessContext';
-import { tenantSession, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
+import { sessionSubjectOf, tenantSession, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
 
 const CSRF_A = 'a'.repeat(43);
 const CSRF_B = 'b'.repeat(43);
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const active = (csrf: string): Response => json(200, { status: 'active', csrfToken: csrf });
+/** A tenant session 200 naming `uid`'s session (M7A-CUSTOMERS-P5-R1: the session read names whose session it is). */
+const activeOf = async (csrf: string, uid: string): Promise<Response> =>
+  json(200, { status: 'active', csrfToken: csrf, subject: await sessionSubjectOf(uid) });
+const NONE = (): Response => json(401, { error: 'unauthenticated' });
 const user = (uid: string) => ({ uid, email: `${uid}@example.test` });
 
 interface Sent { readonly what: string; readonly headers: Headers }
@@ -88,11 +92,11 @@ describe('AccessContext — tenant session handoff (M7A-CUSTOMERS-P3-R2 AM4)', (
     await fire(user('uid-a'));
     await settle();
     expect(sent).toHaveLength(0); // a sign-in by itself sends nothing
-    script([active(CSRF_A), active(CSRF_A)]);
+    script([NONE(), await activeOf(CSRF_A, 'uid-a'), await activeOf(CSRF_A, 'uid-a')]); // no session yet: read, login, confirming read
     expect(await tenantSession.ensure('uid-a', async () => 'tok-a')).toEqual({ kind: 'ok', csrf: CSRF_A });
 
     let endA!: (r: Response) => void;
-    script([new Promise<Response>((resolve) => { endA = resolve; }), active(CSRF_B), active(CSRF_B)]);
+    script([new Promise<Response>((resolve) => { endA = resolve; }), NONE(), await activeOf(CSRF_B, 'uid-b'), await activeOf(CSRF_B, 'uid-b')]);
     await fire(user('uid-b')); // no sign-out between: Firebase simply reports another user
     const b = tenantSession.ensure('uid-b', async () => 'tok-b');
     await settle();
@@ -101,16 +105,17 @@ describe('AccessContext — tenant session handoff (M7A-CUSTOMERS-P3-R2 AM4)', (
     endA(new Response(null, { status: 204 }));
     expect(await b).toEqual({ kind: 'ok', csrf: CSRF_B });
     expect(sent.map((r) => r.what)).toEqual([
-      `POST ${TENANT_SESSION_PATHS.logout}`, `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`,
+      `POST ${TENANT_SESSION_PATHS.logout}`, `GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.login}`,
+      `GET ${TENANT_SESSION_PATHS.current}`,
     ]);
-    expect(sent[1].headers.get('authorization')).toBe('Bearer tok-b');
+    expect(sent[2].headers.get('authorization')).toBe('Bearer tok-b');
   });
 
   it('ATS-03. the same user reported again sends nothing; signing out afterwards ends that user\'s session', async () => {
     render(<AccessProvider><span /></AccessProvider>);
     script([]);
     await fire(user('uid-a'));
-    script([active(CSRF_A), active(CSRF_A)]);
+    script([NONE(), await activeOf(CSRF_A, 'uid-a'), await activeOf(CSRF_A, 'uid-a')]); // no session yet: read, login, confirming read
     await tenantSession.ensure('uid-a', async () => 'tok-a');
     script([]);
     await fire(user('uid-a')); // e.g. a token refresh or a re-subscription

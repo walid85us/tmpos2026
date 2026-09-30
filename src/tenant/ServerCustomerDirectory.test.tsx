@@ -44,6 +44,11 @@ import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSession
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import { decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder } from '../../server/runtime/customerDirectory';
+import { sessionSubjectOf } from '../../server/runtime/sessions';
+
+/** The tenant session 200 as the server writes it (M7A-CUSTOMERS-P5-R1): its token and whose session it is. */
+const activeBody = (uid: string, csrfToken: string) =>
+  ({ status: 'active', csrfToken, subject: sessionSubjectOf({ authProvider: 'firebase', authProviderUid: uid }) });
 
 const uuid = (n: number): string => `${n.toString(16).padStart(8, '0')}-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
 const TENANT_A = uuid(0xa);
@@ -104,9 +109,10 @@ function fakeServer() {
     reads: [] as ReadPlan[], // the next customer reads (list or detail)
     logins: [] as number[], // the next logins
     checks: [] as number[], // the next session reads
-    hold: { reads: 0, posts: 0 }, // answers to hold: computed on arrival, released by the test
+    hold: { reads: 0, posts: 0, checks: 0 }, // answers to hold (checks: session reads): computed on arrival, released by the test
     held: [] as Array<{ url: string; release: (late?: Late) => void }>,
     down: false, // every request fails with no answer
+    swapOnRead: null as string | null,
     /** Customers already stored for a tenant. */
     seed(tenant: string, names: readonly string[]): Row[] {
       const made = names.map((name) => ({ id: uuid(++idCount), name }));
@@ -130,8 +136,15 @@ function fakeServer() {
       const body = typeof init.body === 'string' ? init.body : undefined;
       server.sent.push({ method, url, headers, body, signal: init.signal ?? null });
       if (server.down) throw new TypeError('network');
+      // Another tab of this browser signs in as `swapOnRead`'s user just before the next customer read arrives: the
+      // read leaves with the page's token and arrives with the other session's cookie (M7A-CUSTOMERS-P5-R1).
+      if (method === 'GET' && url.startsWith(CUSTOMERS_PATH) && server.swapOnRead !== null) {
+        const token = server.swapOnRead;
+        server.swapOnRead = null;
+        server.otherTab(token);
+      }
       const limited = (): Response => refuse(429, WORDS[429], server.retryAfter === null ? {} : { 'retry-after': server.retryAfter });
-      const held = async (kind: 'reads' | 'posts', answer: Response | 'lost'): Promise<Response> => {
+      const held = async (kind: 'reads' | 'posts' | 'checks', answer: Response | 'lost'): Promise<Response> => {
         if (server.hold[kind] > 0) {
           server.hold[kind] -= 1;
           const late = await new Promise<Late>((release) => { server.held.push({ url, release }); });
@@ -149,13 +162,14 @@ function fakeServer() {
         const user = users[(headers.get('authorization') ?? '').replace(/^Bearer /, '')];
         if (user === undefined) return refuse(401, WORDS[401]);
         server.cookie = openSession(user);
-        return reply(200, { status: 'active', csrfToken: sessions.get(server.cookie)!.csrf });
+        return reply(200, activeBody(user.uid, sessions.get(server.cookie)!.csrf));
       }
       const session = server.cookie === null ? undefined : sessions.get(server.cookie);
       if (url === TENANT_SESSION_PATHS.current && method === 'GET') {
         const plan = server.checks.shift();
-        if (plan !== undefined) return plan === 429 ? limited() : refuse(plan, WORDS[plan] ?? 'refused');
-        return session === undefined ? refuse(401, WORDS[401]) : reply(200, { status: 'active', csrfToken: session.csrf });
+        const answer = plan !== undefined ? (plan === 429 ? limited() : refuse(plan, WORDS[plan] ?? 'refused'))
+          : session === undefined ? refuse(401, WORDS[401]) : reply(200, activeBody(session.user.uid, session.csrf));
+        return server.hold.checks > 0 ? held('checks', answer) : answer;
       }
       if (url === TENANT_SESSION_PATHS.logout && method === 'POST') {
         if (server.cookie !== null) sessions.delete(server.cookie);
@@ -171,6 +185,8 @@ function fakeServer() {
           if (plan === 429) return limited(); // before any session is read
           if (typeof plan === 'object') return refuse(429, WORDS[429], { 'retry-after': plan.limited });
           if (session === undefined) return refuse(401, WORDS[401]);
+          // M7A-CUSTOMERS-P5-R1: a read names its session; another session's token (or none) is refused, as by the chain.
+          if (headers.get('x-tmpos-session-csrf') !== session.csrf) return refuse(403, WORDS[403]);
           if (!session.user.view) return refuse(403, WORDS[403]);
           if (plan === 'lost') return 'lost';
           if (plan === 'html') return new Response('<!doctype html><title>Shop</title>', { status: 200, headers: { 'content-type': 'text/html' } });
@@ -332,7 +348,8 @@ function expectNoSelector(server: Server): void {
     if (r.headers.has('authorization')) expect(r.url).toBe(TENANT_SESSION_PATHS.login);
     if (r.url.startsWith(CUSTOMERS_PATH)) {
       if (r.method === 'GET') {
-        expect([...r.headers].map(([name]) => name)).toEqual(['accept']);
+        expect([...r.headers].map(([name]) => name)).toEqual(['accept', 'x-tmpos-session-csrf']); // the session it names (P5-R1)
+        expect(r.headers.get('x-tmpos-session-csrf')).toMatch(/^[A-Za-z0-9_-]{43}$/);
         expect(r.body).toBeUndefined();
         expect(r.url).not.toMatch(/limit=/);
       } else {
@@ -384,20 +401,26 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     // Byte-order pages behind real cursors; a cursor naming no customer of this tenant is one 400.
     const seeded = server.seed(TENANT_A, ['Zoe', 'adam', String.fromCodePoint(0xc9, 0x6d, 0x69, 0x6c, 0x65), 'Bob']);
     server.pageSize = 2;
-    const one = (await (await send('GET', CUSTOMERS_PATH)).json()) as { customers: Row[]; nextCursor: string };
+    // A read names its session (M7A-CUSTOMERS-P5-R1): without the token, or with another session's, it is refused.
+    const bound = { 'x-tmpos-session-csrf': csrfA };
+    expect((await send('GET', CUSTOMERS_PATH)).status).toBe(403);
+    expect((await send('GET', CUSTOMERS_PATH, { 'x-tmpos-session-csrf': 'x'.repeat(43) })).status).toBe(403);
+    const one = (await (await send('GET', CUSTOMERS_PATH, bound)).json()) as { customers: Row[]; nextCursor: string };
     expect(one.nextCursor).toMatch(/^[A-Za-z0-9_-]{23}$/);
-    const two = (await (await send('GET', `${CUSTOMERS_PATH}?cursor=${one.nextCursor}`)).json()) as { customers: Row[]; nextCursor: string };
-    const three = (await (await send('GET', `${CUSTOMERS_PATH}?cursor=${two.nextCursor}`)).json()) as { customers: Row[]; nextCursor: string | null };
+    expect((await send('GET', `${CUSTOMERS_PATH}?cursor=${one.nextCursor}`)).status).toBe(403);
+    const two = (await (await send('GET', `${CUSTOMERS_PATH}?cursor=${one.nextCursor}`, bound)).json()) as { customers: Row[]; nextCursor: string };
+    const three = (await (await send('GET', `${CUSTOMERS_PATH}?cursor=${two.nextCursor}`, bound)).json()) as { customers: Row[]; nextCursor: string | null };
     const walked = [...one.customers, ...two.customers, ...three.customers];
     expect(walked.map((r) => r.name)).toEqual(['Ada Lovelace', 'Bob', 'Zoe', 'adam', String.fromCodePoint(0xc9, 0x6d, 0x69, 0x6c, 0x65)]);
     expect(inCustomerPageOrder(walked)).toBe(true); // the server's own order predicate
     expect(three.nextCursor).toBeNull();
     const [foreign] = server.seed(TENANT_B, ['Foreign']);
-    expect((await send('GET', `${CUSTOMERS_PATH}?cursor=${encodeCustomerCursor(foreign.id)}`)).status).toBe(400);
-    expect((await send('GET', `${CUSTOMERS_PATH}?limit=10`)).status).toBe(400);
-    expect((await send('GET', `${CUSTOMERS_PATH}/${foreign.id}`)).status).toBe(404); // another tenant's id == a missing one
-    expect((await send('GET', `${CUSTOMERS_PATH}/${uuid(0xdead)}`)).status).toBe(404);
-    expect((await send('GET', `${CUSTOMERS_PATH}/${seeded[0].id.toUpperCase()}X`)).status).toBe(400);
+    expect((await send('GET', `${CUSTOMERS_PATH}?cursor=${encodeCustomerCursor(foreign.id)}`, bound)).status).toBe(400);
+    expect((await send('GET', `${CUSTOMERS_PATH}?limit=10`, bound)).status).toBe(400);
+    expect((await send('GET', `${CUSTOMERS_PATH}/${foreign.id}`, bound)).status).toBe(404); // another tenant's id == a missing one
+    expect((await send('GET', `${CUSTOMERS_PATH}/${uuid(0xdead)}`, bound)).status).toBe(404);
+    expect((await send('GET', `${CUSTOMERS_PATH}/${seeded[0].id}`)).status).toBe(403); // a detail names its session too
+    expect((await send('GET', `${CUSTOMERS_PATH}/${seeded[0].id.toUpperCase()}X`, bound)).status).toBe(400);
     // Sessions are bound to tenants, each with its own token; the same key under another tenant is refused.
     server.moveGrant('tok-a', TENANT_B);
     expect((await send('GET', CUSTOMERS_PATH)).status).toBe(401);
@@ -426,8 +449,9 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await ready();
     expect(screen.getByTestId('directory-empty')).toHaveTextContent(EMPTY_TEXT);
     expect(screen.queryByTestId('directory-list')).toBeNull();
+    // The session this browser holds is read first (none here: 401), and only then does the page sign in (P5-R1).
     expect(server.sent.map((r) => `${r.method} ${r.url}`)).toEqual([
-      `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`,
+      `GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`,
     ]);
     expect(addButton()).toBeEnabled();
     expectNoSelector(server);
@@ -1523,7 +1547,8 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     const none = fakeServer();
     mount(none, { tokens: {} });
     await waitFor(() => expect(phase()).toBe('signed-out'));
-    expect(none.sent).toHaveLength(0);
+    // Only the session read (none held: 401) leaves; no login is sent without the user's own ID token (P5-R1).
+    expect(none.sent.map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
     expect(screen.getByTestId('directory-retry')).toHaveTextContent('Reconnect');
   });
 
@@ -1670,7 +1695,9 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       expect(notice).toHaveTextContent('Saved on the server: "Ada Lovelace".');
       expect(screen.getByTestId('directory-saved-link')).toBeInTheDocument();
       await waitFor(() => expect(names()).toEqual(['Ada Lovelace']));
-      expect(lists(server).length).toBeGreaterThan(reads); // page one was read again
+      // The row was already on page one (the fake commits before it holds the answer), so wait for the re-read itself:
+      // it follows the page's session check.
+      await waitFor(() => expect(lists(server)).toHaveLength(reads + 1)); // page one was read again, once
       expect(screen.queryByTestId('directory-hold')).toBeNull();
       expect(posts(server)).toHaveLength(1);
       cleanup();
@@ -2199,5 +2226,237 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(screen.getByTestId('customer-directory')).toBe(pageBefore); // one mounted page for both
     await view.go('/customers/something-else');
     expect(screen.getByTestId('local-customers')).toBeInTheDocument(); // the old redirect still stands for every other id
+  });
+
+  // M7A-CUSTOMERS-P5-R1 (DA-138) — a read names the session the page checked; another session's cookie reads nothing.
+  it('SCD-62. another user signs in in another tab between the session check and the list read: the read is refused, nothing of theirs is shown, and the page reconnects as its own user', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bob']);
+    server.seed(TENANT_B, ['Mallory', 'Trent']);
+    mount(server);
+    await ready();
+    expect(names()).toEqual(['Ada', 'Bob']);
+    const before = server.sent.length;
+    server.swapOnRead = 'tok-b';
+    await click('directory-refresh');
+    await ready();
+    expect(names()).toEqual(['Ada', 'Bob']); // A's rows, read again under A's new session
+    expect(page()).not.toContain('Mallory');
+    expect(page()).not.toContain('Trent');
+    const after = server.sent.slice(before).map((r) => `${r.method} ${r.url}`);
+    expect(after).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, // checked A, then the read arrived with B's cookie: 403
+      `GET ${TENANT_SESSION_PATHS.current}`, `POST ${TENANT_SESSION_PATHS.login}`, `GET ${TENANT_SESSION_PATHS.current}`, // B's session is not A's: A signs in
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, // a new connection checks, then reads again
+    ]);
+    expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument();
+    expectNoSelector(server);
+  });
+
+  it('SCD-63. the same for a customer opened by address: the detail read is refused, and only the page\'s own customer is shown', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const [mallory] = server.seed(TENANT_B, ['Mallory']);
+    const view = mount(server);
+    await ready();
+    server.swapOnRead = 'tok-b';
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    expect(screen.getByTestId('directory-detail')).toHaveTextContent('Ada');
+    expect(page()).not.toContain('Mallory');
+    expect(details(server).every((r) => !r.url.endsWith(mallory.id))).toBe(true);
+    expect(details(server).length).toBeGreaterThanOrEqual(2); // the refused read, then the new connection's
+  });
+
+  it('SCD-64. a 403 under the session the page holds is a real refusal: ONE session check, then the denied state, and no loop', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada']);
+    mount(server);
+    await ready();
+    server.users['tok-a'].view = false;
+    const before = server.sent.length;
+    await click('directory-refresh');
+    await waitFor(() => expect(phase()).toBe('denied'));
+    await settle();
+    expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`,
+    ]);
+    expect(logins(server)).toHaveLength(1); // the first load's only
+  });
+  // M7A-CUSTOMERS-P5-R1 — the one session check after a 403: a check that cannot decide never keeps a refused read's data.
+  const deniedThenCheck = async (server: Server, check: number): Promise<number> => {
+    server.users['tok-a'].view = false;
+    server.hold.reads = 1;
+    const before = server.sent.length;
+    await click('directory-refresh');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.checks.push(check); // the check sent AFTER the 403, not the one before the read
+    await act(async () => { server.held[0].release(); });
+    return before;
+  };
+
+  it('SCD-65. a list read refused 403 whose session check answers 503: the list is cleared, no login, no further read', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bob']);
+    mount(server);
+    await ready();
+    const before = await deniedThenCheck(server, 503);
+    await waitFor(() => expect(phase()).toBe('denied'));
+    await settle();
+    expect(names()).toEqual([]);
+    expect(screen.queryByTestId('directory-list')).toBeNull();
+    expect(screen.queryByTestId('directory-last-known')).toBeNull();
+    expect(page()).not.toContain('Ada');
+    expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`,
+    ]);
+    expect(logins(server)).toHaveLength(1); // the first load's only
+  });
+
+  it('SCD-66. the same with a 429 on the check: the list is cleared, the check\'s wait runs and is shown, no login', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bob']);
+    server.retryAfter = '2';
+    mount(server);
+    await ready();
+    const before = await deniedThenCheck(server, 429);
+    await waitFor(() => expect(phase()).toBe('denied'));
+    await settle();
+    expect(names()).toEqual([]);
+    expect(page()).not.toContain('Ada');
+    expect(screen.getByTestId('directory-refresh')).toBeDisabled(); // the wait runs
+    expect(document.getElementById('directory-busy-hint')).toHaveTextContent('Wait 2 seconds.');
+    expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`,
+    ]);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-67. a detail read refused 403 whose session check answers 503: the customer shown before is not shown', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const view = mount(server);
+    await ready();
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    await view.go('/customers/directory');
+    await ready();
+    server.users['tok-a'].view = false;
+    server.hold.reads = 1;
+    const before = server.sent.length;
+    await view.go(`/customers/directory/${ada.id}`); // the same id: its last answer would be the fallback
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.checks.push(503);
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'denied'));
+    await settle();
+    expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
+    expect(page()).not.toContain('Ada');
+    expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}`, `GET ${TENANT_SESSION_PATHS.current}`,
+    ]);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-68. "Load more" refused 403 under the session the page holds: denied after exactly one session check', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, Array.from({ length: 60 }, (_, i) => `Customer ${String(i).padStart(2, '0')}`));
+    mount(server);
+    await ready();
+    server.users['tok-a'].view = false;
+    const before = server.sent.length;
+    await click('directory-load-more');
+    await waitFor(() => expect(phase()).toBe('denied'));
+    await settle();
+    expect(names()).toEqual([]);
+    const after = server.sent.slice(before).map((r) => `${r.method} ${r.url}`);
+    expect(after).toHaveLength(3);
+    expect(after[0]).toBe(`GET ${TENANT_SESSION_PATHS.current}`);
+    expect(after[1]).toMatch(/^GET \/api\/v1\/customers\?cursor=[A-Za-z0-9_-]{23}$/);
+    expect(after[2]).toBe(`GET ${TENANT_SESSION_PATHS.current}`);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-69. a detail read refused 403 under the session the page holds: denied after exactly one session check', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const view = mount(server);
+    await ready();
+    server.users['tok-a'].view = false;
+    const before = server.sent.length;
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'denied'));
+    await settle();
+    expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+    expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}`, `GET ${TENANT_SESSION_PATHS.current}`,
+    ]);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-70. a reopened page with a new session client reuses the session the browser holds: one login overall', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bob']);
+    const starts: number[] = [];
+    for (let open = 0; open < 3; open++) {
+      starts.push(server.sent.length);
+      mount(server); // a new session client each time, over the same browser cookie
+      await ready();
+      expect(names()).toEqual(['Ada', 'Bob']);
+      cleanup();
+    }
+    for (const at of starts) expect(`${server.sent[at].method} ${server.sent[at].url}`).toBe(`GET ${TENANT_SESSION_PATHS.current}`);
+    expect(logins(server)).toHaveLength(1);
+    expect(server.sent.slice(starts[1]).map((r) => `${r.method} ${r.url}`)).toEqual([
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}`,
+    ]);
+  });
+
+  it('SCD-71. a first session read answered 429 or 503 at mount signs nothing in and reads nothing', async () => {
+    for (const [check, wanted] of [[429, 'rate-limited'], [503, 'unavailable']] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Ada']);
+      server.checks.push(check);
+      mount(server);
+      await waitFor(() => expect(phase()).toBe(wanted));
+      await settle();
+      expect(server.sent.map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+      expect(logins(server)).toHaveLength(0);
+      expect(names()).toEqual([]);
+      cleanup();
+    }
+  });
+  it('SCD-72. the session check after a 403 is a read sent AFTER it: a check already in flight with the old token does not answer for it', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bob']);
+    mount(server);
+    await ready();
+    const oldCsrf = server.csrfOfCookie();
+    // The Refresh's list read is parked; meanwhile a focus reconnect sends a session read, answered (and parked) with the old token.
+    server.hold.reads = 1;
+    await click('directory-refresh');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.hold.checks = 1;
+    await focusWindow();
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    const [listRead, inFlight] = server.held;
+    expect(inFlight.url).toBe(TENANT_SESSION_PATHS.current);
+    // Another tab replaces the cookie with a new session of the same user; the parked list read then arrives refused.
+    server.otherTab('tok-a');
+    const newCsrf = server.csrfOfCookie();
+    expect(newCsrf).not.toBe(oldCsrf);
+    const sessionReads = () => server.sent.filter((r) => r.url === TENANT_SESSION_PATHS.current).length;
+    const readsBefore = sessionReads();
+    await act(async () => { listRead.release(new Response(JSON.stringify({ error: 'forbidden', requestId: 'req-synthetic' }), { status: 403, headers: { 'content-type': 'application/json' } })); });
+    await settle();
+    expect(sessionReads()).toBe(readsBefore); // the check waits for the read already out; it does not join its answer
+    await act(async () => { inFlight.release(); }); // the old token
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument());
+    await ready();
+    expect(sessionReads()).toBeGreaterThan(readsBefore); // a session read sent after the 403
+    expect(names()).toEqual(['Ada', 'Bob']);
+    expect(lists(server).at(-1)?.headers.get('x-tmpos-session-csrf')).toBe(newCsrf); // the new session's answer is the one acted on
+    expect(logins(server)).toHaveLength(1);
   });
 });

@@ -18,7 +18,7 @@ import { testRequestLimits } from './rateLimiter.testkit.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from './requestSecurity.js';
 import { EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
 import type { RouteContext } from './routes.js';
-import { SESSION_COOKIES } from './sessions.js';
+import { SESSION_COOKIES, SESSION_CSRF_HEADER } from './sessions.js';
 import type { SessionBoundaryDeps } from './sessions.js';
 import { decodeTenantCursor, encodeTenantCursor } from './tenantDirectory.js';
 import {
@@ -408,7 +408,7 @@ test('the port\'s refusals and faults are bounded: denied is the generic 403, an
 
 interface Reply { status: number; headers: http.IncomingHttpHeaders; body: string }
 
-function request(port: number, method: string, path: string, headers: Record<string, string>): Promise<Reply> {
+function request(port: number, method: string, path: string, headers: Record<string, string | string[]>): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, method, path, headers, agent: false }, (res) => {
       let text = '';
@@ -433,15 +433,31 @@ function tenantBoundary(authorizations: unknown[][], authorize: (...args: unknow
     },
     admission: { admit: () => ({ admitted: true, securityVersion: 'v1', actor: ACTOR }) },
     authorizer: { authorize: (...args: unknown[]) => { authorizations.push(args); return authorize(...args); } },
-    store: createMemorySessionStore(),
+    store: countingIdleRefreshes(createMemorySessionStore()),
   };
+}
+
+/** Idle-window refreshes (an `update` carrying `lastSeenAt`) the chain asked of the session store, across this file's chains. */
+let idleRefreshes = 0;
+function countingIdleRefreshes<T extends object>(store: T): T {
+  return new Proxy(store, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      if (prop !== 'update' || typeof value !== 'function') return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      return (...args: unknown[]) => {
+        if ((args[1] as { lastSeenAt?: unknown } | undefined)?.lastSeenAt !== undefined) idleRefreshes += 1;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
 }
 
 async function withChain(
   setup: { answer?: (query: CustomerDirectoryQuery) => unknown; authorize?: (...args: unknown[]) => unknown },
   fn: (h: {
     calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery }>; authorizations: unknown[][]; logs: string[];
-    probes: Array<string | null>; storeKey: string; get: (target?: string, headers?: Record<string, string>) => Promise<Reply>;
+    probes: Array<string | null>; storeKey: string; csrf: string; get: (target?: string, headers?: Record<string, string>) => Promise<Reply>;
+    raw: (target?: string, headers?: Record<string, string | string[]>) => Promise<Reply>; anon: (target?: string) => Promise<Reply>;
   }) => Promise<void>,
 ): Promise<void> {
   const calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery }> = [];
@@ -481,7 +497,14 @@ async function withChain(
     authorizations.length = 0;
     // The store key the chain derives from the identifier, computed here independently (sessions.ts digestOf).
     const storeKey = createHash('sha256').update(id).digest('base64url');
-    await fn({ calls, authorizations, logs, probes, storeKey, get: (target = CUSTOMER_DIRECTORY_PATH, headers = {}) => request(p, 'GET', target, { cookie, ...headers }) });
+    const csrf = (JSON.parse(login.body) as { csrfToken: string }).csrfToken;
+    await fn({
+      calls, authorizations, logs, probes, storeKey, csrf,
+      // A customer read names the session it checked (M7A-CUSTOMERS-P5-R1): `get` sends the presenting session's own token; `raw` sends nothing it is not told.
+      get: (target = CUSTOMER_DIRECTORY_PATH, headers = {}) => request(p, 'GET', target, { cookie, [SESSION_CSRF_HEADER]: csrf, ...headers }),
+      raw: (target = CUSTOMER_DIRECTORY_PATH, headers = {}) => request(p, 'GET', target, { cookie, ...headers }),
+      anon: (target = CUSTOMER_DIRECTORY_PATH) => request(p, 'GET', target, {}),
+    });
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -673,7 +696,8 @@ test('detail handler: denied is the list\'s 403, not_found one bounded 404, and 
 
 async function withDetailChain(
   answer: (id: string) => unknown,
-  fn: (h: { calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>; authorizations: unknown[][]; logs: string[]; storeKey: string;
+  fn: (h: { calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>; authorizations: unknown[][]; logs: string[]; storeKey: string; csrf: string;
+    raw: (target: string, headers?: Record<string, string | string[]>) => Promise<Reply>;
     get: (target: string, headers?: Record<string, string>, method?: string) => Promise<Reply>; anon: (target: string, method?: string) => Promise<Reply> }) => Promise<void>,
 ): Promise<void> {
   const calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }> = [];
@@ -703,9 +727,11 @@ async function withDetailChain(
     const cookie = `${SESSION_COOKIES.tenant}=${sid}`;
     authorizations.length = 0;
     const storeKey = createHash('sha256').update(sid).digest('base64url');
+    const csrf = (JSON.parse(login.body) as { csrfToken: string }).csrfToken;
     await fn({
-      calls, authorizations, logs, storeKey,
-      get: (target, headers = {}, method = 'GET') => request(p, method, target, { cookie, ...headers }),
+      calls, authorizations, logs, storeKey, csrf,
+      get: (target, headers = {}, method = 'GET') => request(p, method, target, { cookie, [SESSION_CSRF_HEADER]: csrf, ...headers }),
+      raw: (target, headers = {}) => request(p, 'GET', target, { cookie, ...headers }),
       anon: (target, method = 'GET') => request(p, method, target, {}),
     });
   } finally {
@@ -776,5 +802,95 @@ test('detail over the enforced chain: 401 before any id is judged; after authori
     for (const line of h.logs) {
       for (const secret of [CID, FOREIGN, 'Grace Hopper', h.storeKey]) assert.ok(!line.includes(secret), `no log line carries ${secret}`);
     }
+  });
+});
+
+// --- 6. the read binding (M7A-CUSTOMERS-P5-R1, DA-138): a bound read must name the session it presents -----------------------
+
+const reasonOf = (logs: string[], reply: Reply): unknown => {
+  const lines = logs.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.event === 'request' && l.requestId === reply.headers['x-request-id']);
+  assert.equal(lines.length, 1, 'exactly one request log line');
+  return lines[0].reason;
+};
+const assertForbidden = (r: Reply, label: string): void => {
+  assert.equal(r.status, 403, `${label}: ${r.body}`);
+  const body = JSON.parse(r.body) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], label);
+  assert.equal(body.error, 'forbidden', label);
+  assert.equal(body.requestId, r.headers['x-request-id'], label);
+};
+
+test('list and cursor page over the enforced chain: a missing, repeated, malformed or another session\'s CSRF token is a 403 before the authorizer, the port and the idle refresh; 401 still wins; the right token reads', async () => {
+  await withChain({}, async (h) => {
+    const cursor = encodeCustomerCursor(idOf(0));
+    const good = await h.raw(CUSTOMER_DIRECTORY_PATH, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(good.status, 200, good.body);
+    assert.equal(h.calls.length, 1);
+    const refreshesAfterGood = idleRefreshes;
+    assert.ok(refreshesAfterGood > 0, 'control: a successful read slides the idle window');
+    const other = createHash('sha256').update('another session').digest('base64url');
+    const cases: Array<[string, Record<string, string | string[]>, string]> = [
+      ['no header', {}, 'csrf_session_missing'],
+      ['two header lines', { [SESSION_CSRF_HEADER]: [h.csrf, h.csrf] }, 'csrf_session_duplicate'],
+      ['another session\'s token', { [SESSION_CSRF_HEADER]: other }, 'csrf_session_invalid'],
+      ['a malformed token (wrong alphabet)', { [SESSION_CSRF_HEADER]: '*'.repeat(43) }, 'csrf_session_invalid'],
+      ['a malformed token (wrong length)', { [SESSION_CSRF_HEADER]: 'abc' }, 'csrf_session_invalid'],
+      ['an empty token', { [SESSION_CSRF_HEADER]: '' }, 'csrf_session_invalid'],
+    ];
+    const authorizedBefore = h.authorizations.length;
+    for (const target of [CUSTOMER_DIRECTORY_PATH, `${CUSTOMER_DIRECTORY_PATH}?limit=2`, `${CUSTOMER_DIRECTORY_PATH}?cursor=${cursor}`]) {
+      for (const [label, headers, reason] of cases) {
+        const r = await h.raw(target, headers);
+        assertForbidden(r, `${target} ${label}`);
+        assert.equal(reasonOf(h.logs, r), reason, `${target} ${label}`);
+        assert.ok(!('customers' in JSON.parse(r.body)), `${label}: no customers`);
+      }
+    }
+    assert.equal(h.authorizations.length, authorizedBefore, 'the authorizer was never asked');
+    assert.equal(h.calls.length, 1, 'the port was never asked');
+    assert.equal(idleRefreshes, refreshesAfterGood, 'no refusal slid the idle window');
+    // 401 wins when there is no cookie at all, whatever the header says.
+    const anon = await h.anon();
+    assert.equal(anon.status, 401, anon.body);
+    // The right token on a cursor page reads as before.
+    const page = await h.raw(`${CUSTOMER_DIRECTORY_PATH}?cursor=${cursor}`, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(page.status, 200, page.body);
+    assert.equal(h.calls.length, 2);
+    // A route that declares no sessionBinding is unaffected by the header's absence (and presence).
+    assert.equal((await h.raw('/api/v1/unbound-probe')).status, 204);
+    assert.equal((await h.raw(sessionPaths('tenant').current)).status, 200, 'GET /api/v1/session needs no header');
+    assert.equal((await h.raw('/api/v1/unbound-probe', { [SESSION_CSRF_HEADER]: other })).status, 204);
+  });
+});
+
+test('detail over the enforced chain: the same refusals before the authorizer, the port and the idle refresh; 401 wins; a foreign id with the right token is still the 404', async () => {
+  await withDetailChain((id) => (id === CID ? { outcome: 'customer', id, name: 'Grace Hopper' } : { outcome: 'not_found' }), async (h) => {
+    const target = `${CUSTOMER_DIRECTORY_PATH}/${CID}`;
+    const good = await h.raw(target, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(good.status, 200, good.body);
+    assert.deepEqual(JSON.parse(good.body), { customer: { id: CID, name: 'Grace Hopper' } });
+    const refreshesAfterGood = idleRefreshes;
+    const authorizedBefore = h.authorizations.length;
+    const other = createHash('sha256').update('another session').digest('base64url');
+    for (const [label, headers, reason] of [
+      ['no header', {}, 'csrf_session_missing'],
+      ['two header lines', { [SESSION_CSRF_HEADER]: [h.csrf, h.csrf] }, 'csrf_session_duplicate'],
+      ['another session\'s token', { [SESSION_CSRF_HEADER]: other }, 'csrf_session_invalid'],
+      ['a malformed token', { [SESSION_CSRF_HEADER]: '*'.repeat(43) }, 'csrf_session_invalid'],
+    ] as Array<[string, Record<string, string | string[]>, string]>) {
+      const r = await h.raw(target, headers);
+      assertForbidden(r, label);
+      assert.equal(reasonOf(h.logs, r), reason, label);
+      assert.ok(!('customer' in JSON.parse(r.body)), `${label}: no customer`);
+      // Even a malformed id is judged only after the token: the 403 wins over the handler's 400.
+      assertForbidden(await h.raw(`${CUSTOMER_DIRECTORY_PATH}/x`, headers), `${label} malformed id`);
+    }
+    assert.equal(h.authorizations.length, authorizedBefore, 'the authorizer was never asked');
+    assert.equal(h.calls.length, 1, 'the port was never asked');
+    assert.equal(idleRefreshes, refreshesAfterGood, 'no refusal slid the idle window');
+    assert.equal((await h.anon(target)).status, 401, 'no cookie: 401 wins');
+    const foreign = await h.raw(`${CUSTOMER_DIRECTORY_PATH}/${idOf(77)}`, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(foreign.status, 404, foreign.body);
+    assert.equal(JSON.parse(foreign.body).error, 'not_found');
   });
 });

@@ -862,7 +862,9 @@ export function createApp(deps: AppDeps): Express {
           if (logout && isOutage(active)) res.setHeader('Set-Cookie', boundary.clearingCookie);
           return verdict(req, res, active, 401);
         }
-        if (UNSAFE_METHODS.has(route.method)) {
+        // A read bound to its session (`sessionBinding: 'required'`, M7A-CUSTOMERS-P5-R1) carries the token too: the client
+        // names the session it checked, and a request whose cookie is another session's reads nothing (DA-138).
+        if (UNSAFE_METHODS.has(route.method) || route.sessionBinding === 'required') {
           const csrf = sessionCsrfRefusal(req, active.context.csrfToken);
           if (csrf !== null) return refuse(req, res, 403, 'forbidden', csrf);
         }

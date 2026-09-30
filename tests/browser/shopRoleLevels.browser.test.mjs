@@ -84,6 +84,25 @@
 //   SCB-06 a first send that never reached the server, then the account's grant moves to tenant B: "Check again" notices
 //          the new connection — the attempt is detached, no POST leaves under the new session, neither tenant holds the name.
 //
+// M7A-CUSTOMERS-P5-R1 — the tenant session is REUSED across loads and the customer reads are BOUND to it (same harness).
+// One more substitution, stated: SCB-08 swaps the browser's tenant session cookie (CDP Storage.setCookies in the page's
+// browser context) while one read is parked at the front, and the front forwards that parked read with the swapped cookie —
+// exactly what the jar would have sent had the swap landed a moment earlier. Numbers are appended to scb-witness.jsonl in
+// the evidence folder BEFORE anything is asserted, so the entry run records the whole "before" picture.
+//   SCB-07 SESSION REUSE (DA-143): inside one 5-minute window an owner opens the directory, reloads it 6 times, reopens it
+//          by in-app navigation (away, back by the sidebar), makes one load that shows both server consumers (directory,
+//          Permissions server panel, directory again) and opens it in a second TAB of the same browser; every load shows
+//          the rows. Counted: POST /api/v1/session/login for this owner, live tmpos_session.session rows for the principal,
+//          tmpos_mint.tenant_session rows (live, and the ledger's growth), every 429, and whether each load read GET
+//          /api/v1/session before its first customer read. Expected: ONE login, one session row, one mint row, no 429.
+//   SCB-08 READ BINDING (DA-138): owner A's page; owner B's valid session made outside the page. A's next list read (a
+//          Refresh), then separately A's detail read (one of A's customers, by URL), is parked at the front AFTER the page's
+//          session check was answered; the jar's session cookie is replaced with B's; the read is released carrying B's.
+//          Recorded per read: the session it carried (A/B), the status, whether any answer delivered to the page or the DOM
+//          (sampled at release and after the page settles) held a B id or name, and what the page ends showing. Expected:
+//          403 with no customers, no B id ever on page A, and — after a session read, A's login and a confirming read — A's
+//          own rows and customer again (a new A session).
+//
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
 // witness; P3R2_SPA_DIST reuses a finished build; P3R2_EVIDENCE names the evidence folder):
@@ -99,7 +118,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import tls from 'node:tls';
 import { tmpdir } from 'node:os';
@@ -603,13 +622,19 @@ function send(port, method, path, headers, body) {
   });
 }
 
-/** A request from outside the browser (a pre-issued employee session, a manager's direct attempt), as a same-origin client. */
+/**
+ * A request from outside the browser (a pre-issued employee session, a manager's direct attempt), as a same-origin client.
+ * A request with a session names it by its session CSRF token, as the shop does: the customer reads require it since
+ * M7A-CUSTOMERS-P5-R1 (DA-138), and it changes nothing on a route that does not.
+ */
 async function call(method, path, { session = null, body, key } = {}) {
   const unsafe = method !== 'GET';
   const headers = {
     host: SHOP_HOST,
     ...(session ? { cookie: session.cookie } : {}),
-    ...(unsafe ? { origin: SHOP, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, ...(session ? { [SESSION_CSRF_HEADER]: session.csrf } : {}) } : {}),
+    // A bare cookie (readWith: the unbound roles/levels read) carries no token to send.
+    ...(typeof session?.csrf === 'string' ? { [SESSION_CSRF_HEADER]: session.csrf } : {}),
+    ...(unsafe ? { origin: SHOP, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE } : {}),
     ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     ...(key ? { 'idempotency-key': key } : {}),
   };
@@ -1036,8 +1061,8 @@ async function assertNoLeak(page) {
 // the suite
 // ---------------------------------------------------------------------------------------------------------------------
 
-function scenario(id, title, fn) {
-  test(`${id}: ${title}`, { timeout: 180_000 }, async () => {
+function scenario(id, title, fn, timeout = 180_000) {
+  test(`${id}: ${title}`, { timeout }, async () => {
     st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
     const errorsBefore = browser.interceptErrors.length;
@@ -2088,5 +2113,253 @@ scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reache
   assert.deepEqual(await customersOf(b), [], 'nor any other');
   assert.deepEqual(await customersOf(a.tenant), inA, 'tenant A holds what it held');
   await assertDelta(before, NOTHING, 'nothing was written anywhere: no customer, audit, completion or lease');
+  await assertNoLeak(page);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P5-R1 — session reuse (DA-143) and read binding (DA-138)
+// ---------------------------------------------------------------------------------------------------------------------
+
+const isSessionRead = (r) => r.method === 'GET' && r.path === '/api/v1/session';
+const isLogin = (r) => r.method === 'POST' && r.path === LOGIN;
+const isCustomersRead = (r) => r.method === 'GET' && r.path.startsWith(CUSTOMERS);
+const cookieValue = (pair) => pair.split('=').slice(1).join('=');
+/** Numbers first: one JSON line per case in the evidence folder (labels, counts, statuses, booleans — no secrets). */
+function record(id, data) {
+  try { appendFileSync(join(EVIDENCE, 'scb-witness.jsonl'), `${JSON.stringify({ id, at: new Date().toISOString(), ...data })}\n`); } catch { /* best effort */ }
+  return note('witness', data);
+}
+
+/** A principal's live tenant sessions, the mint rows beside them, and every mint row (for the ledger's growth). */
+async function sessionRows(who) {
+  const [r] = await owner`select
+    (select count(*) from tmpos_session.session where audience = 'tenant' and auth_provider_uid = ${who.uid})::int as sessions,
+    (select count(*) from tmpos_mint.tenant_session m join tmpos_session.session s using (session_key) where s.auth_provider_uid = ${who.uid})::int as mint_live,
+    (select count(*) from tmpos_mint.tenant_session)::int as mint_all`;
+  return r;
+}
+
+/** The list's settled phase after a load or reopen (never throws: 'timeout' is an observation too). */
+function listSettled(page, from, timeout = 30_000) {
+  return page.waitFor(async () => {
+    const phase = await page.evaluate(`${q('directory-state')}?.dataset.phase ?? null`);
+    if (phase === null || phase === 'loading') return null;
+    if (phase === 'ready' && !sentBy(page, isList, from).some((r) => r.status !== null)) return null;
+    return phase;
+  }, timeout, 'the list settled').catch(() => 'timeout');
+}
+
+/** What one load (or reopen) of the directory did on the wire and showed. */
+async function observeLoad(page, label, from, expected) {
+  const phase = await listSettled(page, from);
+  await quiet(page, from).catch(() => {});
+  const mine = st.api.slice(from).filter((r) => r.frameId === page.frameId);
+  const firstRead = mine.findIndex(isCustomersRead);
+  const rows = await rowsOf(page);
+  return {
+    label, phase,
+    logins: mine.filter(isLogin).map(answered),
+    sessionReads: mine.filter(isSessionRead).map(answered),
+    sessionReadBeforeCustomers: firstRead >= 0 && mine.slice(0, firstRead).some((r) => isSessionRead(r) && r.status !== null),
+    customerReads: mine.filter(isCustomersRead).map(answered),
+    status429: mine.filter((r) => r.status === 429).map((r) => `${r.method} ${r.path}`),
+    rowsShown: JSON.stringify(rows) === JSON.stringify(expected),
+    rowCount: rows.length,
+  };
+}
+
+scenario('SCB-07', 'SESSION REUSE (DA-143) — inside one 5-minute window: first open, 6 reloads, an in-app reopen, one load showing both server consumers and a second tab; ONE login, one session row, one mint row, no 429, every load reads the session before any customer read and shows the rows', async () => {
+  const { tenant, boss } = await shop('c7');
+  await seedCustomers(tenant, [`M7SCB c7 one ${SUFFIX}`, `M7SCB c7 two ${SUFFIX}`, `M7SCB c7 three ${SUFFIX}`]);
+  const expected = await customersOf(tenant);
+  const dbBefore = await sessionRows(boss);
+  const started = performance.now();
+  const loads = [];
+  const page = await openPage();
+  await signIn(page, boss);
+  await openDirectory(page);
+  loads.push(await observeLoad(page, 'first open (sign-in, then in-app)', 0, expected));
+  for (let i = 1; i <= 6; i++) {
+    const from = st.api.length;
+    await page.goto(`${SHOP}${DIRECTORY}`, 30_000);
+    loads.push(await observeLoad(page, `reload ${i}`, from, expected));
+  }
+  {
+    const from = st.api.length;
+    await go(page, '/');
+    await page.waitFor(`!${q('customer-directory')}`, 10_000, 'left the directory');
+    const back = await openBySidebar(page);
+    loads.push({ ...(await observeLoad(page, 'in-app reopen (away, back by the sidebar)', from, expected)), sidebar: back });
+  }
+  {
+    const from = st.api.length;
+    await page.goto(`${SHOP}${DIRECTORY}`, 30_000);
+    const directory = await observeLoad(page, 'both consumers: directory', from, expected);
+    await openPermissions(page);
+    const panel = await page.waitFor(`(() => { const s = ${q('server-levels-state')}?.dataset.state; return s && s !== 'loading' ? s : null; })()`, 30_000, 'the server panel settled').catch(() => 'timeout');
+    const mid = st.api.length;
+    const back = await openBySidebar(page);
+    const again = await observeLoad(page, 'both consumers: directory again', mid, expected);
+    const whole = await observeLoad(page, 'both consumers (one load)', from, expected);
+    loads.push({ ...whole, panel, sidebar: back, directoryFirst: directory.rowsShown, directoryAgain: again.rowsShown, rowsShown: directory.rowsShown && again.rowsShown });
+  }
+  {
+    const tab = await sameContextTab(page);
+    const from = st.api.length;
+    await tab.goto(`${SHOP}${DIRECTORY}`, 30_000);
+    await tab.waitFor(`!!${q('customer-directory')}`, 30_000, 'the directory in the second tab').catch(() => {});
+    loads.push(await observeLoad(tab, 'second tab of the same browser', from, expected));
+  }
+  const elapsedSeconds = Math.round((performance.now() - started) / 1000);
+  const logins = st.api.filter((r) => isLogin(r) && bearerUid(r) === boss.uid);
+  const db = await sessionRows(boss);
+  const numbers = record('SCB-07', {
+    elapsedSeconds, loads,
+    loginsTotal: logins.length, loginStatuses: logins.map(answered),
+    firstLoginOnLoad: loads.findIndex((l) => l.logins.length > 0),
+    status429: st.api.filter((r) => r.status === 429).map((r) => `${r.method} ${r.path}`),
+    first429OnLoad: loads.findIndex((l) => l.status429.length > 0),
+    sessionRowsLive: db.sessions, mintRowsLive: db.mint_live, mintRowsAdded: db.mint_all - dbBefore.mint_all,
+  });
+
+  assert.ok(elapsedSeconds < 300, `every load inside one 5-minute window: ${elapsedSeconds} s`);
+  assert.equal(loads.length, 10, 'first open + 6 reloads + in-app reopen + both-consumer load + second tab');
+  assert.deepEqual(numbers.loginStatuses, ['200'], `exactly ONE login for the whole case: ${loads.map((l) => `${l.label}: [${l.logins.join(', ')}]`).join('; ')}`);
+  assert.deepEqual(numbers.status429, [], 'no 429 anywhere');
+  assert.deepEqual([numbers.sessionRowsLive, numbers.mintRowsLive, numbers.mintRowsAdded], [1, 1, 1], 'one live session row, one mint row beside it, one mint row made');
+  for (const l of loads) {
+    assert.equal(l.phase, 'ready', `${l.label}: the list is ready`);
+    assert.ok(l.rowsShown, `${l.label}: the rows are shown`);
+    assert.ok(l.sessionReadBeforeCustomers, `${l.label}: GET /api/v1/session answered before any customer read (${l.sessionReads.join(', ')} / ${l.customerReads.join(', ')})`);
+  }
+  assert.equal(loads.find((l) => l.panel !== undefined).panel, 'ready', 'the Permissions server panel was ready in the same load');
+  await assertNoLeak(page);
+}, 360_000);
+
+/** Whether page A's DOM holds any of tenant B's ids or names: { id, name } booleans (nothing else recorded). */
+async function domHasB(page, bees) {
+  const html = await page.evaluate('document.documentElement.outerHTML');
+  return { id: bees.some((c) => html.includes(c.id)), name: bees.some((c) => html.includes(c.name)) };
+}
+
+/**
+ * Park page A's next read that `match`es AFTER the page's session check was answered, swap the jar's tenant session cookie
+ * to B's, release the read carrying B's cookie, and observe. Answers labels, statuses and booleans only.
+ */
+async function swapRead(page, { match, trigger, cookieName, aValues, bSession, bees }) {
+  const from = st.api.length;
+  const held = gate((r) => r.frameId === page.frameId && match(r), 'request');
+  await trigger();
+  const rec = await Promise.race([held.reached, delay(30_000).then(() => null)]);
+  if (rec === null) return { reached: false, requests: st.api.slice(from).map(apiLine) };
+  const mine = st.api.slice(from).filter((r) => r.frameId === page.frameId);
+  const before = mine.slice(0, mine.indexOf(rec));
+  const bValue = cookieValue(bSession.cookie);
+  const label = (header) => {
+    const v = (header ?? '').split(/;\s*/).find((p) => p.startsWith(`${cookieName}=`));
+    if (v === undefined) return 'none';
+    return aValues().has(cookieValue(v)) ? 'A' : cookieValue(v) === bValue ? 'B' : 'other';
+  };
+  const sent = label(rec.headers.cookie);
+  await browser.send('Storage.setCookies', {
+    browserContextId: page.contextId,
+    cookies: [{ name: cookieName, value: bValue, url: `${SHOP}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Strict' }],
+  });
+  let forwarded = null;
+  st.tamper = async (r, out) => {
+    if (r !== rec) return;
+    const others = (out.cookie ?? '').split(/;\s*/).filter((p) => p !== '' && !p.startsWith(`${cookieName}=`));
+    out.cookie = [...others, `${cookieName}=${bValue}`].join('; ');
+    forwarded = label(out.cookie);
+  };
+  held.release();
+  await page.waitFor(() => rec.status !== null, 30_000, 'the swapped read was answered');
+  st.tamper = null;
+  let swappedBody = null;
+  try { swappedBody = JSON.parse(rec.replied?.text ?? ''); } catch { /* not JSON */ }
+  const atRelease = await domHasB(page, bees);
+  await page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 30_000, 'every request answered').catch(() => {});
+  await delay(3_000); // whatever the page does next (a re-check, a new sign-in, a re-read), it has done
+  await quiet(page, from).catch(() => {});
+  await page.settle();
+  const settled = await domHasB(page, bees);
+  const after = st.api.slice(from).filter((r) => r.frameId === page.frameId && st.api.indexOf(r) > st.api.indexOf(rec));
+  const delivered = st.api.slice(from).filter((r) => r.frameId === page.frameId && r.lost === undefined && typeof r.replied?.text === 'string');
+  return {
+    reached: true,
+    sessionCheckBefore: before.filter((r) => isSessionRead(r) || isLogin(r)).map((r) => `${r.method} ${r.path} -> ${answered(r)}`),
+    sentWith: sent, forwardedWith: forwarded,
+    swapped: {
+      status: rec.status, error: rec.error ?? null,
+      customersKey: swappedBody !== null && (Object.hasOwn(swappedBody, 'customers') || Object.hasOwn(swappedBody, 'customer')),
+      bIdsInAnswer: bees.filter((c) => rec.replied.text.includes(c.id)).length,
+    },
+    deliveredWithB: delivered.filter((r) => bees.some((c) => r.replied.text.includes(c.id))).map((r) => `${r.method} ${r.path === rec.path ? '(the swapped path)' : r.path} -> ${answered(r)}`),
+    domAtRelease: atRelease, domSettled: settled,
+    afterRelease: after.map((r) => `${r.method} ${r.path.startsWith(`${CUSTOMERS}/`) ? `${CUSTOMERS}/{id}` : r.path} -> ${answered(r)}`),
+  };
+}
+
+scenario('SCB-08', 'READ BINDING (DA-138) — page A\'s list read and detail read, each parked after the session check and released with tenant B\'s session cookie: 403 with no customers, no B id ever reaches page A\'s answers or DOM, and the page ends on A\'s own rows and customer (a new A session)', async () => {
+  const a = await shop('c8a');
+  const b = await shop('c8b');
+  await seedCustomers(a.tenant, [`M7SCB c8 A one ${SUFFIX}`, `M7SCB c8 A two ${SUFFIX}`, `M7SCB c8 A three ${SUFFIX}`]);
+  const bees = await seedCustomers(b.tenant, [`M7SCB c8 B one ${SUFFIX}`, `M7SCB c8 B two ${SUFFIX}`, `M7SCB c8 B three ${SUFFIX}`]);
+  const expectA = await customersOf(a.tenant);
+  const page = await directoryPage(a.boss);
+  await waitRows(page, expectA, 'page A shows tenant A\'s rows');
+  const cookieName = st.api.filter(acceptedLogin(a.boss)).at(-1).cookie.split('=')[0];
+  const aValues = () => new Set(st.api.filter(acceptedLogin(a.boss)).map((r) => cookieValue(r.cookie)));
+
+  // The list: a Refresh (the page's session check, then the list read — parked).
+  const list = await swapRead(page, {
+    match: isList, trigger: () => page.click(by('directory-refresh')), cookieName, aValues, bSession: await directLogin(b.boss), bees,
+  });
+  const listRows = await rowsOf(page);
+  list.end = {
+    phase: await page.evaluate(`${q('directory-state')}?.dataset.phase ?? null`),
+    rowsA: JSON.stringify(listRows) === JSON.stringify(expectA), rowsB: listRows.some((r) => bees.some((c) => c.id === r.id)), rowCount: listRows.length,
+  };
+
+  // The detail: a fresh B session, the jar emptied, one of A's customers opened by URL (a load: sign-in, then the reads).
+  const target = expectA[0];
+  const bSession = await directLogin(b.boss);
+  await browser.send('Storage.clearCookies', { browserContextId: page.contextId });
+  const detail = await swapRead(page, {
+    match: (r) => isDetail(r) && r.path === `${CUSTOMERS}/${target.id}`, trigger: () => page.goto(`${SHOP}${DIRECTORY}/${target.id}`, 30_000), cookieName, aValues, bSession, bees,
+  });
+  detail.end = {
+    phase: await page.evaluate(`${q('directory-detail')}?.dataset.phase ?? null`),
+    showsA: (await textOf(page, 'directory-detail-id')) === target.id,
+    showsB: (await domHasB(page, bees)).id,
+  };
+  record('SCB-08', { list, detail });
+
+  for (const [label, r] of [['list', list], ['detail', detail]]) {
+    assert.ok(r.reached, `${label}: the read was parked (${(r.requests ?? []).join('; ')})`);
+    assert.ok(r.sessionCheckBefore.some((line) => line.endsWith(' -> 200')), `${label}: the page's session check was answered first: ${r.sessionCheckBefore.join('; ')}`);
+    assert.deepEqual([r.sentWith, r.forwardedWith], ['A', 'B'], `${label}: sent with A's session, forwarded with B's`);
+    assert.equal(r.swapped.status, 403, `${label}: the swapped read is refused`);
+    assert.equal(r.swapped.customersKey, false, `${label}: the refusal carries no customers`);
+    assert.equal(r.swapped.bIdsInAnswer, 0, `${label}: no B id in the refusal`);
+    assert.deepEqual(r.deliveredWithB, [], `${label}: no answer delivered to page A holds a B id`);
+    assert.deepEqual([r.domAtRelease, r.domSettled], [{ id: false, name: false }, { id: false, name: false }], `${label}: no B id or name ever in page A's DOM`);
+  }
+  // The page recovers as A: after the refused read it checks the session, finds B's, signs A in again and confirms it.
+  const inOrder = (lines, wanted) => {
+    let at = 0;
+    for (const w of wanted) {
+      at = lines.findIndex((l, i) => i >= at && l.startsWith(`${w} -> `)) + 1;
+      if (at === 0) return false;
+    }
+    return true;
+  };
+  for (const [label, r] of [['list', list], ['detail', detail]]) {
+    assert.ok(inOrder(r.afterRelease, ['GET /api/v1/session', `POST ${LOGIN}`, 'GET /api/v1/session']), `${label}: a session read, A's login, then a session read after the refused read: ${r.afterRelease.join('; ')}`);
+  }
+  assert.deepEqual([list.end.phase, list.end.rowsA], ['ready', true], `the list ends on A's own rows: ${JSON.stringify(list.end)}`);
+  assert.equal(list.end.rowsB, false, 'never B\'s rows on A\'s page');
+  assert.deepEqual([detail.end.phase, detail.end.showsA], ['ready', true], `the detail ends on A's own customer: ${JSON.stringify(detail.end)}`);
+  assert.equal(detail.end.showsB, false, 'never B\'s customer on A\'s page');
   await assertNoLeak(page);
 });

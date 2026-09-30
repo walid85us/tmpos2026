@@ -313,7 +313,7 @@ async function withEntry(overrides, fn) {
   const port = result.address.port;
   const unsafe = (method, path) => (s, body, { key = randomUUID() } = {}) =>
     send(port, method, path, unsafeHeaders(s, key), JSON.stringify(body), { localAddress: clientAddress });
-  const get = (path) => (s) => send(port, 'GET', path, { host: TENANT_HOST, cookie: s.cookie }, undefined, { localAddress: clientAddress });
+  const get = (path) => (s) => send(port, 'GET', path, { host: TENANT_HOST, cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf }, undefined, { localAddress: clientAddress });
   const ctx = {
     port,
     put: unsafe('PUT', ROLE_LEVELS_PATH),

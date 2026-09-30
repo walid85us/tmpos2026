@@ -16,6 +16,11 @@
 //     is inferred from it. A window focus or a return to the tab runs `connect()` so a changed session is noticed.
 //   - A read answer applies only under the generation that started it, as the latest read started of its kind and — for
 //     a detail — for the id the route still names. A superseded read is cancelled.
+//   - Every read carries the token `connect()` just answered (M7A-CUSTOMERS-P5-R1, DA-138), and the server answers it
+//     only under that session: when another tab replaced the cookie between the check and the read, the read is refused
+//     (403) and nothing of the other session's reaches this page. A read refused 403 is followed by ONE session check:
+//     another token starts a new generation, the same token leaves the refusal ("may not view") standing, and a check
+//     that cannot decide (an outage, a wait) leaves it standing too — a refused read shows nothing either way.
 //   - A create is NEVER sent automatically, and never under a token other than the one it was first sent with. "Add
 //     customer" sends one POST under a new Idempotency-Key, only once `connect()` has answered this generation's own
 //     token. It is "Saved on the server" ONLY on a validated 201 (a fresh execution or the same key's sealed replay)
@@ -32,8 +37,8 @@
 //     that arrives after its page has gone is kept in the store as a terminal OUTCOME (saved, or conclusively refused)
 //     until a mounted page holding a session token shows it; an undecided one stays as the unresolved attempt. The
 //     React view of an attempt is token-free (the token stays in refs and the store). The store survives in-app
-//     navigation, not a reload (a reloaded page has another session and could not re-send it; persisting it would put
-//     a name and a key in browser storage).
+//     navigation, not a reload (persisting it would put a name, a key and a token in browser storage), though since
+//     M7A-CUSTOMERS-P5-R1 a reloaded page usually reuses the same session (DA-137).
 //   - A read the server refuses (a 401 or a 403 on the list or on a detail, or a focus check whose sign-in the server
 //     no longer accepts) clears BOTH views: no rows, no cursor and no customer, whichever view was reading. No read
 //     starts during a rate limit's wait (the later deadline wins; a wait text states the wait running when written): a blocked
@@ -328,7 +333,8 @@ function UserPage({
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
-  const connect = (who: string): Promise<SessionResult> => session.ensure(who, () => identity.idToken(who));
+  const connect = (who: string, fresh = false): Promise<SessionResult> =>
+    session.ensure(who, () => identity.idToken(who), fresh ? { fresh: true } : undefined);
   const putList = (next: ListState): void => { listRef.current = next; setList(next); };
   const putDetail = (next: DetailState): void => { detailRef.current = next; setDetail(next); };
 
@@ -427,6 +433,20 @@ function UserPage({
     void loadList('first');
   }
 
+  /**
+   * After a read refused 403. The server gives the same answer to a read whose cookie is another session's than the
+   * token it carried (DA-138), so ONE session check tells them apart: another token starts a new generation (which reads
+   * again and shows nothing of this one; the caller is then stale), a failed check is returned as that failure, and the
+   * same token leaves the refusal standing (null). The caller shows the read's own refusal unless the check itself was
+   * refused (signed out): a check that cannot decide never turns a refused read into last-known rows.
+   */
+  async function recheck(who: string): Promise<Failure | null> {
+    const s = await connect(who, true); // a session read sent AFTER the 403, never one already in flight before it
+    if (s.kind !== 'ok') return sessionFailure(s);
+    if (alive.current) adopt(who, s.csrf);
+    return null;
+  }
+
   /** Returns the failure as shown (its wait text states the wait that runs). */
   function failList(failure: Failure): Failure {
     const shown = withWait(failure);
@@ -459,7 +479,7 @@ function UserPage({
       if (stale()) return;
       if (s.kind !== 'ok') { failList(sessionFailure(s)); return; }
       if (adopt(uid, s.csrf)) return; // a new generation has started its own reads
-      const answer = await customers.list(cursor, controller.signal);
+      const answer = await customers.list(cursor, s.csrf, controller.signal);
       if (stale()) return;
       if (answer.kind === 'ok') {
         const was = listRef.current;
@@ -475,6 +495,12 @@ function UserPage({
         // cursor, so it cannot come back here.
         if (mode === 'more') return void loadList('first', TEXT.reloaded);
         { failList({ kind: 'unavailable', text: TEXT.unreachable }); return; }
+      }
+      if (answer.kind === 'denied') {
+        const again = await recheck(uid);
+        if (stale()) return;
+        if (again !== null && isRefusal(again)) { failList(again); return; }
+        if (again !== null) withWait(again); // an undecided check: its wait still runs, and the refused read shows nothing
       }
       failList(readFailure(answer));
     } finally {
@@ -511,10 +537,16 @@ function UserPage({
     if (stale()) return;
     if (s.kind !== 'ok') return failDetail(id, sessionFailure(s), shown);
     if (adopt(uid, s.csrf)) return;
-    const answer = await customers.detail(id, controller.signal);
+    const answer = await customers.detail(id, s.csrf, controller.signal);
     if (stale()) return;
     if (answer.kind === 'ok') return putDetail({ id, phase: 'ready', text: '', customer: answer.customer });
     if (answer.kind === 'not-found') return putDetail({ id, phase: 'not-found', text: NOT_FOUND_TEXT, customer: null });
+    if (answer.kind === 'denied') {
+      const again = await recheck(uid);
+      if (stale()) return; // another session started its own generation, which reads this id again
+      if (again !== null && isRefusal(again)) return failDetail(id, again, shown);
+      if (again !== null) withWait(again); // an undecided check: its wait still runs, and the refused read shows nothing
+    }
     failDetail(id, readFailure(answer), shown);
   }
 

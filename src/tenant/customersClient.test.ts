@@ -69,10 +69,10 @@ function assertSameOriginOnly(r: Sent): void {
 }
 const headerNames = (r: Sent): string[] => [...r.headers].map(([name]) => name).sort();
 
-test('CDC-01. page one is a GET of the bare path with Accept only: no limit, no selector, no body', async () => {
+test('CDC-01. page one is a GET of the bare path with Accept and the session CSRF header only: no limit, no selector, no body', async () => {
   const rows = [{ id: ID, name: 'Ada Lovelace' }, { id: OTHER, name: 'Grace Hopper' }];
   const { sent, client } = once(page(rows, CURSOR));
-  const result = await client.list(null);
+  const result = await client.list(null, CSRF);
   assert.deepEqual(result, { kind: 'ok', customers: rows, nextCursor: CURSOR });
   assert.ok(result.kind === 'ok' && Object.isFrozen(result) && Object.isFrozen(result.customers) && Object.isFrozen(result.customers[0]));
   assert.equal(sent.length, 1);
@@ -81,20 +81,20 @@ test('CDC-01. page one is a GET of the bare path with Accept only: no limit, no 
   assert.equal(CUSTOMERS_PATH, CUSTOMER_DIRECTORY_PATH); // the server's own literal
   assert.equal(r.init.method, 'GET');
   assert.equal(r.init.body, undefined);
-  assert.deepEqual(headerNames(r), ['accept']);
+  assert.deepEqual(headerNames(r), ['accept', 'x-tmpos-session-csrf']);
   assert.equal(r.headers.get('accept'), 'application/json');
   assertSameOriginOnly(r);
 });
 
 test('CDC-02. a cursor rides the query verbatim; one outside the grammar is never sent', async () => {
   const next = once(page([], null));
-  assert.deepEqual(await next.client.list(CURSOR), { kind: 'ok', customers: [], nextCursor: null });
+  assert.deepEqual(await next.client.list(CURSOR, CSRF), { kind: 'ok', customers: [], nextCursor: null });
   assert.equal(next.sent[0].url, `${CUSTOMERS_PATH}?cursor=${CURSOR}`);
-  assert.deepEqual(headerNames(next.sent[0]), ['accept']);
+  assert.deepEqual(headerNames(next.sent[0]), ['accept', 'x-tmpos-session-csrf']);
   assertSameOriginOnly(next.sent[0]);
   for (const bad of ['', 'short', `${CURSOR}A`, CURSOR.slice(1), `${CURSOR.slice(0, 22)}=`, `${CURSOR.slice(0, 22)}&`, `${CURSOR.slice(0, 20)}%2F`, '../../session/logout?x=']) {
     const none = once(page([], null));
-    assert.deepEqual(await none.client.list(bad), { kind: 'bad-cursor' }, JSON.stringify(bad));
+    assert.deepEqual(await none.client.list(bad, CSRF), { kind: 'bad-cursor' }, JSON.stringify(bad));
     assert.equal(none.sent.length, 0, `a malformed cursor reached the network: ${JSON.stringify(bad)}`);
   }
 });
@@ -103,7 +103,7 @@ test('CDC-03. a list 200 is a result only when it is exactly the contract', asyn
   const row = { id: ID, name: 'Ada Lovelace' };
   const many = (n: number) => Array.from({ length: n }, (_, i) => ({ id: uuid(i + 1), name: `Customer ${i}` }));
   const full = once(page(many(100), CURSOR));
-  const ok = await full.client.list(null);
+  const ok = await full.client.list(null, CSRF);
   assert.ok(ok.kind === 'ok' && ok.customers.length === 100 && ok.nextCursor === CURSOR);
   const refused: Array<[string, Response]> = [
     ['an extra top-level key', json(200, { customers: [row], nextCursor: null, tenant: uuid(9) })],
@@ -135,13 +135,13 @@ test('CDC-03. a list 200 is a result only when it is exactly the contract', asyn
     ['a 201 with the contract body', json(201, { customers: [row], nextCursor: null })],
   ];
   for (const [label, reply] of refused) {
-    assert.deepEqual(await once(reply).client.list(null), { kind: 'unavailable' }, label);
+    assert.deepEqual(await once(reply).client.list(null, CSRF), { kind: 'unavailable' }, label);
   }
 });
 
 test('CDC-04. every other list answer maps to one outcome; a 400 is a bad cursor only when one was sent', async () => {
-  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(CURSOR), { kind: 'bad-cursor' });
-  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(null), { kind: 'unavailable' }); // page one
+  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(CURSOR, CSRF), { kind: 'bad-cursor' });
+  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(null, CSRF), { kind: 'unavailable' }); // page one
   const cases: Array<[Reply, unknown]> = [
     [refusal(401, 'unauthenticated'), { kind: 'signed-out' }],
     [refusal(403, 'forbidden'), { kind: 'denied' }],
@@ -155,18 +155,18 @@ test('CDC-04. every other list answer maps to one outcome; a 400 is a bad cursor
     [() => { throw new Error('sync'); }, { kind: 'unavailable' }],
   ];
   for (const [reply, expected] of cases) {
-    for (const cursor of [null, CURSOR]) assert.deepEqual(await once(reply instanceof Response ? reply.clone() : reply).client.list(cursor), expected);
+    for (const cursor of [null, CURSOR]) assert.deepEqual(await once(reply instanceof Response ? reply.clone() : reply).client.list(cursor, CSRF), expected);
   }
   // No answer in time, and a caller's abort before or during the request: never a rejection, never a result.
-  assert.deepEqual(await hanging(5).client.list(null), { kind: 'unavailable' });
+  assert.deepEqual(await hanging(5).client.list(null, CSRF), { kind: 'unavailable' });
   const before = new AbortController();
   before.abort();
   const unsent = hanging();
-  assert.deepEqual(await unsent.client.list(null, before.signal), { kind: 'unavailable' });
+  assert.deepEqual(await unsent.client.list(null, CSRF, before.signal), { kind: 'unavailable' });
   assert.equal(unsent.sent.length, 0);
   const during = new AbortController();
   const out = hanging();
-  const pending = out.client.list(null, during.signal);
+  const pending = out.client.list(null, CSRF, during.signal);
   during.abort();
   assert.deepEqual(await pending, { kind: 'unavailable' });
 });
@@ -189,7 +189,7 @@ test('CDC-06. a full page of 100 long names is read; a body over the cap is not'
   const escaped = raw.replace(/[\ud800-\udfff]/g, (u) => `\\u${u.charCodeAt(0).toString(16)}`);
   assert.ok(escaped.length > 240_000 && escaped.length <= 524_288);
   for (const text of [raw, escaped]) {
-    const result = await once(new Response(text, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } })).client.list(null);
+    const result = await once(new Response(text, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } })).client.list(null, CSRF);
     assert.ok(result.kind === 'ok');
     assert.equal(result.customers.length, 100);
     assert.equal(result.customers[99].name, astral.repeat(200));
@@ -197,23 +197,23 @@ test('CDC-06. a full page of 100 long names is read; a body over the cap is not'
   }
   const padded = `${' '.repeat(524_289 - raw.length)}${raw}`; // valid JSON, one character over the cap
   assert.equal(padded.length, 524_289);
-  assert.deepEqual(await once(new Response(padded, { status: 200, headers: { 'content-type': 'application/json' } })).client.list(null), { kind: 'unavailable' });
+  assert.deepEqual(await once(new Response(padded, { status: 200, headers: { 'content-type': 'application/json' } })).client.list(null, CSRF), { kind: 'unavailable' });
   const atCap = `${' '.repeat(524_288 - raw.length)}${raw}`;
-  assert.equal((await once(new Response(atCap, { status: 200, headers: { 'content-type': 'application/json' } })).client.list(null)).kind, 'ok');
+  assert.equal((await once(new Response(atCap, { status: 200, headers: { 'content-type': 'application/json' } })).client.list(null, CSRF)).kind, 'ok');
 });
 
 test('CDC-07. detail: a malformed id sends nothing; the 200 must name exactly the id asked for', async () => {
   const good = once(json(200, { customer: { id: ID, name: 'Ada Lovelace' } }));
-  const result = await good.client.detail(ID);
+  const result = await good.client.detail(ID, CSRF);
   assert.deepEqual(result, { kind: 'ok', customer: { id: ID, name: 'Ada Lovelace' } });
   assert.ok(result.kind === 'ok' && Object.isFrozen(result.customer));
   assert.equal(good.sent[0].url, `${CUSTOMERS_PATH}/${ID}`);
   assert.equal(good.sent[0].init.method, 'GET');
-  assert.deepEqual(headerNames(good.sent[0]), ['accept']);
+  assert.deepEqual(headerNames(good.sent[0]), ['accept', 'x-tmpos-session-csrf']);
   assertSameOriginOnly(good.sent[0]);
   for (const bad of ['', 'new', 'c1700000000000', ID.toUpperCase(), `{${ID}}`, `${ID}/`, `${ID}?x=1`, `../session/logout`, `${ID.slice(0, 35)}g`, encodeURIComponent(`${ID} `), `%2e%2e/${ID}`]) {
     const none = once(json(200, { customer: { id: ID, name: 'A' } }));
-    assert.deepEqual(await none.client.detail(bad), { kind: 'not-found' }, JSON.stringify(bad));
+    assert.deepEqual(await none.client.detail(bad, CSRF), { kind: 'not-found' }, JSON.stringify(bad));
     assert.equal(none.sent.length, 0, `a malformed id reached the network: ${JSON.stringify(bad)}`);
   }
   const cases: Array<[Reply, unknown]> = [
@@ -235,8 +235,8 @@ test('CDC-07. detail: a malformed id sends nothing; the 200 must name exactly th
     [refusal(503, 'service_unavailable'), { kind: 'unavailable' }],
     [new TypeError('network'), { kind: 'unavailable' }],
   ];
-  for (const [reply, expected] of cases) assert.deepEqual(await once(reply).client.detail(ID), expected);
-  assert.deepEqual(await hanging(5).client.detail(ID), { kind: 'unavailable' });
+  for (const [reply, expected] of cases) assert.deepEqual(await once(reply).client.detail(ID, CSRF), expected);
+  assert.deepEqual(await hanging(5).client.detail(ID, CSRF), { kind: 'unavailable' });
 });
 
 test('CDC-08. a create sends the caller\'s exact bytes with the five headers and nothing that selects a tenant', async () => {
@@ -384,8 +384,30 @@ test('CDC-12. the id rule is the server\'s canonical form, and the cursor gramma
   for (const id of [ID, OTHER, 'ffffffff-ffff-ffff-ffff-ffffffffffff', '00000000-0000-0000-0000-000000000000']) {
     const cursor = encodeCustomerCursor(id);
     const { sent, client } = once(page([], null));
-    await client.list(cursor);
+    await client.list(cursor, CSRF);
     assert.equal(sent.length, 1);
     assert.equal(decodeCustomerCursor(sent[0].url.slice(`${CUSTOMERS_PATH}?cursor=`.length)), id);
+  }
+});
+
+test('CDC-13. a read names its session in X-TMPOS-Session-CSRF: page one, a cursor page and a detail send Accept and that header only, never in the URL', async () => {
+  const token = 'Zx9-_'.repeat(9).slice(0, 43); // a synthetic 43-character token, distinct from the shared one
+  assert.equal(token.length, 43);
+  const sends = [
+    (c: ReturnType<typeof once>['client']) => c.list(null, token),
+    (c: ReturnType<typeof once>['client']) => c.list(CURSOR, token),
+    (c: ReturnType<typeof once>['client']) => c.detail(ID, token),
+  ];
+  for (const go of sends) {
+    const { sent, client } = once(() => json(200, { customers: [], nextCursor: null }));
+    await go(client);
+    assert.equal(sent.length, 1);
+    const [r] = sent;
+    assert.equal(r.init.method, 'GET');
+    assert.deepEqual(headerNames(r), ['accept', 'x-tmpos-session-csrf']);
+    assert.equal(r.headers.get('accept'), 'application/json');
+    assert.equal(r.headers.get('x-tmpos-session-csrf'), token);
+    assert.ok(!r.url.includes(token), 'the session token rode the URL');
+    assertSameOriginOnly(r);
   }
 });
