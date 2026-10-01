@@ -26,6 +26,9 @@
 //                 TrustedScope), never the request's: the tenant and store it selected (null at platform
 //                 scope) and the app-owned actor it resolved (M7A-CUSTOMERS-P3, contract version 2). So a
 //                 principal whose tenant or actor changed cannot replay one context's record in another's.
+//                 A templated command (M7A-CUSTOMERS-P7) appends its validated path target after the body,
+//                 so a key sent to two targets is a conflict; a literal route's fingerprint is unchanged
+//                 (no contract version bump).
 // The same key and principal with another operation, boundary, tenant, store, actor or body is the same
 // scope under another fingerprint: a conflict, answered identically whatever differs. No digest is
 // a bare hash, so neither a small body nor a known key can be guessed from what the store holds.
@@ -196,7 +199,17 @@ export interface OperationBinding {
   readonly actor: string | null;
   /** The exact body bytes read. */
   readonly body: Uint8Array;
+  /**
+   * The validated target a templated command's path names (M7A-CUSTOMERS-P7: the canonical lowercase uuid of
+   * PATCH /api/v1/customers/{id}), or absent/null on every literal route. When present it is APPENDED to the fingerprint,
+   * so one key and body sent to two targets are two fingerprints (422), never a replay of one target's response for the
+   * other; when absent the fingerprint is byte-identical to contract version 2's.
+   */
+  readonly target?: string | null;
 }
+
+/** A target slot: absent, null, or one uuid in canonical lowercase text form. */
+const TARGET_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface OperationIdentity {
   readonly scope: string;
@@ -362,9 +375,16 @@ export function createIdempotencyKeyring(secret: unknown): IdempotencyKeyring {
       // A slot that is neither a string nor null — an omitted actor, say — would hash as null: refuse it instead.
       const slots: readonly unknown[] = [binding.audience, binding.tenant, binding.store, binding.actor];
       if (!slots.every((slot) => slot === null || typeof slot === 'string')) throw new TypeError('idempotency_binding_invalid');
+      const target = binding.target;
+      if (target !== undefined && target !== null && (typeof target !== 'string' || !TARGET_RE.test(target))) {
+        throw new TypeError('idempotency_binding_invalid');
+      }
       const scope = digest(tag('scope', digest(tag('key', clientKey)), digest(tag('principal', principal.authProvider, principal.authProviderUid))));
       const body = createHash('sha256').update(binding.body).digest('base64url');
-      const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, binding.actor, body));
+      // A literal route builds exactly contract version 2's array; a target is one more element after the body, and the
+      // JSON framing keeps an array of one length from ever equalling one of another.
+      const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, binding.actor, body,
+        ...(target === undefined || target === null ? [] : [target])));
       return Object.freeze({ scope, fingerprint });
     },
     seal(envelope: ReplayEnvelope, operation: OperationIdentity): string {

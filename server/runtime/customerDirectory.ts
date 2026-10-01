@@ -74,6 +74,15 @@
 // stores, or a creation time not in exactly that form, is a 503. The list and the detail read stay {id, name}: contacts
 // are read here and nowhere else. No audit record (the list's owner decision), and no contact in any log or refusal.
 //
+// M7A-CUSTOMERS-P7 UPDATE — THE VERSION. The port now asks migration 024's tmpos_customer_edit.m7a_customer_profile, which
+// delegates to 023's routine and reads the customer's row version on the same snapshot, and its answer carries `version`
+// (a safe integer 1..2^53-1; missing or out of range is the same out-of-shape 503). The 200's JSON body is byte-identical
+// to P6's; the version travels as a STRONG ETag on that 200 only — `ETag: "<version>"`, decimal, no leading zero — set
+// explicitly, and the 200 is written without Express's send, so its weak body-hash ETag never replaces it and a matching
+// If-None-Match (or an If-Modified-Since) never turns the 200 into a 304. No refusal carries one. The edit
+// (customerUpdate.ts) sends it back as expectedVersion. No If-Match or If-None-Match is processed here, and Cache-Control
+// stays no-store.
+//
 // PURE AND PORTABLE: part of the emitted runtime artifact, importing only the runtime. It holds no infrastructure; the
 // port is handed to it by the composition root.
 import { Buffer } from 'node:buffer';
@@ -460,13 +469,17 @@ export interface CustomerProfile {
   readonly phone: string | null;
   readonly email: string | null;
   readonly createdAt: string | null;
+  /** The customer's row version (M7A-CUSTOMERS-P7, migration 024): the profile 200's strong ETag, never a body field. */
+  readonly version: number;
 }
 
 /**
- * The port to migration 023's session-bound profile read, handed exactly what the detail port is. Its answer is untrusted
+ * The port to migration 024's session-bound profile read, handed exactly what the detail port is. Its answer is untrusted
  * input, expected to be
- *   { outcome: 'customer', id, name, phone, email, createdAt } — id exactly the one asked for; phone, email a stored value
+ *   { outcome: 'customer', id, name, phone, email, createdAt, version }
+ *                                                             — id exactly the one asked for; phone, email a stored value
  *                                                               or null; createdAt YYYY-MM-DDTHH:mm:ss.sssZ or null;
+ *                                                               version a safe integer 1..2^53-1, on the values' snapshot;
  *   { outcome: 'not_found' }                                  — missing and foreign alike;
  *   { outcome: 'denied' }                                     — the authority no longer holds.
  * A throw is an outage.
@@ -480,7 +493,7 @@ export interface CustomerProfilePorts {
   readonly customerProfile: CustomerProfilePort;
 }
 
-const PROFILE_KEYS: readonly string[] = ['outcome', 'id', 'name', 'phone', 'email', 'createdAt'];
+const PROFILE_KEYS: readonly string[] = ['outcome', 'id', 'name', 'phone', 'email', 'createdAt', 'version'];
 /** toISOString's exact form: a four-digit year, milliseconds, UTC. */
 const CREATED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -504,11 +517,12 @@ export function customerProfileOf(raw: unknown, customerId: string): CustomerPro
     if (outcome === 'denied' || outcome === 'not_found') return hasExactly(raw, ['outcome']) ? outcome : null;
     if (outcome !== 'customer' || !hasExactly(raw, PROFILE_KEYS)) return null;
     // Read once each, so a value validated is the value copied.
-    const { id, name, phone, email, createdAt } = raw;
+    const { id, name, phone, email, createdAt, version } = raw;
     if (typeof id !== 'string' || id !== customerId || !UUID_RE.test(id) || !isStorableName(name)) return null;
     if (!isStoredContact(phone, normalizeCustomerPhone) || !isStoredContact(email, normalizeCustomerEmail)) return null;
     if (!isCustomerCreatedAt(createdAt)) return null;
-    return Object.freeze({ id, name, phone, email, createdAt });
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) return null;
+    return Object.freeze({ id, name, phone, email, createdAt, version });
   } catch {
     return null; // a throwing getter or proxy trap is never a customer
   }
@@ -543,7 +557,18 @@ export function createCustomerProfileRoute(ports: CustomerProfilePorts, options:
     // Missing and foreign alike: the detail read's one 404, body shape and log reason.
     if (answer === 'not_found') return refuse(res, ctx, 404, 'not_found', 'customer_not_found');
     if (answer === null) return refuse(res, ctx, 503, 'service_unavailable', 'customer_profile_answer_invalid');
-    res.status(200).json({ customer: { id: answer.id, name: answer.name, phone: answer.phone, email: answer.email, createdAt: answer.createdAt } });
+    // The version as a strong validator (M7A-CUSTOMERS-P7), and the body exactly P6's bytes (what res.json wrote: the same
+    // JSON.stringify, content type and length). Written with res.end, never res.json/res.send: Express's send would answer a
+    // request whose If-None-Match matches this ETag (or whose If-Modified-Since qualifies) with a bodiless 304, and would
+    // add its own weak ETag were none set. This route processes no conditional header: every 200 is the full representation.
+    const bytes = Buffer.from(JSON.stringify({
+      customer: { id: answer.id, name: answer.name, phone: answer.phone, email: answer.email, createdAt: answer.createdAt },
+    }), 'utf8');
+    res.status(200);
+    res.setHeader('ETag', `"${answer.version}"`);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Length', String(bytes.length));
+    res.end(bytes);
   };
   const route: RouteDefinition = {
     method: 'GET',

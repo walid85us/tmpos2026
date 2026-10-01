@@ -912,7 +912,9 @@ test('detail over the enforced chain: the same refusals before the authorizer, t
 const PROFILE_OF = (id: string) => `${CUSTOMER_DIRECTORY_PATH}/${id}/profile`;
 const CREATED = '2026-09-30T08:15:42.123Z';
 const ADA = Object.freeze({ name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test', createdAt: CREATED });
-const profileAnswerOf = (id: string, over: Record<string, unknown> = {}) => ({ outcome: 'customer', id, ...ADA, ...over });
+/** The port's answer carries the row version (M7A-CUSTOMERS-P7); the 200 body never does — it is the strong ETag. */
+const VERSION = 7;
+const profileAnswerOf = (id: string, over: Record<string, unknown> = {}) => ({ outcome: 'customer', id, ...ADA, version: VERSION, ...over });
 
 test('the profile route is a GET of the second template, exactly the detail route\'s policy, trusted context and session binding, no body and no key', () => {
   const route = createCustomerProfileRoute({ customerProfile: { get: () => ({ outcome: 'not_found' }) } });
@@ -950,17 +952,28 @@ test('isCustomerCreatedAt: null, or exactly toISOString\'s UTC form of a real in
 });
 
 test('customerProfileOf: only an exactly shaped answer for the id asked, with stored-shape contacts and creation time, is a customer; refusals carry nothing; anything else is null', () => {
-  assert.deepEqual(customerProfileOf(profileAnswerOf(CID), CID), { id: CID, ...ADA });
+  assert.deepEqual(customerProfileOf(profileAnswerOf(CID), CID), { id: CID, ...ADA, version: VERSION });
   assert.ok(Object.isFrozen(customerProfileOf(profileAnswerOf(CID), CID)));
-  assert.deepEqual(customerProfileOf(profileAnswerOf(CID, { phone: null, email: null, createdAt: null }), CID),
-    { id: CID, name: 'Ada Lovelace', phone: null, email: null, createdAt: null }, 'a legacy customer: no contact, no known creation time');
+  assert.deepEqual(customerProfileOf(profileAnswerOf(CID, { phone: null, email: null, createdAt: null, version: 1 }), CID),
+    { id: CID, name: 'Ada Lovelace', phone: null, email: null, createdAt: null, version: 1 }, 'a legacy customer: no contact, no known creation time');
+  assert.equal((customerProfileOf(profileAnswerOf(CID, { version: Number.MAX_SAFE_INTEGER }), CID) as { version: number }).version, Number.MAX_SAFE_INTEGER,
+    'the largest version a row can hold (2^53-1)');
   assert.equal(customerProfileOf({ outcome: 'not_found' }, CID), 'not_found');
   assert.equal(customerProfileOf({ outcome: 'denied' }, CID), 'denied');
   const hostile = new Proxy({}, { ownKeys: () => { throw new Error('trap'); } });
   for (const [label, raw] of [
     ['another id', profileAnswerOf(idOf(43))],
     ['the detail\'s shape', { outcome: 'customer', id: CID, name: 'Ada' }],
-    ['a missing createdAt', { outcome: 'customer', id: CID, name: 'Ada', phone: null, email: null }],
+    ['a missing createdAt', { outcome: 'customer', id: CID, name: 'Ada', phone: null, email: null, version: 1 }],
+    ['P6\'s shape, with no version (M7A-CUSTOMERS-P7)', { outcome: 'customer', id: CID, ...ADA }],
+    ['version 0', profileAnswerOf(CID, { version: 0 })],
+    ['a negative version', profileAnswerOf(CID, { version: -1 })],
+    ['a fractional version', profileAnswerOf(CID, { version: 1.5 })],
+    ['a version past 2^53-1', profileAnswerOf(CID, { version: Number.MAX_SAFE_INTEGER + 1 })],
+    ['a version as text', profileAnswerOf(CID, { version: '7' })],
+    ['a version as a bigint', profileAnswerOf(CID, { version: 7n })],
+    ['a null version', profileAnswerOf(CID, { version: null })],
+    ['NaN', profileAnswerOf(CID, { version: Number.NaN })],
     ['an extra key', profileAnswerOf(CID, { tenant: T1 })],
     ['an untrimmed phone', profileAnswerOf(CID, { phone: ' +1 555 0100' })],
     ['a blank phone (stored as null, never empty)', profileAnswerOf(CID, { phone: '' })],
@@ -981,6 +994,7 @@ test('customerProfileOf: only an exactly shaped answer for the id asked, with st
     ['createdAt an impossible date', profileAnswerOf(CID, { createdAt: '2026-02-30T00:00:00.000Z' })],
     ['a 201-character name', profileAnswerOf(CID, { name: 'x'.repeat(CUSTOMER_NAME_MAX_CHARACTERS + 1) })],
     ['not_found with a field', { outcome: 'not_found', phone: null }],
+    ['not_found with a version', { outcome: 'not_found', version: 1 }],
     ['denied with a field', { outcome: 'denied', email: 'x@y' }],
     ['invalid', { outcome: 'invalid' }],
     ['an array', [profileAnswerOf(CID)]],
@@ -989,6 +1003,27 @@ test('customerProfileOf: only an exactly shaped answer for the id asked, with st
   ] as const) {
     assert.equal(customerProfileOf(raw, CID), null, label);
   }
+});
+
+test('M7A-CUSTOMERS-P7 profile over the enforced chain: no conditional header is processed — a matching If-None-Match (strong, weak, *) or any If-Modified-Since still gets the full 200, the same bytes and the strong ETag, never a 304', async () => {
+  await withDetailChain(() => ({ outcome: 'not_found' }), async (h) => {
+    const target = PROFILE_OF(CID);
+    const own = await h.raw(target, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(own.status, 200, own.body);
+    // M7A-CUSTOMERS-P7: no conditional header is processed — a validator that matches the strong ETag (strong, weak or *), or
+    // any If-Modified-Since, still gets the full 200 with the same bytes and the strong ETag, never a bodiless 304.
+    for (const conditional of [
+      { 'if-none-match': `"${VERSION}"` }, { 'if-none-match': `W/"${VERSION}"` }, { 'if-none-match': '*' },
+      { 'if-none-match': `"1", "${VERSION}"` }, { 'if-modified-since': new Date(Date.now() + 86_400_000).toUTCString() },
+      { 'if-none-match': `"${VERSION}"`, 'if-modified-since': new Date().toUTCString() }, { 'if-match': '"999"' },
+    ] as Array<Record<string, string>>) {
+      const r = await h.raw(target, { [SESSION_CSRF_HEADER]: h.csrf, ...conditional });
+      assert.equal(r.status, 200, JSON.stringify(conditional));
+      assert.equal(r.body, own.body, `${JSON.stringify(conditional)}: the exact bytes`);
+      assert.equal(r.headers.etag, `"${VERSION}"`, `${JSON.stringify(conditional)}: the strong ETag`);
+    }
+    assert.equal(h.profileCalls.length, 8, 'every request read the port: none was answered from a validator');
+  }, (id) => (id === CID ? profileAnswerOf(id) : { outcome: 'not_found' }));
 });
 
 /** Run the profile handler once over a minimal request, response and context, recording what the port was handed. */
@@ -1001,11 +1036,16 @@ async function runProfile(opts: { path?: string; url?: unknown; trusted?: unknow
     },
   };
   const route = createCustomerProfileRoute({ customerProfile: port }, opts.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs });
-  const out: Captured = { status: null, body: undefined, locals: {} };
+  const out: Captured & { headers: Record<string, unknown>; headersAtJson: Record<string, unknown> | null; raw: string | null } = {
+    status: null, body: undefined, locals: {}, headers: {}, headersAtJson: null, raw: null,
+  };
   const res = {
     locals: out.locals,
+    setHeader(name: string, value: unknown) { out.headers[name.toLowerCase()] = value; return res; },
     status(code: number) { out.status = code; return res; },
-    json(body: unknown) { out.body = body; return res; },
+    json(body: unknown) { out.body = body; out.headersAtJson = { ...out.headers }; return res; },
+    // The profile 200 is written with res.end (never Express's send, which could turn it into a 304): its exact bytes.
+    end(chunk: unknown) { out.raw = Buffer.from(chunk as Uint8Array).toString('utf8'); out.body = JSON.parse(out.raw); out.headersAtJson = { ...out.headers }; return res; },
   };
   const ctx = {
     requestId: 'req-7', principal: null, session: null, authenticatedAt: null, body: undefined,
@@ -1053,11 +1093,11 @@ test('profile handler: without a resolved tenant scope or the session key it ref
 });
 
 test('profile handler: a canonical id makes exactly one port call with (scope, key, id), and 200 carries exactly {customer:{id,name,phone,email,createdAt}} in that order', async () => {
-  for (const [id, answer] of [
-    [CID, ADA], ['00000000-0000-0000-0000-000000000000', { ...ADA, phone: null, email: null, createdAt: null }],
-    ['ffffffff-ffff-8fff-bfff-ffffffffffff', { ...ADA, email: null }],
+  for (const [id, answer, version] of [
+    [CID, ADA, 1], ['00000000-0000-0000-0000-000000000000', { ...ADA, phone: null, email: null, createdAt: null }, 42],
+    ['ffffffff-ffff-8fff-bfff-ffffffffffff', { ...ADA, email: null }, Number.MAX_SAFE_INTEGER],
   ] as const) {
-    const { out, calls, ctx } = await runProfile({ path: PROFILE_OF(id), answer: (asked) => ({ outcome: 'customer', id: asked, ...answer }) });
+    const { out, calls, ctx } = await runProfile({ path: PROFILE_OF(id), answer: (asked) => ({ outcome: 'customer', id: asked, ...answer, version }) });
     assert.equal(calls.length, 1, id);
     assert.equal(calls[0].scope, ctx.trusted, 'the very scope the chain resolved');
     assert.equal(calls[0].sessionKey, SESSION_KEY);
@@ -1068,6 +1108,34 @@ test('profile handler: a canonical id makes exactly one port call with (scope, k
     assert.deepEqual(Object.keys(out.body as object), ['customer']);
     assert.deepEqual(Object.keys((out.body as { customer: object }).customer), ['id', 'name', 'phone', 'email', 'createdAt']);
     assert.equal(out.locals.refusal, undefined);
+    // M7A-CUSTOMERS-P7: the version is a strong ETag set BEFORE the body (so Express adds no weak one), never a body field.
+    assert.deepEqual(out.headersAtJson, {
+      etag: `"${version}"`, 'content-type': 'application/json; charset=utf-8', 'content-length': String(Buffer.byteLength(out.raw ?? '')),
+    }, `${id}: exactly the strong ETag, the JSON type and the length, set before the body`);
+    assert.equal(out.raw, JSON.stringify({ customer: { id, ...answer } }), 'the exact bytes res.json wrote before M7A-CUSTOMERS-P7');
+    assert.ok(!JSON.stringify(out.body).includes('version'), 'no version in the body');
+  }
+});
+
+test('M7A-CUSTOMERS-P7 profile handler: no refusal carries the version ETag; a version missing or out of range is the existing out-of-shape 503', async () => {
+  const cases: Array<[string, (id: string, s: AbortSignal) => unknown, number]> = [
+    ['denied', () => ({ outcome: 'denied' }), 403],
+    ['not_found', () => ({ outcome: 'not_found' }), 404],
+    ['a throw', () => { throw new Error('down'); }, 503],
+    ['P6\'s answer without a version', (id) => ({ outcome: 'customer', id, ...ADA }), 503],
+    ['version 0', (id) => profileAnswerOf(id, { version: 0 }), 503],
+    ['a version past 2^53-1', (id) => profileAnswerOf(id, { version: 2 ** 53 }), 503],
+    ['a version as text', (id) => profileAnswerOf(id, { version: '7' }), 503],
+  ];
+  for (const [label, answer, status] of cases) {
+    const { out } = await runProfile({ answer, deadlineMs: 1_000 });
+    assert.equal(out.status, status, label);
+    assert.deepEqual(out.headers, {}, `${label}: no ETag is set`);
+    if (status === 503 && label !== 'a throw') assert.equal(out.locals.refusal, 'customer_profile_answer_invalid', label);
+  }
+  for (const segment of ['x', CID.toUpperCase()]) {
+    const { out } = await runProfile({ path: PROFILE_OF(segment) });
+    assert.deepEqual([out.status, out.headers], [400, {}], segment);
   }
 });
 
@@ -1106,7 +1174,10 @@ test('profile over the enforced chain: 401 first; the session-binding witness re
     const own = await h.raw(target, { [SESSION_CSRF_HEADER]: h.csrf });
     assert.equal(own.status, 200, own.body);
     assert.equal(own.headers['cache-control'], 'no-store');
-    assert.deepEqual(JSON.parse(own.body), { customer: { id: CID, ...ADA } });
+    assert.equal(own.headers.etag, `"${VERSION}"`, 'M7A-CUSTOMERS-P7: the strong version ETag, never Express\'s weak body hash');
+    assert.equal(own.body, JSON.stringify({ customer: { id: CID, ...ADA } }), 'the body bytes are exactly P6\'s');
+    assert.equal(own.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(own.headers['content-length'], String(Buffer.byteLength(own.body)));
     assert.deepEqual(h.authorizations.map((a) => [a[1], a[2]]), [[{ scope: 'tenant', permission: 'view_customers' }, { method: 'GET', path: '/api/v1/customers/{id}/profile', audience: 'tenant' }]]);
     assert.deepEqual(h.profileCalls, [{ scope: SCOPE, sessionKey: h.storeKey, id: CID }]);
     assert.equal(h.calls.length, 0, 'the detail port is never asked for a profile');
@@ -1143,6 +1214,9 @@ test('profile over the enforced chain: 401 first; the session-binding witness re
     const headersOf = (r: Reply): Record<string, unknown> => Object.fromEntries(Object.entries(r.headers)
       .map(([k, v]) => [k, k === 'etag' ? typeof v : v]).filter(([k]) => k !== 'x-request-id' && k !== 'date'));
     assert.deepEqual(headersOf(foreign), headersOf(missing), 'identical headers modulo the request id, date and body hash');
+    for (const r of [foreign, missing, malformed]) {
+      assert.ok(r.headers.etag === undefined || /^W\//.test(String(r.headers.etag)), 'a refusal never carries the strong version ETag');
+    }
     assert.equal(h.profileCalls.length, 3);
     // No route past the template: an extra segment, a trailing slash, another suffix, another method — the terminal 404.
     for (const [path, method] of [[`${target}/extra`, 'GET'], [`${target}/`, 'GET'], [`${CUSTOMER_DIRECTORY_PATH}//profile`, 'GET'],

@@ -311,13 +311,40 @@ jobs:
       # privileges, the create's database clock, every refused contact class, the tenant store's rollback of a refused
       # contact, parity with 020's refusals, the profile read and its adapter, the refused and the exact rollback), against
       # the SAME disposable service; the HTTP and compiled cases run in the tenant entry step above. It leaves 023 applied and
-      # none of its customers. Synthetic data and keys made at run time only. Same binding, no new service, no secret, no
+      # none of its customers. (M7A-CUSTOMERS-P7: it proves 023 with 024 rolled back and re-applies 024 when it ends; the
+      # profile adapter now reads 024's versioned profile and is proven in the customer edit step below.) Synthetic data and keys made at run time only. Same binding, no new service, no secret, no
       # permission change.
       - name: Tenant customer contact records against disposable PostgreSQL (M7A-CUSTOMERS-P6)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerContact.integration.test.mjs
+      # M7A-CUSTOMERS-P7 — migration 024's customer edit as the runtime login (024 rolled back with its own down file,
+      # customers with and without contacts and creation times seeded on 001-023, 024 re-applied by the trusted executor over
+      # them; the postcondition, the privileges, patch semantics, every refused argument, the Edit threshold and owner-edited
+      # levels, versions and no-ops, two writers and revocations ordered by lock waits, the versioned profile read and its
+      # adapter, the refused, exact and committed rollback), against the SAME disposable service. It leaves 024 applied and
+      # none of its customers (an edited customer would refuse every later rollback of 024). Synthetic data and keys made at
+      # run time only. Same binding, no new service, no secret, no permission change.
+      - name: Tenant customer edit against disposable PostgreSQL (M7A-CUSTOMERS-P7)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerEdit.integration.test.mjs
+      # M7A-CUSTOMERS-P7 — PATCH /api/v1/customers/{id} end to end over real loopback HTTP: the tenant entry composed as
+      # production composes it (two instances over one database where the case needs them), the command transaction, 024's
+      # edit routine, the audit record naming the customer and the sealed completion, against the SAME disposable service:
+      # persistence read back through a second instance, patch semantics and refusals, Edit authority and owner-edited
+      # levels, the tenant boundary, the key's replay and target binding, audit and completion faults, a lost COMMIT answer,
+      # no-ops, two writers on one version and revocations ordered by lock waits. Its committed edits leave audit records
+      # naming customers (append-only), after which 024 cannot be rolled back on this service: it runs AFTER every step that
+      # rolls 024 back, and deletes every customer it made. Synthetic data and keys made at run time only. Same binding, no
+      # new service, no secret, no permission change.
+      - name: Tenant customer edit over HTTP against disposable PostgreSQL (M7A-CUSTOMERS-P7)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerEditHttp.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

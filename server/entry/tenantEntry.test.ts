@@ -200,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 11 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 12 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -212,6 +212,8 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 11 frozen tenant routes', ()
     // M7A-CUSTOMERS-P6: the contact profile, the route table's second template.
     { method: 'GET', path: '/api/v1/customers/{id}/profile', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
+    // M7A-CUSTOMERS-P7: the customer edit, the route table's one templated command.
+    { method: 'PATCH', path: '/api/v1/customers/{id}', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
   ]);
@@ -305,7 +307,7 @@ function classify(text: string): Kind {
   if (text.includes('m7a_session_create')) return 'sessionMint';
   if (text.includes('m5_admit_tenant_session_v2')) return 'tenantAdmissionProbe';
   if (text.includes('m7a_customer_page_v3')) return 'customerProbe';
-  if (text.includes('m7a_contact_profile')) return 'customerProfileProbe';
+  if (text.includes('m7a_customer_profile')) return 'customerProfileProbe';
   if (text.includes('m7a_customer_get')) return 'customerDetailProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
@@ -346,7 +348,7 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   tenantAdmissionProbe: [{ outcome: 'refused' }],
   customerProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   customerDetailProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
-  customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null }],
+  customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null, o_version: null }],
   storeProbe: [{ ok: true }],
 });
 

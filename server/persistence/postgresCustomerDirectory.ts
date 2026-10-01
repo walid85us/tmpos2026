@@ -52,6 +52,12 @@
 // (503), with this file's one bounded message — never a contact. Its readiness (probeCustomerProfile) asks the routine
 // for a random key no session holds and requires its one 'denied' with every other column null; the reads probe asks it
 // after the detail's.
+//
+// M7A-CUSTOMERS-P7 UPDATE — THE VERSIONED PROFILE. The profile read (and its probe) now asks migration 024's
+// tmpos_customer_edit.m7a_customer_profile — 024 revokes the runtime role's EXECUTE on 023's routine — which delegates to
+// 023's on one snapshot and adds the customer's row version (o_version, NULL on every refusal). A 'customer' row must carry
+// it as bigint decimal text from 1 to 2^53-1 with no leading zero, answered to the runtime as a number; anything else is
+// the same bounded throw (503).
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
@@ -71,8 +77,10 @@ export const CUSTOMER_DIRECTORY_BOUNDS: TransactionBounds = Object.freeze({
 
 /** The columns migration 020's routine answers with — 018's and 017's own. */
 const ROW_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_customer_id', 'o_name'];
-/** The columns migration 023's profile read answers with: 022's, then the contact record's three. */
-const PROFILE_COLUMNS: readonly string[] = [...ROW_COLUMNS, 'o_phone', 'o_email', 'o_created_at'];
+/** The columns migration 024's profile read answers with: 022's, then 023's contact record's three, then the row version. */
+const PROFILE_COLUMNS: readonly string[] = [...ROW_COLUMNS, 'o_phone', 'o_email', 'o_created_at', 'o_version'];
+/** A row version as PostgreSQL sends a bigint: decimal text, no sign, no leading zero, at most 16 digits. */
+const VERSION_TEXT_RE = /^[1-9][0-9]{0,15}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** A session store key: the SHA-256 of a session identifier, unpadded base64url (sessions.ts digestOf). */
 const SESSION_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -214,9 +222,12 @@ function profileOf(rows: unknown, tenant: string, customerId: string): unknown {
   if (!Array.isArray(rows) || rows.length !== 1) throw fault();
   const {
     o_outcome: outcome, o_tenant_id: owner, o_customer_id: id, o_name: name, o_phone: phone, o_email: email, o_created_at: createdAt,
+    o_version: versionText,
   } = rowOf(rows[0], PROFILE_COLUMNS);
   if (outcome === 'not_found' || outcome === 'denied') {
-    if (owner !== null || id !== null || name !== null || phone !== null || email !== null || createdAt !== null) throw fault();
+    if (owner !== null || id !== null || name !== null || phone !== null || email !== null || createdAt !== null || versionText !== null) {
+      throw fault();
+    }
     return Object.freeze({ outcome });
   }
   if (outcome !== 'customer' || owner !== tenant || id !== customerId || !isStorableName(name)) throw fault();
@@ -224,7 +235,11 @@ function profileOf(rows: unknown, tenant: string, customerId: string): unknown {
   if (phone !== null && (typeof phone !== 'string' || normalizeCustomerPhone(phone) !== phone)) throw fault();
   if (email !== null && (typeof email !== 'string' || normalizeCustomerEmail(email) !== email)) throw fault();
   if (!isCustomerCreatedAt(createdAt)) throw fault();
-  return Object.freeze({ outcome: 'customer', id, name, phone, email, createdAt });
+  // Compared as text first, so no value is ever rounded through a float before it is known to be exact.
+  if (typeof versionText !== 'string' || !VERSION_TEXT_RE.test(versionText)) throw fault();
+  const version = Number(versionText);
+  if (!Number.isSafeInteger(version) || String(version) !== versionText) throw fault();
+  return Object.freeze({ outcome: 'customer', id, name, phone, email, createdAt, version });
 }
 
 /** The production customer profile read over the M6 runtime client — the kernel the composition root already built. */
@@ -238,8 +253,8 @@ export function createPostgresCustomerProfile(deps: { readonly client: Supervise
       if (typeof customerId !== 'string' || !UUID_RE.test(customerId)) throw fault();
       const tenant = scope.tenant;
       return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
-        const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at
-          from tmpos_customer_contact.m7a_contact_profile(${sessionKey}::text, ${customerId}::uuid, ${tenant}::uuid)`;
+        const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at, o_version
+          from tmpos_customer_edit.m7a_customer_profile(${sessionKey}::text, ${customerId}::uuid, ${tenant}::uuid)`;
         return profileOf(rows, tenant, customerId);
       });
     },
@@ -252,8 +267,8 @@ export async function probeCustomerProfile(client: SupervisedPgClient, signal: A
   const absentKey = randomBytes(32).toString('base64url');
   try {
     return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
-      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at
-        from tmpos_customer_contact.m7a_contact_profile(${absentKey}::text, ${randomUUID()}::uuid, ${randomUUID()}::uuid)`;
+      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at, o_version
+        from tmpos_customer_edit.m7a_customer_profile(${absentKey}::text, ${randomUUID()}::uuid, ${randomUUID()}::uuid)`;
       if (!Array.isArray(rows) || rows.length !== 1) return false;
       const row = rowOf(rows[0], PROFILE_COLUMNS);
       return row.o_outcome === 'denied' && PROFILE_COLUMNS.slice(1).every((column) => row[column] === null);

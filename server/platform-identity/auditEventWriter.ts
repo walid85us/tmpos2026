@@ -209,6 +209,7 @@ function assertSessionShape(event: AuditEventWriteInput, shape: SessionAuditShap
   // The request id is the server's random operation id (sessions.ts), never a client's value.
   const matches = UUID_RE.test(event.requestId) && (event.traceId ?? null) === null && event.actorAuthProvider === null
     && (event.onBehalfOfInternalUserId ?? null) === null && (event.subjectTenantId ?? null) === null
+    && (event.subjectCustomerId ?? null) === null
     && event.scopeType === scopeType && event.tenantId === null && event.storeId === null
     && event.requiredPermission === 'n_a' && event.decision === shape.decision && event.reasonCode === shape.reasonCode
     && event.humanReadableReason === shape.humanReadableReason && event.resultStatus === 'succeeded'
@@ -299,6 +300,14 @@ export interface AuditEventWriteInput {
    * target — never from request metadata. Absent or null, the row is written exactly as before 009.
    */
   subjectTenantId?: string | null;
+
+  /**
+   * The customer the recorded action targeted (migration 024, M7A-CUSTOMERS-P7): a tenant command that changes one
+   * customer names it here. A UUID or null; set only by a caller that derived it from a server-validated target (the
+   * transactional store, from the aggregate its mutator locked) — never from request metadata. An event names at most one
+   * subject: never both this and subjectTenantId. Absent or null, the row is written exactly as before 024.
+   */
+  subjectCustomerId?: string | null;
 }
 
 /** Non-sensitive validation error (carries a label only — never an input value). */
@@ -369,6 +378,12 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
   }
   if (event.subjectTenantId != null && !UUID_RE.test(event.subjectTenantId)) {
     throw new AuditEventValidationError('audit event subjectTenantId must be a UUID or null');
+  }
+  if (event.subjectCustomerId != null && !UUID_RE.test(event.subjectCustomerId)) {
+    throw new AuditEventValidationError('audit event subjectCustomerId must be a UUID or null');
+  }
+  if (event.subjectTenantId != null && event.subjectCustomerId != null) {
+    throw new AuditEventValidationError('audit event names at most one subject');
   }
 
   // Scope fields must be MUTUALLY consistent, not merely well-typed. Reaching the database
@@ -596,8 +611,59 @@ export async function writeAuditEvent(
   const eventId = randomUUID();
 
   // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
-  // Two fixed statements, never a fragment: subject_tenant_id (migration 009) is named only when the event names a
-  // subject, so every other caller's statement — and every database before 009 — is exactly as it was.
+  // Three fixed statements, never a fragment: subject_tenant_id (migration 009) or subject_customer_id (migration 024)
+  // is named only when the event names that subject, so every other caller's statement — and every database before
+  // 009 or 024 — is exactly as it was. Validation proved at most one subject is named.
+  if (validated.subjectCustomerId != null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_customer_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectCustomerId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
   if (validated.subjectTenantId != null) {
     await executor`
       insert into public.audit_event (

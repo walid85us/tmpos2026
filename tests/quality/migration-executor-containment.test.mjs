@@ -572,6 +572,16 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // about migration 023's columns, routines or privilege containment, and applies them through the SAME trusted executor.
     // Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/customerContact.integration.test.mjs',
+    // M7A-CUSTOMERS-P7: the customer edit's proof needs 001-023 applied and populated (and 024 applied over those rows,
+    // refused, rolled back and re-applied) before it can say anything about migration 024's version column, audit subject,
+    // routines or privilege containment, and applies them through the SAME trusted executor. Same category (a tests/db/
+    // suite), same reasoning; the containment property above is untouched.
+    'tests/db/customerEdit.integration.test.mjs',
+    // M7A-CUSTOMERS-P7: the customer edit's HTTP proof stands up the tenant entry over every migration in the directory
+    // (024 included) and applies them through the SAME trusted executor before any request, validating its target with the
+    // same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property above is
+    // untouched.
+    'tests/db/customerEditHttp.integration.test.mjs',
     // M7A-CUSTOMERS-P3-R2: the shop's real-browser gate stands up the tenant entry over a disposable PostgreSQL and needs
     // 001-020 applied first; it applies them through the SAME trusted executor (and validates its target with the same
     // assertDisposableTestDsn), never a second apply path. A test suite that runs the database lane, like the tests/db/

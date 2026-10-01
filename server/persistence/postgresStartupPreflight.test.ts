@@ -21,11 +21,11 @@ const MIGRATIONS_DIR = resolve(HERE, '..', 'platform-identity', 'migrations');
 
 // --- A. REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS, bound to the real migration files ------------------
 
-test('the migrations directory holds exactly the up files 001..023, and REQUIRED_MIGRATIONS is each one\'s sha256', () => {
+test('the migrations directory holds exactly the up files 001..024, and REQUIRED_MIGRATIONS is each one\'s sha256', () => {
   const upFiles = readdirSync(MIGRATIONS_DIR).filter((f) => /\.up\.sql$/.test(f));
   const versions = upFiles.map((f) => /^(\d{3})_/.exec(f)?.[1]).sort();
-  assert.deepEqual(versions, Array.from({ length: 23 }, (_, i) => String(i + 1).padStart(3, '0')),
-    'the up files are exactly 001..023: a new migration must update the pin');
+  assert.deepEqual(versions, Array.from({ length: 24 }, (_, i) => String(i + 1).padStart(3, '0')),
+    'the up files are exactly 001..024: a new migration must update the pin');
   assert.deepEqual(REQUIRED_MIGRATIONS.map((m) => m.version), versions, 'REQUIRED_MIGRATIONS names the same versions, in order');
   for (const { version, checksum } of REQUIRED_MIGRATIONS) {
     const file = upFiles.find((f) => f.startsWith(`${version}_`));
@@ -135,6 +135,24 @@ test('evaluateRuntimeLogin: one targeted case per violation code', () => {
   }
 });
 
+test('M7A-CUSTOMERS-P7: a runtime login that can still EXECUTE 023\'s profile read (024 revokes it) is refused; one missing a 024 grant is refused too', () => {
+  const PROFILE_023 = 'tmpos_app|a|function|tmpos_customer_contact.m7a_contact_profile(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid)|EXECUTE';
+  assert.ok(!APPROVED_ROLE_GRANTS.includes(PROFILE_023), 'not approved since 024: the runtime\'s only profile path is 024\'s');
+  assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: [...APPROVED_ROLE_GRANTS, PROFILE_023] }), ['role_privilege_unexpected'],
+    'a database at 024 whose grant was given back');
+  for (const line of [
+    'tmpos_app|a|function|tmpos_customer_edit.m7a_customer_profile(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid)|EXECUTE',
+    'tmpos_app|a|function|tmpos_customer_edit.m7a_customer_update(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid,bigint,pg_catalog.text,boolean,pg_catalog.text,boolean,pg_catalog.text)|EXECUTE',
+    'tmpos_app|a|schema|tmpos_customer_edit|USAGE',
+  ]) {
+    assert.ok(APPROVED_ROLE_GRANTS.includes(line), line);
+    assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: APPROVED_ROLE_GRANTS.filter((g) => g !== line) }), ['role_privilege_missing'], line);
+  }
+  // A database still at 023 (its profile grant present, 024's absent): both refusals at once.
+  const at023 = [...APPROVED_ROLE_GRANTS.filter((g) => !g.includes('tmpos_customer_edit')), PROFILE_023];
+  assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: at023 }).sort(), ['role_privilege_missing', 'role_privilege_unexpected']);
+});
+
 test('evaluateRuntimeLogin: inheritOption null falls back to login.inherit', () => {
   const membershipsWithNull = [{ ...BASE_MEMBERSHIPS[0], inheritOption: null }, BASE_MEMBERSHIPS[1]] as const;
   assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, memberships: membershipsWithNull, login: { ...BASE_LOGIN, inherit: true } }), [],
@@ -188,13 +206,13 @@ test('evaluateMigrationLedger: each ledger code', () => {
     ['migration_ledger_missing', { present: false, readable: false, rows: [] }],
     ['migration_ledger_missing', { present: false, readable: true, rows: [] }],
     ['migration_ledger_unreadable', { present: true, readable: false, rows: [] }],
-    ['migration_unknown', { present: true, readable: true, rows: [...GOLDEN_ROWS, { version: '024', checksum: 'f'.repeat(64), dirty: false, finished: true }] }],
+    ['migration_unknown', { present: true, readable: true, rows: [...GOLDEN_ROWS, { version: '025', checksum: 'f'.repeat(64), dirty: false, finished: true }] }],
     ['migration_dirty', withRow(0, { dirty: true })],
     ['migration_dirty', withRow(0, { finished: false })],
     ['migration_checksum_mismatch', withRow(0, { checksum: '0'.repeat(64) })],
     ['migration_checksum_mismatch', withRow(0, { checksum: 'not-a-checksum' })],
-    ['migration_missing', { present: true, readable: true, rows: GOLDEN_ROWS.slice(0, -1) }], // 023 absent, above the newest recorded
-    ['migration_not_contiguous', { present: true, readable: true, rows: GOLDEN_ROWS.filter((r) => r.version !== '007') }], // gap below 023
+    ['migration_missing', { present: true, readable: true, rows: GOLDEN_ROWS.slice(0, -1) }], // 024 absent, above the newest recorded
+    ['migration_not_contiguous', { present: true, readable: true, rows: GOLDEN_ROWS.filter((r) => r.version !== '007') }], // gap below 024
   ];
   for (const [code, facts] of cases) {
     assert.deepEqual(evaluateMigrationLedger(facts), [code], `${code}: ${JSON.stringify(facts)}`);
@@ -211,7 +229,7 @@ test('evaluateMigrationLedger: each ledger code', () => {
     const violations = evaluateMigrationLedger({ present: true, readable: true, rows: [malformed] });
     assert.ok(violations.includes('migration_ledger_malformed'), JSON.stringify(malformed));
   }
-  // The 23 required rows plus a second, clean, identical row for '023': the key no longer holds — malformed,
+  // The 24 required rows plus a second, clean, identical row for '024': the key no longer holds — malformed,
   // and nothing else (every required version is still recorded exactly once as far as the chain is concerned).
   assert.deepEqual(
     evaluateMigrationLedger({ present: true, readable: true, rows: [...GOLDEN_ROWS, GOLDEN_ROWS[GOLDEN_ROWS.length - 1]] }),

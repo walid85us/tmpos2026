@@ -54,6 +54,11 @@
 //                  unavailable), the session-bound CSRF token on an unsafe method (403),
 //                  then the authorizer when the route declares a requirement (403) — and
 //                  only such a route's 2xx slides the session's idle window;
+//             6b. the target of a templated command (M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id}):
+//                the path's final segment must be a canonical lowercase uuid -> else 400, judged only
+//                now that the chain has authenticated and authorized the request and before anything
+//                is read or reserved; it is bound into the idempotency fingerprint and handed to the
+//                planner as ctx.targetId;
 //             7. body: only now is a declared JSON body read, capped on the bytes
 //                actually streamed (readBoundedBody), and parsed as strict UTF-8
 //                JSON -> 413 / 400 (trailer fields -> 400);
@@ -67,7 +72,8 @@
 //                crash window), under the port deadline, handed its IdempotentContext only, its
 //                outcome recorded before it is sent (a malformed outcome -> 500, an overrun or a
 //                store that cannot record -> 503; neither is recorded); a `required` route's
-//                `command` planned synchronously from its body alone (a throw or a plan out of its
+//                `command` planned synchronously from its body (and a templated command's validated
+//                target) alone (a throw or a plan out of its
 //                contract -> 500; a body its contract refuses, COMMAND_REQUEST_INVALID -> 400; each
 //                records nothing, and the lease waits out its time) and committed atomically — the lease
 //                check, the trusted context's revalidation, the mutation, the completion, its audit
@@ -136,7 +142,7 @@ import type { CommandContract, CommandTransactionDeps, CommandTransactions } fro
 import { defineOutboxEvents } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
-import { COMMAND_REQUEST_INVALID, EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
+import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, defineRoutes, pathIdOf, sessionPaths } from './routes.js';
 import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 import type { TrustedScope } from './principals.js';
 
@@ -775,7 +781,9 @@ export function createApp(deps: AppDeps): Express {
     };
     try {
       // Map lookups: nothing is read or parsed. A template (routes.ts) matches its prefix, one raw id segment and its own
-      // literal suffix, if it has one; the route's view, fingerprint and log class carry the template's path, never the segment.
+      // literal suffix, if it has one; the route's view and log class carry the template's path, never the segment. Only
+      // the one templated command (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7) carries its validated segment further:
+      // into the idempotency fingerprint's target slot and the planner's ctx.targetId (below), never a log.
       const route = table.lookup(req.method, req.path);
       // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
       // a served authority exactly (DNS names compare case-insensitively). The probes answer on any host.
@@ -902,6 +910,15 @@ export function createApp(deps: AppDeps): Express {
         && (authenticatedAt === null || now() - authenticatedAt > RECENT_AUTH_MAX_AGE_MS)) {
         return refuse(req, res, 403, 'step_up_required', 'recent_auth_required');
       }
+      // The target of a templated command (routes.ts admits exactly one: PATCH /api/v1/customers/{id}), judged only now —
+      // after authentication, authorization and the trusted context, so an unauthenticated caller learns nothing about an
+      // id's shape — and before the body is read or a key acquired, so a malformed id reserves nothing. null on every
+      // literal route.
+      let targetId: string | null = null;
+      if ('command' in route && route.path.includes(PATH_ID_SEGMENT)) {
+        targetId = pathIdOf(req.path);
+        if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
+      }
       let parsed: unknown;
       let bytes: Buffer = NO_BYTES;
       if (body && route.body.kind === 'json') {
@@ -938,6 +955,8 @@ export function createApp(deps: AppDeps): Express {
         if (context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
         const operation = store.keyring.operationOf(key.key, principal as VerifiedPrincipal, {
           method: route.method, path: route.path, audience, tenant: context.tenant, store: context.store, actor: context.actor, body: bytes,
+          // A templated command's validated target (null elsewhere: a literal route's fingerprint is unchanged).
+          target: targetId,
         });
         const lease = randomBytes(32).toString('base64url');
         const acquired = await acquireIdempotency(store, Object.freeze({ ...operation, lease, ...IDEMPOTENCY_POLICY }), deadlineMs);
@@ -950,7 +969,9 @@ export function createApp(deps: AppDeps): Express {
           const newAggregateId = randomUUID();
           let plan: unknown;
           try {
-            plan = route.command.plan(Object.freeze({ audience, body: parsed, newAggregateId }));
+            plan = route.command.plan(Object.freeze(targetId === null
+              ? { audience, body: parsed, newAggregateId }
+              : { audience, body: parsed, newAggregateId, targetId }));
           } catch {
             return refuse(req, res, 500, 'internal_error', 'command_plan_failed'); // nothing committed; the lease waits out its time
           }

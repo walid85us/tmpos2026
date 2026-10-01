@@ -54,6 +54,13 @@
 // M7TE-08 the login's EXECUTE on 023's create and profile read and refuses 020's create given back, M7TE-10 the 001-023 ledger
 // (a fake next row is '024'), M7TE-11 withdraws the profile read after startup, M7TE-15 drives a create with contacts and
 // the profile read end to end on the source entry, and M7TE-C1 does both on the compiled entry.
+//
+// M7A-CUSTOMERS-P7 UPDATE (edits). Migration 024 adds the customer row version, the session-bound edit served as
+// PATCH /api/v1/customers/{id} and a versioned profile read that replaces 023's for the login (024 revokes 023's)
+// (tests/db/customerEdit.integration.test.mjs proves the routines). The chain is 001-024: M7TE-01 pins twelve routes, M7TE-04
+// finds the PATCH template behind the session like the detail, M7TE-08 the login's EXECUTE on 024's edit and profile read and
+// refuses 023's profile read given back, M7TE-10 the 001-024 ledger (a fake next row is '025'), and M7TE-11 withdraws 024's
+// profile read after startup. This file edits no customer (024's rollback refuses while any customer is edited).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -112,8 +119,12 @@ const ADMIT = 'tmpos_session.m5_admit_tenant_session_v2(text, text)';
 const CREATE = 'tmpos_customer_contact.m7a_contact_create(text, uuid, text, text, text)';
 /** 020's create: revoked from the login by 023, and a grant too many if given back. */
 const CREATE_020 = 'tmpos_role.m7a_customer_create(text, uuid, text)';
-/** 023's customer profile read (M7A-CUSTOMERS-P6). */
-const PROFILE_GET = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
+/** The customer profile read the login calls: 024's versioned one since M7A-CUSTOMERS-P7 (023's was the P6 read). */
+const PROFILE_GET = 'tmpos_customer_edit.m7a_customer_profile(text, uuid, uuid)';
+/** 023's customer profile read: revoked from the login by 024, and a grant too many if given back. */
+const PROFILE_023 = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
+/** 024's customer edit (M7A-CUSTOMERS-P7). */
+const CUSTOMER_UPDATE = 'tmpos_customer_edit.m7a_customer_update(text, uuid, uuid, bigint, text, boolean, text, boolean, text)';
 const LEVELS_READ = 'tmpos_role.m7a_role_levels(uuid, text)';
 const LEVEL_SET = 'tmpos_role_edit.m7a_role_level_set_v2(text, text, text, text, uuid, bigint)';
 const LEVEL_STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -832,6 +843,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'GET /api/v1/session session none none',
       'GET /health public none none',
       'GET /readiness public none none',
+      'PATCH /api/v1/customers/{id} session json required',
       'POST /api/v1/customers session json required',
       'POST /api/v1/session/login login none none',
       'POST /api/v1/session/logout session none none',
@@ -932,8 +944,8 @@ test('M7TE-04: an administrative session is no tenant session; no administrative
       ['GET', '/__witness'], ['GET', '/admin/v1/witness'], ['GET', '/dev'], ['GET', '/identity/whoami'], ['GET', '/diagnostics'],
       // M7A-CUSTOMERS-P3: POST on the customer path is now the create (M7TE-01); no other write method is.
       ['GET', '/bootstrap'], ['GET', '/migrations'], ['PUT', CUSTOMER_DIRECTORY_PATH], ['PATCH', CUSTOMER_DIRECTORY_PATH],
-      // M7A-CUSTOMERS-P4: GET /api/v1/customers/<one segment> is now the detail template (below); deeper paths and other
-      // methods on it are still no route.
+      // M7A-CUSTOMERS-P4: GET /api/v1/customers/<one segment> is now the detail template (below), and since
+      // M7A-CUSTOMERS-P7 PATCH on it is the edit; deeper paths and other methods on it are still no route.
       ['DELETE', CUSTOMER_DIRECTORY_PATH], ['GET', `${CUSTOMER_DIRECTORY_PATH}/x/y`], ['DELETE', `${CUSTOMER_DIRECTORY_PATH}/x`],
       ['GET', `${CUSTOMER_DIRECTORY_PATH}/`]]) {
       assertBounded404(await ctx.req(method, path, { cookie: `${SESSION_COOKIES.admin}=${id}` }), `${method} ${path}`);
@@ -944,6 +956,14 @@ test('M7TE-04: an administrative session is no tenant session; no administrative
     const detailUnderAdmin = await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/x`, { cookie: `${SESSION_COOKIES.admin}=${id}` });
     assertRefusal(detailUnderAdmin, 401, 'unauthenticated', 'the detail template under the administrative cookie');
     assert.equal(reasonOf(ctx, detailUnderAdmin), 'session_missing');
+    // M7A-CUSTOMERS-P7: the edit template likewise — a well-formed unsafe request (Origin, CSRF, a JSON body, a key) under
+    // the administrative cookie is no tenant session there (401).
+    const editUnderAdmin = await ctx.req('PATCH', `${CUSTOMER_DIRECTORY_PATH}/x`, {
+      origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: `${SESSION_COOKIES.admin}=${id}`,
+      'content-type': 'application/json', 'idempotency-key': randomUUID(),
+    }, JSON.stringify({ expectedVersion: 1, name: 'Ada Lovelace' }));
+    assertRefusal(editUnderAdmin, 401, 'unauthenticated', 'the edit template under the administrative cookie');
+    assert.equal(reasonOf(ctx, editUnderAdmin), 'session_missing');
   });
 });
 
@@ -1071,13 +1091,17 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   // M7A-CUSTOMERS-P4: 022's customer detail read.
   await withoutExecute(DETAIL_GET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer detail read withdrawn')));
-  // M7A-CUSTOMERS-P6: 023's customer profile read.
+  // M7A-CUSTOMERS-P6: the customer profile read (024's since M7A-CUSTOMERS-P7).
   await withoutExecute(PROFILE_GET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer profile read withdrawn')));
+  // M7A-CUSTOMERS-P7: 024's customer edit.
+  await withoutExecute(CUSTOMER_UPDATE, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the customer edit withdrawn')));
   // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many; so is
   // 020's unconditional set (M7A-CUSTOMERS-P4: an edit that asserts neither the tenant nor the version).
   for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)'],
-    ['020\'s set', LEVEL_SET_020], ['020\'s create (023 revoked it: M7A-CUSTOMERS-P6)', CREATE_020]]) {
+    ['020\'s set', LEVEL_SET_020], ['020\'s create (023 revoked it: M7A-CUSTOMERS-P6)', CREATE_020],
+    ['023\'s profile read (024 revoked it: M7A-CUSTOMERS-P7)', PROFILE_023]]) {
     try {
       await owner.unsafe(`grant execute on function ${fn} to tmpos_app`);
       await withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_unexpected'], `${label} given back`));
@@ -1121,27 +1145,28 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-023 refuses startup migration_state_invalid', async () => {
-  // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); since M7A-CUSTOMERS-P6 it is 023 (the contact
-  // records), and the fake "next migration" row is '024' — the restore below never removes the real 023 row it re-inserts.
+test('M7TE-10: a migration ledger that is not exactly 001-024 refuses startup migration_state_invalid', async () => {
+  // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); M7A-CUSTOMERS-P6 made it 023 (the contact
+  // records) and M7A-CUSTOMERS-P7 024 (customer edits), so the fake "next migration" row is '025' — the restore below never
+  // removes the real 024 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '023'`;
-  assert.ok(row !== undefined, '023 is recorded');
+    from public.schema_migrations where version = '024'`;
+  assert.ok(row !== undefined, '024 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('023', '024')`;
+    await sql`delete from public.schema_migrations where version in ('024', '025')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '023'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 022'));
+    await owner`delete from public.schema_migrations where version = '024'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 023'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 023').digest('hex')} where version = '023'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '023 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 024').digest('hex')} where version = '024'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '024 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('024', ${createHash('sha256').update('024').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 024'));
+      values ('025', ${createHash('sha256').update('025').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 025'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1151,7 +1176,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-023 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '023'`;
+    from public.schema_migrations where version = '024'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 
@@ -1212,7 +1237,8 @@ test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted o
     });
     assert.ok(await readinessUntil(ctx, 200), 'the detail read restored: ready');
 
-    // M7A-CUSTOMERS-P6: the customer profile read withdrawn from the login — the third part of the reads' probe.
+    // M7A-CUSTOMERS-P6: the customer profile read (024's since M7A-CUSTOMERS-P7) withdrawn from the login — the third part
+    // of the reads' probe.
     await withoutExecute(PROFILE_GET, async () => {
       await readinessHolds(ctx, 503);
       assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}/profile`, { cookie: session.cookie, ...csrfOf(session.cookie) }), 503,

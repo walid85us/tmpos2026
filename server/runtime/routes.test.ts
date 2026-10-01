@@ -400,7 +400,7 @@ const list = (over: Record<string, unknown> = {}): Record<string, unknown> => de
 const profile = (over: Record<string, unknown> = {}): Record<string, unknown> => detail({ path: '/api/v1/customers/{id}/profile', ...over });
 const ID = '0f8e2a4c-9b1d-4e3f-8a2b-6c7d8e9f0a1b';
 
-test('the {id} templates register only as GET /api/v1/customers/{id} and GET /api/v1/customers/{id}/profile without idempotency; every other template is refused', () => {
+test('the GET {id} templates register only as GET /api/v1/customers/{id} and GET /api/v1/customers/{id}/profile without idempotency; every other template is refused (the PATCH: below)', () => {
   assert.equal(setupCode([detail()]), undefined);
   assert.equal(setupCode([profile()]), undefined, 'M7A-CUSTOMERS-P6: the profile template');
   assert.equal(setupCode([list(), detail(), profile()]), undefined, 'all three beside each other');
@@ -439,6 +439,57 @@ test('the {id} templates register only as GET /api/v1/customers/{id} and GET /ap
   // A template on a non-session policy is refused by the boundary rule, as any /api path would be.
   assert.notEqual(setupCode([route({ path: '/api/v1/customers/{id}' })]), undefined);
   assert.equal(setupCode([detail(), detail()]), 'route_duplicate', 'a duplicate template');
+});
+
+const EDIT = { scope: 'tenant', permission: 'edit_customers' };
+/** M7A-CUSTOMERS-P7: the one templated command — PATCH /api/v1/customers/{id}, idempotency required, a command, no handler. */
+const patch = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  method: 'PATCH', path: '/api/v1/customers/{id}', policy: SESSION('tenant', EDIT), body: { kind: 'json', maxBytes: 8_192, required: true },
+  idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: {}, plan: () => ({}) }, ...over,
+});
+
+test('M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id} registers only as an idempotency-required command; every other templated write or keyed template stays refused', () => {
+  assert.equal(setupCode([patch()]), undefined, 'the templated command');
+  assert.equal(setupCode([list(), detail(), profile(), patch()]), undefined, 'beside the list, the detail and the profile');
+  const table = defineRoutes([list(), detail(), profile(), patch()]);
+  const declared = table.lookup('PATCH', `/api/v1/customers/${ID}`);
+  assert.equal(declared?.path, '/api/v1/customers/{id}');
+  assert.equal(declared?.idempotency, 'required');
+  assert.equal(declared?.trustedContext, 'required');
+  assert.ok(declared !== undefined && 'command' in declared && !('handler' in declared), 'a command, never a handler');
+  const { command: _command, ...noCommand } = patch();
+  for (const [label, def] of [
+    ['the PATCH template without idempotency, as a handler', { ...noCommand, idempotency: 'none', handler }],
+    ['the PATCH template as a perform', { ...noCommand, perform: outcome }],
+    ['the PATCH template with a command AND a perform', patch({ perform: outcome })],
+    ['the PATCH template on the profile', patch({ path: '/api/v1/customers/{id}/profile' })],
+    ['a PATCH template beside customers', patch({ path: '/api/v1/roles/{id}' })],
+    ['a deeper PATCH template', patch({ path: '/api/v1/customers/x/{id}' })],
+    ...(['POST', 'PUT', 'DELETE'] as const).map((method) => [`${method} as a command on the template`, patch({ method })] as const),
+    ['the GET detail template requiring idempotency as a command', patch({ method: 'GET', body: { kind: 'none' } })],
+    ['the GET profile template requiring idempotency', required({ path: '/api/v1/customers/{id}/profile', policy: SESSION('tenant', VIEW), trustedContext: 'required' })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  // The closed rule itself answers route_path_invalid wherever the earlier policy checks admit the shape.
+  for (const [label, def] of [
+    ['a handler on the PATCH template', { ...noCommand, idempotency: 'none', handler }],
+    ['PUT as a command on the template', patch({ method: 'PUT' })],
+    ['POST as a command on the template', patch({ method: 'POST' })],
+    ['PATCH as a command on the profile template', patch({ path: '/api/v1/customers/{id}/profile' })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  assert.equal(setupCode([patch(), patch()]), 'route_duplicate', 'a duplicate PATCH template');
+  // Lookup: the PATCH answers one raw segment, exactly as the GET detail does, and never the profile path.
+  for (const segment of [ID, ID.toUpperCase(), 'x', '{id}', 'a'.repeat(128)]) {
+    assert.equal(table.lookup('PATCH', `/api/v1/customers/${segment}`)?.method, 'PATCH', segment);
+  }
+  for (const miss of [`/api/v1/customers/${ID}/profile`, '/api/v1/customers', '/api/v1/customers/', `/api/v1/customers/${ID}/`, `/api/v1/customers/${'a'.repeat(129)}`]) {
+    assert.equal(table.lookup('PATCH', miss), undefined, miss);
+  }
+  for (const method of ['patch', 'PUT', 'POST', 'DELETE']) assert.equal(table.lookup(method, `/api/v1/customers/${ID}`), undefined, method);
+  assert.equal(table.lookup('GET', `/api/v1/customers/${ID}`)?.method, 'GET', 'the GET detail is its own entry');
 });
 
 test('the template and its literal prefix coexist; list() keeps declaration order; literal session and admin routes still match exactly', () => {

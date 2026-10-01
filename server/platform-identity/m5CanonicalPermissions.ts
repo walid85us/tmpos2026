@@ -72,6 +72,12 @@
 // some level: Employees is plan-gated and the server holds no entitlement set, so that rule would deny everyone; and the
 // client's delegated editing (manage_role_permissions) is refused on the server until the owner decides its parity rules —
 // its grant is itself owner-editable only in client memory.
+//
+// M7A-CUSTOMERS-P7 UPDATE. The fourth tenant route permission, edit_customers, is the Customers domain at Edit or above
+// (edit, manage, approve, full on the tenant family ordering) for PATCH /api/v1/customers/{id}. It is decided exactly as
+// create_customers is — same materializer, same owner-edited levels, no role default changed, no role-name shortcut —
+// and the read_only rule denies it like every threshold above View. The load-time threshold set widens to exactly View,
+// Create and Edit; nothing above Edit is admitted except the owner rule.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -141,16 +147,18 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
  * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1, -P3): each names exactly one tenant DOMAIN and the level a role
  * must hold on it, as the owner fixed it for one route. They are the only tenant keys this module decides, and only at
  * TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route permission
- * never shares a key with a sub-permission, and every one but the owner-only edit_role_levels is non-sensitive at View or
- * Create — the module refuses to load otherwise.
+ * never shares a key with a sub-permission, and every one but the owner-only edit_role_levels is non-sensitive at View,
+ * Create or Edit — the module refuses to load otherwise.
  *   * view_customers   — GET /api/v1/customers: the Customers domain at View or above.
  *   * create_customers — POST /api/v1/customers: the Customers domain at Create or above (ADR-34).
+ *   * edit_customers   — PATCH /api/v1/customers/{id} (M7A-CUSTOMERS-P7): the Customers domain at Edit or above.
  *   * edit_role_levels — PUT /api/v1/roles/levels (M7A-CUSTOMERS-P3-R1): the OWNER RULE (header), sensitive. Its parent and
  *     threshold record where the product edits roles (Employees) and the level the owner holds there; neither is compared.
  */
 export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_customers', Object.freeze({ key: 'view_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'view' as const })],
   ['create_customers', Object.freeze({ key: 'create_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'create' as const })],
+  ['edit_customers', Object.freeze({ key: 'edit_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'edit' as const })],
   ['edit_role_levels', Object.freeze({ key: 'edit_role_levels', plane: 'tenant' as const, parent: 'employees', sensitive: true, threshold: 'full' as const })],
 ]));
 
@@ -160,11 +168,11 @@ const OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['edit
 /**
  * The thresholds a tenant route permission may carry. THE READ_ONLY RULE: a read_only limitation grants a tenant route
  * permission only at threshold View — the materializer caps every domain at View, and evaluateCanonicalPermission
- * denies every threshold above View under read_only before anything is materialized — so a Create permission is
- * DENIED under read_only. A sensitive permission, or one above Create, needs its own rule before it is added: the one
+ * denies every threshold above View under read_only before anything is materialized — so a Create or Edit permission
+ * is DENIED under read_only. A sensitive permission, or one above Edit, needs its own rule before it is added: the one
  * such rule is the owner rule, admitted here for exactly the sensitive, Full-threshold edit_role_levels and nothing else.
  */
-const TENANT_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create']);
+const TENANT_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
 for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
   if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
   if (OWNER_ONLY_ROUTE_PERMISSIONS.has(key)) {
@@ -172,7 +180,7 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
     continue;
   }
   if (entry.sensitive || entry.threshold === null || !TENANT_ROUTE_THRESHOLDS.has(entry.threshold)) {
-    throw new Error('tenant route permission is not a non-sensitive View or Create threshold');
+    throw new Error('tenant route permission is not a non-sensitive View, Create or Edit threshold');
   }
 }
 
@@ -316,8 +324,8 @@ export function evaluateCanonicalPermission(input: {
     if (typeof roleId !== 'string') return 'denied';
     // The role's current definition is required: no edits read is not "no edits" (R3).
     if (!isPlainRecord(levels)) return 'denied';
-    // THE READ_ONLY RULE (TENANT_ROUTE_THRESHOLDS): View only — create_customers and the sensitive edit_role_levels are
-    // denied here. It also holds for a sensitive entry added to the (surface-frozen) map after the load-time check.
+    // THE READ_ONLY RULE (TENANT_ROUTE_THRESHOLDS): View only — create_customers, edit_customers and the sensitive
+    // edit_role_levels are denied here. It also holds for a sensitive entry added to the (surface-frozen) map after the load-time check.
     if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
     // The materializer applies the edits (and refuses malformed ones with {}) before the gate and the cap.
     const materialized = materializeTenantPermissions(roleId, {}, limitation === 'read_only', levels);

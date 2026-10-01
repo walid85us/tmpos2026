@@ -87,6 +87,12 @@ const UP_022 = readFileSync(`${MIG_DIR}/022_m7a_customer_detail.up.sql`, 'utf8')
 const DOWN_022 = readFileSync(`${MIG_DIR}/022_m7a_customer_detail.down.sql`, 'utf8');
 const UP_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.up.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
+const UP_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`, 'utf8');
+const DOWN_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.down.sql`, 'utf8');
+/** Migration 024's edit and versioned profile read, and the profile read it revokes from the login (023's), M7A-CUSTOMERS-P7. */
+const UPDATE_024 = 'tmpos_customer_edit.m7a_customer_update(text, uuid, uuid, bigint, text, boolean, text, boolean, text)';
+const PROFILE_024 = 'tmpos_customer_edit.m7a_customer_profile(text, uuid, uuid)';
+const PROFILE_023 = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
 /** Migration 023's create and the routine it revokes from the login (020's), M7A-CUSTOMERS-P6. */
 const CREATE_023 = 'tmpos_customer_contact.m7a_contact_create(text, uuid, text, text, text)';
 const CREATE_020 = 'tmpos_role.m7a_customer_create(text, uuid, text)';
@@ -515,11 +521,11 @@ const routineAsLogin = routineAs(runtime);
 // M7C-01..02: the composition and migration 017 as applied
 // ---------------------------------------------------------------------------
 
-test('M7C-01: 001-023 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
+test('M7C-01: 001-024 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024']
       .map((v) => [v, false]));
   // 005-016 up checksums are postgresStartupPreflight.ts REQUIRED_MIGRATIONS; down checksums are the committed pins of
   // the earlier suites (tenantDirectory, migration-files-contract). 017's are M7A-CUSTOMERS-P1's; 018's are pinned by the
@@ -1313,7 +1319,10 @@ test('RB-04: customer detail needs its own session CSRF token; a foreign id with
 // 023's down runs before 022's — it refuses while any customer holds a contact or a creation time (none: this file's own
 // customers are deleted first, and 017's down already requires an empty table) and gives 020's create back — and 023 is
 // re-applied last of all in the restoring transaction.
-test('M7C-14: 017 down refuses while a customer exists; under 018, 020, 021, 022 and 023 the rollback runs 023\'s, 022\'s, 021\'s, 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018, 020, 021, 022 then 023 leave a fresh apply\'s grants', async () => {
+// SINCE M7A-CUSTOMERS-P7: 024 adds a column to 017's table and revoked 023's profile read from the login, so 024's down runs
+// before 023's — it refuses while any customer is edited or an audit record names a customer (none: this file edits none) —
+// and 024 is re-applied after 023.
+test('M7C-14: 017 down refuses while a customer exists; under 018, 020-024 the rollback runs 024\'s, 023\'s, 022\'s, 021\'s, 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018, 020, 021, 022, 023 then 024 leave a fresh apply\'s grants', async () => {
   const down = (file, isolation) => owner.begin(isolation, (tx) => tx.unsafe(file).simple())
     .then(() => null, (err) => ({ code: err.code, message: String(err.message) }));
   const present = async () => (await owner`select pg_catalog.to_regnamespace('tmpos_customer') is not null as present`)[0].present;
@@ -1329,7 +1338,8 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020, 021, 022
     await owner`delete from tmpos_mint.issuer_key`;
     await owner`delete from tmpos_mint.tenant_session`;
     try {
-      assert.equal(await down(DOWN_023, 'isolation level read committed'), null, '023 rolls back first: no customer is left to hold a contact or a creation time');
+      assert.equal(await down(DOWN_024, 'isolation level read committed'), null, '024 rolls back first: no customer is left edited');
+      assert.equal(await down(DOWN_023, 'isolation level read committed'), null, '023 rolls back next: no customer is left to hold a contact or a creation time');
       assert.equal(await down(DOWN_022, 'isolation level read committed'), null, '022 rolls back: it holds no data');
       assert.equal(await down(DOWN_021, 'isolation level read committed'), null, '021 rolls back: no version row');
       assert.equal(await down(DOWN_020, 'isolation level read committed'), null, '020 rolls back: no role level differs from its default');
@@ -1348,16 +1358,17 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020, 021, 022
         pg_catalog.to_regnamespace('tmpos_role_edit') is null as role_edit_gone,
         pg_catalog.to_regnamespace('tmpos_customer_detail') is null as detail_gone,
         pg_catalog.to_regnamespace('tmpos_customer_contact') is null as contact_gone,
+        pg_catalog.to_regnamespace('tmpos_customer_edit') is null as edit_gone,
         pg_catalog.to_regprocedure('tmpos_session.m5_admit_tenant_session_v2(text, text)') is not null as s016,
         pg_catalog.to_regprocedure('tmpos_session.m5_hold_tenant_standing(text, text)') is not null as s016_hold,
         pg_catalog.to_regprocedure('tmpos_directory.m5_tenant_directory_page(uuid, text, uuid, text, uuid, integer)') is not null as s012,
         pg_catalog.to_regprocedure('tmpos_identity.m5_security_version(uuid)') is not null as s007`;
-      assert.deepEqual({ ...gone }, { schema_gone: true, mint_gone: true, role_gone: true, role_edit_gone: true, detail_gone: true, contact_gone: true, s016: true, s016_hold: true, s012: true, s007: true });
+      assert.deepEqual({ ...gone }, { schema_gone: true, mint_gone: true, role_gone: true, role_edit_gone: true, detail_gone: true, contact_gone: true, edit_gone: true, s016: true, s016_hold: true, s012: true, s007: true });
       // Without its routine the listing is an outage, never a page.
       assertRefusal(await list(a), 503, 'service_unavailable', 'rolled back');
     } finally {
-      // 017, 018, 020, 021, 022 then 023, together: never a committed moment with 017's grant, 018's page_v2, 020's edit or
-      // 020's create given back.
+      // 017, 018, 020, 021, 022, 023 then 024, together: never a committed moment with 017's grant, 018's page_v2, 020's
+      // edit, 020's create or 023's profile read given back.
       // Then the key.
       await owner.begin(async (tx) => {
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_customer') is null as absent`)[0].absent) await tx.unsafe(UP_017).simple();
@@ -1366,6 +1377,7 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020, 021, 022
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_role_edit') is null as absent`)[0].absent) await tx.unsafe(UP_021).simple();
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_customer_detail') is null as absent`)[0].absent) await tx.unsafe(UP_022).simple();
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_customer_contact') is null as absent`)[0].absent) await tx.unsafe(UP_023).simple();
+        if ((await tx`select pg_catalog.to_regnamespace('tmpos_customer_edit') is null as absent`)[0].absent) await tx.unsafe(UP_024).simple();
       });
       await installTestIssuerKey(owner, ISSUER_KEY);
     }
@@ -1377,14 +1389,18 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020, 021, 022
       pg_catalog.has_function_privilege('tmpos_app', ${GET_022}, 'EXECUTE') as app_get_022,
       pg_catalog.has_function_privilege('tmpos_app', ${CREATE_020}, 'EXECUTE') as app_create_020,
       pg_catalog.has_function_privilege('tmpos_app', ${CREATE_023}, 'EXECUTE') as app_create_023,
+      pg_catalog.has_function_privilege('tmpos_app', ${PROFILE_023}, 'EXECUTE') as app_profile_023,
+      pg_catalog.has_function_privilege('tmpos_app', ${UPDATE_024}, 'EXECUTE') as app_update_024,
+      pg_catalog.has_function_privilege('tmpos_app', ${PROFILE_024}, 'EXECUTE') as app_profile_024,
       pg_catalog.has_table_privilege('tmpos_app', 'tmpos_customer.customer', 'SELECT') as app_select,
       (select proacl::text from pg_catalog.pg_proc where oid = ${ROUTINE}::regprocedure) as acl_017,
       (select proacl::text from pg_catalog.pg_proc where oid = ${ROUTINE_V2}::regprocedure) as acl_v2,
       (select proacl::text from pg_catalog.pg_proc where oid = ${CREATE_011}::regprocedure) as acl_011`;
     assert.deepEqual({ ...back }, {
-      app: false, app_v2: false, app_v3: true, app_set_020: false, app_get_022: true, app_create_020: false, app_create_023: true, app_select: false,
+      app: false, app_v2: false, app_v3: true, app_set_020: false, app_get_022: true, app_create_020: false, app_create_023: true,
+      app_profile_023: false, app_update_024: true, app_profile_024: true, app_select: false,
       acl_017: `{${me}=X/${me}}`, acl_v2: `{${me}=X/${me}}`, acl_011: `{${me}=X/${me}}`,
-    }, 'the grants a fresh 001-023 apply leaves: the login holds neither 017\'s page, 018\'s page_v2, 011\'s create, 020\'s edit nor 020\'s create');
+    }, 'the grants a fresh 001-024 apply leaves: the login holds neither 017\'s page, 018\'s page_v2, 011\'s create, 020\'s edit, 020\'s create nor 023\'s profile read');
     // The session minted before the rollback lost its ledger row with it and reads nothing; a fresh sign-in reads again.
     assertRefusal(await list(a), 403, 'forbidden', 'a session minted before the rollback');
     assert.deepEqual(pageOf(await list(await signIn(A_OWNER)), 're-applied'), { customers: [], nextCursor: null }, 'the same runtime reads again');

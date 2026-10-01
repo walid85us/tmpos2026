@@ -21,12 +21,12 @@
 // through both (control) (M7CN-06). The profile read: own customer with its contacts and the creation time in toISOString's
 // form (the stored instant, to the millisecond); a legacy row's NULL creation time; a foreign and a missing id the SAME
 // ('not_found', nulls) row; a wrong expected tenant, an unknown key and a revoked session 'denied'; every outcome 022's for
-// the same inputs; the production adapter over the real login, its probe, and with EXECUTE withdrawn its probe false and
-// its read a throw; reads write nothing (M7CN-07). Rollback: committed, 023's down REFUSES while any customer holds a contact
-// or a creation time and changes nothing; in a transaction that clears them, it succeeds and leaves exactly the 001-022
-// surface captured before 023 was applied (schemas, routines and ACLs, the table's columns, constraints, indexes and ACL —
-// 020's create granted back), the preflight names the 023 grants missing and 020's create unexpected, and a re-apply is
-// byte-identical in definition and ACL and accepted; out of order, with 020 rolled back first, 023's create raises at call
+// the same inputs; reads write nothing (M7CN-07; the production adapter now reads 024's versioned profile: customerEdit's
+// M7CE-10). Rollback: committed, 023's down REFUSES while any customer holds a contact or a creation time and changes
+// nothing; in a transaction that clears them, it succeeds and leaves exactly the 001-022 surface captured before 023 was
+// applied (schemas, routines and ACLs, the table's columns, constraints, indexes and ACL — 020's create granted back), the
+// preflight names the 023 grants missing and 020's create unexpected, and a re-apply is byte-identical in definition and
+// ACL and is exactly the 023 database (which the P7 runtime accepts only once 024 is applied too); out of order, with 020 rolled back first, 023's create raises at call
 // and 023's down refuses until 020 is back (M7CN-08).
 // The profile read's access-control parity beyond the owner key (AC-5): every standing, grant, level and tenant refusal 022's read
 // makes — a technician, manager or sales_staff narrowed to none, a suspended account or tenant — is the profile read's, with every
@@ -41,10 +41,11 @@
 //
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster
 // this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service
-// it first rolls 023 back with its own committed down file (which refuses, failing this suite loudly, if any customer still
-// holds a contact or a creation time), so its legacy rows are seeded on 001-022 exactly as a deployed database would hold
-// them, then applies 023 through the trusted executor. Every fixture is synthetic and randomly suffixed; every widening and
-// every successful rollback runs in a transaction that is rolled back. It leaves 023 applied, the issuer key row it found,
+// it first rolls 024 and 023 back with their own committed down files (which refuse, failing this suite loudly, if any
+// customer is edited or still holds a contact or a creation time), so its legacy rows are seeded on 001-022 exactly as a
+// deployed database would hold them, then applies 023 (only) through the trusted executor; its teardown applies 024. Every
+// fixture is synthetic and randomly suffixed; every widening and every successful rollback runs in a transaction that is
+// rolled back. It leaves 023 and 024 applied, the issuer key row it found,
 // no customer, session, ledger, role-level or version row of its own, and its login dropped; its tenants, identities, audit
 // and idempotency records stay, as every suite's do.
 import test from 'node:test';
@@ -56,7 +57,6 @@ import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { portThrough, rollBackAbove } from './migrationsThrough.mjs';
 import { REQUIRED_MIGRATIONS, createPostgresStartupPreflight } from '../../server/persistence/postgresStartupPreflight.ts';
-import { createPostgresCustomerProfile, probeCustomerProfile } from '../../server/persistence/postgresCustomerDirectory.ts';
 import { CUSTOMER_CREATE_MUTATOR } from '../../server/persistence/postgresCustomerCreate.ts';
 import { createPostgresTransactionalStore } from '../../server/persistence/postgresTransactionalStore.ts';
 import { defineCommands, prepareCommand } from '../../server/runtime/commandTransaction.ts';
@@ -69,6 +69,7 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.up.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
+const UP_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
@@ -85,6 +86,19 @@ const RUNTIME_LOGIN = 'tmpos_m7cn_probe';
 const HOUR = 3_600_000;
 const ROLLBACK = new Error('m7cn: roll the proof back');
 const RC = 'isolation level read committed';
+/**
+ * M7A-CUSTOMERS-P7: this file proves 023 on the chain it was written for. 024 (customer edits) revokes the login's EXECUTE
+ * on 023's profile read and adds a column 023's postcondition does not know, so this file applies the chain THROUGH 023 and
+ * leaves 024 to its teardown. The P7 runtime's real preflight pins 001-024, so on 023 it names 024's grants missing, 023's
+ * profile read unexpected and 024's ledger row missing; with 024 applied (in a rolled-back transaction) it accepts.
+ */
+const PREFLIGHT_AT_023 = Object.freeze({ runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] });
+/** 024 applied on `tx`, its ledger row recorded, as the trusted executor would leave them. */
+async function apply024(tx) {
+  await tx.unsafe(UP_024).simple();
+  await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
+    values ('024', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex')}, false, now(), now())`;
+}
 const PROFILE_NULLS = Object.freeze({ o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null });
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const signal = () => AbortSignal.timeout(10_000);
@@ -153,9 +167,10 @@ test.after(async () => {
   // Every customer this file made, legacy or created through 023: a later suite's rollback of 023 refuses while any
   // customer holds a creation time, so none of ours may stay behind.
   if (TENANTS.length > 0) await quietly(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 023 applied, whatever failed above: the executor applies it if it is not.
+  // The shared service is left with 023 AND 024 applied, whatever failed above: the executor applies what is not (024, which
+  // this file keeps out while it proves 023, always).
   await quietly(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '023') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '024') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -297,8 +312,6 @@ async function asRuntime(tx, fn) {
   }).catch((err) => { if (err !== ROLLBACK) throw err; });
   return out;
 }
-/** A kernel over one transaction, each call in its own savepoint, as whoever the caller set the authorization to. */
-const kernelOn = (tx) => Object.freeze({ transaction: (_s, _b, work) => tx.savepoint((sp) => work(sp)), end: async () => {} });
 /** A kernel over the runtime login's own pool: one READ COMMITTED transaction per call, as the supervised kernel runs it. */
 const RUNTIME_KERNEL = Object.freeze({ transaction: (_s, _b, work) => runtime.begin(RC, (tx) => work(tx)), end: async () => {} });
 /** The real startup preflight's login and ledger answers, as the runtime login, on `tx`'s state. */
@@ -352,8 +365,8 @@ const SURFACE_022 = await surface(owner);
 const COLUMNS_AT_022 = (await owner`select a.attname::text as name from pg_catalog.pg_attribute a
   where a.attrelid = 'tmpos_customer.customer'::regclass and a.attnum > 0 and not a.attisdropped order by a.attnum`).map((r) => r.name);
 
-// Now 023, by the same trusted executor, over those rows.
-const applyReport = await trustedApply();
+// Now 023, by the same trusted executor, over those rows (and not 024: see PREFLIGHT_AT_023).
+const applyReport = await trustedApply('023');
 
 const scopeOf = async (who, tenant) => {
   const [m] = await owner`select membership_id, role_id from user_membership where internal_user_id = ${who.id} and tenant_id = ${tenant} and scope_type = 'tenant'`;
@@ -371,7 +384,7 @@ test('M7CN-01: 023 applied by the trusted executor over 001-022, its checksum it
   assert.deepEqual(COLUMNS_AT_022, ['customer_id', 'tenant_id', 'name'], 'the rows were seeded on 017\'s three columns');
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 23 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
-  assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
+  assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.slice(0, 23).map((m) => m.checksum), 'the ledger records the pinned chain through 023');
   assert.equal(ledger[22].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/023_m7a_customer_contact.up.sql`)).digest('hex'));
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_023).simple())).code, undefined, 'the postcondition holds as applied');
   for (const [label, widen, pattern] of [
@@ -467,7 +480,9 @@ test('M7CN-03: the login executes 023\'s two routines and uses their schema, exe
     assert.equal((await errorOf(runtime.unsafe(statement)))?.code, '42501', statement);
   }
   const verdict = await rolledBack(RC, (tx) => preflightOn(tx));
-  assert.deepEqual(verdict.value, { runtimeLogin: [], migrationLedger: [] }, JSON.stringify(verdict));
+  assert.deepEqual(verdict.value, PREFLIGHT_AT_023, `the P7 runtime refuses a 023 database: ${JSON.stringify(verdict)}`);
+  const with024 = await rolledBack(RC, async (tx) => { await apply024(tx); return preflightOn(tx); });
+  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's applied: accepted (${JSON.stringify(with024)})`);
 });
 
 // ---------------------------------------------------------------------------
@@ -659,7 +674,7 @@ test('M7CN-06: every refusal 020\'s create makes is 023\'s too — no row, nothi
 // M7CN-07: the profile read
 // ---------------------------------------------------------------------------
 
-test('M7CN-07: the profile read answers the contacts and the creation time in toISOString\'s form; legacy NULL; foreign and missing the same row; wrong tenant, unknown and revoked keys denied; every outcome 022\'s; the production adapter and its probe; reads write nothing', async () => {
+test('M7CN-07: the profile read answers the contacts and the creation time in toISOString\'s form; legacy NULL; foreign and missing the same row; wrong tenant, unknown and revoked keys denied; every outcome 022\'s; reads write nothing', async () => {
   const key = await mint(OWNER_A);
   const id = randomUUID();
   await create(key, id, 'Profile Owner', '+1 555 0100', 'ada@example.test');
@@ -694,24 +709,8 @@ test('M7CN-07: the profile read answers the contacts and the creation time in to
   for (const [k, cid, t] of [[key, id, T_A], [key, foreignId, T_A], [key, id, T_B], [newKey(), id, T_A], [revoked, id, T_A], [key, LEGACY_A[0].id, T_A]]) {
     assert.equal((await profile(k, cid, t))[0].o_outcome, (await detail(k, cid, t))[0].o_outcome, `${cid} as ${t}`);
   }
-  // The production adapter over the real login.
-  const scope = await scopeOf(OWNER_A, T_A);
-  const adapter = createPostgresCustomerProfile({ client: RUNTIME_KERNEL });
-  assert.deepEqual(await adapter.get(scope, key, id, signal()),
-    { outcome: 'customer', id, name: 'Profile Owner', phone: '+1 555 0100', email: 'ada@example.test', createdAt: own.o_created_at });
-  assert.deepEqual(await adapter.get(scope, key, LEGACY_A[0].id, signal()),
-    { outcome: 'customer', id: LEGACY_A[0].id, name: LEGACY_A[0].name, phone: null, email: null, createdAt: null });
-  assert.deepEqual(await adapter.get(scope, key, foreignId, signal()), { outcome: 'not_found' });
-  assert.deepEqual(await adapter.get({ ...scope, tenant: T_B }, key, id, signal()), { outcome: 'denied' }, 'the scope\'s tenant is a precondition');
-  assert.equal(await probeCustomerProfile(RUNTIME_KERNEL, signal()), true);
-  const withdrawn = await rolledBack(RC, async (tx) => {
-    await tx.unsafe(`revoke execute on function ${PROFILE} from tmpos_app`);
-    await tx.unsafe(`set local session authorization ${RUNTIME_LOGIN}`);
-    const probe = await probeCustomerProfile(kernelOn(tx), signal());
-    const read = await errorOf(createPostgresCustomerProfile({ client: kernelOn(tx) }).get(scope, key, id, signal()));
-    return { probe, read: read?.code ?? read?.message ?? null };
-  });
-  assert.deepEqual(withdrawn.value, { probe: false, read: '42501' }, JSON.stringify(withdrawn));
+  // The production profile adapter and its probe read 024's versioned profile since M7A-CUSTOMERS-P7, a routine this file
+  // keeps out while it proves 023: they are proven over the real login in tests/db/customerEdit.integration.test.mjs (M7CE-10).
   // Reads write nothing.
   const counts = async () => ({ ...(await owner`select
     (select count(*) from public.audit_event)::int as audit,
@@ -768,7 +767,7 @@ test('M7CN-08: committed, 023\'s down refuses while any customer holds a contact
   assert.deepEqual(alone.value.reapplied, applied, 're-applied: the same definitions, configuration and ACLs');
   assert.deepEqual(alone.value.reappliedSurface.routines, appliedSurface.routines);
   assert.deepEqual(alone.value.reappliedSurface.columns, appliedSurface.columns);
-  assert.deepEqual(alone.value.up, { runtimeLogin: [], migrationLedger: [] }, 're-applied: accepted');
+  assert.deepEqual(alone.value.up, PREFLIGHT_AT_023, 're-applied: exactly the 023 database (the P7 runtime needs 024 as well)');
   // Out of order: 020 rolled back under 023 (its own guard cleared first) — 023's create raises at call, and 023's down
   // refuses until 020 is applied again; then it rolls back.
   // Minted first, on the login's own connection: the transaction below holds 020's tables, which the mint would wait on.

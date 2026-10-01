@@ -29,14 +29,19 @@
 // lowercase segments with no parameter, wildcard, encoding, dot segment, empty segment or
 // trailing slash, and lookup is an exact METHOD + path string match, so no prefix, case,
 // slash or encoding variant can inherit another route's policy. ONE exception, closed
-// (M7A-CUSTOMERS-P4, -P6): the two declared templates GET /api/v1/customers/{id} and
-// GET /api/v1/customers/{id}/profile — no other method, path or template registers. {id} matches
+// (M7A-CUSTOMERS-P4, -P6, -P7): the three declared templates GET /api/v1/customers/{id},
+// GET /api/v1/customers/{id}/profile and PATCH /api/v1/customers/{id} — no other method, path or
+// template registers. A templated GET takes no idempotency; the one templated PATCH (a closed set of
+// exactly that route) must be an idempotency-required `command`, and the runtime binds its validated
+// id into the idempotency fingerprint and hands it to the planner as ctx.targetId (app.ts,
+// idempotency.ts). Every other templated combination is refused. {id} matches
 // exactly one raw, undecoded, non-empty segment of at most 128 characters without '/'; the first
 // template ends there, and the second requires exactly its one literal suffix segment after it,
 // and nothing else (no empty segment, trailing slash, other suffix or extra segment). Lookup is
 // an exact literal first, then the template ending in {id}, then the template with {id} before its
-// suffix. The route's own handler judges the id segment only after the chain has authenticated
-// and authorized the request, so an unauthenticated caller learns nothing about an id's shape;
+// suffix. The route's own handler (for the PATCH, the runtime) judges the id segment only after the
+// chain has authenticated and authorized the request, so an unauthenticated caller learns nothing
+// about an id's shape;
 // no literal route may sit anywhere below a template's prefix. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
@@ -188,6 +193,13 @@ export interface CommandContext {
   readonly body: unknown;
   /** A UUID the runtime generated for this attempt: the only aggregate ID a create may name. */
   readonly newAggregateId: string;
+  /**
+   * The canonical lowercase uuid the request path names, set by the runtime ONLY for a templated command route
+   * (M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id}) after the chain has authenticated and authorized the request; the
+   * same id is bound into the idempotency fingerprint. Absent on every literal route. Still untrusted as a target: the
+   * planner validates it and the store's mutator decides whether it names anything.
+   */
+  readonly targetId?: string;
 }
 
 type PlanRecord = Readonly<Record<string, string | number | boolean>>;
@@ -363,11 +375,19 @@ const MAX_PATH_LENGTH = 256;
 
 /**
  * The one path parameter: `/{id}`, final or followed by exactly one literal segment, on a template the table admits by
- * name (M7A-CUSTOMERS-P4, -P6).
+ * name (M7A-CUSTOMERS-P4, -P6, -P7).
  */
 export const PATH_ID_SEGMENT = '/{id}';
 /** The ONLY templated routes, as `METHOD path`: any other template is refused at registration. */
-const TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile']);
+const TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
+  'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'PATCH /api/v1/customers/{id}',
+]);
+/**
+ * The templated routes that are idempotency-required COMMANDS (M7A-CUSTOMERS-P7), as `METHOD path`: a closed set of
+ * exactly one. Such a route must require idempotency and declare a `command` (never a `perform`, which is handed no
+ * target); every other template must be a GET that takes no idempotency.
+ */
+const IDEMPOTENT_TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['PATCH /api/v1/customers/{id}']);
 /** Every template's path before its `/{id}`: no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, key.indexOf(PATH_ID_SEGMENT))));
 /** The longest raw segment a template matches; a longer one is no route (the terminal 404). */
@@ -564,8 +584,14 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
   const idempotency = parseIdempotency(raw.idempotency, method, policy, 'command' in raw);
-  // A templated path never reaches an idempotency fingerprint (app.ts binds route.path, never the id).
-  if (templated && idempotency !== 'none') throw new EnforcementSetupError('route_path_invalid');
+  // A templated GET takes no idempotency; the closed set of templated commands takes nothing else — app.ts binds their
+  // validated path id into the fingerprint (idempotency.ts `target`) and the planner context. Every other combination
+  // (a templated GET under a key, a templated write without one, a templated `perform`) is refused.
+  if (templated && (IDEMPOTENT_TEMPLATED_ROUTES.has(`${method} ${path}`)
+    ? idempotency !== 'required' || !('command' in raw) || 'perform' in raw
+    : method !== 'GET' || idempotency !== 'none')) {
+    throw new EnforcementSetupError('route_path_invalid');
+  }
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
   const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency);

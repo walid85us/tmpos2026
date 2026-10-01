@@ -486,6 +486,58 @@ test('S3-W-18: a subject that is not a UUID is refused before any statement', as
   }
 });
 
+// ---------------------------------------------------------------------------
+// M7A-CUSTOMERS-P7 — the record's customer subject (migration 024)
+// ---------------------------------------------------------------------------
+
+const CUSTOMER = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+
+test('S3-W-22: a subject customer is its own bound column after metadata; without one the statements are exactly the earlier ones', async () => {
+  const withSubject = recorder();
+  const event = { ...baseEvent(), scopeType: 'tenant' as const, tenantId: T1, storeId: null, subjectCustomerId: CUSTOMER };
+  const receipt = await writeAuditEvent(event, { executor: withSubject.executor });
+  const { strings, values, sql } = withSubject.calls[0];
+  assert.equal(withSubject.calls.length, 1, 'one statement');
+  assert.equal(values.length, 21);
+  assert.equal(strings.length, 22);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_customer_id\s*\)/, 'the customer subject column follows metadata');
+  assert.ok(!sql.includes('subject_tenant_id'), 'the tenant subject column is not named');
+  assert.ok(!strings.join(' ').includes(CUSTOMER), 'bound as a value, never spliced into the text');
+  assert.equal(values[0], receipt.eventId);
+  assert.deepEqual(values.slice(1, 19), [
+    AUDIT_CONTRACT_VERSION, event.requestId, event.traceId, event.actorInternalUserId, event.actorAuthProvider,
+    event.onBehalfOfInternalUserId, event.scopeType, event.tenantId, event.storeId, event.actionId,
+    event.requiredPermission, event.decision, event.reasonCode, event.humanReadableReason, event.resultStatus,
+    event.sourceOfTruth, event.evaluatedBy, event.evidenceLevel,
+  ]);
+  assert.deepEqual(values[19], { __json: event.metadata ?? {} });
+  assert.equal(values[20], CUSTOMER, 'the customer subject is the last binding, its own column');
+  for (const absent of [undefined, null]) {
+    const without = recorder();
+    await writeAuditEvent({ ...baseEvent(), subjectCustomerId: absent }, { executor: without.executor });
+    assert.equal(without.calls[0].values.length, 20, `subject ${String(absent)}: 20 values`);
+    assert.ok(!without.calls[0].sql.includes('subject_customer_id'), `subject ${String(absent)}: the column is not named`);
+    const tenantOnly = recorder();
+    await writeAuditEvent({ ...baseEvent(), scopeType: 'platform', tenantId: null, storeId: null, subjectTenantId: T1, subjectCustomerId: absent },
+      { executor: tenantOnly.executor });
+    assert.ok(tenantOnly.calls[0].sql.includes('subject_tenant_id') && !tenantOnly.calls[0].sql.includes('subject_customer_id'),
+      `a tenant subject beside a ${String(absent)} customer subject is the 009 statement`);
+  }
+});
+
+test('S3-W-23: a customer subject that is not a UUID, or one beside a tenant subject, is refused before any statement', async () => {
+  for (const subjectCustomerId of ['not-a-uuid', '', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa', `${T1} `, 7]) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), subjectCustomerId: subjectCustomerId as never }, { executor: r.executor }),
+      AuditEventValidationError, JSON.stringify(subjectCustomerId));
+    assert.equal(r.calls.length, 0, 'nothing sent');
+  }
+  const both = recorder();
+  await assert.rejects(writeAuditEvent({ ...baseEvent(), scopeType: 'platform', tenantId: null, storeId: null, subjectTenantId: T1, subjectCustomerId: CUSTOMER },
+    { executor: both.executor }), AuditEventValidationError, 'two subjects');
+  assert.equal(both.calls.length, 0, 'nothing sent');
+});
+
 test('S3-W-19: the session metadata keys persist for the three administrative session events alone, and are all those events keep', async () => {
   const ids = Object.values(ADMIN_SESSION_AUDIT_EVENTS).map((shape) => shape.actionId);
   assert.deepEqual(ids, ['platform.admin.session.login', 'platform.admin.session.reauthenticate', 'platform.admin.session.logout']);
@@ -534,6 +586,7 @@ test('S3-W-20: a row under a session action id must match that event\'s fixed sh
     ['a provider', { ...login, actorAuthProvider: 'firebase' }],
     ['an on-behalf actor', { ...login, onBehalfOfInternalUserId: BEHALF }],
     ['a subject tenant', { ...login, subjectTenantId: T1 }],
+    ['a subject customer', { ...login, subjectCustomerId: T1 }],
     ['another scope', { ...login, scopeType: 'none' }],
     ['a tenant scope, itself consistent', { ...login, scopeType: 'tenant', tenantId: T1 }],
     ['advisory evidence', { ...login, evidenceLevel: 'dev_sidecar_log_advisory' }],

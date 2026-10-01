@@ -47,10 +47,16 @@
 // contract kind and mutator, the change set now carrying the contacts. Readiness: the reads probe asks the profile routine
 // last, after the detail's, and is ready only when all three refuse an absent key.
 //
+// M7A-CUSTOMERS-P7 UPDATE (edit). A third command, PATCH /api/v1/customers/{id} (customerUpdate.ts): a versioned edit of one
+// customer's name and contacts over its one mutator into migration 024's session-bound routine (postgresCustomerUpdate.ts),
+// requiring edit_customers. It is never classified as a read, so no read-only actor reaches it; it enqueues nothing. The
+// profile read now asks 024's versioned routine (the profile probe with it); nothing else is added to readiness.
+//
 // Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, then probeCustomerProfile), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
 import { CUSTOMER_CREATE_MUTATOR } from '../persistence/postgresCustomerCreate.js';
+import { CUSTOMER_UPDATE_MUTATOR } from '../persistence/postgresCustomerUpdate.js';
 import {
   createPostgresCustomerDetail, createPostgresCustomerDirectory, createPostgresCustomerProfile, probeCustomerDetail, probeCustomerDirectory,
   probeCustomerProfile,
@@ -63,6 +69,7 @@ import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
 import { TENANT_OWNER_ROLE_ID, materializeTenantPermissions } from '../platform-identity/permissionCatalog.js';
 import { CUSTOMER_CREATE_ROUTE } from '../runtime/customerCreate.js';
+import { CUSTOMER_UPDATE_ROUTE } from '../runtime/customerUpdate.js';
 import { createCustomerDetailRoute, createCustomerDirectoryRoute, createCustomerProfileRoute } from '../runtime/customerDirectory.js';
 import type { CustomerDetailPorts, CustomerDirectoryPorts, CustomerProfilePorts } from '../runtime/customerDirectory.js';
 import { createRoleLevelDirectoryRoute } from '../runtime/roleLevelDirectory.js';
@@ -112,11 +119,11 @@ const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal)
 // The tenant route inventory, added to here and only here: the customer directory over its production adapter, the
 // customer create over its mutator (M7A-CUSTOMERS-P3), the role-level edit over its mutator and the role-level reads
 // (M7A-CUSTOMERS-P3-R1), the role levels' read-back over its one-snapshot read (M7A-CUSTOMERS-P3-R2), the customer
-// detail over its session-bound read (M7A-CUSTOMERS-P4), and the customer profile over its session-bound read
-// (M7A-CUSTOMERS-P6).
+// detail over its session-bound read (M7A-CUSTOMERS-P4), the customer profile over its session-bound read
+// (M7A-CUSTOMERS-P6), and the customer edit over its mutator (M7A-CUSTOMERS-P7).
 export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({
   reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute]),
-  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR]) }),
+  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR]) }),
   ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults(createPostgresRoleLevelDirectory({ client })) }),
   inert: INERT,
   probe: probeTenantReads,

@@ -3,6 +3,7 @@
 // M7A-CUSTOMERS-P2: the routine is migration 018's session-bound read, handed the presenting session's store key — since
 // M7A-CUSTOMERS-P3-R1 migration 020's page_v3, which adds the role's current Customers level to 018's derivation.
 // M7A-CUSTOMERS-P6: the profile read over migration 023's m7a_contact_profile (M7CPP-01..04).
+// M7A-CUSTOMERS-P7: the profile read is now migration 024's versioned m7a_customer_profile (o_version, M7CPP-05).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -370,18 +371,18 @@ test('M7CDP-04 probeCustomerDetail: true only for the routine\'s one denial of a
   assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
 });
 
-// --- the profile read (M7A-CUSTOMERS-P6): migration 023's m7a_contact_profile ----------------------------------------------
+// --- the profile read (M7A-CUSTOMERS-P6, -P7): migration 024's m7a_customer_profile over 023's -----------------------------
 
-const PROFILE_STATEMENT = /select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at\s+from tmpos_customer_contact\.m7a_contact_profile\(\?::text, \?::uuid, \?::uuid\)$/;
+const PROFILE_STATEMENT = /select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at, o_version\s+from tmpos_customer_edit\.m7a_customer_profile\(\?::text, \?::uuid, \?::uuid\)$/;
 const CREATED = '2026-09-30T08:15:42.123Z';
 const profileRow = (i: number, over: Record<string, unknown> = {}): Record<string, unknown> =>
-  ({ ...customerRow(i), o_phone: '+1 555 0100', o_email: 'ada@example.test', o_created_at: CREATED, ...over });
+  ({ ...customerRow(i), o_phone: '+1 555 0100', o_email: 'ada@example.test', o_created_at: CREATED, o_version: '3', ...over });
 const profileRefusal = (outcome: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
-  ({ ...refusalRow(outcome), o_phone: null, o_email: null, o_created_at: null, ...over });
+  ({ ...refusalRow(outcome), o_phone: null, o_email: null, o_created_at: null, o_version: null, ...over });
 const profileOne = (rows: unknown, id = C(1), scope: TrustedScope = SCOPE, key: unknown = SESSION_KEY) =>
   createPostgresCustomerProfile({ client: fakeClient(rows) }).get(scope, key as string, id, live()) as Promise<unknown>;
 
-test('M7CPP-01 profile: one fixed call to 023\'s routine — the store key, the id and the authorizer\'s tenant — and the contact record answered as stored', async () => {
+test('M7CPP-01 profile: one fixed call to 024\'s routine — the store key, the id and the authorizer\'s tenant — and the contact record answered as stored', async () => {
   const client = fakeClient([profileRow(1)]);
   const signal = live();
   const answer = await createPostgresCustomerProfile({ client }).get(SCOPE, SESSION_KEY, C(1), signal);
@@ -392,10 +393,11 @@ test('M7CPP-01 profile: one fixed call to 023\'s routine — the store key, the 
   assert.ok(!client.statements[0].includes('tmpos_customer.'), '017\'s table is never named');
   assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
   assert.equal(client.signals[0], signal);
-  assert.deepEqual(answer, { outcome: 'customer', id: C(1), name: 'Customer 1', phone: '+1 555 0100', email: 'ada@example.test', createdAt: CREATED });
+  assert.ok(!client.statements[0].includes('tmpos_customer_contact.'), '023\'s routine is no longer asked (024 revokes it from the runtime)');
+  assert.deepEqual(answer, { outcome: 'customer', id: C(1), name: 'Customer 1', phone: '+1 555 0100', email: 'ada@example.test', createdAt: CREATED, version: 3 });
   assert.ok(Object.isFrozen(answer));
-  assert.deepEqual(await profileOne([profileRow(1, { o_phone: null, o_email: null, o_created_at: null })]),
-    { outcome: 'customer', id: C(1), name: 'Customer 1', phone: null, email: null, createdAt: null }, 'a legacy customer');
+  assert.deepEqual(await profileOne([profileRow(1, { o_phone: null, o_email: null, o_created_at: null, o_version: '1' })]),
+    { outcome: 'customer', id: C(1), name: 'Customer 1', phone: null, email: null, createdAt: null, version: 1 }, 'a legacy customer');
   for (const outcome of ['not_found', 'denied']) assert.deepEqual(await profileOne([profileRefusal(outcome)]), { outcome }, outcome);
 });
 
@@ -411,6 +413,14 @@ test('M7CPP-02 profile: every answer out of shape is a throw with the one bounde
     ['a creation time out of form', [profileRow(1, { o_created_at: '2026-09-30 08:15:42.123+00' })]],
     ['denied naming a phone', [profileRefusal('denied', { o_phone: '+1 555 0100' })]],
     ['not_found naming a creation time', [profileRefusal('not_found', { o_created_at: CREATED })]], ['null', null],
+    // M7A-CUSTOMERS-P7: the version, as bigint decimal text 1..2^53-1 with no leading zero, and NULL on every refusal.
+    ['P6\'s seven columns', [(({ o_version: _v, ...rest }) => rest)(profileRow(1))]],
+    ['a null version', [profileRow(1, { o_version: null })]], ['version 0', [profileRow(1, { o_version: '0' })]],
+    ['a leading zero', [profileRow(1, { o_version: '03' })]], ['a negative version', [profileRow(1, { o_version: '-3' })]],
+    ['a numeric version', [profileRow(1, { o_version: 3 })]], ['a bigint version', [profileRow(1, { o_version: 3n })]],
+    ['a version past 2^53-1', [profileRow(1, { o_version: '9007199254740992' })]], ['a 17-digit version', [profileRow(1, { o_version: '10000000000000000' })]],
+    ['a version with a space', [profileRow(1, { o_version: ' 3' })]], ['a fractional version', [profileRow(1, { o_version: '3.0' })]],
+    ['denied naming a version', [profileRefusal('denied', { o_version: '1' })]], ['not_found naming a version', [profileRefusal('not_found', { o_version: '1' })]],
   ];
   for (const [label, rows] of cases) {
     await assert.rejects(profileOne(rows), (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid'
@@ -443,6 +453,8 @@ test('M7CPP-04 probeCustomerProfile: true only for the routine\'s one denial of 
     ['no row', []], ['the detail\'s four columns', [refusalRow('denied')]], ['not_found', [profileRefusal('not_found')]],
     ['a customer row', [profileRow(1)]], ['a denial naming a phone', [profileRefusal('denied', { o_phone: '1' })]],
     ['a denial naming a creation time', [profileRefusal('denied', { o_created_at: CREATED })]], ['two denials', [profileRefusal('denied'), profileRefusal('denied')]],
+    ['a denial naming a version', [profileRefusal('denied', { o_version: '1' })]],
+    ['P6\'s seven-column denial', [(({ o_version: _v, ...rest }) => rest)(profileRefusal('denied'))]],
   ] as const) {
     assert.equal(await probeCustomerProfile(fakeClient(rows), live()), false, label);
   }
@@ -452,4 +464,9 @@ test('M7CPP-04 probeCustomerProfile: true only for the routine\'s one denial of 
   const idle = fakeClient([profileRefusal('denied')]);
   assert.equal(await probeCustomerProfile(idle, aborted.signal), false, 'an aborted probe');
   assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
+});
+
+test('M7CPP-05 profile (M7A-CUSTOMERS-P7): the largest version a row can hold is answered exactly, never rounded through a float', async () => {
+  assert.equal(((await profileOne([profileRow(1, { o_version: '9007199254740991' })])) as { version: number }).version, Number.MAX_SAFE_INTEGER);
+  assert.equal(((await profileOne([profileRow(1, { o_version: '1' })])) as { version: number }).version, 1);
 });

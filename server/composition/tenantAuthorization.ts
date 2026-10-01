@@ -41,8 +41,8 @@
 //
 // THE ROLE DECISION, AND WHERE IT IS NOT MADE. For a key the canonical catalog DECIDES — the tenant
 // route permissions owner decision D1 fixed: view_customers for GET /api/v1/customers (M7A-CUSTOMERS-P1)
-// and create_customers for POST /api/v1/customers (M7A-CUSTOMERS-P3, ADR-34) — the selected grant's role
-// must hold it (step 7 below), by the catalog's own rule.
+// and create_customers for POST /api/v1/customers (M7A-CUSTOMERS-P3, ADR-34), and edit_customers for
+// PATCH /api/v1/customers/{id} (M7A-CUSTOMERS-P7) — the selected grant's role must hold it (step 7 below), by the catalog's own rule.
 // Every other tenant- and store-scope key is 'undecidable' until D1 defines its route and authoritative
 // product rules (m5CanonicalPermissions.ts GAP_11_TENANT_ORDERING_UNRESOLVED, GAP-11), and deciding it
 // here would be exactly the comparison-of-unsettled-meaning that gate exists to prevent. For those the
@@ -382,7 +382,7 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       // The permission must NAME something: a key the catalog does not define is a typo or an
       // invention, never a weaker permission. Where the catalog DECIDES the key — the tenant route
       // permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; create_customers,
-      // M7A-CUSTOMERS-P3, ADR-34; the owner-only edit_role_levels, M7A-CUSTOMERS-P3-R1) — the selected grant's ROLE must
+      // M7A-CUSTOMERS-P3, ADR-34; edit_customers, M7A-CUSTOMERS-P7; the owner-only edit_role_levels, M7A-CUSTOMERS-P3-R1) — the selected grant's ROLE must
       // hold it, on the scope's limitation and the role's current definition: the owner's durable edits of that role in
       // that tenant, read now (a fault throws — a 503, never a decision on the defaults). Any other catalogued key stays
       // undecidable and is not decided here (see the header: the production inventory refuses such a route at startup).

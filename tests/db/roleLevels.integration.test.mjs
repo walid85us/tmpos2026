@@ -1,6 +1,6 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-023, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-024, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 //
 // M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
 // the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
@@ -331,7 +331,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-023 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-024 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 
@@ -917,10 +917,10 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
 /**
- * The tenant artifact's eleven intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
- * read; P6: the profile read).
+ * The tenant artifact's twelve intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
+ * read; P6: the profile read; P7: the customer edit).
  */
-const TENANT_ELEVEN = Object.freeze([
+const TENANT_TWELVE = Object.freeze([
   'GET /api/v1/customers session none none',
   'GET /api/v1/customers/{id} session none none',
   'GET /api/v1/customers/{id}/profile session none none',
@@ -928,6 +928,7 @@ const TENANT_ELEVEN = Object.freeze([
   'GET /api/v1/session session none none',
   'GET /health public none none',
   'GET /readiness public none none',
+  'PATCH /api/v1/customers/{id} session json required',
   'POST /api/v1/customers session json required',
   'POST /api/v1/session/login login none none',
   'POST /api/v1/session/logout session none none',
@@ -1865,7 +1866,7 @@ test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write
 // ===========================================================================
 
 test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the owner\'s PUT and its read-back among them — applies an owner\'s edit, reads it back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_ELEVEN], 'the source tenant inventory');
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_TWELVE], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1891,13 +1892,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the 
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_ELEVEN], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_TWELVE], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_ELEVEN], 'the compiled entry serves exactly the eleven');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_TWELVE], 'the compiled entry serves exactly the twelve');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');

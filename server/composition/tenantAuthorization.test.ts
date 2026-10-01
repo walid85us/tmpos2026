@@ -585,3 +585,60 @@ test('M7TL-05 the revalidator decides edit_role_levels on a fresh authentication
   assert.equal(await revalidator({ read: admitted([grant({ roleId: 'technician' })]), levels: { customers: 'create' } })
     .revalidate('tx', technician, 'create_customers', null, KEY), true);
 });
+
+// --- edit_customers: the route decision and its revalidation (M7A-CUSTOMERS-P7) ----------------------------------------
+
+const UPDATE_ROUTE: RouteView = Object.freeze({ method: 'PATCH', path: '/api/v1/customers/{id}', audience: 'tenant' });
+const EDIT_CUSTOMERS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'edit_customers' });
+
+test('M7TE-AZ-01 edit_customers: the store owner and the manager are granted at their defaults; the technician (View), the sales staff (Create), a read-only actor and a store grant deny', async () => {
+  const granted = Object.fromEntries(await Promise.all(TENANT_ROLE_IDS.map(async (roleId) =>
+    [roleId, grantedOf(await withLevels(stub(admitted([grant({ roleId })])), {}).decide(EDIT_CUSTOMERS, UPDATE_ROUTE))])));
+  assert.deepEqual(granted, { store_owner: true, manager: true, technician: false, sales_staff: false }, 'Customers at Edit or above, and no other role');
+  const storeManager = grant({ membershipId: '77777777-7777-4777-8777-777777777777', scopeType: 'store', store: STORE, storeStatus: 'active', roleId: 'manager' });
+  for (const [label, answer] of [
+    ['a read-only tenant', admitted([grant({ roleId: 'manager', tenantStatus: 'read_only' })])],
+    ['a read-only account', admitted([grant({ roleId: 'manager' })], 'read_only')],
+    ['a store manager grant alone', admitted([storeManager])],
+    ['two tenant grants', admitted([grant({ roleId: 'manager' }), grant({ roleId: 'manager', membershipId: '66666666-6666-4666-8666-666666666666', tenant: OTHER_TENANT })])],
+    ['a suspended tenant', admitted([grant({ roleId: 'manager', tenantStatus: 'suspended' })])],
+  ] as const) assert.equal(grantedOf(await withLevels(stub(answer), {}).decide(EDIT_CUSTOMERS, UPDATE_ROUTE)), false, label);
+});
+
+test('M7TE-AZ-02 edit_customers follows the owner\'s edits: View or Create only deny; Edit, Manage, Approve and Full grant; read-only caps a widened role', async () => {
+  const cases: Array<[string, string, unknown, boolean]> = [
+    ['sales_staff widened to Edit', 'sales_staff', { customers: 'edit' }, true],
+    ['technician widened to Manage', 'technician', { customers: 'manage' }, true],
+    ['technician widened to Approve', 'technician', { customers: 'approve' }, true],
+    ['technician widened to Full', 'technician', { customers: 'full' }, true],
+    ['manager narrowed to Create', 'manager', { customers: 'create' }, false],
+    ['manager narrowed to View', 'manager', { customers: 'view' }, false],
+    ['manager narrowed to None', 'manager', { customers: 'none' }, false],
+    ['the owner is never narrowed', 'store_owner', { customers: 'view' }, true],
+    ['malformed edits deny', 'manager', { customers: 'Edit' }, false],
+    ['no edits answered denies', 'manager', undefined, false],
+  ];
+  for (const [label, roleId, levels, expected] of cases) {
+    assert.equal(grantedOf(await withLevels(stub(admitted([grant({ roleId })])), levels).decide(EDIT_CUSTOMERS, UPDATE_ROUTE)), expected, label);
+  }
+  const readOnly = withLevels(stub(admitted([grant({ roleId: 'technician', tenantStatus: 'read_only' })])), { customers: 'full' });
+  assert.equal(await readOnly.decide(EDIT_CUSTOMERS, UPDATE_ROUTE), false, 'read-only caps the edit');
+});
+
+test('M7TE-AZ-03 the revalidator re-decides edit_customers on the committing handle, with no recent-authentication deadline, against the current levels', async () => {
+  for (const roleId of ['store_owner', 'manager']) {
+    const { revalidate, steps } = revalidator({ read: admitted([grant({ roleId })]) });
+    assert.equal(await revalidate('tx', { ...SCOPE, roleId }, 'edit_customers', null, KEY), true, roleId);
+    assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'levels'], roleId);
+  }
+  for (const [label, over, scope] of [
+    ['a sales staff (Create)', { read: admitted([grant({ roleId: 'sales_staff' })]) }, { ...SCOPE, roleId: 'sales_staff' }],
+    ['a manager the owner narrowed to Create after the authorizer decided', { levels: { customers: 'create' } }, SCOPE],
+    ['a read-only scope', {}, { ...SCOPE, limitation: 'read_only' }],
+  ] as const) {
+    const { revalidate } = revalidator(over as never);
+    assert.equal(await revalidate('tx', scope as TrustedScope, 'edit_customers', null, KEY), false, label);
+  }
+  const { revalidate } = revalidator({ read: admitted([grant({ roleId: 'technician' })]), levels: { customers: 'edit' } });
+  assert.equal(await revalidate('tx', { ...SCOPE, roleId: 'technician' }, 'edit_customers', null, KEY), true, 'a technician the owner widened to Edit');
+});

@@ -21,6 +21,7 @@ import { TEST_IDEMPOTENCY_KEY } from '../runtime/idempotencyStore.testkit.js';
 import { defineOutboxEvents } from '../runtime/outbox.js';
 import { TEST_CREATE, TEST_EVENTS } from '../runtime/transactionalOutbox.testkit.js';
 import { TENANT_DISPLAY_NAME_CONTRACT, TENANT_DISPLAY_NAME_EVENTS, planTenantDisplayName } from '../runtime/tenantDisplayName.js';
+import { CUSTOMER_UPDATE_CONTRACT, planCustomerUpdate } from '../runtime/customerUpdate.js';
 
 const UNAVAILABLE = { outcome: 'unavailable' };
 const LEASE_LOST = { outcome: 'lease_lost' };
@@ -619,10 +620,42 @@ test('a tenant store commits a tenant context audited at tenant scope, naming it
   assert.deepEqual(await tenantStore(client).transactions.commit(c, live()), COMMITTED);
   const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
   assert.ok(audit >= 0 && !client.texts[audit].includes('subject_tenant_id'), 'a customer is no tenant aggregate: no subject column');
+  assert.ok(!client.texts[audit].includes('subject_customer_id'), 'a create names no customer subject (DA-111 unchanged)');
   const bound = client.values[audit];
   assert.deepEqual([bound[4], bound[7], bound[8], bound[9]], [TENANT_CONTEXT.actor, 'tenant', TENANT, null],
     'the actor, the tenant scope, the context\'s own tenant and no store');
   assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+});
+
+test('M7A-CUSTOMERS-P7: a customer UPDATE names its own validated target as the audit record\'s subject customer — a create and a tenant command never do', async () => {
+  const target = '77777777-7777-4777-8777-777777777777';
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'PATCH', path: '/api/v1/customers/{id}', audience: 'tenant', tenant: TENANT, store: null, actor: TENANT_CONTEXT.actor,
+    body: Buffer.from('{}'), target,
+  });
+  const plan = planCustomerUpdate({ audience: 'tenant', body: { expectedVersion: 4, name: 'Ada Lovelace' }, newAggregateId: randomUUID(), targetId: target });
+  const prepared = prepareCommand(CUSTOMER_UPDATE_CONTRACT, defineOutboxEvents([]), plan, {
+    scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'tenant', permission: 'edit_customers' }),
+    context: TENANT_CONTEXT, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null);
+  const updater: AggregateMutator = Object.freeze({ kind: CUSTOMER_UPDATE_CONTRACT.kind, mode: 'update', aggregateType: 'customer', apply: async () => 'applied' });
+  const client = scripted(prepared.command.lease);
+  assert.deepEqual(await tenantStore(client, [updater]).transactions.commit(prepared.command, live()), COMMITTED);
+  const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
+  assert.ok(audit >= 0 && client.texts[audit].includes('subject_customer_id') && !client.texts[audit].includes('subject_tenant_id'));
+  const bound = client.values[audit];
+  assert.equal(bound[bound.length - 1], target, 'the subject is the command\'s own validated target');
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11]],
+    [TENANT_CONTEXT.actor, 'tenant', TENANT, null, 'tenant.customer.update', 'edit_customers'],
+    'the trusted actor, the tenant scope and tenant, no store, the contract kind and the route permission');
+  assert.deepEqual(bound[bound.length - 2], { json: {} }, 'metadata stays {}: no field name and no value is recorded');
+  assert.ok(!bound.some((value) => value === 'Ada Lovelace'), 'the name never reaches the audit record');
+  // The caller cannot hand a subject in: the audit record it sends has exactly its own fields.
+  const { client: untouchedClient, begins } = untouched();
+  assert.deepEqual(await tenantStore(untouchedClient, [updater]).transactions
+    .commit({ ...prepared.command, audit: { ...prepared.command.audit, subjectCustomerId: target } } as never, live()), UNAVAILABLE);
+  assert.equal(begins(), 0);
 });
 
 test('a tenant store refuses every command not of its scope, and the audit scope must equal the context\'s, before any statement', async () => {

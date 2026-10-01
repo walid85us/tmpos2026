@@ -228,6 +228,8 @@ const EVENT_FIELDS: readonly string[] = [
 export const COMMAND_AUDIT_EVALUATED_BY = 'm6_postgres_command_transaction@v1';
 /** The aggregate type whose commands name their target as the audit record's subject tenant (migration 009). */
 const TENANT_AGGREGATE = 'tenant';
+/** The aggregate type whose UPDATE commands name their target as the audit record's subject customer (migration 024). */
+const CUSTOMER_AGGREGATE = 'customer';
 
 /** Transaction-local bounds under a port deadline: lock waits, then any one statement, then an idle transaction. */
 const boundsUnder = (deadlineMs: number): TransactionBounds => Object.freeze({
@@ -523,6 +525,9 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       // above, which its mutator locks and changes — never a value the caller's audit record names. So the
       // record finds its tenant without the outbox event it shares a correlation with.
       subjectTenantId: mutator.aggregateType === TENANT_AGGREGATE ? aggregateId : null,
+      // M7A-CUSTOMERS-P7 (migration 024): a customer UPDATE names its target customer the same way — the aggregate ID
+      // checked above, which its mutator locks in the session's tenant. A customer create names none (DA-111 unchanged).
+      subjectCustomerId: mutator.aggregateType === CUSTOMER_AGGREGATE && mutator.mode === 'update' ? aggregateId : null,
     };
     // The mutator is handed this copy — the values checked above, frozen — never the caller's live object.
     const checked: TransactionMutation = Object.freeze({

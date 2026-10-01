@@ -256,19 +256,34 @@ const PINNED = {
   // chain through 023; the exact-[005] gate is unchanged and still refuses.
   '023_m7a_customer_contact.up.sql': '0e81bc627a681e0d999e24f04262a3fd8780c3736f80b170ac73ac6b13ca9a04',
   '023_m7a_customer_contact.down.sql': '391d95aad1b9b417af97c9985ac042a1df02d8808807f802654ac674aae422bc',
+  // Phase 4.0 M7A-CUSTOMERS-P7 — editing a saved customer: on 017's table a row_version column (bigint, not null, constant
+  // default 1 — every existing row reads 1 and none is rewritten — with the CHECK customer_row_version_chk bounding it to
+  // 1..2^53-1); on 002's audit table a nullable subject_customer_id (009's subject_tenant_id precedent; no grant beyond the
+  // writer's table-wide INSERT) with its partial index; and in its OWN schema tmpos_customer_edit two SECURITY DEFINER
+  // routines: m7a_customer_update (VOLATILE; every argument judged first, then 020's caller derivation restated at Customers
+  // Edit with the expected tenant as a precondition, then the customer row FOR UPDATE, the version compared before the
+  // values: not_found / conflict / unchanged / applied, the version moved by exactly one) and m7a_customer_profile (STABLE;
+  // 023's profile read plus that row's version on the same snapshot). tmpos_app gains EXECUTE on both and USAGE on the
+  // schema, and loses EXECUTE on 023's profile read (023's own precedent with 020's create): those are its only ACL
+  // changes, no table or column privilege is granted, and migrations 001-023 are untouched, byte for byte. Its rollback
+  // refuses while any customer is edited (row_version above 1) or any audit record names a customer. Proved against
+  // disposable PostgreSQL only; applied to no managed, persistent or application database. D4 now names the contiguous
+  // chain through 024; the exact-[005] gate is unchanged and still refuses.
+  '024_m7a_customer_edit.up.sql': '04272c40e863a82d9a1f71980da00e38494cd30df1ee90ae90cf02aad6fa35fb',
+  '024_m7a_customer_edit.down.sql': 'bf73ed076b7fc7ccec50ff491ae901d9154cedbc35d64a85f45550b605fd7bdb',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the forty-six expected files', () => {
+test('the migrations directory holds exactly the forty-eight expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');
