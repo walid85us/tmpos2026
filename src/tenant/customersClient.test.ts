@@ -1,14 +1,19 @@
 // M7A-CUSTOMERS-P5 — the shop's customers client against a scripted fetch: what each request carries, the exact
 // answers it accepts, and the one outcome every other answer maps to. The name rule and the id rule are swept against
-// the server's own (server/runtime/customerCreate.ts, server/runtime/routes.ts); special characters are built from
-// code points, so this source stays ASCII.
+// the server's own (server/runtime/customerCreate.ts, server/runtime/routes.ts), and since M7A-CUSTOMERS-P6 the phone and
+// email rules too (server/runtime/customerDirectory.ts), with the profile read's exact shape; special characters are built
+// from code points, so this source stays ASCII.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CUSTOMERS_PATH, createCustomersClient, isCustomerId, normalizeCustomerName, retryAfterSeconds,
+  CONTACT_INVALID, CUSTOMERS_PATH, createCustomersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName,
+  normalizeCustomerPhone, retryAfterSeconds,
 } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
-import { CUSTOMER_DIRECTORY_PATH, decodeCustomerCursor, encodeCustomerCursor } from '../../server/runtime/customerDirectory';
+import {
+  CONTACT_REFUSED, CUSTOMER_DIRECTORY_PATH, decodeCustomerCursor, encodeCustomerCursor, isCustomerCreatedAt,
+  normalizeCustomerEmail as serverNormalizeCustomerEmail, normalizeCustomerPhone as serverNormalizeCustomerPhone,
+} from '../../server/runtime/customerDirectory';
 import { pathIdOf } from '../../server/runtime/routes';
 
 const cp = (code: number): string => String.fromCodePoint(code);
@@ -410,4 +415,148 @@ test('CDC-13. a read names its session in X-TMPOS-Session-CSRF: page one, a curs
     assert.ok(!r.url.includes(token), 'the session token rode the URL');
     assertSameOriginOnly(r);
   }
+});
+
+const PROFILE = { id: ID, name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test', createdAt: '2026-09-30T12:34:56.789Z' };
+
+test('CDC-14. profile: a malformed id sends nothing; the 200 must be exactly this customer\'s contact record, or it is unavailable', async () => {
+  const good = once(json(200, { customer: PROFILE }));
+  const result = await good.client.profile(ID, CSRF);
+  assert.deepEqual(result, { kind: 'ok', customer: PROFILE });
+  assert.ok(result.kind === 'ok' && Object.isFrozen(result) && Object.isFrozen(result.customer));
+  assert.equal(good.sent.length, 1);
+  assert.equal(good.sent[0].url, `${CUSTOMERS_PATH}/${ID}/profile`);
+  assert.equal(good.sent[0].init.method, 'GET');
+  assert.equal(good.sent[0].init.body, undefined);
+  assert.deepEqual(headerNames(good.sent[0]), ['accept', 'x-tmpos-session-csrf']);
+  assert.equal(good.sent[0].headers.get('x-tmpos-session-csrf'), CSRF);
+  assert.ok(!good.sent[0].url.includes(CSRF), 'the session token rode the URL');
+  assertSameOriginOnly(good.sent[0]);
+  // A customer created before the server kept contacts or a creation time: every one null.
+  const legacy = { id: ID, name: 'Ada', phone: null, email: null, createdAt: null };
+  assert.deepEqual(await once(json(200, { customer: legacy })).client.profile(ID, CSRF), { kind: 'ok', customer: legacy });
+  for (const bad of ['', 'new', ID.toUpperCase(), `${ID}/`, `${ID}/profile`, `../session/logout`, `${ID.slice(0, 35)}g`, `%2e%2e/${ID}`]) {
+    const none = once(json(200, { customer: PROFILE }));
+    assert.deepEqual(await none.client.profile(bad, CSRF), { kind: 'not-found' }, JSON.stringify(bad));
+    assert.equal(none.sent.length, 0, `a malformed id reached the network: ${JSON.stringify(bad)}`);
+  }
+  const unavailable: unknown[] = [
+    { customer: { ...PROFILE, id: OTHER } }, // another customer's record
+    { customer: { id: ID, name: 'Ada Lovelace' } }, // the detail's shape is not a profile
+    { customer: { ...PROFILE, loyalty: 3 } },
+    { customer: PROFILE, tenant: uuid(9) },
+    { customer: { id: ID, name: 'A', phone: null, email: null } },
+    { customer: { ...PROFILE, name: 7 } },
+    { customer: { ...PROFILE, name: '' } }, // not a name the server could have stored
+    { customer: { ...PROFILE, name: 'x'.repeat(201) } },
+    { customer: { ...PROFILE, name: cp(0x1f600).repeat(201) } },
+    { customer: { ...PROFILE, name: `Ada${unit(0xd800)}` } }, // a lone surrogate
+    { customer: { ...PROFILE, name: `${unit(0xdfff)}Ada` } },
+    { customer: { ...PROFILE, phone: 15550100 } },
+    { customer: { ...PROFILE, email: {} } },
+    { customer: { ...PROFILE, phone: '' } }, // absent is null, never an empty string
+    { customer: { ...PROFILE, phone: ' +1 555 0100' } }, // not as stored: untrimmed
+    { customer: { ...PROFILE, phone: 'no digits' } },
+    { customer: { ...PROFILE, phone: `+1 555${cp(0x202e)}0100` } },
+    { customer: { ...PROFILE, phone: '1'.repeat(65) } }, // over the bound
+    { customer: { ...PROFILE, email: 'ada example.test' } },
+    { customer: { ...PROFILE, email: 'ada@@example.test' } },
+    { customer: { ...PROFILE, email: '@example.test' } },
+    { customer: { ...PROFILE, email: `${'a'.repeat(242)}@example.test` } }, // 255 characters
+    { customer: { ...PROFILE, createdAt: '2026-09-30T12:34:56Z' } }, // no milliseconds
+    { customer: { ...PROFILE, createdAt: '2026-09-30T12:34:56.789+00:00' } },
+    { customer: { ...PROFILE, createdAt: '2026-09-30t12:34:56.789z' } },
+    { customer: { ...PROFILE, createdAt: '2026-02-30T00:00:00.000Z' } }, // not an instant that spells itself back
+    { customer: { ...PROFILE, createdAt: '+002026-09-30T12:34:56.789Z' } },
+    { customer: { ...PROFILE, createdAt: 1790000000000 } },
+    { customer: { ...PROFILE, createdAt: '' } },
+    { customers: [PROFILE], nextCursor: null },
+  ];
+  for (const body of unavailable) assert.deepEqual(await once(json(200, body)).client.profile(ID, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
+  // At the bounds, a stored value is a value: a 200-scalar name (astral too), and the longest contacts.
+  for (const name of ['x'.repeat(200), cp(0x1f600).repeat(200), 'A']) {
+    assert.equal((await once(json(200, { customer: { ...PROFILE, name } })).client.profile(ID, CSRF)).kind, 'ok', `${[...name].length} scalars`);
+  }
+  const edge = { ...PROFILE, phone: '1'.repeat(64), email: `${'a'.repeat(241)}@example.test` };
+  assert.equal(edge.email.length, 254);
+  assert.equal((await once(json(200, { customer: edge })).client.profile(ID, CSRF)).kind, 'ok');
+  const cases: Array<[Reply, unknown]> = [
+    [new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } }), { kind: 'unavailable' }],
+    [json(201, { customer: PROFILE }), { kind: 'unavailable' }],
+    [refusal(404, 'not_found'), { kind: 'not-found' }],
+    [refusal(400, 'invalid_request'), { kind: 'unavailable' }],
+    [refusal(401, 'unauthenticated'), { kind: 'signed-out' }],
+    [refusal(403, 'forbidden'), { kind: 'denied' }],
+    [refusal(429, 'rate_limited', { 'retry-after': '12' }), { kind: 'rate-limited', retryAfterSeconds: 12 }],
+    [refusal(429, 'rate_limited'), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    [refusal(503, 'service_unavailable'), { kind: 'unavailable' }],
+    [new TypeError('network'), { kind: 'unavailable' }],
+  ];
+  for (const [reply, expected] of cases) assert.deepEqual(await once(reply).client.profile(ID, CSRF), expected);
+  assert.deepEqual(await hanging(5).client.profile(ID, CSRF), { kind: 'unavailable' });
+});
+
+test('CDC-15. the phone and email rules accept, refuse and normalize exactly as the server\'s do; the creation-time grammar is the server\'s', async () => {
+  const astral = cp(0x1f600);
+  const phones: unknown[] = [
+    '', ' ', '+1 555 0100', '  +1 555 0100  ', '(555) 010-0100 ext. 7', '0', 'x', 'phone', '+', `${cp(0x661)}`, // an Arabic-Indic digit is no ASCII digit
+    '1'.repeat(64), '1'.repeat(65), ` ${'1'.repeat(64)} `, `1${astral.repeat(63)}`, `1${astral.repeat(64)}`, `+1\t555`, `+1\n555`,
+  ];
+  const emails: unknown[] = [
+    '', ' ', 'ada@example.test', '  ada@example.test  ', 'Ada.Lovelace+tag@Example.TEST', 'a@b', 'ada', '@example.test', 'ada@', 'ada@@example.test',
+    'a@b@c', 'ada @example.test', `ada${cp(0xa0)}@example.test`, `ada${cp(0x3000)}@example.test`, `${'a'.repeat(241)}@example.test`,
+    `${'a'.repeat(242)}@example.test`, `${astral.repeat(250)}@b.c`, `${astral.repeat(251)}@b.c`, `ada@example.test${cp(0x200b)}`,
+  ];
+  for (const other of [null, undefined, 0, 7, true, {}, [], ['+1 555 0100']]) { phones.push(other); emails.push(other); }
+  for (let code = 0; code <= 0xffff; code++) {
+    const ch = unit(code);
+    phones.push(ch, `${ch}+1 555 0100`, `+1 555 0100${ch}`, `+1 555${ch}0100`);
+    emails.push(ch, `${ch}ada@example.test`, `ada@example.test${ch}`, `ada${ch}@example.test`, `ada@exa${ch}mple.test`);
+  }
+  for (const code of [0x10000, 0x1f600, 0xe0001, 0xe0020, 0xe007f, 0xe0100, 0x1d173, 0x10ffff]) {
+    phones.push(`${cp(code)}1`, `1${cp(code)}`);
+    emails.push(`${cp(code)}a@b`, `a@b${cp(code)}`);
+  }
+  for (const [label, corpus, mine, theirs] of [
+    ['phone', phones, normalizeCustomerPhone, serverNormalizeCustomerPhone],
+    ['email', emails, normalizeCustomerEmail, serverNormalizeCustomerEmail],
+  ] as const) {
+    const tally = { value: 0, absent: 0, invalid: 0 };
+    for (const raw of corpus) {
+      const server = theirs(raw);
+      const client = mine(raw);
+      const same = server === CONTACT_REFUSED ? client === CONTACT_INVALID : client === server;
+      if (!same) {
+        const shown = typeof raw === 'string' ? [...raw].map((c) => c.codePointAt(0)!.toString(16)).slice(0, 8).join(' ') : String(raw);
+        assert.fail(`the ${label} rules disagree on [${shown}]: server ${String(server)}, client ${String(client)}`);
+      }
+      if (server === CONTACT_REFUSED) tally.invalid += 1; else if (server === null) tally.absent += 1; else tally.value += 1;
+    }
+    assert.ok(tally.value > 100_000 && tally.invalid > 1_000 && tally.absent > 10, `the ${label} sweep must exercise every answer ${JSON.stringify(tally)}`);
+  }
+  // Anchors, so the sweep is not two copies of one mistake.
+  assert.equal(normalizeCustomerPhone('  +1 555 0100  '), '+1 555 0100');
+  assert.equal(normalizeCustomerPhone('   '), null);
+  assert.equal(normalizeCustomerPhone(null), null);
+  assert.equal(normalizeCustomerPhone('no digits'), CONTACT_INVALID);
+  assert.equal(normalizeCustomerPhone('1'.repeat(65)), CONTACT_INVALID);
+  assert.equal(normalizeCustomerPhone(7), CONTACT_INVALID);
+  assert.equal(normalizeCustomerEmail(' ada@example.test '), 'ada@example.test');
+  assert.equal(normalizeCustomerEmail(''), null);
+  assert.equal(normalizeCustomerEmail('ada example@test'), CONTACT_INVALID);
+  assert.equal(normalizeCustomerEmail('a@b@c'), CONTACT_INVALID);
+  assert.equal(normalizeCustomerEmail(`ada@example.test${cp(0x202e)}`), CONTACT_INVALID);
+  // The profile's createdAt grammar is exactly the runtime's.
+  const times: unknown[] = [
+    null, '2026-09-30T12:34:56.789Z', '1970-01-01T00:00:00.000Z', '9999-12-31T23:59:59.999Z', '2024-02-29T00:00:00.000Z', '2026-02-29T00:00:00.000Z',
+    '2026-09-30T12:34:56Z', '2026-09-30T24:00:00.000Z', '2026-09-30T12:34:60.000Z', '2026-13-01T00:00:00.000Z', '2026-09-30 12:34:56.789Z',
+    '+002026-09-30T12:34:56.789Z', '2026-09-30T12:34:56.789+00:00', '', 0, undefined,
+  ];
+  let admitted = 0;
+  for (const at of times) {
+    const answer = await once(json(200, { customer: { ...PROFILE, createdAt: at } })).client.profile(ID, CSRF);
+    assert.equal(answer.kind === 'ok', isCustomerCreatedAt(at), JSON.stringify(at)); // undefined: the key is missing
+    if (answer.kind === 'ok') admitted += 1;
+  }
+  assert.equal(admitted, 5);
 });

@@ -4,8 +4,11 @@
 // token is not that session's; the intent header and a v4 Idempotency-Key required; the name judged AFTER the key is
 // acquired (a 400 keeps the lease, and the same key then answers 409); 422 for other bytes or another tenant; a sealed
 // 201 with Location, replayed with Idempotent-Replayed: true; real 23-character cursors over byte-order pages; sessions
-// bound to tenants. Its name rule, cursor codec and page order are the server's own modules. Every assertion about a
-// request is made on what the fake recorded — the wire — never on what the page believes it sent.
+// bound to tenants; since M7A-CUSTOMERS-P6 an optional phone and email on a create (judged by the server's own contact
+// rules, any other key refused) and the profile read GET /api/v1/customers/{id}/profile (seeded customers are legacy:
+// no contacts, no creation time). Its name rule, contact rules, cursor codec and page order are the server's own
+// modules. Every assertion about a request is made on what the fake recorded — the wire — never on what the page
+// believes it sent.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -37,13 +40,17 @@ vi.mock('../context/AccessContext', async () => {
 });
 
 import {
-  CHECK_CUTOFF_MS, CONNECTION_CHANGED_TEXT, CustomerDirectoryPage, EMPTY_TEXT, LAST_KNOWN_TEXT, NAME_RULE_TEXT, NOT_FOUND_TEXT,
-  savedEarlierText, STOP_WARNING_TEXT, createHoldStore, unresolvedText, type HoldStore,
+  CHECK_CUTOFF_MS, CONNECTION_CHANGED_TEXT, CustomerDirectoryPage, EMAIL_RULE_TEXT, EMPTY_TEXT, LAST_KNOWN_TEXT, NAME_RULE_TEXT,
+  NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, savedEarlierText, STOP_WARNING_TEXT, createHoldStore,
+  unresolvedText, type HoldStore,
 } from './ServerCustomerDirectory';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
-import { decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder } from '../../server/runtime/customerDirectory';
+import {
+  CONTACT_REFUSED, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, normalizeCustomerEmail as serverNormalizeCustomerEmail,
+  normalizeCustomerPhone as serverNormalizeCustomerPhone,
+} from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
 /** The tenant session 200 as the server writes it (M7A-CUSTOMERS-P5-R1): its token and whose session it is. */
@@ -68,6 +75,8 @@ type ReadPlan = number | 'html' | 'lost' | { readonly limited: string }; // `lim
 interface Sent { readonly method: string; readonly url: string; readonly headers: Headers; readonly body: string | undefined; readonly signal: AbortSignal | null }
 interface User { uid: string; tenant: string; view: boolean; create: boolean }
 interface Row { id: string; name: string }
+interface Contact { phone: string | null; email: string | null; createdAt: string | null }
+const LEGACY: Contact = Object.freeze({ phone: null, email: null, createdAt: null }); // a customer from before P6
 type Late = Response | 'drop' | undefined;
 
 /** One fake tenant server. `cookie` is the session the browser currently presents; a login replaces it. */
@@ -79,7 +88,9 @@ function fakeServer() {
   const sessions = new Map<string, { user: User; tenant: string; csrf: string }>();
   const rows: Record<string, Row[]> = { [TENANT_A]: [], [TENANT_B]: [] };
   const records = new Map<string, { fingerprint: string; leased: boolean; sealed: Row | null }>();
+  const contacts = new Map<string, Contact>(); // by customer id; a row with none is LEGACY
   let sessionCount = 0;
+  let createdCount = 0;
   let idCount = 0xa00; // ids carry a hex letter, so an uppercase spelling is a different string
   const reply = (status: number, body?: unknown, headers: Record<string, string> = {}): Response =>
     new Response(body === undefined ? null : JSON.stringify(body), { status, headers: body === undefined ? headers : { 'content-type': 'application/json; charset=utf-8', ...headers } });
@@ -101,6 +112,7 @@ function fakeServer() {
     sent: [] as Sent[],
     users,
     rows,
+    contacts,
     sessions,
     cookie: null as string | null,
     pageSize: 50,
@@ -193,11 +205,16 @@ function fakeServer() {
           if (plan !== undefined) return refuse(plan, WORDS[plan] ?? 'refused');
           if (path !== CUSTOMERS_PATH) {
             if (url.includes('?')) return refuse(400, WORDS[400]);
-            const id = path.slice(CUSTOMERS_PATH.length + 1);
+            const rest = path.slice(CUSTOMERS_PATH.length + 1);
+            const profile = rest.endsWith('/profile');
+            const id = profile ? rest.slice(0, -'/profile'.length) : rest;
             if (id.includes('/') || id.length === 0) return refuse(404, WORDS[404]); // no route
             if (!CANONICAL_ID_RE.test(id)) return refuse(400, WORDS[400]);
             const found = rows[session.tenant].find((r) => r.id === id); // another tenant's id is simply not here
-            return found === undefined ? refuse(404, WORDS[404]) : reply(200, { customer: { id: found.id, name: found.name } });
+            if (found === undefined) return refuse(404, WORDS[404]);
+            if (!profile) return reply(200, { customer: { id: found.id, name: found.name } });
+            const c = contacts.get(found.id) ?? LEGACY;
+            return reply(200, { customer: { id: found.id, name: found.name, phone: c.phone, email: c.email, createdAt: c.createdAt } });
           }
           const all = ordered(session.tenant);
           let start = 0;
@@ -241,13 +258,18 @@ function fakeServer() {
           if (record !== undefined && record.leased) return refuse(409, WORDS[409]);
           const mine = { fingerprint, leased: true, sealed: null as Row | null };
           records.set(scope, mine);
-          // Only now is the body judged: a refused name keeps the lease.
+          // Only now is the body judged: a refused field keeps the lease. `name` required; `phone`, `email` optional.
           const shape = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? Object.keys(parsed) : [];
-          const name = shape.length === 1 && shape[0] === 'name' ? serverNormalizeCustomerName((parsed as { name: unknown }).name) : null;
-          if (name === null) return refuse(400, WORDS[400]);
+          const known = shape.includes('name') && shape.every((k) => k === 'name' || k === 'phone' || k === 'email');
+          const fields = (known ? parsed : {}) as { name?: unknown; phone?: unknown; email?: unknown };
+          const name = known ? serverNormalizeCustomerName(fields.name) : null;
+          const phone = serverNormalizeCustomerPhone(fields.phone);
+          const email = serverNormalizeCustomerEmail(fields.email);
+          if (name === null || phone === CONTACT_REFUSED || email === CONTACT_REFUSED) return refuse(400, WORDS[400]);
           if (plan === 'rollback-503') return refuse(503, WORDS[503]);
           const customer = { id: uuid(++idCount), name };
           rows[session.tenant].push(customer);
+          contacts.set(customer.id, { phone, email, createdAt: new Date(Date.UTC(2026, 8, 30, 9, 5, 0, ++createdCount)).toISOString() });
           mine.sealed = customer;
           if (plan === 'lost-after-commit') return 'lost';
           if (plan === 'commit-then-503') return refuse(503, WORDS[503]);
@@ -353,7 +375,10 @@ function expectNoSelector(server: Server): void {
         expect(r.body).toBeUndefined();
         expect(r.url).not.toMatch(/limit=/);
       } else {
-        expect(Object.keys(JSON.parse(r.body ?? 'null') as object)).toEqual(['name']);
+        // `{ name }`, with a phone and an email when given: in that order, nothing else.
+        const keys = Object.keys(JSON.parse(r.body ?? 'null') as object);
+        expect(keys).toEqual(['name', 'phone', 'email'].filter((k) => keys.includes(k)));
+        expect(keys[0]).toBe('name');
       }
     }
   }
@@ -437,8 +462,9 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     server.hold.reads = 1;
     mount(server);
     expect(screen.getByRole('heading', { level: 1, name: 'Customer directory' })).toBeInTheDocument();
-    expect(page()).toContain("Saved on the server for this store. Only the customer's name is stored here.");
-    expect(page()).toContain('held only in this browser\'s memory and are not linked');
+    expect(page()).toContain("Saved on the server for this store: each customer's name, and a phone and an email when they are given.");
+    expect(page()).not.toContain('Only the customer');
+    expect(page()).toContain("The Customers page's own contact details, loyalty and history are held only in this browser's memory and are not linked");
     expect(phase()).toBe('loading');
     expect(screen.queryByTestId('directory-empty')).toBeNull(); // never before a list answer
     await waitFor(() => expect(server.held).toHaveLength(1));
@@ -690,7 +716,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Byron$/); // never the list row's name
     expect(screen.getByTestId('directory-detail-id')).toHaveTextContent(ada.id);
     expect(screen.getByRole('heading', { level: 2, name: 'Customer' })).toHaveFocus();
-    expect(details(server).map((r) => r.url)).toEqual([`${CUSTOMERS_PATH}/${ada.id}`]);
+    expect(details(server).map((r) => r.url)).toEqual([`${CUSTOMERS_PATH}/${ada.id}/profile`]); // the profile read
     expect(screen.queryByTestId('directory-state')).toBeNull();
     const listReads = lists(server).length;
     await userEvent.setup().click(screen.getByTestId('directory-back'));
@@ -729,7 +755,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       seen.push(screen.getByTestId('directory-detail').textContent ?? '');
       expect(screen.queryByTestId('directory-detail-name')).toBeNull();
     }
-    expect(details(server).map((r) => r.url)).toEqual([`${CUSTOMERS_PATH}/${uuid(0xdead)}`, `${CUSTOMERS_PATH}/${foreign.id}`]);
+    expect(details(server).map((r) => r.url)).toEqual([`${CUSTOMERS_PATH}/${uuid(0xdead)}/profile`, `${CUSTOMERS_PATH}/${foreign.id}/profile`]);
     await settle();
     const before = server.sent.length;
     for (const bad of ['new', foreign.id.toUpperCase(), `${foreign.id}x`, 'c1700000000000', '..%2Fsession%2Flogout', 'a%3Fcursor%3Dx']) {
@@ -746,13 +772,17 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(server.sent.every((r) => !r.url.includes('logout') && !r.url.includes('cursor'))).toBe(true);
   });
 
-  it('SCD-13. a detail 200 that is not exactly this customer is never shown', async () => {
+  it('SCD-13. a detail 200 that is not exactly this customer\'s profile is never shown', async () => {
     const server = fakeServer();
     const [ada, bob] = server.seed(TENANT_A, ['Ada', 'Bob']);
+    const adaProfile = { id: ada.id, name: 'Ada', phone: null, email: null, createdAt: null };
     const bodies: unknown[] = [
-      { customer: { id: bob.id, name: 'Bob' } }, // another customer's answer
-      { customer: { id: ada.id, name: 'Ada', email: 'ada@synthetic.test' } },
-      { customer: { id: ada.id, name: 'Ada' }, tenant: TENANT_A },
+      { customer: { ...adaProfile, id: bob.id, name: 'Bob' } }, // another customer's answer
+      { customer: { id: ada.id, name: 'Ada' } }, // the detail's shape is not a profile
+      { customer: { ...adaProfile, loyalty: 3 } },
+      { customer: adaProfile, tenant: TENANT_A },
+      { customer: { ...adaProfile, phone: ' +1 555 0100' } }, // not a stored value
+      { customer: { ...adaProfile, createdAt: '2026-09-30T09:05:00Z' } },
       { customers: [{ id: ada.id, name: 'Ada' }], nextCursor: null },
     ];
     for (const body of bodies) {
@@ -863,7 +893,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await click('directory-detail-retry');
     await waitFor(() => expect(detail()).toHaveAttribute('data-phase', 'ready'));
     expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Bob$/);
-    expect(details(server).every((r) => r.url === `${CUSTOMERS_PATH}/${ada.id}` || r.url === `${CUSTOMERS_PATH}/${bob.id}`)).toBe(true);
+    expect(details(server).every((r) => r.url === `${CUSTOMERS_PATH}/${ada.id}/profile` || r.url === `${CUSTOMERS_PATH}/${bob.id}/profile`)).toBe(true);
   });
 
   it('SCD-16. a create: ONE POST with the normalized name, this session\'s token and a fresh key; "Saved on the server" only after the 201', async () => {
@@ -970,9 +1000,9 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
   it('SCD-19. a first send the server refuses outright ends the attempt with its own text, keeps the draft, and never says saved', async () => {
     const cases: Array<[number, RegExp]> = [
       [403, /^Refused by the server\./],
-      [400, /^The server did not accept this name\./],
-      [413, /^The server did not accept this name\./],
-      [415, /^The server did not accept this name\./],
+      [400, /^The server did not accept these customer details\. Nothing was added\.$/],
+      [413, /^The server did not accept these customer details\./],
+      [415, /^The server did not accept these customer details\./],
       [404, /does not offer adding customers here/],
       [422, /^The server rejected this request\.$/],
     ];
@@ -2302,7 +2332,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
     expect(screen.getByTestId('directory-detail')).toHaveTextContent('Ada');
     expect(page()).not.toContain('Mallory');
-    expect(details(server).every((r) => !r.url.endsWith(mallory.id))).toBe(true);
+    expect(details(server).every((r) => !r.url.includes(mallory.id))).toBe(true);
     expect(details(server).length).toBeGreaterThanOrEqual(2); // the refused read, then the new connection's
   });
 
@@ -2392,7 +2422,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
     expect(page()).not.toContain('Ada');
     expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
-      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}`, `GET ${TENANT_SESSION_PATHS.current}`,
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}/profile`, `GET ${TENANT_SESSION_PATHS.current}`,
     ]);
     expect(logins(server)).toHaveLength(1);
   });
@@ -2428,7 +2458,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await settle();
     expect(screen.queryByTestId('directory-detail-name')).toBeNull();
     expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([
-      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}`, `GET ${TENANT_SESSION_PATHS.current}`,
+      `GET ${TENANT_SESSION_PATHS.current}`, `GET ${CUSTOMERS_PATH}/${ada.id}/profile`, `GET ${TENANT_SESSION_PATHS.current}`,
     ]);
     expect(logins(server)).toHaveLength(1);
   });
@@ -2828,5 +2858,386 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(page()).not.toMatch(/Ada/);
     await settle();
     expect(logins(server)).toHaveLength(1);
+  });
+
+  // M7A-CUSTOMERS-P6 — contact records: an optional phone and email on a create, and the customer's profile.
+  const phoneInput = () => screen.getByTestId('directory-phone') as HTMLInputElement;
+  const emailInput = () => screen.getByTestId('directory-email') as HTMLInputElement;
+  const fill = (fields: { name?: string; phone?: string; email?: string }) => {
+    if (fields.name !== undefined) fireEvent.change(nameInput(), { target: { value: fields.name } });
+    if (fields.phone !== undefined) fireEvent.change(phoneInput(), { target: { value: fields.phone } });
+    if (fields.email !== undefined) fireEvent.change(emailInput(), { target: { value: fields.email } });
+  };
+  const PHONE = '+1 555 0100';
+  const EMAIL = 'ada@example.test';
+  const FULL_BODY = `{"name":"Ada Lovelace","phone":"${PHONE}","email":"${EMAIL}"}`;
+  const openDetail = async (view: ReturnType<typeof mount>, id: string) => {
+    await view.go(`/customers/directory/${id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+  };
+
+  it('SCD-83. the fake server takes an optional phone and email by the server\'s own rules, answers the 201 without them, and serves the profile', async () => {
+    const server = fakeServer();
+    const send = (method: string, url: string, headers: Record<string, string> = {}, body?: string) => server.fetch(url, { method, headers, body });
+    const login = await send('POST', TENANT_SESSION_PATHS.login, { authorization: 'Bearer tok-a', 'x-tmpos-csrf': '1' });
+    const csrf = ((await login.json()) as { csrfToken: string }).csrfToken;
+    const post = (k: string, body: string) =>
+      send('POST', CUSTOMERS_PATH, { 'content-type': 'application/json', 'x-tmpos-csrf': '1', 'x-tmpos-session-csrf': csrf, 'idempotency-key': k }, body);
+    const bound = { 'x-tmpos-session-csrf': csrf };
+    expect((await post(key(1), JSON.stringify({ name: 'Ada', phone: 'no digits' }))).status).toBe(400);
+    expect((await post(key(2), JSON.stringify({ name: 'Ada', email: 'ada example.test' }))).status).toBe(400);
+    expect((await post(key(3), JSON.stringify({ name: 'Ada', phone: 7 }))).status).toBe(400);
+    expect((await post(key(4), JSON.stringify({ name: 'Ada', loyalty: 1 }))).status).toBe(400);
+    expect((await post(key(5), JSON.stringify({ phone: PHONE }))).status).toBe(400);
+    expect(server.rows[TENANT_A]).toEqual([]);
+    const made = await post(key(6), JSON.stringify({ name: 'Ada Lovelace', phone: ` ${PHONE} `, email: EMAIL }));
+    expect(made.status).toBe(201);
+    const { customer } = (await made.json()) as { customer: Row };
+    expect(Object.keys(customer)).toEqual(['id', 'name']); // the 201 stays { id, name }
+    const profile = await (await send('GET', `${CUSTOMERS_PATH}/${customer.id}/profile`, bound)).json();
+    expect(profile).toEqual({ customer: { id: customer.id, name: 'Ada Lovelace', phone: PHONE, email: EMAIL, createdAt: '2026-09-30T09:05:00.001Z' } });
+    expect(Object.keys((profile as { customer: object }).customer)).toEqual(['id', 'name', 'phone', 'email', 'createdAt']);
+    expect(await (await send('GET', `${CUSTOMERS_PATH}/${customer.id}`, bound)).json()).toEqual({ customer: { id: customer.id, name: 'Ada Lovelace' } });
+    const [old] = server.seed(TENANT_A, ['Old']);
+    expect(await (await send('GET', `${CUSTOMERS_PATH}/${old.id}/profile`, bound)).json()).toEqual({ customer: { id: old.id, name: 'Old', ...LEGACY } });
+    const [foreign] = server.seed(TENANT_B, ['Foreign']);
+    expect((await send('GET', `${CUSTOMERS_PATH}/${foreign.id}/profile`, bound)).status).toBe(404);
+    expect((await send('GET', `${CUSTOMERS_PATH}/${old.id}/profile`)).status).toBe(403); // the profile names its session too
+    expect((await send('GET', `${CUSTOMERS_PATH}/${old.id}/other`, bound)).status).toBe(404);
+  });
+
+  it('SCD-84. the form: Name required, Phone and Email optional; every invalid field says so, the first takes focus, and NOTHING is sent and no key taken', async () => {
+    const server = fakeServer();
+    const view = mount(server);
+    await ready();
+    expect(screen.getByLabelText('Customer name (required)')).toBe(nameInput());
+    expect(nameInput()).toHaveAttribute('aria-required', 'true');
+    expect(screen.getByLabelText('Phone (optional)')).toBe(phoneInput());
+    expect(screen.getByLabelText('Email (optional)')).toBe(emailInput());
+    for (const input of [phoneInput(), emailInput()]) {
+      expect(input).not.toHaveAttribute('aria-required');
+      expect(input).toHaveAttribute('aria-invalid', 'false');
+      expect(input).not.toHaveAttribute('aria-describedby');
+    }
+    const before = server.sent.length;
+    const errorOf = (field: 'name' | 'phone' | 'email') => screen.queryByTestId(`directory-${field}-error`);
+    const cases: Array<[{ name: string; phone: string; email: string }, Array<'name' | 'phone' | 'email'>]> = [
+      [{ name: 'Ada', phone: 'no digits', email: '' }, ['phone']],
+      [{ name: 'Ada', phone: '', email: 'ada example.test' }, ['email']],
+      [{ name: 'Ada', phone: '1'.repeat(65), email: 'a@b@c' }, ['phone', 'email']],
+      [{ name: '   ', phone: `+1${String.fromCodePoint(0x202e)}555`, email: '@example.test' }, ['name', 'phone', 'email']],
+      [{ name: 'Ada', phone: ' ', email: `${'a'.repeat(242)}@example.test` }, ['email']],
+      [{ name: '', phone: PHONE, email: EMAIL }, ['name']],
+    ];
+    const RULES = { name: NAME_RULE_TEXT, phone: PHONE_RULE_TEXT, email: EMAIL_RULE_TEXT } as const;
+    const inputOf = { name: nameInput, phone: phoneInput, email: emailInput } as const;
+    for (const [fields, invalid] of cases) {
+      fill(fields);
+      await click('directory-add');
+      await waitFor(() => expect(errorOf(invalid[0])).not.toBeNull());
+      for (const field of ['name', 'phone', 'email'] as const) {
+        const input = inputOf[field]();
+        if (invalid.includes(field)) {
+          expect(errorOf(field)).toHaveTextContent(RULES[field]);
+          expect(errorOf(field)).toHaveAttribute('role', 'alert');
+          expect(errorOf(field)).toHaveAttribute('id', `directory-${field}-error`);
+          expect(input).toHaveAttribute('aria-invalid', 'true');
+          expect(input).toHaveAttribute('aria-describedby', `directory-${field}-error`);
+        } else {
+          expect(errorOf(field)).toBeNull();
+          expect(input).toHaveAttribute('aria-invalid', 'false');
+        }
+        expect(input.value).toBe(fields[field]); // every draft is kept as typed
+      }
+      expect(inputOf[invalid[0]]()).toHaveFocus(); // the first invalid field, in form order
+    }
+    await settle();
+    expect(server.sent).toHaveLength(before); // not even a session read
+    expect(view.made).toEqual([]);
+    expect(view.holds.get('uid-a')).toBeUndefined();
+    // Editing a field clears its own error only.
+    fill({ name: '', phone: 'x', email: 'y' });
+    await click('directory-add');
+    await waitFor(() => expect(errorOf('email')).not.toBeNull());
+    fill({ phone: PHONE });
+    expect(errorOf('phone')).toBeNull();
+    expect(phoneInput()).toHaveAttribute('aria-invalid', 'false');
+    expect(errorOf('name')).not.toBeNull();
+    expect(errorOf('email')).not.toBeNull();
+    fill({ name: 'Ada Lovelace', email: EMAIL });
+    await click('directory-add');
+    await screen.findByTestId('directory-saved');
+    expect(posts(server).map((r) => r.body)).toEqual([FULL_BODY]);
+    expect(view.made).toHaveLength(1);
+  });
+
+  it('SCD-85. the body: contacts trimmed, in the order name, phone, email; a blank contact is left OUT, so a name-only create keeps its exact bytes; a confirmed create clears all three drafts', async () => {
+    const server = fakeServer();
+    const view = mount(server, { keys: [key(1), key(2), key(3), key(4)] });
+    await ready();
+    const sends: Array<[{ name: string; phone: string; email: string }, string]> = [
+      [{ name: '  Ada Lovelace ', phone: `  ${PHONE}  `, email: ` ${EMAIL}\t` }, FULL_BODY],
+      [{ name: 'Ada Lovelace', phone: '   ', email: EMAIL }, `{"name":"Ada Lovelace","email":"${EMAIL}"}`],
+      [{ name: 'Ada Lovelace', phone: PHONE, email: '' }, `{"name":"Ada Lovelace","phone":"${PHONE}"}`],
+      [{ name: 'Ada Lovelace', phone: ' ', email: '  ' }, '{"name":"Ada Lovelace"}'],
+    ];
+    for (const [fields, body] of sends) {
+      const sent = posts(server).length;
+      fill(fields);
+      await click('directory-add');
+      await waitFor(() => expect(posts(server)).toHaveLength(sent + 1));
+      expect(posts(server)[sent].body).toBe(body);
+      const saved = await screen.findByTestId('directory-saved');
+      expect(saved.textContent).not.toContain(PHONE); // the notice names the customer, never a contact
+      expect(saved.textContent).not.toContain(EMAIL);
+      await ready();
+      expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['', '', '']); // cleared together
+    }
+    expect(posts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([key(1), key(2), key(3), key(4)]);
+    expect(names()).toEqual(['Ada Lovelace', 'Ada Lovelace', 'Ada Lovelace', 'Ada Lovelace']); // rows carry names only
+    expect(screen.getByTestId('directory-list').textContent).not.toMatch(/555|@/);
+    // A confirmation while the name draft is another name keeps every draft.
+    server.hold.posts = 1;
+    fill({ name: 'Grace Hopper', phone: PHONE, email: EMAIL });
+    await click('directory-add');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    fill({ name: 'Someone Else' });
+    server.held[0].release();
+    await screen.findByTestId('directory-saved');
+    expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['Someone Else', PHONE, EMAIL]);
+    expectNoSelector(server);
+    expect(view.holds.get('uid-a')).toBeUndefined();
+  });
+
+  it('SCD-86. an uncertain create holds the exact body WITH its contacts: "Check again" re-sends those bytes after every field was edited; the card never shows a contact', async () => {
+    const server = fakeServer();
+    server.posts.push('lost-after-commit');
+    const view = mount(server, { keys: [key(1), key(2)] });
+    await ready();
+    fill({ name: 'Ada Lovelace', phone: ` ${PHONE}`, email: EMAIL });
+    await click('directory-add');
+    await unresolved();
+    expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), body: FULL_BODY, name: 'Ada Lovelace', state: 'unresolved' });
+    expect(hold().textContent).not.toContain(PHONE);
+    expect(hold().textContent).not.toContain(EMAIL);
+    fill({ name: 'Ada King', phone: '+1 555 0199', email: 'king@example.test' });
+    await click('directory-check-again');
+    const saved = await screen.findByTestId('directory-saved');
+    expect(saved).toHaveTextContent('Saved on the server: "Ada Lovelace".'); // settled by the name sent
+    expect(posts(server).map((r) => [r.headers.get('idempotency-key'), r.body])).toEqual([[key(1), FULL_BODY], [key(1), FULL_BODY]]);
+    expect(server.rows[TENANT_A].map((r) => r.name)).toEqual(['Ada Lovelace']); // ONE customer, its contacts as first sent
+    expect(server.contacts.get(server.rows[TENANT_A][0].id)).toMatchObject({ phone: PHONE, email: EMAIL });
+    expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['Ada King', '+1 555 0199', 'king@example.test']);
+    expect(page()).not.toContain(PHONE);
+  });
+
+  it('SCD-87. the profile: phone, email and the creation time as a <time>; a customer from before contacts shows "Not provided" and "Not recorded"', async () => {
+    const server = fakeServer();
+    const [old] = server.seed(TENANT_A, ['Old Customer']);
+    const view = mount(server, { keys: [key(1)] });
+    await ready();
+    fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+    await click('directory-add');
+    await screen.findByTestId('directory-saved');
+    await ready();
+    expect(page()).not.toContain(PHONE);
+    await click('directory-saved-link');
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    const made = server.rows[TENANT_A].find((r) => r.name === 'Ada Lovelace')!;
+    expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Lovelace$/);
+    expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(new RegExp(`^\\${PHONE}$`));
+    expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(/^ada@example\.test$/);
+    const time = screen.getByTestId('directory-detail-created').querySelector('time');
+    expect(time).not.toBeNull();
+    expect(time).toHaveAttribute('datetime', '2026-09-30T09:05:00.001Z');
+    expect(time).toHaveTextContent(/^2026-09-30 09:05 UTC$/);
+    expect(screen.getByTestId('directory-detail-id')).toHaveTextContent(made.id);
+    expect(details(server).map((r) => r.url)).toEqual([`${CUSTOMERS_PATH}/${made.id}/profile`]);
+    await openDetail(view, old.id);
+    expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Old Customer$/);
+    expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(new RegExp(`^${NOT_PROVIDED_TEXT}$`));
+    expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(new RegExp(`^${NOT_PROVIDED_TEXT}$`));
+    expect(screen.getByTestId('directory-detail-created')).toHaveTextContent(new RegExp(`^${NOT_RECORDED_TEXT}$`));
+    expect(screen.getByTestId('directory-detail-created').querySelector('time')).toBeNull(); // no time is invented
+    await view.go('/customers/directory');
+    await ready();
+    expect(screen.getByTestId('directory-list').textContent).not.toMatch(/555|@|Not provided/);
+    expectNoSelector(server);
+  });
+
+  it('SCD-88. a confirmed create stays confirmed when the following profile read fails', async () => {
+    const server = fakeServer();
+    mount(server, { keys: [key(1)] });
+    await ready();
+    fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+    await click('directory-add');
+    await screen.findByTestId('directory-saved');
+    await ready(); // page one, read again after the 201
+    for (const plan of [503, 'lost', 'html'] as const) {
+      server.reads.push(plan);
+      await click('directory-saved-link');
+      await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'unavailable'));
+      expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+      expect(screen.getByTestId('directory-saved')).toHaveTextContent('Saved on the server: "Ada Lovelace".');
+      expect(screen.queryByTestId('directory-hold')).toBeNull();
+      expect(createStatus()).toHaveTextContent('');
+      expect(page()).not.toMatch(/not saved|Not confirmed/i);
+      await click('directory-back');
+      await ready();
+    }
+    expect(posts(server)).toHaveLength(1);
+    expect(server.rows[TENANT_A].map((r) => r.name)).toEqual(['Ada Lovelace']);
+  });
+
+  it('SCD-89. a tenant change clears the profile\'s contacts: never shown under the new connection, not even as last known; the contact drafts stay with the name draft', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    server.contacts.set(ada.id, { phone: PHONE, email: EMAIL, createdAt: '2026-09-30T09:05:00.000Z' });
+    server.seed(TENANT_B, ['Bea']);
+    const view = mount(server);
+    await ready();
+    await openDetail(view, ada.id);
+    expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(PHONE);
+    await view.go('/customers/directory');
+    await ready();
+    fill({ name: 'Cy', phone: '+1 555 0142', email: 'cy@example.test' });
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(EMAIL));
+    server.users['tok-a'].tenant = TENANT_B;
+    server.otherTab('tok-a');
+    server.hold.reads = 2; // the new connection's list and profile reads
+    await focusWindow();
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    // A new generation: the old store's contact record is gone before the new store has answered anything.
+    expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-email')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-created')).toBeNull();
+    expect(page()).not.toContain(PHONE);
+    expect(page()).not.toContain(EMAIL);
+    // The new connection cannot read the profile (a 503): the old store's record is never its "last known".
+    const outage = new Response(JSON.stringify({ error: 'service_unavailable', requestId: 'req-synthetic' }), { status: 503, headers: { 'content-type': 'application/json' } });
+    for (const h of server.held) h.release(h.url.endsWith('/profile') ? outage : undefined);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'unavailable'));
+    expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+    expect(page()).not.toContain(PHONE);
+    expect(page()).not.toContain(EMAIL);
+    await click('directory-detail-retry');
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'not-found')); // not in this store
+    expect(page()).not.toContain(PHONE);
+    await view.go('/customers/directory');
+    await waitFor(() => expect(names()).toEqual(['Bea']));
+    expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['Cy', '+1 555 0142', 'cy@example.test']);
+    expect(posts(server)).toHaveLength(0);
+  });
+
+  it('SCD-90. a session that ends clears the profile\'s contacts: nothing of them is shown until a Reconnect reads them again', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    server.contacts.set(ada.id, { phone: PHONE, email: EMAIL, createdAt: null });
+    const view = mount(server);
+    await ready();
+    await openDetail(view, ada.id);
+    expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(PHONE);
+    expect(screen.getByTestId('directory-detail-created')).toHaveTextContent(NOT_RECORDED_TEXT);
+    server.sessions.clear();
+    await focusWindow();
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-email')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
+    expect(page()).not.toContain(PHONE);
+    expect(page()).not.toContain(EMAIL);
+    expect(logins(server)).toHaveLength(1);
+    await click('directory-detail-retry');
+    await waitFor(() => expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(PHONE));
+    expect(logins(server)).toHaveLength(2);
+  });
+
+  it('SCD-91. a confirmation clears the drafts only when ALL of them still are what was sent: a same-named customer with another phone being typed stays', async () => {
+    const server = fakeServer();
+    const view = mount(server, { keys: [key(1), key(2)] });
+    await ready();
+    server.hold.posts = 1;
+    fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+    await click('directory-add');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    fill({ phone: ' +1 555 0199 ' }); // the next Ada Lovelace: same name, another phone
+    server.held[0].release();
+    await screen.findByTestId('directory-saved');
+    await ready();
+    expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['Ada Lovelace', ' +1 555 0199 ', EMAIL]);
+    // The same, with an email added to a draft whose contacts were sent blank.
+    server.hold.posts = 1;
+    fill({ phone: '', email: '' });
+    await click('directory-add');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    fill({ email: 'ada.second@example.test' });
+    server.held[1].release();
+    await waitFor(() => expect(posts(server)).toHaveLength(2));
+    await waitFor(() => expect(view.holds.get('uid-a')).toBeUndefined());
+    await ready();
+    expect(posts(server)[1].body).toBe('{"name":"Ada Lovelace"}');
+    expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['Ada Lovelace', '', 'ada.second@example.test']);
+    // What was sent, untouched since (padding aside): every draft is cleared.
+    fill({ name: ' Ada Lovelace ', phone: ` ${PHONE}`, email: EMAIL });
+    await click('directory-add');
+    await waitFor(() => expect(posts(server)).toHaveLength(3));
+    await waitFor(() => expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['', '', '']));
+  });
+
+  it('SCD-92. an attempt that can never be sent again keeps no contact: detached by a connection change, or past the cutoff, its body is emptied; the card is unchanged; a name-only body stays', async () => {
+    // Detached by a connection change.
+    {
+      const server = fakeServer();
+      server.posts.push('lost-before');
+      const view = mount(server, { keys: [key(1)] });
+      await ready();
+      fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+      await click('directory-add');
+      await unresolved();
+      const before = view.holds.get('uid-a')!;
+      expect(before.body).toBe(FULL_BODY);
+      const card = hold().textContent;
+      server.otherTab('tok-a');
+      await focusWindow();
+      await waitFor(() => expect(hold()).toHaveAttribute('data-detached', 'true'));
+      const after = view.holds.get('uid-a')!;
+      expect(after.body).toBe('');
+      expect(JSON.stringify(after)).not.toMatch(/555|@/);
+      expect({ ...after, body: before.body, csrf: before.csrf }).toEqual(before); // key, name, state, sent time unchanged
+      expect(hold()).toHaveTextContent(unresolvedText('Ada Lovelace'));
+      expect(card).not.toMatch(/555|@/);
+      expect(hold().textContent).not.toMatch(/555|@/);
+      expect(posts(server)).toHaveLength(1);
+      cleanup();
+      vi.restoreAllMocks();
+    }
+    // Past the check cutoff (not detached).
+    {
+      const server = fakeServer();
+      server.posts.push('commit-then-503');
+      let t = 1_000;
+      const view = mount(server, { keys: [key(1)], now: () => t });
+      await ready();
+      fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+      await click('directory-add');
+      await unresolved();
+      expect(view.holds.get('uid-a')!.body).toBe(FULL_BODY);
+      t += CHECK_CUTOFF_MS;
+      await click('directory-check-again');
+      await waitFor(() => expect(view.holds.get('uid-a')!.body).toBe(''));
+      expect(hold()).toHaveAttribute('data-detached', 'false');
+      expect(screen.getByTestId('directory-hold-detached')).toHaveTextContent('It was sent too long ago');
+      expect(posts(server)).toHaveLength(1);
+      cleanup();
+    }
+    // A name-only body holds nothing but the name: it stays when detached.
+    {
+      const holds = createHoldStore();
+      expect(holds.put('uid-a', { key: key(1), body: '{"name":"Ada"}', name: 'Ada', csrf: 'c'.repeat(43), sentAt: 1, state: 'unresolved' })).toBe(true);
+      holds.change('uid-a', key(1), { csrf: null });
+      expect(holds.get('uid-a')).toMatchObject({ body: '{"name":"Ada"}', csrf: null });
+    }
   });
 });

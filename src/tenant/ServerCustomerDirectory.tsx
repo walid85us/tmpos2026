@@ -1,13 +1,19 @@
 // M7A-CUSTOMERS-P5 — the shop's server-backed Customer directory: the customers the tenant server holds for this store,
-// read from GET /api/v1/customers (cursor pages) and GET /api/v1/customers/{id}, and added through the idempotent
-// POST /api/v1/customers. Only an id and a name exist on the server; the Customers screen's contact, loyalty and history
-// data stays in this browser and is not linked to these records.
+// read from GET /api/v1/customers (cursor pages) and GET /api/v1/customers/{id}/profile, and added through the idempotent
+// POST /api/v1/customers. The server holds an id, a name and — since M7A-CUSTOMERS-P6 — an optional phone and email and
+// the time it created the customer (none for a customer created before it kept one). The Customers screen's own contact,
+// loyalty and history data stays in this browser and is not linked to these records.
 //
 //   - The server decides everything: who may view or add, which store this is, what a valid name is, what was stored.
 //     `canCreate` is a hint from the local role state; a 403 is the answer that counts. Nothing here names a tenant,
 //     store, role or actor.
 //   - Server rows live in this page's own state and nowhere else: never in the local customer state, browser storage,
-//     a URL query or a log. A detail shows its own answer, never a list row.
+//     a URL query or a log. A detail shows its own answer (the profile read), never a list row; a phone or an email is
+//     shown only there — never in a list row, a notice or the unresolved card.
+//   - The form refuses here what the server would refuse (customersClient.ts restates its name, phone and email rules):
+//     every invalid field says so, the first takes focus, and nothing is sent and no key taken. A blank phone or email is
+//     left OUT of the body, so a name-only create keeps its exact bytes `{"name":"…"}`; otherwise the keys are name, phone,
+//     email in that order. Contact drafts follow the name draft: kept across a connection change, cleared with it.
 //   - A GENERATION is one store connection as this page knows it: a counter and the session's CSRF token, kept in refs.
 //     `connect()` (the session client's `ensure`) runs before EVERY request, reads included. The first token fixes the
 //     generation; a later DIFFERENT token starts a new one — reads in flight are cancelled, rows, cursor, detail and
@@ -62,7 +68,8 @@ import { Link, useParams } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import {
-  customers as customersClient, isCustomerId, normalizeCustomerName, type CreateResult, type CustomerEntry, type CustomersClient,
+  CONTACT_INVALID, customers as customersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName, normalizeCustomerPhone,
+  type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient,
 } from './customersClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 
@@ -79,6 +86,12 @@ export const savedEarlierText = (name: string): string => `"${name}" was saved o
 export const STOP_WARNING_TEXT =
   'Stop tracking does not cancel the request, and adding the same name again can create a second customer.';
 export const NAME_RULE_TEXT = 'Enter a name of 1 to 200 characters, without control or text-direction characters.';
+export const PHONE_RULE_TEXT = 'Enter a phone number of up to 64 characters with at least one digit and no control or text-direction characters, or leave it blank.';
+export const EMAIL_RULE_TEXT = 'Enter an email address of up to 254 characters with exactly one @, no spaces and no control or text-direction characters, or leave it blank.';
+export const NOT_PROVIDED_TEXT = 'Not provided';
+export const NOT_RECORDED_TEXT = 'Not recorded';
+/** A creation time (`YYYY-MM-DDTHH:mm:ss.sssZ`, as the client admits it) as `YYYY-MM-DD HH:mm UTC`. */
+export const createdText = (iso: string): string => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 export const unresolvedText = (name: string): string => `Not confirmed yet: "${name}". The server may have saved it.`;
 const waitText = (seconds: number): string => `Too many requests. Wait ${seconds} second${seconds === 1 ? '' : 's'}, then try again.`;
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
@@ -98,7 +111,7 @@ const TEXT = Object.freeze({
 const REFUSED_TEXT = Object.freeze({
   'signed-out': 'Not sent through: your server session ended. Reconnect, then add again.',
   denied: 'Refused by the server. This account may not add customers to this store.',
-  invalid: 'The server did not accept this name. Nothing was added.',
+  invalid: 'The server did not accept these customer details. Nothing was added.',
   absent: 'The store server does not offer adding customers here. Nothing was added.',
   'key-reused': 'The server rejected this request.',
 });
@@ -121,7 +134,11 @@ function reasonOf(answer: CreateResult, waitSeconds?: number): string {
 /** A create whose outcome is not known yet: exactly what a check must send again, and the connection it belongs to. */
 export interface HeldCreate {
   readonly key: string;
-  /** The exact request body string: `JSON.stringify({ name })`, never rebuilt. */
+  /**
+   * The exact request body string — `{ name }`, with a phone and an email when given — never rebuilt. Once the attempt
+   * can never be sent again (detached, or past the check cutoff) a body that carries a contact is emptied (''), so no
+   * phone or email is kept for an attempt that cannot use it; a name-only body holds nothing but the name and stays.
+   */
   readonly body: string;
   /** The normalized name that was sent. */
   readonly name: string;
@@ -134,7 +151,10 @@ export interface HeldCreate {
 
 /** What a create that settled after its page had gone ended as; kept until a mounted page shows it. */
 export type HoldOutcome =
-  | { readonly kind: 'saved'; readonly customer: CustomerEntry; /** The token the attempt was sent with; null once detached. */ readonly csrf: string | null }
+  | {
+    readonly kind: 'saved'; readonly customer: CustomerEntry; /** The token the attempt was sent with; null once detached. */ readonly csrf: string | null;
+    /** Whether the body sent was name-only (no contact): only then can a later page's draft be matched against it. */ readonly plain: boolean;
+  }
   | { readonly kind: 'refused'; readonly name: string };
 
 /** What React sees of an attempt: everything but the session token, frozen and stable between store changes. */
@@ -156,13 +176,26 @@ function viewOf(held: HeldCreate | undefined): HeldView | undefined {
   return view;
 }
 
+/** What an attempt that can never be sent again keeps of its body: a name-only body (nothing but the name), else ''. */
+const unusableBody = (attempt: Pick<HeldCreate, 'body' | 'name'>): string =>
+  attempt.body === JSON.stringify({ name: attempt.name }) ? attempt.body : '';
+
+/** What was sent, as the draft is compared with it; null when the body no longer says (a contact was sent, then emptied). */
+interface Sent { readonly name: string; readonly phone: string | null; readonly email: string | null }
+function sentOf(attempt: Pick<HeldCreate, 'body' | 'name'>): Sent | null {
+  if (attempt.body === '') return null;
+  const fields = JSON.parse(attempt.body) as { phone?: string; email?: string }; // this page's own string
+  return { name: attempt.name, phone: fields.phone ?? null, email: fields.email ?? null };
+}
+
 /** At most one held create per user, in memory only. */
 export interface HoldStore {
   get(uid: string): HeldCreate | undefined;
   /** Hold `attempt` for `uid`; false (and nothing held) when that user already has one. */
   put(uid: string, attempt: HeldCreate): boolean;
   /** Change the attempt under `key`; false when the store's attempt is another (a stale continuation is a no-op). */
-  change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state'>>): boolean;
+  /** Detaching (`csrf: null`) also empties a body that carries a contact (see HeldCreate.body). */
+  change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body'>>): boolean;
   remove(uid: string, key: string): boolean;
   /** Remove the attempt under `key` and record its terminal `outcome` (one per user; a newer one replaces it). */
   finish(uid: string, key: string, outcome: HoldOutcome): boolean;
@@ -184,10 +217,11 @@ export function createHoldStore(): HoldStore {
       tell();
       return true;
     },
-    change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state'>>): boolean {
+    change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body'>>): boolean {
       const current = held.get(uid);
       if (current === undefined || current.key !== key) return false;
-      held.set(uid, Object.freeze({ ...current, ...next }));
+      const changed = { ...current, ...next };
+      held.set(uid, Object.freeze(next.csrf === null ? { ...changed, body: unusableBody(changed) } : changed));
       tell();
       return true;
     },
@@ -232,13 +266,15 @@ interface DetailState {
   readonly id: string | null;
   readonly phase: DetailPhase;
   readonly text: string;
-  readonly customer: CustomerEntry | null; // this id's own answer in this generation
+  readonly customer: CustomerProfile | null; // this id's own answer (its profile) in this generation
 }
 /** A read or a session that did not answer with rows: the phase it puts the page in and what it says. */
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
 const LIST_INITIAL: ListState = Object.freeze({ phase: 'loading', text: TEXT.loading, rows: [], next: null, note: '' });
 const DETAIL_NONE: DetailState = Object.freeze({ id: null, phase: 'loading', text: '', customer: null });
+interface Fields { readonly name: string; readonly phone: string; readonly email: string }
+const NO_FIELDS: Fields = Object.freeze({ name: '', phone: '', email: '' });
 
 function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
   if (s.kind === 'no-identity') return { kind: 'signed-out', text: TEXT.noIdentity };
@@ -307,8 +343,8 @@ function UserPage({
   const [list, setList] = useState<ListState>(LIST_INITIAL);
   const [listBusy, setListBusy] = useState(false);
   const [detail, setDetail] = useState<DetailState>(DETAIL_NONE);
-  const [draft, setDraft] = useState('');
-  const [nameError, setNameError] = useState('');
+  const [draft, setDraft] = useState<Fields>(NO_FIELDS);
+  const [errors, setErrors] = useState<Fields>(NO_FIELDS); // each field's rule text while it is refused here
   const [createStatus, setCreateStatus] = useState<{ readonly refusal: boolean; readonly text: string; readonly named?: true } | null>(null);
   const [saved, setSaved] = useState<CustomerEntry | { readonly earlier: string } | null>(null);
   const [connectionChanged, setConnectionChanged] = useState(false);
@@ -341,6 +377,8 @@ function UserPage({
   const detailTitle = useRef<HTMLHeadingElement | null>(null);
   const savedNotice = useRef<HTMLParagraphElement | null>(null);
   const nameInput = useRef<HTMLInputElement | null>(null);
+  const phoneInput = useRef<HTMLInputElement | null>(null);
+  const emailInput = useRef<HTMLInputElement | null>(null);
   const focusSaved = useRef(false);
   routeRef.current = routeId;
 
@@ -443,16 +481,21 @@ function UserPage({
     const outcome = holds.takeOutcome(uid);
     if (outcome === undefined) return;
     if (outcome.kind === 'refused') return setCreateStatus({ refusal: true, text: `"${outcome.name}" was not added: the server refused that request.`, named: true });
-    confirmed(outcome.customer, outcome.csrf === gen.current.csrf, false); // the user may be typing: no focus move
+    const sent = outcome.plain ? { name: outcome.customer.name, phone: null, email: null } : null;
+    confirmed(outcome.customer, sent, outcome.csrf === gen.current.csrf, false); // the user may be typing: no focus move
   }
 
-  /** A validated 201 naming the name sent: the notice, the draft only when it still is that name, and page one again. */
-  function confirmed(customer: CustomerEntry, here: boolean, focus: boolean): void {
+  /**
+   * A validated 201 naming the name sent: the notice, the draft only when ALL its fields still are what was sent (a
+   * same-named customer with other contacts being typed stays; `sent` null: unknown, so nothing is cleared), and page one again.
+   */
+  function confirmed(customer: CustomerEntry, sent: Sent | null, here: boolean, focus: boolean): void {
     setHoldNote(null);
-    setDraft((d) => (normalizeCustomerName(d) === customer.name ? '' : d));
+    setDraft((d) => (sent !== null && normalizeCustomerName(d.name) === sent.name && normalizeCustomerPhone(d.phone) === sent.phone
+      && normalizeCustomerEmail(d.email) === sent.email ? NO_FIELDS : d));
     setCreateStatus(null);
     if (here) {
-      setNameError('');
+      setErrors(NO_FIELDS);
       setSaved(customer);
       focusSaved.current = focus;
     } else {
@@ -544,7 +587,7 @@ function UserPage({
     }
   }
 
-  function failDetail(id: string, raw: Failure, shown: CustomerEntry | null): void {
+  function failDetail(id: string, raw: Failure, shown: CustomerProfile | null): void {
     const failure = withWait(raw);
     if (isRefusal(failure)) return clearBoth(failure);
     // An answer already shown for this id in this generation may stay, as last known, when the server cannot be asked.
@@ -575,7 +618,7 @@ function UserPage({
     if (stale()) return;
     if (s.kind !== 'ok') return failDetail(id, sessionFailure(s), shown);
     if (adopt(uid, s.csrf)) return;
-    const answer = await customers.detail(id, s.csrf, controller.signal);
+    const answer = await customers.profile(id, s.csrf, controller.signal);
     if (stale()) return;
     if (answer.kind === 'ok') return putDetail({ id, phase: 'ready', text: '', customer: answer.customer });
     if (answer.kind === 'not-found') return putDetail({ id, phase: 'not-found', text: NOT_FOUND_TEXT, customer: null });
@@ -692,9 +735,11 @@ function UserPage({
     const here = alive.current && held.csrf !== null && held.csrf === gen.current.csrf;
     if (answer.kind === 'created' && answer.customer.name === held.name) {
       // CONFIRMED: a validated 201 naming the name that was sent
-      if (!alive.current) return void holds.finish(who, key, { kind: 'saved', customer: answer.customer, csrf: held.csrf });
+      if (!alive.current) {
+        return void holds.finish(who, key, { kind: 'saved', customer: answer.customer, csrf: held.csrf, plain: held.body === JSON.stringify({ name: held.name }) });
+      }
       holds.remove(who, key);
-      return confirmed(answer.customer, here, true);
+      return confirmed(answer.customer, sentOf(held), here, true);
     }
     const kind = answer.kind;
     if (first && (kind === 'signed-out' || kind === 'denied' || kind === 'invalid' || kind === 'absent' || kind === 'key-reused' || kind === 'rate-limited')) {
@@ -719,16 +764,20 @@ function UserPage({
     if (uid === null || addRef.current) return;
     const token = gen.current.csrf;
     if (!canCreate || token === null || listRef.current.phase !== 'ready' || waitRef.current || holds.get(uid) !== undefined) return;
-    const name = normalizeCustomerName(draft);
-    if (name === null) { // refused here: no request and no key (the server would bind the key before refusing the name)
-      setNameError(NAME_RULE_TEXT);
-      nameInput.current?.focus();
+    const name = normalizeCustomerName(draft.name);
+    const phone = normalizeCustomerPhone(draft.phone);
+    const email = normalizeCustomerEmail(draft.email);
+    // Refused here: no request and no key (the server would bind the key before refusing a field). Every refused field
+    // says so; the first takes focus.
+    if (name === null || phone === CONTACT_INVALID || email === CONTACT_INVALID) {
+      setErrors({ name: name === null ? NAME_RULE_TEXT : '', phone: phone === CONTACT_INVALID ? PHONE_RULE_TEXT : '', email: email === CONTACT_INVALID ? EMAIL_RULE_TEXT : '' });
+      (name === null ? nameInput : phone === CONTACT_INVALID ? phoneInput : emailInput).current?.focus();
       return;
     }
     const mine = gen.current.n;
     addRef.current = true;
     setAdding(true);
-    setNameError('');
+    setErrors(NO_FIELDS);
     setCreateStatus(null);
     setSaved(null);
     setConnectionChanged(false);
@@ -741,7 +790,8 @@ function UserPage({
       // Another token than this generation's: a new generation, and NOTHING is sent under it.
       if (s.csrf !== token) return void adopt(uid, s.csrf);
       const key = nextKey();
-      const body = JSON.stringify({ name });
+      // A blank contact is left out, so a name-only body keeps its bytes; the keys are name, phone, email in that order.
+      const body = JSON.stringify({ name, ...(phone !== null ? { phone } : {}), ...(email !== null ? { email } : {}) });
       // Held BEFORE the request leaves: whatever happens to this page, the key and the bytes are not lost.
       if (!holds.put(uid, { key, body, name, csrf: token, sentAt: clock(), state: 'sending' })) return;
       settle(uid, key, await customers.create(body, key, token), true);
@@ -796,6 +846,11 @@ function UserPage({
   const waiting = wait !== null;
   const detached = attempt !== undefined && attempt.detached;
   const tooOld = attempt !== undefined && clock() - attempt.sentAt >= CHECK_CUTOFF_MS;
+  // Past the cutoff the attempt can never be sent again: a body that carries a contact is not kept for it either.
+  useEffect(() => {
+    const held = uid === null || !tooOld ? undefined : holds.get(uid);
+    if (uid !== null && held !== undefined && held.body !== unusableBody(held)) holds.change(uid, held.key, { body: unusableBody(held) });
+  });
   const canAdd = canCreate && list.phase === 'ready' && attempt === undefined && !waiting && !adding;
   const addHint = adding ? 'Sending…'
     : attempt !== undefined ? 'An earlier customer is not confirmed yet. Check it again or stop tracking it first.'
@@ -818,9 +873,9 @@ function UserPage({
       className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4"
     >
       <h1 id="customer-directory-title" className="text-3xl font-black text-primary tracking-tight">Customer directory</h1>
-      <p className="text-slate-600 text-sm font-medium">Saved on the server for this store. Only the customer&apos;s name is stored here.</p>
+      <p className="text-slate-600 text-sm font-medium">Saved on the server for this store: each customer&apos;s name, and a phone and an email when they are given.</p>
       <p className="text-slate-500 text-sm font-medium">
-        Contact details, loyalty and history on the Customers page are held only in this browser&apos;s memory and are not linked to these records.
+        The Customers page&apos;s own contact details, loyalty and history are held only in this browser&apos;s memory and are not linked to these records.
       </p>
 
       {connectionChanged && (
@@ -897,6 +952,15 @@ function UserPage({
             <dl className="grid grid-cols-[8rem_1fr] gap-2 text-sm">
               <dt className="font-black text-slate-500">Name</dt>
               <dd data-testid="directory-detail-name" className="font-bold text-slate-900 break-words">{shownDetail.customer.name}</dd>
+              <dt className="font-black text-slate-500">Phone</dt>
+              <dd data-testid="directory-detail-phone" className="font-bold text-slate-900 break-words">{shownDetail.customer.phone ?? NOT_PROVIDED_TEXT}</dd>
+              <dt className="font-black text-slate-500">Email</dt>
+              <dd data-testid="directory-detail-email" className="font-bold text-slate-900 break-all">{shownDetail.customer.email ?? NOT_PROVIDED_TEXT}</dd>
+              <dt className="font-black text-slate-500">Created</dt>
+              <dd data-testid="directory-detail-created" className="text-slate-700">
+                {shownDetail.customer.createdAt === null ? NOT_RECORDED_TEXT
+                  : <time dateTime={shownDetail.customer.createdAt}>{createdText(shownDetail.customer.createdAt)}</time>}
+              </dd>
               <dt className="font-black text-slate-500">Customer ID</dt>
               <dd data-testid="directory-detail-id" className="font-mono text-slate-700 break-all">{shownDetail.customer.id}</dd>
             </dl>
@@ -954,24 +1018,61 @@ function UserPage({
 
           {canCreate ? (
             <form noValidate onSubmit={(e) => { e.preventDefault(); void add(); }} className="pt-4 border-t border-slate-100 space-y-2">
-              <label htmlFor="directory-name" className="block text-[10px] font-black text-slate-500 uppercase tracking-widest">Customer name</label>
-              <div className="flex flex-wrap items-center gap-3">
-                <input
-                  ref={nameInput}
-                  id="directory-name"
-                  data-testid="directory-name"
-                  type="text"
-                  autoComplete="off"
-                  value={draft}
-                  aria-invalid={nameError !== ''}
-                  aria-describedby={nameError !== '' ? 'directory-name-error' : undefined}
-                  onChange={(e) => { setDraft(e.target.value); setNameError(''); }}
-                  className="flex-1 min-w-[14rem] text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
-                />
-                <button type="submit" data-testid="directory-add" disabled={!canAdd} aria-describedby="directory-add-hint" className={button}>Add customer</button>
+              <label htmlFor="directory-name" className="block text-[10px] font-black text-slate-500 uppercase tracking-widest">Customer name (required)</label>
+              <input
+                ref={nameInput}
+                id="directory-name"
+                data-testid="directory-name"
+                type="text"
+                autoComplete="off"
+                aria-required="true"
+                value={draft.name}
+                aria-invalid={errors.name !== ''}
+                aria-describedby={errors.name !== '' ? 'directory-name-error' : undefined}
+                onChange={(e) => { const name = e.target.value; setDraft((d) => ({ ...d, name })); setErrors((x) => ({ ...x, name: '' })); }}
+                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
+              />
+              {errors.name !== '' && <p id="directory-name-error" data-testid="directory-name-error" role="alert" className="text-xs font-bold text-rose-700">{errors.name}</p>}
+              <div className="flex flex-wrap gap-3">
+                <div className="flex-1 min-w-[14rem] space-y-1">
+                  <label htmlFor="directory-phone" className="block text-[10px] font-black text-slate-500 uppercase tracking-widest">Phone (optional)</label>
+                  <input
+                    ref={phoneInput}
+                    id="directory-phone"
+                    data-testid="directory-phone"
+                    type="text"
+                    inputMode="tel"
+                    autoComplete="off"
+                    value={draft.phone}
+                    aria-invalid={errors.phone !== ''}
+                    aria-describedby={errors.phone !== '' ? 'directory-phone-error' : undefined}
+                    onChange={(e) => { const phone = e.target.value; setDraft((d) => ({ ...d, phone })); setErrors((x) => ({ ...x, phone: '' })); }}
+                    className="w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                  />
+                  {errors.phone !== '' && <p id="directory-phone-error" data-testid="directory-phone-error" role="alert" className="text-xs font-bold text-rose-700">{errors.phone}</p>}
+                </div>
+                <div className="flex-1 min-w-[14rem] space-y-1">
+                  <label htmlFor="directory-email" className="block text-[10px] font-black text-slate-500 uppercase tracking-widest">Email (optional)</label>
+                  <input
+                    ref={emailInput}
+                    id="directory-email"
+                    data-testid="directory-email"
+                    type="text"
+                    inputMode="email"
+                    autoComplete="off"
+                    value={draft.email}
+                    aria-invalid={errors.email !== ''}
+                    aria-describedby={errors.email !== '' ? 'directory-email-error' : undefined}
+                    onChange={(e) => { const email = e.target.value; setDraft((d) => ({ ...d, email })); setErrors((x) => ({ ...x, email: '' })); }}
+                    className="w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                  />
+                  {errors.email !== '' && <p id="directory-email-error" data-testid="directory-email-error" role="alert" className="text-xs font-bold text-rose-700">{errors.email}</p>}
+                </div>
               </div>
-              <p id="directory-add-hint" data-testid="directory-add-hint" className={`${hintClass} min-h-[1rem]`}>{addHint}</p>
-              {nameError !== '' && <p id="directory-name-error" data-testid="directory-name-error" role="alert" className="text-xs font-bold text-rose-700">{nameError}</p>}
+              <div className="flex flex-wrap items-center gap-3">
+                <button type="submit" data-testid="directory-add" disabled={!canAdd} aria-describedby="directory-add-hint" className={button}>Add customer</button>
+                <p id="directory-add-hint" data-testid="directory-add-hint" className={`${hintClass} min-h-[1rem]`}>{addHint}</p>
+              </div>
             </form>
           ) : (
             <p data-testid="directory-create-unavailable" className="pt-4 border-t border-slate-100 text-sm font-medium text-slate-600">

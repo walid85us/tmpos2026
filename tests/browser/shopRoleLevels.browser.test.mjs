@@ -119,6 +119,13 @@
 //          no login from the page. A reload while the cookie names an ended session is a fresh page: one login, the
 //          stated residual (the 401 does not say "expired", and the page stores nothing). Not run in this stage's
 //          sandbox (no browser gate here): written to SCB-05/07/08's helpers.
+// Since M7A-CUSTOMERS-P6 the detail view reads the customer's profile (GET /api/v1/customers/{id}/profile): every detail
+// matcher above names that path.
+//   SCB-10 CONTACT RECORD: an owner adds a customer with a phone (typed with edge spaces) and an email — ONE POST whose body
+//          is exactly { name, phone, email } (trimmed), 201 { id, name }; the database holds the trimmed phone, the email
+//          and a creation time; the profile (opened from the saved notice) shows both and that time as a <time> whose
+//          datetime is the stored instant; list rows and the notice show no contact. A customer from before contacts
+//          (inserted with no phone, email or creation time) shows "Not provided" twice and "Not recorded".
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -1851,6 +1858,8 @@ async function waitRows(page, expected, label) {
 const isCreate = (r) => r.method === 'POST' && r.path === CUSTOMERS;
 const isList = (r) => r.method === 'GET' && r.path === CUSTOMERS;
 const isDetail = (r) => r.method === 'GET' && r.path.startsWith(`${CUSTOMERS}/`);
+/** The path the detail view reads for `id` (M7A-CUSTOMERS-P6: the customer's profile). */
+const profilePath = (id) => `${CUSTOMERS}/${id}/profile`;
 /** The API requests a page (or tab) made that `match`, from record index `from`. */
 const sentBy = (page, match, from = 0) => st.api.slice(from).filter((r) => r.frameId === page.frameId && match(r));
 const quiet = (page, from) => page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 20_000, 'every request answered');
@@ -1901,7 +1910,8 @@ async function seedCustomers(tenant, names) {
 }
 
 /**
- * Customers requests select nothing: the query is empty or one cursor, a POST body is exactly { name }, a GET has no body,
+ * Customers requests select nothing: the query is empty or one cursor, a POST body is { name } with at most a phone and an
+ * email after it (in that order), a GET has no body,
  * no header is named for a tenant, store, role or actor, and none of `values` (tenant ids, the accounts' ids) rides
  * anywhere in the path, query, headers or body.
  */
@@ -1911,7 +1921,11 @@ function assertNoSelector(records, values) {
     const line = apiLine(r);
     assert.match(r.query, /^(\?cursor=[A-Za-z0-9_-]{23})?$/, `only a cursor may ride the query: ${line}`);
     assert.deepEqual(Object.keys(r.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], `no selecting header: ${line}`);
-    if (r.method === 'POST') assert.deepEqual(Object.keys(JSON.parse(r.body)), ['name'], `the body is exactly { name }: ${line}`);
+    if (r.method === 'POST') {
+      const keys = Object.keys(JSON.parse(r.body));
+      assert.deepEqual(keys, ['name', 'phone', 'email'].filter((k) => keys.includes(k)), `the body is { name, phone?, email? }: ${line}`);
+      assert.equal(keys[0], 'name', `the body names the customer: ${line}`);
+    }
     else assert.equal(r.body, '', `a read carries no body: ${line}`);
     const wire = `${r.path}${r.query}\n${Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}\n${r.body}`;
     for (const value of values) assert.ok(!wire.includes(String(value)), `a tenant or account id rides a request: ${line}`);
@@ -1969,7 +1983,7 @@ scenario('SCB-01', 'ENTRY WITNESS — an owner opens the Customer directory from
   assert.equal(await second.evaluate('location.pathname'), `${DIRECTORY}/${id}`);
   assert.deepEqual([await textOf(second, 'directory-detail-id'), await textOf(second, 'directory-detail-name')], [id, name], 'the detail by click');
   const reads = sentBy(second, isDetail).map((r) => `${r.path} -> ${r.status}`);
-  assert.ok(reads.length >= 1 && reads.every((line) => line === `${CUSTOMERS}/${id} -> 200`), `the detail came from its own read: ${reads.join('; ')}`);
+  assert.ok(reads.length >= 1 && reads.every((line) => line === `${profilePath(id)} -> 200`), `the detail came from its own read: ${reads.join('; ')}`);
   await second.click(by('directory-back'));
   await waitRows(second, [{ id, name }], 'the list is still there on the way back');
 
@@ -1997,12 +2011,12 @@ scenario('SCB-02', 'ISOLATION — tenant B\'s owner opening tenant A\'s customer
     const from = st.api.length;
     await go(page, `${DIRECTORY}/${id}`);
     if (label === 'malformed') await delay(1_000); // whatever it would send, it has sent
-    else await page.waitFor(() => sentBy(page, isDetail, from).some((r) => r.path === `${CUSTOMERS}/${id}` && r.status !== null), 20_000, `the ${label} id was read`);
+    else await page.waitFor(() => sentBy(page, isDetail, from).some((r) => r.path === profilePath(id) && r.status !== null), 20_000, `the ${label} id was read`);
     await page.settle();
     await waitData(page, 'directory-detail', 'phase', phase);
     seen[label] = {
       text: await textOf(page, phase === 'ready' ? 'directory-detail-name' : 'directory-not-found'),
-      requests: sentBy(page, isDetail, from).map((r) => (r.path === `${CUSTOMERS}/${id}` ? `this id -> ${answered(r)}` : apiLine(r))),
+      requests: sentBy(page, isDetail, from).map((r) => (r.path === profilePath(id) ? `this id -> ${answered(r)}` : apiLine(r))),
       page: await textOf(page, 'customer-directory'),
     };
     note(label, { text: seen[label].text, requests: seen[label].requests });
@@ -2405,7 +2419,7 @@ scenario('SCB-08', 'READ BINDING (DA-138) — page A\'s list read and detail rea
   const bSession = await directLogin(b.boss);
   await browser.send('Storage.clearCookies', { browserContextId: page.contextId });
   const detail = await swapRead(page, {
-    match: (r) => isDetail(r) && r.path === `${CUSTOMERS}/${target.id}`, trigger: () => page.goto(`${SHOP}${DIRECTORY}/${target.id}`, 30_000), cookieName, aValues, bSession, bees,
+    match: (r) => isDetail(r) && r.path === profilePath(target.id), trigger: () => page.goto(`${SHOP}${DIRECTORY}/${target.id}`, 30_000), cookieName, aValues, bSession, bees,
   });
   detail.end = {
     phase: await page.evaluate(`${q('directory-detail')}?.dataset.phase ?? null`),
@@ -2548,3 +2562,77 @@ scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page conf
   assert.deepEqual(await named(tenant, name), expected.filter((c) => c.name === name), 'ONE customer of the held name');
   await assertNoLeak(page);
 }, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P6 — a customer's contact record
+// ---------------------------------------------------------------------------------------------------------------------
+
+scenario('SCB-10', 'CONTACT RECORD (M7A-CUSTOMERS-P6) — an owner adds a customer with a phone and an email: ONE POST of exactly { name, phone, email } (trimmed), stored with a creation time; the profile shows both and that time, and no list row or notice shows a contact; a customer from before contacts shows "Not provided" and "Not recorded"', async () => {
+  const { tenant, boss } = await shop('c10');
+  const name = `M7SCB c10 ${SUFFIX}`;
+  const phone = '+1 555 0100';
+  const email = 'ada@example.test';
+  // A customer from before contacts: no phone, no email and no creation time, as 023 leaves every earlier row.
+  const legacy = { id: randomUUID(), name: `M7SCB c10 legacy ${SUFFIX}` };
+  await owner`insert into tmpos_customer.customer (customer_id, tenant_id, name, created_at) values (${legacy.id}, ${tenant}, ${legacy.name}, null)`;
+  const page = await directoryPage(boss);
+  await page.fill(by('directory-phone'), `  ${phone} `);
+  await page.fill(by('directory-email'), email);
+  const from = await addCustomer(page, name);
+  await page.waitFor(() => sentBy(page, isCreate, from).some((r) => r.status !== null), 30_000, 'the create was answered');
+  await page.waitFor(`!!${q('directory-saved-link')}`, 30_000, 'the saved notice');
+  // The list read again after the 201 has answered: the created row is shown before the rows are judged.
+  await page.waitFor(async () => (await rowsOf(page)).some((r) => r.name === name), 30_000, 'the created row is shown');
+  const stored = await owner`select customer_id as id, name, phone, email,
+    to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as created
+    from tmpos_customer.customer where tenant_id = ${tenant} and name = ${name}`;
+  const notice = await textOf(page, 'directory-saved');
+  const listText = await textOf(page, 'directory-list');
+  const opened = st.api.length;
+  await page.click(by('directory-saved-link'));
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  const created = {
+    phone: await textOf(page, 'directory-detail-phone'),
+    email: await textOf(page, 'directory-detail-email'),
+    datetime: await page.evaluate(`${q('directory-detail-created')}?.querySelector('time')?.getAttribute('datetime') ?? null`),
+    createdText: await textOf(page, 'directory-detail-created'),
+    reads: sentBy(page, isDetail, opened).map((r) => `${r.path} -> ${answered(r)}`),
+  };
+  await go(page, `${DIRECTORY}/${legacy.id}`);
+  await page.waitFor(`${q('directory-detail-name')}?.textContent.trim() === ${JSON.stringify(legacy.name)}`, 30_000, 'the legacy customer');
+  const old = {
+    phone: await textOf(page, 'directory-detail-phone'),
+    email: await textOf(page, 'directory-detail-email'),
+    created: await textOf(page, 'directory-detail-created'),
+    time: await page.evaluate(`!!${q('directory-detail-created')}?.querySelector('time')`),
+  };
+  const posts = sentBy(page, isCreate, from); // every POST the page made in the case, counted at the end
+  // The evidence names no contact value: whether each one matched, only.
+  record('SCB-10', {
+    posts: posts.map((r) => r.status),
+    stored: stored.map((r) => ({ phoneMatches: r.phone === phone, emailMatches: r.email === email, createdAtSet: r.created !== null })),
+    profile: {
+      phoneMatches: stored.length === 1 && created.phone === stored[0].phone,
+      emailMatches: stored.length === 1 && created.email === stored[0].email,
+      createdAtMatches: stored.length === 1 && created.datetime === stored[0].created,
+      reads: created.reads,
+    },
+    old,
+  });
+
+  assert.deepEqual(posts.map((r) => r.status), [201], 'exactly one POST, answered 201');
+  assert.equal(posts[0].body, JSON.stringify({ name, phone, email }), 'the body is { name, phone, email }, trimmed, in that order');
+  assert.equal(stored.length, 1, 'one customer of that name');
+  const [row] = stored;
+  assert.deepEqual(JSON.parse(posts[0].replied.text), { customer: { id: row.id, name } }, 'the 201 stays { id, name }');
+  assert.deepEqual([row.phone, row.email], [phone, email], 'the database holds the trimmed phone and the email');
+  assert.match(row.created ?? '', /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, 'and a creation time');
+  assert.ok(!(notice ?? '').includes(phone) && !(notice ?? '').includes(email), `the saved notice shows no contact: ${notice}`);
+  assert.ok(!(listText ?? '').includes(phone) && !(listText ?? '').includes(email), 'no list row shows a contact');
+  assert.ok(created.reads.length >= 1 && created.reads.every((line) => line === `${profilePath(row.id)} -> 200`), `the profile came from its own read: ${created.reads.join('; ')}`);
+  assert.deepEqual([created.phone, created.email, created.datetime], [phone, email, row.created], 'the profile shows the phone, the email and the stored instant');
+  assert.match(created.createdText ?? '', /UTC$/, 'the creation time is shown in UTC');
+  assert.deepEqual([old.phone, old.email, old.created, old.time], ['Not provided', 'Not provided', 'Not recorded', false], 'a customer from before contacts invents nothing');
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
+  await assertNoLeak(page);
+});
