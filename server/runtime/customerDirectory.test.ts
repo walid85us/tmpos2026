@@ -2,6 +2,10 @@
 // validation of the port's untrusted answer, the route's registration, the handler's every outcome, and the enforced
 // chain over real loopback sockets on the TENANT boundary — session, the authorizer's trusted scope, the bounded page.
 //
+// M7A-CUSTOMERS-P6: the profile read, GET /api/v1/customers/{id}/profile — its registration, the strict validation of its
+// untrusted answer (stored-shape contacts, toISOString's creation time), the handler's every outcome in the detail read's
+// order, and the chain: 401 first, the session-binding witness, a foreign id the missing id's 404, no contact in a log.
+//
 // Synthetic principals, sessions and ports only. The directory port here is an in-memory stand-in; the real PostgreSQL
 // adapter is proved database-free in server/persistence/postgresCustomerDirectory.test.ts, and the canonical decision
 // of view_customers in server/platform-identity/m5CanonicalPermissions.test.ts and tenantAuthorization.test.ts.
@@ -23,10 +27,11 @@ import type { SessionBoundaryDeps } from './sessions.js';
 import { decodeTenantCursor, encodeTenantCursor } from './tenantDirectory.js';
 import {
   CUSTOMER_DETAIL_PATH, CUSTOMER_DIRECTORY_DEFAULT_LIMIT, CUSTOMER_DIRECTORY_MAX_LIMIT, CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS,
-  createCustomerDetailRoute, createCustomerDirectoryRoute, customerDetailOf, customerDirectoryPageOf, decodeCustomerCursor, encodeCustomerCursor,
-  inCustomerPageOrder, parseCustomerDirectoryQuery,
+  CUSTOMER_PROFILE_PATH, createCustomerDetailRoute, createCustomerDirectoryRoute, createCustomerProfileRoute, customerDetailOf,
+  customerDirectoryPageOf, customerProfileOf, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, isCustomerCreatedAt,
+  parseCustomerDirectoryQuery,
 } from './customerDirectory.js';
-import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery } from './customerDirectory.js';
+import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery, CustomerProfilePort } from './customerDirectory.js';
 
 const ACTOR = '7b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d';
 const MEMBERSHIP = '5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d';
@@ -554,7 +559,7 @@ const MALFORMED_IDS: readonly string[] = [
   'a'.repeat(128), `%7B${CID}%7D`,
 ];
 
-test('the detail route is a GET of the one template, the list\'s permission, trusted context and session binding, no body and no key', () => {
+test('the detail route is a GET of the first template, the list\'s permission, trusted context and session binding, no body and no key', () => {
   const route = createCustomerDetailRoute({ customerDetail: { get: () => ({ outcome: 'not_found' }) } });
   assert.equal(CUSTOMER_DETAIL_PATH, '/api/v1/customers/{id}');
   assert.equal(route.method, 'GET');
@@ -696,11 +701,15 @@ test('detail handler: denied is the list\'s 403, not_found one bounded 404, and 
 
 async function withDetailChain(
   answer: (id: string) => unknown,
-  fn: (h: { calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>; authorizations: unknown[][]; logs: string[]; storeKey: string; csrf: string;
+  fn: (h: { calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>; profileCalls: Array<{ scope: TrustedScope; sessionKey: string; id: string }>;
+    authorizations: unknown[][]; logs: string[]; storeKey: string; csrf: string;
     raw: (target: string, headers?: Record<string, string | string[]>) => Promise<Reply>;
     get: (target: string, headers?: Record<string, string>, method?: string) => Promise<Reply>; anon: (target: string, method?: string) => Promise<Reply> }) => Promise<void>,
+  /** M7A-CUSTOMERS-P6: when given, the profile route is served too, over a port answering this. */
+  profileAnswer?: (id: string) => unknown,
 ): Promise<void> {
   const calls: Array<{ scope: TrustedScope; sessionKey: string; id: string }> = [];
+  const profileCalls: Array<{ scope: TrustedScope; sessionKey: string; id: string }> = [];
   const authorizations: unknown[][] = [];
   const logs: string[] = [];
   const readiness = createReadinessState();
@@ -711,6 +720,9 @@ async function withDetailChain(
     routes: [
       createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } }),
       createCustomerDetailRoute({ customerDetail: { get: (scope, sessionKey, id) => { calls.push({ scope, sessionKey, id }); return answer(id); } } }),
+      ...(profileAnswer === undefined ? [] : [createCustomerProfileRoute({
+        customerProfile: { get: (scope, sessionKey, id) => { profileCalls.push({ scope, sessionKey, id }); return profileAnswer(id); } },
+      })]),
     ],
     limits: testRequestLimits(),
   });
@@ -729,7 +741,7 @@ async function withDetailChain(
     const storeKey = createHash('sha256').update(sid).digest('base64url');
     const csrf = (JSON.parse(login.body) as { csrfToken: string }).csrfToken;
     await fn({
-      calls, authorizations, logs, storeKey, csrf,
+      calls, profileCalls, authorizations, logs, storeKey, csrf,
       get: (target, headers = {}, method = 'GET') => request(p, method, target, { cookie, [SESSION_CSRF_HEADER]: csrf, ...headers }),
       raw: (target, headers = {}) => request(p, 'GET', target, { cookie, ...headers }),
       anon: (target, method = 'GET') => request(p, method, target, {}),
@@ -893,4 +905,257 @@ test('detail over the enforced chain: the same refusals before the authorizer, t
     assert.equal(foreign.status, 404, foreign.body);
     assert.equal(JSON.parse(foreign.body).error, 'not_found');
   });
+});
+
+// --- 7. the customer profile read, GET /api/v1/customers/{id}/profile (M7A-CUSTOMERS-P6) ----------------------------------
+
+const PROFILE_OF = (id: string) => `${CUSTOMER_DIRECTORY_PATH}/${id}/profile`;
+const CREATED = '2026-09-30T08:15:42.123Z';
+const ADA = Object.freeze({ name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test', createdAt: CREATED });
+const profileAnswerOf = (id: string, over: Record<string, unknown> = {}) => ({ outcome: 'customer', id, ...ADA, ...over });
+
+test('the profile route is a GET of the second template, exactly the detail route\'s policy, trusted context and session binding, no body and no key', () => {
+  const route = createCustomerProfileRoute({ customerProfile: { get: () => ({ outcome: 'not_found' }) } });
+  assert.equal(CUSTOMER_PROFILE_PATH, '/api/v1/customers/{id}/profile');
+  assert.equal(route.method, 'GET');
+  assert.equal(route.path, '/api/v1/customers/{id}/profile');
+  const detail = createCustomerDetailRoute({ customerDetail: { get: () => null } });
+  assert.deepEqual(route.policy, detail.policy, 'view_customers at tenant scope, as the detail read');
+  assert.deepEqual([route.body, route.idempotency, route.trustedContext, route.recentAuth, route.sessionBinding], [{ kind: 'none' }, 'none', 'required', 'none', 'required']);
+  assert.deepEqual(Object.keys(route).sort(), ['body', 'handler', 'idempotency', 'method', 'path', 'policy', 'recentAuth', 'sessionBinding', 'trustedContext']);
+  assert.ok(Object.isFrozen(route) && Object.isFrozen(route.policy) && Object.isFrozen(route.body));
+  const list = createCustomerDirectoryRoute({ customers: { page: () => null } });
+  assert.equal(defineRoutes([list, detail, route]).list().length, 3, 'the runtime\'s own table accepts it beside the list and the detail');
+  for (const ports of [undefined, null, {}, { customerProfile: null }, { customerProfile: {} }, { customerProfile: { get: 'yes' } }, { customerDetail: { get: () => null } }]) {
+    assert.throws(() => createCustomerProfileRoute(ports as never), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'route_handler_invalid', JSON.stringify(ports));
+  }
+  for (const deadlineMs of [0, -1, 1.5, 3_001, Number.NaN, '100']) {
+    assert.throws(() => createCustomerProfileRoute({ customerProfile: { get: () => null } }, { deadlineMs: deadlineMs as never }),
+      (e: unknown) => e instanceof EnforcementSetupError && e.code === 'port_deadline_invalid', String(deadlineMs));
+  }
+  for (const deadlineMs of [1, 3_000]) assert.ok(createCustomerProfileRoute({ customerProfile: { get: () => null } }, { deadlineMs }), `${deadlineMs} (control)`);
+});
+
+test('isCustomerCreatedAt: null, or exactly toISOString\'s UTC form of a real instant', () => {
+  for (const ok of [null, CREATED, '1970-01-01T00:00:00.000Z', '2026-02-28T23:59:59.999Z', '2028-02-29T12:00:00.000Z', new Date(0).toISOString()]) {
+    assert.equal(isCustomerCreatedAt(ok), true, String(ok));
+  }
+  for (const bad of [
+    '2026-09-30T08:15:42Z', '2026-09-30T08:15:42.12Z', '2026-09-30T08:15:42.1234Z', '2026-09-30T08:15:42.123+00:00', '2026-09-30 08:15:42.123Z',
+    '2026-09-30t08:15:42.123z', '2026-02-30T00:00:00.000Z', '2026-13-01T00:00:00.000Z', '2026-09-30T24:00:00.000Z', '+012026-09-30T08:15:42.123Z',
+    ' 2026-09-30T08:15:42.123Z', '', 'null', 0, Date.parse(CREATED), new Date(CREATED), undefined, {},
+  ]) {
+    assert.equal(isCustomerCreatedAt(bad), false, String(bad));
+  }
+});
+
+test('customerProfileOf: only an exactly shaped answer for the id asked, with stored-shape contacts and creation time, is a customer; refusals carry nothing; anything else is null', () => {
+  assert.deepEqual(customerProfileOf(profileAnswerOf(CID), CID), { id: CID, ...ADA });
+  assert.ok(Object.isFrozen(customerProfileOf(profileAnswerOf(CID), CID)));
+  assert.deepEqual(customerProfileOf(profileAnswerOf(CID, { phone: null, email: null, createdAt: null }), CID),
+    { id: CID, name: 'Ada Lovelace', phone: null, email: null, createdAt: null }, 'a legacy customer: no contact, no known creation time');
+  assert.equal(customerProfileOf({ outcome: 'not_found' }, CID), 'not_found');
+  assert.equal(customerProfileOf({ outcome: 'denied' }, CID), 'denied');
+  const hostile = new Proxy({}, { ownKeys: () => { throw new Error('trap'); } });
+  for (const [label, raw] of [
+    ['another id', profileAnswerOf(idOf(43))],
+    ['the detail\'s shape', { outcome: 'customer', id: CID, name: 'Ada' }],
+    ['a missing createdAt', { outcome: 'customer', id: CID, name: 'Ada', phone: null, email: null }],
+    ['an extra key', profileAnswerOf(CID, { tenant: T1 })],
+    ['an untrimmed phone', profileAnswerOf(CID, { phone: ' +1 555 0100' })],
+    ['a blank phone (stored as null, never empty)', profileAnswerOf(CID, { phone: '' })],
+    ['a phone with no digit', profileAnswerOf(CID, { phone: 'call me' })],
+    ['a 65-character phone', profileAnswerOf(CID, { phone: '1'.repeat(65) })],
+    ['a Bidi control in the phone', profileAnswerOf(CID, { phone: `1${String.fromCodePoint(0x202e)}2` })],
+    ['a numeric phone', profileAnswerOf(CID, { phone: 5550100 })],
+    ['an email with a space', profileAnswerOf(CID, { email: 'ada @example.test' })],
+    ['an email with two @', profileAnswerOf(CID, { email: 'a@b@example.test' })],
+    ['an untrimmed email', profileAnswerOf(CID, { email: 'ada@example.test\n' })],
+    ['a 255-character email', profileAnswerOf(CID, { email: `${'a'.repeat(127)}@${'b'.repeat(127)}` })],
+    ['a lone surrogate in the email', profileAnswerOf(CID, { email: 'a\ud800@b' })],
+    ['an undefined email', profileAnswerOf(CID, { email: undefined })],
+    ['createdAt without milliseconds', profileAnswerOf(CID, { createdAt: '2026-09-30T08:15:42Z' })],
+    ['createdAt with an offset', profileAnswerOf(CID, { createdAt: '2026-09-30T08:15:42.123+00:00' })],
+    ['createdAt as epoch ms', profileAnswerOf(CID, { createdAt: Date.parse(CREATED) })],
+    ['createdAt as a Date', profileAnswerOf(CID, { createdAt: new Date(CREATED) })],
+    ['createdAt an impossible date', profileAnswerOf(CID, { createdAt: '2026-02-30T00:00:00.000Z' })],
+    ['a 201-character name', profileAnswerOf(CID, { name: 'x'.repeat(CUSTOMER_NAME_MAX_CHARACTERS + 1) })],
+    ['not_found with a field', { outcome: 'not_found', phone: null }],
+    ['denied with a field', { outcome: 'denied', email: 'x@y' }],
+    ['invalid', { outcome: 'invalid' }],
+    ['an array', [profileAnswerOf(CID)]],
+    ['a class instance', Object.assign(new (class X {})(), profileAnswerOf(CID))],
+    ['a string', 'customer'], ['null', null], ['undefined', undefined], ['a hostile proxy', hostile],
+  ] as const) {
+    assert.equal(customerProfileOf(raw, CID), null, label);
+  }
+});
+
+/** Run the profile handler once over a minimal request, response and context, recording what the port was handed. */
+async function runProfile(opts: { path?: string; url?: unknown; trusted?: unknown; sessionKey?: unknown; answer?: (id: string, signal: AbortSignal) => unknown; deadlineMs?: number } = {}) {
+  const calls: Array<{ scope: TrustedScope; sessionKey: string; id: string; signal: AbortSignal }> = [];
+  const port: CustomerProfilePort = {
+    get(scope, sessionKey, id, signal) {
+      calls.push({ scope, sessionKey, id, signal });
+      return (opts.answer ?? ((asked) => profileAnswerOf(asked)))(id, signal);
+    },
+  };
+  const route = createCustomerProfileRoute({ customerProfile: port }, opts.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs });
+  const out: Captured = { status: null, body: undefined, locals: {} };
+  const res = {
+    locals: out.locals,
+    status(code: number) { out.status = code; return res; },
+    json(body: unknown) { out.body = body; return res; },
+  };
+  const ctx = {
+    requestId: 'req-7', principal: null, session: null, authenticatedAt: null, body: undefined,
+    trusted: 'trusted' in opts ? opts.trusted : SCOPE,
+    sessionKey: 'sessionKey' in opts ? opts.sessionKey : SESSION_KEY,
+  } as unknown as RouteContext;
+  assert.ok(route.idempotency === 'none', 'a handler route');
+  const path = opts.path ?? PROFILE_OF(CID);
+  await route.handler({ path, url: 'url' in opts ? opts.url : path } as unknown as Request, res as unknown as Response, ctx);
+  return { out, calls, ctx };
+}
+
+test('profile handler: any query and any non-canonical id are 400 invalid_request before the port is asked', async () => {
+  for (const url of [`${PROFILE_OF(CID)}?`, `${PROFILE_OF(CID)}?x=1`, `${PROFILE_OF(CID)}?tenantId=${T1}`]) {
+    const { out, calls } = await runProfile({ url });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_profile_query_invalid', url);
+    assert.equal(calls.length, 0, `${url}: the port was never asked`);
+  }
+  for (const segment of MALFORMED_IDS) {
+    const { out, calls } = await runProfile({ path: PROFILE_OF(segment) });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_profile_id_invalid', segment);
+    assert.equal(calls.length, 0, `${segment}: the port was never asked`);
+  }
+  // The id is read only before the exact suffix: a path the table would never route here is refused all the same.
+  for (const path of [`${CUSTOMER_DIRECTORY_PATH}/${CID}`, `${PROFILE_OF(CID)}/`, `${CUSTOMER_DIRECTORY_PATH}/${CID}/contacts`]) {
+    const { out, calls } = await runProfile({ path });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_profile_id_invalid', path);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('profile handler: without a resolved tenant scope or the session key it refuses 403 and never asks the port — before the id is judged', async () => {
+  for (const [label, opts] of [
+    ['no trusted scope', { trusted: null }],
+    ['a platform scope', { trusted: { ...SCOPE, scope: 'platform', tenant: null, roleId: 'system_owner' } }],
+    ['a store scope', { trusted: { ...SCOPE, scope: 'store', store: STORE } }],
+    ['a tenant scope with no tenant', { trusted: { ...SCOPE, tenant: null } }],
+    ['no session key', { sessionKey: null }],
+    ['no session key, a malformed id', { sessionKey: null, path: PROFILE_OF('x') }],
+  ] as const) {
+    const { out, calls } = await runProfile(opts);
+    assertHandlerRefusal(out, 403, 'forbidden', 'authz_context_missing', label);
+    assert.equal(calls.length, 0, `${label}: the port was never asked`);
+  }
+});
+
+test('profile handler: a canonical id makes exactly one port call with (scope, key, id), and 200 carries exactly {customer:{id,name,phone,email,createdAt}} in that order', async () => {
+  for (const [id, answer] of [
+    [CID, ADA], ['00000000-0000-0000-0000-000000000000', { ...ADA, phone: null, email: null, createdAt: null }],
+    ['ffffffff-ffff-8fff-bfff-ffffffffffff', { ...ADA, email: null }],
+  ] as const) {
+    const { out, calls, ctx } = await runProfile({ path: PROFILE_OF(id), answer: (asked) => ({ outcome: 'customer', id: asked, ...answer }) });
+    assert.equal(calls.length, 1, id);
+    assert.equal(calls[0].scope, ctx.trusted, 'the very scope the chain resolved');
+    assert.equal(calls[0].sessionKey, SESSION_KEY);
+    assert.equal(calls[0].id, id);
+    assert.ok(calls[0].signal instanceof AbortSignal && !calls[0].signal.aborted);
+    assert.equal(out.status, 200);
+    assert.deepEqual(out.body, { customer: { id, ...answer } });
+    assert.deepEqual(Object.keys(out.body as object), ['customer']);
+    assert.deepEqual(Object.keys((out.body as { customer: object }).customer), ['id', 'name', 'phone', 'email', 'createdAt']);
+    assert.equal(out.locals.refusal, undefined);
+  }
+});
+
+test('profile handler: denied is the 403, not_found the detail read\'s one 404, and a throw, an overrun or an out-of-shape answer a 503 that names no contact', async () => {
+  const cases: Array<[string, (id: string, s: AbortSignal) => unknown, number, string, string]> = [
+    ['denied', () => ({ outcome: 'denied' }), 403, 'forbidden', 'customer_profile_denied'],
+    ['not_found', () => ({ outcome: 'not_found' }), 404, 'not_found', 'customer_not_found'],
+    ['a throw', () => { throw new Error('connection to db-secret.internal refused'); }, 503, 'service_unavailable', 'customer_profile_unavailable'],
+    ['a rejection', () => Promise.reject(new Error('password authentication failed for user secret')), 503, 'service_unavailable', 'customer_profile_unavailable'],
+    ['an overrun', (_id, signal) => new Promise((resolve) => { signal.addEventListener('abort', () => resolve({ outcome: 'not_found' })); }),
+      503, 'service_unavailable', 'customer_profile_timeout'],
+    ['another id', () => profileAnswerOf(idOf(43), { name: 'secret other' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['the detail\'s shape', (id) => ({ outcome: 'customer', id, name: 'Ada' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['an unstored phone', (id) => profileAnswerOf(id, { phone: ' secret 555 0100 ' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['an unstored email', (id) => profileAnswerOf(id, { email: 'secret@x@example.test' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['a creation time out of form', (id) => profileAnswerOf(id, { createdAt: '2026-09-30 08:15:42' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['no answer', () => undefined, 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+    ['invalid', () => ({ outcome: 'invalid' }), 503, 'service_unavailable', 'customer_profile_answer_invalid'],
+  ];
+  for (const [label, answer, status, error, reason] of cases) {
+    const { out, calls } = await runProfile({ answer, deadlineMs: 1_000 });
+    assert.equal(calls.length, 1, `${label}: asked once`);
+    assertHandlerRefusal(out, status, error, reason, label);
+    assert.ok(!/secret|password|customer_profile|555|example/.test(JSON.stringify(out.body)), `${label}: nothing about the port crosses the boundary`);
+  }
+});
+
+test('profile over the enforced chain: 401 first; the session-binding witness refuses before the authorizer and the port; foreign and missing are one 404; no contact in any log line', async () => {
+  const FOREIGN = idOf(77);
+  await withDetailChain(() => ({ outcome: 'not_found' }), async (h) => {
+    const target = PROFILE_OF(CID);
+    // No session: the chain's 401 for every segment the template reaches — no id-shape oracle.
+    for (const segment of [CID, ...MALFORMED_IDS]) assert.equal((await h.anon(PROFILE_OF(segment))).status, 401, segment);
+    assert.equal(h.profileCalls.length + h.authorizations.length, 0, 'nothing reached the authorizer or the port');
+    // The right token reads: the authorizer is asked for view_customers on the TEMPLATE's view, never the id.
+    const own = await h.raw(target, { [SESSION_CSRF_HEADER]: h.csrf });
+    assert.equal(own.status, 200, own.body);
+    assert.equal(own.headers['cache-control'], 'no-store');
+    assert.deepEqual(JSON.parse(own.body), { customer: { id: CID, ...ADA } });
+    assert.deepEqual(h.authorizations.map((a) => [a[1], a[2]]), [[{ scope: 'tenant', permission: 'view_customers' }, { method: 'GET', path: '/api/v1/customers/{id}/profile', audience: 'tenant' }]]);
+    assert.deepEqual(h.profileCalls, [{ scope: SCOPE, sessionKey: h.storeKey, id: CID }]);
+    assert.equal(h.calls.length, 0, 'the detail port is never asked for a profile');
+    // The P5-R1 witness: a missing, repeated, foreign or malformed token is a 403 before the authorizer, the port and the
+    // idle refresh — even for a malformed id.
+    const refreshesAfterGood = idleRefreshes;
+    const authorizedBefore = h.authorizations.length;
+    const other = createHash('sha256').update('another session').digest('base64url');
+    for (const [label, headers, reason] of [
+      ['no header', {}, 'csrf_session_missing'],
+      ['two header lines', { [SESSION_CSRF_HEADER]: [h.csrf, h.csrf] }, 'csrf_session_duplicate'],
+      ['another session\'s token', { [SESSION_CSRF_HEADER]: other }, 'csrf_session_invalid'],
+      ['a malformed token', { [SESSION_CSRF_HEADER]: '*'.repeat(43) }, 'csrf_session_invalid'],
+    ] as Array<[string, Record<string, string | string[]>, string]>) {
+      const r = await h.raw(target, headers);
+      assertForbidden(r, label);
+      assert.equal(reasonOf(h.logs, r), reason, label);
+      assert.ok(!('customer' in JSON.parse(r.body)), `${label}: no customer`);
+      assertForbidden(await h.raw(PROFILE_OF('x'), headers), `${label} malformed id`);
+    }
+    assert.equal(h.authorizations.length, authorizedBefore, 'the authorizer was never asked');
+    assert.equal(h.profileCalls.length, 1, 'the port was never asked');
+    assert.equal(idleRefreshes, refreshesAfterGood, 'no refusal slid the idle window');
+    // After authorization: a malformed id is the 400; a foreign and a missing id one 404 with one header set and log reason.
+    const malformed = await h.get(PROFILE_OF('x'));
+    assert.deepEqual([malformed.status, JSON.parse(malformed.body).error], [400, 'invalid_request']);
+    const foreign = await h.get(PROFILE_OF(FOREIGN));
+    const missing = await h.get(PROFILE_OF(randomUUID()));
+    for (const r of [foreign, missing]) {
+      assert.equal(r.status, 404, r.body);
+      assert.deepEqual(Object.keys(JSON.parse(r.body)), ['error', 'requestId']);
+      assert.equal(JSON.parse(r.body).error, 'not_found');
+    }
+    const headersOf = (r: Reply): Record<string, unknown> => Object.fromEntries(Object.entries(r.headers)
+      .map(([k, v]) => [k, k === 'etag' ? typeof v : v]).filter(([k]) => k !== 'x-request-id' && k !== 'date'));
+    assert.deepEqual(headersOf(foreign), headersOf(missing), 'identical headers modulo the request id, date and body hash');
+    assert.equal(h.profileCalls.length, 3);
+    // No route past the template: an extra segment, a trailing slash, another suffix, another method — the terminal 404.
+    for (const [path, method] of [[`${target}/extra`, 'GET'], [`${target}/`, 'GET'], [`${CUSTOMER_DIRECTORY_PATH}//profile`, 'GET'],
+      [`${CUSTOMER_DIRECTORY_PATH}/${CID}/contacts`, 'GET'], [target, 'POST'], [target, 'DELETE']] as const) {
+      const r = await h.anon(path, method);
+      assert.equal(r.status, 404, `${method} ${path}`);
+    }
+    assert.equal(h.profileCalls.length, 3);
+    // The request log: route class 'other', one reason for both 404s, and never an id, a name, a contact or the key.
+    const lines = h.logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((l) => l.event === 'request');
+    assert.equal(lines.filter((l) => l.status === 404 && l.reason === 'customer_not_found').length, 2);
+    for (const line of h.logs) {
+      for (const secret of [CID, FOREIGN, ADA.name, ADA.phone, ADA.email, CREATED, h.storeKey]) assert.ok(!line.includes(secret), `no log line carries ${secret}`);
+    }
+  }, (id) => (id === CID ? profileAnswerOf(id) : { outcome: 'not_found' }));
 });

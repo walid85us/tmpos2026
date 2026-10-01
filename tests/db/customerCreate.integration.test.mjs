@@ -39,7 +39,14 @@
 //   M7CC-09 as the runtime login itself: no direct write to the customer table (42501); a technician's live key creates
 //           nothing; another tenant's key creates only in ITS tenant, and the routine takes no tenant argument;
 //   M7CC-10 no log line carries a customer name or id, a session identifier, key or CSRF token, or an Idempotency-Key —
-//           nor, on a cluster this file started, the server's own log.
+//           nor, on a cluster this file started, the server's own log;
+//   M7CC-11 (M7A-CUSTOMERS-P6) a create with a phone and an email is one 201 {customer:{id,name}} and one customer holding
+//           them with the database's creation time, audit metadata {}; the same key and bytes replay; a changed phone or
+//           email, dropped or reordered contacts under the key are the 422; refused contacts are 400s that write nothing.
+//
+// M7A-CUSTOMERS-P6 UPDATE. The chain is 001-023 and the create the login calls is migration 023's
+// tmpos_customer_contact.m7a_contact_create, which judges the contacts and decides through 020's create (023 revokes 020's
+// from the login): every "019"/"020" behaviour above is the one 023 keeps, and M7CC-09's direct calls go to 023's routine.
 //
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a cluster
 // this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service
@@ -1180,9 +1187,10 @@ test('M7CC-07: malformed, oversized, extra-field and non-object bodies, every re
       ['an empty body', () => ctx.post(s, ''), 400, 'invalid_request', 'body_required'],
       ['text/plain', () => ctx.post(s, body, { headers: { 'content-type': 'text/plain' } }), 415, 'unsupported_media_type', 'media_type_unsupported'],
       ['no Content-Type', () => ctx.post(s, body, { drop: ['content-type'] }), 415, 'unsupported_media_type', 'media_type_missing'],
-      ['a declared length over the cap', () => ctx.raw(s, `Idempotency-Key: ${randomUUID()}\r\nContent-Length: 4097\r\n`), 413, 'content_too_large', 'body_declared_too_large'],
+      // M7A-CUSTOMERS-P6 moved the cap deliberately from 4096 to 8192 bytes (the optional phone and email).
+      ['a declared length over the cap', () => ctx.raw(s, `Idempotency-Key: ${randomUUID()}\r\nContent-Length: 8193\r\n`), 413, 'content_too_large', 'body_declared_too_large'],
       ['a streamed body over the cap', () => {
-        const big = JSON.stringify({ name: 'x'.repeat(5_000) });
+        const big = JSON.stringify({ name: 'x'.repeat(9_000) });
         return ctx.raw(s, `Idempotency-Key: ${randomUUID()}\r\nTransfer-Encoding: chunked\r\n`, `${Buffer.byteLength(big).toString(16)}\r\n${big}\r\n0\r\n\r\n`);
       }, 413, 'content_too_large', 'body_streamed_too_large'],
       ['a foreign Origin', () => ctx.post(s, body, { headers: { origin: 'https://evil.test' } }), 403, 'forbidden', 'csrf_origin_mismatch'],
@@ -1324,13 +1332,15 @@ test('M7CC-08: an audit INSERT that raises or writes no row, a 019 refusal, and 
 // M7CC-09: the runtime login itself
 // ===========================================================================
 
-// M7A-CUSTOMERS-P3-R1: the routine the login can call is 020's tmpos_role.m7a_customer_create (019's decided on the role's
-// name alone and is revoked from the login, with its schema's USAGE); the direct calls below go to it, and 019's is refused.
-test('M7CC-09: as the runtime login, no direct write reaches the customer table (42501) and 019\'s create is closed (42501); a technician\'s live key creates nothing; another tenant\'s key creates only in its own tenant — the routine takes no tenant argument', async () => {
+// M7A-CUSTOMERS-P3-R1: the routine the login could call was 020's tmpos_role.m7a_customer_create (019's decided on the role's
+// name alone and is revoked from the login, with its schema's USAGE). M7A-CUSTOMERS-P6: it is now 023's
+// tmpos_customer_contact.m7a_contact_create, which decides through 020's — 023 revokes 020's from the login — so the direct
+// calls below go to 023's, and 019's and 020's are refused.
+test('M7CC-09: as the runtime login, no direct write reaches the customer table (42501) and 019\'s and 020\'s creates are closed (42501); a technician\'s live key creates nothing; another tenant\'s key creates only in its own tenant — the routine takes no tenant argument', async () => {
   const tech = await actor('m7cc09-tech', [tenantGrant(T_A, 'technician')]);
   const bManager = await actor('m7cc09-b', [tenantGrant(T_B, 'manager')]);
-  const [{ args }] = await owner`select pg_catalog.pg_get_function_identity_arguments('tmpos_role.m7a_customer_create(text, uuid, text)'::regprocedure) as args`;
-  assert.equal(args, 'p_session_key text, p_customer_id uuid, p_name text', 'the session key is the only authority argument');
+  const [{ args }] = await owner`select pg_catalog.pg_get_function_identity_arguments('tmpos_customer_contact.m7a_contact_create(text, uuid, text, text, text)'::regprocedure) as args`;
+  assert.equal(args, 'p_session_key text, p_customer_id uuid, p_name text, p_phone text, p_email text', 'the session key is the only authority argument');
   await withEntry({}, async (ctx) => {
     const techSession = await signIn(ctx, tech);
     const bSession = await signIn(ctx, bManager);
@@ -1347,14 +1357,16 @@ test('M7CC-09: as the runtime login, no direct write reaches the customer table 
       // 019's routine, with a live key it would once have honoured (B's manager): permission denied, nothing written.
       assert.equal(await codeOf(runtime`select * from tmpos_customer_write.m7a_customer_create(${bSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`),
         '42501', '019\'s create is closed to the runtime login');
-      const none = await runtime`select * from tmpos_role.m7a_customer_create(${techSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`;
+      assert.equal(await codeOf(runtime`select * from tmpos_role.m7a_customer_create(${bSession.key}::text, ${randomUUID()}::uuid, ${name}::text)`),
+        '42501', '020\'s create is closed to the runtime login (023 revokes it)');
+      const none = await runtime`select * from tmpos_customer_contact.m7a_contact_create(${techSession.key}::text, ${randomUUID()}::uuid, ${name}::text, null::text, null::text)`;
       assert.equal(none.length, 0, 'a technician\'s live key: no row');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'nothing written');
 
       // B's live key, called by the login directly: there is no tenant to name, so the one row lands in B, never in A.
       const [{ n: inA }] = await owner`select count(*)::int as n from tmpos_customer.customer where tenant_id = ${T_A}`;
       const id = randomUUID();
-      const made = await runtime`select * from tmpos_role.m7a_customer_create(${bSession.key}::text, ${id}::uuid, ${name}::text)`;
+      const made = await runtime`select * from tmpos_customer_contact.m7a_contact_create(${bSession.key}::text, ${id}::uuid, ${name}::text, null::text, null::text)`;
       const [{ membership_id: grant }] = await owner`select membership_id from user_membership where internal_user_id = ${bManager.id}`;
       assert.deepEqual(made.map((r) => ({ ...r })), [{ o_tenant_id: T_B, o_actor_id: bManager.id, o_membership_id: grant }],
         'the key\'s own tenant, actor and grant');
@@ -1365,6 +1377,56 @@ test('M7CC-09: as the runtime login, no direct write reaches the customer table 
     } finally {
       await runtime.end({ timeout: 5 });
     }
+  });
+});
+
+// ===========================================================================
+// M7CC-11: contacts through the real create (M7A-CUSTOMERS-P6)
+// ===========================================================================
+
+test('M7CC-11: a create with contacts is one 201 {customer:{id,name}} and one customer holding them; the same key and bytes replay it; a changed phone or email under the key is the 422; a refused contact is a 400 that writes nothing but its key\'s lease', async () => {
+  const who = await actor('m7cc11', [tenantGrant(T_A, 'sales_staff')]);
+  await withEntry({}, async (ctx) => {
+    const s = await signIn(ctx, who);
+    const key = randomUUID();
+    const name = canary('contact');
+    const contacts = { phone: '+1 555 0100', email: `m7cc11-${SUFFIX}@example.test` };
+    SECRETS.add(contacts.email);
+    const body = JSON.stringify({ name, ...contacts });
+    let before = await counts();
+    const first = await ctx.post(s, body, { key });
+    const made = createdOf(first, name, 'the first attempt');
+    const [row] = await owner`select tenant_id, phone, email, created_at from tmpos_customer.customer where customer_id = ${made.id}`;
+    assert.deepEqual([row.tenant_id, row.phone, row.email], [T_A, contacts.phone, contacts.email], 'the contacts stored');
+    assert.ok(row.created_at instanceof Date, 'the database\'s creation time');
+    const [audit] = await owner`select metadata::text as metadata, pg_catalog.row_to_json(a)::text as row from public.audit_event a
+      where action_id = ${ACTION} and actor_internal_user_id = ${who.id}`;
+    assert.equal(audit.metadata, '{}', 'audit metadata stays {}');
+    assert.ok(!audit.row.includes(contacts.phone) && !audit.row.includes(contacts.email), 'no contact in the audit record');
+    const again = await ctx.post(s, body, { key });
+    assert.deepEqual(createdOf(again, name, 'the replay', { replayed: true }), made);
+    assert.equal(again.body, first.body, 'the recorded body, byte for byte');
+    await assertDelta(before, { ...ONE, L: 1 }, 'one create under one key');
+    // The same key, any change to the contact bytes: the existing conflict policy, nothing new.
+    before = await counts();
+    for (const [label, changed] of [
+      ['a changed phone', { name, ...contacts, phone: '+1 555 0199' }], ['a changed email', { name, ...contacts, email: `other-${SUFFIX}@example.test` }],
+      ['the contacts dropped', { name }], ['the same values reordered', { email: contacts.email, phone: contacts.phone, name }],
+    ]) {
+      assertRefusal(await ctx.post(s, changed, { key }), 422, 'idempotency_key_reused', label);
+    }
+    await assertDelta(before, { ...NOTHING, L: 0 }, 'a changed contact under one key');
+    // A refused contact: 400 once the key is acquired, nothing committed (its lease row alone, as every refused body's).
+    before = await counts();
+    const refused = [{ name, phone: 'no digit' }, { name, email: 'a@b@example.test' }, { name, email: 'a b@example.test' }, { name, phone: 5550100 },
+      { name, phone: '1', note: 'x' }];
+    for (const bad of refused) {
+      const reply = await ctx.post(s, bad, { key: randomUUID() });
+      assertRefusal(reply, 400, 'invalid_request', JSON.stringify(Object.keys(bad)));
+      assert.equal(ctx.reason(reply), 'command_request_invalid');
+      assert.ok(!reply.body.includes('no digit') && !reply.body.includes('example.test'), 'the refusal names no contact');
+    }
+    await assertDelta(before, { ...NOTHING, L: refused.length }, 'refused contacts');
   });
 });
 

@@ -5,10 +5,11 @@
 // POST /api/v1/customers — a session route of the TENANT boundary, beside the directory's GET on the same literal path
 // (customerDirectory.ts). The path carries no tenant, and neither may the body.
 //
-// Request  { name } — exactly this one field.
+// Request  { name, phone?, email? } — name required, the two contacts optional (M7A-CUSTOMERS-P6), no other field.
 // Response 201 { customer: { id, name } } — the new id and the name as stored — with Location: /api/v1/customers/<id>, the
 // detail route's path (M7A-CUSTOMERS-P4). The header is part of the sealed idempotent response: a same-key replay sends
-// the same Location, and a response sealed before this build replays without one, exactly as it was committed.
+// the same Location, and a response sealed before this build replays without one, exactly as it was committed. The body
+// never carries a contact, sent or not: the profile read (GET /api/v1/customers/{id}/profile) is where they are read.
 //
 // AUTHORITY. The route requires create_customers — the canonical Customers domain at Create or above
 // (m5CanonicalPermissions.ts): store_owner, manager and sales_staff hold it; a technician, a read_only limitation, a store
@@ -31,6 +32,20 @@
 // Anything else is a 400 invalid_request, decided once the idempotency record is acquired; it commits and records
 // nothing, and the attempt's lease waits out its time.
 //
+// CONTACTS (M7A-CUSTOMERS-P6). phone and email are each optional: omitted, JSON null, or a string that trim() leaves
+// empty is "not provided" (stored NULL); any other non-string is a 400. A provided value is stored trimmed, exactly as
+// typed otherwise — no case folding, normalization, country or E.164 form — and must hold no refused character (the
+// name's set above: C0 incl. NUL, DEL, C1, LS/PS, lone surrogate, Bidi_Control). phone: 1-64 scalars with at least one
+// ASCII digit; internal spaces and punctuation are kept. email: 1-254 scalars, no White_Space anywhere, and exactly one
+// '@' between a non-empty local part and a non-empty domain. Migration 023's CHECKs and its create restate both rules,
+// so the database never refuses a contact this module admits. Nothing is verified, deduplicated, matched or merged, and
+// no contact value ever reaches a log line, a refusal reason, the audit record (its metadata stays {}) or an
+// idempotency diagnostic: a refusal is the same bounded 400 for every field.
+//
+// THE FINGERPRINT IS THE BYTES. app.ts binds the idempotency fingerprint to the exact request body bytes, so a name-only
+// body keeps the fingerprint it had before contacts existed, and any change to the phone or email bytes under one key is
+// the changed-request refusal (422 idempotency_key_reused) — never a re-plan. IDEMPOTENCY_CONTRACT_VERSION is unchanged.
+//
 // OUTCOMES. Once committed: the customer, its audit record and the idempotency completion, atomically; no outbox event
 // (no approved customer event contract exists, and none is invented). Any refusal inside the transaction — lost
 // authority, a duplicate id, a store fault — rolls everything back and is a 503; a retry replays or re-plans a fresh id.
@@ -38,7 +53,10 @@
 // PURE AND PORTABLE: part of the emitted tenant runtime artifact, importing only the runtime. The planner holds no
 // infrastructure, reads nothing but the body and writes nothing.
 import type { CommandContract } from './commandTransaction.js';
-import { CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS } from './customerDirectory.js';
+import {
+  CONTACT_REFUSED, CUSTOMER_DIRECTORY_PATH, CUSTOMER_EMAIL_MAX_CHARACTERS, CUSTOMER_NAME_MAX_CHARACTERS, CUSTOMER_PHONE_MAX_CHARACTERS,
+  REFUSED_CHARACTER_RE, normalizeCustomerEmail, normalizeCustomerPhone,
+} from './customerDirectory.js';
 import { COMMAND_REQUEST_INVALID } from './routes.js';
 import type { AuthorizationRequirement, CommandContext, CommandPlan, RouteDefinition } from './routes.js';
 
@@ -46,25 +64,28 @@ import type { AuthorizationRequirement, CommandContext, CommandPlan, RouteDefini
 export const CUSTOMER_CREATE_PERMISSION = 'create_customers';
 export const CUSTOMER_CREATE_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: CUSTOMER_CREATE_PERMISSION });
 /**
- * A bounded body: the worst canonical spelling of a 200-scalar name — every scalar astral, escaped as two \uXXXX units —
- * is 2411 bytes with its field, which leaves room for trimmable padding.
+ * A bounded body: the worst canonical spelling of a full request — every scalar astral, escaped as two \uXXXX units, 12
+ * bytes — is 6249 bytes with its three fields (name 2411, phone 779, email 3059), which leaves room for trimmable padding.
  */
-const MAX_BODY_BYTES = 4_096;
+const MAX_BODY_BYTES = 8_192;
 
-/** The name in UTF-16 code units, which is how a record schema counts: every scalar is one or two (outbox.ts). */
+/** Each field in UTF-16 code units, which is how a record schema counts: every scalar is one or two (outbox.ts). */
 const NAME_FIELD = Object.freeze({ type: 'string', maxLength: CUSTOMER_NAME_MAX_CHARACTERS * 2 } as const);
+const PHONE_FIELD = Object.freeze({ type: 'string', maxLength: CUSTOMER_PHONE_MAX_CHARACTERS * 2 } as const);
+const EMAIL_FIELD = Object.freeze({ type: 'string', maxLength: CUSTOMER_EMAIL_MAX_CHARACTERS * 2 } as const);
 
+/**
+ * The change set always carries all three strings — a record holds no null (outbox.ts) — so an absent contact is ''
+ * here, never a value a user sent (a provided contact is never empty), and the mutator binds '' as SQL NULL.
+ */
 export const CUSTOMER_CREATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'tenant.customer.create',
   mode: 'create',
   aggregateType: 'customer',
-  changes: Object.freeze({ name: NAME_FIELD }),
+  changes: Object.freeze({ name: NAME_FIELD, phone: PHONE_FIELD, email: EMAIL_FIELD }),
   events: Object.freeze([]),
 });
 
-// C0 controls (NUL included), DEL, C1 controls, and the line and paragraph separators; a lone surrogate is no Unicode
-// scalar value at all; and every Bidi_Control character — tenantDisplayName.ts's set, which 017's CHECK restates.
-const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
 /** One scalar that renders: not White_Space, Default_Ignorable_Code_Point, a format character, a mark or U+2800. */
 const VISIBLE_RE = /[^\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cf}\p{M}\u2800]/u;
 
@@ -77,20 +98,26 @@ export function normalizeCustomerName(raw: unknown): string | null {
   return scalars >= 1 && scalars <= CUSTOMER_NAME_MAX_CHARACTERS ? name : null;
 }
 
-/** The command's plan from the body alone, or COMMAND_REQUEST_INVALID: the runtime's new id, the name, no event. */
+const BODY_KEYS: readonly string[] = ['name', 'phone', 'email'];
+
+/** The command's plan from the body alone, or COMMAND_REQUEST_INVALID: the runtime's new id, the name and contacts, no event. */
 export function planCustomerCreate(ctx: CommandContext): CommandPlan | typeof COMMAND_REQUEST_INVALID {
   const body: unknown = ctx.body;
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return COMMAND_REQUEST_INVALID;
   // A parsed JSON object: own enumerable data properties only ("__proto__" too). A repeated key keeps its last value, as
   // everywhere in the chain (JSON.parse); the fingerprint binds the exact bytes sent.
   const keys = Object.keys(body);
-  if (keys.length !== 1 || keys[0] !== 'name') return COMMAND_REQUEST_INVALID;
-  const name = normalizeCustomerName((body as Record<string, unknown>).name);
-  if (name === null) return COMMAND_REQUEST_INVALID;
+  if (!keys.includes('name') || !keys.every((key) => BODY_KEYS.includes(key))) return COMMAND_REQUEST_INVALID;
+  const fields = body as Record<string, unknown>;
+  const name = normalizeCustomerName(fields.name);
+  // Only an own key is read: an omitted contact is absent, whatever a prototype might carry.
+  const phone = normalizeCustomerPhone(keys.includes('phone') ? fields.phone : undefined);
+  const email = normalizeCustomerEmail(keys.includes('email') ? fields.email : undefined);
+  if (name === null || phone === CONTACT_REFUSED || email === CONTACT_REFUSED) return COMMAND_REQUEST_INVALID;
   return {
     aggregateId: ctx.newAggregateId,
     expectedVersion: null,
-    changes: { name },
+    changes: { name, phone: phone ?? '', email: email ?? '' },
     events: [],
     response: { status: 201, body: { customer: { id: ctx.newAggregateId, name } }, headers: { location: `${CUSTOMER_DIRECTORY_PATH}/${ctx.newAggregateId}` } },
   };

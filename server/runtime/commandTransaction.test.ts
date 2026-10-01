@@ -198,10 +198,12 @@ test('command contracts are closed at startup against the event contracts', () =
     assert.throws(() => defineCommands(defs, events), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', label);
   }
   assert.equal(defineCommands([{ ...base, events: [] }], events).list().length, 1, 'a command may enqueue no event');
-  // M7A-CUSTOMERS-P3: a change set's strings reach MAX_CHANGE_STRING_FIELD_LENGTH (400: a 200-scalar name), and no further.
+  // M7A-CUSTOMERS-P3: a change set's strings reach MAX_CHANGE_STRING_FIELD_LENGTH (400: a 200-scalar name), and no further;
+  // M7A-CUSTOMERS-P6 moved the cap deliberately to 508 (a 254-scalar email).
   assert.equal(defineCommands([{ ...base, changes: { name: { type: 'string', maxLength: 400 } } }], events).list().length, 1, 'a 400-unit name');
-  assert.throws(() => defineCommands([{ ...base, changes: { name: { type: 'string', maxLength: 401 } } }], events),
-    (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', 'a 401-unit name');
+  assert.equal(defineCommands([{ ...base, changes: { email: { type: 'string', maxLength: 508 } } }], events).list().length, 1, 'a 508-unit email');
+  assert.throws(() => defineCommands([{ ...base, changes: { email: { type: 'string', maxLength: 509 } } }], events),
+    (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', 'a 509-unit field');
 });
 
 test('only an exact commit answer is obeyed; everything else is refused for what it is, never read as a rollback', async () => {

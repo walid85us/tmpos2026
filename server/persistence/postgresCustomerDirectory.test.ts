@@ -2,12 +2,13 @@
 // what it refuses to read back as a page. DATABASE-FREE; the routine itself is proved against a real cluster.
 // M7A-CUSTOMERS-P2: the routine is migration 018's session-bound read, handed the presenting session's store key — since
 // M7A-CUSTOMERS-P3-R1 migration 020's page_v3, which adds the role's current Customers level to 018's derivation.
+// M7A-CUSTOMERS-P6: the profile read over migration 023's m7a_contact_profile (M7CPP-01..04).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDetail, createPostgresCustomerDirectory, probeCustomerDetail,
-  probeCustomerDirectory,
+  CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDetail, createPostgresCustomerDirectory,
+  createPostgresCustomerProfile, probeCustomerDetail, probeCustomerDirectory, probeCustomerProfile,
 } from './postgresCustomerDirectory.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
@@ -366,5 +367,89 @@ test('M7CDP-04 probeCustomerDetail: true only for the routine\'s one denial of a
   aborted.abort();
   const idle = fakeClient([refusalRow('denied')]);
   assert.equal(await probeCustomerDetail(idle, aborted.signal), false, 'an aborted probe');
+  assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
+});
+
+// --- the profile read (M7A-CUSTOMERS-P6): migration 023's m7a_contact_profile ----------------------------------------------
+
+const PROFILE_STATEMENT = /select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at\s+from tmpos_customer_contact\.m7a_contact_profile\(\?::text, \?::uuid, \?::uuid\)$/;
+const CREATED = '2026-09-30T08:15:42.123Z';
+const profileRow = (i: number, over: Record<string, unknown> = {}): Record<string, unknown> =>
+  ({ ...customerRow(i), o_phone: '+1 555 0100', o_email: 'ada@example.test', o_created_at: CREATED, ...over });
+const profileRefusal = (outcome: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
+  ({ ...refusalRow(outcome), o_phone: null, o_email: null, o_created_at: null, ...over });
+const profileOne = (rows: unknown, id = C(1), scope: TrustedScope = SCOPE, key: unknown = SESSION_KEY) =>
+  createPostgresCustomerProfile({ client: fakeClient(rows) }).get(scope, key as string, id, live()) as Promise<unknown>;
+
+test('M7CPP-01 profile: one fixed call to 023\'s routine — the store key, the id and the authorizer\'s tenant — and the contact record answered as stored', async () => {
+  const client = fakeClient([profileRow(1)]);
+  const signal = live();
+  const answer = await createPostgresCustomerProfile({ client }).get(SCOPE, SESSION_KEY, C(1), signal);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], PROFILE_STATEMENT);
+  assert.deepEqual(client.values[0], [SESSION_KEY, C(1), TENANT], 'key, id, expected tenant — in that order');
+  for (const fact of [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician']) assert.ok(!client.values[0].includes(fact), `${fact} is not sent`);
+  assert.ok(!client.statements[0].includes('tmpos_customer.'), '017\'s table is never named');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  assert.deepEqual(answer, { outcome: 'customer', id: C(1), name: 'Customer 1', phone: '+1 555 0100', email: 'ada@example.test', createdAt: CREATED });
+  assert.ok(Object.isFrozen(answer));
+  assert.deepEqual(await profileOne([profileRow(1, { o_phone: null, o_email: null, o_created_at: null })]),
+    { outcome: 'customer', id: C(1), name: 'Customer 1', phone: null, email: null, createdAt: null }, 'a legacy customer');
+  for (const outcome of ['not_found', 'denied']) assert.deepEqual(await profileOne([profileRefusal(outcome)]), { outcome }, outcome);
+});
+
+test('M7CPP-02 profile: every answer out of shape is a throw with the one bounded message — never a customer, a refusal or a contact', async () => {
+  const cases: Array<[string, unknown]> = [
+    ['no row', []], ['two rows', [profileRow(1), profileRow(1)]], ['invalid', [profileRefusal('invalid')]],
+    ['the detail\'s four columns', [customerRow(1)]], ['an extra column', [{ ...profileRow(1), o_extra: 1 }]],
+    ['another tenant', [profileRow(1, { o_tenant_id: OTHER_TENANT })]], ['another id', [profileRow(2)]],
+    ['an untrimmed phone', [profileRow(1, { o_phone: ' +1 555 0100' })]], ['an empty phone', [profileRow(1, { o_phone: '' })]],
+    ['a phone with no digit', [profileRow(1, { o_phone: 'call me' })]], ['a numeric phone', [profileRow(1, { o_phone: 5550100 })]],
+    ['an email with a space', [profileRow(1, { o_email: 'ada @example.test' })]], ['an email with no @', [profileRow(1, { o_email: 'ada' })]],
+    ['a Date for the creation time', [profileRow(1, { o_created_at: new Date(CREATED) })]],
+    ['a creation time out of form', [profileRow(1, { o_created_at: '2026-09-30 08:15:42.123+00' })]],
+    ['denied naming a phone', [profileRefusal('denied', { o_phone: '+1 555 0100' })]],
+    ['not_found naming a creation time', [profileRefusal('not_found', { o_created_at: CREATED })]], ['null', null],
+  ];
+  for (const [label, rows] of cases) {
+    await assert.rejects(profileOne(rows), (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid'
+      && !/555|example|ada/i.test(err.message), label);
+  }
+});
+
+test('M7CPP-03 profile: only a selected tenant scope, a store-key-shaped key and a canonical id reach the database', async () => {
+  for (const [label, scope, key, id] of [
+    ['a platform scope', { ...SCOPE, scope: 'platform', tenant: null }, SESSION_KEY, C(1)], ['no scope', null, SESSION_KEY, C(1)],
+    ['a tenant scope with no tenant', { ...SCOPE, tenant: null }, SESSION_KEY, C(1)], ['no key', SCOPE, null, C(1)],
+    ['a short key', SCOPE, 'k'.repeat(42), C(1)], ['an uppercase id', SCOPE, SESSION_KEY, C(1).toUpperCase()], ['a braced id', SCOPE, SESSION_KEY, '{id}'],
+  ] as const) {
+    const client = fakeClient([profileRow(1)]);
+    await faults(createPostgresCustomerProfile({ client }).get(scope as TrustedScope, key as string, id as string, live()) as Promise<unknown>, label);
+    assert.equal(client.statements.length + client.bounds.length, 0, `${label}: nothing reached the database`);
+  }
+});
+
+test('M7CPP-04 probeCustomerProfile: true only for the routine\'s one denial of a random key with every other column null; anything else, a fault or an abort is false', async () => {
+  const client = fakeClient([profileRefusal('denied')]);
+  const signal = live();
+  assert.equal(await probeCustomerProfile(client, signal), true);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], PROFILE_STATEMENT);
+  assert.match(client.values[0][0] as string, /^[A-Za-z0-9_-]{43}$/, 'a store-key-shaped key');
+  for (const v of client.values[0].slice(1)) assert.match(v as string, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'random ids');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  for (const [label, rows] of [
+    ['no row', []], ['the detail\'s four columns', [refusalRow('denied')]], ['not_found', [profileRefusal('not_found')]],
+    ['a customer row', [profileRow(1)]], ['a denial naming a phone', [profileRefusal('denied', { o_phone: '1' })]],
+    ['a denial naming a creation time', [profileRefusal('denied', { o_created_at: CREATED })]], ['two denials', [profileRefusal('denied'), profileRefusal('denied')]],
+  ] as const) {
+    assert.equal(await probeCustomerProfile(fakeClient(rows), live()), false, label);
+  }
+  assert.equal(await probeCustomerProfile(fakeClient(null, Object.assign(new Error('M7CPP-CANARY'), { code: '42501' })), live()), false, 'a driver error');
+  const aborted = new AbortController();
+  aborted.abort();
+  const idle = fakeClient([profileRefusal('denied')]);
+  assert.equal(await probeCustomerProfile(idle, aborted.signal), false, 'an aborted probe');
   assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
 });

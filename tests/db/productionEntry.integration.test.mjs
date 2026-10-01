@@ -725,6 +725,8 @@ test('M6EP-09: test, DEV and witness routes are absent, and never appear in the 
       '/api/v1/customers',
       // M7A-CUSTOMERS-P4: so is the customer detail read, under any segment.
       `/api/v1/customers/${randomUUID()}`, '/api/v1/customers/{id}',
+      // M7A-CUSTOMERS-P6: and the contact profile read.
+      `/api/v1/customers/${randomUUID()}/profile`, '/api/v1/customers/{id}/profile',
     ];
     for (const path of absent) {
       assertBounded404(await ctx.req('GET', path));

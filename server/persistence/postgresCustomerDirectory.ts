@@ -42,11 +42,23 @@
 // every other column null. Anything else — 'invalid', no row, two rows, another tenant, another id — is a throw (503). Its
 // readiness (probeCustomerDetail) asks the routine for a random key no session holds and requires its one 'denied'; the
 // tenant entry's one reads probe asks the directory's and then this one.
+//
+// M7A-CUSTOMERS-P6 UPDATE — THE PROFILE READ (createPostgresCustomerProfile). The detail read's shape over migration 023's
+// tmpos_customer_contact.m7a_contact_profile, which delegates every decision and the point read to 022's routine and adds
+// that row's phone, email and creation time (UTC text in toISOString's form, or NULL for a customer created before 023).
+// Only an exactly shaped row is an answer: 'customer' naming the authorizer's tenant and the id asked for, with a storable
+// name, each contact NULL or a value the create stores (the runtime's own normalizer answering it unchanged), and a
+// creation time NULL or exactly that form; 'not_found' or 'denied' with every other column null. Anything else is a throw
+// (503), with this file's one bounded message — never a contact. Its readiness (probeCustomerProfile) asks the routine
+// for a random key no session holds and requires its one 'denied' with every other column null; the reads probe asks it
+// after the detail's.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
-import { CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isStorableName } from '../runtime/customerDirectory.js';
-import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery } from '../runtime/customerDirectory.js';
+import {
+  CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isCustomerCreatedAt, isStorableName, normalizeCustomerEmail, normalizeCustomerPhone,
+} from '../runtime/customerDirectory.js';
+import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery, CustomerProfilePort } from '../runtime/customerDirectory.js';
 import type { SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
 
 /** One short read, cancelled by PostgreSQL itself if it overruns, like the other runtime reads. */
@@ -59,6 +71,8 @@ export const CUSTOMER_DIRECTORY_BOUNDS: TransactionBounds = Object.freeze({
 
 /** The columns migration 020's routine answers with — 018's and 017's own. */
 const ROW_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_customer_id', 'o_name'];
+/** The columns migration 023's profile read answers with: 022's, then the contact record's three. */
+const PROFILE_COLUMNS: readonly string[] = [...ROW_COLUMNS, 'o_phone', 'o_email', 'o_created_at'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** A session store key: the SHA-256 of a session identifier, unpadded base64url (sessions.ts digestOf). */
 const SESSION_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -68,10 +82,10 @@ const fault = (): Error => new Error('customer directory answer invalid');
 
 type Row = Readonly<Record<string, unknown>>;
 
-function rowOf(value: unknown): Row {
+function rowOf(value: unknown, columns: readonly string[] = ROW_COLUMNS): Row {
   if (typeof value !== 'object' || value === null) throw fault();
   const keys = Object.keys(value as Record<string, unknown>);
-  if (keys.length !== ROW_COLUMNS.length || !ROW_COLUMNS.every((c) => keys.includes(c))) throw fault();
+  if (keys.length !== columns.length || !columns.every((c) => keys.includes(c))) throw fault();
   return value as Row;
 }
 
@@ -79,7 +93,7 @@ function rowOf(value: unknown): Row {
 function answerOf(rows: unknown, limit: number, tenant: string): unknown {
   // The bound is checked before any row is read, so an oversized answer costs nothing to refuse.
   if (!Array.isArray(rows) || rows.length > limit + 1) throw fault();
-  const all = rows.map(rowOf);
+  const all = rows.map((row) => rowOf(row));
   const first = all[0];
   // A refusal is the routine's only row, with every other column null.
   if (first !== undefined && first.o_outcome !== 'customer') {
@@ -189,6 +203,60 @@ export async function probeCustomerDetail(client: SupervisedPgClient, signal: Ab
       if (!Array.isArray(rows) || rows.length !== 1) return false;
       const row = rowOf(rows[0]);
       return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;
+    });
+  } catch {
+    return false; // an outage, an abort, an overrun, a driver fault or a row out of shape: nothing is disclosed
+  }
+}
+
+/** The profile routine's one row as the port's answer for `tenant` and `customerId`; a throw for anything out of shape. */
+function profileOf(rows: unknown, tenant: string, customerId: string): unknown {
+  if (!Array.isArray(rows) || rows.length !== 1) throw fault();
+  const {
+    o_outcome: outcome, o_tenant_id: owner, o_customer_id: id, o_name: name, o_phone: phone, o_email: email, o_created_at: createdAt,
+  } = rowOf(rows[0], PROFILE_COLUMNS);
+  if (outcome === 'not_found' || outcome === 'denied') {
+    if (owner !== null || id !== null || name !== null || phone !== null || email !== null || createdAt !== null) throw fault();
+    return Object.freeze({ outcome });
+  }
+  if (outcome !== 'customer' || owner !== tenant || id !== customerId || !isStorableName(name)) throw fault();
+  // A stored contact is already the value the create stores: null, or a string its normalizer answers unchanged.
+  if (phone !== null && (typeof phone !== 'string' || normalizeCustomerPhone(phone) !== phone)) throw fault();
+  if (email !== null && (typeof email !== 'string' || normalizeCustomerEmail(email) !== email)) throw fault();
+  if (!isCustomerCreatedAt(createdAt)) throw fault();
+  return Object.freeze({ outcome: 'customer', id, name, phone, email, createdAt });
+}
+
+/** The production customer profile read over the M6 runtime client — the kernel the composition root already built. */
+export function createPostgresCustomerProfile(deps: { readonly client: SupervisedPgClient }): CustomerProfilePort {
+  const { client } = deps;
+  return Object.freeze({
+    async get(scope: TrustedScope, sessionKey: string, customerId: string, signal: AbortSignal): Promise<unknown> {
+      // Refused before a statement runs, as the detail's.
+      if (!isTrustedScope(scope) || scope.scope !== 'tenant' || scope.tenant === null || !UUID_RE.test(scope.tenant)) throw fault();
+      if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) throw fault();
+      if (typeof customerId !== 'string' || !UUID_RE.test(customerId)) throw fault();
+      const tenant = scope.tenant;
+      return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+        const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at
+          from tmpos_customer_contact.m7a_contact_profile(${sessionKey}::text, ${customerId}::uuid, ${tenant}::uuid)`;
+        return profileOf(rows, tenant, customerId);
+      });
+    },
+  });
+}
+
+/** Readiness: true only for the profile routine's one refusal of a random key no session holds; anything else is false. */
+export async function probeCustomerProfile(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  const absentKey = randomBytes(32).toString('base64url');
+  try {
+    return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name, o_phone, o_email, o_created_at
+        from tmpos_customer_contact.m7a_contact_profile(${absentKey}::text, ${randomUUID()}::uuid, ${randomUUID()}::uuid)`;
+      if (!Array.isArray(rows) || rows.length !== 1) return false;
+      const row = rowOf(rows[0], PROFILE_COLUMNS);
+      return row.o_outcome === 'denied' && PROFILE_COLUMNS.slice(1).every((column) => row[column] === null);
     });
   } catch {
     return false; // an outage, an abort, an overrun, a driver fault or a row out of shape: nothing is disclosed

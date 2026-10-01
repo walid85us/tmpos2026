@@ -1,7 +1,8 @@
 // Phase 4.0 M7A-CUSTOMERS-P3 — the tenant customer create's mutator: the one fixed call it makes, the session key as its
 // only authority input, the identities it requires the database to answer, and — through the real store over a recording
 // kernel — that every answer but 'applied' rolls the whole command back instead of committing a sealed 409. No database:
-// migration 019's routine and its M7A-CUSTOMERS-P3-R1 successor in migration 020 are proved against a disposable cluster (tests/db).
+// migration 019's routine, its M7A-CUSTOMERS-P3-R1 successor in migration 020, and since M7A-CUSTOMERS-P6 migration 023's
+// contact-aware create over it are proved against a disposable cluster (tests/db).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -42,7 +43,7 @@ function recording(answer: readonly Record<string, unknown>[] | Error): { sql: P
   return { sql, texts, values };
 }
 const mutation = (over: Partial<TransactionMutation> = {}): TransactionMutation => Object.freeze({
-  kind: CUSTOMER_CREATE_CONTRACT.kind, aggregateType: 'customer', aggregateId: CUSTOMER, expectedVersion: null, changes: { name: 'Ada Lovelace' }, ...over,
+  kind: CUSTOMER_CREATE_CONTRACT.kind, aggregateType: 'customer', aggregateId: CUSTOMER, expectedVersion: null, changes: { name: 'Ada Lovelace', phone: '', email: '' }, ...over,
 } as TransactionMutation);
 
 test('the mutator registers for exactly the customer create contract, as a create of a customer, frozen', () => {
@@ -52,12 +53,21 @@ test('the mutator registers for exactly the customer create contract, as a creat
   assert.ok(Object.isFrozen(CUSTOMER_CREATE_MUTATOR));
 });
 
-test('one fixed call into 020 (M7A-CUSTOMERS-P3-R1; never 019\'s allow-list): the session key as the ONLY authority input, then the id and the name — never a tenant, actor or grant', async () => {
+test('one fixed call into 023 (M7A-CUSTOMERS-P6; 020 decides inside it, never 019\'s allow-list): the session key as the ONLY authority input, then the id, the name and the contacts — never a tenant, actor or grant', async () => {
+  const STATEMENT = /^select o_tenant_id, o_actor_id, o_membership_id\s+from tmpos_customer_contact\.m7a_contact_create\(\?::text, \?::uuid, \?::text,\s+\?::text, \?::text\)$/;
   const r = recording([DERIVED]);
   assert.equal(await CUSTOMER_CREATE_MUTATOR.apply(r.sql, mutation(), AUTHORITY), 'applied');
   assert.equal(r.texts.length, 1);
-  assert.match(r.texts[0], /^select o_tenant_id, o_actor_id, o_membership_id\s+from tmpos_role\.m7a_customer_create\(\?::text, \?::uuid, \?::text\)$/);
-  assert.deepEqual(r.values, [[SESSION_KEY, CUSTOMER, 'Ada Lovelace']], 'three bound values: the key, the new id, the name');
+  assert.match(r.texts[0], STATEMENT);
+  assert.deepEqual(r.values, [[SESSION_KEY, CUSTOMER, 'Ada Lovelace', null, null]], 'five bound values: the key, the new id, the name, and an absent contact as NULL');
+  const withContacts = recording([DERIVED]);
+  assert.equal(await CUSTOMER_CREATE_MUTATOR.apply(withContacts.sql, mutation({ changes: { name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test' } }), AUTHORITY), 'applied');
+  assert.match(withContacts.texts[0], STATEMENT);
+  assert.deepEqual(withContacts.values, [[SESSION_KEY, CUSTOMER, 'Ada Lovelace', '+1 555 0100', 'ada@example.test']], 'each contact bound as itself');
+  const onlyEmail = recording([DERIVED]);
+  await CUSTOMER_CREATE_MUTATOR.apply(onlyEmail.sql, mutation({ changes: { name: 'Ada Lovelace', phone: '', email: 'ada@example.test' } }), AUTHORITY);
+  assert.deepEqual(onlyEmail.values, [[SESSION_KEY, CUSTOMER, 'Ada Lovelace', null, 'ada@example.test']], 'an absent phone beside an email');
+  assert.doesNotMatch(r.texts[0], /tmpos_role\.m7a_customer_create/, '020\'s create is not called directly: 023 revokes it from the runtime role');
   for (const identity of [TENANT, ACTOR, MEMBERSHIP, 'sales_staff']) assert.ok(!r.values[0].includes(identity), `${identity} is never passed in`);
   assert.doesNotMatch(r.texts[0], /tmpos_customer\.customer|insert|update|delete/i, 'no table and no write of its own');
 });
@@ -87,7 +97,9 @@ test('a driver or routine error propagates uncaught, and nothing is called witho
     ['a null context', { context: null, sessionKey: SESSION_KEY }, mutation()],
     ['a platform context', { context: { ...CONTEXT, scope: 'platform', tenant: null }, sessionKey: SESSION_KEY }, mutation()],
     ['no session key', { context: CONTEXT, sessionKey: null }, mutation()],
-    ['a name that is not text', AUTHORITY, mutation({ changes: { name: 7 } })],
+    ['a name that is not text', AUTHORITY, mutation({ changes: { name: 7, phone: '', email: '' } })],
+    ['no phone in the change set', AUTHORITY, mutation({ changes: { name: 'Ada', email: '' } })],
+    ['a null email in the change set', AUTHORITY, mutation({ changes: { name: 'Ada', phone: '', email: null } })],
   ] as const) {
     const r = recording([DERIVED]);
     assert.equal(await CUSTOMER_CREATE_MUTATOR.apply(r.sql, m, authority as never), 'unavailable', label);
@@ -125,7 +137,7 @@ function kernel(routine: readonly Record<string, unknown>[]) {
     const text = strings.join('?');
     texts.push(text);
     if (text.includes('m6_command_fence')) return rows([{ held: true }]);
-    if (text.includes('m7a_customer_create')) return rows(routine);
+    if (text.includes('m7a_contact_create')) return rows(routine);
     if (text.includes('insert into public.audit_event')) return Object.assign([], { count: 1, command: 'INSERT' });
     if (text.includes('m6_idempotency_complete')) return rows([{ outcome: 'completed' }]);
     throw new Error(`a statement this command never sends: ${text.slice(0, 80)}`);
@@ -154,8 +166,8 @@ test('through the tenant store: applied commits the create, its audit record and
   };
   const ok = await commit([DERIVED]);
   assert.deepEqual(ok.answer, { outcome: 'committed' });
-  assert.deepEqual(ok.texts.map((t) => (t.includes('m6_command_fence') ? 'fence' : t.includes('m7a_customer_create') ? '020'
-    : t.includes('audit_event') ? 'audit' : t.includes('m6_idempotency_complete') ? 'completion' : t)), ['fence', '020', 'audit', 'completion', 'commit']);
+  assert.deepEqual(ok.texts.map((t) => (t.includes('m6_command_fence') ? 'fence' : t.includes('m7a_contact_create') ? '023'
+    : t.includes('audit_event') ? 'audit' : t.includes('m6_idempotency_complete') ? 'completion' : t)), ['fence', '023', 'audit', 'completion', 'commit']);
   for (const [label, routine] of [['refused', []], ['another tenant', [{ ...DERIVED, o_tenant_id: OTHER }]], ['two rows', [DERIVED, DERIVED]]] as const) {
     const { answer, texts } = await commit(routine);
     assert.deepEqual(answer, { outcome: 'unavailable' }, label);

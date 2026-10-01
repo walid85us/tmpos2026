@@ -81,10 +81,11 @@ export const MAX_RECORD_FIELDS = 16;
 export const MAX_STRING_FIELD_LENGTH = 256;
 /**
  * The longest string field a COMMAND change set may declare (parseChangeSchema), in UTF-16 code units. M7A-CUSTOMERS-P3:
- * a customer name is 200 scalars, up to 400 UTF-16 units. Changes are the mutation's input, never an event or an
- * envelope, so every payload and envelope keeps MAX_STRING_FIELD_LENGTH, and MAX_RECORD_BYTES bounds every record.
+ * a customer name is 200 scalars, up to 400 UTF-16 units; M7A-CUSTOMERS-P6: a customer email is 254 scalars, up to 508.
+ * Changes are the mutation's input, never an event or an envelope, so every payload and envelope keeps
+ * MAX_STRING_FIELD_LENGTH, and MAX_RECORD_BYTES bounds every record (a full customer change set is under 2.2 KB).
  */
-export const MAX_CHANGE_STRING_FIELD_LENGTH = 400;
+export const MAX_CHANGE_STRING_FIELD_LENGTH = 508;
 /** The largest serialized outbox envelope: a bounded payload beside the fixed, format-bounded fields. */
 export const MAX_OUTBOX_ENVELOPE_BYTES = MAX_RECORD_BYTES + 1_024;
 /** The most events one command may enqueue. */

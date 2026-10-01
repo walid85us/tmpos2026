@@ -130,7 +130,12 @@ const UIDS = [];
 const TENANTS = [];
 const KEYS = new Set();
 let keyBeforeSuite;
-/** The later migrations (021, and 022 since M7A-CUSTOMERS-P4's detail read) this file rolled back to run on 001-020, re-applied at the end. */
+/**
+ * The later migrations (021, 022 since M7A-CUSTOMERS-P4's detail read, and 023 since M7A-CUSTOMERS-P6's contact records) this
+ * file rolled back to run on 001-020, re-applied at the end. 023's down gives 020's create back to tmpos_app, as 020 left it,
+ * and refuses while any customer holds a contact or a creation time; 023's up (restore) revokes it again, once this file's
+ * own customers — created on 001-020, with no such column — are deleted.
+ */
 let later = null;
 
 test.after(async () => {
@@ -145,7 +150,7 @@ test.after(async () => {
   if (KEYS.size > 0) await quietly(() => owner`delete from tmpos_mint.tenant_session where session_key = any(${[...KEYS]}::text[])`);
   if (UIDS.length > 0) await owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`;
   if (TENANTS.length > 0) await owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`;
-  // The shared service is left with the later migrations it had (021, 022), each with its exact ledger row.
+  // The shared service is left with the later migrations it had (021, 022, 023), each with its exact ledger row.
   if (later !== null) await later.restore();
   if (keyBeforeSuite !== undefined) {
     await quietly(async () => {

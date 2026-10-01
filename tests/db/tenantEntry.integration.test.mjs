@@ -47,6 +47,13 @@
 // read after startup, M7TE-14 drives the detail read end to end on the source entry — own 200, foreign and missing 404s
 // alike, malformed ids 400 only after authentication, a narrowed role, a revoked and a parked-then-revoked session, the admin
 // cookie, the wrong Host, the store down, a read-only tenant — and M7TE-C1 follows the compiled create's Location.
+//
+// M7A-CUSTOMERS-P6 UPDATE (contacts). Migration 023 adds phone, email and created_at to the customer table, its create
+// (now the login's only create path: 023 revokes 020's) and its profile read, served as GET /api/v1/customers/{id}/profile
+// (tests/db/customerContact.integration.test.mjs proves the routines). The chain is 001-023: M7TE-01 pins eleven routes,
+// M7TE-08 the login's EXECUTE on 023's create and profile read and refuses 020's create given back, M7TE-10 the 001-023 ledger
+// (a fake next row is '024'), M7TE-11 withdraws the profile read after startup, M7TE-15 drives a create with contacts and
+// the profile read end to end on the source entry, and M7TE-C1 does both on the compiled entry.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -101,7 +108,12 @@ const ADMIT = 'tmpos_session.m5_admit_tenant_session_v2(text, text)';
  * M7A-CUSTOMERS-P4, when 020's unconditional set left the login —, and 006's probe the tenant store answers readiness with
  * (its idempotency and command ports).
  */
-const CREATE = 'tmpos_role.m7a_customer_create(text, uuid, text)';
+/** The customer create the login calls: migration 023's since M7A-CUSTOMERS-P6, deciding through 020's create. */
+const CREATE = 'tmpos_customer_contact.m7a_contact_create(text, uuid, text, text, text)';
+/** 020's create: revoked from the login by 023, and a grant too many if given back. */
+const CREATE_020 = 'tmpos_role.m7a_customer_create(text, uuid, text)';
+/** 023's customer profile read (M7A-CUSTOMERS-P6). */
+const PROFILE_GET = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
 const LEVELS_READ = 'tmpos_role.m7a_role_levels(uuid, text)';
 const LEVEL_SET = 'tmpos_role_edit.m7a_role_level_set_v2(text, text, text, text, uuid, bigint)';
 const LEVEL_STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -815,6 +827,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     assert.deepEqual(canonical(ctx.result.routes), [
       'GET /api/v1/customers session none none',
       'GET /api/v1/customers/{id} session none none',
+      'GET /api/v1/customers/{id}/profile session none none',
       'GET /api/v1/roles/levels session none none',
       'GET /api/v1/session session none none',
       'GET /health public none none',
@@ -1045,7 +1058,7 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   await withoutExecute(MINT, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the session mint withdrawn')));
   // The customer create withdrawn (M7A-CUSTOMERS-P3): the same census names it — the write never serves without it (020's
-  // since M7A-CUSTOMERS-P3-R1). So do 020's role-level read, which every tenant route decision asks, and — since
+  // since M7A-CUSTOMERS-P3-R1, 023's since M7A-CUSTOMERS-P6). So do 020's role-level read, which every tenant route decision asks, and — since
   // M7A-CUSTOMERS-P4 — 021's set and its states read.
   await withoutExecute(CREATE, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer create withdrawn')));
@@ -1058,10 +1071,13 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   // M7A-CUSTOMERS-P4: 022's customer detail read.
   await withoutExecute(DETAIL_GET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer detail read withdrawn')));
+  // M7A-CUSTOMERS-P6: 023's customer profile read.
+  await withoutExecute(PROFILE_GET, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the customer profile read withdrawn')));
   // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many; so is
   // 020's unconditional set (M7A-CUSTOMERS-P4: an edit that asserts neither the tenant nor the version).
   for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)'],
-    ['020\'s set', LEVEL_SET_020]]) {
+    ['020\'s set', LEVEL_SET_020], ['020\'s create (023 revoked it: M7A-CUSTOMERS-P6)', CREATE_020]]) {
     try {
       await owner.unsafe(`grant execute on function ${fn} to tmpos_app`);
       await withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_unexpected'], `${label} given back`));
@@ -1105,26 +1121,27 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-022 refuses startup migration_state_invalid', async () => {
-  // M7A-CUSTOMERS-P4: the newest required migration is 022 (the detail read), and the fake "next migration" row is '023'.
+test('M7TE-10: a migration ledger that is not exactly 001-023 refuses startup migration_state_invalid', async () => {
+  // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); since M7A-CUSTOMERS-P6 it is 023 (the contact
+  // records), and the fake "next migration" row is '024' — the restore below never removes the real 023 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '022'`;
-  assert.ok(row !== undefined, '022 is recorded');
+    from public.schema_migrations where version = '023'`;
+  assert.ok(row !== undefined, '023 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('022', '023')`;
+    await sql`delete from public.schema_migrations where version in ('023', '024')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '022'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 021'));
+    await owner`delete from public.schema_migrations where version = '023'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 022'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 022').digest('hex')} where version = '022'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '022 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 023').digest('hex')} where version = '023'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '023 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('023', ${createHash('sha256').update('023').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 023'));
+      values ('024', ${createHash('sha256').update('024').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 024'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1134,7 +1151,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-022 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '022'`;
+    from public.schema_migrations where version = '023'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 
@@ -1194,6 +1211,16 @@ test('M7TE-11: after startup, readiness is 503 while the issuer key is deleted o
       assert.deepEqual(pageOf(await list(ctx, session.cookie), 'the list still reads').customers, SEED_A);
     });
     assert.ok(await readinessUntil(ctx, 200), 'the detail read restored: ready');
+
+    // M7A-CUSTOMERS-P6: the customer profile read withdrawn from the login — the third part of the reads' probe.
+    await withoutExecute(PROFILE_GET, async () => {
+      await readinessHolds(ctx, 503);
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}/profile`, { cookie: session.cookie, ...csrfOf(session.cookie) }), 503,
+        'service_unavailable', 'the profile read withdrawn');
+      assert.equal((await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${SEED_A[0].id}`, { cookie: session.cookie, ...csrfOf(session.cookie) })).status, 200,
+        'the detail still reads');
+    });
+    assert.ok(await readinessUntil(ctx, 200), 'the profile read restored: ready');
 
     // The mint probe writes nothing: readiness asked it across three reuse windows, and every mint-ledger and session row is
     // exactly as it was — counted, and digested whole on the server (a digest, never a row, leaves the database).
@@ -1419,6 +1446,114 @@ test('M7TE-14: the customer detail read — own 200, foreign and missing 404s al
   }
 });
 
+/** GET /api/v1/customers/{segment}/profile presenting `cookie` (null: no session) and its CSRF token. */
+const profileOf = (ctx, cookie, segment, headers = {}) =>
+  ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${segment}/profile`, { ...(cookie === null ? {} : { cookie, ...csrfOf(cookie) }), ...headers });
+/** A 200 profile body: exactly { customer: { id, name, phone, email, createdAt } }, in that key order. */
+function profileBody(reply, label) {
+  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
+  const body = JSON.parse(reply.body);
+  assert.deepEqual(Object.keys(body), ['customer'], label);
+  assert.deepEqual(Object.keys(body.customer), ['id', 'name', 'phone', 'email', 'createdAt'], label);
+  return body.customer;
+}
+/** A POST /api/v1/customers presenting `s`, under a fresh Idempotency-Key unless one is given. */
+const createWith = (ctx, s, body, key = randomUUID()) => ctx.req('POST', CUSTOMER_DIRECTORY_PATH, {
+  origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: s.cookie,
+  [SESSION_CSRF_HEADER]: s.csrf, 'content-type': 'application/json', 'idempotency-key': key,
+}, typeof body === 'string' ? body : JSON.stringify(body));
+
+test('M7TE-15: a create with contacts and the profile read end to end — 201 {customer:{id,name}}, the row holding the contacts and the database\'s creation time, the profile 200 in its exact shape, a legacy row\'s null creation time, foreign and missing one 404, malformed ids 400 only after authentication, the session-binding witness, a refused contact writing nothing', async () => {
+  // Its own tenant: the list pins of the cases around it (M7TE-C1 reads T_A's page) see none of its customers.
+  const T_C = await newTenant('m7te15');
+  const who = await actor('m7te15', [tenantGrant(T_C, 'manager')]);
+  const name = `Contact ${SUFFIX}`;
+  const phone = `+1 555 01${SUFFIX.slice(0, 2).replace(/[^0-9]/g, '0')}`;
+  const email = `m7te15-${SUFFIX}@example.test`;
+  SECRETS.add(name).add(phone).add(email);
+  // A row as a 022 database left it: no contact and no creation time (the owner states the NULL the default would fill).
+  const legacyId = randomUUID();
+  const legacyName = `Legacy ${SUFFIX}`;
+  SECRETS.add(legacyId).add(legacyName);
+  await owner`insert into tmpos_customer.customer (customer_id, tenant_id, name, created_at) values (${legacyId}, ${T_C}, ${legacyName}, null)`;
+  try {
+    await withEntry({}, async (ctx) => {
+      assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
+      const s = await signIn(ctx, who);
+      const counts = async () => ({ ...(await owner`select (select count(*) from tmpos_customer.customer where tenant_id = ${T_C})::int as c,
+        (select count(*) from public.audit_event where action_id = 'tenant.customer.create' and actor_internal_user_id = ${who.id})::int as a`)[0] });
+      const before = await counts();
+      const created = await createWith(ctx, s, { name: ` ${name} `, phone: ` ${phone} `, email });
+      assert.equal(created.status, 201, created.body);
+      const { customer } = JSON.parse(created.body);
+      SECRETS.add(customer.id);
+      assert.deepEqual(JSON.parse(created.body), { customer: { id: customer.id, name } }, 'the 201 is {customer:{id,name}}: no contact');
+      assert.equal(created.headers.location, `${CUSTOMER_DIRECTORY_PATH}/${customer.id}`);
+      assert.deepEqual(await counts(), { c: before.c + 1, a: before.a + 1 }, 'one customer, one audit record');
+      const [row] = await owner`select tenant_id, phone, email, created_at, pg_catalog.floor(extract(epoch from created_at) * 1000)::bigint::text as ms
+        from tmpos_customer.customer where customer_id = ${customer.id}`;
+      assert.deepEqual([row.tenant_id, row.phone, row.email], [T_C, phone, email], 'stored trimmed, as sent otherwise');
+      // The profile: the contacts, and the database's creation time in toISOString's form.
+      const own = profileBody(await profileOf(ctx, s.cookie, customer.id), 'own');
+      assert.deepEqual({ ...own, createdAt: null }, { id: customer.id, name, phone, email, createdAt: null });
+      assert.equal(own.createdAt, new Date(Number(row.ms)).toISOString(), 'the stored instant, truncated to the millisecond, UTC');
+      assert.deepEqual(profileBody(await profileOf(ctx, s.cookie, legacyId), 'legacy'), { id: legacyId, name: legacyName, phone: null, email: null, createdAt: null },
+        'a customer from before 023: no contact, an unknown creation time');
+      // The detail read is unchanged: {id, name} only.
+      assert.deepEqual(JSON.parse((await ctx.req('GET', created.headers.location, { cookie: s.cookie, ...csrfOf(s.cookie) })).body), { customer: { id: customer.id, name } });
+      // Foreign and missing: one 404 body, one header set, one log reason.
+      const missing = randomUUID();
+      SECRETS.add(missing);
+      const foreign = await profileOf(ctx, s.cookie, SEED_B[0].id);
+      const absent = await profileOf(ctx, s.cookie, missing);
+      for (const [label, reply] of [['foreign', foreign], ['missing', absent]]) {
+        assertBounded404(reply, label);
+        assert.equal(reasonOf(ctx, reply), 'customer_not_found', label);
+      }
+      assert.deepEqual(headerShape(foreign), headerShape(absent), 'foreign and missing: identical headers modulo request id, date and body hash');
+      // Malformed: the chain's 401 without a session, the 400 after authentication.
+      for (const segment of [customer.id.toUpperCase(), '{id}', 'x']) {
+        assertRefusal(await profileOf(ctx, null, segment), 401, 'unauthenticated', `${segment}: no session`);
+        const bad = await profileOf(ctx, s.cookie, segment);
+        assertRefusal(bad, 400, 'invalid_request', `${segment}: authenticated`);
+        assert.equal(reasonOf(ctx, bad), 'customer_profile_id_invalid');
+      }
+      for (const path of [`${customer.id}/profile/`, `${customer.id}/profile/x`, `${customer.id}/contacts`]) {
+        assertBounded404(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${path}`, { cookie: s.cookie, ...csrfOf(s.cookie) }), path);
+      }
+      // The session-binding witness: no CSRF token, or another session's, is a 403 before the read.
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id}/profile`, { cookie: s.cookie }), 403, 'forbidden', 'no session CSRF');
+      assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id}/profile`, { cookie: s.cookie, [SESSION_CSRF_HEADER]: 'A'.repeat(43) }),
+        403, 'forbidden', 'another token');
+      // A refused contact: 400, and nothing written.
+      const mid = await counts();
+      for (const body of [{ name, phone: 'no digit' }, { name, email: 'two@at@example.test' }, { name, email: 'a b@example.test' }, { name, phone: 5550100 }]) {
+        assertRefusal(await createWith(ctx, s, body), 400, 'invalid_request', JSON.stringify(Object.keys(body)));
+      }
+      assert.deepEqual(await counts(), mid, 'no refused contact wrote a customer or an audit record');
+      // AC-5 over HTTP: a role narrowed to None after sign-in is refused the profile of a customer that HAS a phone and an
+      // email — the list's and the detail's 403 — and the refusal carries neither value (nor the name or the creation time).
+      const readable = profileBody(await profileOf(ctx, s.cookie, customer.id), 'before the narrowing (control)');
+      assert.deepEqual([readable.phone, readable.email], [phone, email], 'the customer holds both contacts, readable before the narrowing');
+      // An upsert: the creates above took the manager's row lock, which seeds the row at its default level.
+      await owner`insert into tmpos_role.tenant_role_level (tenant_id, role_id, domain, level, updated_at)
+        values (${T_C}, 'manager', 'customers', 'none', now())
+        on conflict (tenant_id, role_id, domain) do update set level = excluded.level, updated_at = excluded.updated_at`;
+      assert.equal((await owner`select level from tmpos_role.tenant_role_level where tenant_id = ${T_C} and role_id = 'manager' and domain = 'customers'`)[0].level, 'none', 'the manager is narrowed to None');
+      const narrowed = await profileOf(ctx, s.cookie, customer.id);
+      assertRefusal(narrowed, 403, 'forbidden', 'the profile of a customer with contacts, narrowed to None');
+      for (const secret of [phone, email, name, readable.createdAt]) {
+        assert.ok(!narrowed.body.includes(secret), 'the narrowed refusal carries no customer value');
+        assert.ok(!JSON.stringify(narrowed.headers).includes(secret), 'nor does a header of it');
+      }
+    });
+  } finally {
+    // 020's down (a later suite's rollback) refuses while a level row exists: this test's own are removed.
+    await owner`delete from tmpos_role_edit.role_level_version where tenant_id = ${T_C}`;
+    await owner`delete from tmpos_role.tenant_role_level where tenant_id = ${T_C}`;
+  }
+});
+
 // ===========================================================================
 // M7TE-C1: the COMPILED tenant entry over the same disposable database and real sockets
 // ===========================================================================
@@ -1515,6 +1650,21 @@ test('M7TE-C1: the compiled tenant entry starts over the disposable database, se
       }
       assertRefusal(await ctx.req('GET', `${CUSTOMER_DIRECTORY_PATH}/${customer.id.toUpperCase()}`, { cookie: session.cookie, ...csrfOf(session.cookie) }), 400,
         'invalid_request', 'compiled: an uppercase id');
+      // M7A-CUSTOMERS-P6: the compiled artifact carries the contacts and the profile read — a create with both contacts, and
+      // its profile with the database's creation time; the name-only create above has no contact.
+      const contacts = { phone: '+1 555 0142', email: `m7te-c1-${SUFFIX}@example.test` };
+      SECRETS.add(contacts.email);
+      const withContacts = await createWith(ctx, session, { name, ...contacts });
+      assert.equal(withContacts.status, 201, `compiled create with contacts: ${withContacts.body}`);
+      const contactId = JSON.parse(withContacts.body).customer.id;
+      SECRETS.add(contactId);
+      const profile = profileBody(await profileOf(ctx, session.cookie, contactId), 'compiled profile');
+      assert.deepEqual({ ...profile, createdAt: null }, { id: contactId, name, ...contacts, createdAt: null });
+      assert.equal(new Date(profile.createdAt).toISOString(), profile.createdAt, 'compiled profile: toISOString\'s form');
+      const nameOnly = profileBody(await profileOf(ctx, session.cookie, customer.id), 'compiled profile, name only');
+      assert.deepEqual([nameOnly.id, nameOnly.name, nameOnly.phone, nameOnly.email], [customer.id, name, null, null]);
+      assert.equal(new Date(nameOnly.createdAt).toISOString(), nameOnly.createdAt, 'a name-only create has a creation time too');
+      assertBounded404(await profileOf(ctx, session.cookie, SEED_B[0].id), 'compiled profile: foreign');
 
       ctx.cap.proc.emit('SIGTERM');
       await waitFor(() => ctx.cap.codes.length > 0, 5_000);

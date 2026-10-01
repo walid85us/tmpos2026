@@ -14,7 +14,7 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–022, clean, checksums pinned (each of 020, 021 and 022 moves with its build);
+//    5. the migration ledger — exactly 001–023, clean, checksums pinned (each of 020-023 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
@@ -26,8 +26,9 @@
 //       processes hold the same RATE_LIMIT_KEY, since 014 keeps one fingerprint per database;
 //   10. readiness — the session store reads, the session mint answers its probe (018's refusal of all-null arguments,
 //       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready, the
-//       customer reads answer their probe (the directory's routine, then the detail's — M7A-CUSTOMERS-P4 — each refusing an
-//       absent key), and the idempotency store and the command port answer theirs (006's probe);
+//       customer reads answer their probe (the directory's routine, then the detail's — M7A-CUSTOMERS-P4 — then the
+//       profile's — M7A-CUSTOMERS-P6 — each refusing an absent key), and the idempotency store and the command port answer
+//       theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
 // ever opened. There is no degraded mode, no in-memory fallback, no automatic migration and no key installation.
@@ -37,8 +38,10 @@
 // POST /api/v1/customers, the customer create, and — M7A-CUSTOMERS-P3-R1 — PUT /api/v1/roles/levels, an owner's durable
 // edit of a built-in role's Customers level, each idempotent and committed through the tenant store; — M7A-CUSTOMERS-P3-R2 —
 // GET /api/v1/roles/levels, the owner's read-back of those levels beside their catalog defaults; — M7A-CUSTOMERS-P4 —
-// GET /api/v1/customers/{id}, one customer by id (the route table's one template: /api/v1/customers/ plus one segment,
-// judged after authentication) — then the bounded 404.
+// GET /api/v1/customers/{id}, one customer by id (the route table's first template: /api/v1/customers/ plus one segment,
+// judged after authentication); — M7A-CUSTOMERS-P6 — GET /api/v1/customers/{id}/profile, that customer's phone, email and
+// creation time (the second template: the same segment, then exactly '/profile'), and POST /api/v1/customers taking the
+// optional contacts — then the bounded 404.
 // No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -81,6 +84,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/customers/{id}', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/customers/{id}/profile', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },

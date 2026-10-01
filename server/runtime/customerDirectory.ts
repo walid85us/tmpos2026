@@ -47,8 +47,8 @@
 // synthetic page.
 //
 // M7A-CUSTOMERS-P4 UPDATE — THE DETAIL READ. GET /api/v1/customers/{id}: one customer by id, under the list's permission
-// (view_customers), trusted context and session binding, over the same module's conventions. It is the route table's one
-// template (routes.ts): /api/v1/customers/ plus one raw segment of 1-128 characters without '/' reaches this handler only
+// (view_customers), trusted context and session binding, over the same module's conventions. It is the route table's first
+// template (routes.ts; the profile read below is the second): /api/v1/customers/ plus one raw segment of 1-128 characters without '/' reaches this handler only
 // after the chain has proved the session and decided the permission, so an unauthenticated caller gets the chain's 401 or
 // 403 whatever the segment. Then, as the list's query: any query at all, or a segment that is not a canonical lowercase
 // uuid (uppercase, %-encoded, braces, anything else), is a 400 invalid_request before the port is asked. A canonical id
@@ -60,18 +60,36 @@
 // withdrawn authority is the list's 403; an outage or an out-of-shape answer a 503. 200 { customer: { id, name } } — the
 // create's 201 body shape, the list entry's two fields, nothing else. No audit record (the list's owner decision).
 //
+// M7A-CUSTOMERS-P6 UPDATE — THE PROFILE READ. GET /api/v1/customers/{id}/profile: the same customer's contact record,
+// under exactly the detail route's policy (view_customers, trusted context, the session binding and its CSRF witness, no
+// body, no idempotency, no recent sign-in) and in exactly its order of refusals: any query 400; no tenant scope or no key
+// 403; a segment before '/profile' that is not a canonical lowercase uuid 400; exactly one port call; a throw 503;
+// 'denied' 403; 'not_found' the same 404 {error:'not_found', requestId} for a missing and a foreign id; out of shape 503.
+// It is the route table's second template (routes.ts): the id segment followed by exactly the literal '/profile'. The port
+// asks migration 023's session-bound routine, which delegates the whole decision and the point read to 022's and then
+// reads that row's contacts on the same snapshot. 200 { customer: { id, name, phone, email, createdAt } }, in that key
+// order: phone and email a stored value or null ("not provided"), createdAt the database's creation time as
+// YYYY-MM-DDTHH:mm:ss.sssZ (UTC, toISOString's form) or null — a customer created before migration 023 has no known
+// creation time, and none is invented. The answer is untrusted: a phone or email that is not already a value the create
+// stores, or a creation time not in exactly that form, is a 503. The list and the detail read stay {id, name}: contacts
+// are read here and nowhere else. No audit record (the list's owner decision), and no contact in any log or refusal.
+//
 // PURE AND PORTABLE: part of the emitted runtime artifact, importing only the runtime. It holds no infrastructure; the
 // port is handed to it by the composition root.
 import { Buffer } from 'node:buffer';
 import type { Response } from 'express';
 import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
 import type { TrustedScope } from './principals.js';
-import { EnforcementSetupError, PATH_ID_SEGMENT, pathIdOf } from './routes.js';
+import { EnforcementSetupError, PATH_ID_SEGMENT, pathIdBeforeSuffixOf, pathIdOf } from './routes.js';
 import type { AuthorizationRequirement, RouteContext, RouteDefinition, RouteHandler } from './routes.js';
 
 export const CUSTOMER_DIRECTORY_PATH = '/api/v1/customers';
-/** The detail read's path: the route table's one template, '/api/v1/customers/{id}'. */
+/** The detail read's path: the route table's first template, '/api/v1/customers/{id}'. */
 export const CUSTOMER_DETAIL_PATH = `${CUSTOMER_DIRECTORY_PATH}${PATH_ID_SEGMENT}`;
+/** The profile read's literal suffix after the id segment (M7A-CUSTOMERS-P6). */
+export const CUSTOMER_PROFILE_SUFFIX = '/profile';
+/** The profile read's path: the route table's second template, '/api/v1/customers/{id}/profile'. */
+export const CUSTOMER_PROFILE_PATH = `${CUSTOMER_DETAIL_PATH}${CUSTOMER_PROFILE_SUFFIX}`;
 /** The canonical tenant route permission: the Customers domain at View or above. */
 export const CUSTOMER_DIRECTORY_PERMISSION = 'view_customers';
 export const CUSTOMER_DIRECTORY_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: CUSTOMER_DIRECTORY_PERMISSION });
@@ -82,6 +100,55 @@ export const CUSTOMER_DIRECTORY_MAX_LIMIT = 100;
  * not a row this schema can hold, so the page is a 503 rather than an unbounded response.
  */
 export const CUSTOMER_NAME_MAX_CHARACTERS = 200;
+
+/** The longest phone and email, in Unicode scalars — migration 023's CHECKs (M7A-CUSTOMERS-P6). */
+export const CUSTOMER_PHONE_MAX_CHARACTERS = 64;
+export const CUSTOMER_EMAIL_MAX_CHARACTERS = 254;
+
+/**
+ * The characters no customer field may hold: C0 controls (NUL included), DEL, C1 controls, and the line and paragraph
+ * separators; a lone surrogate, which is no Unicode scalar value at all; and every Bidi_Control character —
+ * tenantDisplayName.ts's set, which 017's CHECK restates for the name and 023's for the contacts. The create's name rule
+ * (customerCreate.ts) and the contact rules below share it.
+ */
+export const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
+
+/** What a contact normalizer answers for a value no customer may hold: a create refuses it (400), whatever the field. */
+export const CONTACT_REFUSED: unique symbol = Symbol('contact refused');
+/** A contact as stored, null when not provided, or CONTACT_REFUSED. */
+export type CustomerContact = string | null | typeof CONTACT_REFUSED;
+
+/** A contact's common rule: absent (undefined, null, blank after trim) is null; any other non-string refused; else trimmed. */
+function contactOf(raw: unknown, max: number, admits: (value: string) => boolean): CustomerContact {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') return CONTACT_REFUSED;
+  const value = raw.trim();
+  if (value === '') return null;
+  // Code points; with no lone surrogate (refused first), exactly the scalar values 023's char_length counts.
+  if (REFUSED_CHARACTER_RE.test(value) || [...value].length > max) return CONTACT_REFUSED;
+  return admits(value) ? value : CONTACT_REFUSED;
+}
+
+const ASCII_DIGIT_RE = /[0-9]/;
+const WHITE_SPACE_RE = /\p{White_Space}/u;
+/** Exactly one '@', with a non-empty part on each side. */
+const EMAIL_SHAPE_RE = /^[^@]+@[^@]+$/u;
+
+/**
+ * The phone as stored — trimmed, 1-64 scalars, no refused character, at least one ASCII digit, kept as typed otherwise —
+ * null when not provided, or CONTACT_REFUSED (M7A-CUSTOMERS-P6; migration 023's customer_phone_chk restates it).
+ */
+export function normalizeCustomerPhone(raw: unknown): CustomerContact {
+  return contactOf(raw, CUSTOMER_PHONE_MAX_CHARACTERS, (phone) => ASCII_DIGIT_RE.test(phone));
+}
+
+/**
+ * The email as stored — trimmed, 1-254 scalars, no refused or White_Space character, exactly one '@' between non-empty
+ * parts, kept as typed otherwise — null when not provided, or CONTACT_REFUSED (023's customer_email_chk restates it).
+ */
+export function normalizeCustomerEmail(raw: unknown): CustomerContact {
+  return contactOf(raw, CUSTOMER_EMAIL_MAX_CHARACTERS, (email) => !WHITE_SPACE_RE.test(email) && EMAIL_SHAPE_RE.test(email));
+}
 
 /**
  * Whether `name` could be a stored name by length and encoding: 1-200 characters and well formed (a lone surrogate
@@ -378,6 +445,114 @@ export function createCustomerDetailRoute(ports: CustomerDetailPorts, options: {
     idempotency: 'none',
     // The list's reasons: the routine re-confirms that exact grant and reads only its tenant, bound to the presenting
     // minted session. No recent sign-in.
+    trustedContext: 'required',
+    recentAuth: 'none',
+    sessionBinding: 'required',
+    handler,
+  };
+  return Object.freeze(route);
+}
+
+/** One customer's contact record as the profile read shows it (M7A-CUSTOMERS-P6). */
+export interface CustomerProfile {
+  readonly id: string;
+  readonly name: string;
+  readonly phone: string | null;
+  readonly email: string | null;
+  readonly createdAt: string | null;
+}
+
+/**
+ * The port to migration 023's session-bound profile read, handed exactly what the detail port is. Its answer is untrusted
+ * input, expected to be
+ *   { outcome: 'customer', id, name, phone, email, createdAt } — id exactly the one asked for; phone, email a stored value
+ *                                                               or null; createdAt YYYY-MM-DDTHH:mm:ss.sssZ or null;
+ *   { outcome: 'not_found' }                                  — missing and foreign alike;
+ *   { outcome: 'denied' }                                     — the authority no longer holds.
+ * A throw is an outage.
+ */
+export interface CustomerProfilePort {
+  get(scope: TrustedScope, sessionKey: string, customerId: string, signal: AbortSignal): unknown;
+}
+
+/** What the profile route is built from. */
+export interface CustomerProfilePorts {
+  readonly customerProfile: CustomerProfilePort;
+}
+
+const PROFILE_KEYS: readonly string[] = ['outcome', 'id', 'name', 'phone', 'email', 'createdAt'];
+/** toISOString's exact form: a four-digit year, milliseconds, UTC. */
+const CREATED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** Whether `value` is a creation time in exactly toISOString's form — an instant that spells itself back — or null. */
+export function isCustomerCreatedAt(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== 'string' || !CREATED_AT_RE.test(value)) return false;
+  const instant = new Date(value);
+  return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
+}
+
+/** Whether `value` is a stored contact for `normalize`: null, or a string that normalizes to itself (trimmed and admitted). */
+const isStoredContact = (value: unknown, normalize: (raw: unknown) => CustomerContact): value is string | null =>
+  value === null || (typeof value === 'string' && normalize(value) === value);
+
+/** The port's answer as a CustomerProfile, 'not_found' or 'denied' — or null for anything out of shape. Never throws. */
+export function customerProfileOf(raw: unknown, customerId: string): CustomerProfile | 'not_found' | 'denied' | null {
+  try {
+    if (!isPlain(raw)) return null;
+    const { outcome } = raw;
+    if (outcome === 'denied' || outcome === 'not_found') return hasExactly(raw, ['outcome']) ? outcome : null;
+    if (outcome !== 'customer' || !hasExactly(raw, PROFILE_KEYS)) return null;
+    // Read once each, so a value validated is the value copied.
+    const { id, name, phone, email, createdAt } = raw;
+    if (typeof id !== 'string' || id !== customerId || !UUID_RE.test(id) || !isStorableName(name)) return null;
+    if (!isStoredContact(phone, normalizeCustomerPhone) || !isStoredContact(email, normalizeCustomerEmail)) return null;
+    if (!isCustomerCreatedAt(createdAt)) return null;
+    return Object.freeze({ id, name, phone, email, createdAt });
+  } catch {
+    return null; // a throwing getter or proxy trap is never a customer
+  }
+}
+
+/** The customer profile route over `ports`, for a route table; refused at construction without its port. */
+export function createCustomerProfileRoute(ports: CustomerProfilePorts, options: { deadlineMs?: number } = {}): RouteDefinition {
+  const reader = ports?.customerProfile;
+  if (typeof reader?.get !== 'function') throw new EnforcementSetupError('route_handler_invalid');
+  const deadlineMs = options.deadlineMs ?? PORT_DEADLINE_MS;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > PORT_DEADLINE_MS) {
+    throw new EnforcementSetupError('port_deadline_invalid');
+  }
+  // The detail handler's order of refusals, step for step; only the id's place in the path and the answer differ.
+  const handler: RouteHandler = async (req, res, ctx) => {
+    if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'customer_profile_query_invalid');
+    const scope = ctx.trusted;
+    if (scope === null || scope.scope !== 'tenant' || scope.tenant === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    const { sessionKey } = ctx;
+    if (sessionKey === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    // The segment before the literal suffix of the same req.path the table matched.
+    const id = pathIdBeforeSuffixOf(typeof req.path === 'string' ? req.path : '', CUSTOMER_PROFILE_SUFFIX);
+    if (id === null) return refuse(res, ctx, 400, 'invalid_request', 'customer_profile_id_invalid');
+    let raw: unknown;
+    try {
+      raw = await withDeadline(deadlineMs, (signal) => reader.get(scope, sessionKey, id, signal));
+    } catch (err) {
+      return refuse(res, ctx, 503, 'service_unavailable', outage('customer_profile', err));
+    }
+    const answer = customerProfileOf(raw, id);
+    if (answer === 'denied') return refuse(res, ctx, 403, 'forbidden', 'customer_profile_denied');
+    // Missing and foreign alike: the detail read's one 404, body shape and log reason.
+    if (answer === 'not_found') return refuse(res, ctx, 404, 'not_found', 'customer_not_found');
+    if (answer === null) return refuse(res, ctx, 503, 'service_unavailable', 'customer_profile_answer_invalid');
+    res.status(200).json({ customer: { id: answer.id, name: answer.name, phone: answer.phone, email: answer.email, createdAt: answer.createdAt } });
+  };
+  const route: RouteDefinition = {
+    method: 'GET',
+    path: CUSTOMER_PROFILE_PATH,
+    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: CUSTOMER_DIRECTORY_REQUIREMENT }),
+    body: Object.freeze({ kind: 'none' }),
+    idempotency: 'none',
+    // The detail read's reasons, unchanged: the routine re-confirms that exact grant and reads only its tenant, bound to the
+    // presenting minted session (and, by the binding, to the session the client checked). No recent sign-in.
     trustedContext: 'required',
     recentAuth: 'none',
     sessionBinding: 'required',

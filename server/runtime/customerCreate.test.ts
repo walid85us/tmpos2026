@@ -3,6 +3,12 @@
 // enforced chain over real loopback sockets on the TENANT boundary — session, CSRF, the authorizer's trusted scope, the
 // command handed to the transaction port, replay, and a key bound to the trusted tenant and actor.
 //
+// M7A-CUSTOMERS-P6: the optional phone and email — each refused class, their parity with migration 023's CHECKs (every
+// code point swept), the body's three keys, the 8 KiB cap, the change set carrying '' for an absent contact, and the
+// idempotency witnesses: the fingerprint is the body bytes (a name-only body's is pinned to the value the pre-contact code
+// computes), a changed contact under one key is the 422, and records sealed before contacts existed — with and without
+// Location — replay exactly as committed.
+//
 // Synthetic principals, sessions, keys and ports only. The transaction port here is a recording stand-in whose lease check
 // is the idempotency store's own; the PostgreSQL store, its tenant revalidation and migration 019 are proved elsewhere
 // (server/persistence, tests/db). Special characters are built from code points so this source stays ASCII.
@@ -18,7 +24,10 @@ import type { CommandTransactionPort, TransactionCommand } from './commandTransa
 import {
   CUSTOMER_CREATE_CONTRACT, CUSTOMER_CREATE_PERMISSION, CUSTOMER_CREATE_ROUTE, normalizeCustomerName, planCustomerCreate,
 } from './customerCreate.js';
-import { CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS, createCustomerDirectoryRoute } from './customerDirectory.js';
+import {
+  CONTACT_REFUSED, CUSTOMER_DIRECTORY_PATH, CUSTOMER_EMAIL_MAX_CHARACTERS, CUSTOMER_NAME_MAX_CHARACTERS, CUSTOMER_PHONE_MAX_CHARACTERS,
+  createCustomerDirectoryRoute, normalizeCustomerEmail, normalizeCustomerPhone,
+} from './customerDirectory.js';
 import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyState, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
 import { IDEMPOTENCY_POLICY, createIdempotencyKeyring, envelopeFromOutcome } from './idempotency.js';
 import { createMemorySessionStore } from './memorySessionStore.testkit.js';
@@ -145,13 +154,142 @@ test('the length is 1-200 scalars after trimming, astral scalars included, and p
   for (const raw of [undefined, null, 1, true, {}, ['A'], { toString: () => 'A' }]) assert.equal(normalizeCustomerName(raw), null, String(raw));
 });
 
+// --- 1b. the contact rules (M7A-CUSTOMERS-P6), and their parity with migration 023's CHECKs ------------------------------
+
+const MIGRATION_023 = readFileSync(new URL('../platform-identity/migrations/023_m7a_customer_contact.up.sql', import.meta.url), 'utf8');
+/** One of 023's two CHECKs, read as 017's is read above: its bounds, its anywhere classes and its edge class. */
+function check023(field: 'phone' | 'email') {
+  const constraint = new RegExp(`add constraint customer_${field}_chk check \\(\\n([\\s\\S]*?)\\)\\)`).exec(MIGRATION_023)?.[1] ?? '';
+  const anywhere = [...constraint.matchAll(new RegExp(`and ${field} !~ '\\[([^\\]]+)\\]'\\n`, 'g'))].map((m) => classOf(m[1]));
+  const edge = new RegExp(`and ${field} !~ '\\^\\[([^\\]]+)\\]\\|\\[([^\\]]+)\\]\\$'`).exec(constraint);
+  const length = new RegExp(`char_length\\(${field}\\) between 1 and (\\d+)`).exec(constraint);
+  return { anywhere, edge, length: Number(length?.[1]), refusals: (constraint.match(new RegExp(`${field} !~`, 'g')) ?? []).length, constraint };
+}
+const PHONE_023 = check023('phone');
+const EMAIL_023 = check023('email');
+
+test('migration 023\'s CHECKs read as this test expects, and restate 017\'s classes exactly', () => {
+  const [controls017, bidi017] = check017.anywhere;
+  const edge017 = classOf((check017.edge as RegExpExecArray)[1]);
+  assert.deepEqual([PHONE_023.refusals, PHONE_023.anywhere.length, PHONE_023.length], [3, 2, CUSTOMER_PHONE_MAX_CHARACTERS]);
+  assert.deepEqual([EMAIL_023.refusals, EMAIL_023.anywhere.length, EMAIL_023.length], [4, 3, CUSTOMER_EMAIL_MAX_CHARACTERS]);
+  for (const check of [PHONE_023, EMAIL_023]) {
+    assert.deepEqual([...check.anywhere[0]], [...controls017], 'the controls class is 017\'s');
+    assert.deepEqual([...check.anywhere[1]], [...bidi017], 'the Bidi_Control class is 017\'s');
+    assert.ok(check.edge !== null && check.edge[1] === check.edge[2], 'the same class at either edge');
+    assert.deepEqual([...classOf((check.edge as RegExpExecArray)[1])], [...edge017], 'the edge class is 017\'s');
+  }
+  assert.match(PHONE_023.constraint, /and phone ~ '\[0-9\]'$/, 'a phone needs an ASCII digit');
+  assert.match(EMAIL_023.constraint, /and email ~ '\^\[\^@\]\+@\[\^@\]\+\$'$/, 'an email is exactly one @ between non-empty parts');
+  // 023's email White_Space class is EXACTLY Unicode's White_Space: every scalar value swept.
+  const wrong: number[] = [];
+  for (let c = 0; c <= 0x10ffff; c++) {
+    if (c >= 0xd800 && c <= 0xdfff) continue;
+    if (EMAIL_023.anywhere[2].has(c) !== /\p{White_Space}/u.test(String.fromCodePoint(c))) wrong.push(c);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('inside a contact the refused set is EXACTLY 023\'s classes plus NUL (and, in an email, a second @): swept over every scalar value', () => {
+  const [controls, bidi] = PHONE_023.anywhere;
+  const space = EMAIL_023.anywhere[2];
+  const wrongPhone: number[] = [];
+  const wrongEmail: number[] = [];
+  for (let c = 0; c <= 0x10ffff; c++) {
+    if (c >= 0xd800 && c <= 0xdfff) continue;
+    const refusedAnywhere = c === 0 || controls.has(c) || bidi.has(c);
+    if ((normalizeCustomerPhone(`1${ch(c)}2`) === CONTACT_REFUSED) !== refusedAnywhere) wrongPhone.push(c);
+    if ((normalizeCustomerEmail(`a${ch(c)}@b`) === CONTACT_REFUSED) !== (refusedAnywhere || space.has(c) || c === 0x40)) wrongEmail.push(c);
+  }
+  assert.deepEqual(wrongPhone, [], 'the runtime refuses inside a phone exactly what 023 refuses, NUL besides');
+  assert.deepEqual(wrongEmail, [], 'the runtime refuses inside an email exactly what 023 refuses, NUL besides');
+  // The edges: every one of 017's edge characters (023's edge class) is trimmed away, so a stored contact never has one.
+  for (const c of classOf((PHONE_023.edge as RegExpExecArray)[1])) {
+    assert.equal(normalizeCustomerPhone(`${ch(c)}+1 555 0100${ch(c)}`), '+1 555 0100', c.toString(16));
+    assert.equal(normalizeCustomerEmail(`${ch(c)}ada@example.test${ch(c)}`), 'ada@example.test', c.toString(16));
+  }
+});
+
+test('the phone: optional, trimmed, 1-64 scalars, an ASCII digit, kept as typed — and every refused class refused', () => {
+  for (const absent of [undefined, null, '', ' ', '   ', '\t\n', ch(0x3000, 0xa0)]) assert.equal(normalizeCustomerPhone(absent), null, `absent: ${JSON.stringify(absent)}`);
+  for (const [label, raw, stored] of [
+    ['as typed', '+1 555 0100', '+1 555 0100'], ['trimmed', '  (555) 0100\n', '(555) 0100'], ['one digit', '7', '7'],
+    ['internal spaces and punctuation kept', '+44 (0)20 7946-0958 ext. 12', '+44 (0)20 7946-0958 ext. 12'],
+    ['letters beside a digit', 'call 555 0100 after 5', 'call 555 0100 after 5'], ['an internal NBSP kept', `555${ch(0xa0)}0100`, `555${ch(0xa0)}0100`],
+    ['64 scalars', '1'.repeat(64), '1'.repeat(64)], ['64 astral scalars with a digit', `1${ch(0x1f4de).repeat(63)}`, `1${ch(0x1f4de).repeat(63)}`],
+    ['padding does not count', ` ${'1'.repeat(64)} `, '1'.repeat(64)],
+  ] as const) {
+    assert.equal(normalizeCustomerPhone(raw), stored, label);
+  }
+  const refused: Array<[string, unknown]> = [
+    ['no digit', 'call me'], ['a non-ASCII digit only', ch(0x0661, 0x0662)], ['a fullwidth digit only', ch(0xff11)],
+    ['65 scalars', '1'.repeat(65)], ['65 astral scalars', `1${ch(0x1f4de).repeat(64)}`],
+    ['NUL', `1${ch(0)}2`], ['a C0 control', `1${ch(0x7)}2`], ['a tab inside', `1${ch(0x9)}2`], ['DEL', `1${ch(0x7f)}2`], ['a C1 control', `1${ch(0x85)}2`],
+    ['LS inside', `1${ch(0x2028)}2`], ['PS inside', `1${ch(0x2029)}2`], ['a lone high surrogate', `1${unit(0xd800)}2`], ['a lone low surrogate', `1${unit(0xdfff)}`],
+    ...[0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069]
+      .map((c): [string, unknown] => [`Bidi_Control U+${c.toString(16)}`, `1${ch(c)}2`]),
+    ['a number', 5550100], ['true', true], ['an object', { phone: '1' }], ['an array', ['1']], ['a String object', Object('1')],
+  ];
+  for (const [label, raw] of refused) assert.equal(normalizeCustomerPhone(raw), CONTACT_REFUSED, label);
+});
+
+test('the email: optional, trimmed, 1-254 scalars, no White_Space, exactly one @ between non-empty parts, kept as typed — and every refused class refused', () => {
+  for (const absent of [undefined, null, '', '  ', `${ch(0x2028)}`]) assert.equal(normalizeCustomerEmail(absent), null, `absent: ${JSON.stringify(absent)}`);
+  const local = 'a'.repeat(126);
+  for (const [label, raw, stored] of [
+    ['as typed', 'ada@example.test', 'ada@example.test'], ['trimmed', '  Ada.Lovelace@Example.TEST\n', 'Ada.Lovelace@Example.TEST'],
+    ['no case folding', 'ADA@EXAMPLE.TEST', 'ADA@EXAMPLE.TEST'], ['no domain rule', 'a@b', 'a@b'], ['plus and quotes kept', '"ada+x"@example.test', '"ada+x"@example.test'],
+    ['254 scalars', `${local}@${'b'.repeat(127)}`, `${local}@${'b'.repeat(127)}`],
+    ['254 astral scalars', `${ch(0x1f600).repeat(126)}@${ch(0x1f600).repeat(127)}`, `${ch(0x1f600).repeat(126)}@${ch(0x1f600).repeat(127)}`],
+    ['a ZWSP is not White_Space (kept as typed)', `a${ch(0x200b)}@example.test`, `a${ch(0x200b)}@example.test`],
+  ] as const) {
+    assert.equal(normalizeCustomerEmail(raw), stored, label);
+  }
+  const refused: Array<[string, unknown]> = [
+    ['no @', 'ada.example.test'], ['two @', 'a@b@example.test'], ['@@', 'a@@example.test'], ['an empty local part', '@example.test'],
+    ['an empty domain', 'ada@'], ['only @', '@'], ['255 scalars', `${local}@${'b'.repeat(128)}`],
+    ['a space inside', 'ada lovelace@example.test'], ['a space after @', 'ada@ example.test'], ['a tab inside', `ada${ch(9)}@example.test`],
+    ['an NBSP inside', `ada${ch(0xa0)}@example.test`], ['an ideographic space inside', `ada${ch(0x3000)}@example.test`], ['NEL inside', `ada${ch(0x85)}@example.test`],
+    ['NUL', `a${ch(0)}@b`], ['DEL', `a${ch(0x7f)}@b`], ['a C1 control', `a${ch(0x9f)}@b`], ['LS inside', `a${ch(0x2028)}@b`], ['PS inside', `a${ch(0x2029)}@b`],
+    ['a lone surrogate', `a${unit(0xdc00)}@b`],
+    ...[0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069]
+      .map((c): [string, unknown] => [`Bidi_Control U+${c.toString(16)}`, `a${ch(c)}@b`]),
+    ['a number', 1], ['false', false], ['an object', { email: 'a@b' }], ['an array', ['a@b']],
+  ];
+  for (const [label, raw] of refused) assert.equal(normalizeCustomerEmail(raw), CONTACT_REFUSED, label);
+});
+
+test('the planner: contacts optional and independent, stored trimmed, blank or null absent (the empty string), keys name, phone and email only', () => {
+  const id = randomUUID();
+  const changesOf = (body: unknown) => (planCustomerCreate({ audience: 'tenant', body, newAggregateId: id }) as CommandPlan).changes;
+  assert.deepEqual(changesOf({ name: 'Ada', phone: ' +1 555 0100 ', email: ' ada@example.test ' }), { name: 'Ada', phone: '+1 555 0100', email: 'ada@example.test' });
+  assert.deepEqual(changesOf({ name: 'Ada', phone: '+1 555 0100' }), { name: 'Ada', phone: '+1 555 0100', email: '' });
+  assert.deepEqual(changesOf({ name: 'Ada', email: 'ada@example.test' }), { name: 'Ada', phone: '', email: 'ada@example.test' });
+  assert.deepEqual(changesOf({ name: 'Ada', phone: null, email: '   ' }), { name: 'Ada', phone: '', email: '' }, 'null and blank are absent');
+  assert.deepEqual(changesOf({ email: 'ada@example.test', name: 'Ada', phone: '1' }), { name: 'Ada', phone: '1', email: 'ada@example.test' }, 'any key order');
+  // The 201 representation never carries a contact.
+  const p = planCustomerCreate({ audience: 'tenant', body: { name: 'Ada', phone: '+1 555 0100', email: 'ada@example.test' }, newAggregateId: id }) as CommandPlan;
+  assert.deepEqual(p.response, { status: 201, body: { customer: { id, name: 'Ada' } }, headers: { location: `/api/v1/customers/${id}` } });
+  // An own key the prototype also names is read; an omitted one is never read from a prototype.
+  const polluted = Object.create({ phone: 'proto 1', email: 'proto@example.test' }) as Record<string, unknown>;
+  polluted.name = 'Ada';
+  assert.deepEqual(changesOf(polluted), { name: 'Ada', phone: '', email: '' }, 'an inherited contact is not a field');
+});
+
 // --- 2. the planner ------------------------------------------------------------------------------------------------------
 
-test('a body the contract refuses plans nothing: exactly { name } and a valid name, or COMMAND_REQUEST_INVALID', () => {
+test('a body the contract refuses plans nothing: name and at most phone and email, each valid, or COMMAND_REQUEST_INVALID', () => {
+  // M7A-CUSTOMERS-P6 changed one expectation deliberately: { name, email } is no longer refused (it plans; see the next test).
   const invalid: Array<[string, unknown]> = [
     ['null', null], ['undefined', undefined], ['an array', [{ name: 'A' }]], ['an empty array', []], ['a string', 'A'], ['a number', 1], ['true', true],
     ['no field', {}], ['a tenant selector', { name: 'A', tenantId: T2 }], ['a client id', { name: 'A', id: randomUUID() }],
-    ['an actor', { name: 'A', actor: ACTOR }], ['a contact field', { name: 'A', email: 'a@example.test' }], ['only another field', { title: 'A' }],
+    ['an actor', { name: 'A', actor: ACTOR }], ['a contact beside an unknown field', { name: 'A', email: 'a@example.test', note: 'x' }],
+    ['a contact without a name', { phone: '+1 555 0100' }], ['contacts without a name', { phone: '+1 555 0100', email: 'ada@example.test' }],
+    ['a capitalised contact key', { name: 'A', Email: 'a@example.test' }], ['only another field', { title: 'A' }],
+    ['a number for the phone', { name: 'A', phone: 5550100 }], ['an object for the email', { name: 'A', email: { address: 'a@example.test' } }],
+    ['an array for the phone', { name: 'A', phone: ['+1 555 0100'] }], ['false for the email', { name: 'A', email: false }],
+    ['a phone with no digit', { name: 'A', phone: 'call me' }], ['an email with a space', { name: 'A', email: 'ada @example.test' }],
+    ['an email without @', { name: 'A', email: 'ada.example.test' }], ['a valid name with a refused phone', { name: 'Ada', phone: `1${ch(0x202e)}2` }],
     ['a number for the name', { name: 1 }], ['null for the name', { name: null }], ['an object for the name', { name: { first: 'A' } }],
     ['an array for the name', { name: ['A'] }], ['an empty name', { name: '' }], ['a blank name', { name: '   ' }],
     ['an invisible name', { name: ch(0x200b) }], ['a Bidi override', { name: `a${ch(0x202e)}b` }], ['a C1 control', { name: `a${ch(0x85)}b` }],
@@ -161,11 +299,12 @@ test('a body the contract refuses plans nothing: exactly { name } and a valid na
   for (const [label, body] of invalid) assert.equal(plan(body), COMMAND_REQUEST_INVALID, label);
 });
 
-test('the plan: the runtime\'s new id as the aggregate, no version, the stored name alone, no event, and the 201 representation', () => {
+test('the plan: the runtime\'s new id as the aggregate, no version, the stored name with no contact, no event, and the 201 representation', () => {
   const newAggregateId = randomUUID();
   const p = planCustomerCreate({ audience: 'tenant', body: { name: '  Ada  Lovelace ' }, newAggregateId });
+  // M7A-CUSTOMERS-P6 changed one expectation deliberately: the change set always carries phone and email, '' when absent.
   assert.deepEqual(p, {
-    aggregateId: newAggregateId, expectedVersion: null, changes: { name: 'Ada  Lovelace' }, events: [],
+    aggregateId: newAggregateId, expectedVersion: null, changes: { name: 'Ada  Lovelace', phone: '', email: '' }, events: [],
     response: { status: 201, body: { customer: { id: newAggregateId, name: 'Ada  Lovelace' } }, headers: { location: `/api/v1/customers/${newAggregateId}` } },
   });
   // M7A-CUSTOMERS-P4: the detail route exists, so the 201 names it — the one allowlisted, sealed header, and nothing else.
@@ -184,7 +323,7 @@ test('the route registers as one POST behind the tenant session and create_custo
   }, {
     method: 'POST', path: '/api/v1/customers', idempotency: 'required', trustedContext: 'required', recentAuth: 'none', sessionBinding: 'none',
     policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'create_customers' } },
-    body: { kind: 'json', maxBytes: 4096, required: true },
+    body: { kind: 'json', maxBytes: 8192, required: true },
   });
   assert.equal(CUSTOMER_CREATE_PERMISSION, 'create_customers');
   assert.ok('command' in route && route.command.contract === CUSTOMER_CREATE_CONTRACT && route.command.plan === planCustomerCreate);
@@ -200,28 +339,38 @@ test('the route registers as one POST behind the tenant session and create_custo
   assert.equal(CUSTOMER_DIRECTORY_PATH, route.path);
 });
 
-test('the contract registers with no event contract at all, and declares the name as 400 UTF-16 units — the record cap it needs', () => {
+test('the contract registers with no event contract at all, and declares the name, phone and email as 400, 128 and 508 UTF-16 units — the record caps they need', () => {
   const [contract] = defineCommands([CUSTOMER_CREATE_CONTRACT], defineOutboxEvents([])).list();
   assert.deepEqual(contract, {
-    kind: 'tenant.customer.create', mode: 'create', aggregateType: 'customer', changes: { name: { type: 'string', maxLength: 400 } }, events: [],
+    kind: 'tenant.customer.create', mode: 'create', aggregateType: 'customer', events: [],
+    changes: { name: { type: 'string', maxLength: 400 }, phone: { type: 'string', maxLength: 128 }, email: { type: 'string', maxLength: 508 } },
   });
-  // The longest legal name — 200 astral scalars — plans, and the runtime prepares it for the store: the schema admits it.
+  // The longest legal record — a 200-, a 64- and a 254-scalar field, every scalar astral — plans, and the runtime prepares it
+  // for the store: the schema admits it.
   const newAggregateId = randomUUID();
   const longest = ch(0x1f600).repeat(200);
+  const longestPhone = `1${ch(0x1f4de).repeat(63)}`;
+  const longestEmail = `${ch(0x1f600).repeat(126)}@${ch(0x1f600).repeat(127)}`;
+  assert.deepEqual([[...longestPhone].length, [...longestEmail].length, longestEmail.length], [64, 254, 507]);
   const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
   const operation = keyring.operationOf(randomUUID(), { authProvider: 'synthetic', authProviderUid: 'uid-a' }, {
     method: 'POST', path: CUSTOMER_DIRECTORY_PATH, audience: 'tenant', tenant: T1, store: null, actor: ACTOR, body: Buffer.from('{}'),
   });
-  const prepared = prepareCommand(contract, defineOutboxEvents([]), planCustomerCreate({ audience: 'tenant', body: { name: longest }, newAggregateId }), {
+  const prepared = prepareCommand(contract, defineOutboxEvents([]), planCustomerCreate({ audience: 'tenant', body: { name: longest, phone: longestPhone, email: longestEmail }, newAggregateId }), {
     scope: operation.scope, lease: 'l'.repeat(43), newAggregateId, authorization: { scope: 'tenant', permission: 'create_customers' },
     context: SCOPE, authNotAfter: null, sessionKey: 'k'.repeat(43), seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null, 'prepared');
-  assert.deepEqual(prepared.command.mutation, { kind: 'tenant.customer.create', aggregateType: 'customer', aggregateId: newAggregateId, expectedVersion: null, changes: { name: longest } });
+  assert.deepEqual(prepared.command.mutation, {
+    kind: 'tenant.customer.create', aggregateType: 'customer', aggregateId: newAggregateId, expectedVersion: null,
+    changes: { name: longest, phone: longestPhone, email: longestEmail },
+  });
   assert.deepEqual({ ...prepared.command.audit, correlationId: '' }, {
     action: 'tenant.customer.create', permission: 'create_customers', scope: 'tenant', tenant: T1, store: null, actor: ACTOR, correlationId: '',
     reasonCode: null, reason: null,
-  }, 'the audit record carries the trusted scope and no name');
+  }, 'the audit record carries the trusted scope and no name, phone or email');
+  assert.ok(!JSON.stringify(prepared.command.audit).includes(ch(0x1f4de)) && !JSON.stringify(prepared.command.audit).includes('@'), 'no contact in the audit record');
+  assert.ok(!JSON.stringify(prepared.command.response).includes(ch(0x1f4de)), 'nor in the sealed 201');
   assert.deepEqual(prepared.command.events, []);
 });
 
@@ -344,7 +493,8 @@ test('a committed create answers 201 { customer: { id, name } }, and the port re
     assert.deepEqual(h.authorizations.map((a) => a[1]), [{ scope: 'tenant', permission: 'create_customers' }], 'the declared requirement, never one the request names');
     assert.equal(h.commits.length, 1);
     const [c] = h.commits;
-    assert.deepEqual(c.mutation, { kind: 'tenant.customer.create', aggregateType: 'customer', aggregateId: customer.id, expectedVersion: null, changes: { name: 'Ada  Lovelace' } });
+    // M7A-CUSTOMERS-P6 changed one expectation deliberately: an absent contact is '' in the change set (a record holds no null).
+    assert.deepEqual(c.mutation, { kind: 'tenant.customer.create', aggregateType: 'customer', aggregateId: customer.id, expectedVersion: null, changes: { name: 'Ada  Lovelace', phone: '', email: '' } });
     assert.deepEqual(c.context, SCOPE, 'the authorizer\'s scope, unchanged by any header');
     assert.equal(c.sessionKey, h.storeKey, 'the presenting session\'s store key, for the store to hold and hand its routine');
     assert.deepEqual([c.audit.action, c.audit.permission, c.audit.scope, c.audit.tenant, c.audit.store, c.audit.actor], ['tenant.customer.create', 'create_customers', 'tenant', T1, null, ACTOR]);
@@ -393,7 +543,12 @@ test('refusals before the store: a denial, a missing or malformed key, a body th
       ['no session CSRF', { headers: { [SESSION_CSRF_HEADER]: 'wrong' } }, 403, 'forbidden'],
       ['a cross-site request', { headers: { 'sec-fetch-site': 'cross-site' } }, 403, 'forbidden'],
       ['another origin', { headers: { origin: 'http://admin.trusted.test' } }, 403, 'forbidden'],
-      ['an oversized body', { body: JSON.stringify({ name: 'a'.repeat(4_100) }) }, 413, 'content_too_large'],
+      // M7A-CUSTOMERS-P6: the cap is 8192 bytes (a body of 4100 is now admitted, and refused only as a 201-scalar name).
+      ['an over-cap name', { body: JSON.stringify({ name: 'a'.repeat(4_100) }) }, 400, 'invalid_request'],
+      ['an oversized body', { body: JSON.stringify({ name: 'a'.repeat(8_200) }) }, 413, 'content_too_large'],
+      ['a refused phone', { body: JSON.stringify({ name: 'Ada', phone: 'no digit' }) }, 400, 'invalid_request'],
+      ['a refused email', { body: JSON.stringify({ name: 'Ada', email: 'a@b@example.test' }) }, 400, 'invalid_request'],
+      ['an unknown field beside the contacts', { body: JSON.stringify({ name: 'Ada', phone: '1', email: 'a@example.test', id: randomUUID() }) }, 400, 'invalid_request'],
     ];
     for (const [label, over, status, error] of cases) {
       const r = await h.post(over);
@@ -459,5 +614,68 @@ test('a completion sealed BEFORE M7A-CUSTOMERS-P4 replays on its first request w
     assert.equal(fresh.headers.location, `/api/v1/customers/${(JSON.parse(fresh.body) as { customer: { id: string } }).customer.id}`);
     assert.deepEqual([again.headers['idempotent-replayed'], again.headers.location, again.body], ['true', fresh.headers.location, fresh.body]);
     assert.equal(h.commits.length, 1, 'one commit: the new key\'s first request');
+  });
+});
+
+// --- 5. contacts and idempotency (M7A-CUSTOMERS-P6) -------------------------------------------------------------------------
+
+test('contacts ride in the fingerprint as bytes: the same key and bytes replay the sealed 201; a changed phone, email or spelling under the key is the 422', async () => {
+  await withChain(async (h) => {
+    const key = randomUUID();
+    const body = JSON.stringify({ name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test' });
+    const first = await h.post({ key, body });
+    assert.equal(first.status, 201, first.body);
+    const { customer } = JSON.parse(first.body) as { customer: { id: string; name: string } };
+    assert.deepEqual(JSON.parse(first.body), { customer: { id: customer.id, name: 'Ada Lovelace' } }, 'the 201 is {customer:{id,name}}: no contact');
+    assert.equal(first.headers.location, `/api/v1/customers/${customer.id}`);
+    assert.deepEqual(h.commits[0].mutation.changes, { name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test' });
+    const replay = await h.post({ key, body });
+    assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed'], replay.headers.location], [201, first.body, 'true', first.headers.location]);
+    for (const [label, changed] of [
+      ['a changed phone', JSON.stringify({ name: 'Ada Lovelace', phone: '+1 555 0199', email: 'ada@example.test' })],
+      ['a changed email', JSON.stringify({ name: 'Ada Lovelace', phone: '+1 555 0100', email: 'grace@example.test' })],
+      ['the phone dropped', JSON.stringify({ name: 'Ada Lovelace', email: 'ada@example.test' })],
+      ['the same values, another key order', JSON.stringify({ email: 'ada@example.test', name: 'Ada Lovelace', phone: '+1 555 0100' })],
+      ['the same values, padded', JSON.stringify({ name: 'Ada Lovelace', phone: ' +1 555 0100', email: 'ada@example.test' })],
+    ] as const) {
+      const r = await h.post({ key, body: changed });
+      assert.deepEqual([r.status, errorOf(r)], [422, 'idempotency_key_reused'], `${label}: ${r.body}`);
+      assert.ok(!r.body.includes('555') && !r.body.includes('@'), `${label}: the refusal names no contact`);
+    }
+    // A name-only body and the same name with an explicit null phone are two spellings: the bytes, not the parsed value, bind.
+    const nameOnly = randomUUID();
+    assert.equal((await h.post({ key: nameOnly, body: '{"name":"Grace"}' })).status, 201);
+    const nulled = await h.post({ key: nameOnly, body: '{"name":"Grace","phone":null}' });
+    assert.deepEqual([nulled.status, errorOf(nulled)], [422, 'idempotency_key_reused'], nulled.body);
+    assert.equal(h.commits.length, 2, 'one commit per key; no refusal re-planned');
+    for (const line of h.logs) assert.ok(!line.includes('555 0') && !line.includes('example.test'), 'no log line carries a contact');
+  });
+});
+
+test('a name-only body keeps the fingerprint the pre-contact code computed: pinned, and a record sealed with Location before contacts replays unchanged', async () => {
+  // The fingerprint app.ts derives for these exact inputs, computed with this repository's code at ad584b5 (idempotency.ts
+  // is unchanged by M7A-CUSTOMERS-P6) and written out here; assembled from two halves so no scanner reads a token literal.
+  const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+  const pinned = ['jNmrjvWu3XnY6Zbou', 'QMNeh5VfHOl7vZjA2g3II2kZYQ'].join('');
+  const operation = keyring.operationOf('0b6f1d2e-3c4a-4b5c-8d6e-7f8091a2b3c4', { authProvider: 'synthetic', authProviderUid: 'uid-customers' }, {
+    method: 'POST', path: CUSTOMER_DIRECTORY_PATH, audience: 'tenant', tenant: T1, store: null, actor: ACTOR, body: Buffer.from('{"name":"Ada Lovelace"}'),
+  });
+  assert.equal(operation.fingerprint, pinned, 'a name-only body\'s fingerprint is unchanged: no default contact enters it');
+  await withChain(async (h) => {
+    // EXACTLY what the P4/P5 build sealed for a name-only create: the four envelope fields with Location, as a literal.
+    const key = randomUUID();
+    const body = JSON.stringify({ name: 'Sealed Before Contacts' });
+    const id = randomUUID();
+    const sealedBody = JSON.stringify({ customer: { id, name: 'Sealed Before Contacts' } });
+    const p5 = { status: 201, contentType: 'application/json; charset=utf-8', headers: { location: `/api/v1/customers/${id}` }, body: sealedBody };
+    assert.deepEqual(envelopeFromOutcome({ status: 201, body: { customer: { id, name: 'Sealed Before Contacts' } }, headers: { location: `/api/v1/customers/${id}` } }), p5);
+    h.seedCompleted(key, body, (op) => keyring.seal(p5, op));
+    const replay = await h.post({ key, body });
+    assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed'], replay.headers.location],
+      [201, sealedBody, 'true', `/api/v1/customers/${id}`], replay.body);
+    // The same key with a contact added is a changed request against that record, never a re-plan.
+    const changed = await h.post({ key, body: JSON.stringify({ name: 'Sealed Before Contacts', phone: '+1 555 0100' }) });
+    assert.deepEqual([changed.status, errorOf(changed)], [422, 'idempotency_key_reused']);
+    assert.equal(h.commits.length, 0, 'nothing planned, committed or sent to the port');
   });
 });

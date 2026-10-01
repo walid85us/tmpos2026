@@ -9,7 +9,7 @@
 // the reserved /api and /admin namespaces.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, pathIdOf, sessionPaths } from './routes.js';
+import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, pathIdBeforeSuffixOf, pathIdOf, sessionPaths } from './routes.js';
 
 const handler = (): void => {};
 const PUBLIC = { access: 'public' };
@@ -391,16 +391,19 @@ test('the session binding is optional, and required only on a session route with
   }
 });
 
-// --- the one path template (M7A-CUSTOMERS-P4, docs/phase-4 C1/C2.5) --------------------------------
+// --- the two path templates (M7A-CUSTOMERS-P4, -P6; docs/phase-4 C1/C2.5) ---------------------------
 
 const VIEW = { scope: 'tenant', permission: 'view_customers' };
 const detail = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   route({ path: '/api/v1/customers/{id}', policy: SESSION('tenant', VIEW), trustedContext: 'required', sessionBinding: 'required', ...over });
 const list = (over: Record<string, unknown> = {}): Record<string, unknown> => detail({ path: '/api/v1/customers', ...over });
+const profile = (over: Record<string, unknown> = {}): Record<string, unknown> => detail({ path: '/api/v1/customers/{id}/profile', ...over });
 const ID = '0f8e2a4c-9b1d-4e3f-8a2b-6c7d8e9f0a1b';
 
-test('the {id} template registers only as GET /api/v1/customers/{id} without idempotency; every other template is refused', () => {
+test('the {id} templates register only as GET /api/v1/customers/{id} and GET /api/v1/customers/{id}/profile without idempotency; every other template is refused', () => {
   assert.equal(setupCode([detail()]), undefined);
+  assert.equal(setupCode([profile()]), undefined, 'M7A-CUSTOMERS-P6: the profile template');
+  assert.equal(setupCode([list(), detail(), profile()]), undefined, 'all three beside each other');
   for (const [label, def] of [
     ['a template elsewhere', route({ path: '/v1/{id}' })],
     ['a middle parameter', route({ path: '/v1/{id}/x' })],
@@ -417,9 +420,22 @@ test('the {id} template registers only as GET /api/v1/customers/{id} without ide
     ['a literal uuid below the template, POST', required({ path: `/api/v1/customers/${ID}`, policy: SESSION('tenant', { scope: 'tenant', permission: 'create_customers' }), trustedContext: 'required' })],
     ...(['POST', 'PUT', 'PATCH', 'DELETE'] as const).map((method) => [`${method} on the template`, detail({ method })] as const),
     ['the template requiring idempotency', required({ path: '/api/v1/customers/{id}', policy: SESSION('tenant', VIEW), trustedContext: 'required' })],
+    // M7A-CUSTOMERS-P6: the suffix template admits exactly its one suffix, nothing beside or below it.
+    ['another suffix', detail({ path: '/api/v1/customers/{id}/contacts' })],
+    ['a suffix below the profile', detail({ path: '/api/v1/customers/{id}/profile/x' })],
+    ['the profile with a trailing slash', detail({ path: '/api/v1/customers/{id}/profile/' })],
+    ['an uppercase suffix', detail({ path: '/api/v1/customers/{id}/Profile' })],
+    ['a parameter after the suffix', detail({ path: '/api/v1/customers/{id}/profile/{id}' })],
+    ['the profile suffix elsewhere', detail({ path: '/api/v1/roles/{id}/profile' })],
+    ...(['POST', 'PUT', 'PATCH', 'DELETE'] as const).map((method) => [`${method} on the profile template`, profile({ method })] as const),
+    ['the profile template requiring idempotency', required({ path: '/api/v1/customers/{id}/profile', policy: SESSION('tenant', VIEW), trustedContext: 'required' })],
+    ['a literal profile below the template', detail({ path: `/api/v1/customers/${ID}/profile` })],
+    ['a literal word-and-profile below the template', detail({ path: '/api/v1/customers/x/profile' })],
+    ['a deeper literal below the template', detail({ path: '/api/v1/customers/x/y/z' })],
   ] as const) {
     assert.equal(setupCode([def]), 'route_path_invalid', label);
   }
+  assert.equal(setupCode([profile(), profile()]), 'route_duplicate', 'a duplicate profile template');
   // A template on a non-session policy is refused by the boundary rule, as any /api path would be.
   assert.notEqual(setupCode([route({ path: '/api/v1/customers/{id}' })]), undefined);
   assert.equal(setupCode([detail(), detail()]), 'route_duplicate', 'a duplicate template');
@@ -459,6 +475,44 @@ test('lookup: /api/v1/customers/ plus ONE raw segment of 1-128 characters withou
   }
   // A table with no template matches literally only.
   assert.equal(defineRoutes([list()]).lookup('GET', `/api/v1/customers/${ID}`), undefined);
+});
+
+test('lookup: /api/v1/customers/ plus ONE raw segment plus exactly /profile reaches the profile template, and nothing else does; the literal and the detail still win their own paths', () => {
+  const table = defineRoutes([list(), detail(), profile()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  for (const segment of [ID, ID.toUpperCase(), '{id}', 'x', '..', '%2F', 'a'.repeat(128), ID.slice(1), 'profile']) {
+    assert.equal(hit(`/api/v1/customers/${segment}/profile`), '/api/v1/customers/{id}/profile', segment);
+  }
+  // The literal list and the detail template are unchanged by the second template.
+  assert.equal(hit('/api/v1/customers'), '/api/v1/customers');
+  assert.equal(hit(`/api/v1/customers/${ID}`), '/api/v1/customers/{id}');
+  assert.equal(hit('/api/v1/customers/profile'), '/api/v1/customers/{id}', 'a bare "profile" segment is the detail template\'s id');
+  for (const miss of [
+    `/api/v1/customers/${ID}/profile/extra`, '/api/v1/customers//profile', `/api/v1/customers/${ID}/profile/`, `/api/v1/customers/${ID}/Profile`,
+    `/api/v1/customers/${ID}/profiles`, `/api/v1/customers/${ID}/contacts`, `/api/v1/customers/${ID}/x`, `/api/v1/customers/${'a'.repeat(129)}/profile`,
+    `/api/v1/customers/${ID}/${ID}/profile`, `/api/v1/customers/x/y/profile`, `/api/v1/customers/${ID}//profile`, `/api/v1/customersx/${ID}/profile`,
+    `/api/v1/${ID}/profile`, '/api/v1/customers/profile/', `/API/v1/customers/${ID}/profile`,
+  ]) {
+    assert.equal(hit(miss), undefined, miss);
+  }
+  for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'get']) {
+    assert.equal(hit(`/api/v1/customers/${ID}/profile`, method), undefined, method);
+  }
+  // Without the profile template, its path is no route: the detail template never reaches past its one segment.
+  assert.equal(defineRoutes([list(), detail()]).lookup('GET', `/api/v1/customers/${ID}/profile`), undefined);
+  // Without the detail template, the profile template does not answer a bare id either.
+  assert.equal(defineRoutes([list(), profile()]).lookup('GET', `/api/v1/customers/${ID}`), undefined);
+});
+
+test('pathIdBeforeSuffixOf: the segment directly before the exact suffix as a canonical lowercase uuid, or null', () => {
+  assert.equal(pathIdBeforeSuffixOf(`/api/v1/customers/${ID}/profile`, '/profile'), ID);
+  for (const path of [
+    `/api/v1/customers/${ID}`, `/api/v1/customers/${ID}/profile/`, `/api/v1/customers/${ID}/profiles`, `/api/v1/customers/${ID.toUpperCase()}/profile`,
+    `/api/v1/customers/x${ID}/profile`, `/api/v1/customers/${ID}x/profile`, '/api/v1/customers/{id}/profile', `/${ID}/profile`, '/profile', '',
+    `/api/v1/customers/${ID}/Profile`, 42 as unknown as string,
+  ]) {
+    assert.equal(pathIdBeforeSuffixOf(path, '/profile'), null, String(path));
+  }
 });
 
 test('pathIdOf: the final segment as a canonical lowercase uuid, or null', () => {

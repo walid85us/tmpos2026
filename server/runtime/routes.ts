@@ -29,12 +29,15 @@
 // lowercase segments with no parameter, wildcard, encoding, dot segment, empty segment or
 // trailing slash, and lookup is an exact METHOD + path string match, so no prefix, case,
 // slash or encoding variant can inherit another route's policy. ONE exception, closed
-// (M7A-CUSTOMERS-P4): the single declared template GET /api/v1/customers/{id} — no other
-// method, path or template registers — matches exactly one further raw, undecoded, non-empty
-// segment of at most 128 characters without '/', and nothing else (no empty segment, trailing
-// slash or extra segment). The route's own handler judges that segment only after the chain
-// has authenticated and authorized the request, so an unauthenticated caller learns nothing
-// about an id's shape; no literal route may sit beside the template's segment. Definitions are copied and
+// (M7A-CUSTOMERS-P4, -P6): the two declared templates GET /api/v1/customers/{id} and
+// GET /api/v1/customers/{id}/profile — no other method, path or template registers. {id} matches
+// exactly one raw, undecoded, non-empty segment of at most 128 characters without '/'; the first
+// template ends there, and the second requires exactly its one literal suffix segment after it,
+// and nothing else (no empty segment, trailing slash, other suffix or extra segment). Lookup is
+// an exact literal first, then the template ending in {id}, then the template with {id} before its
+// suffix. The route's own handler judges the id segment only after the chain has authenticated
+// and authorized the request, so an unauthenticated caller learns nothing about an id's shape;
+// no literal route may sit anywhere below a template's prefix. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
 // handler only as the parsed ctx.body. A `perform` or a planner receives no request or response at all.
@@ -358,12 +361,15 @@ const NO_BODY: BodyPolicy = Object.freeze({ kind: 'none' });
 const PATH_RE = /^(?:\/[a-z0-9][a-z0-9_-]*)+$/;
 const MAX_PATH_LENGTH = 256;
 
-/** The one path parameter: a final `/{id}`, on a template the table admits by name (M7A-CUSTOMERS-P4). */
+/**
+ * The one path parameter: `/{id}`, final or followed by exactly one literal segment, on a template the table admits by
+ * name (M7A-CUSTOMERS-P4, -P6).
+ */
 export const PATH_ID_SEGMENT = '/{id}';
-/** The ONLY templated route, as `METHOD path`: any other template is refused at registration. */
-const TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['GET /api/v1/customers/{id}']);
-/** Every template's path without its `/{id}`: no literal path may name a segment directly below one. */
-const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, -PATH_ID_SEGMENT.length)));
+/** The ONLY templated routes, as `METHOD path`: any other template is refused at registration. */
+const TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile']);
+/** Every template's path before its `/{id}`: no literal path may sit anywhere below one. */
+const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, key.indexOf(PATH_ID_SEGMENT))));
 /** The longest raw segment a template matches; a longer one is no route (the terminal 404). */
 export const MAX_PATH_ID_SEGMENT_LENGTH = 128;
 /** Any uuid in PostgreSQL's canonical lowercase text form (customerDirectory.ts: 017 accepts every uuid). */
@@ -376,6 +382,14 @@ const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 export function pathIdOf(path: string): string | null {
   return typeof path === 'string' && path.startsWith('/') && path.length > 37 && path[path.length - 37] === '/'
     && CANONICAL_UUID_RE.test(path.slice(-36)) ? path.slice(-36) : null;
+}
+
+/**
+ * The canonical lowercase uuid a path names as the segment directly before its final `suffix` (e.g. '/profile'), or null:
+ * pathIdOf of the path without that suffix. A suffix-templated route's handler asks this of the req.path the table matched.
+ */
+export function pathIdBeforeSuffixOf(path: string, suffix: string): string | null {
+  return typeof path === 'string' && path.endsWith(suffix) ? pathIdOf(path.slice(0, path.length - suffix.length)) : null;
 }
 // Lowercase tokens joined by `.`, `:` or `-`, e.g. `bcp.readiness:read`.
 const PERMISSION_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
@@ -539,10 +553,10 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const { method, path, handler, perform, command } = raw;
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
-  // A template registers only as itself — the one declared (method, path) — and a literal path never directly below one.
-  const templated = path.endsWith(PATH_ID_SEGMENT);
-  if (templated ? !TEMPLATED_ROUTES.has(`${method} ${path}`) || !PATH_RE.test(path.slice(0, -PATH_ID_SEGMENT.length))
-    : !PATH_RE.test(path) || TEMPLATE_PREFIXES.has(path.slice(0, path.lastIndexOf('/')))) {
+  // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one.
+  const templated = path.includes(PATH_ID_SEGMENT);
+  if (templated ? !TEMPLATED_ROUTES.has(`${method} ${path}`) || templateOf(path) === null
+    : !PATH_RE.test(path) || [...TEMPLATE_PREFIXES].some((prefix) => path.startsWith(`${prefix}/`))) {
     throw new EnforcementSetupError('route_path_invalid');
   }
   const policy = parsePolicy(raw.policy);
@@ -567,11 +581,25 @@ function parseDefinition(raw: unknown): RouteDefinition {
   return Object.freeze({ ...declared, idempotency, perform: perform as IdempotentOperation });
 }
 
+/** A template path split around its `/{id}`: a literal prefix and '' or one literal `/segment` after it — or null. */
+function templateOf(path: string): { readonly prefix: string; readonly suffix: string } | null {
+  const at = path.indexOf(PATH_ID_SEGMENT);
+  const prefix = path.slice(0, at);
+  const suffix = path.slice(at + PATH_ID_SEGMENT.length);
+  return at > 0 && PATH_RE.test(prefix) && (suffix === '' || (PATH_RE.test(suffix) && suffix.lastIndexOf('/') === 0))
+    ? Object.freeze({ prefix, suffix }) : null;
+}
+
+/** Whether `segment` is one an `{id}` matches: raw, 1-128 characters, no '/'. */
+const isIdSegment = (segment: string): boolean =>
+  segment.length >= 1 && segment.length <= MAX_PATH_ID_SEGMENT_LENGTH && !segment.includes('/');
+
 /**
- * Validate every definition and build the closed, frozen table: literal routes keyed `METHOD path`, the template keyed
- * `METHOD prefix` (its path without `/{id}`). A literal path always matches exactly; a request path matches the template
- * only when it is that prefix, '/', and one raw segment of 1-128 characters with no '/'. A request literally spelling a
- * template's path is such a segment ('{id}'), never the template itself.
+ * Validate every definition and build the closed, frozen table: literal routes and templates alike keyed `METHOD path`,
+ * a template by its declared path. A literal path always matches exactly. Otherwise a request path matches the template
+ * ending in {id} when it is that prefix, '/', and one id segment (raw, 1-128 characters, no '/'); failing that, the
+ * template with {id} before a suffix when it is that prefix, '/', one id segment, and exactly that suffix. A request
+ * literally spelling a template's path is such a segment ('{id}'), never the template itself.
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
@@ -579,9 +607,8 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const ordered: RouteDefinition[] = [];
   for (const raw of defs) {
     const def = parseDefinition(raw);
-    const templated = def.path.endsWith(PATH_ID_SEGMENT);
-    const map = templated ? templates : table;
-    const key = `${def.method} ${templated ? def.path.slice(0, -PATH_ID_SEGMENT.length) : def.path}`;
+    const map = def.path.includes(PATH_ID_SEGMENT) ? templates : table;
+    const key = `${def.method} ${def.path}`;
     if (map.has(key)) throw new EnforcementSetupError('route_duplicate');
     map.set(key, def);
     ordered.push(def);
@@ -591,9 +618,15 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
     lookup: (method: string, path: string) => {
       const exact = table.get(`${method} ${path}`);
       if (exact !== undefined || templates.size === 0 || typeof path !== 'string') return exact;
-      const cut = path.lastIndexOf('/');
-      const segment = path.length - cut - 1;
-      return cut > 0 && segment >= 1 && segment <= MAX_PATH_ID_SEGMENT_LENGTH ? templates.get(`${method} ${path.slice(0, cut)}`) : undefined;
+      // prefix/{id}: the last segment is the id.
+      const last = path.lastIndexOf('/');
+      if (last <= 0) return undefined;
+      const final = isIdSegment(path.slice(last + 1)) ? templates.get(`${method} ${path.slice(0, last)}${PATH_ID_SEGMENT}`) : undefined;
+      if (final !== undefined) return final;
+      // prefix/{id}/suffix: the segment before the last is the id, and the last is the template's own literal suffix.
+      const before = path.lastIndexOf('/', last - 1);
+      return before > 0 && isIdSegment(path.slice(before + 1, last))
+        ? templates.get(`${method} ${path.slice(0, before)}${PATH_ID_SEGMENT}${path.slice(last)}`) : undefined;
     },
     list: () => list,
   });

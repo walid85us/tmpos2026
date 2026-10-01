@@ -306,6 +306,18 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerDetail.integration.test.mjs
+      # M7A-CUSTOMERS-P6 — migration 023's customer contact records as the runtime login (023 rolled back with its own down
+      # file, legacy rows seeded on 001-022, 023 re-applied by the trusted executor over them; the postcondition, the
+      # privileges, the create's database clock, every refused contact class, the tenant store's rollback of a refused
+      # contact, parity with 020's refusals, the profile read and its adapter, the refused and the exact rollback), against
+      # the SAME disposable service; the HTTP and compiled cases run in the tenant entry step above. It leaves 023 applied and
+      # none of its customers. Synthetic data and keys made at run time only. Same binding, no new service, no secret, no
+      # permission change.
+      - name: Tenant customer contact records against disposable PostgreSQL (M7A-CUSTOMERS-P6)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerContact.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

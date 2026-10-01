@@ -243,19 +243,32 @@ const PINNED = {
   // exact-[005] gate is unchanged and still refuses.
   '022_m7a_customer_detail.up.sql': '0782d04f32e489611ab5e04e592fc7ded6d2a8cfd8b3ba0f824f5bae4dbc59e4',
   '022_m7a_customer_detail.down.sql': '2d031c83cd432b70ff53818dd443f8ca278f50b11e2a7c3a625a1513feeb26e8',
+  // Phase 4.0 M7A-CUSTOMERS-P6 — customer contact records: three nullable columns on 017's table (phone and email, text
+  // collation "C", each bounded by a named CHECK restating 017's refused characters and edges; created_at, NULL on every row
+  // that existed at apply — never the migration's time — and pg_catalog.now() for rows inserted afterwards), no index, and
+  // in its OWN schema tmpos_customer_contact two SECURITY DEFINER routines: m7a_contact_create (VOLATILE; judges the
+  // contacts, then delegates the whole authority decision and the insert to 020's create and writes the contacts onto that
+  // row) and m7a_contact_profile (STABLE; 022's read, then that row's contacts and creation time on the same snapshot).
+  // tmpos_app gains EXECUTE on both and USAGE on the schema, and loses EXECUTE on 020's create (020's own precedent with
+  // 019): those are its only ACL changes, no table or column privilege is granted, and migrations 001-022 are untouched,
+  // byte for byte. Its rollback refuses while any customer holds a phone, an email or a creation time. Proved against
+  // disposable PostgreSQL only; applied to no managed, persistent or application database. D4 now names the contiguous
+  // chain through 023; the exact-[005] gate is unchanged and still refuses.
+  '023_m7a_customer_contact.up.sql': '0e81bc627a681e0d999e24f04262a3fd8780c3736f80b170ac73ac6b13ca9a04',
+  '023_m7a_customer_contact.down.sql': '391d95aad1b9b417af97c9985ac042a1df02d8808807f802654ac674aae422bc',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the forty-four expected files', () => {
+test('the migrations directory holds exactly the forty-six expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

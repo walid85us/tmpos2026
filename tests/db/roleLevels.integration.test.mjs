@@ -1,6 +1,6 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-022, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-023, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 //
 // M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
 // the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
@@ -331,7 +331,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-022 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-023 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 
@@ -916,10 +916,14 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
-/** The tenant artifact's ten intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail read). */
-const TENANT_TEN = Object.freeze([
+/**
+ * The tenant artifact's eleven intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
+ * read; P6: the profile read).
+ */
+const TENANT_ELEVEN = Object.freeze([
   'GET /api/v1/customers session none none',
   'GET /api/v1/customers/{id} session none none',
+  'GET /api/v1/customers/{id}/profile session none none',
   'GET /api/v1/roles/levels session none none',
   'GET /api/v1/session session none none',
   'GET /health public none none',
@@ -1111,8 +1115,9 @@ test('M7RLH-04: two entries on one database — the owner\'s edit, parked holdin
         sentAt = Date.now();
         createReq = quietly(b.post(s, { name }, { key }));
         createReq.then(() => { repliedAt = Date.now(); }, () => {});
-        const createPid = waitingPid(await blockedOrSettled(createReq, { by: editPid, query: /tmpos_role\.m7a_customer_create/ }),
-          'the create waiting on the edit inside 020\'s create routine');
+        // M7A-CUSTOMERS-P6: the runtime's create statement is 023's routine; the wait is 020's, inside it.
+        const createPid = waitingPid(await blockedOrSettled(createReq, { by: editPid, query: /tmpos_customer_contact\.m7a_contact_create/ }),
+          'the create waiting on the edit inside 020\'s create routine (called by 023\'s)');
         locks = await waitingLocks(createPid);
       } finally {
         await lever.commit();
@@ -1439,11 +1444,12 @@ test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff ke
     const o = await signIn(ctx, boss);
     const runtime = runtimeClient();
     try {
-      // (1) A live sales_staff key on 020's create: one customer in the key's tenant, and nothing else.
+      // (1) A live sales_staff key on the create the runtime role holds — 023's since M7A-CUSTOMERS-P6, deciding through
+      //     020's: one customer in the key's tenant, and nothing else.
       const id = randomUUID();
       const name = nameOf('m7rlh08 direct');
       let before = await counts();
-      const made = await runtime`select * from tmpos_role.m7a_customer_create(${s.key}::text, ${id}::uuid, ${name}::text)`;
+      const made = await runtime`select * from tmpos_customer_contact.m7a_contact_create(${s.key}::text, ${id}::uuid, ${name}::text, null::text, null::text)`;
       assert.deepEqual(made.map((r) => ({ ...r })), [{ o_tenant_id: tenant, o_actor_id: sales.id, o_membership_id: salesGrant }],
         'the key\'s own tenant, actor and grant');
       await assertDelta(before, { C: 1, A: 0, E: 0, K: 0, O: 0, L: 0 }, 'RESIDUAL: a direct create writes no audit, completion or outbox row');
@@ -1451,7 +1457,7 @@ test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff ke
       // (2) Once the owner narrows (through the audited route), the same direct call is refused: no row, nothing written.
       await edit(ctx, o, 'sales_staff', 'view');
       before = await counts();
-      const none = await runtime`select * from tmpos_role.m7a_customer_create(${s.key}::text, ${randomUUID()}::uuid, ${name}::text)`;
+      const none = await runtime`select * from tmpos_customer_contact.m7a_contact_create(${s.key}::text, ${randomUUID()}::uuid, ${name}::text, null::text, null::text)`;
       assert.equal(none.length, 0, 'the narrowed key: no row');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'the narrowed key');
 
@@ -1487,6 +1493,8 @@ test('M7RLH-08: the runtime login plus a live key, directly — a sales_staff ke
         // M7A-CUSTOMERS-P4: 020's unconditional set is revoked from the runtime role by 021.
         ['020\'s set', runtime`select * from tmpos_role.m7a_role_level_set(${o.key}::text, 'sales_staff'::text, 'customers'::text, 'full'::text)`],
         ['019\'s create', runtime`select * from tmpos_customer_write.m7a_customer_create(${s.key}::text, ${randomUUID()}::uuid, ${name}::text)`],
+        // M7A-CUSTOMERS-P6: 020's create is revoked from the runtime role by 023, whose create calls it.
+        ['020\'s create', runtime`select * from tmpos_role.m7a_customer_create(${s.key}::text, ${randomUUID()}::uuid, ${name}::text)`],
         ['018\'s page_v2', runtime`select * from tmpos_mint.m7a_customer_page_v2(${s.key}::text, null::uuid, 10)`],
         ['INSERT on the customer table', runtime`insert into tmpos_customer.customer (customer_id, tenant_id, name) values (${randomUUID()}, ${tenant}, ${name})`],
         ['SELECT on the role table', runtime`select * from tmpos_role.tenant_role_level`],
@@ -1857,7 +1865,7 @@ test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write
 // ===========================================================================
 
 test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the owner\'s PUT and its read-back among them — applies an owner\'s edit, reads it back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_TEN], 'the source tenant inventory');
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_ELEVEN], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1883,13 +1891,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the 
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_TEN], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_ELEVEN], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_TEN], 'the compiled entry serves exactly the ten');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_ELEVEN], 'the compiled entry serves exactly the eleven');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');

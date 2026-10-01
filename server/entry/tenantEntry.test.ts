@@ -200,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 10 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 11 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -209,6 +209,8 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 10 frozen tenant routes', ()
     { method: 'POST', path: '/api/v1/session/logout', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/customers', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/customers/{id}', access: 'session', body: 'none', idempotency: 'none' },
+    // M7A-CUSTOMERS-P6: the contact profile, the route table's second template.
+    { method: 'GET', path: '/api/v1/customers/{id}/profile', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
@@ -229,7 +231,7 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
   const tenantAdmission: TenantAdmissionPort = Object.freeze({ admit: async () => Object.freeze({ outcome: 'refused' }), probe: async () => true });
   const limiter: DistributedRateLimiter = { consume: async () => ({ outcome: 'unavailable' }), probe: async () => true };
   const sessions = composeProductionSessions(VALID_ENV, {
-    store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/roles/levels']),
+    store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels']),
     roleLevels: async () => ({}),
   }, { audiences: ['tenant'], tokenVerifier: SYNTHETIC_VERIFIER });
   const readiness = createReadinessState();
@@ -282,7 +284,7 @@ type Row = Readonly<Record<string, unknown>>;
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
-  | 'customerDetailProbe' | 'storeProbe';
+  | 'customerDetailProbe' | 'customerProfileProbe' | 'storeProbe';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -303,6 +305,7 @@ function classify(text: string): Kind {
   if (text.includes('m7a_session_create')) return 'sessionMint';
   if (text.includes('m5_admit_tenant_session_v2')) return 'tenantAdmissionProbe';
   if (text.includes('m7a_customer_page_v3')) return 'customerProbe';
+  if (text.includes('m7a_contact_profile')) return 'customerProfileProbe';
   if (text.includes('m7a_customer_get')) return 'customerDetailProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
@@ -343,6 +346,7 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   tenantAdmissionProbe: [{ outcome: 'refused' }],
   customerProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   customerDetailProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
+  customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null }],
   storeProbe: [{ ok: true }],
 });
 
@@ -505,6 +509,11 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ customerDetailProbe: [[{ o_outcome: 'not_found', o_tenant_id: null, o_customer_id: null, o_name: null }]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerDetailProbe: [[]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerDetailProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  // M7A-CUSTOMERS-P6: the profile routine is the third part of the same reads probe.
+  await assertRefused({ customerProfileProbe: [[{ ...GOLDEN.customerProfileProbe[0], o_outcome: 'not_found' }]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ customerProfileProbe: [[GOLDEN.customerDetailProbe[0]]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ customerProfileProbe: [[]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ customerProfileProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
   // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
   await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
   await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);
@@ -523,7 +532,7 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
       'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'customerDetailProbe',
-      'storeProbe'],
+      'customerProfileProbe', 'storeProbe'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
   } finally {
     await stop();
@@ -557,7 +566,7 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
     assert.equal(result.outcome, 'listening');
     const port = (result.address as { port: number }).port;
     for (const host of [ADMIN_HOST, 'unknown.tmpos.test', `${TENANT_HOST}.evil.test`, '127.0.0.1', `${TENANT_HOST}:443`]) {
-      for (const [method, path] of [['GET', '/api/v1/customers'], ['GET', `/api/v1/customers/${DETAIL_ID}`], ['GET', '/api/v1/customers/NOT-AN-ID'], ['POST', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants']]) {
+      for (const [method, path] of [['GET', '/api/v1/customers'], ['GET', `/api/v1/customers/${DETAIL_ID}`], ['GET', '/api/v1/customers/NOT-AN-ID'], ['GET', `/api/v1/customers/${DETAIL_ID}/profile`], ['POST', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants']]) {
         const reply = await send(port, method, path, { host, origin: `https://${TENANT_HOST}` });
         assert.equal(reply.status, 404, `${method} ${path} on ${host}`);
         assert.equal(JSON.parse(reply.body).error, 'not_found');
@@ -577,6 +586,13 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
       assert.equal((await send(port, 'GET', `/api/v1/customers/${segment}`, { host: TENANT_HOST })).status, 401, segment);
     }
     assert.equal((await send(port, 'GET', `/api/v1/customers/${DETAIL_ID}/`, { host: TENANT_HOST })).status, 404, 'a trailing slash is no route');
+    // M7A-CUSTOMERS-P6: the profile template the same way — a 401 for any id segment, and nothing past its one suffix.
+    for (const segment of [DETAIL_ID, 'NOT-AN-ID', '{id}']) {
+      assert.equal((await send(port, 'GET', `/api/v1/customers/${segment}/profile`, { host: TENANT_HOST })).status, 401, `${segment}/profile`);
+    }
+    for (const path of [`/api/v1/customers/${DETAIL_ID}/profile/`, `/api/v1/customers/${DETAIL_ID}/profile/x`, `/api/v1/customers/${DETAIL_ID}/contacts`]) {
+      assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
+    }
     assert.equal((await send(port, 'GET', '/admin/v1/tenants', { host: TENANT_HOST })).status, 404, 'no administrative route on the tenant host');
     // The probes answer on any host.
     for (const host of [TENANT_HOST, ADMIN_HOST]) assert.equal((await send(port, 'GET', '/health', { host })).status, 200);
@@ -604,6 +620,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the session mint answers another word', 'sessionMint', [{ outcome: 'refused' }]],
       ['the customer probe answers two rows', 'customerProbe', [GOLDEN.customerProbe[0], GOLDEN.customerProbe[0]]],
       ['the customer detail probe fails', 'customerDetailProbe', 'reject'],
+      ['the customer profile probe fails', 'customerProfileProbe', 'reject'],
       ['the idempotency store and command port probe fails', 'storeProbe', 'reject'],
       ['the store probe answers false', 'storeProbe', [{ ok: false }]],
       ['the tenant admission fails', 'tenantAdmissionProbe', 'reject'],
@@ -613,7 +630,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the database is down for everything', 'connect', 'default'],
     ];
     for (const [label, kind, entry] of transitions) {
-      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
+      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
       else fake.live[kind] = entry;
       t.mock.timers.tick(1_000);
       assert.equal(await ready(), 503, label);
@@ -626,7 +643,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
     const before = fake.kinds.length;
     await Promise.all(Array.from({ length: 5 }, () => ready()));
     const asked = fake.kinds.slice(before);
-    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
+    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
     assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');

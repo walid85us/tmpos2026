@@ -5,7 +5,7 @@
 // alone, with no runtime in front of it; the HTTP route over it, its audit, idempotency and step-up, and the runtime's
 // comparison of each answer with its trusted context, are tests/db/roleLevels.integration.test.mjs's.
 //
-// WHAT IS PROVEN. 001-022 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
+// WHAT IS PROVEN. 001-023 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M7RV-01); the installed inventory and
 // the login's effective privileges: EXECUTE on the two new routines and on 020's levels read, create and page_v3, NONE on
 // 020's unconditional edit (has_function_privilege, and 42501 when called), nothing on the version table (M7RV-02); the
@@ -50,6 +50,8 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.up.sql`, 'utf8');
 const DOWN_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.down.sql`, 'utf8');
+const UP_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.up.sql`, 'utf8');
+const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_021 = UP_021.slice(UP_021.lastIndexOf('do $$'));
 const STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -59,6 +61,17 @@ const ADVANCE = 'tmpos_role_edit.m7a_role_level_version_advance()';
 const TRIGGER = 'trg_tenant_role_level_version_advance';
 const LEVELS_020 = 'tmpos_role.m7a_role_levels(uuid, text)';
 const CREATE_020 = 'tmpos_role.m7a_customer_create(text, uuid, text)';
+/** Migration 023's create (M7A-CUSTOMERS-P6): the login's only create path, which decides through 020's create. */
+const CREATE_023 = 'tmpos_customer_contact.m7a_contact_create(text, uuid, text, text, text)';
+/**
+ * 021's postcondition, run again inside `tx`. 021's check (f) requires the login to hold EXECUTE on 020's create, which
+ * migration 023 revoked (its create became the login's one path, deciding through 020's): the grant is given back first,
+ * inside the same transaction that is always rolled back, so 021's own end state is what is judged.
+ */
+const postcondition021 = async (tx) => {
+  await tx.unsafe(`grant execute on function ${CREATE_020} to tmpos_app`);
+  await tx.unsafe(POSTCONDITION_021).simple();
+};
 const PAGE_020 = 'tmpos_role.m7a_customer_page_v3(text, uuid, integer)';
 const MIGRATOR = { purpose: 'migration', migratorRef: 'm7rv-migrator', runtimeRef: 'm7rv-runtime' };
 const LOCK_KEY = 528_528;
@@ -121,6 +134,8 @@ test.after(async () => {
       await owner.begin((tx) => tx.unsafe(UP_021).simple());
     }
   });
+  // And 023 (M7A-CUSTOMERS-P6), which those tests roll back first, applied again above it.
+  await quietly(() => up023IfAbsent());
   // Version rows first, then levels: 021's rollback refuses while a version row exists, 020's while a level differs from
   // its default. Tenants stay, as every suite leaves its synthetic tenants.
   if (TENANTS.length > 0) await quietly(() => owner`delete from tmpos_role_edit.role_level_version where tenant_id = any(${TENANTS}::uuid[])`);
@@ -143,7 +158,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-022), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-023), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -244,13 +259,33 @@ const setV2 = async (key, role, level, tenant, version, db = runtime, domain = '
     from tmpos_role_edit.m7a_role_level_set_v2(${key}::text, ${role}::text, ${domain}::text, ${level}::text,
       ${tenant}::uuid, ${version}::bigint)`)
     .map((r) => ({ ...r, o_version: r.o_version === null ? null : Number(r.o_version) }));
+/**
+ * Migration 023 (M7A-CUSTOMERS-P6) sits above 021 and revoked the login's EXECUTE on 020's create, which 021's apply-time
+ * postcondition requires; so a committed rollback of 021 that is re-applied runs in the supported order — 023's down first,
+ * 023's up last (each a file run; the ledger rows stay). 023's down refuses while any customer holds a contact or a creation
+ * time, and this file's customers carry the column default's: it clears its OWN rows' (never another suite's) first — test
+ * hygiene, not the migration's job — and they stay NULL (an unknown creation time) once 023 is back.
+ */
+const down023 = async () => {
+  await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
+  await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_023).simple());
+};
+const up023IfAbsent = async () => {
+  if ((await owner`select pg_catalog.to_regnamespace('tmpos_customer_contact') is null as absent`)[0].absent) {
+    await owner.begin((tx) => tx.unsafe(UP_023).simple());
+  }
+};
 /** 021's read-back, as the runtime login. */
 const statesOf = async (tenant) => (await runtime`select tmpos_role_edit.m7a_role_level_states(${tenant}::uuid) as states`)[0].states;
 /** The one role's entry of the read-back. */
 const stateOf = async (tenant, role) => (await statesOf(tenant)).find((s) => s.roleId === role);
-/** 020's create, as the runtime login (or on `db`). */
+/**
+ * A customer create, as the runtime login (or on `db`): since M7A-CUSTOMERS-P6 through migration 023's routine, name only —
+ * it delegates the whole decision to 020's create, which this file's level and version cases are about.
+ */
 const create = async (key, id = randomUUID(), db = runtime) =>
-  (await db`select o_tenant_id from tmpos_role.m7a_customer_create(${key}::text, ${id}::uuid, ${`M7RV ${SUFFIX}`}::text)`).map((r) => ({ ...r }));
+  (await db`select o_tenant_id from tmpos_customer_contact.m7a_contact_create(${key}::text, ${id}::uuid, ${`M7RV ${SUFFIX}`}::text,
+    null::text, null::text)`).map((r) => ({ ...r }));
 /** Every stored role row and every version row of `tenant`, read by the owner. */
 const storedRows = async (tenant) => (await owner`select role_id, level from tmpos_role.tenant_role_level
   where tenant_id = ${tenant} order by role_id`).map((r) => ({ ...r }));
@@ -309,11 +344,11 @@ const onRoleRow = (locks) => locks.length > 0 && locks.every((l) => l.locktype =
 // M7RV-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7RV-01: 001-022 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M7RV-01: 001-023 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 22 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 23 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   // 001-020 byte-identical: the ledger, the startup pins and the files on disk agree (the pins are bound to the committed
   // bytes by tests/quality/migration-files-contract.test.mjs).
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
@@ -326,7 +361,7 @@ test('M7RV-01: 001-022 applied clean, every checksum the pinned one; 021\'s post
   const [{ me }] = await owner`select current_user as me`;
   const postcondition = async (widen) => rolledBack('isolation level read committed', async (tx) => {
     for (const statement of widen) await tx.unsafe(statement);
-    await tx.unsafe(POSTCONDITION_021).simple();
+    await postcondition021(tx);
   });
   for (const [label, widen] of [
     ['a SELECT on the version table', ['grant select on tmpos_role_edit.role_level_version to tmpos_app']],
@@ -400,13 +435,15 @@ test('M7RV-02: the installed inventory, and the login\'s effective privileges �
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${STATES}::regprocedure, 'EXECUTE') as states,
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${SET_V2}::regprocedure, 'EXECUTE') as set_v2,
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${LEVELS_020}::regprocedure, 'EXECUTE') as levels,
-      pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${CREATE_020}::regprocedure, 'EXECUTE') as creates,
+      pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${CREATE_023}::regprocedure, 'EXECUTE') as creates,
+      pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${CREATE_020}::regprocedure, 'EXECUTE') as creates_020,
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${PAGE_020}::regprocedure, 'EXECUTE') as reads,
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${SET_020}::regprocedure, 'EXECUTE') as set_020,
       pg_catalog.has_function_privilege('tmpos_app', ${SET_020}::regprocedure, 'EXECUTE') as app_set_020,
       pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${ADVANCE}::regprocedure, 'EXECUTE') as advance,
       pg_catalog.has_schema_privilege(${RUNTIME_LOGIN}, 'tmpos_role_edit', 'USAGE') as schema_usage`;
-  assert.deepEqual({ ...rights }, { states: true, set_v2: true, levels: true, creates: true, reads: true, set_020: false, app_set_020: false, advance: false, schema_usage: true });
+  // M7A-CUSTOMERS-P6: the login creates through 023's routine; 023 revoked 020's create from it.
+  assert.deepEqual({ ...rights }, { states: true, set_v2: true, levels: true, creates: true, creates_020: false, reads: true, set_020: false, app_set_020: false, advance: false, schema_usage: true });
   const [{ set_acl }] = await owner`select proacl::text as set_acl from pg_catalog.pg_proc where oid = ${SET_020}::regprocedure`;
   assert.equal(set_acl, `{${me}=X/${me}}`, '020\'s edit stays, granted to its owner alone');
   for (const privilege of TABLE_PRIVILEGES) {
@@ -732,6 +769,7 @@ test('M7RV-12: 021 down refuses while a version row exists and outside READ COMM
   assert.equal(regranted.code, '55000');
   assert.match(regranted.message, /can execute 020's unconditional edit/);
 
+  await down023();
   await owner.begin((tx) => tx.unsafe(DOWN_021).simple());
   try {
     const [state] = await owner`select pg_catalog.to_regnamespace('tmpos_role_edit') is null as gone,
@@ -745,8 +783,9 @@ test('M7RV-12: 021 down refuses while a version row exists and outside READ COMM
       '42501', 'rolled back, the runtime role edits nothing');
   } finally {
     await owner.begin((tx) => tx.unsafe(UP_021).simple());
+    await up023IfAbsent();
   }
-  assert.equal((await rolledBack('isolation level read committed', (tx) => tx.unsafe(POSTCONDITION_021).simple())).code, undefined,
+  assert.equal((await rolledBack('isolation level read committed', (tx) => postcondition021(tx))).code, undefined,
     're-applied, 021\'s postcondition holds');
   assert.deepEqual(await stateOf(T_A, 'sales_staff'), { roleId: 'sales_staff', level: 'view', version: 0 }, 're-applied, the counter restarts at 0');
   assert.deepEqual(await setV2(ownerKey, 'sales_staff', 'none', T_A, 0), [await applied(OWNER_A, 'none', 1)], 're-applied, the edit works');
@@ -789,8 +828,9 @@ test('M7RV-13: a session that expires while its edit waits on the role row answe
 test('M7RV-14: a 020 edit parked across 021\'s apply — its EXECUTE checked while 021 is uncommitted, then waiting on 021\'s table lock — completes after 021 commits AND advances the version, so a version-0 draft is refused', async () => {
   await resetState();
   const ownerKey = await mint(OWNER_A);
-  // 020 the newest migration, as the pre-021 runtime saw it: 021 rolled back (no version row exists) and 020's grant of
-  // its edit to tmpos_app, which 021 revoked and its rollback does not give back, restored.
+  // 020 the newest migration, as the pre-021 runtime saw it: 023 and 021 rolled back (no version row exists; 023 first, the
+  // supported order) and 020's grant of its edit to tmpos_app, which 021 revoked and its rollback does not give back, restored.
+  await down023();
   await owner.begin(async (tx) => {
     await tx.unsafe(DOWN_021).simple();
     await tx.unsafe(`grant execute on function ${SET_020} to tmpos_app`);
@@ -818,8 +858,9 @@ test('M7RV-14: a 020 edit parked across 021\'s apply — its EXECUTE checked whi
     if ((await owner`select pg_catalog.to_regnamespace('tmpos_role_edit') is null as absent`)[0].absent) {
       await owner.begin((tx) => tx.unsafe(UP_021).simple());
     }
+    await up023IfAbsent();
   }
-  assert.equal((await rolledBack('isolation level read committed', (tx) => tx.unsafe(POSTCONDITION_021).simple())).code, undefined,
+  assert.equal((await rolledBack('isolation level read committed', (tx) => postcondition021(tx))).code, undefined,
     're-applied over a parked call, 021\'s postcondition holds');
 });
 
