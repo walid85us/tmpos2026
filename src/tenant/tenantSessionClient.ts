@@ -16,6 +16,14 @@
 //     another identity's, logs in (a login ends the session presented to it); an outage, a rate limit or a malformed
 //     answer logs in nothing. So a page load reuses the signed-in user's session, and one person's session can never
 //     answer for another.
+//   - A session this client has CONFIRMED for a user in this page's life is never re-established on its own
+//     (M7A-CUSTOMERS-P6): once one was kept for that UID, a session read answering 401 (expiry, revocation, a logout
+//     elsewhere) is `ended` — no ID token is asked for and no login is sent — and stays so on every later `ensure` until
+//     a read finds a valid session of that user again (another tab's, reused with no login) or the caller passes
+//     `reconnect` (the page's Reconnect button, the only caller that does). The marker lives in this closure only and is
+//     forgotten by a reset, a logout or another user: a fresh page (a reload) has confirmed nothing, so its first 401 is
+//     a first establishment and logs in — the server's 401 does not say "expired", and nothing is stored to tell
+//     (a stated residual). Another identity's session still logs this user in, as above.
 //   - Every reset supersedes earlier work: an answer that arrives under an older epoch is dropped, so a slow login for a
 //     user who has since signed out can never re-establish their session here.
 //   - A logout runs to completion and every later session step waits for it (M7A-CUSTOMERS-P3-R2 AM4): a user switch
@@ -50,28 +58,36 @@ export function parseRetryAfter(header: string | null): number | null {
 
 /**
  * What asking for a session for one UID ended in: `ok` with the session's CSRF token; `no-identity` — no signed-in user
- * here to present (nothing was sent); `refused` — the server did not accept the sign-in or the session it made;
+ * here to present (nothing was sent); `refused` — the server did not accept the sign-in or the session it made; `ended`
+ * — the session this client confirmed for that user is gone and no login was sent (only a `reconnect` signs in again);
  * `rate-limited` — with `retryAfterSeconds` ONLY when the refusal carried a valid `Retry-After` (the key is absent
  * otherwise, M7A-CUSTOMERS-P5); `unavailable` — nothing could be confirmed (an outage, a timeout, a malformed answer, or
  * superseded).
  */
 export type SessionResult =
   | { readonly kind: 'ok'; readonly csrf: string }
-  | { readonly kind: 'no-identity' | 'refused' | 'unavailable' }
+  | { readonly kind: 'no-identity' | 'refused' | 'unavailable' | 'ended' }
   | { readonly kind: 'rate-limited'; readonly retryAfterSeconds?: number };
+
+/** `fresh`: describe the session as it stands after an answer the caller holds. `reconnect`: the user asked to sign in again. */
+export interface EnsureOptions { readonly fresh?: boolean; readonly reconnect?: boolean }
 
 export interface TenantSessionClient {
   /**
    * A confirmed tenant session for `uid`. A session read comes first: a session the server names as `uid`'s is reused
    * with its current CSRF token (another tab may have rotated it) and no login. Only when that read answers 401, or names
    * another identity's session, is the user's ID token (from `idToken`, null when that user is not signed in here)
-   * exchanged at the login route, and a session read confirms the new cookie. Any other answer to the first read (an
-   * outage, a 429, a malformed body) ends the attempt without a login. Concurrent calls for one UID share one attempt,
-   * except a `fresh` call: it must describe the session as it stands AFTER an answer the caller already holds (a read
-   * refused 403), so it waits for an attempt in flight — which may have read before that answer — and then reads again;
-   * if another user's attempt, a logout or a reset came in between, it answers `unavailable` and sends nothing.
+   * exchanged at the login route, and a session read confirms the new cookie — except that a 401 for a user whose session
+   * this client has already confirmed is `ended`, with no ID token asked and no login, unless `reconnect` is set. Any
+   * other answer to the first read (an outage, a 429, a malformed body) ends the attempt without a login. Concurrent
+   * calls for one UID share one attempt, except a `fresh` call: it must describe the session as it stands AFTER an
+   * answer the caller already holds (a read refused 403), so it waits for an attempt in flight — which may have read
+   * before that answer — and then reads again; if another user's attempt, a logout or a reset came in between, it
+   * answers `unavailable` and sends nothing — as it does at once for a user other than the one this client is attempting,
+   * keeping, or confirmed (even after that session `ended`). A `reconnect` call never takes an attempt in flight's `ended` as its own
+   * answer: it waits for it and then runs its own.
    */
-  ensure(uid: string, idToken: () => Promise<string | null>, options?: { readonly fresh?: boolean }): Promise<SessionResult>;
+  ensure(uid: string, idToken: () => Promise<string | null>, options?: EnsureOptions): Promise<SessionResult>;
   /**
    * A recent sign-in by the user already signed in: `freshToken` (after a real provider re-authentication) sent once to
    * the login route in its re-authentication mode, beside this page's cookie. `ok` only when the server rotated the
@@ -79,12 +95,12 @@ export interface TenantSessionClient {
    */
   reauthenticate(uid: string, freshToken: string): Promise<SessionResult>;
   /**
-   * End the tenant session this browser holds, best effort. Everything in flight before it is abandoned and the memo is
-   * cleared at once, whatever the server answers. With no session remembered it reads the current one first (none →
+   * End the tenant session this browser holds, best effort. Everything in flight before it is abandoned and the memo
+   * (with the confirmed-session marker) is cleared at once, whatever the server answers. With no session remembered it reads the current one first (none →
    * nothing is sent). Logouts run one after another, and every later `ensure` waits until they have finished.
    */
   logout(): Promise<void>;
-  /** Forget this page's session and abandon everything in flight (a user switch). Sends nothing. */
+  /** Forget this page's session (and that one was ever confirmed) and abandon everything in flight (a user switch). Sends nothing. */
   reset(): void;
 }
 
@@ -121,6 +137,7 @@ const statusOf = (outcome: Outcome): number | null => (outcome.kind === 'respons
 const wellFormed = (token: unknown): token is string =>
   typeof token === 'string' && token.length <= MAX_BEARER_LENGTH && BEARER_RE.test(token);
 const UNAVAILABLE: SessionResult = Object.freeze({ kind: 'unavailable' });
+const ENDED: SessionResult = Object.freeze({ kind: 'ended' });
 const result = (kind: 'no-identity' | 'refused' | 'unavailable'): SessionResult => Object.freeze({ kind });
 /** A 429 is `rate-limited`, carrying the server's delay only when it named one; any other undecided answer is `unavailable`. */
 function undecided(outcome: Outcome): SessionResult {
@@ -137,6 +154,7 @@ export function createTenantSessionClient(
   const subjectOf = options.subjectOf ?? sessionSubjectOf;
   const controllers = new Set<AbortController>();
   let memo: { readonly uid: string; readonly csrf: string } | null = null;
+  let confirmedUid: string | null = null; // the UID a session was kept for in this page's life: its 401 is `ended`, not a login
   let epoch = 0;
   let pending: { readonly uid: string; readonly run: Promise<SessionResult> } | null = null;
   let ending: Promise<void> | null = null; // the last logout still running
@@ -192,6 +210,7 @@ export function createTenantSessionClient(
 
   const keep = (uid: string, csrf: string): SessionResult => {
     memo = Object.freeze({ uid, csrf });
+    confirmedUid = uid;
     return Object.freeze({ kind: 'ok', csrf });
   };
 
@@ -207,17 +226,26 @@ export function createTenantSessionClient(
     return undecided(check);
   }
 
-  function ensure(uid: string, idToken: () => Promise<string | null>, options: { readonly fresh?: boolean } = {}): Promise<SessionResult> {
-    // A check for a user this client has moved on from answers nothing and supersedes nothing.
-    if (options.fresh === true && ((pending !== null && pending.uid !== uid) || (memo !== null && memo.uid !== uid))) return Promise.resolve(UNAVAILABLE);
+  function ensure(uid: string, idToken: () => Promise<string | null>, options: EnsureOptions = {}): Promise<SessionResult> {
+    // A check for a user this client has moved on from answers nothing and supersedes nothing — nor clears the end of
+    // the session it confirmed for another user (after an `ended` there is no memo, but that marker still names who).
+    if (
+      options.fresh === true
+      && ((pending !== null && pending.uid !== uid) || (memo !== null && memo.uid !== uid) || (confirmedUid !== null && confirmedUid !== uid))
+    ) return Promise.resolve(UNAVAILABLE);
     if (pending !== null && pending.uid === uid) {
-      if (options.fresh !== true) return pending.run;
-      const waited = epoch;
-      return pending.run.then(() => (waited === epoch ? ensure(uid, idToken, options) : UNAVAILABLE));
+      if (options.fresh === true) {
+        const waited = epoch;
+        return pending.run.then(() => (waited === epoch ? ensure(uid, idToken, options) : UNAVAILABLE));
+      }
+      // A Reconnect is the user's own request to sign in: an attempt in flight that ends `ended` does not answer it.
+      if (options.reconnect === true) return pending.run.then((r) => (r.kind === 'ended' ? ensure(uid, idToken, options) : r));
+      return pending.run;
     }
     // Another user's session is never reused, nor is any of their work in flight allowed to answer.
     if (pending !== null || (memo !== null && memo.uid !== uid)) supersede();
     if (memo !== null && memo.uid !== uid) memo = null;
+    if (confirmedUid !== uid) confirmedUid = null; // another user: nothing of the previous one's session decides this one's login
     const mine = epoch;
     const after = ending;
     const run = (async (): Promise<SessionResult> => {
@@ -231,9 +259,16 @@ export function createTenantSessionClient(
       const held = await whose(current, uid);
       if (mine !== epoch || held === 'failed') return UNAVAILABLE;
       if (held !== null && held !== 'other') return keep(uid, held.csrf);
-      // Only no session (expiry, logout elsewhere, revocation, none yet) or another identity's signs in; that login ends
-      // the session it is presented with. Anything else — an outage, a 429, a malformed answer — signs nothing in.
+      // Only no session (none yet, or — on a reconnect — expiry, logout elsewhere, revocation) or another identity's signs
+      // in; that login ends the session it is presented with. Anything else — an outage, a 429, a malformed answer — signs
+      // nothing in.
       if (held === null && statusOf(current) !== 401) return undecided(current);
+      // The session this client confirmed for this user is gone (M7A-CUSTOMERS-P6): nothing signs in on its own — no ID
+      // token is asked for and no login is sent — until the user asks to reconnect. Its token is forgotten with it.
+      if (held === null && confirmedUid === uid && options.reconnect !== true) {
+        memo = null;
+        return ENDED;
+      }
       // The digest the confirming read is compared with is made before any login: one that cannot be made signs nothing in.
       try {
         await subjectOf(uid);
@@ -295,6 +330,7 @@ export function createTenantSessionClient(
     supersede(); // its own epoch: whatever was in flight before this logout answers for nothing
     const remembered = memo?.csrf ?? null;
     memo = null;
+    confirmedUid = null;
     const previous = ending;
     const run = (async (): Promise<void> => {
       if (previous !== null) await previous;
@@ -324,6 +360,7 @@ export function createTenantSessionClient(
     reset(): void {
       supersede();
       memo = null;
+      confirmedUid = null;
     },
   });
 }

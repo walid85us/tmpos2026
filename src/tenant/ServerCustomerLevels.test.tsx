@@ -1590,4 +1590,64 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
       `GET ${TENANT_SESSION_PATHS.current}`, `GET ${ROLE_LEVELS_PATH}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${ROLE_LEVELS_PATH}`,
     ]);
   });
+
+  // M7A-CUSTOMERS-P6 — a session this panel confirmed that the server then ends is never re-established on its own: Save
+  // and the focus refresh find it ended and sign nothing in; only the Reconnect click logs in, once.
+  const ENDED_NOTE = 'Your server session ended. Reconnect to see server-enforced Customers access.';
+  const logins = (server: ReturnType<typeof fakeServer>) => server.sent.filter((r) => r.url === TENANT_SESSION_PATHS.login).length;
+  const settled = async () => { for (let i = 0; i < 4; i++) await flush(); };
+
+  it('SCL-54. the session ends under a ready panel: Save, Save again and a focus refresh send NO login and NO PUT; only Reconnect logs in, once, keeping the draft', async () => {
+    const server = fakeServer();
+    mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
+    await waitFor(() => expect(state()).toHaveTextContent('Ready'));
+    expect(logins(server)).toBe(1);
+    server.session = null; // expired or revoked in the store
+    await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'signed-out'));
+    expect(status('technician')).toHaveTextContent('Not saved: your server session ended. Reconnect, then save again.');
+    expect(screen.getByTestId('server-levels-retry')).toHaveTextContent('Reconnect');
+    await click('server-level-save-technician'); // Save again: still nothing
+    await settled();
+    expect(status('technician')).toHaveAttribute('data-status', 'signed-out');
+    expect(puts(server)).toHaveLength(0);
+    expect(logins(server)).toBe(1);
+    await focusRefresh();
+    await waitFor(() => expect(state()).toHaveTextContent('Signed out'));
+    expect(screen.getByText(ENDED_NOTE)).toBeInTheDocument();
+    expect(screen.queryByTestId('server-level-row-technician')).toBeNull();
+    expect(puts(server)).toHaveLength(0);
+    expect(logins(server)).toBe(1);
+    expect(levelReads(server)).toBe(1);
+    await click('server-levels-retry');
+    await waitFor(() => expect(state()).toHaveTextContent('Ready'));
+    expect(logins(server)).toBe(2);
+    expect(screen.getByTestId('server-level-select-technician')).toHaveValue('none');
+    expect(screen.getByTestId('server-level-reason-technician')).toHaveValue(REASON);
+    await click('server-level-save-technician');
+    await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
+    expect(logins(server)).toBe(2);
+  });
+
+  it('SCL-55. a PUT refused 401 whose session really ended: the focus refresh that follows signs nothing in; Reconnect reuses another tab\'s valid session with no login', async () => {
+    const server = fakeServer();
+    server.puts.push(401);
+    mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
+    await waitFor(() => expect(state()).toHaveTextContent('Ready'));
+    await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'signed-out'));
+    const user = server.session;
+    server.session = null; // the server session really ended
+    await focusRefresh();
+    await waitFor(() => expect(state()).toHaveTextContent('Signed out'));
+    expect(screen.getByText(ENDED_NOTE)).toBeInTheDocument();
+    await focusRefresh();
+    await settled();
+    expect(logins(server)).toBe(1);
+    server.session = user; // another tab of this browser signed the same user in
+    await click('server-levels-retry');
+    await waitFor(() => expect(state()).toHaveTextContent('Ready'));
+    expect(logins(server)).toBe(1);
+    expect(screen.getByTestId('server-level-select-technician')).toHaveValue('none');
+  });
 });

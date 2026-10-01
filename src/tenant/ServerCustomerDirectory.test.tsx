@@ -564,19 +564,29 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await click('directory-retry');
     await ready();
     expect(names()).toEqual(['Ada', 'Bob']);
-    // The session is gone and the server refuses the sign-in: the same state, and nothing is read.
+    // The session is gone: Refresh finds it ended and signs nothing in (M7A-CUSTOMERS-P6); nothing is read.
     server.sessions.clear();
     server.logins.push(401);
     const before = lists(server).length;
     await click('directory-refresh');
     await waitFor(() => expect(phase()).toBe('signed-out'));
-    expect(state()).toHaveTextContent('did not accept this sign-in');
+    expect(state()).toHaveTextContent('Your server session ended. Reconnect');
     expect(names()).toEqual([]);
     expect(lists(server)).toHaveLength(before);
-    await click('directory-retry'); // ensure() signs in again
+    expect(logins(server)).toHaveLength(1);
+    expect(server.logins).toEqual([401]); // the planned refusal is still unused: no login was sent
+    // Reconnect signs in, and the server refuses the sign-in: the same state, and nothing is read.
+    await click('directory-retry');
+    await waitFor(() => expect(state()).toHaveTextContent('did not accept this sign-in'));
+    expect(phase()).toBe('signed-out');
+    expect(names()).toEqual([]);
+    expect(lists(server)).toHaveLength(before);
+    expect(logins(server)).toHaveLength(2);
+    await click('directory-retry'); // Reconnect: ensure() signs in again
     await ready();
     expect(names()).toEqual(['Ada', 'Bob']);
     expect(addButton()).toBeEnabled();
+    expect(logins(server)).toHaveLength(3);
   });
 
   it('SCD-07. a 403 on the list is the denied state: rows cleared, no local fallback, no create', async () => {
@@ -1190,9 +1200,16 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await addCustomer('Ada Lovelace');
     await unresolved();
     server.moveGrant('tok-a', TENANT_B);
+    // The move ended the session: "Check again" finds it ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6).
     await click('directory-check-again');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(hold()).toHaveAttribute('data-detached', 'false');
+    expect(logins(server)).toHaveLength(1);
+    expect(posts(server)).toHaveLength(1);
+    await click('directory-retry'); // Reconnect: the new session is the other store's
     await waitFor(() => expect(hold()).toHaveAttribute('data-detached', 'true'));
     await ready();
+    expect(logins(server)).toHaveLength(2);
     expect(posts(server)).toHaveLength(1); // NO POST under the new session
     expect(server.rows[TENANT_B].map((r) => r.name)).toEqual(['Bea']); // and no row in the other tenant
     expect(server.rows[TENANT_A]).toEqual([]);
@@ -1207,7 +1224,11 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     // Going back to a session of the first store does not re-attach it: detached for good.
     server.moveGrant('tok-a', TENANT_A);
     await click('directory-refresh');
+    await waitFor(() => expect(phase()).toBe('signed-out')); // ended again: Refresh signs nothing in
+    expect(logins(server)).toHaveLength(2);
+    await click('directory-retry');
     await ready();
+    expect(logins(server)).toHaveLength(3);
     expect(hold()).toHaveAttribute('data-detached', 'true');
     expect(screen.queryByTestId('directory-check-again')).toBeNull();
     await focusWindow();
@@ -1646,8 +1667,12 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
     expect(screen.queryByTestId('directory-connection-changed')).toBeNull(); // the same token: nothing changes
     expect(names()).toEqual(['Ada']);
-    await focusWindow();
-    await settle();
+    // A later focus sends its own read once the first is judged. That takes a Web Crypto digest whose time varies with
+    // load, and a focus before then shares the first read, so focus until one is sent rather than guess the turns.
+    for (let i = 0; i < 50 && server.sent.length - before < 2; i++) {
+      await focusWindow();
+      await settle();
+    }
     expect(server.sent.slice(before).map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${TENANT_SESSION_PATHS.current}`]);
   });
 
@@ -1883,15 +1908,22 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       expect(names()).toEqual(['Ada']);
       expect(screen.queryByTestId('directory-connection-changed')).toBeNull();
     }
-    // The session has ended and the server refuses the sign-in: no rows any more.
+    // The session has ended: no rows any more, and the focus check signs nothing in (M7A-CUSTOMERS-P6) — the planned
+    // refusal stays unused. Its Reconnect is what signs in: refused here, the same state.
     server.sessions.clear();
     server.logins.push(401);
     await focusWindow();
     await waitFor(() => expect(phase()).toBe('signed-out'));
-    expect(state()).toHaveTextContent('did not accept this sign-in');
+    expect(state()).toHaveTextContent('Your server session ended. Reconnect');
     expect(names()).toEqual([]);
     expect(addButton()).toBeDisabled();
-    // With no identity to sign in with, the same.
+    expect(logins(server)).toHaveLength(1);
+    expect(server.logins).toEqual([401]);
+    await click('directory-retry');
+    await waitFor(() => expect(state()).toHaveTextContent('did not accept this sign-in'));
+    expect(names()).toEqual([]);
+    expect(logins(server)).toHaveLength(2);
+    // With no identity to sign in with, the same: ended on focus (no ID token asked), and the Reconnect finds nobody.
     cleanup();
     const tokens: Record<string, string> = { 'uid-a': 'tok-a' };
     const other = fakeServer();
@@ -1902,8 +1934,12 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     delete tokens['uid-a'];
     await focusWindow();
     await waitFor(() => expect(phase()).toBe('signed-out'));
-    expect(state()).toHaveTextContent('Sign in with your store account');
+    expect(state()).toHaveTextContent('Your server session ended. Reconnect');
     expect(names()).toEqual([]);
+    await click('directory-retry');
+    await waitFor(() => expect(state()).toHaveTextContent('Sign in with your store account'));
+    expect(names()).toEqual([]);
+    expect(logins(other)).toHaveLength(1); // the first load's only
   });
 
   it('SCD-51. a shorter Retry-After never shortens a running wait, and "Stop tracking" during a wait reads nothing (R6, T5)', async () => {
@@ -2070,8 +2106,10 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await waitFor(() => expect(server.held).toHaveLength(1));
     server.sessions.clear();
     server.logins.push(401);
-    await focusWindow(); // the session is definitely gone
+    await focusWindow(); // the session is definitely gone: found ended, with no login (M7A-CUSTOMERS-P6)
     await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(logins(server)).toHaveLength(1);
+    expect(server.logins).toEqual([401]); // unused
     server.held[0].release(); // the read answered 200 before the session ended
     await settle();
     expect(phase()).toBe('signed-out');
@@ -2457,6 +2495,338 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(sessionReads()).toBeGreaterThan(readsBefore); // a session read sent after the 403
     expect(names()).toEqual(['Ada', 'Bob']);
     expect(lists(server).at(-1)?.headers.get('x-tmpos-session-csrf')).toBe(newCsrf); // the new session's answer is the one acted on
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  // M7A-CUSTOMERS-P6 — a session this page confirmed that the server then ends (expiry, revocation, a logout elsewhere) is
+  // never re-established on its own: everything the page does by itself finds it ended and signs nothing in; only a
+  // Reconnect click logs in, once. `server.sessions.clear()` is the real end (a customer read's 401 alone keeps the session).
+  const ENDED = 'Your server session ended. Reconnect to see the customers saved on the server.';
+  const tabReturn = async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  };
+
+  it('SCD-73. a confirmed session that ends: Refresh, Load more, a focus, a tab return and Add each find it ended — NO login, nothing of the server\'s shown, Reconnect offered — and only Reconnect logs in, once', async () => {
+    for (const trigger of ['refresh', 'more', 'focus', 'visibility', 'add'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, Array.from({ length: 60 }, (_, i) => `Customer ${String(i).padStart(2, '0')}`));
+      mount(server);
+      await ready();
+      expect(names()).toHaveLength(50);
+      expect(logins(server)).toHaveLength(1);
+      if (trigger === 'add') await typeName('Ada Lovelace');
+      server.sessions.clear(); // expired or revoked in the store; the browser still presents its cookie
+      const before = lists(server).length;
+      if (trigger === 'refresh') await click('directory-refresh');
+      if (trigger === 'more') await click('directory-load-more');
+      if (trigger === 'focus') await focusWindow();
+      if (trigger === 'visibility') await tabReturn();
+      if (trigger === 'add') await click('directory-add');
+      await waitFor(() => expect(phase(), trigger).toBe('signed-out'));
+      expect(state(), trigger).toHaveTextContent(ENDED);
+      expect(names(), trigger).toEqual([]); // rows and cursor cleared
+      expect(screen.queryByTestId('directory-load-more'), trigger).toBeNull();
+      expect(screen.queryByTestId('directory-last-known'), trigger).toBeNull();
+      expect(screen.getByTestId('directory-retry'), trigger).toHaveTextContent('Reconnect');
+      expect(addButton(), trigger).toBeDisabled();
+      expect(lists(server), trigger).toHaveLength(before); // nothing read without a session
+      if (trigger === 'add') {
+        expect(createStatus()).toHaveTextContent(`Not sent. ${ENDED}`);
+        expect(nameInput()).toHaveValue('Ada Lovelace'); // the draft kept
+      }
+      // Nothing else that runs on its own signs in either.
+      await focusWindow();
+      await tabReturn();
+      await settle();
+      expect(phase(), trigger).toBe('signed-out');
+      expect(logins(server), trigger).toHaveLength(1);
+      expect(posts(server), trigger).toHaveLength(0);
+      // Reconnect: exactly one login, and the rows are back.
+      await click('directory-retry');
+      await ready();
+      expect(logins(server), trigger).toHaveLength(2);
+      expect(names(), trigger).toHaveLength(50);
+      expect(posts(server), trigger).toHaveLength(0);
+      cleanup();
+    }
+  });
+
+  it('SCD-74. a customer opened after the session ended sends NO login and shows nothing of it, through route changes and a focus; its Reconnect logs in once and shows it', async () => {
+    const server = fakeServer();
+    const [ada, bob] = server.seed(TENANT_A, ['Ada', 'Bob']);
+    const view = mount(server);
+    await ready();
+    server.sessions.clear(); // not yet noticed by the page
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.getByTestId('directory-detail-state')).toHaveTextContent(ENDED);
+    expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+    expect(screen.getByTestId('directory-detail-retry')).toHaveTextContent('Reconnect');
+    await view.go('/customers/directory'); // back to the list: cleared by the same refusal
+    expect(phase()).toBe('signed-out');
+    expect(names()).toEqual([]);
+    await view.go(`/customers/directory/${bob.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'signed-out'));
+    await focusWindow();
+    await settle();
+    expect(logins(server)).toHaveLength(1);
+    expect(details(server)).toHaveLength(0);
+    await click('directory-detail-retry');
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Bob'));
+    expect(logins(server)).toHaveLength(2);
+    await view.go('/customers/directory');
+    await ready();
+    expect(names()).toEqual(['Ada', 'Bob']);
+    expect(logins(server)).toHaveLength(2);
+  });
+
+  it('SCD-75. an uncertain create, then the session ends: "Check again" and "Stop tracking" send NO login and NO POST; Reconnect logs in once and detaches the attempt — never re-sent', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Bea']);
+    server.posts.push('lost-before');
+    const view = mount(server, { keys: [key(1), key(2)] });
+    await ready();
+    await addCustomer('Ada Lovelace');
+    await unresolved();
+    server.sessions.clear();
+    await click('directory-check-again');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(state()).toHaveTextContent(ENDED);
+    expect(hold()).toHaveAttribute('data-state', 'unresolved');
+    expect(hold()).toHaveAttribute('data-detached', 'false');
+    expect(screen.getByTestId('directory-hold-reason')).toHaveTextContent(`Not checked. ${ENDED}`);
+    expect(names()).toEqual([]);
+    expect(logins(server)).toHaveLength(1);
+    expect(posts(server)).toHaveLength(1);
+    await click('directory-retry'); // Reconnect
+    await ready();
+    expect(logins(server)).toHaveLength(2);
+    expect(hold()).toHaveAttribute('data-detached', 'true'); // the new connection is not the attempt's: detached for good
+    expect(screen.queryByTestId('directory-check-again')).toBeNull();
+    expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), csrf: null, state: 'unresolved' });
+    expect(posts(server)).toHaveLength(1);
+    // It ends again: "Stop tracking" forgets the attempt, and the page-one read it starts signs nothing in.
+    server.sessions.clear();
+    await click('directory-stop-tracking');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(screen.queryByTestId('directory-hold')).toBeNull();
+    expect(logins(server)).toHaveLength(2);
+    await click('directory-retry');
+    await ready();
+    expect(names()).toEqual(['Bea']);
+    expect(logins(server)).toHaveLength(3);
+    expect(posts(server)).toHaveLength(1);
+    expect(server.rows[TENANT_A].map((r) => r.name)).toEqual(['Bea']);
+  });
+
+  it('SCD-76. a read refused 403 whose session check finds the session ended: no login, the ended state, nothing shown', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada']);
+    mount(server);
+    await ready();
+    server.reads.push(403);
+    server.hold.reads = 1;
+    await click('directory-refresh');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.sessions.clear(); // the session ends while the refused read is on its way back
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(state()).toHaveTextContent(ENDED);
+    expect(names()).toEqual([]);
+    await settle();
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-77. after the session ended, a valid session of the same user (another tab signed in) is reused on focus: no login, the rows read under it', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada']);
+    mount(server);
+    await ready();
+    server.sessions.clear();
+    await focusWindow();
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(logins(server)).toHaveLength(1);
+    server.otherTab('tok-a');
+    await focusWindow();
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toHaveTextContent(CONNECTION_CHANGED_TEXT));
+    await ready();
+    expect(names()).toEqual(['Ada']);
+    expect(logins(server)).toHaveLength(1);
+    expect(lists(server).at(-1)?.headers.get('x-tmpos-session-csrf')).toBe(server.csrfOfCookie());
+  });
+
+  it('SCD-78. the stated residual: a page opened afresh while the cookie names an ended session signs in once, as a first load (the 401 does not say "expired", and nothing is stored to tell)', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada']);
+    mount(server);
+    await ready();
+    cleanup();
+    server.sessions.clear();
+    mount(server); // a reload: a new session client that has confirmed nothing yet
+    await ready();
+    expect(logins(server)).toHaveLength(2);
+    expect(names()).toEqual(['Ada']);
+  });
+
+  it('SCD-79. an automatic session check that answers `ended` while a Reconnect waits on it never cancels that Reconnect: the list, then a customer, each come back with exactly one more login', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const view = mount(server);
+    await ready();
+    server.sessions.clear();
+    await focusWindow();
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    // A focus check is out when Reconnect is pressed; the check answers `ended` first, then the Reconnect logs in.
+    server.hold.checks = 1;
+    await focusWindow();
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-retry');
+    await act(async () => { server.held[0].release(); });
+    await ready();
+    expect(names()).toEqual(['Ada']);
+    expect(logins(server)).toHaveLength(2);
+    // The same for a customer opened after the session ended again: a tab return is out when its Reconnect is pressed.
+    server.held.length = 0;
+    server.sessions.clear();
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'signed-out'));
+    server.hold.checks = 1;
+    await tabReturn();
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-detail-retry');
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Ada'));
+    await settle();
+    expect(logins(server)).toHaveLength(3);
+    expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready');
+  });
+
+  it('SCD-80. a saved notice does not outlive the session: once a focus finds it ended, neither "Saved on the server" nor the earlier-connection notice stays', async () => {
+    {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Bea']);
+      mount(server, { keys: [key(1)] });
+      await ready();
+      await addCustomer('Ada Lovelace'); // a validated 201
+      await waitFor(() => expect(screen.getByTestId('directory-saved')).toHaveTextContent('Saved on the server: "Ada Lovelace".'));
+      await waitFor(() => expect(names()).toEqual(['Ada Lovelace', 'Bea']));
+      server.sessions.clear();
+      await focusWindow();
+      await waitFor(() => expect(phase()).toBe('signed-out'));
+      expect(screen.queryByTestId('directory-saved')).toBeNull();
+      expect(screen.queryByTestId('directory-saved-link')).toBeNull();
+      expect(names()).toEqual([]);
+      expect(logins(server)).toHaveLength(1);
+      cleanup();
+    }
+    {
+      const server = fakeServer();
+      const view = mount(server, { keys: [key(1)] });
+      await ready();
+      server.hold.posts = 1;
+      await addCustomer('Ada Lovelace');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await view.go('/elsewhere');
+      server.otherTab('tok-a');
+      server.held[0].release();
+      await settle();
+      await view.go('/customers/directory');
+      expect(await screen.findByTestId('directory-saved-earlier')).toHaveTextContent(savedEarlierText('Ada Lovelace'));
+      await waitFor(() => expect(names()).toEqual(['Ada Lovelace']));
+      server.sessions.clear();
+      await focusWindow();
+      await waitFor(() => expect(phase()).toBe('signed-out'));
+      expect(screen.queryByTestId('directory-saved-earlier')).toBeNull();
+      expect(logins(server)).toHaveLength(1);
+      cleanup();
+    }
+    // A settled refusal names the customer too: it does not outlive the session either.
+    {
+      const server = fakeServer();
+      server.posts.push(403);
+      const view = mount(server, { keys: [key(1)] });
+      await ready();
+      server.hold.posts = 1;
+      await addCustomer('Ada Lovelace');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await view.go('/elsewhere');
+      await view.go('/customers/directory');
+      await ready();
+      server.held[0].release();
+      await waitFor(() => expect(createStatus()).toHaveTextContent('"Ada Lovelace" was not added: the server refused that request.'));
+      server.sessions.clear();
+      await focusWindow();
+      await waitFor(() => expect(phase()).toBe('signed-out'));
+      expect(createStatus().textContent).toBe('');
+      expect(page()).not.toMatch(/Ada Lovelace/);
+      expect(logins(server)).toHaveLength(1);
+      cleanup();
+    }
+    // What must stay does: the hold of an uncertain create and its reason outlive the session's end.
+    {
+      const server = fakeServer();
+      server.posts.push('rollback-503');
+      mount(server, { keys: [key(1)] });
+      await ready();
+      await addCustomer('Ada Lovelace');
+      await unresolved();
+      await click('directory-check-again'); // inside the lease: still in progress
+      await waitFor(() => expect(screen.getByTestId('directory-hold-reason')).toHaveTextContent('The server is still working on it.'));
+      server.sessions.clear();
+      await focusWindow();
+      await waitFor(() => expect(phase()).toBe('signed-out'));
+      expect(hold()).toHaveAttribute('data-state', 'unresolved');
+      expect(screen.getByTestId('directory-hold-reason')).toHaveTextContent('The server is still working on it.');
+      expect(logins(server)).toHaveLength(1);
+    }
+  });
+
+  it('SCD-81. a plain read of the OTHER view that finds the session ended never cancels a Reconnect already pressed: the customer comes back with exactly one more login, and nothing is re-sent', async () => {
+    const server = fakeServer();
+    const [bea] = server.seed(TENANT_A, ['Bea']);
+    server.posts.push('lost-before');
+    const view = mount(server, { keys: [key(1)] });
+    await ready();
+    await addCustomer('Ada Lovelace');
+    await unresolved();
+    await view.go(`/customers/directory/${bea.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Bea'));
+    server.sessions.clear();
+    await focusWindow();
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'signed-out'));
+    server.hold.checks = 1;
+    await click('directory-stop-tracking'); // a plain page-one read of the list, whose session read is held
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-detail-retry'); // Reconnect, before that read answers
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Bea'));
+    await settle();
+    expect(logins(server)).toHaveLength(2);
+    expect(posts(server)).toHaveLength(1);
+    await view.go('/customers/directory');
+    await ready();
+    expect(names()).toEqual(['Bea']);
+    expect(logins(server)).toHaveLength(2);
+  });
+
+  it('SCD-82. a focus check that finds the session ended after "Back to directory" (a route change, no read) still clears: the old rows never come back as ready, and nothing logs in', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const view = mount(server);
+    await ready();
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Ada'));
+    server.sessions.clear();
+    server.hold.checks = 1;
+    await focusWindow();
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/customers/directory'); // leaving the detail moves its read counter and starts no read
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(names()).toEqual([]);
+    expect(page()).not.toMatch(/Ada/);
+    await settle();
     expect(logins(server)).toHaveLength(1);
   });
 });

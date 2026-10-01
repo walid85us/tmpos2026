@@ -1,6 +1,7 @@
 // M7A-CUSTOMERS-P3-R2 — the shop's tenant session client against a scripted fetch: what it sends, what it keeps for
 // which user, and which answers it believes. M7A-CUSTOMERS-P5-R1: every ensure reads the session first and reuses one
 // the server names as that user's (`subject`), so a page load signs in only when there is no such session.
+// M7A-CUSTOMERS-P6: a session the client confirmed that then ends is `ended` — no login until a reconnect (TSC-25..31).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -86,8 +87,9 @@ test('TSC-01. a first ensure reads the session, finds none, logs in with the Bea
   assertBoundaryOnly(net.sent);
 });
 
-test('TSC-02. the same user reuses the session a read names as theirs; a 401 read signs in again', async () => {
-  const net = scripted([NONE(), active(), active(), active(ROTATED), NONE(), active(), active()]);
+// M7A-CUSTOMERS-P6: a 401 after a confirmed session is `ended` (no login); only a reconnect signs in again (TSC-25).
+test('TSC-02. the same user reuses the session a read names as theirs; a 401 read then ends it, and only a reconnect signs in again', async () => {
+  const net = scripted([NONE(), active(), active(), active(ROTATED), NONE(), NONE(), active(), active()]);
   const client = createTenantSessionClient({ fetch: net.fetch });
   let tokens = 0;
   const idToken = async () => { tokens += 1; return TOKEN_A; };
@@ -95,9 +97,12 @@ test('TSC-02. the same user reuses the session a read names as theirs; a 401 rea
   assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: ROTATED }); // another tab rotated it
   assert.equal(tokens, 1);
   assert.deepEqual(lines(net.sent.slice(3)), [READ]);
-  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: CSRF }); // expired: logged in again
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' }); // expired: nothing signs in on its own
+  assert.equal(tokens, 1);
+  assert.deepEqual(lines(net.sent.slice(4)), [READ]);
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'ok', csrf: CSRF }); // the Reconnect: logged in again
   assert.equal(tokens, 2);
-  assert.deepEqual(lines(net.sent.slice(4)), [READ, LOGIN, READ]);
+  assert.deepEqual(lines(net.sent.slice(5)), [READ, LOGIN, READ]);
 });
 
 test('TSC-03. a different user never reuses the previous user session: the read names another identity, so it logs in with its own token', async () => {
@@ -476,4 +481,142 @@ test('TSC-24. a fresh ensure for a user this client has moved on from answers un
   // B is still remembered: its re-authentication is sent (unscripted here, so unavailable) rather than refused unsent.
   assert.deepEqual(await client.reauthenticate('uid-b', TOKEN_B), { kind: 'unavailable' });
   assert.deepEqual(lines(net.sent), [READ, LOGIN, READ]);
+});
+
+// M7A-CUSTOMERS-P6 — a session this client confirmed that the server then ends (expiry, revocation, a logout elsewhere)
+// is never re-established on its own: only an explicit reconnect logs in again.
+test('TSC-25. a confirmed session that ends answers `ended`: no ID token asked, no login, again and again, until a reconnect logs in exactly once', async () => {
+  const net = scripted([NONE(), active(), active(), NONE(), NONE(), NONE(), NONE(), active(ROTATED), active(ROTATED), NONE()]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  let tokens = 0;
+  const idToken = async () => { tokens += 1; return TOKEN_A; };
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: CSRF }); // the first establishment logs in
+  assert.equal(tokens, 1);
+  const ended = await client.ensure('uid-a', idToken);
+  assert.deepEqual(ended, { kind: 'ended' });
+  assert.ok(Object.isFrozen(ended));
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' }); // the marker stands
+  assert.deepEqual(await client.ensure('uid-a', idToken, { fresh: true }), { kind: 'ended' }); // a check after a 403 too
+  assert.equal(tokens, 1); // not even an ID token was asked for
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, READ, READ]);
+  assert.deepEqual(await client.reauthenticate('uid-a', TOKEN_B), { kind: 'refused' }); // no session left to renew: sent nowhere
+  assert.equal(net.sent.length, 6);
+  // The Reconnect: one read, one login, one confirming read.
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'ok', csrf: ROTATED });
+  assert.equal(tokens, 2);
+  assert.deepEqual(lines(net.sent.slice(6)), [READ, LOGIN, READ]);
+  // Confirmed again: its end is again `ended`, with nothing sent but the read.
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.deepEqual(lines(net.sent.slice(9)), [READ]);
+  assert.equal(tokens, 2);
+  assertBoundaryOnly(net.sent);
+});
+
+test('TSC-26. after an end, a valid session of the same user that a read finds (another tab signed in) is reused with no login', async () => {
+  const net = scripted([NONE(), active(), active(), NONE(), active(ROTATED), active(ROTATED), NONE()]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  let tokens = 0;
+  const idToken = async () => { tokens += 1; return TOKEN_A; };
+  await client.ensure('uid-a', idToken);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: ROTATED }); // another tab's session
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'ok', csrf: ROTATED }); // a reconnect reuses it too
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.equal(tokens, 1);
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, READ, READ, READ]);
+});
+
+test('TSC-27. what the end does not change: another identity\'s session still logs this user in; outages and 429s still log nothing in', async () => {
+  const net = scripted([NONE(), active(), active(), NONE(), active(CSRF, 'uid-b'), active(ROTATED), active(ROTATED), refused(503), limited('9'), NONE()]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  let tokens = 0;
+  const idToken = async () => { tokens += 1; return TOKEN_A; };
+  await client.ensure('uid-a', idToken);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  // Another identity's session in this browser: this user logs in as themselves, as before (TSC-17).
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(net.sent.slice(4)), [READ, LOGIN, READ]);
+  assert.equal(tokens, 2);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'unavailable' });
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'rate-limited', retryAfterSeconds: 9 });
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.deepEqual(lines(net.sent.slice(7)), [READ, READ, READ]);
+  assert.equal(tokens, 2);
+});
+
+test('TSC-28. a reset, a logout or another user starts afresh: a 401 read then logs in as a first establishment', async () => {
+  const afterReset = scripted([NONE(), active(), active(), NONE(), active(ROTATED), active(ROTATED)]);
+  const reset = createTenantSessionClient({ fetch: afterReset.fetch });
+  await reset.ensure('uid-a', async () => TOKEN_A);
+  reset.reset();
+  assert.deepEqual(await reset.ensure('uid-a', async () => TOKEN_A), { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(afterReset.sent.slice(3)), [READ, LOGIN, READ]);
+  const afterLogout = scripted([NONE(), active(), active(), new Response(null, { status: 204 }), NONE(), active(ROTATED), active(ROTATED)]);
+  const out = createTenantSessionClient({ fetch: afterLogout.fetch });
+  await out.ensure('uid-a', async () => TOKEN_A);
+  await out.logout();
+  assert.deepEqual(await out.ensure('uid-a', async () => TOKEN_A), { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(afterLogout.sent.slice(4)), [READ, LOGIN, READ]);
+  const switched = scripted([NONE(), active(), active(), NONE(), active(ROTATED, 'uid-b'), active(ROTATED, 'uid-b')]);
+  const other = createTenantSessionClient({ fetch: switched.fetch });
+  await other.ensure('uid-a', async () => TOKEN_A);
+  assert.deepEqual(await other.ensure('uid-b', async () => TOKEN_B), { kind: 'ok', csrf: ROTATED }); // B never had a session here
+  assert.deepEqual(lines(switched.sent.slice(3)), [READ, LOGIN, READ]);
+  // Another user's turn that ends with nothing kept (nobody to present) still forgets the first user's confirmation:
+  // the first user's next 401 is a first establishment, not `ended`.
+  const passed = scripted([NONE(), active(), active(), NONE(), NONE(), active(ROTATED), active(ROTATED)]);
+  const turn = createTenantSessionClient({ fetch: passed.fetch });
+  await turn.ensure('uid-a', async () => TOKEN_A);
+  assert.deepEqual(await turn.ensure('uid-b', async () => null), { kind: 'no-identity' });
+  assert.deepEqual(await turn.ensure('uid-a', async () => TOKEN_A), { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(passed.sent.slice(3)), [READ, READ, LOGIN, READ]);
+});
+
+test('TSC-29. a reconnect that does not establish a session leaves the end standing: the next plain ensure still logs nothing in', async () => {
+  const net = scripted([NONE(), active(), active(), NONE(), NONE(), refused(401), NONE(), NONE(), NONE()]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  let token: string | null = TOKEN_A;
+  let tokens = 0;
+  const idToken = async () => { tokens += 1; return token; };
+  await client.ensure('uid-a', idToken);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'refused' }); // the login was refused
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  token = null;
+  assert.deepEqual(await client.ensure('uid-a', idToken, { reconnect: true }), { kind: 'no-identity' }); // nobody to present
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' });
+  assert.equal(tokens, 3);
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, READ, LOGIN, READ, READ, READ]);
+});
+
+test('TSC-30. a reconnect that arrives while a plain attempt is out is not answered by that attempt\'s end: it waits, then logs in', async () => {
+  const first = held();
+  const net = scripted([NONE(), active(), active(), first.reply, NONE(), active(ROTATED), active(ROTATED)]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  await client.ensure('uid-a', async () => TOKEN_A);
+  const plain = client.ensure('uid-a', async () => TOKEN_A);
+  await ticks(1);
+  const reconnect = client.ensure('uid-a', async () => TOKEN_A, { reconnect: true });
+  await ticks();
+  assert.deepEqual(lines(net.sent.slice(3)), [READ]); // nothing more while the plain read is out
+  first.answer(NONE());
+  assert.deepEqual(await plain, { kind: 'ended' });
+  assert.deepEqual(await reconnect, { kind: 'ok', csrf: ROTATED });
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, READ, LOGIN, READ]);
+});
+
+test('TSC-31. after an end, a fresh check for another user sends nothing and answers unavailable: the end stands, and the confirmed user still logs nothing in', async () => {
+  const net = scripted([NONE(), active(), active(), NONE(), NONE(), active(ROTATED), active(ROTATED)]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  let tokens = 0;
+  const idToken = async () => { tokens += 1; return TOKEN_A; };
+  await client.ensure('uid-a', idToken);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' }); // nothing kept now: no memo, nothing in flight
+  let asked = 0;
+  assert.deepEqual(await client.ensure('uid-b', async () => { asked += 1; return TOKEN_B; }, { fresh: true }), { kind: 'unavailable' });
+  assert.equal(net.sent.length, 4); // nothing sent for uid-b
+  assert.equal(asked, 0);
+  assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' }); // the stale check cleared nothing
+  assert.deepEqual(lines(net.sent.slice(3)), [READ, READ]);
+  assert.equal(tokens, 1);
 });

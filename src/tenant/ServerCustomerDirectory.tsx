@@ -39,14 +39,23 @@
 //     React view of an attempt is token-free (the token stays in refs and the store). The store survives in-app
 //     navigation, not a reload (persisting it would put a name, a key and a token in browser storage), though since
 //     M7A-CUSTOMERS-P5-R1 a reloaded page usually reuses the same session (DA-137).
-//   - A read the server refuses (a 401 or a 403 on the list or on a detail, or a focus check whose sign-in the server
-//     no longer accepts) clears BOTH views: no rows, no cursor and no customer, whichever view was reading. No read
-//     starts during a rate limit's wait (the later deadline wins; a wait text states the wait running when written): a blocked
-//     page-one read is remembered and runs, once, when the wait ends (a read, never a create); the first reads of a
-//     fresh page or generation still run. A failed "Load more" is a failed refresh: phase unavailable / rate-limited,
-//     the rows kept under the last-known label, "Try again" reads page one.
+//   - A read the server refuses (a 401 or a 403 on the list or on a detail, or a session check that finds the session
+//     ended or a sign-in the server no longer accepts) clears BOTH views: no rows, no cursor and no customer, whichever
+//     view was reading. No read starts during a rate limit's wait (the later deadline wins; a wait text states the wait
+//     running when written): a blocked page-one read is remembered and runs, once, when the wait ends (a read, never a
+//     create); the first reads of a fresh page or generation still run. A failed "Load more" is a failed refresh: phase
+//     unavailable / rate-limited, the rows kept under the last-known label, "Try again" reads page one.
 //   - One page per signed-in user (keyed by UID): a user switch mounts a fresh page, and one user's attempt is never
 //     shown to another.
+//   - A session that ENDS is never re-established on its own (M7A-CUSTOMERS-P6): once the session client has confirmed
+//     this user's session, its expiry or revocation makes `connect()` answer `ended` with no login and no ID token, and
+//     the page shows the refusal state (both views cleared, "Reconnect"). Focus, a tab return, Refresh, Load more, a route
+//     change, a wait's end, Add, Check again, Stop tracking and the check after a 403 all stay there: only the two
+//     Reconnect buttons (directory-retry, directory-detail-retry, while signed out) ask the client to log in again. A
+//     valid session of the same user that a read finds (another tab) is still taken with no login. The Reconnect's new
+//     token is a new generation, so an unresolved create is detached, never re-sent. A Reconnect already pressed is never
+//     cancelled by an `ended` that a plain caller reports meanwhile (the other view's read, a focus check out before the
+//     click): that view waits for the Reconnect's own answer. An ended session also removes a "Saved on the server" notice.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -234,6 +243,7 @@ const DETAIL_NONE: DetailState = Object.freeze({ id: null, phase: 'loading', tex
 function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
   if (s.kind === 'no-identity') return { kind: 'signed-out', text: TEXT.noIdentity };
   if (s.kind === 'refused') return { kind: 'signed-out', text: TEXT.refused };
+  if (s.kind === 'ended') return { kind: 'signed-out', text: TEXT.sessionEnded };
   if (s.kind === 'rate-limited') {
     const seconds = s.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS;
     return { kind: 'rate-limited', text: waitText(seconds), seconds };
@@ -299,7 +309,7 @@ function UserPage({
   const [detail, setDetail] = useState<DetailState>(DETAIL_NONE);
   const [draft, setDraft] = useState('');
   const [nameError, setNameError] = useState('');
-  const [createStatus, setCreateStatus] = useState<{ readonly refusal: boolean; readonly text: string } | null>(null);
+  const [createStatus, setCreateStatus] = useState<{ readonly refusal: boolean; readonly text: string; readonly named?: true } | null>(null);
   const [saved, setSaved] = useState<CustomerEntry | { readonly earlier: string } | null>(null);
   const [connectionChanged, setConnectionChanged] = useState(false);
   const [wait, setWait] = useState<number | null>(null); // the seconds a rate limit asked for, while that wait runs
@@ -316,6 +326,9 @@ function UserPage({
   const lastRoute = useRef<string | null | undefined>(undefined);
   const listSeq = useRef(0); // the start order of list reads
   const detailSeq = useRef(0);
+  // The read a Reconnect click started, per view, while its session step is still out (0: none): an ended session that a
+  // plain caller reports meanwhile does not cancel it — the Reconnect is the user's own request, and it answers itself.
+  const reconnecting = useRef({ list: 0, detail: 0 });
   const listCtl = useRef<AbortController | null>(null);
   const detailCtl = useRef<AbortController | null>(null);
   const addRef = useRef(false);
@@ -333,8 +346,9 @@ function UserPage({
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
-  const connect = (who: string, fresh = false): Promise<SessionResult> =>
-    session.ensure(who, () => identity.idToken(who), fresh ? { fresh: true } : undefined);
+  /** The session for `who`: plain (never signs in after an end), `fresh` (the check after a 403) or `reconnect` (the user's click). */
+  const connect = (who: string, mode?: 'fresh' | 'reconnect'): Promise<SessionResult> =>
+    session.ensure(who, () => identity.idToken(who), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
   const putList = (next: ListState): void => { listRef.current = next; setList(next); };
   const putDetail = (next: DetailState): void => { detailRef.current = next; setDetail(next); };
 
@@ -396,16 +410,30 @@ function UserPage({
 
   /** A refusal or an ended session shows nothing of the server's on either view: no rows, no cursor, no customer. */
   function clearBoth(failure: Failure): void {
+    const ended = failure.kind === 'signed-out';
+    // A view whose Reconnect is still out is left to it: whatever it answers, it shows (no rows are on it meanwhile).
+    const spareList = ended && reconnecting.current.list !== 0 && reconnecting.current.list === listSeq.current;
+    const spareDetail = ended && reconnecting.current.detail !== 0 && reconnecting.current.detail === detailSeq.current;
     // Reads already in flight must not repaint over the refusal.
-    listSeq.current += 1;
-    detailSeq.current += 1;
-    listCtl.current?.abort();
-    detailCtl.current?.abort();
-    setListBusy(false);
-    putList({ phase: failure.kind as 'denied' | 'signed-out', text: failure.text, rows: [], next: null, note: '' });
-    const id = routeRef.current;
-    if (id === null) putDetail(DETAIL_NONE); // no customer is shown: nothing to stamp
-    else if (isCustomerId(id)) putDetail({ id, phase: failure.kind as 'denied' | 'signed-out', text: failure.text, customer: null });
+    if (!spareList) {
+      listSeq.current += 1;
+      listCtl.current?.abort();
+      setListBusy(false);
+      putList({ phase: failure.kind as 'denied' | 'signed-out', text: failure.text, rows: [], next: null, note: '' });
+    }
+    if (!spareDetail) {
+      detailSeq.current += 1;
+      detailCtl.current?.abort();
+      const id = routeRef.current;
+      if (id === null) putDetail(DETAIL_NONE); // no customer is shown: nothing to stamp
+      else if (isCustomerId(id)) putDetail({ id, phase: failure.kind as 'denied' | 'signed-out', text: failure.text, customer: null });
+    }
+    // Signed out: no notice of a save or of a settled create stays either (they name a customer of a session that is
+    // gone). The hold note and every other create status stay: Add, Check again and a refused send write theirs.
+    if (ended) {
+      setSaved(null);
+      setCreateStatus((status) => (status?.named === true ? null : status));
+    }
   }
   const isRefusal = (failure: Failure): boolean => failure.kind === 'denied' || failure.kind === 'signed-out';
 
@@ -414,7 +442,7 @@ function UserPage({
     if (uid === null || !alive.current || gen.current.csrf === null) return;
     const outcome = holds.takeOutcome(uid);
     if (outcome === undefined) return;
-    if (outcome.kind === 'refused') return setCreateStatus({ refusal: true, text: `"${outcome.name}" was not added: the server refused that request.` });
+    if (outcome.kind === 'refused') return setCreateStatus({ refusal: true, text: `"${outcome.name}" was not added: the server refused that request.`, named: true });
     confirmed(outcome.customer, outcome.csrf === gen.current.csrf, false); // the user may be typing: no focus move
   }
 
@@ -441,7 +469,7 @@ function UserPage({
    * refused (signed out): a check that cannot decide never turns a refused read into last-known rows.
    */
   async function recheck(who: string): Promise<Failure | null> {
-    const s = await connect(who, true); // a session read sent AFTER the 403, never one already in flight before it
+    const s = await connect(who, 'fresh'); // a session read sent AFTER the 403, never one already in flight before it
     if (s.kind !== 'ok') return sessionFailure(s);
     if (alive.current) adopt(who, s.csrf);
     return null;
@@ -457,8 +485,11 @@ function UserPage({
     return shown;
   }
 
-  /** Page one (`first`) or the page after the last shown (`more`). Rows are appended in arrival order, once per id. */
-  async function loadList(mode: 'first' | 'more', note = ''): Promise<void> {
+  /**
+   * Page one (`first`) or the page after the last shown (`more`). Rows are appended in arrival order, once per id.
+   * `reconnect` only from the list's Reconnect button: the one read that may sign in again after the session ended.
+   */
+  async function loadList(mode: 'first' | 'more', note = '', reconnect = false): Promise<void> {
     if (uid === null) return;
     const cursor = mode === 'more' ? listRef.current.next : null;
     if (mode === 'more' && cursor === null) return;
@@ -475,7 +506,10 @@ function UserPage({
     setListBusy(true);
     if (mode === 'first') putList({ ...listRef.current, phase: 'loading', text: TEXT.loading, note });
     try {
-      const s = await connect(uid);
+      if (reconnect) reconnecting.current.list = seq;
+      const s = await connect(uid, reconnect ? 'reconnect' : undefined).finally(() => {
+        if (reconnecting.current.list === seq) reconnecting.current.list = 0;
+      });
       if (stale()) return;
       if (s.kind !== 'ok') { failList(sessionFailure(s)); return; }
       if (adopt(uid, s.csrf)) return; // a new generation has started its own reads
@@ -517,7 +551,8 @@ function UserPage({
     putDetail({ id, phase: failure.kind, text: failure.text, customer: shown });
   }
 
-  async function loadDetail(id: string): Promise<void> {
+  /** `reconnect` only from the detail's Reconnect button, as for the list. */
+  async function loadDetail(id: string, reconnect = false): Promise<void> {
     const mine = gen.current.n;
     const seq = ++detailSeq.current;
     detailCtl.current?.abort();
@@ -533,7 +568,10 @@ function UserPage({
       return putDetail({ id, phase: 'rate-limited', text: waitText(left), customer: shown });
     }
     putDetail({ id, phase: 'loading', text: TEXT.detailLoading, customer: shown });
-    const s = await connect(uid);
+    if (reconnect) reconnecting.current.detail = seq;
+    const s = await connect(uid, reconnect ? 'reconnect' : undefined).finally(() => {
+      if (reconnecting.current.detail === seq) reconnecting.current.detail = 0;
+    });
     if (stale()) return;
     if (s.kind !== 'ok') return failDetail(id, sessionFailure(s), shown);
     if (adopt(uid, s.csrf)) return;
@@ -580,7 +618,8 @@ function UserPage({
 
   useEffect(() => {
     begin(null, true);
-    // A changed session is noticed without a click: reads only, one at a time, and never while a create is out.
+    // A changed session is noticed without a click: reads only, one at a time, and never while a create is out. It never
+    // signs in: an ended session stays ended (`ended`), and only a Reconnect click logs in again.
     const reconnect = (): void => {
       if (uid === null || document.visibilityState === 'hidden' || gen.current.csrf === null) return;
       if (addRef.current || checkRef.current || waitRef.current) return;
@@ -590,7 +629,9 @@ function UserPage({
       void connect(uid).then((s) => {
         if (mine !== gen.current.n) return;
         if (s.kind === 'ok') adopt(uid, s.csrf);
-        else if (s.kind === 'refused' || s.kind === 'no-identity') clearBoth(sessionFailure(s)); // definitely gone; the rest teaches nothing
+        // Definitely gone; the rest teaches nothing. Always cleared (a route change moves a read counter without a read):
+        // clearBoth spares only a view whose Reconnect is still out.
+        else if (s.kind === 'ended' || s.kind === 'refused' || s.kind === 'no-identity') clearBoth(sessionFailure(s));
       });
     };
     window.addEventListener('focus', reconnect);
@@ -862,7 +903,7 @@ function UserPage({
           )}
           {(shownDetail.phase === 'unavailable' || shownDetail.phase === 'signed-out' || shownDetail.phase === 'rate-limited') && uid !== null && (
             <div className="flex flex-wrap items-center gap-3">
-              <button type="button" data-testid="directory-detail-retry" disabled={waiting} aria-describedby="directory-detail-hint" onClick={() => { void loadDetail(routeId); }} className={button}>
+              <button type="button" data-testid="directory-detail-retry" disabled={waiting} aria-describedby="directory-detail-hint" onClick={() => { void loadDetail(routeId, shownDetail.phase === 'signed-out'); }} className={button}>
                 {shownDetail.phase === 'signed-out' ? 'Reconnect' : 'Try again'}
               </button>
               <span id="directory-detail-hint" className={hintClass}>{waiting ? waitHint(wait) : ''}</span>
@@ -881,7 +922,7 @@ function UserPage({
 
           <div className="flex flex-wrap items-center gap-3">
             {(list.phase === 'unavailable' || list.phase === 'signed-out' || list.phase === 'rate-limited') && uid !== null && (
-              <button type="button" data-testid="directory-retry" disabled={listBusy || waiting} aria-describedby="directory-busy-hint" onClick={() => { void loadList('first'); }} className={button}>
+              <button type="button" data-testid="directory-retry" disabled={listBusy || waiting} aria-describedby="directory-busy-hint" onClick={() => { void loadList('first', '', list.phase === 'signed-out'); }} className={button}>
                 {list.phase === 'signed-out' ? 'Reconnect' : 'Try again'}
               </button>
             )}

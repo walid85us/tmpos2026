@@ -43,6 +43,11 @@
 //     ever applied to the next one (A, then B, then A again is three panels).
 //   - Focus/visibility refreshes run one at a time, wait while a save or a sign-in confirmation is under way, and speak
 //     only while no later read has started.
+//   - A session that ENDS is never re-established on its own (M7A-CUSTOMERS-P6): once the session client has confirmed
+//     this user's session, its expiry or revocation answers `ended` — no login, no ID token. Save then sends nothing
+//     ("Not saved: your server session ended…", or a held row's "Not confirmed yet…") and offers Reconnect; a focus
+//     refresh shows the signed-out state. Only the Reconnect button (server-levels-retry, while signed out or after a
+//     save found the session ended) asks the client to log in again; the drafts are kept for the read that follows.
 
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { EmailAuthProvider, GoogleAuthProvider, reauthenticateWithCredential, reauthenticateWithPopup } from 'firebase/auth';
@@ -103,6 +108,7 @@ const PHASE_LABELS: Record<Phase, string> = {
 export const DENIED_NOTE =
   'Server-enforced Customers access can only be viewed and changed by the store owner. Changes in the table below affect this browser only.';
 export const REFRESH_FAILED_NOTE = 'Could not refresh from the server; values may be out of date.';
+const SESSION_ENDED_NOTE = 'Your server session ended. Reconnect to see server-enforced Customers access.';
 export const STORE_CHANGED_NOTICE =
   'The store server now answers for a different store. Unsent changes were cleared. No change was sent to the newly connected store.';
 /** The detached notices for a save whose store connection changed while it was out: its answer, never a read-back. */
@@ -385,7 +391,9 @@ function UserPanel({
     setStepUp(next);
   };
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
-  const ensure = (who: string): Promise<SessionResult> => session.ensure(who, () => identity.idToken(who));
+  /** `reconnect` only from the Reconnect button: the one session step that may sign in again after the session ended. */
+  const ensure = (who: string, reconnect = false): Promise<SessionResult> =>
+    session.ensure(who, () => identity.idToken(who), reconnect ? { reconnect: true } : undefined);
 
   useEffect(() => {
     const id = focusNext.current;
@@ -430,6 +438,9 @@ function UserPanel({
     } else if (kind === 'refused') {
       setPhase('signed-out');
       setNote('The store server did not accept this sign-in. Reconnect, or sign out and sign in again.');
+    } else if (kind === 'ended') {
+      setPhase('signed-out');
+      setNote(SESSION_ENDED_NOTE);
     } else {
       setPhase('unavailable');
       setNote(kind === 'rate-limited'
@@ -444,7 +455,7 @@ function UserPanel({
    * values, a note, a demotion) applies only while no later read has started — an older answer arriving last is
    * dropped. An initial load or a save's read-back is never dropped that way.
    */
-  async function load(mode: 'initial' | 'refresh'): Promise<void> {
+  async function load(mode: 'initial' | 'refresh', reconnect = false): Promise<void> {
     if (uid === null || controller.current === null) return;
     const mine = gen.current;
     const signal = controller.current.signal;
@@ -454,7 +465,7 @@ function UserPanel({
     if (refresh) refreshingRef.current = true;
     try {
       if (!refresh) setPhase('loading');
-      const s = await ensure(uid);
+      const s = await ensure(uid, reconnect);
       if (superseded()) return;
       if (s.kind !== 'ok') {
         if (refresh && (s.kind === 'unavailable' || s.kind === 'rate-limited')) return setNote(REFRESH_FAILED_NOTE);
@@ -478,7 +489,7 @@ function UserPanel({
         setNote(DENIED_NOTE);
       } else if (answer.kind === 'signed-out') {
         setPhase('signed-out');
-        setNote('Your server session ended. Reconnect to see server-enforced Customers access.');
+        setNote(SESSION_ENDED_NOTE);
       } else {
         setPhase('unavailable');
         setNote('The store server could not be reached. Nothing was changed.');
@@ -593,7 +604,7 @@ function UserPanel({
       const s = await ensure(uid);
       if (replaced()) return; // never sent: cancelled with its context
       if (s.kind !== 'ok') {
-        const ended = s.kind === 'refused' || s.kind === 'no-identity';
+        const ended = s.kind === 'ended' || s.kind === 'refused' || s.kind === 'no-identity';
         if (ended) setReconnect(true);
         // A held attempt stays held: nothing was sent, and its key may already have committed (R2-2).
         if (pending !== undefined) return finish('confirm', ended ? CONFIRM_AGAIN.sessionEnded : CONFIRM_AGAIN.unreachable, current.version);
@@ -762,7 +773,7 @@ function UserPanel({
         <button
           type="button"
           data-testid="server-levels-retry"
-          onClick={() => { setReconnect(false); void load('initial'); }}
+          onClick={() => { setReconnect(false); void load('initial', phase === 'signed-out' || reconnect); }}
           disabled={saving !== null}
           className="mb-4 px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50"
         >

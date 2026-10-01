@@ -37,7 +37,11 @@
 //   SRL-03 a write whose session is missing or ended, whose session CSRF or Origin is stripped/foreign, whose Host is wrong,
 //          whose owner lost the grant, or whose tenant server is down never shows "Saved" and writes nothing, each with the
 //          status line the panel promises (AM1/AM6); a focus refresh during the outage keeps the rows (AM3); then a save
-//          succeeds.
+//          succeeds. M7A-CUSTOMERS-P6: after the session ended in the store, the owner presses Reconnect (one login)
+//          before the next save — Save no longer signs in on its own. A revoked owner grant ends the owner's session:
+//          the held key's save sends no login and no PUT ("Not confirmed yet", Reconnect offered); with the grant back,
+//          Reconnect logs in once and a 403 refusal of the held key still says "Not confirmed yet"; and a Reconnect pressed
+//          while the grant is revoked logs in once, shows the owner-only Denied state and writes nothing.
 //   SRL-04 a stale sign-in is refused (403 step_up_required), the owner re-authenticates in a labelled prompt that takes
 //          focus (AM7), and only then saves.
 //   SRL-05 a failed identity verifier leaves the panel unavailable (no levels, no save) until it recovers.
@@ -55,9 +59,10 @@
 //   SRL-09 a user switch in one browser (a second tab signs in as another owner) ends the first user's tenant session
 //          BEFORE the next user's login leaves the page (AM4: while that login is held, the old cookie reads 401); signing
 //          out (the persisted sign-in cleared, as a sign-out in another tab leaves it) ends the next user's session too.
-//   SRL-10 a draft made in tenant A, saved after the SAME owner's session moved to tenant B (grant swapped, re-login on
-//          save): the PUT asserting A is refused (409) with nothing written in A or B — no level, version, edit audit or
-//          completion — and the shop says the store changed and that the change to the previous store was not saved.
+//   SRL-10 a draft made in tenant A, saved after the SAME owner's session moved to tenant B (grant swapped): since
+//          M7A-CUSTOMERS-P6 the save finds the session ended and sends NOTHING — no login, no PUT — and offers Reconnect;
+//          the Reconnect's one login (now B's) reads another store, so the draft is cleared and the shop says the store
+//          changed. Nothing is written in A or B — no level, version, edit audit, completion or idempotency row.
 //   SRL-11 a save PARKED INSIDE THE DATABASE (a side transaction holds A's role row FOR UPDATE; the PUT's backend waits
 //          on it) while the owner's session moves to B (another tab of the browser signs in again): B is untouched, A
 //          holds whatever the server decided, and the panel — now B's — reports it only as a detached notice, never as
@@ -81,8 +86,9 @@
 //          state and no rows.
 //   SCB-05 a reply lost after the commit: the unresolved card, never "saved"; "Check again" re-sends the SAME key and the
 //          byte-identical body (though the field was edited since), answered 201 as a replay; ONE customer of that name.
-//   SCB-06 a first send that never reached the server, then the account's grant moves to tenant B: "Check again" notices
-//          the new connection — the attempt is detached, no POST leaves under the new session, neither tenant holds the name.
+//   SCB-06 a first send that never reached the server, then the account's grant moves to tenant B: "Check again" finds
+//          the session ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6); the owner's Reconnect signs in (now
+//          B's) and the attempt is detached — no POST leaves under the new session, neither tenant holds the name.
 //
 // M7A-CUSTOMERS-P5-R1 — the tenant session is REUSED across loads and the customer reads are BOUND to it (same harness).
 // One more substitution, stated: SCB-08 swaps the browser's tenant session cookie (CDP Storage.setCookies in the page's
@@ -102,6 +108,17 @@
 //          (sampled at release and after the page settles) held a B id or name, and what the page ends showing. Expected:
 //          403 with no customers, no B id ever on page A, and — after a session read, A's login and a confirming read — A's
 //          own rows and customer again (a new A session).
+//
+// M7A-CUSTOMERS-P6 — a session the page confirmed that the server then ends is NEVER re-established on its own (same
+// harness). The end is the one SRL-03 makes: the owner's tmpos_session.session rows (and their mint rows) deleted.
+//   SCB-09 SESSION END: an owner's page with rows and an unresolved create (its answer lost after the commit); the session
+//          is ended in the store. Refresh, a window focus, a tab return (visibilitychange), "Check again", a customer
+//          opened in the app and the way back send ZERO logins and no POST; the list and the detail show "Reconnect" and
+//          no customer. ONE Reconnect click sends exactly ONE login, the rows return and the attempt is detached (never
+//          re-sent: one POST in the whole case). Ended again, a valid session another TAB made is reused on focus with
+//          no login from the page. A reload while the cookie names an ended session is a fresh page: one login, the
+//          stated residual (the 401 does not say "expired", and the page stores nothing). Not run in this stage's
+//          sandbox (no browser gate here): written to SCB-05/07/08's helpers.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -961,6 +978,7 @@ const SAY = Object.freeze({
   notConfirmed: (level) => `Not confirmed yet — press Save again to check. The server has ${LABELS[level]}.`,
   // a held attempt (its key may have committed) refused or unsent: never "Not saved" (R2-2)
   confirmDenied: 'Not confirmed yet — the server refused the check. Only the store owner can change these levels.',
+  confirmEnded: 'Not confirmed yet — your server session ended. Reconnect, then press Save again to check.',
   confirmUnreachable: 'Not confirmed yet — the store server could not be reached. Press Save again to check.',
   lostRace: (level) => `Changed elsewhere — the server now has ${LABELS[level]}. Your change is not saved.`,
   changedElsewhere: (level) => `Changed elsewhere — the server now has ${LABELS[level]}.`,
@@ -1290,9 +1308,19 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     assert.deepEqual(st.api.slice(from).filter(isPut).map((r) => r.status), [expected], `${label}: ${st.api.slice(from).map(apiLine).join('; ')}`);
     await assertDelta(before, NOTHING, label);
     assert.equal(await levelOf(tenant, 'sales_staff'), undefined, `${label}: nothing stored`);
+    if (label === 'the session ended in the store') {
+      // M7A-CUSTOMERS-P6: the session this page confirmed is gone, and no save signs in on its own — the owner presses
+      // Reconnect: exactly one login, and the panel is ready again with the draft kept.
+      const reconnect = st.api.length;
+      await page.click('[data-testid="server-levels-retry"]');
+      await page.waitFor(`!document.querySelector('[data-testid="server-levels-retry"]') && document.querySelector('[data-testid="server-levels-state"]')?.textContent.trim() === 'Ready'`, 30_000, 'the panel reconnected');
+      assert.deepEqual(st.api.slice(reconnect).filter((r) => r.path === LOGIN).map(answered), ['200'], 'the Reconnect: exactly one login');
+    }
   }
   // The 404 left the key HELD (it may have committed), so the next two saves re-send that key: a refusal of it, or a
   // save that never reaches the server, does not say what it did — "Not confirmed yet", never "Not saved" (R2-2).
+  // M7A-CUSTOMERS-P6: revoking the grant ends the owner's session in the store, and Save no longer signs in on its own:
+  // the held key is NOT re-sent (no login, no PUT) and the row says "Not confirmed yet", with Reconnect offered.
   {
     const before = await counts();
     await owner`update user_membership set role_id = 'technician' where internal_user_id = ${boss.id}`;
@@ -1300,9 +1328,23 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
     const status = await save(page, 'sales_staff');
     await owner`update user_membership set role_id = 'store_owner' where internal_user_id = ${boss.id}`;
     note('the owner grant revoked', status);
-    assert.equal(status, SAY.confirmDenied);
-    assert.deepEqual(st.api.slice(from).filter(isPut).map((r) => r.status), [403], 'the server refused the former owner\'s PUT');
+    assert.equal(status, SAY.confirmEnded);
+    assert.deepEqual(st.api.slice(from).filter((r) => isPut(r) || r.path === LOGIN).map(apiLine), [], 'the save sent no login and no PUT');
     await assertDelta(before, NOTHING, 'the owner grant revoked');
+    // The grant back, Reconnect logs in exactly once; the draft and the held key are kept for the read that follows.
+    const reconnect = st.api.length;
+    await page.click('[data-testid="server-levels-retry"]');
+    await page.waitFor(`!document.querySelector('[data-testid="server-levels-retry"]') && document.querySelector('[data-testid="server-levels-state"]')?.textContent.trim() === 'Ready'`, 30_000, 'the panel reconnected');
+    assert.deepEqual(st.api.slice(reconnect).filter((r) => r.path === LOGIN).map(answered), ['200'], 'the Reconnect: exactly one login');
+    // A refusal of the held key (here a foreign Origin, 403) does not say what the key did: "Not confirmed yet" (R2-2).
+    const refused = st.api.length;
+    st.tamper = async (rec, out) => { if (isPut(rec)) out.origin = ADMIN; };
+    const again = await save(page, 'sales_staff');
+    st.tamper = null;
+    note('the held key refused', again);
+    assert.equal(again, SAY.confirmDenied);
+    assert.deepEqual(st.api.slice(refused).filter(isPut).map((r) => r.status), [403], 'the server refused the held key\'s PUT');
+    await assertDelta(before, NOTHING, 'the held key refused');
   }
   {
     const before = await counts();
@@ -1326,6 +1368,31 @@ scenario('SRL-03', 'a write with no session, an ended session, a stripped sessio
   assert.ok(saved(status), status);
   await assertDelta(before, EDIT, 'the save after every failure');
   assert.equal(await levelOf(tenant, 'sales_staff'), 'view');
+  // M7A-CUSTOMERS-P6: a Reconnect pressed while the grant is revoked logs in once and shows what that account may see —
+  // the owner-only Denied state, no save control — and writes nothing.
+  {
+    await draft(page, 'sales_staff', 'create');
+    const revoked = await counts();
+    await owner`update user_membership set role_id = 'technician' where internal_user_id = ${boss.id}`;
+    try {
+      const from = st.api.length;
+      const ended = await save(page, 'sales_staff');
+      note('revoked, then saved', ended);
+      assert.equal(ended, SAY.signedOut);
+      assert.deepEqual(st.api.slice(from).filter((r) => isPut(r) || r.path === LOGIN).map(apiLine), [], 'the save sent no login and no PUT');
+      const reconnect = st.api.length;
+      await page.click('[data-testid="server-levels-retry"]');
+      await waitState(page, 'Denied');
+      assert.deepEqual(st.api.slice(reconnect).filter((r) => r.path === LOGIN).map(answered), ['200'], 'the Reconnect: exactly one login');
+      assert.deepEqual(st.api.slice(reconnect).filter(isPut).map(apiLine), [], 'the Reconnect sent no PUT');
+      assert.match(await page.evaluate(`document.querySelector('[data-testid="server-customer-levels"]').textContent`), /only be viewed and changed by the store owner/);
+      assert.equal(await page.evaluate(`document.querySelectorAll('[data-testid^="server-level-save-"]').length`), 0, 'no save control for a revoked owner');
+      await assertDelta(revoked, NOTHING, 'the Reconnect while revoked');
+      assert.equal(await levelOf(tenant, 'sales_staff'), 'view', 'nothing stored');
+    } finally {
+      await owner`update user_membership set role_id = 'store_owner' where internal_user_id = ${boss.id}`;
+    }
+  }
 });
 
 scenario('SRL-04', 'a stale sign-in is refused with step_up_required and nothing written; the owner re-authenticates in the page, and only the next save lands', async () => {
@@ -1531,23 +1598,25 @@ scenario('SRL-10', 'TENANT SWITCH BEFORE THE SAVE — a draft made in tenant A, 
   assert.equal((await readWith(aLogin.cookie)).status, 401, 'the switch ended the tenant-A session');
   const was = { a: await tenantState(a.tenant), b: await tenantState(b) };
   const before = await counts();
-  const from = await clickSave(page, 'sales_staff');
-  // The save signs in again (its A session is over) — now scoped to B — and sends the A draft, asserting tenant A.
-  await page.waitFor(async () => {
-    const n = await noticesOf(page);
-    return n.changed === STORE_CHANGED && n.previous.includes(PREVIOUS_STORE.notSaved);
-  }, 30_000, 'the store-changed and previous-store notices');
+  // M7A-CUSTOMERS-P6: the move ended the session this page confirmed, so the save signs nothing in and sends nothing.
+  const from = st.api.length;
+  const first = await save(page, 'sales_staff');
+  note('the save after the switch', first);
+  assert.equal(first, SAY.signedOut, 'the save found the session ended');
+  assert.deepEqual(st.api.slice(from).filter((r) => isPut(r) || r.path === LOGIN).map(apiLine), [], 'no login and no PUT left the page');
+  // Reconnect: one login — now scoped to B — whose read names another store: the draft is cleared, the store-changed notice shown.
+  const reconnect = st.api.length;
+  await page.click('[data-testid="server-levels-retry"]');
+  await page.waitFor(async () => (await noticesOf(page)).changed === STORE_CHANGED, 30_000, 'the store-changed notice');
   await waitState(page, 'Ready');
   await waitRow(page, 'sales_staff', 'create', 'Default');
   await page.waitFor(() => st.api.slice(from).every((r) => r.status !== null), 10_000, 'every request answered');
   const sent = note('requests', st.api.slice(from).map(apiLine));
-  const puts = st.api.slice(from).filter(isPut);
-  assert.deepEqual(puts.map(answered), ['409 write_conflict'], `one PUT, refused: ${sent.join('; ')}`);
-  const body = JSON.parse(puts[0].body);
-  assert.deepEqual([body.level, body.expectedTenant, body.expectedVersion], ['view', a.tenant, 0], 'the A draft, asserting A');
-  const relogin = st.api.slice(from).filter(acceptedLogin(a.boss));
-  assert.ok(relogin.length >= 1 && relogin[0].doneAt <= puts[0].at, 'it was sent on the new session (scoped to B)');
-  await assertDelta(before, { C: 0, A: 0, E: 0, K: 0, L: 1 }, 'the A draft after the switch (T: the re-login)');
+  assert.deepEqual(st.api.slice(from).filter(isPut).map(answered), [], `no PUT at all, to either store: ${sent.join('; ')}`);
+  assert.deepEqual((await noticesOf(page)).previous, [], 'no change was sent, so there is no previous-store notice');
+  assert.equal(st.api.slice(reconnect).filter(acceptedLogin(a.boss)).length, 1, 'exactly one login: the Reconnect (scoped to B)');
+  assert.deepEqual(st.api.slice(from, reconnect).filter(acceptedLogin(a.boss)), [], 'none before it');
+  await assertDelta(before, NOTHING, 'the A draft after the switch: nothing written (T: the Reconnect\'s login)');
   assert.deepEqual({ a: await tenantState(a.tenant), b: await tenantState(b) }, was, 'neither A nor B changed: no level, version or edit audit');
   assert.equal(await statusOf(page, 'sales_staff'), '', 'B\'s row says nothing of A\'s draft');
   assert.equal(await hasDraft(page, 'sales_staff'), false, 'no draft survives the switch');
@@ -2095,6 +2164,15 @@ scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reache
   assert.equal((await readWith(aLogin.cookie)).status, 401, 'the move ended the tenant-A session');
   const moved = st.api.length;
   await page.click(by('directory-check-again')); // the page's next action: it must check the connection before anything is sent
+  // M7A-CUSTOMERS-P6: the move ended the session this page confirmed — "Check again" finds it ended and sends nothing:
+  // no login and no POST; the card stays unresolved (no other connection exists yet) and the list offers Reconnect.
+  await waitList(page, 'signed-out');
+  await quiet(page, moved);
+  assert.deepEqual(st.api.slice(moved).filter((r) => isLogin(r) || isCreate(r)).map(apiLine), [], 'no login and no POST on "Check again"');
+  assert.equal(await page.evaluate(`${q('directory-hold')}.dataset.detached`), 'false', 'not detached before a new connection exists');
+  assert.equal(await textOf(page, 'directory-retry'), 'Reconnect');
+  const reconnect = st.api.length;
+  await page.click(by('directory-retry'));
   await waitData(page, 'directory-hold', 'detached', 'true');
   await waitList(page);
   await waitRows(page, [], 'the list is now tenant B\'s: empty');
@@ -2102,7 +2180,8 @@ scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reache
   await delay(1_000); // whatever it would still send, it has sent
   note('after the move', st.api.slice(moved).map(apiLine));
   const relogin = st.api.slice(moved).filter(acceptedLogin(a.boss));
-  assert.ok(relogin.length >= 1, 'the page signed in again: the new session is tenant B\'s');
+  assert.equal(relogin.length, 1, 'the page signed in again once, on the Reconnect: the new session is tenant B\'s');
+  assert.ok(st.api.indexOf(relogin[0]) >= reconnect, 'and only after the click');
   assert.deepEqual(st.api.slice(moved).filter(isCreate).map(apiLine), [], 'NO POST left under the new session');
   assert.equal(await offered(page, 'directory-check-again'), false, 'Check again is not offered for a detached attempt');
   assert.match((await textOf(page, 'directory-hold-detached')) ?? '', /earlier connection/, 'the card says why it cannot be checked from here');
@@ -2363,3 +2442,109 @@ scenario('SCB-08', 'READ BINDING (DA-138) — page A\'s list read and detail rea
   assert.equal(detail.end.showsB, false, 'never B\'s customer on A\'s page');
   await assertNoLeak(page);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P6 — an ended session is never re-established on its own
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The end SRL-03 makes: every tenant session of `who` (and its mint row) removed in the store. */
+async function endSessions(who) {
+  const keys = (await owner`select session_key from tmpos_session.session where auth_provider_uid = ${who.uid}`).map((r) => r.session_key);
+  if (keys.length > 0) await owner`delete from tmpos_mint.tenant_session where session_key = any(${keys}::text[])`;
+  await owner`delete from tmpos_session.session where auth_provider_uid = ${who.uid}`;
+}
+
+scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page confirmed is ended in the store: Refresh, a focus, a tab return, "Check again" and a customer opened in the app send ZERO logins and no POST, showing Reconnect and no customer; ONE Reconnect click sends exactly ONE login, the rows return and the unresolved create is detached, never re-sent; ended again, another tab\'s valid session is reused with no login; a reload with an ended cookie signs in once (the stated residual)', async () => {
+  const { tenant, boss } = await shop('c9');
+  await seedCustomers(tenant, [`M7SCB c9 one ${SUFFIX}`, `M7SCB c9 two ${SUFFIX}`]);
+  const name = `M7SCB c9 held ${SUFFIX}`;
+  const page = await directoryPage(boss);
+  // An unresolved create: it commits, and its answer is lost at the front (as SCB-05).
+  let lost = 0;
+  st.lose = (rec, phase) => phase === 'response' && isCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+  await addCustomer(page, name);
+  await waitData(page, 'directory-hold', 'state', 'unresolved');
+  st.lose = null;
+  const expected = await customersOf(tenant); // the two seeded and the held one
+  await waitRows(page, expected.filter((c) => c.name !== name), 'the page shows the rows it read');
+  const pageLogins = (from) => sentBy(page, isLogin, from);
+  const steps = {};
+
+  // The end, while the page is ready. Everything the page does by itself — or that is not a Reconnect — signs nothing in.
+  const ended = st.api.length;
+  await endSessions(boss);
+  await page.click(by('directory-refresh'));
+  await waitList(page, 'signed-out');
+  steps.refresh = { logins: pageLogins(ended).map(answered), state: await textOf(page, 'directory-state') };
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await page.evaluate(`document.dispatchEvent(new Event('visibilitychange'))`);
+  await page.waitFor(() => offered(page, 'directory-check-again'), 15_000, 'Check again is offered');
+  await page.click(by('directory-check-again'));
+  await page.waitFor(async () => /Not checked/.test((await textOf(page, 'directory-hold-reason')) ?? ''), 15_000, 'the check found the session ended');
+  await go(page, `${DIRECTORY}/${expected[0].id}`);
+  await waitData(page, 'directory-detail', 'phase', 'signed-out');
+  steps.detail = { name: await has(page, 'directory-detail-name'), retry: await textOf(page, 'directory-detail-retry') };
+  await go(page, DIRECTORY);
+  await waitList(page, 'signed-out');
+  await quiet(page, ended);
+  await delay(2_000); // whatever it would still send on its own, it has sent
+  steps.ended = {
+    logins: pageLogins(ended).map(answered),
+    creates: sentBy(page, isCreate, ended).map(answered),
+    customerReads: sentBy(page, isCustomersRead, ended).map(answered),
+    rows: (await rowsOf(page)).length,
+    retry: await textOf(page, 'directory-retry'),
+    detached: await page.evaluate(`${q('directory-hold')}?.dataset.detached ?? null`),
+  };
+
+  // The Reconnect: exactly one login, and the rows are back; the attempt is detached (a new session), never re-sent.
+  const reconnect = st.api.length;
+  await page.click(by('directory-retry'));
+  await waitList(page);
+  await waitData(page, 'directory-hold', 'detached', 'true');
+  await quiet(page, reconnect);
+  const shown = await rowsOf(page);
+  steps.reconnect = {
+    logins: pageLogins(reconnect).map(answered),
+    rowsBack: JSON.stringify(shown) === JSON.stringify(expected),
+    creates: sentBy(page, isCreate).length,
+  };
+
+  // Ended again; another TAB of this browser then signs the same owner in: the page's focus reuses that session (no login).
+  const again = st.api.length;
+  await endSessions(boss);
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await waitList(page, 'signed-out');
+  const tab = await sameContextTab(page);
+  await tab.goto(`${SHOP}${DIRECTORY}`, 30_000);
+  await tab.waitFor(`${q('directory-state')}?.dataset.phase === 'ready'`, 30_000, 'the second tab is ready');
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await waitList(page);
+  await waitRows(page, expected, 'the page shows the rows under the other tab\'s session');
+  steps.otherTab = { pageLogins: pageLogins(again).map(answered), tabLogins: sentBy(tab, isLogin, again).map(answered) };
+
+  // The stated residual: a reload while the cookie names an ended session is a fresh page — its first 401 signs in.
+  await endSessions(boss);
+  const reload = st.api.length;
+  await page.goto(`${SHOP}${DIRECTORY}`, 30_000);
+  await waitList(page);
+  await quiet(page, reload);
+  steps.reload = { logins: pageLogins(reload).map(answered) };
+  record('SCB-09', steps);
+
+  assert.deepEqual(steps.refresh.logins, [], 'Refresh after the end: no login');
+  assert.match(steps.refresh.state ?? '', /session ended/i, 'the list says the session ended');
+  assert.deepEqual([steps.detail.name, steps.detail.retry], [false, 'Reconnect'], 'the detail shows no customer, and Reconnect');
+  assert.deepEqual(steps.ended.logins, [], 'ZERO logins across Refresh, focus, tab return, Check again and the route changes');
+  assert.deepEqual(steps.ended.creates, [], 'no POST: the uncertain create is not re-sent');
+  assert.deepEqual(steps.ended.customerReads, [], 'no customer read without a session');
+  assert.deepEqual([steps.ended.rows, steps.ended.retry, steps.ended.detached], [0, 'Reconnect', 'false'], 'no rows, Reconnect, the attempt still held');
+  assert.deepEqual(steps.reconnect.logins, ['200'], 'ONE Reconnect click: exactly one login');
+  assert.ok(steps.reconnect.rowsBack, 'the rows return');
+  assert.equal(steps.reconnect.creates, 1, 'one POST in the whole case: the attempt is detached, never re-sent');
+  assert.deepEqual(steps.otherTab.pageLogins, [], 'another tab\'s valid session is reused: no login from the page');
+  assert.deepEqual(steps.otherTab.tabLogins, ['200'], 'the other tab signed in once (its own first load)');
+  assert.deepEqual(steps.reload.logins, ['200'], 'a reload with an ended cookie signs in once (the stated residual)');
+  assert.deepEqual(await named(tenant, name), expected.filter((c) => c.name === name), 'ONE customer of the held name');
+  await assertNoLeak(page);
+}, 240_000);
