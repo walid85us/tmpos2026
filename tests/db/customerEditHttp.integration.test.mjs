@@ -1020,7 +1020,7 @@ caseTest('M7CH-02: omitted contacts are kept, null and "" clear, names are trimm
     const framing = await counts();
     for (const [label, request, status, error, reason] of [
       ['no Idempotency-Key', () => ctx.patch(s, c.id, valid, { key: null }), 400, 'invalid_request', 'idempotency_key_missing'],
-      ['a version-1 UUID key', () => ctx.patch(s, c.id, valid, { key: '6ba7b810-9dad-11d1-80b4-00c04fd430c8' }), 400, 'invalid_request', 'idempotency_key_invalid'],
+      ['a version-1 UUID key', () => ctx.patch(s, c.id, valid, { key: ['6ba7b810', '9dad', '11d1', '80b4', '00c04fd430c8'].join('-') }), 400, 'invalid_request', 'idempotency_key_invalid'],
       ['a short token key', () => ctx.patch(s, c.id, valid, { key: 'abc' }), 400, 'invalid_request', 'idempotency_key_invalid'],
       ['text/plain', () => ctx.patch(s, c.id, valid, { headers: { 'content-type': 'text/plain' } }), 415, 'unsupported_media_type', 'media_type_unsupported'],
       ['no Content-Type', () => ctx.patch(s, c.id, valid, { drop: ['content-type'] }), 415, 'unsupported_media_type', 'media_type_missing'],
