@@ -39,6 +39,11 @@
 //     string under the caller's key, like a create. It is `saved` on an exactly-shaped 200 for the id asked for ONLY; a
 //     409 write_conflict is `conflict` (somebody else's version won); a 5xx, any other 2xx, an unexpected 409 or no
 //     answer is `unknown` — the edit may have committed, and only the same key and the same bytes can ask again.
+//   - SEARCH (M7A-CUSTOMERS-P8): `list` takes the applied search text, exactly as `normalizeCustomerSearch` spells it
+//     (trimmed; '' is no search). A non-empty one rides the query as `q=<encodeURIComponent(text)>`, before any cursor;
+//     the server matches, this module never filters. A search's continuation is its own grammar (44 characters: the
+//     server binds it to that search's digest), and each kind of request sends and accepts only its own kind; a text
+//     that is not already normalized is never sent (`bad-search`). The text is never kept or logged.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials. No
 //     method ever rejects.
 
@@ -53,6 +58,9 @@ const DEFAULT_RETRY_AFTER_SECONDS = 60;
 // The server's own id rule (routes.ts CANONICAL_UUID_RE): any canonical lowercase UUID.
 const CUSTOMER_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURSOR_RE = /^[A-Za-z0-9_-]{23}$/; // customerDirectory.ts CURSOR_RE: opaque, sent back verbatim
+// A search's continuation (M7A-CUSTOMERS-P8): 33 bytes — a tag, the customer id and the search's digest — unpadded; opaque too.
+const SEARCH_CURSOR_RE = /^[A-Za-z0-9_-]{44}$/;
+export const CUSTOMER_SEARCH_MAX_CHARACTERS = 200; // customerDirectory.ts CUSTOMER_SEARCH_MAX_CHARACTERS
 // customerCreate.ts, restated (this module cannot import the server's: it reaches node:buffer). customersClient.test.ts
 // sweeps one corpus through both and requires identical answers.
 const REFUSED_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cs}|\p{Bidi_Control}/u;
@@ -82,6 +90,16 @@ export function normalizeCustomerName(raw: unknown): string | null {
   if (REFUSED_CHARACTER_RE.test(name) || !VISIBLE_RE.test(name)) return null;
   const scalars = [...name].length;
   return scalars >= 1 && scalars <= CUSTOMER_NAME_MAX_CHARACTERS ? name : null;
+}
+
+/**
+ * The search text as the server applies it (M7A-CUSTOMERS-P8): trimmed; '' is no search (the unfiltered list); null for
+ * a text the server refuses (400) — a refused character (a lone surrogate included) or more than 200 scalars.
+ */
+export function normalizeCustomerSearch(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  return REFUSED_CHARACTER_RE.test(text) || [...text].length > CUSTOMER_SEARCH_MAX_CHARACTERS ? null : text;
 }
 
 /** What a contact normalizer answers for a value no customer may hold (the server refuses it, 400). */
@@ -122,7 +140,7 @@ interface RateLimited { readonly kind: 'rate-limited'; readonly retryAfterSecond
 
 export type ListResult =
   | { readonly kind: 'ok'; readonly customers: readonly CustomerEntry[]; readonly nextCursor: string | null }
-  | { readonly kind: 'bad-cursor' | 'signed-out' | 'denied' | 'unavailable' }
+  | { readonly kind: 'bad-cursor' | 'bad-search' | 'signed-out' | 'denied' | 'unavailable' }
   | RateLimited;
 
 export type DetailResult =
@@ -187,9 +205,11 @@ export function customerEditBody(base: CustomerProfile, version: number, fields:
 export interface CustomersClient {
   /**
    * One page of the session's tenant: page one (`cursor` null) or the page after a `nextCursor`, on the session whose
-   * CSRF token is `csrf` (the server refuses it, 403, when the cookie is another session's). Never rejects.
+   * CSRF token is `csrf` (the server refuses it, 403, when the cookie is another session's). `search` (M7A-CUSTOMERS-P8)
+   * is the applied search text as normalizeCustomerSearch spells it, '' (the default) for none; a cursor must be one a
+   * page of the same search answered. Never rejects.
    */
-  list(cursor: string | null, csrf: string, signal?: AbortSignal): Promise<ListResult>;
+  list(cursor: string | null, csrf: string, signal?: AbortSignal, search?: string): Promise<ListResult>;
   /** One customer of the session's tenant by id, on the session whose CSRF token is `csrf`; a malformed id is `not-found` and nothing is sent. Never rejects. */
   detail(id: string, csrf: string, signal?: AbortSignal): Promise<DetailResult>;
   /** One customer's contact record by id, exactly as `detail` reads (M7A-CUSTOMERS-P6). Never rejects. */
@@ -250,12 +270,12 @@ function profileOf(body: unknown): CustomerProfile | null {
   return Object.freeze({ id, name, phone, email, createdAt });
 }
 
-/** `{ customers: [{ id, name }…], nextCursor }` exactly, at most one full page, no repeated id, otherwise null. */
-function pageOf(body: unknown): { customers: readonly CustomerEntry[]; nextCursor: string | null } | null {
+/** `{ customers: [{ id, name }…], nextCursor }` exactly, at most one full page, no repeated id, a cursor of `grammar`, otherwise null. */
+function pageOf(body: unknown, grammar: RegExp): { customers: readonly CustomerEntry[]; nextCursor: string | null } | null {
   if (!isPlain(body) || !hasKeys(body, ['customers', 'nextCursor'])) return null;
   const { customers, nextCursor } = body;
   if (!Array.isArray(customers) || customers.length > MAX_PAGE_ROWS) return null;
-  const next = nextCursor === null ? null : typeof nextCursor === 'string' && CURSOR_RE.test(nextCursor) ? nextCursor : undefined;
+  const next = nextCursor === null ? null : typeof nextCursor === 'string' && grammar.test(nextCursor) ? nextCursor : undefined;
   if (next === undefined) return null;
   if (customers.length === 0 && next !== null) return null; // the server sets a cursor only behind a full page
   const rows: CustomerEntry[] = [];
@@ -318,13 +338,17 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
   const read = (path: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
     exchange(path, { method: 'GET', headers: { Accept: 'application/json', [SESSION_CSRF_HEADER]: csrf } }, signal);
 
-  async function list(cursor: string | null, csrf: string, signal?: AbortSignal): Promise<ListResult> {
-    // A cursor is the server's own `nextCursor`, verbatim; one outside its grammar is never put into a request.
-    if (cursor !== null && !CURSOR_RE.test(cursor)) return Object.freeze({ kind: 'bad-cursor' });
-    const answer = await read(cursor === null ? CUSTOMERS_PATH : `${CUSTOMERS_PATH}?cursor=${cursor}`, csrf, signal);
+  async function list(cursor: string | null, csrf: string, signal?: AbortSignal, search = ''): Promise<ListResult> {
+    // A search is sent only as the normalizer spells it (never a text the server would refuse, never a lone surrogate).
+    if (normalizeCustomerSearch(search) !== search) return Object.freeze({ kind: 'bad-search' });
+    // A cursor is the server's own `nextCursor`, verbatim; one outside its kind's grammar is never put into a request.
+    const grammar = search === '' ? CURSOR_RE : SEARCH_CURSOR_RE;
+    if (cursor !== null && !grammar.test(cursor)) return Object.freeze({ kind: 'bad-cursor' });
+    const query = [search === '' ? null : `q=${encodeURIComponent(search)}`, cursor === null ? null : `cursor=${cursor}`].filter((pair) => pair !== null).join('&');
+    const answer = await read(query === '' ? CUSTOMERS_PATH : `${CUSTOMERS_PATH}?${query}`, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
     if (answer.status === 200) {
-      const page = pageOf(answer.body);
+      const page = pageOf(answer.body, grammar);
       return Object.freeze(page === null ? { kind: 'unavailable' } : { kind: 'ok', ...page });
     }
     // The server's one answer to a cursor it cannot use (malformed, foreign, deleted); without a cursor a 400 decides nothing.

@@ -137,6 +137,17 @@
 //          first saves; the second's save is a 409 write_conflict that writes nothing but its completion, keeps its draft
 //          and sends nothing more on its own; "Review latest" only reads; its deliberate save expects version 2 under a
 //          NEW key and lands.
+// Since M7A-CUSTOMERS-P8 the list takes a name search (GET /api/v1/customers?q=<text>, a search's own 44-character cursor;
+// migration 025's routine matches case-insensitively anywhere in the name):
+//   SCB-13 SEARCH: 60 matching customers (both letter cases) among others, the same names in a second tenant. The Search
+//          button and Enter each send ONE GET of q; page one is exactly the first 50 matches in the database's
+//          (name collate "C", id) order, "Load more" sends the search's own cursor and completes them, nothing of the
+//          other tenant; a search with no match says "No customers match"; a search whose request is lost at the front is
+//          the outage state, never "no matches", and its "Try again" reads the same search; Clear reads the unfiltered
+//          list. No customer, audit, completion, idempotency or session record is written; the address never holds the text.
+//   SCB-14 SEARCH THEN EDIT: a match opened by its row's link (one profile read); renamed out of the search, the active
+//          search is read again from page one (one GET of q after the PATCH) and the way back lists it no longer, the
+//          search box still holding the text; a search for the new name (by Enter) finds it.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -1937,7 +1948,7 @@ async function seedCustomers(tenant, names) {
 }
 
 /**
- * Customers requests select nothing: the query is empty or one cursor, a POST body is { name } with at most a phone and an
+ * Customers requests select nothing: the query is empty, one cursor, or a search and its own cursor, a POST body is { name } with at most a phone and an
  * email after it (in that order), a PATCH body is { expectedVersion, name } with at most a phone and an email after it, a
  * GET has no body,
  * no header is named for a tenant, store, role or actor, and none of `values` (tenant ids, the accounts' ids) rides
@@ -1947,7 +1958,8 @@ function assertNoSelector(records, values) {
   assert.ok(records.length > 0, 'customers requests were made');
   for (const r of records) {
     const line = apiLine(r);
-    assert.match(r.query, /^(\?cursor=[A-Za-z0-9_-]{23})?$/, `only a cursor may ride the query: ${line}`);
+    // M7A-CUSTOMERS-P8: a search rides first as `q=<encodeURIComponent(text)>`, with only its own 44-character cursor after it.
+    assert.match(r.query, /^(\?cursor=[A-Za-z0-9_-]{23}|\?q=[A-Za-z0-9%._~!*'()-]+(&cursor=[A-Za-z0-9_-]{44})?)?$/, `only a search and a cursor may ride the query: ${line}`);
     assert.deepEqual(Object.keys(r.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], `no selecting header: ${line}`);
     if (r.method === 'POST') {
       const keys = Object.keys(JSON.parse(r.body));
@@ -2841,4 +2853,160 @@ scenario('SCB-12', 'STALE EDITOR (M7A-CUSTOMERS-P7) — two browsers open one cu
   assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
   await assertNoLeak(one);
   await assertNoLeak(two);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P8 — searching the directory by name
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Replace the search box's text as a user does, then apply it by the Search button or by Enter; answers the record count at the action. */
+async function searchFor(page, text, how = 'button') {
+  await retype(page, 'directory-search-input', text);
+  const from = st.api.length;
+  if (how === 'enter') await page.press('Enter');
+  else await page.click(by('directory-search-submit'));
+  return from;
+}
+/** The list's phase once every list read made since `from` has answered (or was lost at the front). */
+function searchSettled(page, from) {
+  return page.waitFor(async () => {
+    const reads = sentBy(page, isList, from);
+    if (reads.length === 0 || reads.some((r) => r.status === null)) return null;
+    const phase = await page.evaluate(`${q('directory-state')}?.dataset.phase ?? null`);
+    return phase === null || phase === 'loading' ? null : phase;
+  }, 30_000, 'the search settled');
+}
+const readLines = (records) => records.map((r) => `${r.query} -> ${r.status}${r.lost ? ` (${r.lost} lost)` : ''}`);
+const searchBox = (page) => page.evaluate(`${q('directory-search-input')}?.value ?? null`);
+
+scenario('SCB-13', 'SEARCH (M7A-CUSTOMERS-P8) — the Search button and Enter each send ONE GET of q; only this tenant\'s matches, both letter cases, in the server\'s order; "Load more" sends the search\'s own cursor; no match says so; a lost search is the outage state, never "no matches"; Clear reads the unfiltered list; searching writes nothing', async () => {
+  const { tenant, boss } = await shop('c13');
+  const other = await newTenant('c13-other');
+  const word = 'Kestrel';
+  const matching = Array.from({ length: 60 }, (_, i) => `M7SCB c13 ${i % 2 === 0 ? word.toUpperCase() : word.toLowerCase()} ${String(i).padStart(2, '0')} ${SUFFIX}`);
+  await seedCustomers(tenant, [...matching, ...Array.from({ length: 15 }, (_, i) => `M7SCB c13 Plover ${String(i).padStart(2, '0')} ${SUFFIX}`)]);
+  const foreign = await seedCustomers(other, matching.slice(0, 5));
+  const expected = (await customersOf(tenant)).filter((c) => c.name.toUpperCase().includes(word.toUpperCase()));
+  assert.equal(expected.length, 60);
+  const nothing = `zz none ${SUFFIX}`;
+  const page = await directoryPage(boss);
+  const before = await counts();
+
+  let from = await searchFor(page, word);
+  const first = await searchSettled(page, from);
+  const firstReads = readLines(sentBy(page, isList, from));
+  const firstRows = await rowsOf(page);
+  const summary = await textOf(page, 'directory-search-summary');
+  from = st.api.length;
+  await page.click(by('directory-load-more'));
+  await page.waitFor(async () => (await rowsOf(page)).length === 60, 30_000, 'the second page of matches');
+  const moreReads = sentBy(page, isList, from);
+  const allRows = await rowsOf(page);
+  const moreOffered = await has(page, 'directory-load-more');
+
+  from = await searchFor(page, nothing, 'enter');
+  const noMatch = await searchSettled(page, from);
+  const noMatchReads = readLines(sentBy(page, isList, from));
+  const noMatchText = await textOf(page, 'directory-search-none');
+
+  let lost = 0;
+  st.lose = (rec, phase) => phase === 'request' && isList(rec) && rec.frameId === page.frameId && lost++ === 0;
+  from = await searchFor(page, word);
+  const failed = await searchSettled(page, from);
+  st.lose = null;
+  const failedReads = readLines(sentBy(page, isList, from));
+  const failedShown = {
+    none: await has(page, 'directory-search-none'), summary: await has(page, 'directory-search-summary'), empty: await has(page, 'directory-empty'),
+    rows: (await rowsOf(page)).length, state: await textOf(page, 'directory-state'),
+  };
+  from = st.api.length;
+  await page.click(by('directory-retry'));
+  const retried = await searchSettled(page, from);
+  const retryReads = readLines(sentBy(page, isList, from));
+  const retryRows = await rowsOf(page);
+
+  from = st.api.length;
+  await page.click(by('directory-search-clear'));
+  const cleared = await searchSettled(page, from);
+  const clearReads = readLines(sentBy(page, isList, from));
+  const clearedBox = await searchBox(page);
+  const clearedRows = (await rowsOf(page)).length;
+  const made = await deltaSince(before);
+  const address = await page.evaluate('location.pathname + location.search + location.hash');
+  record('SCB-13', { first, firstReads: firstReads.length, more: moreReads.map((r) => r.status), noMatch, failed, failedRows: failedShown.rows, retried, cleared, made });
+
+  assert.equal(first, 'ready');
+  assert.deepEqual(firstReads, [`?q=${word} -> 200`], 'the Search button sent ONE read of the search');
+  assert.deepEqual(firstRows, expected.slice(0, 50), 'page one: the first 50 matches, both letter cases, in the server\'s order');
+  assert.equal(summary, `Customers matching “${word}”`);
+  assert.equal(moreReads.length, 1, 'one read for "Load more"');
+  assert.match(moreReads[0].query, new RegExp(`^\\?q=${word}&cursor=[A-Za-z0-9_-]{44}$`), 'with the search\'s own continuation');
+  assert.equal(moreReads[0].status, 200);
+  assert.deepEqual(allRows, expected, 'every match exactly once, in order');
+  assert.equal(moreOffered, false, 'and no more after the last');
+  for (const f of foreign) assert.ok(!allRows.some((r) => r.id === f.id), 'nothing of the other tenant');
+  assert.equal(noMatch, 'ready');
+  assert.deepEqual(noMatchReads, [`?q=${encodeURIComponent(nothing)} -> 200`], 'Enter sent ONE read of the search');
+  assert.equal(noMatchText, `No customers match “${nothing}”.`);
+  assert.equal(failed, 'unavailable', 'a lost search is the outage state');
+  assert.deepEqual(failedReads, [`?q=${word} -> 0 (request lost)`]);
+  assert.deepEqual(failedShown, { none: false, summary: false, empty: false, rows: 0, state: 'The customer directory is unavailable right now.' }, 'never "no matches"');
+  assert.equal(retried, 'ready');
+  assert.deepEqual(retryReads, [`?q=${word} -> 200`], '"Try again" reads the same search');
+  assert.deepEqual(retryRows, expected.slice(0, 50));
+  assert.equal(cleared, 'ready');
+  assert.deepEqual(clearReads, [' -> 200'], 'Clear reads the unfiltered list');
+  assert.equal(clearedBox, '');
+  assert.equal(clearedRows, 50);
+  assert.deepEqual(made, { ...made, ...REFUSED, U: 0 }, `searching writes nothing ${JSON.stringify(made)}`);
+  assert.equal(address, DIRECTORY, 'the address never holds the search');
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, other, boss.uid, boss.id]);
+  await assertNoLeak(page);
+});
+
+scenario('SCB-14', 'SEARCH THEN EDIT (M7A-CUSTOMERS-P8) — a match opens its profile by its row\'s link; renamed out of the search, the active search is read again from page one and no longer lists it; the way back keeps the search box; the new name is found by its own search', async () => {
+  const { tenant, boss } = await shop('c14');
+  const word = 'merlin';
+  const [target, sibling] = await seedCustomers(tenant, [`M7SCB c14 Merlin A ${SUFFIX}`, `M7SCB c14 MERLIN B ${SUFFIX}`, `M7SCB c14 Other ${SUFFIX}`]);
+  const renamed = `M7SCB c14 Osprey ${SUFFIX}`;
+  const page = await directoryPage(boss);
+  let from = await searchFor(page, word);
+  await searchSettled(page, from);
+  const listed = await rowsOf(page);
+  const opened = st.api.length;
+  await page.click(`${by('directory-row')}[data-id="${target.id}"] a`);
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  await quiet(page, opened);
+  const profileReads = sentBy(page, isDetail, opened).map((r) => `${r.path} -> ${r.status}`);
+  await openEditForm(page);
+  await retype(page, 'directory-edit-name', renamed);
+  const at = st.api.length;
+  await page.click(by('directory-edit-save'));
+  await textIs(page, 'directory-edit-status', 'Saved', 'the edit is confirmed');
+  await page.waitFor(() => sentBy(page, isList, at).some((r) => r.status !== null), 30_000, 'the active search is read again');
+  await quiet(page, at);
+  const edits = sentBy(page, isEdit, at).map((r) => r.status);
+  const refreshed = readLines(sentBy(page, isList, at));
+  const addressAfterEdit = await page.evaluate('location.pathname + location.search');
+  await page.click(by('directory-back'));
+  await waitList(page);
+  const after = await rowsOf(page);
+  const summary = await textOf(page, 'directory-search-summary');
+  const box = await searchBox(page);
+  from = await searchFor(page, 'osprey', 'enter');
+  await searchSettled(page, from);
+  const found = await rowsOf(page);
+  record('SCB-14', { listed: listed.length, profileReads, edits, refreshed: refreshed.length, after: after.length, found: found.length });
+
+  assert.deepEqual(listed, [{ id: sibling.id, name: sibling.name }, { id: target.id, name: target.name }], 'both matches, in the server\'s order (MERLIN before Merlin)');
+  assert.deepEqual(profileReads, [`${profilePath(target.id)} -> 200`], 'the row opened its profile');
+  assert.deepEqual(edits, [200], 'one PATCH, confirmed');
+  assert.deepEqual(refreshed, [`?q=${word} -> 200`], 'the active search, read again from page one');
+  assert.equal(addressAfterEdit, `${DIRECTORY}/${target.id}`, 'the address never holds the search');
+  assert.deepEqual(after, [{ id: sibling.id, name: sibling.name }], 'renamed out of the search: no longer listed');
+  assert.equal(summary, `Customers matching “${word}”`);
+  assert.equal(box, word, 'the way back keeps the search box');
+  assert.deepEqual(found, [{ id: target.id, name: renamed }], 'the new name, found by its own search');
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
+  await assertNoLeak(page);
 });

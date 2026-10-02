@@ -2,18 +2,21 @@
 // answers it accepts, and the one outcome every other answer maps to. The name rule and the id rule are swept against
 // the server's own (server/runtime/customerCreate.ts, server/runtime/routes.ts), and since M7A-CUSTOMERS-P6 the phone and
 // email rules too (server/runtime/customerDirectory.ts), with the profile read's exact shape; since M7A-CUSTOMERS-P7 the
-// profile's version from its ETag and the edit (PATCH): its bytes, its headers and the one outcome of every answer. Special
-// characters are built from code points, so this source stays ASCII.
+// profile's version from its ETag and the edit (PATCH): its bytes, its headers and the one outcome of every answer; since
+// M7A-CUSTOMERS-P8 the list's search (`q`): its spelling on the wire, its own cursor grammar, and the search rule swept
+// against the server's own query parser. Special characters are built from code points, so this source stays ASCII.
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CONTACT_INVALID, CUSTOMERS_PATH, createCustomersClient, customerEditBody, isCustomerId, normalizeCustomerEmail, normalizeCustomerName,
-  normalizeCustomerPhone, retryAfterSeconds, versionOfEtag,
+  normalizeCustomerPhone, normalizeCustomerSearch, retryAfterSeconds, versionOfEtag,
 } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
   CONTACT_REFUSED, CUSTOMER_DIRECTORY_PATH, decodeCustomerCursor, encodeCustomerCursor, isCustomerCreatedAt,
-  normalizeCustomerEmail as serverNormalizeCustomerEmail, normalizeCustomerPhone as serverNormalizeCustomerPhone,
+  encodeCustomerSearchCursor, normalizeCustomerEmail as serverNormalizeCustomerEmail, normalizeCustomerPhone as serverNormalizeCustomerPhone,
+  parseCustomerDirectoryQuery,
 } from '../../server/runtime/customerDirectory';
 import { pathIdOf } from '../../server/runtime/routes';
 
@@ -702,4 +705,136 @@ test('CDC-19. the edit body: expectedVersion, name (always), then only the conta
   assert.ok(built.kind === 'ok');
   assert.equal(built.body, (of('Ada King', '', 'ada.k@example.test') as { body: string }).body);
   assert.deepEqual(Object.keys(JSON.parse(built.body) as object), ['expectedVersion', 'name', 'phone', 'email']);
+});
+
+// M7A-CUSTOMERS-P8 — the list's search.
+/** A search's continuation as the contract spells it: tag 0x03, the 16-byte id, the first 16 bytes of SHA-256(the text). */
+const searchCursor = (id: string, text: string): string => Buffer.concat([
+  Buffer.from([0x03]), Buffer.from(id.replace(/-/g, ''), 'hex'), createHash('sha256').update(text, 'utf8').digest().subarray(0, 16),
+]).toString('base64url');
+const ADA_CURSOR = searchCursor(ID, 'Ada');
+
+test('CDC-20. a search rides the query as q=<encodeURIComponent(text)>, before its own 44-character cursor; blank is the bare list; nothing else is sent', async () => {
+  const astral = cp(0x1f600);
+  const spelled: Array<[string, string]> = [
+    ['Ada', 'q=Ada'],
+    ['Ada Lovelace', 'q=Ada%20Lovelace'],
+    ['50% off_sale\\', 'q=50%25%20off_sale%5C'],
+    ['a+b&c=d#e?f/g', 'q=a%2Bb%26c%3Dd%23e%3Ff%2Fg'],
+    [`Caf${cp(0xe9)} ${astral}`, `q=Caf%C3%A9%20%F0%9F%98%80`],
+  ];
+  for (const [text, query] of spelled) {
+    const first = once(page([], null));
+    assert.deepEqual(await first.client.list(null, CSRF, undefined, text), { kind: 'ok', customers: [], nextCursor: null });
+    assert.equal(first.sent[0].url, `${CUSTOMERS_PATH}?${query}`, text);
+    assert.deepEqual(headerNames(first.sent[0]), ['accept', 'x-tmpos-session-csrf']);
+    assert.equal(first.sent[0].init.method, 'GET');
+    assert.equal(first.sent[0].init.body, undefined);
+    assert.ok(!first.sent[0].url.includes(CSRF), 'the session token rode the URL');
+    const cursor = searchCursor(ID, text);
+    const next = once(page([], null));
+    await next.client.list(cursor, CSRF, undefined, text);
+    assert.equal(next.sent[0].url, `${CUSTOMERS_PATH}?${query}&cursor=${cursor}`, text);
+  }
+  // No search (absent or '') is the P5 list, byte for byte.
+  for (const none of [undefined, '']) {
+    const bare = once(page([], null));
+    await bare.client.list(null, CSRF, undefined, none);
+    assert.equal(bare.sent[0].url, CUSTOMERS_PATH);
+    const more = once(page([], null));
+    await more.client.list(CURSOR, CSRF, undefined, none);
+    assert.equal(more.sent[0].url, `${CUSTOMERS_PATH}?cursor=${CURSOR}`);
+  }
+  // A text the normalizer would change or refuse is never sent: untrimmed, refused characters, over 200 scalars, a lone surrogate.
+  for (const bad of [' Ada', 'Ada ', ' ', `Ada${cp(0x202e)}`, `A\u0000da`, `Ada${unit(0xd800)}`, astral.repeat(201), 'x'.repeat(201)]) {
+    const none = once(page([], null));
+    assert.deepEqual(await none.client.list(null, CSRF, undefined, bad), { kind: 'bad-search' }, JSON.stringify(bad));
+    assert.deepEqual(await none.client.list(ADA_CURSOR, CSRF, undefined, bad), { kind: 'bad-search' });
+    assert.equal(none.sent.length, 0, `a search the server refuses reached the network: ${JSON.stringify(bad)}`);
+  }
+  // Each kind of request sends only its own kind of cursor: the other kind, or any other spelling, is never sent.
+  const crossed: Array<[string | null, string]> = [
+    [CURSOR, 'Ada'], // an unfiltered continuation under a search
+    [ADA_CURSOR, ''], // a search's continuation without one
+    [ADA_CURSOR.slice(1), 'Ada'], [`${ADA_CURSOR}A`, 'Ada'], [`${ADA_CURSOR.slice(0, 43)}=`, 'Ada'], [`${ADA_CURSOR.slice(0, 41)}%2F`, 'Ada'],
+  ];
+  for (const [cursor, text] of crossed) {
+    const none = once(page([], null));
+    assert.deepEqual(await none.client.list(cursor, CSRF, undefined, text), { kind: 'bad-cursor' }, `${cursor} under ${JSON.stringify(text)}`);
+    assert.equal(none.sent.length, 0);
+  }
+  assert.equal(ADA_CURSOR.length, 44);
+  assert.equal(searchCursor(OTHER, astral.repeat(200)).length, 44);
+  // The contract's spelling is the server's own encoder's.
+  for (const [id, text] of [[ID, 'Ada'], [OTHER, astral.repeat(200)], [ID, 'a+b&c=d#e?f/g']]) assert.equal(searchCursor(id, text), encodeCustomerSearchCursor(id, text));
+});
+
+test('CDC-21. a search page is a result only with its own kind of cursor; a 400 is a bad cursor only when one was sent', async () => {
+  const row = { id: ID, name: 'Ada Lovelace' };
+  assert.deepEqual(await once(page([row], ADA_CURSOR)).client.list(null, CSRF, undefined, 'Ada'), { kind: 'ok', customers: [row], nextCursor: ADA_CURSOR });
+  assert.deepEqual(await once(page([row], ADA_CURSOR)).client.list(ADA_CURSOR, CSRF, undefined, 'Ada'), { kind: 'ok', customers: [row], nextCursor: ADA_CURSOR });
+  assert.deepEqual(await once(page([], null)).client.list(null, CSRF, undefined, 'Ada'), { kind: 'ok', customers: [], nextCursor: null }); // no match
+  // A search page answering the other kind's continuation (or the unfiltered page a search's) is not the contract.
+  assert.deepEqual(await once(page([row], CURSOR)).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  assert.deepEqual(await once(page([row], ADA_CURSOR)).client.list(null, CSRF), { kind: 'unavailable' });
+  assert.deepEqual(await once(page([row], ADA_CURSOR.slice(1))).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  assert.deepEqual(await once(page([], ADA_CURSOR)).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  assert.deepEqual(await once(page([row, row])).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  assert.deepEqual(await once(page([{ ...row, tenant: uuid(9) }])).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  assert.deepEqual(await once(new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } })).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  // A 400 to a search's cursor is that cursor refused (another search's, deleted, foreign); to page one it decides nothing.
+  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(ADA_CURSOR, CSRF, undefined, 'Ada'), { kind: 'bad-cursor' });
+  assert.deepEqual(await once(refusal(400, 'invalid_request')).client.list(null, CSRF, undefined, 'Ada'), { kind: 'unavailable' });
+  for (const [reply, expected] of [
+    [refusal(401, 'unauthenticated'), { kind: 'signed-out' }], [refusal(403, 'forbidden'), { kind: 'denied' }],
+    [refusal(429, 'rate_limited', { 'retry-after': '9' }), { kind: 'rate-limited', retryAfterSeconds: 9 }],
+    [refusal(503, 'service_unavailable'), { kind: 'unavailable' }], [new TypeError('network'), { kind: 'unavailable' }],
+  ] as Array<[Reply, unknown]>) {
+    assert.deepEqual(await once(reply).client.list(null, CSRF, undefined, 'Ada'), expected);
+  }
+});
+
+test('CDC-22. the search rule accepts, refuses and normalizes exactly as the server\'s query parser does, through the client\'s own spelling of q', () => {
+  const astral = cp(0x1f600);
+  /** What the server applies for a raw search: the text, '' (no search: the unfiltered list), or null (400). */
+  const server = (query: string): string | null => {
+    const parsed = parseCustomerDirectoryQuery(`${CUSTOMER_DIRECTORY_PATH}?${query}`) as { search?: string | null } | null;
+    return parsed === null ? null : parsed.search ?? '';
+  };
+  const corpus: string[] = [
+    '', ' ', '   ', 'A', ' Ada ', 'Ada  Lovelace', `\tAda\n`, 'x'.repeat(200), 'x'.repeat(201), ` ${'x'.repeat(200)} `,
+    astral.repeat(200), astral.repeat(201), `${'x'.repeat(199)}${astral}`, `${'x'.repeat(200)}${astral}`, '%', '_', '\\', '+', '&', '=', '#',
+  ];
+  for (let code = 0; code <= 0xffff; code++) {
+    if (code >= 0xd800 && code <= 0xdfff) continue; // a lone surrogate has no UTF-8 spelling: below
+    const ch = unit(code);
+    corpus.push(ch, `${ch}Ada`, `Ada${ch}`, `A${ch}da`);
+  }
+  for (const code of [0x10000, 0x1f600, 0xe0001, 0xe0020, 0xe007f, 0xe0100, 0x1d173, 0x10ffff]) corpus.push(cp(code), `A${cp(code)}da`);
+  const tally = { text: 0, none: 0, refused: 0 };
+  for (const raw of corpus) {
+    const mine = normalizeCustomerSearch(raw);
+    const theirs = server(`q=${encodeURIComponent(raw)}`);
+    if (mine !== theirs) {
+      const shown = [...raw].map((c) => c.codePointAt(0)!.toString(16)).slice(0, 8).join(' ');
+      assert.fail(`the search rules disagree on [${shown}]: server ${JSON.stringify(theirs)}, client ${JSON.stringify(mine)}`);
+    }
+    if (mine === null) tally.refused += 1; else if (mine === '') tally.none += 1; else tally.text += 1;
+    // What the client sends for an applied text is read back as that very text.
+    if (mine !== null && mine !== '') assert.equal(server(`q=${encodeURIComponent(mine)}`), mine);
+  }
+  assert.ok(tally.text > 100_000 && tally.refused > 250 && tally.none > 10, `the sweep must exercise every answer ${JSON.stringify(tally)}`);
+  // A lone surrogate: refused here, and its only percent spelling (bytes no UTF-8 decoder accepts) is refused there.
+  for (const lone of [unit(0xd800), `Ada${unit(0xdbff)}`, `${unit(0xdc00)}Ada`]) assert.equal(normalizeCustomerSearch(lone), null);
+  assert.equal(server('q=Ada%ED%A0%80'), null);
+  // Anchors, so the sweep is not two copies of one mistake.
+  assert.equal(normalizeCustomerSearch('  Ada  Lovelace  '), 'Ada  Lovelace');
+  assert.equal(normalizeCustomerSearch('   '), '');
+  assert.equal(normalizeCustomerSearch(astral.repeat(200)), astral.repeat(200));
+  assert.equal(normalizeCustomerSearch(astral.repeat(201)), null);
+  assert.equal(normalizeCustomerSearch(`Ada${cp(0x202e)}`), null);
+  assert.equal(normalizeCustomerSearch(`Ada${unit(0x85)}`), null);
+  for (const other of [null, undefined, 7, {}, ['Ada']]) assert.equal(normalizeCustomerSearch(other), null);
+  assert.equal(server('q=+Ada+'), 'Ada'); // the server's form decoding: '+' is a space
+  assert.equal(server('q='), '');
 });

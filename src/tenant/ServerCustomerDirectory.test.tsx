@@ -10,6 +10,9 @@
 // modules. Since M7A-CUSTOMERS-P7 every customer has a row version (1 when stored), the profile 200 carries it as a
 // strong ETag, and PATCH /api/v1/customers/{id} edits one customer as the server does: the key bound to the target and the
 // exact bytes, a stale version a sealed 409 write_conflict, a missing or foreign id a 404, a 200 that names no contact.
+// Since M7A-CUSTOMERS-P8 the list reads its query with the server's own parser: `q` form-decoded and trimmed (blank: the
+// unfiltered list), matched anywhere in the name case-insensitively (full uppercase of both sides) in the list's byte
+// order, each cursor kind accepted only with its own search, a search's continuation being the anchor's current position.
 // Every assertion about a request is made on what the fake recorded — the wire — never on what the page believes it sent.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
@@ -64,7 +67,8 @@ vi.mock('../context/AccessContext', async () => {
 
 import {
   CHECK_CUTOFF_MS, CONNECTION_CHANGED_TEXT, CustomerDirectoryPage, EMAIL_RULE_TEXT, EMPTY_TEXT, LAST_KNOWN_TEXT, NAME_RULE_TEXT,
-  NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, savedEarlierText, STOP_WARNING_TEXT, createHoldStore,
+  NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, SEARCH_RULE_TEXT, savedEarlierText, searchMatchingText, searchNoneText,
+  STOP_WARNING_TEXT, createHoldStore,
   unresolvedText, type HoldStore, createEditHoldStore, type EditHoldStore, type EditOutcome, EDIT_CONFLICT_TEXT, EDIT_DENIED_TEXT, EDIT_NO_CHANGES_TEXT,
   EDIT_REVIEWED_TEXT, EDIT_SAVED_TEXT, EDIT_SAVED_UNREFRESHED_TEXT, EDIT_UNKNOWN_TEXT, bindEditHoldsToAuth, editNamedText,
 } from './ServerCustomerDirectory';
@@ -72,8 +76,8 @@ import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSession
 import { CUSTOMERS_PATH, createCustomersClient, type CustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
-  CONTACT_REFUSED, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, normalizeCustomerEmail as serverNormalizeCustomerEmail,
-  normalizeCustomerPhone as serverNormalizeCustomerPhone,
+  CONTACT_REFUSED, encodeCustomerCursor, encodeCustomerSearchCursor, inCustomerPageOrder,
+  normalizeCustomerEmail as serverNormalizeCustomerEmail, normalizeCustomerPhone as serverNormalizeCustomerPhone, parseCustomerDirectoryQuery,
 } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -127,8 +131,9 @@ function fakeServer() {
     400: 'invalid_request', 401: 'unauthenticated', 403: 'forbidden', 404: 'not_found', 409: 'request_in_progress', 413: 'content_too_large',
     415: 'unsupported_media_type', 422: 'idempotency_key_reused', 429: 'rate_limited', 500: 'internal_error', 503: 'service_unavailable',
   };
-  const ordered = (tenant: string): Row[] => [...rows[tenant]].sort((x, y) =>
-    Buffer.compare(Buffer.from(x.name, 'utf8'), Buffer.from(y.name, 'utf8')) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const byteOrder = (x: Row, y: Row): number =>
+    Buffer.compare(Buffer.from(x.name, 'utf8'), Buffer.from(y.name, 'utf8')) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);
+  const ordered = (tenant: string): Row[] => [...rows[tenant]].sort(byteOrder);
   const openSession = (user: User): string => {
     sessionCount += 1;
     const id = `session-${sessionCount}`;
@@ -149,6 +154,7 @@ function fakeServer() {
     posts: [] as PostPlan[],
     patches: [] as PatchPlan[],
     reads: [] as ReadPlan[], // the next customer reads (list or detail)
+    profileReads: [] as ReadPlan[], // the next PROFILE reads, before `reads` (a list read in between takes none of them)
     logins: [] as number[], // the next logins
     checks: [] as number[], // the next session reads
     hold: { reads: 0, posts: 0, checks: 0, patches: 0 }, // answers to hold (checks: session reads): computed on arrival, released by the test
@@ -228,7 +234,7 @@ function fakeServer() {
       if (method === 'GET' && (path === CUSTOMERS_PATH || path.startsWith(`${CUSTOMERS_PATH}/`))) {
         // Decided on arrival, as the server does; a held answer is the state when the request arrived.
         const decide = (): Response | 'lost' => {
-          const plan = server.reads.shift();
+          const plan = path.endsWith('/profile') && server.profileReads.length > 0 ? server.profileReads.shift() : server.reads.shift();
           if (plan === 429) return limited(); // before any session is read
           if (typeof plan === 'object') return refuse(429, WORDS[429], { 'retry-after': plan.limited });
           if (session === undefined) return refuse(401, WORDS[401]);
@@ -255,17 +261,18 @@ function fakeServer() {
             return reply(200, { customer: { id: found.id, name: found.name, phone: c.phone, email: c.email, createdAt: c.createdAt } }, etag);
           }
           const all = ordered(session.tenant);
-          let start = 0;
-          if (url !== CUSTOMERS_PATH) {
-            const m = /^\?cursor=([A-Za-z0-9_-]{1,32})$/.exec(url.slice(CUSTOMERS_PATH.length)); // the page sends no other query
-            const id = m === null ? null : decodeCustomerCursor(m[1]);
-            const at = id === null ? -1 : all.findIndex((r) => r.id === id);
-            if (at < 0) return refuse(400, WORDS[400]); // malformed, foreign or deleted: one answer
-            start = at + 1;
-          }
-          const slice = all.slice(start, start + server.pageSize);
-          const more = all.length > start + server.pageSize;
-          return reply(200, { customers: slice.map((r) => ({ id: r.id, name: r.name })), nextCursor: more ? encodeCustomerCursor(slice[slice.length - 1].id) : null });
+          if (/[?&]limit=/.test(url)) return refuse(400, WORDS[400]); // the page sends no limit
+          const query = parseCustomerDirectoryQuery(url); // the server's own: q, cursor kinds, bounds
+          if (query === null) return refuse(400, WORDS[400]);
+          const anchor = query.after === null ? null : all.find((r) => r.id === query.after);
+          if (anchor === undefined) return refuse(400, WORDS[400]); // foreign or deleted: one answer
+          const { search } = query;
+          const matching = search === null ? all : all.filter((r) => r.name.toUpperCase().includes(search.toUpperCase()));
+          const rest = anchor === null ? matching : matching.filter((r) => byteOrder(r, anchor) > 0);
+          const slice = rest.slice(0, server.pageSize);
+          const last = slice[slice.length - 1];
+          const next = rest.length <= server.pageSize ? null : search === null ? encodeCustomerCursor(last.id) : encodeCustomerSearchCursor(last.id, search);
+          return reply(200, { customers: slice.map((r) => ({ id: r.id, name: r.name })), nextCursor: next });
         };
         return held('reads', decide());
       }
@@ -3313,7 +3320,8 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       await waitFor(() => expect(hold()).toHaveAttribute('data-detached', 'true'));
       const after = view.holds.get('uid-a')!;
       expect(after.body).toBe('');
-      expect(JSON.stringify(after)).not.toMatch(/555|@/);
+      // The send time is a clock reading whose digits can be "555": it is pinned unchanged on the next line instead.
+      expect(JSON.stringify({ ...after, sentAt: 0 })).not.toMatch(/555|@/);
       expect({ ...after, body: before.body, csrf: before.csrf }).toEqual(before); // key, name, state, sent time unchanged
       expect(hold()).toHaveTextContent(unresolvedText('Ada Lovelace'));
       expect(card).not.toMatch(/555|@/);
@@ -3452,10 +3460,11 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(screen.getByTestId('directory-edit-name')).toBeInTheDocument(); // the form stays open
   });
 
-  it('SCD-95. a confirmed edit: ONE PATCH of the exact body under a new key and this session\'s token; "Saved"; the profile read again at the new version; the list row renamed; id and creation time unchanged; the next edit expects the new version under another key', async () => {
+  it('SCD-95. a confirmed edit: ONE PATCH of the exact body under a new key and this session\'s token; "Saved"; the profile read again at the new version; the list read again from page one, the renamed customer coming from that read; id and creation time unchanged; the next edit expects the new version under another key', async () => {
     const server = fakeServer();
     const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
     const before = details(server).length;
+    const listReads = lists(server).length;
     await openForm();
     fillEdit({ name: ' Ada King ', phone: '+1 555 0199', email: '' }); // the email cleared
     await click('directory-edit-save');
@@ -3478,6 +3487,13 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(screen.getByTestId('directory-detail-created').querySelector('time')).toHaveAttribute('datetime', CREATED);
     expect(screen.queryByTestId('directory-edit-name')).toBeNull(); // the form closed
     expect(server.versions.get(ada.id)).toBe(2);
+    // The list is read again, ONCE, from page one (only the edited row's name is put to the confirmed one meanwhile).
+    await waitFor(() => expect(lists(server)).toHaveLength(listReads + 1));
+    expect(lists(server)[listReads].url).toBe(CUSTOMERS_PATH);
+    await view.go('/customers/directory');
+    expect(names()).toEqual(['Ada King', 'Bea']);
+    expect(lists(server)).toHaveLength(listReads + 1); // the way back reads nothing
+    await view.go(`/customers/directory/${ada.id}`);
     // A second, deliberate edit: the version just read, and another key.
     await openForm();
     expect([editInput('name').value, editInput('phone').value, editInput('email').value]).toEqual(['Ada King', '+1 555 0199', '']);
@@ -3487,11 +3503,8 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada King', email: EMAIL }));
     expect(patches(server)[1].headers.get('idempotency-key')).toBe(key(2));
     await waitFor(() => expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(EMAIL));
-    // The list row shows the confirmed name (the list was not read again for it).
-    const listReads = lists(server).length;
-    await view.go('/customers/directory');
-    expect(names()).toEqual(['Ada King', 'Bea']);
-    expect(lists(server).length).toBe(listReads);
+    await waitFor(() => expect(lists(server)).toHaveLength(listReads + 2)); // the second confirmed edit: page one again
+    expect(lists(server)[listReads + 1].url).toBe(CUSTOMERS_PATH);
     expectNoSelector(server);
   });
 
@@ -3501,7 +3514,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     for (const [plan, name] of [[503, 'Ada King'], ['lost', 'Ada Byron'], ['no-etag', 'Ada Lovelace']] as const) {
       await openForm();
       fillEdit({ name });
-      server.reads.push(plan); // the profile read after the 200
+      server.profileReads.push(plan); // the profile read after the 200 (the list's page-one read after it takes no plan)
       await click('directory-edit-save');
       await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_SAVED_UNREFRESHED_TEXT));
       expect(detailPhase()).toBe('unavailable');
@@ -3519,7 +3532,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     // The refresh refused 403 (one session check, the same token): still "Saved, but…", nothing of before shown.
     await openForm();
     fillEdit({ name: 'Ada King' });
-    server.reads.push(403);
+    server.profileReads.push(403);
     await click('directory-edit-save');
     await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_SAVED_UNREFRESHED_TEXT));
     expect(detailPhase()).toBe('denied');
@@ -4312,8 +4325,11 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await click('directory-edit-save');
     await waitFor(() => expect(server.held).toHaveLength(1));
     await view.go('/customers/directory');
+    const at = lists(server).length;
     await act(async () => { server.held[0].release(); });
-    await waitFor(() => expect(names()).toEqual(['Ada King', 'Bea']));
+    await waitFor(() => expect(lists(server)).toHaveLength(at + 1)); // the list's reload after the 200 ...
+    await waitFor(() => expect(phase()).toBe('ready')); // ... answered, before the next read is planned
+    expect(names()).toEqual(['Ada King', 'Bea']);
     server.reads.push(503);
     await view.go(`/customers/directory/${ada.id}`);
     await waitFor(() => expect(detailPhase()).toBe('unavailable'));
@@ -4871,5 +4887,578 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await click('directory-edit-save');
     await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
     expect(patches(server).map((r) => (JSON.parse(r.body ?? '{}') as { expectedVersion: number }).expectedVersion)).toEqual([1, 2]);
+  });
+
+  // M7A-CUSTOMERS-P8 — searching the server-backed list by name (GET /api/v1/customers?q=…).
+  const searchInput = () => screen.getByTestId('directory-search-input') as HTMLInputElement;
+  /** Put `text` in the search box (no request), then apply it by the Search button or by Enter. */
+  const searchFor = async (text: string, how: 'button' | 'enter' = 'button') => {
+    fireEvent.change(searchInput(), { target: { value: text } });
+    if (how === 'button') await click('directory-search-submit');
+    else await userEvent.setup().type(searchInput(), '{Enter}');
+  };
+  const listUrls = (s: Server, from = 0) => lists(s).slice(from).map((r) => r.url);
+  const summary = () => screen.queryByTestId('directory-search-summary');
+  const none = () => screen.queryByTestId('directory-search-none');
+  const ADAS = ['Ada Lovelace', 'Adam', 'Grace', 'Bea', 'Hadassah', 'ADA KING'];
+
+  it('SCD-147. the fake\'s search is the server\'s: q form-decoded and trimmed, matched anywhere in the name whatever its case, in byte order; each cursor kind only with its own search', async () => {
+    const server = fakeServer();
+    const send = (url: string, headers: Record<string, string> = {}) => server.fetch(url, { method: 'GET', headers });
+    const login = await server.fetch(TENANT_SESSION_PATHS.login, { method: 'POST', headers: { authorization: 'Bearer tok-a', 'x-tmpos-csrf': '1' } });
+    const bound = { 'x-tmpos-session-csrf': ((await login.json()) as { csrfToken: string }).csrfToken };
+    const seeded = server.seed(TENANT_A, ADAS);
+    server.seed(TENANT_B, ['Ada Foreign']);
+    server.pageSize = 2;
+    const read = async (query: string) => {
+      const res = await send(`${CUSTOMERS_PATH}?${query}`, bound);
+      return { status: res.status, body: res.status === 200 ? (await res.json()) as { customers: Row[]; nextCursor: string | null } : null };
+    };
+    const one = await read('q=ada');
+    expect(one.body!.customers.map((r) => r.name)).toEqual(['ADA KING', 'Ada Lovelace']);
+    expect(one.body!.nextCursor).toMatch(/^[A-Za-z0-9_-]{44}$/);
+    const two = await read(`q=ada&cursor=${one.body!.nextCursor}`);
+    expect(two.body!.customers.map((r) => r.name)).toEqual(['Adam', 'Hadassah']); // nothing of tenant B
+    expect(two.body!.nextCursor).toBeNull();
+    expect((await read('q=+ada+')).body!.customers.map((r) => r.name)).toEqual(['ADA KING', 'Ada Lovelace']); // '+' is a space, trimmed
+    expect((await read('q=zed')).body).toEqual({ customers: [], nextCursor: null });
+    expect((await read('q=%20%20')).body!.nextCursor).toMatch(/^[A-Za-z0-9_-]{23}$/); // blank: the unfiltered list
+    // A cursor is accepted only with its own search: another text's, the other kind, or none of them is one 400.
+    const unfiltered = (await read('q=')).body!.nextCursor!;
+    for (const query of [`q=ad&cursor=${one.body!.nextCursor}`, `cursor=${one.body!.nextCursor}`, `q=ada&cursor=${unfiltered}`, 'q=%ZZ', 'q=a%00b',
+      `q=${'x'.repeat(201)}`, 'q=a&q=b', 'q=ada&limit=10', '', 'q', 'q=ada&']) {
+      expect((await read(query)).status, query).toBe(400);
+    }
+    // The continuation is the anchor's CURRENT position, whether or not the anchor still matches.
+    const anchor = seeded.find((r) => r.name === 'Ada Lovelace')!;
+    server.editElsewhere(anchor.id, 'Ab');
+    expect((await read(`q=ada&cursor=${encodeCustomerSearchCursor(anchor.id, 'ada')}`)).body).toEqual({
+      customers: seeded.filter((r) => r.name === 'Adam' || r.name === 'Hadassah').map((r) => ({ id: r.id, name: r.name })), nextCursor: null,
+    });
+  });
+
+  it('SCD-148. typing sends nothing; Search (the button, or Enter) applies the draft: ONE read of q, only the matches, said in the polite status; later typing never relabels them', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    const form = screen.getByRole('search');
+    expect(within(form).getByLabelText('Search customers by name')).toBe(searchInput());
+    const before = lists(server).length;
+    await userEvent.setup().type(searchInput(), 'ada');
+    await settle();
+    expect(lists(server)).toHaveLength(before); // no request per keystroke
+    expect(summary()).toBeNull();
+    await click('directory-search-submit');
+    await waitFor(() => expect(names()).toEqual(['ADA KING', 'Ada Lovelace', 'Adam', 'Hadassah']));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    expect(summary()).toHaveTextContent(searchMatchingText('ada'));
+    expect(state()).toHaveAttribute('role', 'status');
+    expect(state()).toContainElement(summary());
+    // The draft is not the applied search: what is typed now changes nothing shown and sends nothing.
+    await userEvent.setup().type(searchInput(), ' king');
+    await settle();
+    expect(summary()).toHaveTextContent(/^Customers matching “ada”$/);
+    expect(names()).toHaveLength(4);
+    expect(lists(server)).toHaveLength(before + 1);
+    // Enter applies it.
+    await searchFor('  GRACE ', 'enter');
+    await waitFor(() => expect(names()).toEqual(['Grace']));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`, `${CUSTOMERS_PATH}?q=GRACE`]);
+    expect(summary()).toHaveTextContent(searchMatchingText('GRACE'));
+    expect(searchInput().value).toBe('  GRACE '); // the box keeps what was typed
+    expectNoSelector(server);
+  });
+
+  it('SCD-149. a draft the server would refuse is said inline and takes focus, and NOTHING is sent; a blank one is the unfiltered list; 200 characters are sent', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    const before = lists(server).length;
+    const astral = String.fromCodePoint(0x1f600);
+    for (const bad of [`Ada${String.fromCodePoint(0x202e)}`, `A${String.fromCodePoint(0x7)}da`, 'x'.repeat(201), astral.repeat(201), `A${String.fromCodePoint(0x2028)}da`]) {
+      await searchFor(bad);
+      await waitFor(() => expect(screen.getByTestId('directory-search-error')).toHaveTextContent(SEARCH_RULE_TEXT));
+      expect(screen.getByTestId('directory-search-error')).toHaveAttribute('role', 'alert');
+      expect(searchInput()).toHaveAttribute('aria-invalid', 'true');
+      expect(searchInput()).toHaveAttribute('aria-describedby', 'directory-search-error');
+      expect(searchInput()).toHaveFocus();
+      expect(lists(server)).toHaveLength(before);
+      expect(names()).toHaveLength(6); // the list shown is untouched
+    }
+    fireEvent.change(searchInput(), { target: { value: 'Ad' } }); // editing the draft takes the message away
+    expect(screen.queryByTestId('directory-search-error')).toBeNull();
+    expect(searchInput()).toHaveAttribute('aria-invalid', 'false');
+    await searchFor(astral.repeat(200));
+    await waitFor(() => expect(none()).toHaveTextContent(searchNoneText(astral.repeat(200))));
+    await searchFor('   ');
+    await ready();
+    expect(names()).toHaveLength(6);
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=${encodeURIComponent(astral.repeat(200))}`, CUSTOMERS_PATH]);
+    expect(summary()).toBeNull();
+  });
+
+  it('SCD-150. Clear empties the draft and the applied search and reads the unfiltered page one; focus stays in the search box; Clear is off with nothing to clear', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    expect(screen.getByTestId('directory-search-clear')).toBeDisabled();
+    fireEvent.change(searchInput(), { target: { value: 'grace' } });
+    expect(screen.getByTestId('directory-search-clear')).toBeEnabled(); // a draft alone can be cleared
+    await click('directory-search-submit');
+    await waitFor(() => expect(names()).toEqual(['Grace']));
+    const before = lists(server).length;
+    await click('directory-search-clear');
+    await waitFor(() => expect(names()).toHaveLength(6));
+    expect(searchInput().value).toBe('');
+    expect(searchInput()).toHaveFocus();
+    expect(summary()).toBeNull();
+    expect(listUrls(server, before)).toEqual([CUSTOMERS_PATH]);
+    expect(screen.getByTestId('directory-search-clear')).toBeDisabled();
+  });
+
+  it('SCD-151. "No customers match" only after a successful search page with no rows; a failed search is the list\'s own state, never "no matches"; an empty store keeps its own text', async () => {
+    const server = fakeServer();
+    mount(server);
+    await ready();
+    expect(screen.getByTestId('directory-empty')).toHaveTextContent(EMPTY_TEXT);
+    await searchFor('zed');
+    await waitFor(() => expect(none()).toHaveTextContent(/^No customers match “zed”\.$/));
+    expect(state()).toContainElement(none());
+    expect(state()).toHaveAttribute('role', 'status');
+    expect(screen.queryByTestId('directory-empty')).toBeNull();
+    server.seed(TENANT_A, ADAS);
+    for (const plan of [503, 'lost', 'html'] as ReadPlan[]) {
+      server.reads.push(plan);
+      await searchFor('ada');
+      await waitFor(() => expect(phase()).toBe('unavailable'));
+      expect(state()).toHaveTextContent('The customer directory is unavailable right now.');
+      expect(none()).toBeNull();
+      expect(summary()).toBeNull();
+      expect(screen.queryByTestId('directory-empty')).toBeNull();
+      expect(names()).toEqual([]); // the previous search's rows went when this one was applied
+      await click('directory-retry'); // Try again: the same search
+      await waitFor(() => expect(names()).toHaveLength(4));
+      expect(lists(server).at(-1)!.url).toBe(`${CUSTOMERS_PATH}?q=ada`);
+    }
+  });
+
+  it('SCD-152. Load more under a search sends its text and its own cursor; Refresh and a refused cursor\'s one reload stay under the APPLIED search, never the draft', async () => {
+    const server = fakeServer();
+    const adas = server.seed(TENANT_A, Array.from({ length: 60 }, (_, i) => `Ada ${String(i).padStart(2, '0')}`));
+    server.seed(TENANT_A, Array.from({ length: 10 }, (_, i) => `Bea ${i}`));
+    mount(server);
+    await ready();
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(50));
+    expect(names().every((n) => n.startsWith('Ada '))).toBe(true);
+    const before = lists(server).length;
+    fireEvent.change(searchInput(), { target: { value: 'bea' } }); // a draft, not applied
+    await click('directory-load-more');
+    await waitFor(() => expect(names()).toHaveLength(60));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada&cursor=${encodeCustomerSearchCursor(adas[49].id, 'ada')}`]);
+    expect(screen.queryByTestId('directory-load-more')).toBeNull();
+    expect(new Set(screen.getAllByTestId('directory-row').map((r) => r.getAttribute('data-id'))).size).toBe(60);
+    await click('directory-refresh');
+    await waitFor(() => expect(lists(server)).toHaveLength(before + 2));
+    await ready();
+    expect(listUrls(server, before + 1)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    expect(names()).toHaveLength(50);
+    // The customer the continuation names is deleted: ONE reload from page one, still under the search.
+    server.rows[TENANT_A] = server.rows[TENANT_A].filter((r) => r.id !== adas[49].id);
+    await click('directory-load-more');
+    await waitFor(() => expect(screen.getByTestId('directory-list-note')).toHaveTextContent('loaded again from the start'));
+    await ready();
+    expect(listUrls(server, before + 2)).toEqual([`${CUSTOMERS_PATH}?q=ada&cursor=${encodeCustomerSearchCursor(adas[49].id, 'ada')}`, `${CUSTOMERS_PATH}?q=ada`]);
+    expect(summary()).toHaveTextContent(searchMatchingText('ada'));
+    expect(names().every((n) => n.startsWith('Ada '))).toBe(true);
+    expectNoSelector(server);
+  });
+
+  it('SCD-153. an older search\'s answer never replaces a newer one, in either arrival order', async () => {
+    for (const order of ['newer-first', 'older-first'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ADAS);
+      mount(server);
+      await ready();
+      server.hold.reads = 2;
+      await searchFor('ada');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await searchFor('grace');
+      await waitFor(() => expect(server.held).toHaveLength(2));
+      const [older, newer] = server.held;
+      if (order === 'newer-first') {
+        await act(async () => { newer.release(); });
+        await waitFor(() => expect(names()).toEqual(['Grace']));
+        await act(async () => { older.release(); });
+      } else {
+        await act(async () => { older.release(); });
+        await settle();
+        expect(names(), order).toEqual([]); // nothing of the older search, ever
+        expect(phase(), order).toBe('loading');
+        await act(async () => { newer.release(); });
+      }
+      await settle();
+      await waitFor(() => expect(names(), order).toEqual(['Grace']));
+      expect(summary(), order).toHaveTextContent(searchMatchingText('grace'));
+      expect(older.url).toBe(`${CUSTOMERS_PATH}?q=ada`);
+      cleanup();
+    }
+  });
+
+  it('SCD-154. a session that ended: Search finds it ended with NO login and clears the rows, the cursor, the draft and the applied search; only Reconnect logs in, and reads the unfiltered list', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    fireEvent.change(searchInput(), { target: { value: 'grace' } });
+    server.sessions.clear();
+    const before = lists(server).length;
+    await click('directory-search-submit');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(names()).toEqual([]);
+    expect(summary()).toBeNull();
+    expect(searchInput().value).toBe('');
+    expect(lists(server)).toHaveLength(before);
+    expect(logins(server)).toHaveLength(1);
+    expect(screen.getByTestId('directory-search-submit')).toBeDisabled();
+    expect(screen.getByTestId('directory-search-clear')).toBeDisabled();
+    expect(screen.getByTestId('directory-search-hint')).toHaveTextContent('Reconnect to search.');
+    await userEvent.setup().type(searchInput(), 'ada{Enter}'); // Enter cannot apply it either
+    await focusWindow();
+    await settle();
+    expect(lists(server)).toHaveLength(before);
+    expect(logins(server)).toHaveLength(1);
+    await click('directory-retry');
+    await ready();
+    expect(logins(server)).toHaveLength(2);
+    expect(listUrls(server, before)).toEqual([CUSTOMERS_PATH]);
+    expect(names()).toHaveLength(6);
+  });
+
+  it('SCD-155. a search never resends or alters a held create: the same key, the same bytes and the same window; Check again then confirms it, and the filtered list never shows it unless the server says it matches', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    server.posts.push('commit-then-503');
+    const view = mount(server, { keys: [key(1)] });
+    await ready();
+    await addCustomer('Zed Unmatched');
+    await unresolved();
+    const held = view.holds.get('uid-a')!;
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    await click('directory-refresh');
+    await ready();
+    await click('directory-search-clear');
+    await waitFor(() => expect(names()).toHaveLength(7));
+    await searchFor('ada', 'enter');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    expect(posts(server)).toHaveLength(1);
+    expect(view.holds.get('uid-a')).toEqual(held); // its key, bytes, token, send time and state, untouched
+    const before = lists(server).length;
+    await click('directory-check-again');
+    await waitFor(() => expect(screen.getByTestId('directory-saved')).toHaveTextContent('Saved on the server: "Zed Unmatched".'));
+    expect(posts(server).map((r) => [r.headers.get('idempotency-key'), r.body])).toEqual([[key(1), held.body], [key(1), held.body]]);
+    await waitFor(() => expect(lists(server)).toHaveLength(before + 1));
+    await ready();
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]); // page one again, under the search
+    expect(names()).not.toContain('Zed Unmatched');
+    expect(names()).toHaveLength(4);
+  });
+
+  it('SCD-156. a confirmed create reloads page one under the applied search: a matching customer is shown because the server answers it, another is never inserted', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    let before = lists(server).length;
+    await addCustomer('Adaline');
+    await waitFor(() => expect(screen.getByTestId('directory-saved')).toHaveTextContent('Saved on the server: "Adaline".'));
+    await waitFor(() => expect(names()).toContain('Adaline'));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    before = lists(server).length;
+    await addCustomer('Quentin');
+    await waitFor(() => expect(screen.getByTestId('directory-saved')).toHaveTextContent('Saved on the server: "Quentin".'));
+    await waitFor(() => expect(lists(server)).toHaveLength(before + 1));
+    await ready();
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    expect(names()).not.toContain('Quentin');
+    expect(summary()).toHaveTextContent(searchMatchingText('ada'));
+  });
+
+  it('SCD-157. a confirmed edit reloads a FILTERED list from page one: a customer renamed out of the search leaves it; a held edit is never resent by a search', async () => {
+    access.set({ canEdit: true });
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ADAS);
+    const view = mount(server, { keys: [key(1), key(2)] });
+    await ready();
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    await userEvent.setup().click(within(screen.getAllByTestId('directory-row')[1]).getByRole('link', { name: 'Ada Lovelace' }));
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    await openForm();
+    fillEdit({ name: 'Lady Byron' });
+    server.patches.push('commit-then-503'); // undecided: held
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    const held = view.editHolds.get('uid-a')!;
+    await click('directory-back');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    await searchFor('lady');
+    await waitFor(() => expect(names()).toEqual(['Lady Byron'])); // the server's answer: the edit had committed
+    await click('directory-search-clear');
+    await waitFor(() => expect(names()).toHaveLength(6));
+    expect(patches(server)).toHaveLength(1);
+    expect(view.editHolds.get('uid-a')).toEqual(held);
+    await searchFor('ada');
+    await waitFor(() => expect(names()).toHaveLength(3));
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    const before = lists(server).length;
+    await click('directory-edit-check'); // the same key and bytes: the sealed 200
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server).map((r) => [r.headers.get('idempotency-key'), r.body])).toEqual([[key(1), held.body], [key(1), held.body]]);
+    await waitFor(() => expect(lists(server)).toHaveLength(before + 1));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    // An edit that renames a match out of the search, confirmed at once: the list is the server's answer again.
+    const [adam] = server.rows[TENANT_A].filter((r) => r.name === 'Adam');
+    await view.go(`/customers/directory/${adam.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveAttribute('data-phase', 'ready'));
+    await openForm();
+    fillEdit({ name: 'Bram' });
+    const at = lists(server).length;
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await waitFor(() => expect(lists(server)).toHaveLength(at + 1));
+    expect(listUrls(server, at)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+    await click('directory-back');
+    await waitFor(() => expect(names()).toEqual(['ADA KING', 'Hadassah']));
+    expect(summary()).toHaveTextContent(searchMatchingText('ada'));
+  });
+
+  it('SCD-158. a match opens its profile; the way back keeps the search, its rows and the draft; the search text never reaches the address, history or browser storage', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    const stored = vi.spyOn(Storage.prototype, 'setItem');
+    const view = mount(server);
+    await ready();
+    await searchFor('hadas');
+    await waitFor(() => expect(names()).toEqual(['Hadassah']));
+    fireEvent.change(searchInput(), { target: { value: 'hadas and more' } });
+    const reads = lists(server).length;
+    await userEvent.setup().click(screen.getByRole('link', { name: 'Hadassah' }));
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Hadassah$/));
+    expect(view.router.state.location.search).toBe('');
+    expect(view.router.state.location.pathname).toMatch(/^\/customers\/directory\/[0-9a-f-]{36}$/);
+    await click('directory-back');
+    await waitFor(() => expect(names()).toEqual(['Hadassah']));
+    expect(summary()).toHaveTextContent(searchMatchingText('hadas'));
+    expect(searchInput().value).toBe('hadas and more');
+    expect(lists(server)).toHaveLength(reads); // nothing read again for the way back
+    expect(JSON.stringify(view.router.state.location)).not.toMatch(/hadas/i);
+    expect(window.location.href).not.toMatch(/hadas/i);
+    expect(stored.mock.calls.map((call) => call.join(' '))).not.toContainEqual(expect.stringMatching(/hadas/i));
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      for (let i = 0; i < storage.length; i++) expect(storage.getItem(storage.key(i)!) ?? '').not.toMatch(/hadas/i);
+    }
+  });
+
+  it('SCD-159. a search still out when the store connection changes, or when the page goes, never populates: the new store starts unfiltered; a refused search clears the applied search with the rows', async () => {
+    {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Ada A']);
+      server.seed(TENANT_B, ['Ada B', 'Bob B']);
+      mount(server);
+      await ready();
+      server.hold.reads = 1;
+      await searchFor('ada');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      server.users['tok-a'].tenant = TENANT_B;
+      server.otherTab('tok-a');
+      await focusWindow();
+      await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toHaveTextContent(CONNECTION_CHANGED_TEXT));
+      await ready();
+      await act(async () => { server.held[0].release(); });
+      await settle();
+      expect(names()).toEqual(['Ada B', 'Bob B']);
+      expect(summary()).toBeNull();
+      expect(searchInput().value).toBe(''); // the draft typed for the other store goes with it
+      expect(page()).not.toContain('Ada A');
+      cleanup();
+    }
+    {
+      const server = fakeServer();
+      server.seed(TENANT_A, ADAS);
+      const view = mount(server);
+      await ready();
+      server.hold.reads = 1;
+      await searchFor('ada');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await view.go('/elsewhere');
+      await act(async () => { server.held[0].release(); });
+      await settle();
+      await view.go('/customers/directory'); // a fresh page: nothing of the old one's search
+      await ready();
+      expect(names()).toHaveLength(6);
+      expect(summary()).toBeNull();
+      expect(searchInput().value).toBe('');
+      cleanup();
+    }
+    {
+      const server = fakeServer();
+      server.seed(TENANT_A, ADAS);
+      mount(server);
+      await ready();
+      await searchFor('ada');
+      await waitFor(() => expect(names()).toHaveLength(4));
+      server.users['tok-a'].view = false;
+      await searchFor('grace');
+      await waitFor(() => expect(phase()).toBe('denied'));
+      expect(names()).toEqual([]);
+      expect(summary()).toBeNull();
+      expect(none()).toBeNull();
+      expect(searchInput().value).toBe('grace'); // a refusal keeps the draft; only an ended session takes it
+      server.users['tok-a'].view = true;
+      const before = lists(server).length;
+      await click('directory-refresh');
+      await ready();
+      expect(listUrls(server, before)).toEqual([CUSTOMERS_PATH]); // the applied search went with the rows
+      expect(logins(server)).toHaveLength(1);
+    }
+  });
+
+  it('SCD-160. while a rate limit\'s wait runs, Search, Enter and Clear send nothing; a refused search is never "no matches"; after the wait, Try again reads under the search', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    server.reads.push(429);
+    await searchFor('ada');
+    await waitFor(() => expect(phase()).toBe('rate-limited'));
+    expect(state()).toHaveTextContent('Too many requests. Wait 1 second, then try again.');
+    expect(none()).toBeNull();
+    expect(screen.getByTestId('directory-search-submit')).toBeDisabled();
+    expect(screen.getByTestId('directory-search-clear')).toBeDisabled();
+    expect(screen.getByTestId('directory-search-hint')).toHaveTextContent('Wait 1 second.');
+    const before = lists(server).length;
+    await userEvent.setup().type(searchInput(), '{Enter}');
+    await settle();
+    expect(lists(server)).toHaveLength(before);
+    await waitFor(() => expect(screen.getByTestId('directory-search-submit')).toBeEnabled(), { timeout: 2_500 });
+    await click('directory-retry');
+    await waitFor(() => expect(names()).toHaveLength(4));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]);
+  });
+
+  it('SCD-161. the search form works from the keyboard alone: Tab to Search and press it, the result said in the polite status', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    mount(server);
+    await ready();
+    const user = userEvent.setup();
+    searchInput().focus();
+    await user.keyboard('grace');
+    await user.tab();
+    expect(screen.getByTestId('directory-search-submit')).toHaveFocus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(names()).toEqual(['Grace']));
+    expect(state()).toHaveTextContent(searchMatchingText('grace'));
+    await user.tab(); // Clear
+    expect(screen.getByTestId('directory-search-clear')).toHaveFocus();
+    await user.keyboard(' ');
+    await waitFor(() => expect(names()).toHaveLength(6));
+    expect(searchInput()).toHaveFocus();
+  });
+
+  it('SCD-162. the search GET itself answers 401 (the session ended while it was out): signed out, the rows, the cursor, the draft and the applied search gone, no summary, and no login', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ADAS);
+    server.pageSize = 2; // a cursor is shown before the search
+    mount(server);
+    await ready();
+    expect(screen.getByTestId('directory-load-more')).toBeInTheDocument();
+    const before = lists(server).length;
+    const signIns = logins(server).length;
+    server.reads.push(401);
+    await searchFor('ada');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(listUrls(server, before)).toEqual([`${CUSTOMERS_PATH}?q=ada`]); // the search itself was sent, and answered 401
+    expect(state()).toHaveTextContent('Your server session ended. Reconnect');
+    expect(names()).toEqual([]);
+    expect(screen.queryByTestId('directory-load-more')).toBeNull();
+    expect(searchInput().value).toBe('');
+    expect(summary()).toBeNull();
+    expect(none()).toBeNull();
+    await settle();
+    expect(logins(server)).toHaveLength(signIns);
+    expect(lists(server)).toHaveLength(before + 1);
+  });
+
+  // Review fixes (M7A-CUSTOMERS-P8): the list read after a confirmed edit.
+  it('SCD-163. a confirmed edit whose list reload fails keeps the rows under the last-known label with the CONFIRMED name, never the one from before the edit', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/customers/directory');
+    expect(names()).toEqual(['Ada Lovelace', 'Bea']);
+    const before = lists(server).length;
+    server.reads.push(503); // the list's page-one read after the 200 (no profile is read on the list)
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(phase()).toBe('unavailable'));
+    expect(lists(server)).toHaveLength(before + 1);
+    expect(screen.getByTestId('directory-last-known')).toHaveTextContent(LAST_KNOWN_TEXT);
+    expect(names()).toEqual(['Ada King', 'Bea']);
+    expect(page()).not.toContain('Ada Lovelace');
+    expect(editPolite()).toHaveTextContent(editNamedText('saved', 'Ada King'));
+    expect(page()).not.toMatch(/not saved/i);
+  });
+
+  it('SCD-164. a save confirmed while the list is shown, whose list reload finds the session ended: saved, then the session ended, by name; no sign-in and no rows', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/customers/directory');
+    server.sessions.clear(); // the PATCH committed on arrival; the session ends before the list reload
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" were saved, but your server session then ended. Reconnect to see the latest details.'));
+    expect(names()).toEqual([]);
+    expect(page()).not.toMatch(/not saved/i);
+    await settle();
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-165. a save confirmed while the list is shown, whose list reload finds another tenant\'s connection: saved, then the connection changed, unnamed; no old customer name shown', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/customers/directory');
+    server.users['tok-a'].tenant = TENANT_B;
+    server.otherTab('tok-a'); // the list reload's session step finds this new token
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toHaveTextContent(CONNECTION_CHANGED_TEXT));
+    await waitFor(() => expect(editAlert()).toHaveTextContent(/^Your changes were saved, but the store connection then changed\.$/));
+    await ready();
+    expect(names()).toEqual([]);
+    expect(page()).not.toMatch(/Ada King|Ada Lovelace/);
+    expect(logins(server)).toHaveLength(1);
   });
 });

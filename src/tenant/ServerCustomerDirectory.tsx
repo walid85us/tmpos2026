@@ -69,8 +69,10 @@
 //     (customersClient's `customerEditBody`: expectedVersion, name, and only the contacts that differ — a blank one is a
 //     clear) and sent under a NEW key, only once `connect()` (plain: never a sign-in) has answered this generation's own
 //     token. "Saved" ONLY on a 200 naming this customer and the name sent at the expected version (+1 when changed); then
-//     the list row takes the confirmed name and the profile is read again — the values shown before the edit are never
-//     shown as last known, and a refresh that fails says so without unsaying the save. A 409 write_conflict keeps the
+//     the list is read again from page one (its row for this customer, when shown, takes the confirmed name meanwhile)
+//     and the profile is read again — the values shown before the edit are never shown as last known, and a refresh
+//     that fails says so without unsaying the save (a session end or a new connection that a refresh meets is said with
+//     the save, on the list as on the profile). A 409 write_conflict keeps the
 //     draft and offers "Review latest" (a read, nothing sent); only a later deliberate Save sends, built from the reviewed
 //     version under a new key. Nothing is ever merged or sent on its own.
 //   - An undecided edit (a 5xx, an unexpected answer, no answer) is held per user in its own hold store (in memory only:
@@ -86,6 +88,20 @@
 //     user touched and takes every other one from the reviewed profile, so a save never reverts a field it did not
 //     change. Notices go to two fixed live regions (a polite status, an assertive alert); focus moves to Edit after
 //     Cancel or Discard, to "Review latest" on a conflict, and to the status after a confirmed save.
+//   - SEARCH (M7A-CUSTOMERS-P8, GET /api/v1/customers?q=…). The list has a form labelled "Search customers by name". Its
+//     input is a DRAFT: only Search (or Enter) APPLIES it, normalized by customersClient's `normalizeCustomerSearch`
+//     (trimmed; blank is the unfiltered list; a refused character or more than 200 characters is said inline, and nothing
+//     is sent); Clear empties the draft and applies no search. Applying drops the collected pages and the cursor and reads
+//     page one. The applied query is part of the list state, with the rows it answered, so typing never relabels them:
+//     Refresh, Load more, Try again, the read after a wait and a cursor's one reload all read under it. The server
+//     matches; the page never filters, ranks or inserts a row: a confirmed create reloads page one under the applied
+//     query, and a confirmed edit reloads the list from page one whether or not a search is applied (an outdated page
+//     chain is never continued). "No customers match" is said only for a successful filtered page with no rows; a failed read shows the
+//     list's own state, never "no matches". A search is a read: the same generation, sequence and session checks, no
+//     search while a wait runs or once the session has ended (Reconnect stays the only sign-in), and nothing of a held
+//     create or edit is touched. A refusal clears the applied query with the rows, an ended session clears the draft
+//     too, and a new generation starts unfiltered (a tenant switch also empties the draft). The text lives only in this
+//     page's state: never in the address, history, browser storage or a log.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -93,7 +109,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import {
-  CONTACT_INVALID, customers as customersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName, normalizeCustomerPhone,
+  CONTACT_INVALID, customers as customersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName, normalizeCustomerPhone, normalizeCustomerSearch,
   customerEditBody, type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient, type UpdateResult,
 } from './customersClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
@@ -114,6 +130,11 @@ export const STOP_WARNING_TEXT =
 export const NAME_RULE_TEXT = 'Enter a name of 1 to 200 characters, without control or text-direction characters.';
 export const PHONE_RULE_TEXT = 'Enter a phone number of up to 64 characters with at least one digit and no control or text-direction characters, or leave it blank.';
 export const EMAIL_RULE_TEXT = 'Enter an email address of up to 254 characters with exactly one @, no spaces and no control or text-direction characters, or leave it blank.';
+export const SEARCH_RULE_TEXT = 'Enter up to 200 characters to search, without control or text-direction characters.';
+/** What a list says of the search its rows answer (M7A-CUSTOMERS-P8). */
+export const searchMatchingText = (query: string): string => `Customers matching “${query}”`;
+/** Said only for a successful page of that search with no rows. */
+export const searchNoneText = (query: string): string => `No customers match “${query}”.`;
 export const NOT_PROVIDED_TEXT = 'Not provided';
 export const NOT_RECORDED_TEXT = 'Not recorded';
 /** A creation time (`YYYY-MM-DDTHH:mm:ss.sssZ`, as the client admits it) as `YYYY-MM-DD HH:mm UTC`. */
@@ -478,6 +499,7 @@ interface ListState {
   readonly rows: readonly CustomerEntry[]; // in arrival order (the server's byte order); never re-sorted
   readonly next: string | null;
   readonly note: string;
+  readonly query: string; // the applied search the rows and the cursor answer ('' for none: the unfiltered list)
 }
 interface DetailState {
   readonly id: string | null;
@@ -493,7 +515,7 @@ interface EditForm { readonly id: string; readonly base: CustomerProfile; readon
 /** A read or a session that did not answer with rows: the phase it puts the page in and what it says. */
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
-const LIST_INITIAL: ListState = Object.freeze({ phase: 'loading', text: TEXT.loading, rows: [], next: null, note: '' });
+const LIST_INITIAL: ListState = Object.freeze({ phase: 'loading', text: TEXT.loading, rows: [], next: null, note: '', query: '' });
 const DETAIL_NONE: DetailState = Object.freeze({ id: null, phase: 'loading', text: '', customer: null });
 interface Fields { readonly name: string; readonly phone: string; readonly email: string }
 const NO_FIELDS: Fields = Object.freeze({ name: '', phone: '', email: '' });
@@ -587,6 +609,8 @@ function UserPage({
   const [editNote, setEditNote] = useState<{ readonly key: string; readonly text: string } | null>(null);
   const [editing, setEditing] = useState(false); // a save, a check or a review is out
   const editHeld = useSyncExternalStore(editHolds.subscribe, () => (uid === null ? undefined : editViewOf(editHolds.get(uid)))); // token-free
+  const [searchDraft, setSearchDraft] = useState(''); // the search box's text; the APPLIED query is the list's own
+  const [searchRefused, setSearchRefused] = useState(false); // the draft last applied is one the server would refuse
 
   const gen = useRef<{ n: number; csrf: string | null }>({ n: 0, csrf: null }); // the token never leaves refs and the hold store
   const alive = useRef(false);
@@ -633,6 +657,7 @@ function UserPage({
   const editAlertRef = useRef<HTMLParagraphElement | null>(null);
   const editForm = useRef<HTMLFormElement | null>(null);
   const editCard = useRef<HTMLDivElement | null>(null);
+  const searchInput = useRef<HTMLInputElement | null>(null);
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
@@ -751,7 +776,9 @@ function UserPage({
       listSeq.current += 1;
       listCtl.current?.abort();
       setListBusy(false);
-      putList({ phase: failure.kind as 'denied' | 'signed-out', text: failure.text, rows: [], next: null, note: '' });
+      putList({ phase: failure.kind as 'denied' | 'signed-out', text: failure.text, rows: [], next: null, note: '', query: '' });
+      // An ended session takes the search text too; a refusal only the applied query (it went with the rows).
+      if (ended) { setSearchDraft(''); setSearchRefused(false); }
     }
     if (!spareDetail) {
       detailSeq.current += 1;
@@ -840,6 +867,7 @@ function UserPage({
   async function loadList(mode: 'first' | 'more', note = '', reconnect = false): Promise<void> {
     if (uid === null) return;
     const cursor = mode === 'more' ? listRef.current.next : null;
+    const query = listRef.current.query; // a read is always of the applied search, its cursor that search's own
     if (mode === 'more' && cursor === null) return;
     if (waitRef.current) { // no read starts during a rate limit's wait; a page-one read runs when it ends
       if (mode === 'first') reloadAfterWait.current = { note };
@@ -861,7 +889,7 @@ function UserPage({
       if (stale()) return;
       if (s.kind !== 'ok') { failList(sessionFailure(s)); return; }
       if (adopt(uid, s.csrf)) return; // a new generation has started its own reads
-      const answer = await customers.list(cursor, s.csrf, controller.signal);
+      const answer = await customers.list(cursor, s.csrf, controller.signal, query);
       if (stale()) return;
       if (answer.kind === 'ok') {
         const was = listRef.current;
@@ -869,7 +897,7 @@ function UserPage({
         const fresh = answer.customers.filter((row) => !shown.has(row.id) && shown.add(row.id) !== undefined);
         return putList({
           phase: 'ready', text: '', rows: mode === 'more' ? [...was.rows, ...fresh] : fresh, next: answer.nextCursor,
-          note: mode === 'more' ? '' : was.note,
+          note: mode === 'more' ? '' : was.note, query,
         });
       }
       if (answer.kind === 'bad-cursor') {
@@ -890,6 +918,31 @@ function UserPage({
         setListBusy(false);
       }
     }
+  }
+
+  /**
+   * Apply a search (M7A-CUSTOMERS-P8): `raw` normalized, '' for none. A text the server would refuse is said here and
+   * nothing is sent. The pages and the cursor of the previous query go, and page one is read: a read like Refresh —
+   * never while a wait runs, never once the session has ended (only Reconnect signs in again).
+   */
+  function applySearch(raw: string): void {
+    if (uid === null || waitRef.current || listRef.current.phase === 'signed-out') return;
+    const query = normalizeCustomerSearch(raw);
+    if (query === null) {
+      setSearchRefused(true);
+      searchInput.current?.focus();
+      return;
+    }
+    setSearchRefused(false);
+    putList({ ...LIST_INITIAL, query });
+    void loadList('first');
+  }
+  /** Clear: no draft, no search — the unfiltered page one. Focus stays in the search box. */
+  function clearSearch(): void {
+    if (uid === null || waitRef.current || listRef.current.phase === 'signed-out') return;
+    setSearchDraft('');
+    applySearch('');
+    searchInput.current?.focus();
   }
 
   function failDetail(id: string, raw: Failure, shown: CustomerProfile | null): void {
@@ -955,6 +1008,7 @@ function UserPage({
     putEditStatus(null);
     setEditNote(null);
     setConnectionChanged(!user);
+    if (!user) { setSearchDraft(''); setSearchRefused(false); } // a tenant switch: the draft was typed for the other tenant
     if (uid === null) return putList({ ...LIST_INITIAL, phase: 'signed-out', text: TEXT.noIdentity });
     putList(LIST_INITIAL);
     if (csrf !== null) detach(uid, csrf);
@@ -1208,8 +1262,7 @@ function UserPage({
     };
     noticeFor(outcome.kind, outcome, own[outcome.kind] ?? editNamedText(outcome.kind, outcome.name));
     if (outcome.kind === 'saved') {
-      const was = listRef.current;
-      if (was.rows.some((row) => row.id === id)) putList({ ...was, rows: was.rows.map((row) => (row.id === id ? { id, name: outcome.name } : row)) });
+      void reloadAfterSave(id, outcome.name); // the list is the server's answer (to its search, if any): asked again from page one
     }
     if (outcome.kind === 'saved' || outcome.kind === 'conflict' || outcome.kind === 'gone') {
       // What this page shows of that customer may be from before: read again (or forgotten).
@@ -1333,7 +1386,7 @@ function UserPage({
       // CONFIRMED: this customer, the name sent, at the version the body expected
       if (!alive.current) return void editHolds.finish(who, key, { kind: 'saved', customerId: held.customerId, name: held.name, csrf: held.csrf });
       editHolds.remove(who, key);
-      return editSaved(held, answer.customer, focus);
+      return editSaved(held, focus);
     }
     const kind = answer.kind;
     // Conclusive for this key: a conflict or a refusal of the edit itself, on any send; the rest only on the first.
@@ -1371,19 +1424,43 @@ function UserPage({
     putEditStatus({ alert: true, text, customerId: held.customerId, named: `${editNamedText('unconfirmed', held.name)}${reason === '' ? '' : ` ${reason}`}` });
   }
 
-  /** A confirmed edit: the notice, the form closed, the list row's name, and the profile read again (or forgotten). */
-  function editSaved(held: HeldEdit, customer: CustomerEntry, focus: boolean): void {
+  /** A confirmed edit: the notice, the form closed, the list read again from page one, and the profile read again (or forgotten). */
+  function editSaved(held: HeldEdit, focus: boolean): void {
     const id = held.customerId;
     const mine = editRef.current?.id === id;
     if (mine) closeEdit();
     setEditNote(null);
     noticeFor('saved', held, EDIT_SAVED_TEXT);
     if (mine || focus) focusTarget.current = 'status';
-    const was = listRef.current;
-    if (was.rows.some((row) => row.id === id)) putList({ ...was, rows: was.rows.map((row) => (row.id === id ? customer : row)) });
+    // The list is the server's answer (to its search, if any): it is asked again from page one.
+    void reloadAfterSave(id, held.name);
     if (routeRef.current === id) void refreshAfterSave(id, held.name);
     // Not shown now: the profile kept from before the edit is forgotten, so it is never shown as last known.
     else if (detailRef.current.id === id) putDetail(DETAIL_NONE);
+  }
+
+  /**
+   * A confirmed save's list read, from page one. The customer's row, when shown, takes the confirmed name first: a
+   * reload that fails keeps the rows as last known, and the name from before the edit is not one of them. Away from
+   * that customer's route (no profile refresh is there to say it), a new connection or an ended session this reload
+   * meets clears the notices, so the save is said again with it, as refreshAfterSave says it.
+   */
+  async function reloadAfterSave(id: string, name: string): Promise<void> {
+    const was = listRef.current;
+    if (was.rows.some((row) => row.id === id)) putList({ ...was, rows: was.rows.map((row) => (row.id === id ? Object.freeze({ id, name }) : row)) });
+    const told = routeRef.current === id; // there, refreshAfterSave says what its own read meets
+    const mine = gen.current.n;
+    const ends = endedSeen.current;
+    await loadList('first');
+    if (!alive.current || told) return;
+    if (mine !== gen.current.n) {
+      if (statusHasFocus()) focusTarget.current = 'alert';
+      return putEditStatus({ alert: true, text: EDIT_TEXT.savedThenChanged }); // unnamed: the connection changed
+    }
+    if (ends !== endedSeen.current) {
+      if (statusHasFocus()) focusTarget.current = 'alert';
+      savedNews('savedThenEnded', { customerId: id, name });
+    }
   }
 
   async function refreshAfterSave(id: string, name: string): Promise<void> {
@@ -1579,6 +1656,8 @@ function UserPage({
         : list.phase !== 'ready' ? 'Available once the list has loaded from the server.' : '';
   const busyHint = listBusy ? 'Loading…' : waiting ? waitHint(wait) : '';
   const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
+  const canSearch = uid !== null && !waiting && list.phase !== 'signed-out';
+  const searchHint = waiting ? waitHint(wait) : list.phase === 'signed-out' && uid !== null ? 'Reconnect to search.' : '';
   // Until the route's own read has started, nothing of another id is shown.
   const shownDetail: DetailState = routeId === null || detail.id === routeId ? detail
     : { id: routeId, phase: isCustomerId(routeId) ? 'loading' : 'not-found', text: isCustomerId(routeId) ? TEXT.detailLoading : NOT_FOUND_TEXT, customer: null };
@@ -1731,8 +1810,10 @@ function UserPage({
         </p>
       </div>
 
+      {/* Keyed: the list's elements (its state text above all) are never reused for the detail's, or the other way round. */}
       {routeId !== null ? (
         <section
+          key="detail"
           data-testid="directory-detail"
           data-phase={shownDetail.phase}
           aria-labelledby="directory-detail-title"
@@ -1798,12 +1879,38 @@ function UserPage({
           )}
         </section>
       ) : (
-        <section aria-labelledby="directory-list-title" aria-busy={listBusy} className="space-y-3">
+        <section key="list" aria-labelledby="directory-list-title" aria-busy={listBusy} className="space-y-3">
           <h2 id="directory-list-title" ref={listTitle} tabIndex={-1} className="text-xl font-black text-primary tracking-tight">Customers on the server</h2>
+          {uid !== null && (
+            <form role="search" noValidate data-testid="directory-search" onSubmit={(e) => { e.preventDefault(); applySearch(searchDraft); }} className="space-y-1">
+              <label htmlFor="directory-search-input" className={labelClass}>Search customers by name</label>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  ref={searchInput}
+                  id="directory-search-input"
+                  data-testid="directory-search-input"
+                  type="search"
+                  autoComplete="off"
+                  value={searchDraft}
+                  aria-invalid={searchRefused}
+                  aria-describedby={searchRefused ? 'directory-search-error' : undefined}
+                  onChange={(e) => { setSearchDraft(e.target.value); setSearchRefused(false); }}
+                  className="flex-1 min-w-[14rem] text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                />
+                <button type="submit" data-testid="directory-search-submit" disabled={!canSearch} aria-describedby="directory-search-hint" className={button}>Search</button>
+                <button type="button" data-testid="directory-search-clear" disabled={!canSearch || (searchDraft === '' && list.query === '')} onClick={clearSearch} className={quiet}>Clear</button>
+                <span id="directory-search-hint" data-testid="directory-search-hint" className={hintClass}>{searchHint}</span>
+              </div>
+              {searchRefused && <p id="directory-search-error" data-testid="directory-search-error" role="alert" className={errorClass}>{SEARCH_RULE_TEXT}</p>}
+            </form>
+          )}
           <p data-testid="directory-state" data-phase={list.phase} role={list.phase === 'denied' ? 'alert' : 'status'} className="text-sm font-bold text-slate-600 min-h-[1rem]">
             {list.text}
+            {list.query !== '' && list.rows.length > 0 && <span data-testid="directory-search-summary" className="block font-medium text-slate-700 break-words">{searchMatchingText(list.query)}</span>}
             {lastKnown && <span data-testid="directory-last-known" className="block text-xs font-black uppercase tracking-widest text-amber-800">{LAST_KNOWN_TEXT}</span>}
-            {list.phase === 'ready' && list.rows.length === 0 && <span data-testid="directory-empty" className="block font-medium text-slate-600">{EMPTY_TEXT}</span>}
+            {list.phase === 'ready' && list.rows.length === 0 && (list.query === ''
+              ? <span data-testid="directory-empty" className="block font-medium text-slate-600">{EMPTY_TEXT}</span>
+              : <span data-testid="directory-search-none" className="block font-medium text-slate-600 break-words">{searchNoneText(list.query)}</span>)}
           </p>
           {list.note !== '' && <p data-testid="directory-list-note" role="status" className="text-sm font-bold text-amber-800">{list.note}</p>}
 
