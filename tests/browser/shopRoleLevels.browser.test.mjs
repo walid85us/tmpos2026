@@ -126,6 +126,17 @@
 //          and a creation time; the profile (opened from the saved notice) shows both and that time as a <time> whose
 //          datetime is the stored instant; list rows and the notice show no contact. A customer from before contacts
 //          (inserted with no phone, email or creation time) shows "Not provided" twice and "Not recorded".
+// Since M7A-CUSTOMERS-P7 the profile 200 carries the customer's row version as a strong ETag, and the detail edits it
+// (PATCH /api/v1/customers/{id}, body { expectedVersion, name, phone?, email? }):
+//   SCB-11 PERSISTENT EDIT: an owner edits a customer's name and phone and clears its email — ONE PATCH of exactly
+//          { expectedVersion: 1, name, phone, email: null } under a fresh v4 key, 200 { customer: { id, name }, version: 2,
+//          changed: true }; one customer change, one update audit naming the customer, one completion; "Saved" and the
+//          profile read again; after a reload and in a second browser through the second entry the same id, the same
+//          creation time and the edited values.
+//   SCB-12 STALE EDITOR: two browsers (the second through the second entry) open the same customer at version 1; the
+//          first saves; the second's save is a 409 write_conflict that writes nothing but its completion, keeps its draft
+//          and sends nothing more on its own; "Review latest" only reads; its deliberate save expects version 2 under a
+//          NEW key and lands.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -187,6 +198,7 @@ const CUSTOMERS = '/api/v1/customers';
 const LOGIN = '/api/v1/session/login';
 const CREATE_ACTION = 'tenant.customer.create';
 const EDIT_ACTION = 'tenant.role.level.update';
+const UPDATE_ACTION = 'tenant.customer.update';
 const REASON = 'Owner review of customer access';
 const LABELS = Object.freeze({ none: 'None', view: 'View Only', create: 'Create', edit: 'Edit', manage: 'Manage', approve: 'Approve', full: 'Full Access' });
 const STALE_S = Math.ceil((RECENT_AUTH_MAX_AGE_MS + 60_000) / 1000);
@@ -321,14 +333,16 @@ async function teardownDatabase() {
 }
 
 /**
- * C/A/E/K/L/T: customers, create audits, edit audits, sealed completions, every idempotency row, and EVERY audit record
- * (session logins and logouts included, so T is asserted only across steps that make no session) — deltas around a step.
+ * C/A/E/U/K/L/T: customers, create audits, role edit audits, customer update audits, sealed completions, every idempotency
+ * row, and EVERY audit record (session logins and logouts included, so T is asserted only across steps that make no
+ * session) — deltas around a step.
  */
 async function counts() {
   const [r] = await owner`select
     (select count(*) from tmpos_customer.customer)::int as c,
     (select count(*) from public.audit_event where action_id = ${CREATE_ACTION})::int as a,
     (select count(*) from public.audit_event where action_id = ${EDIT_ACTION})::int as e,
+    (select count(*) from public.audit_event where action_id = ${UPDATE_ACTION})::int as u,
     (select count(*) from tmpos_internal.idempotency_record where response is not null)::int as k,
     (select count(*) from tmpos_internal.idempotency_record)::int as l,
     (select count(*) from public.audit_event)::int as t`;
@@ -336,11 +350,11 @@ async function counts() {
 }
 async function deltaSince(before) {
   const now = await counts();
-  return { C: now.c - before.c, A: now.a - before.a, E: now.e - before.e, K: now.k - before.k, L: now.l - before.l, T: now.t - before.t };
+  return { C: now.c - before.c, A: now.a - before.a, E: now.e - before.e, U: now.u - before.u, K: now.k - before.k, L: now.l - before.l, T: now.t - before.t };
 }
 async function assertDelta(before, expected, label) {
   const got = note(label, await deltaSince(before));
-  assert.deepEqual(got, { ...got, ...expected }, `${label}: C/A/E/K/L/T ${JSON.stringify(got)}`);
+  assert.deepEqual(got, { ...got, ...expected }, `${label}: C/A/E/U/K/L/T ${JSON.stringify(got)}`);
 }
 const NOTHING = Object.freeze({ C: 0, A: 0, E: 0, K: 0, L: 0 });
 /** A refused request on a session made beforehand: nothing at all, not even an audit record of any kind. */
@@ -1838,6 +1852,10 @@ const DIRECTORY = '/customers/directory';
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** One create: its customer, its audit record, its sealed completion, its one idempotency record, no role edit. */
 const CREATED = Object.freeze({ C: 1, A: 1, E: 0, K: 1, L: 1 });
+/** One customer edit: no new customer, its update audit, its sealed completion, its one idempotency record. */
+const UPDATED = Object.freeze({ C: 0, A: 0, E: 0, U: 1, K: 1, L: 1 });
+/** A stale edit (409 write_conflict): only its own sealed completion — no customer change, no audit. */
+const CONFLICTED = Object.freeze({ C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 });
 const by = (id) => `[data-testid="${id}"]`;
 const q = (id) => `document.querySelector(${JSON.stringify(by(id))})`;
 const has = (page, id) => page.evaluate(`!!${q(id)}`);
@@ -1858,6 +1876,7 @@ async function waitRows(page, expected, label) {
 const isCreate = (r) => r.method === 'POST' && r.path === CUSTOMERS;
 const isList = (r) => r.method === 'GET' && r.path === CUSTOMERS;
 const isDetail = (r) => r.method === 'GET' && r.path.startsWith(`${CUSTOMERS}/`);
+const isEdit = (r) => r.method === 'PATCH' && r.path.startsWith(`${CUSTOMERS}/`);
 /** The path the detail view reads for `id` (M7A-CUSTOMERS-P6: the customer's profile). */
 const profilePath = (id) => `${CUSTOMERS}/${id}/profile`;
 /** The API requests a page (or tab) made that `match`, from record index `from`. */
@@ -1887,6 +1906,14 @@ async function openBySidebar(page) {
   await page.waitFor(`location.pathname === '${DIRECTORY}' && !!${q('customer-directory')}`, 30_000, 'the Customer directory page');
   return true;
 }
+/** Replace a field's text as a user does: select it all and type over it (an empty `text` deletes it). */
+async function retype(page, id, text) {
+  await page.click(by(id));
+  await page.evaluate(`${q(id)}.select()`);
+  if (text === '') await page.evaluate(`document.execCommand('delete')`);
+  else await page.type(text);
+  await page.waitFor(`${q(id)}?.value === ${JSON.stringify(text)}`, 10_000, `${id} reads what was typed`);
+}
 /** Type a name and press "Add customer"; answers the API record count at the click. */
 async function addCustomer(page, name) {
   await page.fill(by('directory-name'), name);
@@ -1911,7 +1938,8 @@ async function seedCustomers(tenant, names) {
 
 /**
  * Customers requests select nothing: the query is empty or one cursor, a POST body is { name } with at most a phone and an
- * email after it (in that order), a GET has no body,
+ * email after it (in that order), a PATCH body is { expectedVersion, name } with at most a phone and an email after it, a
+ * GET has no body,
  * no header is named for a tenant, store, role or actor, and none of `values` (tenant ids, the accounts' ids) rides
  * anywhere in the path, query, headers or body.
  */
@@ -1925,6 +1953,12 @@ function assertNoSelector(records, values) {
       const keys = Object.keys(JSON.parse(r.body));
       assert.deepEqual(keys, ['name', 'phone', 'email'].filter((k) => keys.includes(k)), `the body is { name, phone?, email? }: ${line}`);
       assert.equal(keys[0], 'name', `the body names the customer: ${line}`);
+    }
+    else if (r.method === 'PATCH') {
+      const keys = Object.keys(JSON.parse(r.body));
+      assert.deepEqual(keys, ['expectedVersion', 'name', 'phone', 'email'].filter((k) => keys.includes(k)), `the body is { expectedVersion, name, phone?, email? }: ${line}`);
+      assert.deepEqual(keys.slice(0, 2), ['expectedVersion', 'name'], `the body names the version and the customer: ${line}`);
+      assert.equal(r.headers['if-match'], undefined, `no validator rides an edit: ${line}`);
     }
     else assert.equal(r.body, '', `a read carries no body: ${line}`);
     const wire = `${r.path}${r.query}\n${Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}\n${r.body}`;
@@ -2635,4 +2669,176 @@ scenario('SCB-10', 'CONTACT RECORD (M7A-CUSTOMERS-P6) — an owner adds a custom
   assert.deepEqual([old.phone, old.email, old.created, old.time], ['Not provided', 'Not provided', 'Not recorded', false], 'a customer from before contacts invents nothing');
   assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
   await assertNoLeak(page);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P7 — editing a customer from the detail
+// ---------------------------------------------------------------------------------------------------------------------
+
+const textIs = (page, id, text, label) => page.waitFor(`${q(id)}?.textContent.trim() === ${JSON.stringify(text)}`, 30_000, label);
+/** The stored row as the database owner reads it: values, version and creation time (toISOString's form). */
+async function storedCustomer(id) {
+  const [row] = await owner`select customer_id as id, tenant_id as tenant, name, phone, email, row_version::text as version,
+    to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as created
+    from tmpos_customer.customer where customer_id = ${id}`;
+  return row;
+}
+/** What the detail shows of a customer. */
+async function shownCustomer(page) {
+  return {
+    id: await textOf(page, 'directory-detail-id'),
+    name: await textOf(page, 'directory-detail-name'),
+    phone: await textOf(page, 'directory-detail-phone'),
+    email: await textOf(page, 'directory-detail-email'),
+    created: await page.evaluate(`${q('directory-detail-created')}?.querySelector('time')?.getAttribute('datetime') ?? null`),
+  };
+}
+/** Open the edit form on the customer the detail shows. */
+async function openEditForm(page) {
+  await page.waitFor(() => offered(page, 'directory-edit'), 30_000, 'Edit is offered');
+  await page.click(by('directory-edit'));
+  await page.waitFor(`!!${q('directory-edit-name')}`, 15_000, 'the edit form');
+}
+
+scenario('SCB-11', 'PERSISTENT EDIT (M7A-CUSTOMERS-P7) — an owner edits a customer\'s name and phone and clears its email: ONE PATCH of exactly { expectedVersion, name, phone, email: null } under a fresh key; one change, one update audit naming the customer, one completion; "Saved", the profile read again; after a reload and in a second browser through the second entry: the same id, the same creation time, the edited values', async () => {
+  const { tenant, boss } = await shop('c11');
+  const name = `M7SCB c11 ${SUFFIX}`;
+  const renamed = `M7SCB c11 renamed ${SUFFIX}`;
+  const phone = '+1 555 0100';
+  const newPhone = '+1 555 0199';
+  const email = 'ada@example.test';
+  const page = await directoryPage(boss);
+  await page.fill(by('directory-phone'), phone);
+  await page.fill(by('directory-email'), email);
+  await addCustomer(page, name);
+  await page.waitFor(`!!${q('directory-saved-link')}`, 30_000, 'the saved notice');
+  const [{ id }] = await named(tenant, name);
+  const initial = await storedCustomer(id);
+  const opened = st.api.length;
+  await page.click(by('directory-saved-link'));
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  await quiet(page, opened);
+  const firstRead = sentBy(page, isDetail, opened).filter((r) => r.path === profilePath(id)).at(-1);
+  await openEditForm(page);
+  await retype(page, 'directory-edit-name', ` ${renamed} `);
+  await retype(page, 'directory-edit-phone', newPhone);
+  await retype(page, 'directory-edit-email', '');
+  const before = await counts();
+  const at = st.api.length;
+  await page.click(by('directory-edit-save'));
+  await textIs(page, 'directory-edit-status', 'Saved', 'the edit is confirmed');
+  await textIs(page, 'directory-detail-name', renamed, 'the profile, read again');
+  await quiet(page, at);
+  const edits = sentBy(page, isEdit, at);
+  const reread = sentBy(page, isDetail, at).map((r) => `${r.path} -> ${answered(r)} ${r.replied?.headers?.etag ?? 'no etag'}`);
+  const made = await deltaSince(before);
+  const stored = await storedCustomer(id);
+  const [audit] = await owner`select count(*)::int as n, count(*) filter (where subject_customer_id = ${id} and tenant_id = ${tenant})::int as named
+    from public.audit_event where action_id = ${UPDATE_ACTION} and subject_customer_id = ${id}`;
+  const afterSave = await shownCustomer(page);
+
+  await page.goto(`${SHOP}${DIRECTORY}/${id}`, 30_000); // a reload: a new page, nothing kept but the sign-in
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  const afterReload = await shownCustomer(page);
+  const two = viaSecond(await openPage()); // another browser, through the second entry
+  await signIn(two, boss);
+  await openDirectory(two, `${DIRECTORY}/${id}`);
+  await waitData(two, 'directory-detail', 'phase', 'ready');
+  const elsewhere = await shownCustomer(two);
+  const secondReads = sentBy(two, isDetail).map((r) => `${r.via === 2 ? 'entry2' : 'entry1'} ${r.path} -> ${answered(r)}`);
+  // The evidence names no contact value: whether each one matched, only.
+  record('SCB-11', {
+    patches: edits.map((r) => r.status), versionHeader: firstRead?.replied?.headers?.etag ?? null, reread, made,
+    stored: { nameMatches: stored.name === renamed, phoneMatches: stored.phone === newPhone, emailCleared: stored.email === null, version: stored.version, createdKept: stored.created === initial.created },
+    audit, secondReads,
+  });
+
+  assert.equal(firstRead?.replied?.headers?.etag, '"1"', 'the profile carried version 1 as a strong ETag');
+  assert.deepEqual(edits.map((r) => r.status), [200], 'exactly one PATCH, answered 200');
+  const [patch] = edits;
+  assert.equal(patch.path, `${CUSTOMERS}/${id}`);
+  assert.equal(patch.body, JSON.stringify({ expectedVersion: 1, name: renamed, phone: newPhone, email: null }), 'the exact body: trimmed, the email cleared');
+  assert.match(patch.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.deepEqual(JSON.parse(patch.replied.text), { customer: { id, name: renamed }, version: 2, changed: true }, 'the 200 names no contact');
+  assert.deepEqual(made, { ...made, ...UPDATED }, `one change, one update audit, one completion ${JSON.stringify(made)}`);
+  assert.deepEqual(audit, { n: 1, named: 1 }, 'the update audit names this customer in this tenant');
+  assert.deepEqual([stored.name, stored.phone, stored.email, stored.version, stored.created, stored.tenant], [renamed, newPhone, null, '2', initial.created, tenant], 'stored: the edit, version 2, the same creation time and tenant');
+  assert.ok(reread.length >= 1 && reread.every((line) => line === `${profilePath(id)} -> 200 "2"`), `the profile was read again at version 2: ${reread.join('; ')}`);
+  const expected = { id, name: renamed, phone: newPhone, email: 'Not provided', created: initial.created };
+  assert.deepEqual(afterSave, expected, 'after the save');
+  assert.deepEqual(afterReload, expected, 'after a reload');
+  assert.deepEqual(elsewhere, expected, 'in a second browser through the second entry');
+  assert.ok(secondReads.length >= 1 && secondReads.every((line) => line.startsWith('entry2 ')), `the second browser read through the second entry: ${secondReads.join('; ')}`);
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
+  await assertNoLeak(page);
+  await assertNoLeak(two);
+});
+
+scenario('SCB-12', 'STALE EDITOR (M7A-CUSTOMERS-P7) — two browsers open one customer at version 1; the first saves; the second\'s save is a 409 write_conflict that writes nothing but its completion, keeps its draft and sends nothing more on its own; "Review latest" only reads; its deliberate save expects version 2 under a NEW key and lands', async () => {
+  const { tenant, boss } = await shop('c12');
+  const [customer] = await seedCustomers(tenant, [`M7SCB c12 ${SUFFIX}`]);
+  const first = `M7SCB c12 first ${SUFFIX}`;
+  const second = `M7SCB c12 second ${SUFFIX}`;
+  const one = await directoryPage(boss);
+  await go(one, `${DIRECTORY}/${customer.id}`);
+  await waitData(one, 'directory-detail', 'phase', 'ready');
+  const two = viaSecond(await openPage());
+  await signIn(two, boss);
+  await openDirectory(two, `${DIRECTORY}/${customer.id}`);
+  await waitData(two, 'directory-detail', 'phase', 'ready');
+  await openEditForm(one);
+  await openEditForm(two); // both drafts start from version 1
+  await retype(two, 'directory-edit-name', second);
+  await retype(one, 'directory-edit-name', first);
+  const atOne = st.api.length;
+  await one.click(by('directory-edit-save'));
+  await textIs(one, 'directory-edit-status', 'Saved', 'the first editor\'s save');
+  await quiet(one, atOne);
+
+  const before = await counts();
+  const atTwo = st.api.length;
+  await two.click(by('directory-edit-save'));
+  await textIs(two, 'directory-edit-alert', 'Someone else changed this customer. Review the latest details, then save again.', 'the conflict');
+  await quiet(two, atTwo);
+  const conflicted = await deltaSince(before);
+  const afterConflict = await storedCustomer(customer.id);
+  const draftKept = await two.evaluate(`${q('directory-edit-name')}?.value ?? null`);
+  await delay(2_000); // whatever the page would send on its own, it has sent
+  const stale = sentBy(two, isEdit, atTwo);
+
+  const reviewAt = st.api.length;
+  await two.click(by('directory-edit-review'));
+  await textIs(two, 'directory-edit-status', 'The latest details are loaded. Your changes are still in the form: save again to apply them.', 'reviewed');
+  await quiet(two, reviewAt);
+  const review = sentBy(two, (r) => r.path.startsWith(CUSTOMERS), reviewAt).map((r) => `${r.method} ${r.path} -> ${answered(r)}`);
+  const latestShown = await textOf(two, 'directory-detail-name');
+  const mid = await counts();
+  const saveAt = st.api.length;
+  await two.click(by('directory-edit-save'));
+  await textIs(two, 'directory-edit-status', 'Saved', 'the deliberate save after the review');
+  await quiet(two, saveAt);
+  const landed = sentBy(two, isEdit, saveAt);
+  const made = await deltaSince(mid);
+  const final = await storedCustomer(customer.id);
+  record('SCB-12', { stale: stale.map((r) => r.status), conflicted, review, landed: landed.map((r) => r.status), made, versions: [afterConflict.version, final.version] });
+
+  const [winner] = sentBy(one, isEdit, atOne);
+  assert.equal(winner.status, 200, 'the first editor\'s PATCH committed');
+  assert.deepEqual(stale.map((r) => r.status), [409], 'the stale PATCH, once, and nothing more on its own');
+  assert.deepEqual(JSON.parse(stale[0].replied.text).error, 'write_conflict');
+  assert.equal(stale[0].body, JSON.stringify({ expectedVersion: 1, name: second }));
+  assert.deepEqual(conflicted, { ...conflicted, ...CONFLICTED }, `a stale edit writes only its completion ${JSON.stringify(conflicted)}`);
+  assert.deepEqual([afterConflict.name, afterConflict.version], [first, '2'], 'the first editor\'s change stands');
+  assert.equal(draftKept, second, 'the stale draft is kept');
+  assert.deepEqual(review, [`GET ${profilePath(customer.id)} -> 200`], 'Review latest only reads the profile');
+  assert.equal(latestShown, first, 'and shows the latest');
+  assert.deepEqual(landed.map((r) => r.status), [200], 'the deliberate save lands');
+  assert.equal(landed[0].body, JSON.stringify({ expectedVersion: 2, name: second }), 'built from the reviewed version');
+  assert.notEqual(landed[0].headers['idempotency-key'], stale[0].headers['idempotency-key'], 'under a NEW key');
+  assert.notEqual(landed[0].headers['idempotency-key'], winner.headers['idempotency-key']);
+  assert.deepEqual(made, { ...made, ...UPDATED }, `one change, one update audit, one completion ${JSON.stringify(made)}`);
+  assert.deepEqual([final.name, final.version, final.id], [second, '3', customer.id], 'stored at version 3, the same id');
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
+  await assertNoLeak(one);
+  await assertNoLeak(two);
 });

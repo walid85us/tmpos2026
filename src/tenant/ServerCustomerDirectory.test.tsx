@@ -7,8 +7,10 @@
 // bound to tenants; since M7A-CUSTOMERS-P6 an optional phone and email on a create (judged by the server's own contact
 // rules, any other key refused) and the profile read GET /api/v1/customers/{id}/profile (seeded customers are legacy:
 // no contacts, no creation time). Its name rule, contact rules, cursor codec and page order are the server's own
-// modules. Every assertion about a request is made on what the fake recorded — the wire — never on what the page
-// believes it sent.
+// modules. Since M7A-CUSTOMERS-P7 every customer has a row version (1 when stored), the profile 200 carries it as a
+// strong ETag, and PATCH /api/v1/customers/{id} edits one customer as the server does: the key bound to the target and the
+// exact bytes, a stale version a sealed 409 write_conflict, a missing or foreign id a 404, a 200 that names no contact.
+// Every assertion about a request is made on what the fake recorded — the wire — never on what the page believes it sent.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -19,22 +21,43 @@ import userEvent from '@testing-library/user-event';
 import { Navigate, RouterProvider, createMemoryRouter } from 'react-router-dom';
 
 const access = vi.hoisted(() => {
-  let value: { uid: string | null; canCreate: boolean } = { uid: 'uid-a', canCreate: true };
+  let value: { uid: string | null; canCreate: boolean; canEdit: boolean } = { uid: 'uid-a', canCreate: true, canEdit: false };
   const listeners = new Set<() => void>();
   return {
     get: () => value,
-    set(next: Partial<{ uid: string | null; canCreate: boolean }>) { value = { ...value, ...next }; for (const l of [...listeners]) l(); },
+    set(next: Partial<{ uid: string | null; canCreate: boolean; canEdit: boolean }>) { value = { ...value, ...next }; for (const l of [...listeners]) l(); },
     subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; },
   };
 });
 vi.mock('../firebase', () => ({ auth: { currentUser: null } }));
-// The routed page reads the signed-in user and the local create hint from the access context: a switchable stand-in.
+// The app's sign-in source, as the shop's own edit hold store listens to it: a switchable stand-in (SCD-139).
+const firebaseAuth = vi.hoisted(() => {
+  const listeners = new Set<(user: { uid: string } | null) => void>();
+  return {
+    subscriptions: 0,
+    listeners,
+    emit(uid: string | null) { for (const l of [...listeners]) l(uid === null ? null : { uid }); },
+  };
+});
+vi.mock('firebase/auth', async (original) => ({
+  ...(await original<typeof import('firebase/auth')>()),
+  onAuthStateChanged: (_auth: unknown, listener: (user: { uid: string } | null) => void) => {
+    firebaseAuth.subscriptions += 1;
+    firebaseAuth.listeners.add(listener);
+    return () => { firebaseAuth.listeners.delete(listener); };
+  },
+}));
+// The routed page reads the signed-in user and the local create and edit hints from the access context: a switchable stand-in.
 vi.mock('../context/AccessContext', async () => {
   const { useSyncExternalStore } = await import('react');
   return {
     useAccess: () => {
       const v = useSyncExternalStore(access.subscribe, access.get);
-      return { session: v.uid === null ? null : { user: { id: v.uid } }, hasPermission: (perm: string) => perm === 'customers' && v.canCreate };
+      return {
+        session: v.uid === null ? null : { user: { id: v.uid } },
+        hasPermission: (perm: string) => perm === 'customers' && v.canCreate,
+        checkPermission: (domain: string, level: string) => domain === 'customers' && (level === 'edit' ? v.canEdit : level === 'create' && v.canCreate),
+      };
     },
   };
 });
@@ -42,10 +65,11 @@ vi.mock('../context/AccessContext', async () => {
 import {
   CHECK_CUTOFF_MS, CONNECTION_CHANGED_TEXT, CustomerDirectoryPage, EMAIL_RULE_TEXT, EMPTY_TEXT, LAST_KNOWN_TEXT, NAME_RULE_TEXT,
   NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, savedEarlierText, STOP_WARNING_TEXT, createHoldStore,
-  unresolvedText, type HoldStore,
+  unresolvedText, type HoldStore, createEditHoldStore, type EditHoldStore, type EditOutcome, EDIT_CONFLICT_TEXT, EDIT_DENIED_TEXT, EDIT_NO_CHANGES_TEXT,
+  EDIT_REVIEWED_TEXT, EDIT_SAVED_TEXT, EDIT_SAVED_UNREFRESHED_TEXT, EDIT_UNKNOWN_TEXT, bindEditHoldsToAuth, editNamedText,
 } from './ServerCustomerDirectory';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
-import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
+import { CUSTOMERS_PATH, createCustomersClient, type CustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
   CONTACT_REFUSED, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, normalizeCustomerEmail as serverNormalizeCustomerEmail,
@@ -71,9 +95,11 @@ const key = (n: number): string => `${String(n).repeat(8)}-${String(n).repeat(4)
 type PostPlan =
   | 'ok' | 'lost-after-commit' | 'lost-before' | 'commit-then-503' | 'commit-then-409' | 'rollback-503'
   | 'commit-other-name' | 'commit-bad-body' | 'commit-200' | number;
-type ReadPlan = number | 'html' | 'lost' | { readonly limited: string }; // `limited`: a 429 with its own Retry-After
+type ReadPlan = number | 'html' | 'lost' | 'no-etag' | 'weak-etag' | { readonly limited: string }; // `limited`: a 429 with its own Retry-After
+// How the fake answers the next PATCH: as PostPlan's words, applied to an edit.
+type PatchPlan = 'ok' | 'lost-after-commit' | 'lost-before' | 'commit-then-503' | 'rollback-503' | number;
 interface Sent { readonly method: string; readonly url: string; readonly headers: Headers; readonly body: string | undefined; readonly signal: AbortSignal | null }
-interface User { uid: string; tenant: string; view: boolean; create: boolean }
+interface User { uid: string; tenant: string; view: boolean; create: boolean; edit: boolean }
 interface Row { id: string; name: string }
 interface Contact { phone: string | null; email: string | null; createdAt: string | null }
 const LEGACY: Contact = Object.freeze({ phone: null, email: null, createdAt: null }); // a customer from before P6
@@ -82,13 +108,15 @@ type Late = Response | 'drop' | undefined;
 /** One fake tenant server. `cookie` is the session the browser currently presents; a login replaces it. */
 function fakeServer() {
   const users: Record<string, User> = {
-    'tok-a': { uid: 'uid-a', tenant: TENANT_A, view: true, create: true },
-    'tok-b': { uid: 'uid-b', tenant: TENANT_B, view: true, create: true },
+    'tok-a': { uid: 'uid-a', tenant: TENANT_A, view: true, create: true, edit: true },
+    'tok-b': { uid: 'uid-b', tenant: TENANT_B, view: true, create: true, edit: true },
   };
   const sessions = new Map<string, { user: User; tenant: string; csrf: string }>();
   const rows: Record<string, Row[]> = { [TENANT_A]: [], [TENANT_B]: [] };
   const records = new Map<string, { fingerprint: string; leased: boolean; sealed: Row | null }>();
   const contacts = new Map<string, Contact>(); // by customer id; a row with none is LEGACY
+  const versions = new Map<string, number>(); // by customer id; a row with none is at version 1
+  const edits = new Map<string, { fingerprint: string; leased: boolean; sealed: { status: number; body: unknown } | null }>();
   let sessionCount = 0;
   let createdCount = 0;
   let idCount = 0xa00; // ids carry a hex letter, so an uppercase spelling is a different string
@@ -113,15 +141,17 @@ function fakeServer() {
     users,
     rows,
     contacts,
+    versions,
     sessions,
     cookie: null as string | null,
     pageSize: 50,
     retryAfter: '1' as string | null, // the Retry-After every 429 carries
     posts: [] as PostPlan[],
+    patches: [] as PatchPlan[],
     reads: [] as ReadPlan[], // the next customer reads (list or detail)
     logins: [] as number[], // the next logins
     checks: [] as number[], // the next session reads
-    hold: { reads: 0, posts: 0, checks: 0 }, // answers to hold (checks: session reads): computed on arrival, released by the test
+    hold: { reads: 0, posts: 0, checks: 0, patches: 0 }, // answers to hold (checks: session reads): computed on arrival, released by the test
     held: [] as Array<{ url: string; release: (late?: Late) => void }>,
     down: false, // every request fails with no answer
     swapOnRead: null as string | null,
@@ -140,7 +170,12 @@ function fakeServer() {
       for (const [id, s] of sessions) if (s.user === users[token]) sessions.delete(id);
     },
     /** Every unfinished attempt's lease has run out: the same key is reclaimed and planned again. */
-    expireLeases(): void { for (const r of records.values()) if (r.sealed === null) r.leased = false; },
+    expireLeases(): void { for (const r of [...records.values(), ...edits.values()]) if (r.sealed === null) r.leased = false; },
+    /** Another editor's committed change: the customer's name moves on, and so does its version. */
+    editElsewhere(id: string, name: string): void {
+      for (const list of Object.values(rows)) for (const r of list) if (r.id === id) r.name = name;
+      versions.set(id, (versions.get(id) ?? 1) + 1);
+    },
     fetch: (async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
       const method = init.method ?? 'GET';
       const url = String(input);
@@ -156,7 +191,7 @@ function fakeServer() {
         server.otherTab(token);
       }
       const limited = (): Response => refuse(429, WORDS[429], server.retryAfter === null ? {} : { 'retry-after': server.retryAfter });
-      const held = async (kind: 'reads' | 'posts' | 'checks', answer: Response | 'lost'): Promise<Response> => {
+      const held = async (kind: 'reads' | 'posts' | 'checks' | 'patches', answer: Response | 'lost'): Promise<Response> => {
         if (server.hold[kind] > 0) {
           server.hold[kind] -= 1;
           const late = await new Promise<Late>((release) => { server.held.push({ url, release }); });
@@ -202,7 +237,7 @@ function fakeServer() {
           if (!session.user.view) return refuse(403, WORDS[403]);
           if (plan === 'lost') return 'lost';
           if (plan === 'html') return new Response('<!doctype html><title>Shop</title>', { status: 200, headers: { 'content-type': 'text/html' } });
-          if (plan !== undefined) return refuse(plan, WORDS[plan] ?? 'refused');
+          if (plan !== undefined && typeof plan === 'number') return refuse(plan, WORDS[plan] ?? 'refused');
           if (path !== CUSTOMERS_PATH) {
             if (url.includes('?')) return refuse(400, WORDS[400]);
             const rest = path.slice(CUSTOMERS_PATH.length + 1);
@@ -214,7 +249,10 @@ function fakeServer() {
             if (found === undefined) return refuse(404, WORDS[404]);
             if (!profile) return reply(200, { customer: { id: found.id, name: found.name } });
             const c = contacts.get(found.id) ?? LEGACY;
-            return reply(200, { customer: { id: found.id, name: found.name, phone: c.phone, email: c.email, createdAt: c.createdAt } });
+            const version = versions.get(found.id) ?? 1;
+            // The version is the values' own, as one ETag (M7A-CUSTOMERS-P7); `no-etag` / `weak-etag` answer without a usable one.
+            const etag: Record<string, string> = plan === 'no-etag' ? {} : { etag: plan === 'weak-etag' ? `W/"${version}"` : `"${version}"` };
+            return reply(200, { customer: { id: found.id, name: found.name, phone: c.phone, email: c.email, createdAt: c.createdAt } }, etag);
           }
           const all = ordered(session.tenant);
           let start = 0;
@@ -281,6 +319,67 @@ function fakeServer() {
         };
         return held('posts', decide());
       }
+
+      if (method === 'PATCH' && path.startsWith(`${CUSTOMERS_PATH}/`)) {
+        const decide = (): Response | 'lost' => {
+          const plan = server.patches.shift() ?? 'ok';
+          if (plan === 'lost-before') return 'lost';
+          if (plan === 429) return limited();
+          if (!/^application\/json(?:[ \t]*;[ \t]*charset=utf-8)?$/i.test(headers.get('content-type') ?? '')) return refuse(415, WORDS[415]);
+          if (headers.get('x-tmpos-csrf') !== '1') return refuse(403, WORDS[403]);
+          if (session === undefined) return refuse(401, WORDS[401]);
+          if (headers.get('x-tmpos-session-csrf') !== session.csrf) return refuse(403, WORDS[403]);
+          if (!session.user.edit) return refuse(403, WORDS[403]);
+          const id = path.slice(CUSTOMERS_PATH.length + 1);
+          if (!CANONICAL_ID_RE.test(id) || url.includes('?')) return refuse(400, WORDS[400]);
+          let parsed: unknown;
+          try { parsed = JSON.parse(body ?? ''); } catch { return refuse(400, WORDS[400]); }
+          const idempotencyKey = headers.get('idempotency-key') ?? '';
+          if (!KEY_RE.test(idempotencyKey)) return refuse(400, WORDS[400]);
+          if (typeof plan === 'number') return refuse(plan, WORDS[plan] ?? 'refused');
+          // The fingerprint binds the target too: the same key and bytes for another customer is another request.
+          const scope = `${idempotencyKey.toLowerCase()}|${session.user.uid}`;
+          const fingerprint = `PATCH|${session.tenant}|${session.user.uid}|${id}|${body}`;
+          const record = edits.get(scope);
+          if (record !== undefined && record.fingerprint !== fingerprint) return refuse(422, WORDS[422]);
+          if (record !== undefined && record.sealed !== null) return reply(record.sealed.status, record.sealed.body, { 'idempotent-replayed': 'true' });
+          if (record !== undefined && record.leased) return refuse(409, WORDS[409]);
+          const mine = { fingerprint, leased: true, sealed: null as { status: number; body: unknown } | null };
+          edits.set(scope, mine);
+          const fields = (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
+          const keys = Object.keys(fields);
+          if (!keys.includes('expectedVersion') || !keys.includes('name') || !keys.every((k) => ['expectedVersion', 'name', 'phone', 'email'].includes(k))) return refuse(400, WORDS[400]);
+          const expected = fields.expectedVersion;
+          if (typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 1 || expected >= Number.MAX_SAFE_INTEGER) return refuse(400, WORDS[400]);
+          const name = serverNormalizeCustomerName(fields.name);
+          const contact = (k: 'phone' | 'email', normalize: (raw: unknown) => unknown): { set: boolean; value: unknown } =>
+            !keys.includes(k) ? { set: false, value: null } : { set: true, value: fields[k] === null ? null : normalize(fields[k]) };
+          const phone = contact('phone', serverNormalizeCustomerPhone);
+          const email = contact('email', serverNormalizeCustomerEmail);
+          if (name === null || phone.value === CONTACT_REFUSED || email.value === CONTACT_REFUSED) return refuse(400, WORDS[400]);
+          if (plan === 'rollback-503') return refuse(503, WORDS[503]);
+          const found = rows[session.tenant].find((r) => r.id === id);
+          if (found === undefined) return refuse(404, WORDS[404]); // missing or another tenant's: rolled back, unsealed
+          const version = versions.get(id) ?? 1;
+          if (version !== expected) {
+            mine.sealed = { status: 409, body: { error: 'write_conflict', requestId: 'req-synthetic' } };
+            return reply(409, mine.sealed.body);
+          }
+          const was = contacts.get(id) ?? LEGACY;
+          const next = { phone: phone.set ? phone.value as string | null : was.phone, email: email.set ? email.value as string | null : was.email, createdAt: was.createdAt };
+          const changed = name !== found.name || next.phone !== was.phone || next.email !== was.email;
+          if (changed) {
+            found.name = name;
+            contacts.set(id, next);
+            versions.set(id, version + 1);
+          }
+          mine.sealed = { status: 200, body: { customer: { id, name }, version: changed ? version + 1 : version, changed } };
+          if (plan === 'lost-after-commit') return 'lost';
+          if (plan === 'commit-then-503') return refuse(503, WORDS[503]);
+          return reply(200, mine.sealed.body);
+        };
+        return held('patches', decide());
+      }
       return refuse(404, WORDS[404]);
     }) as typeof globalThis.fetch,
   };
@@ -292,6 +391,9 @@ interface MountOptions {
   readonly path?: string;
   readonly keys?: string[];
   readonly holds?: HoldStore;
+  readonly editHolds?: EditHoldStore;
+  readonly wrapCustomers?: (client: CustomersClient) => CustomersClient;
+  readonly defaultEditHolds?: boolean; // mount WITHOUT an injected edit hold store: the shop's own, bound to sign-in
   readonly defaultHolds?: boolean; // mount WITHOUT an injected hold store: the page's own module-level one
   readonly now?: () => number;
   readonly tokens?: Record<string, string>;
@@ -307,12 +409,14 @@ function mount(server: Server, options: MountOptions = {}) {
     return next;
   };
   const holds = options.holds ?? createHoldStore();
+  const editHolds = options.editHolds ?? createEditHoldStore();
   const page = (
     <CustomerDirectoryPage
       session={createTenantSessionClient({ fetch: server.fetch })}
-      customers={createCustomersClient({ fetch: server.fetch })}
+      customers={(options.wrapCustomers ?? ((c: CustomersClient) => c))(createCustomersClient({ fetch: server.fetch }))}
       identity={{ idToken: async (uid) => tokens[uid] ?? null }}
       holds={options.defaultHolds === true ? undefined : holds}
+      editHolds={options.defaultEditHolds === true ? undefined : editHolds}
       newKey={newKey}
       now={options.now}
     />
@@ -325,7 +429,7 @@ function mount(server: Server, options: MountOptions = {}) {
   ], { initialEntries: [options.path ?? '/customers/directory'] });
   const view = render(<RouterProvider router={router} />);
   const go = (to: string) => act(async () => { await router.navigate(to); });
-  return { ...view, router, holds, made, go };
+  return { ...view, router, holds, editHolds, made, go };
 }
 
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
@@ -374,6 +478,11 @@ function expectNoSelector(server: Server): void {
         expect(r.headers.get('x-tmpos-session-csrf')).toMatch(/^[A-Za-z0-9_-]{43}$/);
         expect(r.body).toBeUndefined();
         expect(r.url).not.toMatch(/limit=/);
+      } else if (r.method === 'PATCH') {
+        // `{ expectedVersion, name }`, with a phone and an email when they changed: in that order, nothing else.
+        const keys = Object.keys(JSON.parse(r.body ?? 'null') as object);
+        expect(keys).toEqual(['expectedVersion', 'name', 'phone', 'email'].filter((k) => keys.includes(k)));
+        expect(keys.slice(0, 2)).toEqual(['expectedVersion', 'name']);
       } else {
         // `{ name }`, with a phone and an email when given: in that order, nothing else.
         const keys = Object.keys(JSON.parse(r.body ?? 'null') as object);
@@ -387,7 +496,7 @@ function expectNoSelector(server: Server): void {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  access.set({ uid: 'uid-a', canCreate: true });
+  access.set({ uid: 'uid-a', canCreate: true, canEdit: false });
 });
 
 describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
@@ -2023,7 +2132,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
   it('SCD-53. the page\'s own store is the module-level one: an unresolved attempt survives leaving and coming back with no injected store (T6)', async () => {
     access.set({ uid: 'uid-default-store' });
     const server = fakeServer();
-    server.users['tok-c'] = { uid: 'uid-default-store', tenant: TENANT_A, view: true, create: true };
+    server.users['tok-c'] = { uid: 'uid-default-store', tenant: TENANT_A, view: true, create: true, edit: true };
     server.posts.push('lost-after-commit');
     const view = mount(server, { defaultHolds: true, tokens: { 'uid-default-store': 'tok-c' }, keys: [key(1)] });
     await ready();
@@ -3239,5 +3348,1528 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       holds.change('uid-a', key(1), { csrf: null });
       expect(holds.get('uid-a')).toMatchObject({ body: '{"name":"Ada"}', csrf: null });
     }
+  });
+
+  // M7A-CUSTOMERS-P7 — editing a server-backed customer (PATCH /api/v1/customers/{id}).
+  const patches = (s: Server) => s.sent.filter((r) => r.method === 'PATCH');
+  /** Both edit live regions: the polite status and the assertive alert (their text together). */
+  const editStatus = () => screen.getByTestId('directory-edit-notices');
+  const editPolite = () => screen.getByTestId('directory-edit-status');
+  const editAlert = () => screen.getByTestId('directory-edit-alert');
+  const editInput = (field: 'name' | 'phone' | 'email') => screen.getByTestId(`directory-edit-${field}`) as HTMLInputElement;
+  const fillEdit = (fields: { name?: string; phone?: string; email?: string }) => {
+    for (const field of ['name', 'phone', 'email'] as const) {
+      const value = fields[field];
+      if (value !== undefined) fireEvent.change(editInput(field), { target: { value } });
+    }
+  };
+  const detailPhase = () => screen.getByTestId('directory-detail').getAttribute('data-phase');
+  const CREATED = '2026-09-30T09:05:00.000Z';
+  /** A customer with contacts in tenant A, the page mounted with the edit hint, the list loaded, the customer opened. */
+  async function editable(server: Server, options: MountOptions = {}) {
+    access.set({ canEdit: true });
+    const [ada, bea] = server.seed(TENANT_A, ['Ada Lovelace', 'Bea']);
+    server.contacts.set(ada.id, { phone: PHONE, email: EMAIL, createdAt: CREATED });
+    const view = mount(server, options);
+    await ready();
+    await openDetail(view, ada.id);
+    return { view, ada, bea };
+  }
+  const openForm = async () => {
+    await screen.findByTestId('directory-edit'); // after a save, Edit returns only once the profile is read again
+    await click('directory-edit');
+    await waitFor(() => expect(editInput('name')).toHaveFocus());
+  };
+  const editBody = (version: number, fields: Record<string, string | null>) => JSON.stringify({ expectedVersion: version, ...fields });
+  const LATE_CONFLICT_TEXT = 'Your changes were not saved: someone else changed this customer first. The latest details are shown: edit again to change them.';
+
+  it('SCD-93. "Edit" is offered only on a profile confirmed now with its version, and only with the edit hint: never without the hint, never on last-known values, never without a usable ETag', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Lovelace']);
+    const view = mount(server);
+    await ready();
+    await openDetail(view, ada.id);
+    expect(screen.queryByTestId('directory-edit')).toBeNull(); // no edit hint
+    act(() => access.set({ canEdit: true }));
+    expect(screen.getByTestId('directory-edit')).toBeInTheDocument();
+    // The values and the version come from one answer: without a usable ETag the profile is not a result at all.
+    for (const plan of ['no-etag', 'weak-etag'] as const) {
+      await view.go('/customers/directory');
+      server.reads.push(plan);
+      await view.go(`/customers/directory/${ada.id}`);
+      await waitFor(() => expect(detailPhase()).toBe('unavailable'));
+      expect(screen.queryByTestId('directory-edit')).toBeNull();
+      await click('directory-detail-retry');
+      await waitFor(() => expect(detailPhase()).toBe('ready'));
+      expect(screen.getByTestId('directory-edit')).toBeInTheDocument();
+    }
+    // Last known (the server cannot be asked now): shown, but never editable.
+    await view.go('/customers/directory');
+    server.reads.push(503);
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-last-known')).toBeInTheDocument());
+    expect(screen.getByTestId('directory-detail-name')).toHaveTextContent('Ada Lovelace');
+    expect(screen.queryByTestId('directory-edit')).toBeNull();
+    // On the list there is no edit at all.
+    await view.go('/customers/directory');
+    await ready();
+    expect(screen.queryByTestId('directory-edit')).toBeNull();
+    expect(patches(server)).toHaveLength(0);
+  });
+
+  it('SCD-94. the edit form starts from the profile; Name required, Phone and Email optional; every invalid field says so, the first takes focus, and NOTHING is sent and no key taken; a form equal to the profile sends nothing', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server);
+    await openForm();
+    expect([editInput('name').value, editInput('phone').value, editInput('email').value]).toEqual(['Ada Lovelace', PHONE, EMAIL]);
+    expect(screen.getByLabelText('Customer name (required)', { selector: '#directory-edit-name' })).toBe(editInput('name'));
+    expect(screen.getByLabelText('Phone (optional)', { selector: '#directory-edit-phone' })).toBe(editInput('phone'));
+    expect(screen.getByLabelText('Email (optional)', { selector: '#directory-edit-email' })).toBe(editInput('email'));
+    expect(editInput('name')).toHaveAttribute('aria-required', 'true');
+    fillEdit({ name: '   ', phone: 'no digits', email: 'ada@@example.test' });
+    await click('directory-edit-save');
+    expect(screen.getByTestId('directory-edit-name-error')).toHaveTextContent(NAME_RULE_TEXT);
+    expect(screen.getByTestId('directory-edit-phone-error')).toHaveTextContent(PHONE_RULE_TEXT);
+    expect(screen.getByTestId('directory-edit-email-error')).toHaveTextContent(EMAIL_RULE_TEXT);
+    for (const field of ['name', 'phone', 'email'] as const) {
+      expect(editInput(field)).toHaveAttribute('aria-invalid', 'true');
+      expect(editInput(field)).toHaveAttribute('aria-describedby', `directory-edit-${field}-error`);
+    }
+    expect(editInput('name')).toHaveFocus();
+    fillEdit({ name: 'Ada' });
+    await click('directory-edit-save');
+    expect(screen.queryByTestId('directory-edit-name-error')).toBeNull();
+    expect(editInput('phone')).toHaveFocus(); // the first field still refused
+    fillEdit({ phone: '', email: `${'x'.repeat(260)}@b` });
+    await click('directory-edit-save');
+    expect(editInput('email')).toHaveFocus();
+    // Equal to the profile once normalized (padding only): nothing to send.
+    fillEdit({ name: '  Ada Lovelace ', phone: ` ${PHONE} `, email: EMAIL });
+    await click('directory-edit-save');
+    expect(editStatus()).toHaveTextContent(EDIT_NO_CHANGES_TEXT);
+    expect(patches(server)).toHaveLength(0);
+    expect(view.made).toHaveLength(0); // no key was taken
+    expect(screen.getByTestId('directory-edit-name')).toBeInTheDocument(); // the form stays open
+  });
+
+  it('SCD-95. a confirmed edit: ONE PATCH of the exact body under a new key and this session\'s token; "Saved"; the profile read again at the new version; the list row renamed; id and creation time unchanged; the next edit expects the new version under another key', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    const before = details(server).length;
+    await openForm();
+    fillEdit({ name: ' Ada King ', phone: '+1 555 0199', email: '' }); // the email cleared
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`));
+    expect(patches(server)).toHaveLength(1);
+    const sent = patches(server)[0];
+    expect(sent.url).toBe(`${CUSTOMERS_PATH}/${ada.id}`);
+    expect(sent.body).toBe(editBody(1, { name: 'Ada King', phone: '+1 555 0199', email: null }));
+    expect(sent.headers.get('idempotency-key')).toBe(key(1));
+    expect(sent.headers.get('x-tmpos-csrf')).toBe('1');
+    expect(sent.headers.get('x-tmpos-session-csrf')).toBe(server.csrfOfCookie());
+    expect(sent.headers.get('content-type')).toBe('application/json');
+    expect(sent.headers.has('if-match')).toBe(false);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada King$/));
+    expect(details(server).length).toBe(before + 1); // the profile, read again after the 200
+    expect(screen.getByTestId('directory-detail-phone')).toHaveTextContent(/^\+1 555 0199$/);
+    expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(new RegExp(`^${NOT_PROVIDED_TEXT}$`));
+    expect(screen.getByTestId('directory-detail-id')).toHaveTextContent(ada.id);
+    expect(screen.getByTestId('directory-detail-created').querySelector('time')).toHaveAttribute('datetime', CREATED);
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull(); // the form closed
+    expect(server.versions.get(ada.id)).toBe(2);
+    // A second, deliberate edit: the version just read, and another key.
+    await openForm();
+    expect([editInput('name').value, editInput('phone').value, editInput('email').value]).toEqual(['Ada King', '+1 555 0199', '']);
+    fillEdit({ email: EMAIL });
+    await click('directory-edit-save');
+    await waitFor(() => expect(patches(server)).toHaveLength(2));
+    expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada King', email: EMAIL }));
+    expect(patches(server)[1].headers.get('idempotency-key')).toBe(key(2));
+    await waitFor(() => expect(screen.getByTestId('directory-detail-email')).toHaveTextContent(EMAIL));
+    // The list row shows the confirmed name (the list was not read again for it).
+    const listReads = lists(server).length;
+    await view.go('/customers/directory');
+    expect(names()).toEqual(['Ada King', 'Bea']);
+    expect(lists(server).length).toBe(listReads);
+    expectNoSelector(server);
+  });
+
+  it('SCD-96. a confirmed edit stays confirmed when the profile cannot be read again: "Saved, but…", and the values from before the edit are never shown', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server);
+    for (const [plan, name] of [[503, 'Ada King'], ['lost', 'Ada Byron'], ['no-etag', 'Ada Lovelace']] as const) {
+      await openForm();
+      fillEdit({ name });
+      server.reads.push(plan); // the profile read after the 200
+      await click('directory-edit-save');
+      await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_SAVED_UNREFRESHED_TEXT));
+      expect(detailPhase()).toBe('unavailable');
+      expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+      expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+      expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
+      expect(screen.queryByTestId('directory-edit')).toBeNull();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(page()).not.toMatch(/not saved|couldn't confirm/i);
+      expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe(name);
+      await click('directory-detail-retry');
+      await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(new RegExp(`^${name}$`)));
+    }
+    expect(patches(server)).toHaveLength(3);
+    // The refresh refused 403 (one session check, the same token): still "Saved, but…", nothing of before shown.
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.reads.push(403);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_SAVED_UNREFRESHED_TEXT));
+    expect(detailPhase()).toBe('denied');
+    expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+    expect(page()).not.toMatch(/not saved|couldn't confirm/i);
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada King');
+    expect(patches(server)).toHaveLength(4);
+  });
+
+  it('SCD-97. a conflict keeps the draft and sends nothing on its own; "Review latest" only reads; the deliberate save then expects the reviewed version under a NEW key', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+    server.editElsewhere(ada.id, 'Ada Byron'); // another editor's change lands first: version 2
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    expect(editAlert()).toHaveTextContent(EDIT_CONFLICT_TEXT);
+    expect([editInput('name').value, editInput('phone').value]).toEqual(['Ada King', '+1 555 0199']); // the draft stays
+    expect(screen.getByTestId('directory-edit-save')).toBeDisabled();
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada Byron'); // nothing of ours applied
+    const reads = details(server).length;
+    await settle();
+    await focusWindow();
+    await settle();
+    expect(patches(server)).toHaveLength(1); // never re-sent or merged on its own
+    await click('directory-edit-review');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_REVIEWED_TEXT));
+    expect(details(server).length).toBe(reads + 1);
+    expect(patches(server)).toHaveLength(1);
+    expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Byron$/); // the latest, shown
+    expect([editInput('name').value, editInput('phone').value]).toEqual(['Ada King', '+1 555 0199']);
+    expect(screen.getByTestId('directory-edit-save')).toBeEnabled();
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)).toHaveLength(2);
+    expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada King', phone: '+1 555 0199' }));
+    expect(patches(server)[1].headers.get('idempotency-key')).toBe(key(2));
+    expect(patches(server)[0].headers.get('idempotency-key')).toBe(key(1));
+    expect(server.versions.get(ada.id)).toBe(3);
+    expect(view.made).toEqual([key(1), key(2)]);
+  });
+
+  it('SCD-98. an undecided edit: "We couldn\'t confirm…", never re-sent on its own; a matching profile is no proof; "Check again" re-sends the SAME bytes under the SAME key to the SAME customer and token', async () => {
+    const server = fakeServer();
+    server.patches.push('lost-after-commit');
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King', email: '' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(screen.getByTestId('directory-edit-hold')).toHaveTextContent(EDIT_UNKNOWN_TEXT);
+    expect(editAlert()).toHaveTextContent(new RegExp(`^${EDIT_UNKNOWN_TEXT}$`));
+    expect(editPolite()).toHaveTextContent('');
+    expect(page()).not.toMatch(/not saved/i);
+    expect(screen.getByTestId('directory-edit-hold').textContent).not.toMatch(/555|@/);
+    expect(view.editHolds.get('uid-a')).toMatchObject({ key: key(1), customerId: ada.id, expectedVersion: 1, body: editBody(1, { name: 'Ada King', email: null }) });
+    await settle();
+    await focusWindow();
+    await settle();
+    expect(patches(server)).toHaveLength(1);
+    // The profile now matches the edit (it committed), yet that is not proof: the attempt stays undecided.
+    await view.go('/customers/directory');
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada King$/));
+    expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved');
+    expect(screen.queryByTestId('directory-edit')).toBeNull(); // no new edit while one is undecided
+    await click('directory-edit-check');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    const [first, again] = patches(server);
+    expect(again.url).toBe(first.url);
+    expect(again.body).toBe(first.body);
+    expect(again.headers.get('idempotency-key')).toBe(key(1));
+    expect(again.headers.get('x-tmpos-session-csrf')).toBe(first.headers.get('x-tmpos-session-csrf'));
+    expect(view.made).toEqual([key(1)]);
+    expect(server.versions.get(ada.id)).toBe(2); // one change, replayed — never applied twice
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-99. a held edit past the check window keeps no bytes and offers no check; "Discard" forgets it and the draft, and says the request is not cancelled', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    let t = 1_000;
+    const { view } = await editable(server, { keys: [key(1)], now: () => t });
+    await openForm();
+    fillEdit({ phone: '+1 555 0199' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(view.editHolds.get('uid-a')!.body).toBe(editBody(1, { name: 'Ada Lovelace', phone: '+1 555 0199' }));
+    t += CHECK_CUTOFF_MS - 1; // the last moment inside the window: the same bytes under the same key
+    await click('directory-edit-check');
+    await waitFor(() => expect(patches(server)).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(patches(server)[1].body).toBe(patches(server)[0].body);
+    expect(patches(server)[1].headers.get('idempotency-key')).toBe(key(1));
+    t += 1;
+    await click('directory-edit-check');
+    await waitFor(() => expect(view.editHolds.get('uid-a')!.body).toBe(''));
+    expect(screen.getByTestId('directory-edit-hold-too-old')).toHaveTextContent('sent too long ago');
+    expect(screen.queryByTestId('directory-edit-check')).toBeNull();
+    expect(patches(server)).toHaveLength(2);
+    expect(screen.getByTestId('directory-edit-discard')).toHaveAttribute('aria-describedby', 'directory-edit-discard-warning');
+    expect(document.getElementById('directory-edit-discard-warning')).toHaveTextContent('does not cancel the request');
+    await click('directory-edit-discard');
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(screen.getByTestId('directory-edit')).toBeInTheDocument();
+    expect(patches(server)).toHaveLength(2);
+  });
+
+  it('SCD-100. Cancel closes the form and sends nothing; a save already out when Cancel is pressed is still decided by its own answer', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-cancel');
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    await settle();
+    expect(patches(server)).toHaveLength(0);
+    await openForm();
+    expect(editInput('name').value).toBe('Ada Lovelace'); // the cancelled draft is gone
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(screen.getByTestId('directory-edit-save')).toBeDisabled();
+    await click('directory-edit-cancel');
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada King$/));
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada King');
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-101. a tenant switch while a save is out clears the form, the draft, the held edit and every edit notice; the late answer repaints nothing', async () => {
+    const server = fakeServer();
+    const { view, bea } = await editable(server, { keys: [key(1)] });
+    server.seed(TENANT_B, ['Cy']);
+    await openForm();
+    fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'sending');
+    // The account now answers for tenant B (another tab's session): the next read notices the new connection.
+    server.users['tok-a'].tenant = TENANT_B;
+    server.otherTab('tok-a');
+    await view.go(`/customers/directory/${bea.id}`);
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toHaveTextContent(CONNECTION_CHANGED_TEXT));
+    await waitFor(() => expect(detailPhase()).toBe('not-found')); // not a customer of tenant B
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    // The old tenant's answer arrives late: nothing of it is shown, nothing is read or sent for it.
+    const sentBefore = server.sent.length;
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    // Only that the earlier change could not be confirmed is said (the new connection dropped it); never "Saved".
+    expect(editPolite()).toHaveTextContent('');
+    expect(editAlert()).toHaveTextContent(/^The store connection changed before a change could be confirmed\. Check the customer's details\.$/);
+    expect(page()).not.toMatch(/Ada King|555 0199|couldn't confirm/);
+    expect(server.sent.length).toBe(sentBefore);
+    await view.go('/customers/directory');
+    await waitFor(() => expect(names()).toEqual(['Cy']));
+    expect(patches(server)).toHaveLength(1);
+    cleanup();
+    // A tenant switch that Save's own session step finds: a new generation, and NOTHING is sent.
+    const other = fakeServer();
+    const again = await editable(other, { keys: [key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    other.users['tok-a'].tenant = TENANT_B;
+    other.otherTab('tok-a');
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument());
+    await settle();
+    expect(patches(other)).toHaveLength(0);
+    expect(again.view.made).toEqual([]);
+    expect(again.view.editHolds.get('uid-a')).toBeUndefined();
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+  });
+
+  it('SCD-102. a 403 on the edit is a permission loss: "You can\'t edit this customer.", the form closed, the draft and any held edit cleared, nothing re-sent', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1), key(2)] });
+    server.users['tok-a'].edit = false; // the server-backed level no longer reaches Edit; the local hint still says it does
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_DENIED_TEXT}$`)));
+    expect(editAlert()).toHaveTextContent(EDIT_DENIED_TEXT);
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    await settle();
+    expect(patches(server)).toHaveLength(1);
+    expect(page()).not.toMatch(/Ada King/);
+    // A held edit whose check is refused 403 is cleared too, without claiming either outcome.
+    server.users['tok-a'].edit = true;
+    server.patches.push('rollback-503');
+    await openForm();
+    expect(editInput('name').value).toBe('Ada Lovelace'); // the refused draft is gone
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    server.users['tok-a'].edit = false;
+    await click('directory-edit-check');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(/^You can't edit this customer\. Whether the earlier change was saved could not be confirmed\.$/));
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(patches(server)).toHaveLength(3);
+  });
+
+  it('SCD-103. a session that ends during an edit: Save, the PATCH\'s 401 and Check again sign nothing in; the profile, the form and any held edit are cleared; only Reconnect logs in', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    // Ended before Save: the session check finds it; nothing is sent.
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.sessions.clear();
+    await click('directory-edit-save');
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    expect(editStatus()).toHaveTextContent(/^Not sent\./);
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-phone')).toBeNull();
+    expect(page()).not.toContain(PHONE);
+    await settle();
+    expect(patches(server)).toHaveLength(0);
+    expect(logins(server)).toHaveLength(1);
+    await click('directory-detail-retry'); // Reconnect: the one control that signs in
+    await waitFor(() => expect(detailPhase()).toBe('ready'));
+    expect(logins(server)).toHaveLength(2);
+    // The PATCH itself answered 401.
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push(401);
+    await click('directory-edit-save');
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    expect(editStatus()).toHaveTextContent('Not saved: your server session ended.');
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(page()).not.toContain(PHONE);
+    expect(logins(server)).toHaveLength(2);
+    await click('directory-detail-retry');
+    await waitFor(() => expect(detailPhase()).toBe('ready'));
+    // An undecided edit, then the session ends: the held edit can never be checked again, so it is dropped and said so.
+    server.patches.push('rollback-503');
+    await openForm();
+    fillEdit({ email: '' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    const loginsBefore = logins(server).length;
+    server.sessions.clear();
+    await click('directory-edit-check');
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(editStatus()).toHaveTextContent('Your server session ended before a change could be confirmed.');
+    await settle();
+    expect(logins(server)).toHaveLength(loginsBefore);
+    expect(patches(server).map((r) => r.headers.get('idempotency-key'))).toEqual([key(1), key(2)]); // the check sent nothing
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada Lovelace');
+    cleanup();
+    // Refresh and "Review latest" under an ended session sign nothing in either.
+    const other = fakeServer();
+    const again = await editable(other, { keys: [key(3)] });
+    await again.view.go('/customers/directory');
+    await ready();
+    other.sessions.clear();
+    await click('directory-refresh');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(logins(other)).toHaveLength(1);
+    await click('directory-retry'); // Reconnect
+    await ready();
+    expect(logins(other)).toHaveLength(2);
+    await openDetail(again.view, again.ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    other.editElsewhere(again.ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    other.sessions.clear();
+    await click('directory-edit-review');
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    await settle();
+    expect(logins(other)).toHaveLength(2);
+    expect(patches(other)).toHaveLength(1);
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+  });
+
+  it('SCD-104. a double click on Save sends ONE PATCH; drafts and held edits never reach browser storage or the console', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    const before = { local: window.localStorage.length, session: window.sessionStorage.length, cookie: document.cookie };
+    const server = fakeServer();
+    server.patches.push('lost-before');
+    const { view } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+    const save = screen.getByTestId('directory-edit-save');
+    act(() => { fireEvent.click(save); fireEvent.click(save); }); // one task: the button cannot have been disabled yet
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(patches(server)).toHaveLength(1);
+    await click('directory-edit-discard');
+    await openForm();
+    fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+    server.patches.push('lost-after-commit');
+    await userEvent.setup().dblClick(screen.getByTestId('directory-edit-save'));
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(view.made).toEqual([key(1), key(2)]);
+    // Two clicks in one task, before any re-render can disable the button: still one check.
+    const check = screen.getByTestId('directory-edit-check');
+    act(() => { fireEvent.click(check); fireEvent.click(check); });
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await settle();
+    expect(patches(server)).toHaveLength(3); // each save once, the check once
+    expect(view.made).toEqual([key(1), key(2)]);
+    expect(setItem).not.toHaveBeenCalled();
+    expect(window.localStorage.length).toBe(before.local);
+    expect(window.sessionStorage.length).toBe(before.session);
+    expect(document.cookie).toBe(before.cookie);
+    for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+    expect(view.router.state.location.search).toBe('');
+  });
+
+  it('SCD-105. the edit\'s other answers: 400 and 422 keep the draft and change nothing; 409 in progress is undecided; 404 closes the form; 429 waits', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2), key(3), key(4), key(5)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push(400);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent('The server did not accept these customer details. Nothing was changed.'));
+    expect(editInput('name').value).toBe('Ada King');
+    server.patches.push(422);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent('The server rejected this request. Nothing was changed.'));
+    expect(editInput('name').value).toBe('Ada King');
+    server.patches.push(429);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(/^Not sent through: too many requests\. Wait 1 second\. Then save again\.$/));
+    expect(screen.getByTestId('directory-edit-save')).toBeDisabled();
+    await waitFor(() => expect(screen.getByTestId('directory-edit-save')).toBeEnabled(), { timeout: 2_500 });
+    server.patches.push(409);
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(editAlert()).toHaveTextContent(new RegExp(`^${EDIT_UNKNOWN_TEXT}$`));
+    expect(page()).not.toMatch(/not saved/i);
+    await click('directory-edit-discard');
+    // Gone from this store meanwhile: one bounded answer, the form closed, the detail read again.
+    server.rows[TENANT_A] = server.rows[TENANT_A].filter((r) => r.id !== ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent('This customer is no longer available in this store. Nothing was changed.'));
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    await waitFor(() => expect(detailPhase()).toBe('not-found'));
+    expect(patches(server).map((r) => r.headers.get('idempotency-key'))).toEqual([key(1), key(2), key(3), key(4), key(5)]);
+  });
+
+  // Review fixes (M7A-CUSTOMERS-P7).
+  it('SCD-106. Cancel while Save is still checking the session sends NOTHING: no PATCH, no key, no held edit — also when the form is reopened meanwhile', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.checks = 1; // Save's session step is out
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-edit-cancel');
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(patches(server)).toHaveLength(0);
+    expect(view.made).toEqual([]);
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    // Cancelled, then reopened, before the session step answers: the old Save still sends nothing.
+    await openForm();
+    fillEdit({ name: 'Ada Byron' });
+    server.hold.checks = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await click('directory-edit-cancel');
+    await openForm();
+    await act(async () => { server.held[1].release(); });
+    await settle();
+    expect(patches(server)).toHaveLength(0);
+    expect(view.made).toEqual([]);
+    expect(editInput('name').value).toBe('Ada Lovelace');
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada Lovelace');
+  });
+
+  it('SCD-107. "Review latest" takes every field the user did not touch from the reviewed profile: the next save sends only the touched ones and never reverts another editor\'s change', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King', email: 'ada.k@example.test' }); // the phone is not touched
+    // Another editor changes the phone (and only the phone) first: version 2.
+    server.contacts.set(ada.id, { phone: '+1 555 0199', email: EMAIL, createdAt: CREATED });
+    server.versions.set(ada.id, 2);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    await click('directory-edit-review');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_REVIEWED_TEXT));
+    expect([editInput('name').value, editInput('phone').value, editInput('email').value]).toEqual(['Ada King', '+1 555 0199', 'ada.k@example.test']);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada King', email: 'ada.k@example.test' })); // no phone
+    expect(server.contacts.get(ada.id)).toMatchObject({ phone: '+1 555 0199', email: 'ada.k@example.test' });
+    expect(server.versions.get(ada.id)).toBe(3);
+  });
+
+  it('SCD-108. focus is never lost: Cancel and Discard return it to Edit, a conflict moves it to "Review latest", a confirmed save to the status', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2), key(3)] });
+    await openForm();
+    await click('directory-edit-cancel');
+    await waitFor(() => expect(screen.getByTestId('directory-edit')).toHaveFocus());
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-review')).toHaveFocus());
+    await click('directory-edit-review');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_REVIEWED_TEXT));
+    await waitFor(() => expect(editPolite()).toHaveFocus()); // the Review button is gone: the status takes focus
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await waitFor(() => expect(editPolite()).toHaveFocus());
+    server.patches.push('rollback-503');
+    await openForm();
+    fillEdit({ name: 'Ada Lovelace' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    // Check again: the card keeps focus while it checks and after an undecided answer.
+    await click('directory-edit-check');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveFocus());
+    await click('directory-edit-discard');
+    await waitFor(() => expect(screen.getByTestId('directory-edit')).toHaveFocus());
+    // A check that confirms: the card goes, the status takes focus.
+    server.patches.push('lost-after-commit');
+    await openForm();
+    fillEdit({ name: 'Ada Byron' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    await click('directory-edit-cancel');
+    await click('directory-edit-check');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await waitFor(() => expect(editPolite()).toHaveFocus());
+    // A 403 closes the form: the alert takes focus.
+    await waitFor(() => expect(screen.getByTestId('directory-edit')).toBeInTheDocument());
+    server.users['tok-a'].edit = false;
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(editAlert()).toHaveTextContent(EDIT_DENIED_TEXT));
+    await waitFor(() => expect(editAlert()).toHaveFocus());
+    // A 404 closes the form: the alert takes focus.
+    server.users['tok-a'].edit = true;
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    server.rows[TENANT_A] = server.rows[TENANT_A].filter((r) => r.id !== ada.id);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editAlert()).toHaveTextContent('no longer available'));
+    await waitFor(() => expect(editAlert()).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('SCD-109. a user change or a sign-out drops the previous user\'s held edit (its bytes and token) and its draft', async () => {
+    for (const next of ['uid-b', null] as const) {
+      const server = fakeServer();
+      server.patches.push('rollback-503');
+      const { view } = await editable(server, { keys: [key(1)] });
+      await openForm();
+      fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+      await click('directory-edit-save');
+      await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+      expect(view.editHolds.get('uid-a')).toBeDefined();
+      act(() => access.set({ uid: next }));
+      await settle();
+      expect(view.editHolds.get('uid-a')).toBeUndefined();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+      expect(page()).not.toMatch(/Ada King|555 0199/);
+      expect(patches(server)).toHaveLength(1);
+      cleanup();
+      vi.restoreAllMocks();
+      access.set({ uid: 'uid-a', canEdit: false });
+    }
+  });
+
+  it('SCD-110. a held edit dropped because the connection changed says so: the earlier change could not be confirmed, check the customer\'s details', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    server.otherTab('tok-a'); // another session of the same user: a new token
+    await focusWindow();
+    await waitFor(() => expect(view.editHolds.get('uid-a')).toBeUndefined());
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(editAlert()).toHaveTextContent("The store connection changed before a change could be confirmed. Check the customer's details.");
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-111. a session that ends while a save is out drops the attempt in every state: its late 200 repaints nothing', async () => {
+    const server = fakeServer();
+    const { view, bea } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(view.editHolds.get('uid-a')?.state).toBe('sending');
+    server.sessions.clear();
+    await view.go(`/customers/directory/${bea.id}`); // the next read finds the session ended
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(editAlert()).toHaveTextContent('Your server session ended before a change could be confirmed.');
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(editPolite()).toHaveTextContent('');
+    expect(page()).not.toMatch(/Ada King/);
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-112. two persistent live regions: the status is always polite and the alert always assertive — no element changes its role', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2)] });
+    const polite = editPolite();
+    const alert = editAlert();
+    expect([polite.getAttribute('role'), alert.getAttribute('role')]).toEqual(['status', 'alert']);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(alert).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    expect(polite).toHaveTextContent('');
+    await click('directory-edit-review');
+    await click('directory-edit-save');
+    await waitFor(() => expect(polite).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(alert).toHaveTextContent('');
+    expect([editPolite(), editAlert()]).toEqual([polite, alert]); // the same elements throughout
+    expect([polite.getAttribute('role'), alert.getAttribute('role')]).toEqual(['status', 'alert']);
+    // Outcome announcements: an undecided edit is announced through the fixed alert; the card itself holds no live region.
+    // (Per-field validation errors keep role="alert", as the create form's do; this case is about outcome announcements.)
+    server.patches.push('rollback-503');
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    expect(alert).toHaveTextContent(EDIT_UNKNOWN_TEXT);
+    const card = screen.getByTestId('directory-edit-hold');
+    expect(card.querySelectorAll('[role="status"], [role="alert"], [aria-live]')).toHaveLength(0);
+    expect([editPolite(), editAlert()]).toEqual([polite, alert]);
+  });
+
+  // Review fixes, round 2 (M7A-CUSTOMERS-P7).
+  it('SCD-113. "Check again" that finds another token: nothing is sent, and the page still says the earlier change could not be confirmed', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    server.otherTab('tok-a');
+    await click('directory-edit-check');
+    await waitFor(() => expect(view.editHolds.get('uid-a')).toBeUndefined());
+    await settle();
+    expect(editAlert()).toHaveTextContent("The store connection changed before a change could be confirmed. Check the customer's details.");
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-114. a sign-out or a user change drops the held edit even while the directory is not mounted; the same user keeps it across navigation', async () => {
+    for (const next of [null, 'uid-b'] as const) {
+      const listeners = new Set<(uid: string | null) => void>();
+      const store = createEditHoldStore();
+      const unbind = bindEditHoldsToAuth(store, (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+      const emit = (uid: string | null) => act(() => { for (const l of [...listeners]) l(uid); });
+      const server = fakeServer();
+      server.patches.push('rollback-503');
+      const { view } = await editable(server, { keys: [key(1)], editHolds: store });
+      await openForm();
+      fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+      await click('directory-edit-save');
+      await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+      await view.go('/elsewhere'); // the guard's redirect: the directory unmounts
+      emit('uid-a'); // the same user: kept for the next visit
+      expect(store.get('uid-a')).toBeDefined();
+      emit(next);
+      expect(store.get('uid-a')).toBeUndefined();
+      expect(JSON.stringify(store.get('uid-a') ?? null)).not.toMatch(/555|King/);
+      await view.go('/customers/directory');
+      await ready();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(patches(server)).toHaveLength(1);
+      unbind();
+      expect(listeners.size).toBe(0);
+      cleanup();
+      vi.restoreAllMocks();
+      access.set({ uid: 'uid-a', canEdit: false });
+    }
+  });
+
+  it('SCD-115. a field typed and then restored is untouched: "Review latest" shows the other editor\'s value there, and the body sends the REVIEWED name', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada X' });
+    fillEdit({ name: ' Ada Lovelace' }); // restored (as normalized)
+    fillEdit({ phone: '+1 555 0199' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    await click('directory-edit-review');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_REVIEWED_TEXT));
+    expect([editInput('name').value, editInput('phone').value]).toEqual(['Ada Byron', '+1 555 0199']);
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada Byron', phone: '+1 555 0199' }));
+    expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name).toBe('Ada Byron');
+  });
+
+  it('SCD-116. an edit answer that settles after the page has gone is shown by the next page of the same user: saved, or a conflict', async () => {
+    const server = fakeServer();
+    const store = createEditHoldStore();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)], editHolds: store });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(store.get('uid-a')).toBeUndefined();
+    await view.go('/customers/directory');
+    await ready();
+    expect(editPolite()).toHaveTextContent(editNamedText('saved', 'Ada King'));
+    // A conflict that settles while away: the customer's own page says so.
+    await openDetail(view, ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await view.go('/elsewhere');
+    await act(async () => { server.held[1].release(); });
+    await settle();
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(detailPhase()).toBe('ready'));
+    expect(editAlert()).toHaveTextContent(LATE_CONFLICT_TEXT); // no draft and no Review button here
+    expect(page()).not.toMatch(new RegExp(`^${EDIT_SAVED_TEXT}$`));
+  });
+
+  it('SCD-117. Cancel during Save\'s session step still handles what that step found: a new token starts a new generation, an ended session clears; nothing is sent', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1)] });
+    // A new token.
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.otherTab('tok-a');
+    server.hold.checks = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-edit-cancel');
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument());
+    await waitFor(() => expect(detailPhase()).toBe('ready'));
+    // An ended session.
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.sessions.clear();
+    server.hold.checks = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await click('directory-edit-cancel');
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    expect(page()).not.toContain(PHONE);
+    await settle();
+    expect(patches(server)).toHaveLength(0);
+    expect(view.made).toEqual([]);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-118. a PATCH refused 403 because another session\'s cookie answered: ONE session check finds the new connection — "Not saved", never "You can\'t edit", and nothing more sent', async () => {
+    const server = fakeServer();
+    const { view } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.checks = 1; // Save's session step answers with this page's token…
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('tok-a'); // …but the PATCH arrives with another session's cookie
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Not saved: the store connection changed. Nothing was changed.'));
+    expect(page()).not.toContain(EDIT_DENIED_TEXT);
+    expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument();
+    await settle();
+    expect(patches(server)).toHaveLength(1);
+    expect(patches(server)[0].headers.get('x-tmpos-session-csrf')).not.toBe(server.csrfOfCookie());
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-119. an edit notice that arrives while another customer or the list is shown names the customer it belongs to', async () => {
+    const server = fakeServer();
+    const { view, ada, bea } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await openDetail(view, bea.id);
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editPolite()).toHaveTextContent(editNamedText('saved', 'Ada King')));
+    expect(editPolite()).not.toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`));
+    // A conflict that lands while the list is shown.
+    await openDetail(view, ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await view.go('/customers/directory');
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent(editNamedText('conflict', 'Ada Queen')));
+    expect(page()).not.toContain(EDIT_CONFLICT_TEXT);
+  });
+
+  it('SCD-120. the check window is tested again after the session step: past it, nothing is sent, the bytes are emptied, and the card says so', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    let t = 1_000;
+    const { view } = await editable(server, { keys: [key(1)], now: () => t });
+    await openForm();
+    fillEdit({ phone: '+1 555 0199' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    t += CHECK_CUTOFF_MS - 1;
+    server.hold.checks = 1;
+    await click('directory-edit-check');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    t += 2; // the window closes while the session step is out
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold-too-old')).toBeInTheDocument());
+    expect(view.editHolds.get('uid-a')).toMatchObject({ body: '', state: 'unresolved' });
+    expect(screen.getByTestId('directory-edit-hold-reason')).toHaveTextContent('Not checked: it was sent too long ago.');
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-121. a send that throws is an attempt with no answer: the held edit returns to unresolved, and Check again and Discard still work', async () => {
+    const server = fakeServer();
+    let failing = true;
+    const wrapCustomers = (c: CustomersClient): CustomersClient => ({
+      ...c,
+      update: (...args: Parameters<CustomersClient['update']>) => (failing ? Promise.reject(new TypeError('boom')) : c.update(...args)),
+    });
+    const { view } = await editable(server, { keys: [key(1)], wrapCustomers });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    await click('directory-edit-check');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold-reason')).toHaveTextContent('No answer from the server.'));
+    expect(view.editHolds.get('uid-a')?.state).toBe('unresolved');
+    failing = false;
+    await click('directory-edit-check');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)).toHaveLength(1); // the two throwing sends never reached the wire
+    expect(patches(server)[0].headers.get('idempotency-key')).toBe(key(1));
+  });
+
+  it('SCD-122. a save confirmed while the list is shown drops the cached profile: the customer is never shown with its pre-edit values', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/customers/directory');
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(names()).toEqual(['Ada King', 'Bea']));
+    server.reads.push(503);
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(detailPhase()).toBe('unavailable'));
+    expect(screen.queryByTestId('directory-detail-last-known')).toBeNull();
+    expect(screen.queryByTestId('directory-detail-name')).toBeNull();
+    expect(page()).not.toContain('Ada Lovelace');
+  });
+
+  it('SCD-123. a confirmed save whose refresh finds the session ended keeps the truth: saved, then the session ended — no sign-in', async () => {
+    const server = fakeServer();
+    await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.sessions.clear(); // the PATCH committed on arrival; the session ends before the refresh
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes were saved, but your server session then ended. Reconnect to see the latest details.'));
+    expect(page()).not.toMatch(/not saved/i);
+    await settle();
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-124. while an edit is held the form is read-only, so a confirming "Check again" never discards typed changes', async () => {
+    const server = fakeServer();
+    server.patches.push('lost-after-commit');
+    await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    for (const field of ['name', 'phone', 'email'] as const) expect(editInput(field)).toHaveAttribute('readonly');
+    await userEvent.setup().type(editInput('phone'), '9');
+    expect(editInput('phone').value).toBe(PHONE); // nothing typed into a held form
+    await click('directory-edit-check');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)).toHaveLength(2);
+  });
+
+  it('SCD-125. a conflict that lands after Cancel reloads the profile and says so: Edit then starts from the current version, and a save lands', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('directory-edit-cancel');
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes were not saved: someone else changed this customer first. The latest details are shown: edit again to change them.'));
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Byron$/));
+    expect(screen.queryByTestId('directory-edit-review')).toBeNull();
+    await openForm();
+    expect(editInput('name').value).toBe('Ada Byron');
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server)[1].body).toBe(editBody(2, { name: 'Ada King' }));
+  });
+
+  it('SCD-126. an ended session while a PATCH hangs frees the edit controls: after Reconnect, a new edit can be saved, and the old request\'s end changes nothing', async () => {
+    const server = fakeServer();
+    const { view, ada, bea } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push(503);
+    server.hold.patches = 1; // this PATCH hangs
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.sessions.clear();
+    await view.go(`/customers/directory/${bea.id}`); // the next read finds the session ended
+    await waitFor(() => expect(detailPhase()).toBe('signed-out'));
+    await click('directory-detail-retry'); // Reconnect
+    await waitFor(() => expect(detailPhase()).toBe('ready'));
+    await openDetail(view, ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    expect(screen.getByTestId('directory-edit-save')).toBeEnabled();
+    expect(editInput('name')).not.toHaveAttribute('readonly');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    await openForm();
+    await act(async () => { server.held[0].release(); }); // the old request ends now
+    await settle();
+    expect(editInput('name')).not.toHaveAttribute('readonly'); // its end changed nothing here
+    expect(screen.getByTestId('directory-edit-save')).toBeEnabled();
+    expect(editPolite()).toHaveTextContent('');
+    expect(patches(server)).toHaveLength(2);
+  });
+
+  it('SCD-127. "Review latest" that finds the customer gone closes the form and clears the draft', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editStatus()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    server.rows[TENANT_A] = server.rows[TENANT_A].filter((r) => r.id !== ada.id);
+    await click('directory-edit-review');
+    await waitFor(() => expect(detailPhase()).toBe('not-found'));
+    await waitFor(() => expect(editAlert()).toHaveTextContent('This customer is no longer available in this store. Nothing was changed.'));
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(page()).not.toContain('Ada King');
+    await waitFor(() => expect(editAlert()).toHaveFocus());
+  });
+
+  // Review fixes, round 3 (M7A-CUSTOMERS-P7).
+  /** A save refused 403 whose one session check is still out (held). */
+  async function pendingRecheck(server: Server, options: MountOptions = {}) {
+    const mounted = await editable(server, options);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.users['tok-a'].edit = false;
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.hold.checks = 1;
+    await act(async () => { server.held[0].release(); }); // the 403 lands; its session check is held
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    return mounted;
+  }
+
+  it('SCD-128. an outcome an older page records for this user is shown by the page that is already open: the card goes, "Saved" is said, and the profile is read again', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await openDetail(view, ada.id); // a new page, showing the attempt that is still out
+    expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'sending');
+    const reads = details(server).length;
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada King$/));
+    expect(details(server).length).toBe(reads + 1);
+  });
+
+  it('SCD-129. a recorded outcome is bound to the connection it was sent under: after a switch to another tenant nothing of it is shown', async () => {
+    const server = fakeServer();
+    const base = createEditHoldStore();
+    const taken: EditOutcome[] = []; // what a page took from the store: proof the outcome was kept, then refused
+    const store: EditHoldStore = { ...base, takeOutcome: (who) => { const o = base.takeOutcome(who); if (o !== undefined) taken.push(o); return o; } };
+    const { view, ada } = await editable(server, { keys: [key(1)], editHolds: store });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    const sentWith = patches(server)[0].headers.get('x-tmpos-session-csrf');
+    server.users['tok-a'].tenant = TENANT_B; // the same user, now in tenant B (a new session)
+    server.otherTab('tok-a');
+    await view.go('/customers/directory');
+    await ready();
+    await settle();
+    expect(editStatus()).toHaveTextContent('');
+    expect(page()).not.toMatch(/Ada King|Ada Lovelace/);
+    // The control: the outcome WAS kept (saved, this customer, the old token) and reached this page — which refused it.
+    expect(taken).toEqual([{ kind: 'saved', customerId: ada.id, name: 'Ada King', csrf: sentWith }]);
+    await view.go(`/customers/directory/${ada.id}`);
+    await waitFor(() => expect(detailPhase()).toBe('not-found'));
+    expect(editStatus()).toHaveTextContent('');
+  });
+
+  it('SCD-130. every edit notice is bound to its customer: on another page a refusal, an undecided edit and a held edit\'s 403 are named — the held one keeps its uncertainty', async () => {
+    const server = fakeServer();
+    const { view, ada, bea } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push(400);
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await openDetail(view, bea.id);
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" were not saved.'));
+    expect(page()).not.toContain('The server did not accept these customer details');
+    // Undecided, landing while the list is shown.
+    await openDetail(view, ada.id);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push('rollback-503');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await view.go('/customers/directory');
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" could not be confirmed.'));
+    // The held edit's check refused 403 on another customer's page: still "could not be confirmed".
+    await openDetail(view, bea.id);
+    server.users['tok-a'].edit = false;
+    await click('directory-edit-check');
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" could not be confirmed: you can\'t edit that customer.'));
+    expect(page()).not.toMatch(/were not saved: you can't edit/);
+  });
+
+  it('SCD-131. a 403 whose session check is still out when the user cancels: its continuation does nothing — no refusal text, the form stays closed', async () => {
+    const server = fakeServer();
+    await pendingRecheck(server, { keys: [key(1)] });
+    await click('directory-edit-cancel');
+    await act(async () => { server.held[1].release(); });
+    await settle();
+    expect(page()).not.toContain(EDIT_DENIED_TEXT);
+    expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+    expect(screen.getByTestId('directory-edit')).toBeInTheDocument();
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-132. a 403 whose session check is overtaken by a new connection: its continuation does nothing (never "You can\'t edit", never a second notice of its own)', async () => {
+    const server = fakeServer();
+    const { view, bea } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.users['tok-a'].edit = false;
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('tok-a');
+    server.hold.checks = 1;
+    await view.go(`/customers/directory/${bea.id}`); // a read's session step, held: it will find the new connection
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await act(async () => { server.held[0].release(); }); // the 403 (decided under the old cookie); its check waits on that step
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument());
+    await settle();
+    expect(page()).not.toContain(EDIT_DENIED_TEXT);
+    expect(page()).not.toContain('Not saved: the store connection changed.');
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-133. a 403 whose session check is still out when the page goes: the check finishes and the next page of the same user and token says it was not saved', async () => {
+    const server = fakeServer();
+    const { view } = await pendingRecheck(server, { keys: [key(1)] });
+    await view.go('/elsewhere');
+    await act(async () => { server.held[1].release(); });
+    await settle();
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    await view.go('/customers/directory');
+    await ready();
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" were not saved.'));
+  });
+
+  it('SCD-134. a 403 whose session check is still out when the user changes: nothing of it reaches the next user, nor the first user\'s next session', async () => {
+    const server = fakeServer();
+    const { view } = await pendingRecheck(server, { keys: [key(1)] });
+    act(() => access.set({ uid: 'uid-b' }));
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(detailPhase()).not.toBe('loading'));
+    await settle();
+    expect(page()).not.toMatch(/Ada King|can't edit/);
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    act(() => access.set({ uid: 'uid-a' })); // back, with a new sign-in: another session
+    await waitFor(() => expect(detailPhase()).not.toBe('loading'));
+    await settle();
+    expect(page()).not.toMatch(/Ada King|can't edit|were not saved/);
+  });
+
+  it('SCD-135. a conflict recorded while no page was there: the late-conflict wording (no Review), and the profile shown is read again', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await openDetail(view, ada.id);
+    const reads = details(server).length;
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent(LATE_CONFLICT_TEXT));
+    expect(page()).not.toContain(EDIT_CONFLICT_TEXT);
+    expect(screen.queryByTestId('directory-edit-review')).toBeNull();
+    await waitFor(() => expect(details(server).length).toBe(reads + 1));
+    expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Byron$/);
+  });
+
+  it('SCD-136. focus is never lost on a refused save (400, 422, 429), a failed review, or a refresh that finds the session ended', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2), key(3), key(4), key(5)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    for (const plan of [400, 422, 429] as const) {
+      server.patches.push(plan);
+      await click('directory-edit-save');
+      await waitFor(() => expect(editAlert()).not.toHaveTextContent(/^$/));
+      await waitFor(() => expect(editAlert()).toHaveFocus());
+      await waitFor(() => expect(screen.getByTestId('directory-edit-save')).toBeEnabled(), { timeout: 2_500 });
+    }
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editAlert()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    server.reads.push(503);
+    await click('directory-edit-review');
+    await waitFor(() => expect(editAlert()).toHaveTextContent('The latest details could not be loaded. Try again.'));
+    await waitFor(() => expect(editAlert()).toHaveFocus());
+    await click('directory-edit-review');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(EDIT_REVIEWED_TEXT));
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.sessions.clear();
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes were saved, but your server session then ended.'));
+    await waitFor(() => expect(editAlert()).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('SCD-137. a confirmed save whose refresh finds a new connection keeps the truth: saved, then the connection changed', async () => {
+    const server = fakeServer();
+    await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('tok-a');
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-connection-changed')).toBeInTheDocument());
+    await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes were saved, but the store connection then changed.'));
+    expect(page()).not.toMatch(/not saved/i);
+  });
+
+  it('SCD-138. a held form says why it is read-only; a repeated identical notice is cleared and set again, so it is announced again', async () => {
+    const server = fakeServer();
+    await editable(server, { keys: [key(1), key(2), key(3)] });
+    await openForm();
+    // The same notice twice in a row ("No changes to save." puts no other notice in between): cleared, then set again.
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(EDIT_NO_CHANGES_TEXT));
+    const seen: string[] = [];
+    const observer = new MutationObserver(() => { seen.push(editPolite().textContent ?? ''); });
+    observer.observe(editPolite(), { childList: true, characterData: true, subtree: true });
+    await click('directory-edit-save');
+    await waitFor(() => expect(seen.at(-1)).toBe(EDIT_NO_CHANGES_TEXT));
+    observer.disconnect();
+    expect(seen).toEqual(['', EDIT_NO_CHANGES_TEXT]); // cleared before it was set again
+    // A later notice wins over a pending reset: the repeat is pending when Cancel clears the notice in the same task.
+    const save = screen.getByTestId('directory-edit-save');
+    act(() => { fireEvent.click(save); fireEvent.click(screen.getByTestId('directory-edit-cancel')); });
+    await settle();
+    expect(editPolite()).toHaveTextContent(/^$/);
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push('rollback-503');
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    for (const field of ['name', 'phone', 'email'] as const) {
+      const ids = (editInput(field).getAttribute('aria-describedby') ?? '').split(' ');
+      expect(ids).toContain('directory-edit-hold-text');
+    }
+    expect(document.getElementById('directory-edit-hold-text')).toHaveTextContent(EDIT_UNKNOWN_TEXT);
+  });
+
+  it('SCD-139. the shop\'s own edit hold store follows the app\'s sign-in: bound once, kept for the same user, dropped on a sign-out or another user while no page is mounted', async () => {
+    for (const next of [null, 'uid-b'] as const) {
+      const server = fakeServer();
+      server.patches.push('rollback-503');
+      const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: true });
+      await openForm();
+      fillEdit({ name: 'Ada King' });
+      await click('directory-edit-save');
+      await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+      expect(firebaseAuth.subscriptions).toBe(1); // bound once for the whole app, however many pages mount
+      await view.go('/elsewhere');
+      act(() => firebaseAuth.emit('uid-a')); // the same user: kept
+      await view.go('/customers/directory');
+      await ready();
+      expect(screen.getByTestId('directory-edit-hold')).toBeInTheDocument();
+      await view.go('/elsewhere');
+      act(() => firebaseAuth.emit(next));
+      await view.go('/customers/directory');
+      await ready();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(page()).not.toMatch(/Ada King/);
+      cleanup();
+      vi.restoreAllMocks();
+      access.set({ uid: 'uid-a', canEdit: false });
+    }
+    expect(firebaseAuth.subscriptions).toBe(1);
+  });
+
+  // Review fixes, round 4 (M7A-CUSTOMERS-P7).
+  it('SCD-140. a first-send 403 for a form closed by navigation (not by Cancel) is still said, by name, on the page that is open', async () => {
+    const server = fakeServer();
+    const { view, bea } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.users['tok-a'].edit = false;
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await openDetail(view, bea.id); // the route closes the form
+    await act(async () => { server.held[0].release(); }); // the 403; its session check answers the same token
+    await waitFor(() => expect(editAlert()).toHaveTextContent(editNamedText('denied', 'Ada King')));
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+  });
+
+  it('SCD-141. a "Check again" whose page has gone and whose session step finds a new token records that the change could not be confirmed', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    const { view, ada } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    const sentWith = patches(server)[0].headers.get('x-tmpos-session-csrf');
+    server.otherTab('tok-a');
+    server.hold.checks = 1; // the check's session step, answered with the new token
+    await click('directory-edit-check');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(view.editHolds.get('uid-a')).toBeUndefined();
+    expect(view.editHolds.takeOutcome('uid-a')).toEqual({ kind: 'unconfirmed', customerId: ada.id, name: 'Ada King', csrf: sentWith });
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-142. an undecided answer for an older page\'s attempt is announced in the alert region of the page that is open (named on another page)', async () => {
+    const server = fakeServer();
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.patches.push('rollback-503');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    await openDetail(view, ada.id);
+    await act(async () => { server.held[0].release(); });
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    await waitFor(() => expect(editAlert()).toHaveTextContent(new RegExp(`^${EDIT_UNKNOWN_TEXT}$`)));
+    // On the list, the same is said by name.
+    await click('directory-edit-discard');
+    await openForm();
+    fillEdit({ name: 'Ada Queen' });
+    server.patches.push('rollback-503');
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    await view.go('/elsewhere');
+    await view.go('/customers/directory');
+    await ready();
+    await act(async () => { server.held[1].release(); });
+    await waitFor(() => expect(editAlert()).toHaveTextContent(editNamedText('undecided', 'Ada Queen')));
+  });
+
+  it('SCD-143. "saved, then the session ended" names the customer on another page; "saved, then the connection changed" stays unnamed — after a tenant switch no old customer name is shown', async () => {
+    // The session ends while the refresh after the save is out, and another customer is shown by then: named.
+    {
+      const server = fakeServer();
+      const { view, bea } = await editable(server, { keys: [key(1)] });
+      await openForm();
+      fillEdit({ name: 'Ada King' });
+      server.hold.patches = 1;
+      await click('directory-edit-save');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      server.sessions.clear();
+      server.hold.checks = 1; // the refresh's session step: it will find the session ended
+      await act(async () => { server.held[0].release(); });
+      await waitFor(() => expect(server.held).toHaveLength(2));
+      await view.go(`/customers/directory/${bea.id}`);
+      await act(async () => { server.held[1].release(); });
+      await waitFor(() => expect(editAlert()).toHaveTextContent('Your changes to "Ada King" were saved, but your server session then ended. Reconnect to see the latest details.'));
+      expect(logins(server)).toHaveLength(1);
+      cleanup();
+    }
+    // A switch to another tenant found by the refresh, with another customer shown by then: unnamed, no old name.
+    {
+      const server = fakeServer();
+      const { view, bea } = await editable(server, { keys: [key(1)] });
+      await openForm();
+      fillEdit({ name: 'Ada King' });
+      server.hold.patches = 1;
+      await click('directory-edit-save');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      server.users['tok-a'].tenant = TENANT_B;
+      server.otherTab('tok-a');
+      server.hold.checks = 1; // the refresh's session step: it will find the new connection
+      await act(async () => { server.held[0].release(); });
+      await waitFor(() => expect(server.held).toHaveLength(2));
+      await view.go(`/customers/directory/${bea.id}`);
+      await act(async () => { server.held[1].release(); });
+      await waitFor(() => expect(editAlert()).toHaveTextContent(/^Your changes were saved, but the store connection then changed\.$/));
+      expect(screen.getByTestId('directory-connection-changed')).toHaveTextContent(CONNECTION_CHANGED_TEXT);
+      await waitFor(() => expect(detailPhase()).toBe('not-found'));
+      expect(page()).not.toMatch(/Ada King|Ada Lovelace/);
+    }
+  });
+
+  // Review fixes, round 5 (M7A-CUSTOMERS-P7).
+  it('SCD-144. the route is taken in the layout phase together with the edit clear, so a settlement after the commit is never erased by a later route clear', () => {
+    // The window between a commit and its passive effects is not deterministic in jsdom: the ordering is asserted.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(resolve(here, 'ServerCustomerDirectory.tsx'), 'utf8');
+    expect(source.match(/routeRef\.current = routeId;/g)).toHaveLength(1);
+    const layout = /useLayoutEffect\(\(\) => \{([\s\S]*?)\n {2}\}, \[routeId\]\);/.exec(source);
+    expect(layout).not.toBeNull();
+    const body = layout![1];
+    expect(body).toContain('routeRef.current = routeId;');
+    expect(body.indexOf('routeRef.current = routeId;')).toBeLessThan(body.indexOf('closeEdit();'));
+    expect(body).toContain('putEditStatus(null);');
+    // The passive route effect no longer clears edit notices.
+    const passive = /useEffect\(\(\) => \{\n {4}const from = lastRoute\.current;([\s\S]*?)\n {2}\}, \[routeId, uid\]\);/.exec(source);
+    expect(passive).not.toBeNull();
+    expect(passive![1]).not.toMatch(/closeEdit\(\)|putEditStatus\(/);
+  });
+
+  it('SCD-145. a Check again whose page has gone before its session step answers a refusal leaves no timer behind', async () => {
+    const server = fakeServer();
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    server.checks.push(429); // the check's session step: rate limited (a wait the page would time)
+    server.hold.checks = 1;
+    await click('directory-edit-check');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere');
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(timers.mock.calls.filter(([, ms]) => typeof ms === 'number' && ms >= 1000)).toEqual([]);
+    expect(view.editHolds.get('uid-a')?.state).toBe('unresolved'); // still held, for the next page
+  });
+
+  it('SCD-146. Cancel after a conflict reads the profile again: Edit then starts from the current version, and nothing is sent with the stale one', async () => {
+    const server = fakeServer();
+    const { ada } = await editable(server, { keys: [key(1), key(2)] });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.editElsewhere(ada.id, 'Ada Byron');
+    await click('directory-edit-save');
+    await waitFor(() => expect(editAlert()).toHaveTextContent(EDIT_CONFLICT_TEXT));
+    const reads = details(server).length;
+    await click('directory-edit-cancel');
+    await waitFor(() => expect(details(server).length).toBe(reads + 1));
+    await waitFor(() => expect(screen.getByTestId('directory-detail-name')).toHaveTextContent(/^Ada Byron$/));
+    await openForm();
+    expect(editInput('name').value).toBe('Ada Byron');
+    fillEdit({ name: 'Ada Queen' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(editPolite()).toHaveTextContent(new RegExp(`^${EDIT_SAVED_TEXT}$`)));
+    expect(patches(server).map((r) => (JSON.parse(r.body ?? '{}') as { expectedVersion: number }).expectedVersion)).toEqual([1, 2]);
   });
 });

@@ -1,13 +1,14 @@
 // M7A-CUSTOMERS-P5 — the shop's customers client against a scripted fetch: what each request carries, the exact
 // answers it accepts, and the one outcome every other answer maps to. The name rule and the id rule are swept against
 // the server's own (server/runtime/customerCreate.ts, server/runtime/routes.ts), and since M7A-CUSTOMERS-P6 the phone and
-// email rules too (server/runtime/customerDirectory.ts), with the profile read's exact shape; special characters are built
-// from code points, so this source stays ASCII.
+// email rules too (server/runtime/customerDirectory.ts), with the profile read's exact shape; since M7A-CUSTOMERS-P7 the
+// profile's version from its ETag and the edit (PATCH): its bytes, its headers and the one outcome of every answer. Special
+// characters are built from code points, so this source stays ASCII.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CONTACT_INVALID, CUSTOMERS_PATH, createCustomersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName,
-  normalizeCustomerPhone, retryAfterSeconds,
+  CONTACT_INVALID, CUSTOMERS_PATH, createCustomersClient, customerEditBody, isCustomerId, normalizeCustomerEmail, normalizeCustomerName,
+  normalizeCustomerPhone, retryAfterSeconds, versionOfEtag,
 } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
@@ -418,11 +419,13 @@ test('CDC-13. a read names its session in X-TMPOS-Session-CSRF: page one, a curs
 });
 
 const PROFILE = { id: ID, name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test', createdAt: '2026-09-30T12:34:56.789Z' };
+/** A profile 200 as the server writes it since M7A-CUSTOMERS-P7: the body and its row version as one strong ETag. */
+const profiled = (body: unknown, etag: string | null = '"3"'): Response => json(200, body, etag === null ? {} : { etag });
 
 test('CDC-14. profile: a malformed id sends nothing; the 200 must be exactly this customer\'s contact record, or it is unavailable', async () => {
-  const good = once(json(200, { customer: PROFILE }));
+  const good = once(profiled({ customer: PROFILE }));
   const result = await good.client.profile(ID, CSRF);
-  assert.deepEqual(result, { kind: 'ok', customer: PROFILE });
+  assert.deepEqual(result, { kind: 'ok', customer: PROFILE, version: 3 });
   assert.ok(result.kind === 'ok' && Object.isFrozen(result) && Object.isFrozen(result.customer));
   assert.equal(good.sent.length, 1);
   assert.equal(good.sent[0].url, `${CUSTOMERS_PATH}/${ID}/profile`);
@@ -434,9 +437,9 @@ test('CDC-14. profile: a malformed id sends nothing; the 200 must be exactly thi
   assertSameOriginOnly(good.sent[0]);
   // A customer created before the server kept contacts or a creation time: every one null.
   const legacy = { id: ID, name: 'Ada', phone: null, email: null, createdAt: null };
-  assert.deepEqual(await once(json(200, { customer: legacy })).client.profile(ID, CSRF), { kind: 'ok', customer: legacy });
+  assert.deepEqual(await once(profiled({ customer: legacy })).client.profile(ID, CSRF), { kind: 'ok', customer: legacy, version: 3 });
   for (const bad of ['', 'new', ID.toUpperCase(), `${ID}/`, `${ID}/profile`, `../session/logout`, `${ID.slice(0, 35)}g`, `%2e%2e/${ID}`]) {
-    const none = once(json(200, { customer: PROFILE }));
+    const none = once(profiled({ customer: PROFILE }));
     assert.deepEqual(await none.client.profile(bad, CSRF), { kind: 'not-found' }, JSON.stringify(bad));
     assert.equal(none.sent.length, 0, `a malformed id reached the network: ${JSON.stringify(bad)}`);
   }
@@ -472,17 +475,17 @@ test('CDC-14. profile: a malformed id sends nothing; the 200 must be exactly thi
     { customer: { ...PROFILE, createdAt: '' } },
     { customers: [PROFILE], nextCursor: null },
   ];
-  for (const body of unavailable) assert.deepEqual(await once(json(200, body)).client.profile(ID, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
+  for (const body of unavailable) assert.deepEqual(await once(profiled(body)).client.profile(ID, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
   // At the bounds, a stored value is a value: a 200-scalar name (astral too), and the longest contacts.
   for (const name of ['x'.repeat(200), cp(0x1f600).repeat(200), 'A']) {
-    assert.equal((await once(json(200, { customer: { ...PROFILE, name } })).client.profile(ID, CSRF)).kind, 'ok', `${[...name].length} scalars`);
+    assert.equal((await once(profiled({ customer: { ...PROFILE, name } })).client.profile(ID, CSRF)).kind, 'ok', `${[...name].length} scalars`);
   }
   const edge = { ...PROFILE, phone: '1'.repeat(64), email: `${'a'.repeat(241)}@example.test` };
   assert.equal(edge.email.length, 254);
-  assert.equal((await once(json(200, { customer: edge })).client.profile(ID, CSRF)).kind, 'ok');
+  assert.equal((await once(profiled({ customer: edge })).client.profile(ID, CSRF)).kind, 'ok');
   const cases: Array<[Reply, unknown]> = [
-    [new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } }), { kind: 'unavailable' }],
-    [json(201, { customer: PROFILE }), { kind: 'unavailable' }],
+    [new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html', etag: '"3"' } }), { kind: 'unavailable' }],
+    [json(201, { customer: PROFILE }, { etag: '"3"' }), { kind: 'unavailable' }],
     [refusal(404, 'not_found'), { kind: 'not-found' }],
     [refusal(400, 'invalid_request'), { kind: 'unavailable' }],
     [refusal(401, 'unauthenticated'), { kind: 'signed-out' }],
@@ -554,9 +557,149 @@ test('CDC-15. the phone and email rules accept, refuse and normalize exactly as 
   ];
   let admitted = 0;
   for (const at of times) {
-    const answer = await once(json(200, { customer: { ...PROFILE, createdAt: at } })).client.profile(ID, CSRF);
+    const answer = await once(profiled({ customer: { ...PROFILE, createdAt: at } })).client.profile(ID, CSRF);
     assert.equal(answer.kind === 'ok', isCustomerCreatedAt(at), JSON.stringify(at)); // undefined: the key is missing
     if (answer.kind === 'ok') admitted += 1;
   }
   assert.equal(admitted, 5);
+});
+
+// M7A-CUSTOMERS-P7 — the profile's version, and the edit.
+const ROW = { id: ID, name: 'Ada King' };
+const saved = (body: unknown = { customer: ROW, version: 4, changed: true }, headers: Record<string, string> = {}): Response => json(200, body, headers);
+const EDIT = JSON.stringify({ expectedVersion: 3, name: 'Ada King', email: null });
+
+test('CDC-16. profile: the version is the one strong ETag "<n>" (n 1..2^53-1, no leading zero); missing, weak, listed, malformed, out of range or a 304 is unavailable', async () => {
+  for (const [etag, version] of [['"1"', 1], ['"3"', 3], ['"10"', 10], [`"${Number.MAX_SAFE_INTEGER}"`, Number.MAX_SAFE_INTEGER]] as const) {
+    assert.equal(versionOfEtag(etag), version, etag);
+    assert.deepEqual(await once(profiled({ customer: PROFILE }, etag)).client.profile(ID, CSRF), { kind: 'ok', customer: PROFILE, version }, etag);
+  }
+  const refused: Array<string | null> = [
+    null, '', '3', '"0"', '"03"', '"-1"', '"+3"', '"3.0"', '"1e3"', 'W/"3"', 'w/"3"', '"3", "4"', '"3","4"', ' "3"', '"3" ', '"3', '3"', "'3'", '"0x3"',
+    `"${Number.MAX_SAFE_INTEGER + 1}"`, '"9999999999999999"', '"12345678901234567"', '"abc"', `"${cp(0x663)}"`,
+  ];
+  for (const etag of refused) {
+    assert.equal(versionOfEtag(etag), null, String(etag));
+    // A header value arrives trimmed (Fetch normalizes it), and only as bytes: those two are checked on the parser alone.
+    if (etag !== null && (etag.trim() !== etag || /[^\u0000-\u00ff]/.test(etag))) continue;
+    assert.deepEqual(await once(profiled({ customer: PROFILE }, etag)).client.profile(ID, CSRF), { kind: 'unavailable' }, String(etag));
+  }
+  // Two ETag headers arrive as one list: never a version.
+  const two = new Response(JSON.stringify({ customer: PROFILE }), { status: 200, headers: [['content-type', 'application/json'], ['etag', '"3"'], ['etag', '"4"']] });
+  assert.deepEqual(await once(two).client.profile(ID, CSRF), { kind: 'unavailable' });
+  // A 304 (the client never sends a validator) is not a result.
+  assert.deepEqual(await once(new Response(null, { status: 304, headers: { etag: '"3"' } })).client.profile(ID, CSRF), { kind: 'unavailable' });
+  // No validator is ever sent.
+  const read = once(profiled({ customer: PROFILE }));
+  await read.client.profile(ID, CSRF);
+  assert.equal(read.sent[0].headers.get('if-none-match'), null);
+  assert.equal(read.sent[0].headers.get('if-match'), null);
+});
+
+test('CDC-17. update: a PATCH of the caller\'s exact bytes to this customer, with the five headers of a create; a malformed id sends nothing', async () => {
+  const r = once(saved());
+  const body = ` ${EDIT}`; // whatever the caller built, byte for byte
+  await r.client.update(ID, body, KEY, CSRF);
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].url, `${CUSTOMERS_PATH}/${ID}`);
+  assert.equal(r.sent[0].init.method, 'PATCH');
+  assert.equal(r.sent[0].init.body, body);
+  assert.deepEqual(headerNames(r.sent[0]), ['accept', 'content-type', 'idempotency-key', 'x-tmpos-csrf', 'x-tmpos-session-csrf']);
+  assert.equal(r.sent[0].headers.get('content-type'), 'application/json');
+  assert.equal(r.sent[0].headers.get('idempotency-key'), KEY);
+  assert.equal(r.sent[0].headers.get('x-tmpos-csrf'), '1');
+  assert.equal(r.sent[0].headers.get('x-tmpos-session-csrf'), CSRF);
+  assert.equal(r.sent[0].headers.get('if-match'), null);
+  assertSameOriginOnly(r.sent[0]);
+  for (const bad of ['', 'new', ID.toUpperCase(), `${ID}/`, `${ID}/profile`, `../session/logout`, `%2e%2e/${ID}`]) {
+    const none = once(saved());
+    assert.deepEqual(await none.client.update(bad, EDIT, KEY, CSRF), { kind: 'not-found' }, JSON.stringify(bad));
+    assert.equal(none.sent.length, 0, `a malformed id reached the network: ${JSON.stringify(bad)}`);
+  }
+});
+
+test('CDC-18. update: saved is an exactly-shaped 200 for this customer only; every other answer maps to one outcome, and no answer is never a refusal', async () => {
+  const ok = await once(saved()).client.update(ID, EDIT, KEY, CSRF);
+  assert.deepEqual(ok, { kind: 'saved', customer: ROW, version: 4, changed: true });
+  assert.ok(Object.isFrozen(ok) && ok.kind === 'saved' && Object.isFrozen(ok.customer));
+  assert.deepEqual(await once(saved({ customer: ROW, version: 3, changed: false })).client.update(ID, EDIT, KEY, CSRF), { kind: 'saved', customer: ROW, version: 3, changed: false });
+  assert.deepEqual(await once(saved(undefined, { 'idempotent-replayed': 'true' })).client.update(ID, EDIT, KEY, CSRF), { kind: 'saved', customer: ROW, version: 4, changed: true });
+  const undecided: unknown[] = [
+    { customer: { id: OTHER, name: 'Ada King' }, version: 4, changed: true }, // another customer
+    { customer: { id: ID.toUpperCase(), name: 'Ada King' }, version: 4, changed: true },
+    { customer: { ...ROW, phone: '+1 555 0100' }, version: 4, changed: true }, // the 200 names no contact
+    { customer: ROW, version: 4, changed: true, tenant: uuid(9) },
+    { customer: ROW, version: 4 },
+    { customer: ROW, changed: true },
+    { customer: ROW, version: 0, changed: true },
+    { customer: ROW, version: -1, changed: true },
+    { customer: ROW, version: 4.5, changed: true },
+    { customer: ROW, version: '4', changed: true },
+    { customer: ROW, version: Number.MAX_SAFE_INTEGER + 1, changed: true },
+    { customer: ROW, version: 4, changed: 'true' },
+    { customer: ROW, version: 4, changed: null },
+    { customer: { name: 'Ada King' }, version: 4, changed: true },
+    { customer: { ...ROW, name: 7 }, version: 4, changed: true },
+    [],
+    null,
+  ];
+  for (const body of undecided) assert.deepEqual(await once(saved(body)).client.update(ID, EDIT, KEY, CSRF), { kind: 'unknown', responded: true }, JSON.stringify(body));
+  const cases: Array<[Reply, unknown]> = [
+    [new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } }), { kind: 'unknown', responded: true }],
+    [json(201, { customer: ROW, version: 4, changed: true }), { kind: 'unknown', responded: true }],
+    [new Response(null, { status: 204 }), { kind: 'unknown', responded: true }],
+    [refusal(409, 'write_conflict'), { kind: 'conflict' }],
+    [refusal(409, 'request_in_progress'), { kind: 'in-progress' }],
+    [refusal(409, 'conflict'), { kind: 'unknown', responded: true }],
+    [new Response('conflict', { status: 409 }), { kind: 'unknown', responded: true }],
+    [refusal(404, 'not_found'), { kind: 'not-found' }],
+    [refusal(400, 'invalid_request'), { kind: 'invalid' }],
+    [refusal(413, 'content_too_large'), { kind: 'invalid' }],
+    [refusal(415, 'unsupported_media_type'), { kind: 'invalid' }],
+    [refusal(401, 'unauthenticated'), { kind: 'signed-out' }],
+    [refusal(403, 'forbidden'), { kind: 'denied' }],
+    [refusal(422, 'idempotency_key_reused'), { kind: 'key-reused' }],
+    [refusal(429, 'rate_limited', { 'retry-after': '12' }), { kind: 'rate-limited', retryAfterSeconds: 12 }],
+    [refusal(429, 'rate_limited'), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    [refusal(500, 'internal_error'), { kind: 'unknown', responded: true }],
+    [refusal(503, 'service_unavailable'), { kind: 'unknown', responded: true }],
+    [refusal(412, 'precondition_failed'), { kind: 'unknown', responded: true }],
+    [new TypeError('network'), { kind: 'unknown', responded: false }],
+  ];
+  for (const [reply, expected] of cases) assert.deepEqual(await once(reply).client.update(ID, EDIT, KEY, CSRF), expected);
+  assert.deepEqual(await hanging(5).client.update(ID, EDIT, KEY, CSRF), { kind: 'unknown', responded: false });
+  const aborted = new AbortController();
+  aborted.abort();
+  const early = once(saved());
+  assert.deepEqual(await early.client.update(ID, EDIT, KEY, CSRF, aborted.signal), { kind: 'unknown', responded: false });
+  assert.equal(early.sent.length, 0);
+});
+
+test('CDC-19. the edit body: expectedVersion, name (always), then only the contacts that differ from the profile — a blank one clears (null); invalid fields send nothing; a form equal to the profile is unchanged', () => {
+  const base = { id: ID, name: 'Ada Lovelace', phone: '+1 555 0100', email: 'ada@example.test', createdAt: null };
+  const of = (name: string, phone: string, email: string) => customerEditBody(base, 3, { name, phone, email });
+  assert.deepEqual(of('Ada Lovelace', '+1 555 0100', 'ada@example.test'), { kind: 'unchanged' });
+  assert.deepEqual(of(' Ada Lovelace ', ' +1 555 0100 ', '  ada@example.test'), { kind: 'unchanged' }); // as normalized
+  assert.deepEqual(of('Ada King', '+1 555 0100', 'ada@example.test'), { kind: 'ok', body: '{"expectedVersion":3,"name":"Ada King"}', name: 'Ada King' });
+  assert.deepEqual(of('Ada Lovelace', '', 'ada@example.test'), { kind: 'ok', body: '{"expectedVersion":3,"name":"Ada Lovelace","phone":null}', name: 'Ada Lovelace' });
+  assert.deepEqual(of(' Ada King ', ' +1 555 0199 ', '   '), {
+    kind: 'ok', body: '{"expectedVersion":3,"name":"Ada King","phone":"+1 555 0199","email":null}', name: 'Ada King',
+  });
+  assert.deepEqual(of('Ada Lovelace', '+1 555 0100', 'ada.k@example.test'), {
+    kind: 'ok', body: '{"expectedVersion":3,"name":"Ada Lovelace","email":"ada.k@example.test"}', name: 'Ada Lovelace',
+  });
+  assert.deepEqual(of('   ', 'no digits', 'a@@b'), { kind: 'invalid', name: true, phone: true, email: true });
+  assert.deepEqual(of('Ada', '1'.repeat(65), 'ada@example.test'), { kind: 'invalid', name: false, phone: true, email: false });
+  assert.deepEqual(of(`Ada${cp(0x202e)}`, '', ''), { kind: 'invalid', name: true, phone: false, email: false });
+  // A customer with no contacts: a blank field is no change, a value is set.
+  const legacy = { ...base, phone: null, email: null };
+  assert.deepEqual(customerEditBody(legacy, 1, { name: 'Ada Lovelace', phone: ' ', email: '' }), { kind: 'unchanged' });
+  assert.deepEqual(customerEditBody(legacy, 1, { name: 'Ada Lovelace', phone: '+1 555 0100', email: '' }), {
+    kind: 'ok', body: '{"expectedVersion":1,"name":"Ada Lovelace","phone":"+1 555 0100"}', name: 'Ada Lovelace',
+  });
+  // The body is built once: the same inputs give the same bytes, and the keys are in the one order.
+  const built = of('Ada King', '', 'ada.k@example.test');
+  assert.ok(built.kind === 'ok');
+  assert.equal(built.body, (of('Ada King', '', 'ada.k@example.test') as { body: string }).body);
+  assert.deepEqual(Object.keys(JSON.parse(built.body) as object), ['expectedVersion', 'name', 'phone', 'email']);
 });

@@ -62,16 +62,42 @@
 //     token is a new generation, so an unresolved create is detached, never re-sent. A Reconnect already pressed is never
 //     cancelled by an `ended` that a plain caller reports meanwhile (the other view's read, a focus check out before the
 //     click): that view waits for the Reconnect's own answer. An ended session also removes a "Saved on the server" notice.
+//   - EDIT (M7A-CUSTOMERS-P7, PATCH /api/v1/customers/{id}). "Edit" is offered only on a profile this generation read
+//     and confirmed (never a last-known one) that came with its row version, and only while `canEdit` (the local role
+//     state's hint that Customers is at Edit or above) — the server's 403 is the answer that counts. The form starts
+//     from that profile; its rules, texts and focus are the create form's. The body is built ONCE per attempt
+//     (customersClient's `customerEditBody`: expectedVersion, name, and only the contacts that differ — a blank one is a
+//     clear) and sent under a NEW key, only once `connect()` (plain: never a sign-in) has answered this generation's own
+//     token. "Saved" ONLY on a 200 naming this customer and the name sent at the expected version (+1 when changed); then
+//     the list row takes the confirmed name and the profile is read again — the values shown before the edit are never
+//     shown as last known, and a refresh that fails says so without unsaying the save. A 409 write_conflict keeps the
+//     draft and offers "Review latest" (a read, nothing sent); only a later deliberate Save sends, built from the reviewed
+//     version under a new key. Nothing is ever merged or sent on its own.
+//   - An undecided edit (a 5xx, an unexpected answer, no answer) is held per user in its own hold store (in memory only:
+//     the target id, the exact body, its expected version, the normalized name, the key, the token it was sent with, a
+//     monotonic send time). "Check again" re-sends the SAME bytes under the SAME key to the SAME customer, only on a
+//     click, only under that token and inside the create's 23-hour window; past it the body is emptied and only
+//     "Discard" is left. A matching profile is never taken as proof. A held edit, in any state, is dropped (never
+//     re-sent) as soon as another token is seen — a tenant switch, a Reconnect — or the session ends, and the page says
+//     the change could not be confirmed; a user change or a sign-out drops the previous user's held edit too.
+//   - A tenant switch (a new generation), a user change, a route change and a refusal clear the form, its draft and the
+//     edit's notices; an answer that arrives for a dropped attempt changes nothing. A 403 on the edit closes the form.
+//     Cancel sends nothing, also while Save is still checking the session. "Review latest" keeps only the fields the
+//     user touched and takes every other one from the reviewed profile, so a save never reverts a field it did not
+//     change. Notices go to two fixed live regions (a polite status, an assertive alert); focus moves to Edit after
+//     Cancel or Discard, to "Review latest" on a conflict, and to the status after a confirmed save.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import { Link, useParams } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import {
   CONTACT_INVALID, customers as customersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName, normalizeCustomerPhone,
-  type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient,
+  customerEditBody, type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient, type UpdateResult,
 } from './customersClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
+import { auth } from '../firebase';
 
 export const DIRECTORY_PATH = '/customers/directory';
 /** No "Check again" from here on: a conservative client cutoff under the server's 24-hour key retention. */
@@ -93,6 +119,54 @@ export const NOT_RECORDED_TEXT = 'Not recorded';
 /** A creation time (`YYYY-MM-DDTHH:mm:ss.sssZ`, as the client admits it) as `YYYY-MM-DD HH:mm UTC`. */
 export const createdText = (iso: string): string => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 export const unresolvedText = (name: string): string => `Not confirmed yet: "${name}". The server may have saved it.`;
+export const EDIT_SAVED_TEXT = 'Saved';
+export const EDIT_SAVED_UNREFRESHED_TEXT = 'Saved, but the latest details could not be loaded.';
+export const EDIT_NO_CHANGES_TEXT = 'No changes to save.';
+export const EDIT_CONFLICT_TEXT = 'Someone else changed this customer. Review the latest details, then save again.';
+export const EDIT_REVIEWED_TEXT = 'The latest details are loaded. Your changes are still in the form: save again to apply them.';
+export const EDIT_UNKNOWN_TEXT = "We couldn't confirm whether your changes were saved.";
+export const EDIT_DENIED_TEXT = "You can't edit this customer.";
+export const EDIT_DISCARD_WARNING_TEXT = 'Discard does not cancel the request: the change may still be applied on the server.';
+const EDIT_TEXT = Object.freeze({
+  notFound: 'This customer is no longer available in this store. Nothing was changed.',
+  invalid: 'The server did not accept these customer details. Nothing was changed.',
+  keyReused: 'The server rejected this request. Nothing was changed.',
+  ended: 'Not saved: your server session ended. Reconnect to continue.',
+  endedHeld: 'Your server session ended before a change could be confirmed. After you reconnect, check the customer\'s details.',
+  connectionHeld: 'The store connection changed before a change could be confirmed. Check the customer\'s details.',
+  connectionRefused: 'Not saved: the store connection changed. Nothing was changed.',
+  savedThenEnded: 'Your changes were saved, but your server session then ended. Reconnect to see the latest details.',
+  savedThenChanged: 'Your changes were saved, but the store connection then changed.',
+  tooOld: 'Not checked: it was sent too long ago.',
+  conflictClosed: 'Your changes were not saved: someone else changed this customer first. The latest details are shown: edit again to change them.',
+  saving: 'Saving your changes…',
+  checking: 'Checking your changes with the server…',
+  deniedHeld: "You can't edit this customer. Whether the earlier change was saved could not be confirmed.",
+  reviewFailed: 'The latest details could not be loaded. Try again.',
+});
+/** What became of an edit, said for a customer that is not the one shown (named by the name that was sent). */
+export type EditOutcomeKind = 'saved' | 'conflict' | 'gone' | 'denied' | 'deniedHeld' | 'refused' | 'unconfirmed' | 'undecided';
+export function editNamedText(kind: EditOutcomeKind, name: string): string {
+  switch (kind) {
+    case 'saved': return `Your changes to "${name}" were saved.`;
+    case 'conflict': return `Your changes to "${name}" were not saved: someone else changed that customer first. Open it to review the latest details.`;
+    case 'gone': return `Your changes to "${name}" were not saved: that customer is no longer available in this store.`;
+    case 'denied': return `Your changes to "${name}" were not saved: you can't edit that customer.`;
+    case 'deniedHeld': return `Your changes to "${name}" could not be confirmed: you can't edit that customer.`;
+    case 'refused': return `Your changes to "${name}" were not saved.`;
+    case 'undecided': return `Your changes to "${name}" could not be confirmed. Check them again, or check the customer's details.`;
+    default: return `Your changes to "${name}" could not be confirmed. Check the customer's details.`;
+  }
+}
+/**
+ * A confirmed save's later news, said by name on another page: only that the session then ended (shown under that same
+ * ended session; a Reconnect drops it). Every notice that follows a CONNECTION change stays unnamed — "saved, then the
+ * connection changed", a held edit dropped by a changed connection or an ended session, a save refused by either: after
+ * a connection change (possibly to another tenant) no customer name from before it is ever shown.
+ */
+const editEventText = Object.freeze({
+  savedThenEnded: (name: string) => `Your changes to "${name}" were saved, but your server session then ended. Reconnect to see the latest details.`,
+});
 const waitText = (seconds: number): string => `Too many requests. Wait ${seconds} second${seconds === 1 ? '' : 's'}, then try again.`;
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
 
@@ -128,6 +202,19 @@ function reasonOf(answer: CreateResult, waitSeconds?: number): string {
     case 'absent': return 'The store server does not offer this check here.';
     case 'created': return 'The server answered with a different customer name.';
     default: return answer.responded ? 'The server answered, but not with a result.' : 'No answer from the server.';
+  }
+}
+
+/** Why a check left an edit unresolved. Never "not saved": only a validated 200 for the same key decides it. */
+function editReasonOf(answer: UpdateResult, waitSeconds?: number): string {
+  switch (answer.kind) {
+    case 'in-progress': return 'The server is still working on it. Check again in a moment.';
+    case 'rate-limited': return `Too many requests. ${waitHint(waitSeconds ?? answer.retryAfterSeconds)}`;
+    case 'key-reused': return 'The server no longer accepts this as the same request.';
+    case 'invalid': return 'The server did not accept this check.';
+    case 'saved': return 'The server answered with different details.';
+    case 'unknown': return answer.responded ? 'The server answered, but not with a result.' : 'No answer from the server.';
+    default: return 'The server answered, but not with a result.';
   }
 }
 
@@ -253,6 +340,136 @@ export function createHoldStore(): HoldStore {
 /** The shop's one hold store: it outlives the page across in-app navigation, and ends with the page load. */
 const holdStore: HoldStore = createHoldStore();
 
+/** An edit whose outcome is not known yet (M7A-CUSTOMERS-P7): exactly what "Check again" sends again, and where. */
+export interface HeldEdit {
+  readonly key: string;
+  /** The customer the PATCH names. */
+  readonly customerId: string;
+  /** The exact request body string, never rebuilt; '' once it can never be sent again (past the check cutoff). */
+  readonly body: string;
+  /** The version the body expects (its `expectedVersion`). */
+  readonly expectedVersion: number;
+  /** The normalized name that was sent. */
+  readonly name: string;
+  /** The session token it was sent with: a held edit is never sent under another (it is dropped instead). */
+  readonly csrf: string;
+  readonly sentAt: number;
+  readonly state: 'sending' | 'unresolved' | 'checking';
+}
+
+/** At most one held edit per user, in memory only; separate from the create's store. */
+export interface EditHoldStore {
+  get(uid: string): HeldEdit | undefined;
+  /** Hold `attempt` for `uid`; false (and nothing held) when that user already has one. */
+  put(uid: string, attempt: HeldEdit): boolean;
+  /** Change the attempt under `key`; false when the store's attempt is another. */
+  change(uid: string, key: string, next: Partial<Pick<HeldEdit, 'state' | 'body'>>): boolean;
+  remove(uid: string, key: string): boolean;
+  /** Remove the attempt under `key` and record what became of it, for the next page of that user (one per user). */
+  finish(uid: string, key: string, outcome: EditOutcome): boolean;
+  /** Record what a page that has gone learned of the attempt under `key`, keeping the attempt held (an undecided answer). */
+  announce(uid: string, key: string, outcome: EditOutcome): boolean;
+  /** The recorded outcome, forgotten as it is returned. */
+  takeOutcome(uid: string): EditOutcome | undefined;
+  /** Drop every other user's held edit and outcome (a user change or a sign-out): nothing is kept for anyone else. */
+  keepOnly(uid: string | null): void;
+  subscribe(listener: () => void): () => void;
+}
+
+/**
+ * An edit that settled after its page had gone: no body, no contact. `csrf` is the token it was sent under: a page shows
+ * it only under that same token (the same session, so the same tenant), as a create's outcome; otherwise it is dropped.
+ */
+export interface EditOutcome { readonly kind: EditOutcomeKind; readonly customerId: string; readonly name: string; readonly csrf: string }
+
+export function createEditHoldStore(): EditHoldStore {
+  const held = new Map<string, HeldEdit>();
+  const outcomes = new Map<string, EditOutcome>();
+  const listeners = new Set<() => void>();
+  const tell = (): void => { for (const listener of [...listeners]) listener(); };
+  return Object.freeze({
+    get: (uid: string) => held.get(uid),
+    put(uid: string, attempt: HeldEdit): boolean {
+      if (held.has(uid)) return false;
+      held.set(uid, Object.freeze({ ...attempt }));
+      tell();
+      return true;
+    },
+    change(uid: string, key: string, next: Partial<Pick<HeldEdit, 'state' | 'body'>>): boolean {
+      const current = held.get(uid);
+      if (current === undefined || current.key !== key) return false;
+      held.set(uid, Object.freeze({ ...current, ...next }));
+      tell();
+      return true;
+    },
+    remove(uid: string, key: string): boolean {
+      if (held.get(uid)?.key !== key) return false;
+      held.delete(uid);
+      tell();
+      return true;
+    },
+    finish(uid: string, key: string, outcome: EditOutcome): boolean {
+      if (held.get(uid)?.key !== key) return false;
+      held.delete(uid);
+      outcomes.set(uid, Object.freeze({ ...outcome }));
+      tell();
+      return true;
+    },
+    announce(uid: string, key: string, outcome: EditOutcome): boolean {
+      if (held.get(uid)?.key !== key) return false;
+      outcomes.set(uid, Object.freeze({ ...outcome }));
+      tell();
+      return true;
+    },
+    takeOutcome(uid: string): EditOutcome | undefined {
+      const outcome = outcomes.get(uid);
+      outcomes.delete(uid);
+      return outcome;
+    },
+    keepOnly(uid: string | null): void {
+      for (const who of [...outcomes.keys()]) if (who !== uid) outcomes.delete(who);
+      const others = [...held.keys()].filter((who) => who !== uid);
+      for (const who of others) held.delete(who);
+      if (others.length > 0) tell();
+    },
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  });
+}
+
+/** The shop's one edit hold store, like `holdStore`. */
+const editHoldStore: EditHoldStore = createEditHoldStore();
+
+/**
+ * Tie a store to the signed-in user: on a sign-out or another user, every other user's held edit and outcome is dropped
+ * — whether or not a directory page is mounted. The same user keeps them (in-app navigation). Returns the unbinding.
+ */
+export function bindEditHoldsToAuth(store: EditHoldStore, watch: (listener: (uid: string | null) => void) => () => void): () => void {
+  return watch((uid) => store.keepOnly(uid));
+}
+let editHoldStoreBound = false;
+/** The shop's store follows the app's own sign-in state (the provider the access context listens to). */
+function bindShopEditHolds(): void {
+  if (editHoldStoreBound) return;
+  editHoldStoreBound = true;
+  bindEditHoldsToAuth(editHoldStore, (listener) => onAuthStateChanged(auth, (user) => listener(user?.uid ?? null)));
+}
+
+/** What React sees of a held edit: no token, no body. */
+interface HeldEditView { readonly key: string; readonly name: string; readonly state: HeldEdit['state']; readonly sentAt: number }
+const editViews = new WeakMap<HeldEdit, HeldEditView>();
+function editViewOf(held: HeldEdit | undefined): HeldEditView | undefined {
+  if (held === undefined) return undefined;
+  let view = editViews.get(held);
+  if (view === undefined) {
+    view = Object.freeze({ key: held.key, name: held.name, state: held.state, sentAt: held.sentAt });
+    editViews.set(held, view);
+  }
+  return view;
+}
+
 type ListPhase = 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
 type DetailPhase = ListPhase | 'not-found';
 interface ListState {
@@ -267,7 +484,12 @@ interface DetailState {
   readonly phase: DetailPhase;
   readonly text: string;
   readonly customer: CustomerProfile | null; // this id's own answer (its profile) in this generation
+  readonly version?: number; // that answer's row version: only on a profile read and confirmed now ('ready')
 }
+/** An edit notice: `customerId` binds it to a customer (its own `text` there, `named` anywhere else). */
+interface EditNotice { readonly alert: boolean; readonly text: string; readonly customerId?: string; readonly named?: string }
+/** The open edit form: the customer, and the profile and version it was loaded (or last reviewed) from. */
+interface EditForm { readonly id: string; readonly base: CustomerProfile; readonly version: number; readonly conflict: boolean }
 /** A read or a session that did not answer with rows: the phase it puts the page in and what it says. */
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
@@ -305,17 +527,20 @@ export interface ServerCustomerDirectoryProps {
   readonly routeId: string | null;
   /** The local role state's hint that this user may add customers. The server decides. */
   readonly canCreate: boolean;
+  /** The local role state's hint that this user may edit customers (Customers at Edit or above). The server decides. */
+  readonly canEdit?: boolean;
   readonly session?: TenantSessionClient;
   readonly customers?: CustomersClient;
   readonly identity?: Pick<ShopIdentity, 'idToken'>;
   readonly holds?: HoldStore;
+  readonly editHolds?: EditHoldStore;
   readonly newKey?: () => string;
   /** A monotonic clock in milliseconds (default `performance.now()`). */
   readonly now?: () => number;
 }
 
 /** The routed page: the address's id, the signed-in user and the local create hint; everything else is the server's. */
-export function CustomerDirectoryPage(inject: Omit<ServerCustomerDirectoryProps, 'uid' | 'routeId' | 'canCreate'>) {
+export function CustomerDirectoryPage(inject: Omit<ServerCustomerDirectoryProps, 'uid' | 'routeId' | 'canCreate' | 'canEdit'>) {
   const { id } = useParams();
   const access = useAccess();
   return (
@@ -324,6 +549,7 @@ export function CustomerDirectoryPage(inject: Omit<ServerCustomerDirectoryProps,
       uid={access.session?.user.id ?? null}
       routeId={id ?? null}
       canCreate={access.hasPermission('customers')}
+      canEdit={access.checkPermission('customers', 'edit')}
     />
   );
 }
@@ -337,8 +563,8 @@ export default function ServerCustomerDirectory(props: ServerCustomerDirectoryPr
 }
 
 function UserPage({
-  uid, routeId, canCreate, session = tenantSession, customers = customersClient, identity = firebaseShopIdentity,
-  holds = holdStore, newKey, now,
+  uid, routeId, canCreate, canEdit = false, session = tenantSession, customers = customersClient, identity = firebaseShopIdentity,
+  holds = holdStore, editHolds = editHoldStore, newKey, now,
 }: ServerCustomerDirectoryProps) {
   const [list, setList] = useState<ListState>(LIST_INITIAL);
   const [listBusy, setListBusy] = useState(false);
@@ -353,6 +579,14 @@ function UserPage({
   const [holdNote, setHoldNote] = useState<{ readonly key: string; readonly text: string } | null>(null);
   const [, setTick] = useState(0);
   const attempt = useSyncExternalStore(holds.subscribe, () => (uid === null ? undefined : viewOf(holds.get(uid)))); // token-free
+  const [edit, setEdit] = useState<EditForm | null>(null);
+  const [editDraft, setEditDraft] = useState<Fields>(NO_FIELDS);
+  const [editErrors, setEditErrors] = useState<Fields>(NO_FIELDS);
+  // A notice; `customerId` binds it to a customer: shown as `text` there, as `named` anywhere else.
+  const [editStatus, setEditStatus] = useState<EditNotice | null>(null);
+  const [editNote, setEditNote] = useState<{ readonly key: string; readonly text: string } | null>(null);
+  const [editing, setEditing] = useState(false); // a save, a check or a review is out
+  const editHeld = useSyncExternalStore(editHolds.subscribe, () => (uid === null ? undefined : editViewOf(editHolds.get(uid)))); // token-free
 
   const gen = useRef<{ n: number; csrf: string | null }>({ n: 0, csrf: null }); // the token never leaves refs and the hold store
   const alive = useRef(false);
@@ -380,7 +614,25 @@ function UserPage({
   const phoneInput = useRef<HTMLInputElement | null>(null);
   const emailInput = useRef<HTMLInputElement | null>(null);
   const focusSaved = useRef(false);
-  routeRef.current = routeId;
+  const editRef = useRef<EditForm | null>(null);
+  const editBusy = useRef(false);
+  // Bumped when the context an edit request belongs to is gone (a new generation, an ended session): that request's
+  // own end then changes nothing, and the new context's controls are free at once.
+  const editEpoch = useRef(0);
+  const endedSeen = useRef(0); // counts confirmed session ends (clearBoth): a refresh after a save learns of one from it
+  const cancelledForm = useRef<EditForm | null>(null); // the form an explicit Cancel closed (navigation is not a Cancel)
+  const editStatusRef = useRef<EditNotice | null>(null); // the notice as last put (the state may be mid-announcement)
+  const announceSeq = useRef(0);
+  const editName = useRef<HTMLInputElement | null>(null);
+  const editPhone = useRef<HTMLInputElement | null>(null);
+  const editEmail = useRef<HTMLInputElement | null>(null);
+  const focusTarget = useRef<'name' | 'edit' | 'review' | 'status' | 'alert' | 'hold' | 'title' | null>(null);
+  const editButton = useRef<HTMLButtonElement | null>(null);
+  const reviewButton = useRef<HTMLButtonElement | null>(null);
+  const editPolite = useRef<HTMLParagraphElement | null>(null);
+  const editAlertRef = useRef<HTMLParagraphElement | null>(null);
+  const editForm = useRef<HTMLFormElement | null>(null);
+  const editCard = useRef<HTMLDivElement | null>(null);
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
@@ -389,6 +641,33 @@ function UserPage({
     session.ensure(who, () => identity.idToken(who), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
   const putList = (next: ListState): void => { listRef.current = next; setList(next); };
   const putDetail = (next: DetailState): void => { detailRef.current = next; setDetail(next); };
+  const putEdit = (next: EditForm | null): void => { editRef.current = next; setEdit(next); };
+  /** Close the edit form: its draft and field errors go with it. */
+  const closeEdit = (): void => { putEdit(null); setEditDraft(NO_FIELDS); setEditErrors(NO_FIELDS); };
+  /**
+   * Put an edit notice. The same notice again (same region, same words) is cleared first and set on the next task, so a
+   * screen reader announces it again; a later notice always wins over a pending one.
+   */
+  const putEditStatus = (next: EditNotice | null): void => {
+    const seq = ++announceSeq.current;
+    const was = editStatusRef.current;
+    editStatusRef.current = next;
+    if (next !== null && was !== null && was.alert === next.alert && was.text === next.text) {
+      setEditStatus(null);
+      setTimeout(() => { if (seq === announceSeq.current && alive.current) setEditStatus(next); }, 0);
+      return;
+    }
+    setEditStatus(next);
+  };
+  /** The edit controls belong to a new context now: an older request still out no longer holds them. */
+  const freeEdit = (): void => { editEpoch.current += 1; editBusy.current = false; setEditing(false); };
+  /** Start an edit request's busy span; the returned function ends it, unless its context has been replaced meanwhile. */
+  const busyEdit = (): (() => void) => {
+    const epoch = editEpoch.current;
+    editBusy.current = true;
+    setEditing(true);
+    return () => { if (epoch === editEpoch.current) { editBusy.current = false; setEditing(false); } };
+  };
 
   const clearWait = (): void => {
     if (waitTimer.current !== null) clearTimeout(waitTimer.current);
@@ -427,7 +706,20 @@ function UserPage({
   const detach = (who: string, csrf: string): void => {
     const held = holds.get(who);
     if (held !== undefined && held.csrf !== null && held.csrf !== csrf) holds.change(who, held.key, { csrf: null });
+    // A held edit is never sent under another token: it is dropped, with its bytes, and the page says so.
+    const heldEdit = editHolds.get(who);
+    if (heldEdit !== undefined && heldEdit.csrf !== csrf) dropHeldEdit(who, heldEdit.key, 'connectionHeld');
   };
+  /** Drop a held edit that can never be checked again, and say (a page-level notice, unnamed) that its outcome is not known. */
+  function dropHeldEdit(who: string, key: string, event: 'connectionHeld' | 'endedHeld'): void {
+    if (!editHolds.remove(who, key)) return;
+    setEditNote(null);
+    putEditStatus({ alert: true, text: EDIT_TEXT[event] });
+  }
+  /** A confirmed save's later news: its own text on that customer's page, by name anywhere else. */
+  function savedNews(event: keyof typeof editEventText, held: Pick<HeldEdit, 'customerId' | 'name'>): void {
+    putEditStatus({ alert: true, text: EDIT_TEXT[event], customerId: held.customerId, named: editEventText[event](held.name) });
+  }
 
   /**
    * Take a confirmed session token. The first one fixes this generation; the same one changes nothing; a different one
@@ -439,10 +731,12 @@ function UserPage({
       gen.current.csrf = csrf;
       detach(who, csrf);
       consumeOutcome();
+      consumeEditOutcome();
       return false;
     }
     begin(csrf, false);
     consumeOutcome();
+    consumeEditOutcome();
     return true;
   }
 
@@ -466,11 +760,22 @@ function UserPage({
       if (id === null) putDetail(DETAIL_NONE); // no customer is shown: nothing to stamp
       else if (isCustomerId(id)) putDetail({ id, phase: failure.kind as 'denied' | 'signed-out', text: failure.text, customer: null });
     }
+    // The profile is gone, and with it the edit form and its draft (focus that was in it goes to the heading).
+    if (editRef.current !== null && owningFocus()) focusTarget.current = 'title';
+    closeEdit();
     // Signed out: no notice of a save or of a settled create stays either (they name a customer of a session that is
     // gone). The hold note and every other create status stay: Add, Check again and a refused send write theirs.
     if (ended) {
       setSaved(null);
       setCreateStatus((status) => (status?.named === true ? null : status));
+      // A held edit, in any state, can never be checked again (its token has ended): dropped, and said so. An answer still
+      // out for it then finds nothing to settle.
+      const heldEdit = uid === null ? undefined : editHolds.get(uid);
+      endedSeen.current += 1;
+      freeEdit();
+      setEditNote(null);
+      putEditStatus(null);
+      if (uid !== null && heldEdit !== undefined) dropHeldEdit(uid, heldEdit.key, 'endedHeld');
     }
   }
   const isRefusal = (failure: Failure): boolean => failure.kind === 'denied' || failure.kind === 'signed-out';
@@ -620,7 +925,7 @@ function UserPage({
     if (adopt(uid, s.csrf)) return;
     const answer = await customers.profile(id, s.csrf, controller.signal);
     if (stale()) return;
-    if (answer.kind === 'ok') return putDetail({ id, phase: 'ready', text: '', customer: answer.customer });
+    if (answer.kind === 'ok') return putDetail({ id, phase: 'ready', text: '', customer: answer.customer, version: answer.version });
     if (answer.kind === 'not-found') return putDetail({ id, phase: 'not-found', text: NOT_FOUND_TEXT, customer: null });
     if (answer.kind === 'denied') {
       const again = await recheck(uid);
@@ -645,6 +950,10 @@ function UserPage({
     setSaved(null);
     setCreateStatus(null);
     setHoldNote(null);
+    closeEdit();
+    freeEdit();
+    putEditStatus(null);
+    setEditNote(null);
     setConnectionChanged(!user);
     if (uid === null) return putList({ ...LIST_INITIAL, phase: 'signed-out', text: TEXT.noIdentity });
     putList(LIST_INITIAL);
@@ -660,14 +969,18 @@ function UserPage({
   }, [uid]);
 
   useEffect(() => {
+    if (editHolds === editHoldStore) bindShopEditHolds();
+    editHolds.keepOnly(uid); // a user change or a sign-out: the previous user's held edit goes
     begin(null, true);
     // A changed session is noticed without a click: reads only, one at a time, and never while a create is out. It never
     // signs in: an ended session stays ended (`ended`), and only a Reconnect click logs in again.
     const reconnect = (): void => {
       if (uid === null || document.visibilityState === 'hidden' || gen.current.csrf === null) return;
-      if (addRef.current || checkRef.current || waitRef.current) return;
+      if (addRef.current || checkRef.current || editBusy.current || waitRef.current) return;
       const held = holds.get(uid);
       if (held !== undefined && held.state !== 'unresolved') return;
+      const heldEdit = editHolds.get(uid);
+      if (heldEdit !== undefined && heldEdit.state !== 'unresolved') return;
       const mine = gen.current.n;
       void connect(uid).then((s) => {
         if (mine !== gen.current.n) return;
@@ -680,11 +993,14 @@ function UserPage({
     window.addEventListener('focus', reconnect);
     document.addEventListener('visibilitychange', reconnect);
     const unsubscribe = holds.subscribe(consumeOutcome); // an outcome that settles while this page is mounted
+    const unsubscribeEdits = editHolds.subscribe(consumeEditOutcome); // the same for an edit an older page sent
     return () => {
       unsubscribe();
+      unsubscribeEdits();
       window.removeEventListener('focus', reconnect);
       document.removeEventListener('visibilitychange', reconnect);
       gen.current = { n: gen.current.n + 1, csrf: null };
+      editEpoch.current += 1; // an edit request still out no longer touches this page's state when it ends
       reloadAfterWait.current = null;
       listCtl.current?.abort();
       detailCtl.current?.abort();
@@ -698,6 +1014,21 @@ function UserPage({
   // The route decides what the detail shows: another id is another read, and leaving the detail cancels its read. The
   // answer last shown stays in memory (never on the list) so a return to the SAME id in this generation can fall back
   // to it as last known; another id or a new generation forgets it.
+  // The route is taken in the layout phase, together with the edit clear: an answer that settles after this commit sees
+  // the new route (and names its notice accordingly), and no later clear erases it. An edit belongs to the customer it
+  // was opened on: another route closes it (an attempt already out still settles).
+  const clearedRoute = useRef<string | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    const from = clearedRoute.current;
+    clearedRoute.current = routeId;
+    routeRef.current = routeId;
+    if (from !== undefined && from !== routeId) {
+      closeEdit();
+      putEditStatus(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeId]);
+
   useEffect(() => {
     const from = lastRoute.current;
     lastRoute.current = routeId;
@@ -713,6 +1044,16 @@ function UserPage({
   }, [routeId, uid]);
 
   useEffect(() => {
+    const target = focusTarget.current;
+    if (target !== null) {
+      const element = target === 'name' ? editName.current : target === 'review' ? reviewButton.current
+        : target === 'edit' ? editButton.current ?? editPolite.current : target === 'alert' ? editAlertRef.current
+          : target === 'hold' ? editCard.current : target === 'title' ? detailTitle.current ?? listTitle.current : editPolite.current;
+      if (element !== null) {
+        focusTarget.current = null;
+        element.focus();
+      }
+    }
     if (!focusSaved.current) return;
     focusSaved.current = false;
     savedNotice.current?.focus();
@@ -843,6 +1184,380 @@ function UserPage({
     void loadList('first');
   }
 
+  /** Whether focus is in the edit form or the held-edit card, or nowhere: only then may an edit outcome move it. */
+  function owningFocus(): boolean {
+    const active = document.activeElement;
+    return active === null || active === document.body || (editForm.current?.contains(active) ?? false) || (editCard.current?.contains(active) ?? false);
+  }
+  /** A notice about `held`'s customer: its own text on that customer's page, the named text anywhere else. */
+  function noticeFor(kind: EditOutcomeKind, held: Pick<HeldEdit, 'customerId' | 'name'>, text: string): void {
+    putEditStatus({ alert: kind !== 'saved', text, customerId: held.customerId, named: editNamedText(kind, held.name) });
+  }
+  /**
+   * What a page shows of an edit that settled while its own page was gone — once this page holds a session token, and
+   * only under the token it was sent with (another session, so possibly another tenant: dropped, with no text).
+   */
+  function consumeEditOutcome(): void {
+    if (uid === null || !alive.current || gen.current.csrf === null) return;
+    const outcome = editHolds.takeOutcome(uid);
+    if (outcome === undefined || outcome.csrf !== gen.current.csrf) return;
+    const id = outcome.customerId;
+    const own: Partial<Record<EditOutcomeKind, string>> = {
+      saved: EDIT_SAVED_TEXT, conflict: EDIT_TEXT.conflictClosed, gone: EDIT_TEXT.notFound, denied: EDIT_DENIED_TEXT, deniedHeld: EDIT_TEXT.deniedHeld,
+      undecided: EDIT_UNKNOWN_TEXT,
+    };
+    noticeFor(outcome.kind, outcome, own[outcome.kind] ?? editNamedText(outcome.kind, outcome.name));
+    if (outcome.kind === 'saved') {
+      const was = listRef.current;
+      if (was.rows.some((row) => row.id === id)) putList({ ...was, rows: was.rows.map((row) => (row.id === id ? { id, name: outcome.name } : row)) });
+    }
+    if (outcome.kind === 'saved' || outcome.kind === 'conflict' || outcome.kind === 'gone') {
+      // What this page shows of that customer may be from before: read again (or forgotten).
+      if (routeRef.current === id) void (outcome.kind === 'saved' ? refreshAfterSave(id, outcome.name) : loadDetail(id));
+      else if (detailRef.current.id === id) putDetail(DETAIL_NONE);
+    }
+  }
+  /** The send itself: a client that throws is an attempt with no answer. */
+  const sendEdit = (id: string, body: string, key: string, csrf: string): Promise<UpdateResult> =>
+    customers.update(id, body, key, csrf).catch((): UpdateResult => Object.freeze({ kind: 'unknown', responded: false }));
+
+  /** Open the form on the profile this generation confirmed, at its version. */
+  function openEdit(): void {
+    const d = detailRef.current;
+    if (!canEdit || uid === null || d.id === null || d.id !== routeRef.current || d.phase !== 'ready' || d.customer === null || d.version === undefined) return;
+    if (editHolds.get(uid) !== undefined) return;
+    putEdit({ id: d.id, base: d.customer, version: d.version, conflict: false });
+    setEditDraft({ name: d.customer.name, phone: d.customer.phone ?? '', email: d.customer.email ?? '' });
+    setEditErrors(NO_FIELDS);
+    putEditStatus(null);
+    setEditNote(null);
+    focusTarget.current = 'name';
+  }
+
+  /** Cancel: the form and its draft go; nothing is sent. An attempt already out still settles on its own answer. */
+  function cancelEdit(): void {
+    const form = editRef.current;
+    cancelledForm.current = form;
+    closeEdit();
+    // A conflicted form shows a version somebody else has moved on from: read the profile again, so Edit starts current.
+    if (form !== null && form.conflict && routeRef.current === form.id) void loadDetail(form.id);
+    putEditStatus(null);
+    focusTarget.current = 'edit';
+  }
+
+  async function saveEdit(): Promise<void> {
+    const form = editRef.current;
+    if (uid === null || editBusy.current || form === null || form.conflict) return;
+    const token = gen.current.csrf;
+    if (token === null || waitRef.current || editHolds.get(uid) !== undefined) return;
+    const built = customerEditBody(form.base, form.version, editDraft);
+    // Refused here: no request and no key. Every refused field says so; the first takes focus.
+    if (built.kind === 'invalid') {
+      setEditErrors({ name: built.name ? NAME_RULE_TEXT : '', phone: built.phone ? PHONE_RULE_TEXT : '', email: built.email ? EMAIL_RULE_TEXT : '' });
+      (built.name ? editName : built.phone ? editPhone : editEmail).current?.focus();
+      return;
+    }
+    setEditErrors(NO_FIELDS);
+    if (built.kind === 'unchanged') return putEditStatus({ alert: false, text: EDIT_NO_CHANGES_TEXT });
+    const mine = gen.current.n;
+    const epoch = editEpoch.current;
+    const done = busyEdit();
+    putEditStatus(null);
+    try {
+      const s = await connect(uid); // plain: a Save never signs in
+      // The page, its connection or its session was replaced: nothing is sent.
+      if (!alive.current || mine !== gen.current.n || epoch !== editEpoch.current) return;
+      const open = editRef.current === form; // false: cancelled (or reopened) meanwhile — nothing is sent either way
+      if (s.kind !== 'ok') {
+        const failure = withWait(sessionFailure(s));
+        if (isRefusal(failure)) clearBoth(failure);
+        if (open) putEditStatus({ alert: true, text: `Not sent. ${failure.text}` });
+        return;
+      }
+      if (s.csrf !== token) return void adopt(uid, s.csrf); // another token: a new generation, and NOTHING is sent
+      if (!open) return;
+      const key = nextKey();
+      // Held BEFORE the request leaves: whatever happens to this page, the key, the target and the bytes are not lost.
+      const held: HeldEdit = { key, customerId: form.id, body: built.body, expectedVersion: form.version, name: built.name, csrf: token, sentAt: clock(), state: 'sending' };
+      if (!editHolds.put(uid, held)) return;
+      putEditStatus({ alert: false, text: EDIT_TEXT.saving, customerId: form.id, named: `Saving your changes to "${built.name}"…` });
+      const answer = await sendEdit(form.id, built.body, key, token);
+      if (answer.kind === 'denied' && editHolds.get(uid)?.key === key) {
+        // A 403 decides this request (nothing was done), but it may be another session's cookie (DA-138): ONE session
+        // check tells a changed connection from a permission loss, as a read's 403 does. It answers only for this user,
+        // this generation and this form: anything that replaced one of them meanwhile makes it do nothing here.
+        const focus = alive.current && owningFocus();
+        const s2 = await connect(uid, 'fresh');
+        if (editHolds.get(uid)?.key !== key) return; // dropped meanwhile (a new connection, an ended session)
+        if (!alive.current) { // the page went first: the next page of this user and token is told
+          editHolds.finish(uid, key, { kind: 'refused', customerId: held.customerId, name: held.name, csrf: held.csrf });
+          return;
+        }
+        editHolds.remove(uid, key);
+        // Another generation or session owns the page now, or the user cancelled this form: nothing is said here. A
+        // form closed by navigation is not a cancel — the refusal is still said (by name on another page).
+        if (mine !== gen.current.n || epoch !== editEpoch.current) return;
+        if (editRef.current !== form && cancelledForm.current === form) return;
+        if (s2.kind !== 'ok') {
+          const failure = withWait(sessionFailure(s2));
+          if (!isRefusal(failure)) return editRefused(held, answer, true, focus); // undecided check: the refusal stands
+          clearBoth(failure);
+          return putEditStatus({ alert: true, text: EDIT_TEXT.ended });
+        }
+        if (s2.csrf !== token) {
+          adopt(uid, s2.csrf);
+          return putEditStatus({ alert: true, text: EDIT_TEXT.connectionRefused });
+        }
+        return editRefused(held, answer, true, focus);
+      }
+      settleEdit(uid, key, answer, true);
+    } finally {
+      done();
+    }
+  }
+
+  /** The outcome kind of a conclusive answer, for a page that is not there to show it. */
+  const outcomeOf = (kind: UpdateResult['kind'], first: boolean): EditOutcomeKind =>
+    kind === 'conflict' ? 'conflict' : kind === 'not-found' ? 'gone' : kind === 'denied' ? (first ? 'denied' : 'deniedHeld') : 'refused';
+
+  /**
+   * One edit answer, reconciled by KEY: an answer for an attempt that is no longer held (dropped by a new token, an
+   * ended session or Discard) changes nothing. One that arrives after the page has gone is recorded for the next page of
+   * this user. `first` is the attempt's first send.
+   */
+  function settleEdit(who: string, key: string, answer: UpdateResult, first: boolean): void {
+    const held = editHolds.get(who);
+    if (held === undefined || held.key !== key) return;
+    const focus = alive.current && owningFocus();
+    if (answer.kind === 'saved' && answer.customer.name === held.name && answer.version === held.expectedVersion + (answer.changed ? 1 : 0)) {
+      // CONFIRMED: this customer, the name sent, at the version the body expected
+      if (!alive.current) return void editHolds.finish(who, key, { kind: 'saved', customerId: held.customerId, name: held.name, csrf: held.csrf });
+      editHolds.remove(who, key);
+      return editSaved(held, answer.customer, focus);
+    }
+    const kind = answer.kind;
+    // Conclusive for this key: a conflict or a refusal of the edit itself, on any send; the rest only on the first.
+    if (kind === 'conflict' || kind === 'not-found' || kind === 'denied'
+      || (first && (kind === 'signed-out' || kind === 'invalid' || kind === 'key-reused' || kind === 'rate-limited'))) {
+      if (!alive.current) return void editHolds.finish(who, key, { kind: outcomeOf(kind, first), customerId: held.customerId, name: held.name, csrf: held.csrf });
+      editHolds.remove(who, key);
+      return editRefused(held, answer, first, focus);
+    }
+    if (kind === 'signed-out') { // a check whose session has ended: it can never be checked again
+      if (!alive.current) return void editHolds.finish(who, key, { kind: 'unconfirmed', customerId: held.customerId, name: held.name, csrf: held.csrf });
+      editHolds.remove(who, key);
+      clearBoth({ kind: 'signed-out', text: TEXT.sessionEnded });
+      putEditStatus({ alert: true, text: EDIT_TEXT.endedHeld });
+      if (focus) focusTarget.current = 'alert';
+      return;
+    }
+    // Undecided, or any answer to a check that does not confirm: the key may have committed.
+    editHolds.change(who, key, { state: 'unresolved' });
+    if (!alive.current) {
+      // The page that sent it has gone: a page open now (or the next one, under the same token) says so.
+      editHolds.announce(who, key, { kind: 'undecided', customerId: held.customerId, name: held.name, csrf: held.csrf });
+      return;
+    }
+    holdNoteOf(key, first ? '' : editReasonOf(answer, answer.kind === 'rate-limited' ? startWait(answer.retryAfterSeconds) : undefined));
+    if (focus) focusTarget.current = 'hold';
+  }
+
+  /** An undecided edit, announced through the fixed alert region; the reason is shown on the card too. */
+  function holdNoteOf(key: string, reason: string): void {
+    setEditNote({ key, text: reason });
+    const held = uid === null ? undefined : editHolds.get(uid);
+    const text = reason === '' ? EDIT_UNKNOWN_TEXT : `${EDIT_UNKNOWN_TEXT} ${reason}`;
+    if (held === undefined || held.key !== key) return putEditStatus({ alert: true, text });
+    putEditStatus({ alert: true, text, customerId: held.customerId, named: `${editNamedText('unconfirmed', held.name)}${reason === '' ? '' : ` ${reason}`}` });
+  }
+
+  /** A confirmed edit: the notice, the form closed, the list row's name, and the profile read again (or forgotten). */
+  function editSaved(held: HeldEdit, customer: CustomerEntry, focus: boolean): void {
+    const id = held.customerId;
+    const mine = editRef.current?.id === id;
+    if (mine) closeEdit();
+    setEditNote(null);
+    noticeFor('saved', held, EDIT_SAVED_TEXT);
+    if (mine || focus) focusTarget.current = 'status';
+    const was = listRef.current;
+    if (was.rows.some((row) => row.id === id)) putList({ ...was, rows: was.rows.map((row) => (row.id === id ? customer : row)) });
+    if (routeRef.current === id) void refreshAfterSave(id, held.name);
+    // Not shown now: the profile kept from before the edit is forgotten, so it is never shown as last known.
+    else if (detailRef.current.id === id) putDetail(DETAIL_NONE);
+  }
+
+  async function refreshAfterSave(id: string, name: string): Promise<void> {
+    const mine = gen.current.n;
+    const ends = endedSeen.current;
+    // The values shown before the edit are not current any more: never shown again, not even as last known.
+    const d = detailRef.current;
+    if (d.id === id) putDetail({ id, phase: d.phase, text: d.text, customer: null });
+    await loadDetail(id);
+    if (!alive.current) return;
+    if (mine !== gen.current.n) { // a new connection cleared the notices: the save is still true
+      if (statusHasFocus()) focusTarget.current = 'alert';
+      return putEditStatus({ alert: true, text: EDIT_TEXT.savedThenChanged }); // unnamed: the connection changed
+    }
+    // The ended session's policy clears notices: the save is still true, and said with the end (by name elsewhere).
+    if (ends !== endedSeen.current) {
+      if (statusHasFocus()) focusTarget.current = 'alert';
+      return savedNews('savedThenEnded', { customerId: id, name });
+    }
+    if (routeRef.current !== id) return;
+    const after = detailRef.current;
+    if (after.id !== id || after.phase === 'ready' || after.phase === 'loading') return;
+    const status = editStatusRef.current;
+    if (status?.text === EDIT_SAVED_TEXT) putEditStatus({ ...status, text: EDIT_SAVED_UNREFRESHED_TEXT });
+  }
+  /** Whether focus sits on the edit status (or nowhere): a notice that replaces it in the alert region takes it along. */
+  function statusHasFocus(): boolean {
+    const active = document.activeElement;
+    return active === null || active === document.body || active === editPolite.current;
+  }
+
+  /** A conclusive answer: the edit did not apply. What it says, and what stays of the form. */
+  function editRefused(held: HeldEdit, answer: UpdateResult, first: boolean, focus: boolean): void {
+    setEditNote(null);
+    const mine = editRef.current?.id === held.customerId;
+    switch (answer.kind) {
+      case 'conflict':
+        // The draft stays, for this customer only; nothing is sent until the user reviews and saves again.
+        if (mine && editRef.current !== null) {
+          putEdit({ ...editRef.current, conflict: true });
+          focusTarget.current = 'review';
+          return noticeFor('conflict', held, EDIT_CONFLICT_TEXT);
+        }
+        // The form is gone (cancelled): the profile is read again (or forgotten), so a new Edit starts from the current version.
+        if (focus) focusTarget.current = 'alert';
+        if (routeRef.current === held.customerId) void loadDetail(held.customerId);
+        else if (detailRef.current.id === held.customerId) putDetail(DETAIL_NONE);
+        return noticeFor('conflict', held, EDIT_TEXT.conflictClosed);
+      case 'not-found':
+        if (mine) closeEdit();
+        if (mine || focus) focusTarget.current = 'alert';
+        noticeFor('gone', held, EDIT_TEXT.notFound);
+        if (routeRef.current === held.customerId) void loadDetail(held.customerId);
+        return;
+      case 'denied':
+        if (mine) closeEdit();
+        if (mine || focus) focusTarget.current = 'alert';
+        return first ? noticeFor('denied', held, EDIT_DENIED_TEXT) : noticeFor('deniedHeld', held, EDIT_TEXT.deniedHeld);
+      case 'signed-out':
+        if (mine || focus) focusTarget.current = 'alert';
+        clearBoth({ kind: 'signed-out', text: TEXT.sessionEnded });
+        return putEditStatus({ alert: true, text: EDIT_TEXT.ended });
+      default:
+        // The form stays (its Save was disabled while out): focus goes to what is said.
+        if (mine || focus) focusTarget.current = 'alert';
+        if (answer.kind === 'rate-limited') {
+          return noticeFor('refused', held, `Not sent through: too many requests. ${waitHint(startWait(answer.retryAfterSeconds))} Then save again.`);
+        }
+        return noticeFor('refused', held, answer.kind === 'key-reused' ? EDIT_TEXT.keyReused : EDIT_TEXT.invalid);
+    }
+  }
+
+  /** "Check again": the SAME bytes, the SAME key, the SAME customer, under the token it was first sent with. */
+  async function checkEdit(): Promise<void> {
+    if (uid === null || editBusy.current) return;
+    const held = editHolds.get(uid);
+    if (held === undefined || held.state !== 'unresolved' || held.body === '' || waitRef.current) return;
+    if (clock() - held.sentAt >= CHECK_CUTOFF_MS) return setTick((n) => n + 1); // too old: the card now says so
+    const { key, body, csrf, customerId, sentAt } = held;
+    const done = busyEdit();
+    if (owningFocus()) focusTarget.current = 'hold'; // the button goes while it checks: the card keeps focus
+    editHolds.change(uid, key, { state: 'checking' });
+    setEditNote(null);
+    putEditStatus({ alert: false, text: EDIT_TEXT.checking, customerId, named: `Checking your changes to "${held.name}" with the server…` });
+    try {
+      const s = await connect(uid); // plain: a check never signs in
+      if (editHolds.get(uid)?.key !== key) return;
+      if (s.kind !== 'ok') {
+        editHolds.change(uid, key, { state: 'unresolved' });
+        if (!alive.current) return; // the page is gone: no wait is started for it
+        const failure = withWait(sessionFailure(s));
+        if (isRefusal(failure)) return clearBoth(failure); // ended: the held edit is dropped there, and said so
+        return holdNoteOf(key, `Not checked. ${failure.text}`);
+      }
+      if (s.csrf !== csrf) {
+        // Another connection answers now: dropped, NOTHING is sent, and the page says so. A new generation drops it
+        // itself (after clearing the notices); a page already on that token drops it here.
+        if (alive.current) adopt(uid, s.csrf);
+        else {
+          // The page went first: the outcome is recorded under the token the edit was sent with. Under the token rule it
+          // is shown only by a page that holds that token again; a page on the new token drops it with no text.
+          const now = editHolds.get(uid);
+          if (now?.key === key) editHolds.finish(uid, key, { kind: 'unconfirmed', customerId, name: now.name, csrf });
+          return;
+        }
+        dropHeldEdit(uid, key, 'connectionHeld');
+        return;
+      }
+      if (alive.current) adopt(uid, s.csrf);
+      if (editHolds.get(uid)?.key !== key) return; // dropped meanwhile
+      if (clock() - sentAt >= CHECK_CUTOFF_MS) { // the window closed during the session step: nothing is sent
+        editHolds.change(uid, key, { state: 'unresolved', body: '' });
+        if (alive.current) holdNoteOf(key, EDIT_TEXT.tooOld);
+        return;
+      }
+      settleEdit(uid, key, await sendEdit(customerId, body, key, csrf), false);
+    } finally {
+      const now = editHolds.get(uid);
+      if (now?.key === key && now.state === 'checking') editHolds.change(uid, key, { state: 'unresolved' }); // never stuck
+      done();
+    }
+  }
+
+  /** "Discard": forget the held edit and the draft. The request is not cancelled (the card says so). */
+  function discardEdit(): void {
+    if (uid === null) return;
+    const held = editHolds.get(uid);
+    if (held === undefined || held.state !== 'unresolved') return;
+    editHolds.remove(uid, held.key);
+    setEditNote(null);
+    putEditStatus(null);
+    closeEdit();
+    focusTarget.current = 'edit';
+  }
+
+  /**
+   * "Review latest" after a conflict: the profile read again (nothing sent). A field whose value differs from the
+   * profile the form was loaded from stays as typed; every other field takes the reviewed value, so a save never
+   * reverts another editor's change to a field this user did not change (a field typed and restored is unchanged).
+   */
+  async function reviewEdit(): Promise<void> {
+    const form = editRef.current;
+    if (uid === null || editBusy.current || form === null) return;
+    const { id, base: before } = form;
+    const mine = gen.current.n;
+    const done = busyEdit();
+    putEditStatus(null);
+    try {
+      await loadDetail(id);
+    } finally {
+      done();
+    }
+    if (!alive.current || mine !== gen.current.n || routeRef.current !== id || editRef.current?.id !== id) return;
+    const d = detailRef.current;
+    if (d.id === id && d.phase === 'not-found') { // gone: the form and its draft go with it
+      closeEdit();
+      focusTarget.current = 'alert';
+      return noticeFor('gone', { customerId: id, name: before.name }, EDIT_TEXT.notFound);
+    }
+    if (d.id === id && d.phase === 'ready' && d.customer !== null && d.version !== undefined) {
+      const latest = d.customer;
+      setEditDraft((draft) => ({
+        name: normalizeCustomerName(draft.name) !== before.name ? draft.name : latest.name,
+        phone: normalizeCustomerPhone(draft.phone) !== before.phone ? draft.phone : latest.phone ?? '',
+        email: normalizeCustomerEmail(draft.email) !== before.email ? draft.email : latest.email ?? '',
+      }));
+      putEdit({ id, base: latest, version: d.version, conflict: false });
+      focusTarget.current = 'status'; // the Review button goes
+      return putEditStatus({ alert: false, text: EDIT_REVIEWED_TEXT });
+    }
+    focusTarget.current = 'alert';
+    putEditStatus({ alert: true, text: EDIT_TEXT.reviewFailed });
+  }
+
   const waiting = wait !== null;
   const detached = attempt !== undefined && attempt.detached;
   const tooOld = attempt !== undefined && clock() - attempt.sentAt >= CHECK_CUTOFF_MS;
@@ -850,6 +1565,12 @@ function UserPage({
   useEffect(() => {
     const held = uid === null || !tooOld ? undefined : holds.get(uid);
     if (uid !== null && held !== undefined && held.body !== unusableBody(held)) holds.change(uid, held.key, { body: unusableBody(held) });
+  });
+  const editTooOld = editHeld !== undefined && clock() - editHeld.sentAt >= CHECK_CUTOFF_MS;
+  // Past the cutoff a held edit can never be sent again: its bytes are not kept for it either.
+  useEffect(() => {
+    const held = uid === null || !editTooOld ? undefined : editHolds.get(uid);
+    if (uid !== null && held !== undefined && held.body !== '' && held.state === 'unresolved') editHolds.change(uid, held.key, { body: '' });
   });
   const canAdd = canCreate && list.phase === 'ready' && attempt === undefined && !waiting && !adding;
   const addHint = adding ? 'Sending…'
@@ -865,6 +1586,38 @@ function UserPage({
   const button = 'px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed';
   const quiet = 'px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed';
   const hintClass = 'text-[11px] font-medium text-slate-500';
+  const inputClass = 'w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white';
+  const labelClass = 'block text-[10px] font-black text-slate-500 uppercase tracking-widest';
+  const errorClass = 'text-xs font-bold text-rose-700';
+  const canOfferEdit = canEdit && uid !== null && edit === null && editHeld === undefined && shownDetail.phase === 'ready'
+    && shownDetail.customer !== null && shownDetail.version !== undefined;
+  // A notice bound to a customer is said as such on that customer's page, and by name everywhere else.
+  const editNotice = editStatus === null ? '' : editStatus.customerId === undefined || editStatus.customerId === routeId ? editStatus.text : editStatus.named ?? '';
+  const canSaveEdit = edit !== null && !edit.conflict && !editing && editHeld === undefined && !waiting;
+  const editHint = editing ? 'Working…' : edit?.conflict === true ? 'Review the latest details first.'
+    : editHeld !== undefined ? 'An earlier change is not confirmed yet. Check it again or discard it first.' : waiting ? waitHint(wait) : '';
+  /** One edit field: a label, the input with its error wiring, and the error when the field is refused. */
+  const editField = (field: keyof Fields, label: string, ref: typeof editName, inputMode?: 'tel' | 'email') => (
+    <div className="space-y-1">
+      <label htmlFor={`directory-edit-${field}`} className={labelClass}>{label}</label>
+      <input
+        ref={ref}
+        id={`directory-edit-${field}`}
+        data-testid={`directory-edit-${field}`}
+        type="text"
+        inputMode={inputMode}
+        autoComplete="off"
+        aria-required={field === 'name' ? 'true' : undefined}
+        readOnly={editing || editHeld !== undefined}
+        value={editDraft[field]}
+        aria-invalid={editErrors[field] !== ''}
+        aria-describedby={[editErrors[field] !== '' ? `directory-edit-${field}-error` : '', editHeld !== undefined ? 'directory-edit-hold-text' : ''].filter((id) => id !== '').join(' ') || undefined}
+        onChange={(e) => { const value = e.target.value; setEditDraft((d) => ({ ...d, [field]: value })); setEditErrors((x) => ({ ...x, [field]: '' })); }}
+        className={inputClass}
+      />
+      {editErrors[field] !== '' && <p id={`directory-edit-${field}-error`} data-testid={`directory-edit-${field}-error`} role="alert" className={errorClass}>{editErrors[field]}</p>}
+    </div>
+  );
 
   return (
     <section
@@ -930,6 +1683,54 @@ function UserPage({
         </div>
       )}
 
+      {editHeld !== undefined && (
+        <div
+          ref={editCard}
+          tabIndex={-1}
+          role="group"
+          aria-label="A customer change that is not confirmed yet"
+          data-testid="directory-edit-hold"
+          data-state={editHeld.state}
+          className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-2"
+        >
+          {/* Announced through the fixed live regions above; the card only shows. */}
+          {editHeld.state === 'sending' && <p id="directory-edit-hold-text" className="text-sm font-bold text-amber-900">Saving your changes to &quot;{editHeld.name}&quot;…</p>}
+          {editHeld.state === 'checking' && <p id="directory-edit-hold-text" className="text-sm font-bold text-amber-900">Checking your changes to &quot;{editHeld.name}&quot; with the server…</p>}
+          {editHeld.state === 'unresolved' && (
+            <>
+              <p id="directory-edit-hold-text" className="text-sm font-bold text-amber-900">{EDIT_UNKNOWN_TEXT}</p>
+              {editNote !== null && editNote.key === editHeld.key && editNote.text !== '' && (
+                <p data-testid="directory-edit-hold-reason" className="text-xs font-bold text-amber-800">{editNote.text}</p>
+              )}
+              {editTooOld ? (
+                <p data-testid="directory-edit-hold-too-old" className="text-xs font-bold text-amber-800">
+                  It was sent too long ago and cannot be checked from here. Open the customer to see its current details; matching details are not proof.
+                </p>
+              ) : (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button type="button" data-testid="directory-edit-check" disabled={waiting || editing} aria-describedby="directory-edit-check-hint" onClick={() => { void checkEdit(); }} className={button}>
+                    Check again
+                  </button>
+                  <span id="directory-edit-check-hint" className={hintClass}>{waiting ? waitHint(wait) : ''}</span>
+                </div>
+              )}
+              <p id="directory-edit-discard-warning" className="text-xs font-medium text-amber-900">{EDIT_DISCARD_WARNING_TEXT}</p>
+              <button type="button" data-testid="directory-edit-discard" aria-describedby="directory-edit-discard-warning" onClick={discardEdit} className={quiet}>
+                Discard
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      <div data-testid="directory-edit-notices">
+        <p ref={editPolite} tabIndex={-1} data-testid="directory-edit-status" role="status" className="text-sm font-bold text-slate-700">
+          {editStatus !== null && !editStatus.alert ? editNotice : ''}
+        </p>
+        <p ref={editAlertRef} tabIndex={-1} data-testid="directory-edit-alert" role="alert" className="text-sm font-bold text-rose-800">
+          {editStatus !== null && editStatus.alert ? editNotice : ''}
+        </p>
+      </div>
+
       {routeId !== null ? (
         <section
           data-testid="directory-detail"
@@ -964,6 +1765,28 @@ function UserPage({
               <dt className="font-black text-slate-500">Customer ID</dt>
               <dd data-testid="directory-detail-id" className="font-mono text-slate-700 break-all">{shownDetail.customer.id}</dd>
             </dl>
+          )}
+          {canOfferEdit && (
+            <button ref={editButton} type="button" data-testid="directory-edit" onClick={openEdit} className={quiet}>Edit</button>
+          )}
+          {edit !== null && edit.id === routeId && (
+            <form ref={editForm} noValidate aria-labelledby="directory-edit-title" onSubmit={(e) => { e.preventDefault(); void saveEdit(); }} className="pt-4 border-t border-slate-100 space-y-2">
+              <h3 id="directory-edit-title" className="text-sm font-black text-primary uppercase tracking-widest">Edit customer</h3>
+              {editField('name', 'Customer name (required)', editName)}
+              <div className="flex flex-wrap gap-3">
+                <div className="flex-1 min-w-[14rem]">{editField('phone', 'Phone (optional)', editPhone, 'tel')}</div>
+                <div className="flex-1 min-w-[14rem]">{editField('email', 'Email (optional)', editEmail, 'email')}</div>
+              </div>
+              <p className={hintClass}>Leave a phone or an email blank to remove it.</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <button type="submit" data-testid="directory-edit-save" disabled={!canSaveEdit} aria-describedby="directory-edit-hint" className={button}>Save</button>
+                {edit.conflict && (
+                  <button ref={reviewButton} type="button" data-testid="directory-edit-review" disabled={editing} onClick={() => { void reviewEdit(); }} className={quiet}>Review latest</button>
+                )}
+                <button type="button" data-testid="directory-edit-cancel" onClick={cancelEdit} className={quiet}>Cancel</button>
+                <p id="directory-edit-hint" data-testid="directory-edit-hint" className={`${hintClass} min-h-[1rem]`}>{editHint}</p>
+              </div>
+            </form>
           )}
           {(shownDetail.phase === 'unavailable' || shownDetail.phase === 'signed-out' || shownDetail.phase === 'rate-limited') && uid !== null && (
             <div className="flex flex-wrap items-center gap-3">

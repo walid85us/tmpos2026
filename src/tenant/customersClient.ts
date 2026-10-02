@@ -5,7 +5,9 @@
 // createdAt }` — phone and email a stored value or null, createdAt toISOString's UTC form or null for a customer created
 // before the server kept that time) and
 // POST /api/v1/customers (server/runtime/customerCreate.ts, the idempotent create: a name, and optionally a phone and an
-// email — a contact left blank is left out of the body, so a name-only body keeps its exact bytes).
+// email — a contact left blank is left out of the body, so a name-only body keeps its exact bytes) and
+// PATCH /api/v1/customers/{id} (M7A-CUSTOMERS-P7, server/runtime/customerUpdate.ts: the idempotent, versioned edit of one
+// customer's name, phone and email).
 //
 //   - The server is the authority for everything: who may read or create, which tenant this is, what a valid name is and
 //     what was stored. Nothing here names a tenant, store, role or actor — the session does. This client reports what
@@ -29,6 +31,14 @@
 //   - Reads carry the session CSRF token the caller was just handed, in a header (M7A-CUSTOMERS-P5-R1, DA-138): the
 //     server answers a read only under the session that token belongs to, and refuses (403) one whose cookie is another
 //     session's. The token is never put into a URL.
+//   - The profile's row version rides its 200 as a strong ETag, `"<n>"` (n decimal, 1..2^53-1, no leading zero), read
+//     from the same answer as the values (M7A-CUSTOMERS-P7). A missing, weak, listed or malformed ETag, or a 304, makes
+//     the profile `unavailable`: a version is never guessed. No validator is ever sent (no If-Match, no If-None-Match).
+//   - An edit body is built here ONCE (`customerEditBody`): keys expectedVersion, name, then a phone and an email only
+//     when they differ from the profile the form was loaded from (null clears one). `update` sends the caller's exact
+//     string under the caller's key, like a create. It is `saved` on an exactly-shaped 200 for the id asked for ONLY; a
+//     409 write_conflict is `conflict` (somebody else's version won); a 5xx, any other 2xx, an unexpected 409 or no
+//     answer is `unknown` — the edit may have committed, and only the same key and the same bytes can ask again.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials. No
 //     method ever rejects.
 
@@ -54,6 +64,7 @@ const WHITE_SPACE_RE = /\p{White_Space}/u;
 const EMAIL_SHAPE_RE = /^[^@]+@[^@]+$/u; // exactly one '@', a non-empty part on each side
 const LONE_SURROGATE_RE = /\p{Cs}/u; // with the u flag only an unpaired surrogate is a Cs code point
 const CREATED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/; // toISOString's exact form
+const ETAG_RE = /^"[1-9][0-9]{0,15}"$/; // one strong ETag naming a row version (migration 024: 1..2^53-1)
 
 /** A customer as the server stores it: its id and its name, nothing else. */
 export interface CustomerEntry {
@@ -120,7 +131,7 @@ export type DetailResult =
   | RateLimited;
 
 export type ProfileResult =
-  | { readonly kind: 'ok'; readonly customer: CustomerProfile }
+  | { readonly kind: 'ok'; readonly customer: CustomerProfile; /** The row version the values were read at (its ETag). */ readonly version: number }
   | { readonly kind: 'not-found' | 'signed-out' | 'denied' | 'unavailable' }
   | RateLimited;
 
@@ -129,6 +140,49 @@ export type CreateResult =
   | { readonly kind: 'signed-out' | 'denied' | 'invalid' | 'absent' | 'key-reused' | 'in-progress' }
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
+
+export type UpdateResult =
+  | { readonly kind: 'saved'; readonly customer: CustomerEntry; readonly version: number; readonly changed: boolean }
+  | { readonly kind: 'conflict' | 'not-found' | 'invalid' | 'denied' | 'signed-out' | 'in-progress' | 'key-reused' }
+  | RateLimited
+  | { readonly kind: 'unknown'; readonly responded: boolean };
+
+/** A row version as the server writes one: a safe integer from 1. */
+const isVersion = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+
+/** The version an ETag header names: exactly one strong `"<n>"`, n a version without a leading zero; otherwise null. */
+export function versionOfEtag(header: string | null): number | null {
+  if (header === null || !ETAG_RE.test(header)) return null;
+  const version = Number(header.slice(1, -1));
+  return isVersion(version) ? version : null;
+}
+
+/** The form's raw fields of an edit. */
+export interface CustomerEditFields { readonly name: string; readonly phone: string; readonly email: string }
+export type CustomerEditBody =
+  | { readonly kind: 'invalid'; readonly name: boolean; readonly phone: boolean; readonly email: boolean }
+  | { readonly kind: 'unchanged' }
+  | { readonly kind: 'ok'; readonly body: string; readonly name: string };
+
+/**
+ * The PATCH body for an edit of `base` (the profile the form was loaded from, at `version`): built once, never rebuilt.
+ * Keys in order expectedVersion, name (always), phone, email; a contact is included only when it differs from `base`
+ * (a blank field clears it: null). Fields the create rules refuse are `invalid` (nothing to send); a form equal to
+ * `base` is `unchanged` (nothing to send).
+ */
+export function customerEditBody(base: CustomerProfile, version: number, fields: CustomerEditFields): CustomerEditBody {
+  const name = normalizeCustomerName(fields.name);
+  const phone = normalizeCustomerPhone(fields.phone);
+  const email = normalizeCustomerEmail(fields.email);
+  if (name === null || phone === CONTACT_INVALID || email === CONTACT_INVALID) {
+    return Object.freeze({ kind: 'invalid', name: name === null, phone: phone === CONTACT_INVALID, email: email === CONTACT_INVALID });
+  }
+  const setPhone = phone !== base.phone;
+  const setEmail = email !== base.email;
+  if (name === base.name && !setPhone && !setEmail) return Object.freeze({ kind: 'unchanged' });
+  const body = JSON.stringify({ expectedVersion: version, name, ...(setPhone ? { phone } : {}), ...(setEmail ? { email } : {}) });
+  return Object.freeze({ kind: 'ok', body, name });
+}
 
 export interface CustomersClient {
   /**
@@ -142,6 +196,8 @@ export interface CustomersClient {
   profile(id: string, csrf: string, signal?: AbortSignal): Promise<ProfileResult>;
   /** One create attempt: `body` exactly as given, under `idempotencyKey`, on the session whose CSRF token is `csrf`. Never rejects. */
   create(body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateResult>;
+  /** One edit attempt of customer `id`: `body` exactly as given, under `idempotencyKey`, on the session whose CSRF token is `csrf`; a malformed id is `not-found` and nothing is sent. Never rejects. */
+  update(id: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<UpdateResult>;
 }
 
 type Data = Record<string, unknown>;
@@ -300,7 +356,8 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
     if (answer.status === 200) {
       const customer = profileOf(answer.body);
-      return Object.freeze(customer !== null && customer.id === id ? { kind: 'ok', customer } : { kind: 'unavailable' });
+      const version = versionOfEtag(answer.header('etag')); // the values' own version: never guessed
+      return Object.freeze(customer !== null && customer.id === id && version !== null ? { kind: 'ok', customer, version } : { kind: 'unavailable' });
     }
     if (answer.status === 404) return Object.freeze({ kind: 'not-found' }); // one answer for a missing id and another store's
     if (answer.status === 401) return Object.freeze({ kind: 'signed-out' });
@@ -309,15 +366,19 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
     return Object.freeze({ kind: 'unavailable' });
   }
 
-  async function create(body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateResult> {
-    const answer = await exchange(CUSTOMERS_PATH, {
-      method: 'POST',
+  /** A write: the caller's exact string under the caller's key, with the intent and session CSRF headers. */
+  const write = (path: string, method: 'POST' | 'PATCH', body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
+    exchange(path, {
+      method,
       headers: {
         Accept: 'application/json', 'Content-Type': 'application/json',
         [INTENT_HEADER]: '1', [SESSION_CSRF_HEADER]: csrf, 'Idempotency-Key': idempotencyKey,
       },
       body, // the caller's exact string: a retry under the same key must send the same bytes
     }, signal);
+
+  async function create(body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateResult> {
+    const answer = await write(CUSTOMERS_PATH, 'POST', body, idempotencyKey, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
     const { status } = answer;
     if (status === 201) {
@@ -341,7 +402,32 @@ export function createCustomersClient(options: { fetch?: typeof fetch; timeoutMs
     return Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ list, detail, profile, create });
+  async function update(id: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<UpdateResult> {
+    if (!isCustomerId(id)) return Object.freeze({ kind: 'not-found' }); // never a path built from an unvalidated id
+    const answer = await write(`${CUSTOMERS_PATH}/${id}`, 'PATCH', body, idempotencyKey, csrf, signal);
+    if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
+    const { status, body: data } = answer;
+    if (status === 200) {
+      // `{ customer: { id, name }, version, changed }` exactly, for the id asked for; anything else only the key can name.
+      const customer = isPlain(data) && hasKeys(data, ['customer', 'version', 'changed']) ? entryOf(data.customer) : null;
+      if (customer !== null && customer.id === id && isPlain(data) && isVersion(data.version) && typeof data.changed === 'boolean') {
+        return Object.freeze({ kind: 'saved', customer, version: data.version, changed: data.changed });
+      }
+      return Object.freeze({ kind: 'unknown', responded: true });
+    }
+    if (status === 409 && isPlain(data) && data.error === 'write_conflict') return Object.freeze({ kind: 'conflict' });
+    if (status === 409 && isPlain(data) && data.error === 'request_in_progress') return Object.freeze({ kind: 'in-progress' });
+    if (status === 404) return Object.freeze({ kind: 'not-found' }); // one answer for a missing id and another store's
+    if (status === 400 || status === 413 || status === 415) return Object.freeze({ kind: 'invalid' });
+    if (status === 401) return Object.freeze({ kind: 'signed-out' });
+    if (status === 403) return Object.freeze({ kind: 'denied' });
+    if (status === 422) return Object.freeze({ kind: 'key-reused' });
+    if (status === 429) return limited(answer);
+    // Any other 409, a 5xx, any other 2xx: the outcome is undecided.
+    return Object.freeze({ kind: 'unknown', responded: true });
+  }
+
+  return Object.freeze({ list, detail, profile, create, update });
 }
 
 /** The shop's one customers client. */

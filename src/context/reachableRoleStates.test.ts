@@ -115,12 +115,14 @@ const changed = rows.filter((r) => r.before !== r.after);
 test('C1. the four reachable-state groups regenerate from current code to the P4 inventory', () => {
   // The literal call sites the counts rest on (derived from src/, not listed by hand).
   assert.deepEqual(CP.map(([d, l]) => `${d}:${l}`), [
+    'customers:edit', // M7A-CUSTOMERS-P7: the shop customer directory offers Edit only at Customers Edit or above
     'inventory:create', 'inventory:edit', 'inventory:manage', 'inventory:view', 'invoices:create', 'invoices:edit',
     'repairs:create', 'repairs:edit', 'repairs:manage', 'shipping:view', 'suggestive_sales:manage', 'warranties:create',
   ]);
   assert.deepEqual(
     { defaults: count('S0-defaults'), editedArea: count('S1-edit'), subToggles: count('S1-toggle'), custom: count('S2-custom') },
-    { defaults: 259, editedArea: 1517, subToggles: 2598, custom: 504 },
+    // M7A-CUSTOMERS-P7: +3 / +15 / +5 rows for the customers:edit site (3 non-owner roles; 5 Customers levels)
+    { defaults: 262, editedArea: 1532, subToggles: 2598, custom: 509 },
   );
 });
 
