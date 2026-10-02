@@ -141,6 +141,7 @@ export const REQUIRED_SENTINELS = [
   'src/tenant/ServerCustomerDirectory.test.tsx',              // the shop's Customer directory: one POST per click, same key and bytes on a check, nothing sent under a changed connection (M7A-CUSTOMERS-P5)
   'src/layouts/TenantLayout.customerDirectory.test.tsx',      // the sidebar's Customer Directory entry: gated by the customers feature, longest-path highlight (M7A-CUSTOMERS-P5)
   'src/components/Customers.localBanner.test.tsx',            // the local Customers screen says its records stay in this browser, and its create sends nothing (M7A-CUSTOMERS-P5)
+  'src/tenant/ServerCustomerPicker.test.tsx',                 // the server-customer picker: reads only, a choice bound to its session, dropped when that session is over (M7A-CUSTOMERS-P9)
 ];
 
 export const isTestPath = (f) =>

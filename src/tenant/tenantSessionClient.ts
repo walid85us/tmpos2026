@@ -10,6 +10,9 @@
 //     directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5) is its second in-memory holder: it keeps the token
 //     it was handed in refs, and beside an unresolved create in its in-memory hold store, only to compare it with the
 //     next one and to re-send that create on the same session — under the same rule (no state, storage, URL, DOM, log).
+//     The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9) is the third: its dialog keeps the token
+//     it was handed in a ref only to compare it with the next one, and its `sessionContextOf` keeps the latest (UID,
+//     token) pair in module scope only to hand out one opaque context per session — under the same rule.
 //   - A session is only ever reused for the user it belongs to. Every `ensure` first reads the session this browser
 //     already holds (M7A-CUSTOMERS-P5-R1, DA-143) and reuses it — with no login — only when the server's `subject` for it
 //     equals the digest of the UID asked for; the digest is recomputed here from that UID and never sent. No session, or
