@@ -4,12 +4,14 @@
 // M7A-CUSTOMERS-P3-R1 migration 020's page_v3, which adds the role's current Customers level to 018's derivation.
 // M7A-CUSTOMERS-P6: the profile read over migration 023's m7a_contact_profile (M7CPP-01..04).
 // M7A-CUSTOMERS-P7: the profile read is now migration 024's versioned m7a_customer_profile (o_version, M7CPP-05).
+// M7A-CUSTOMERS-P8: a search query is dispatched to migration 025's m7a_customer_search, answered by the list's own
+// validation, and probed by probeCustomerSearch (M7CSP-01..05).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   CUSTOMER_DIRECTORY_BOUNDS, CUSTOMER_DIRECTORY_DEADLINE_MS, createPostgresCustomerDetail, createPostgresCustomerDirectory,
-  createPostgresCustomerProfile, probeCustomerDetail, probeCustomerDirectory, probeCustomerProfile,
+  createPostgresCustomerProfile, probeCustomerDetail, probeCustomerDirectory, probeCustomerProfile, probeCustomerSearch,
 } from './postgresCustomerDirectory.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
 import type { TrustedScope } from '../runtime/principals.js';
@@ -64,7 +66,7 @@ const live = (): AbortSignal => new AbortController().signal;
 test('one fixed call to migration 020\'s session-bound routine: the session\'s store key, the continuation and one row more than the page', async () => {
   const client = fakeClient([customerRow(1), customerRow(2)]);
   const signal = live();
-  const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, SESSION_KEY, { after: C(9), limit: 2 }, signal);
+  const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, SESSION_KEY, { after: C(9), limit: 2, search: null }, signal);
   assert.equal(client.statements.length, 1);
   assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_role\.m7a_customer_page_v3\(\?::text, \?::uuid, \?::integer\)$/);
   assert.deepEqual(client.values[0], [SESSION_KEY, C(9), 3], 'the session key, after, limit + 1 — in that order');
@@ -80,13 +82,13 @@ test('one fixed call to migration 020\'s session-bound routine: the session\'s s
   assert.deepEqual(answer, { outcome: 'page', hasMore: false, customers: [{ id: C(1), name: 'Customer 1' }, { id: C(2), name: 'Customer 2' }] });
   // The rows are checked against the AUTHORIZER's tenant, never a constant: rows naming the scope's tenant are its page.
   const other = fakeClient([customerRow(1, { o_tenant_id: OTHER_TENANT })]);
-  assert.deepEqual(await createPostgresCustomerDirectory({ client: other }).page({ ...SCOPE, tenant: OTHER_TENANT }, SESSION_KEY, { after: null, limit: 100 }, live()),
+  assert.deepEqual(await createPostgresCustomerDirectory({ client: other }).page({ ...SCOPE, tenant: OTHER_TENANT }, SESSION_KEY, { after: null, limit: 100, search: null }, live()),
     { outcome: 'page', hasMore: false, customers: [{ id: C(1), name: 'Customer 1' }] }, 'rows naming the scope\'s tenant are that tenant\'s page');
   assert.deepEqual(other.values[0], [SESSION_KEY, null, 101], 'no continuation is SQL null; limit 100 asks 101');
 });
 
 test('the lookahead row says another page follows and is never returned; exactly the limit is the last page; an empty directory is an empty page', async () => {
-  const read = (rows: unknown[], limit: number) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit }, live());
+  const read = (rows: unknown[], limit: number) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit, search: null }, live());
   assert.deepEqual(await read([customerRow(1), customerRow(2), customerRow(3)], 2),
     { outcome: 'page', hasMore: true, customers: [{ id: C(1), name: 'Customer 1' }, { id: C(2), name: 'Customer 2' }] });
   assert.deepEqual(await read([customerRow(1), customerRow(2)], 2),
@@ -101,7 +103,7 @@ test('the lookahead row says another page follows and is never returned; exactly
 
 test('denied and cursor_unknown are the routine\'s only row, with every other column null', async () => {
   for (const outcome of ['denied', 'cursor_unknown']) {
-    assert.deepEqual(await createPostgresCustomerDirectory({ client: fakeClient([refusalRow(outcome)]) }).page(SCOPE, SESSION_KEY, { after: C(1), limit: 5 }, live()), { outcome });
+    assert.deepEqual(await createPostgresCustomerDirectory({ client: fakeClient([refusalRow(outcome)]) }).page(SCOPE, SESSION_KEY, { after: C(1), limit: 5, search: null }, live()), { outcome });
   }
 });
 
@@ -152,15 +154,15 @@ test('everything out of shape is a throw — an outage the route answers as a 50
     ['a null row', [null]],
   ];
   for (const [label, rows] of cases) {
-    await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>,
+    await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2, search: null }, live()) as Promise<unknown>,
       (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid', label);
   }
   // A driver error propagates as the outage it is; its text is the route's to discard.
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient([], new Error('driver')) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>, /driver/);
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient([], new Error('driver')) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2, search: null }, live()) as Promise<unknown>, /driver/);
 });
 
 test('every row, the lookahead included, must be in the routine\'s order — a page ordered on its own is not enough', async () => {
-  const read = (rows: unknown[]) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>;
+  const read = (rows: unknown[]) => createPostgresCustomerDirectory({ client: fakeClient(rows) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2, search: null }, live()) as Promise<unknown>;
   const named = (i: number, name: string) => customerRow(i, { o_name: name });
   const invalid = (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid';
   // Amy, Zoe is an ordered page of two; only the lookahead, Bob, is out of order — and the route never sees the lookahead.
@@ -187,16 +189,16 @@ test('an answer longer than limit + 1 is refused before any row is read', async 
       return Reflect.get(target, key, receiver);
     },
   });
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2 }, live()) as Promise<unknown>,
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 2, search: null }, live()) as Promise<unknown>,
     (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid');
   assert.equal(reads, 0, 'no row was read');
   // Control: the same trap at limit + 1 is read, so the refusal above is the bound and not the trap.
-  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 3 }, live()) as Promise<unknown>, /row read/);
+  await assert.rejects(createPostgresCustomerDirectory({ client: fakeClient(trap()) }).page(SCOPE, SESSION_KEY, { after: null, limit: 3, search: null }, live()) as Promise<unknown>, /row read/);
   assert.ok(reads > 0, 'at limit + 1 the rows are read (control)');
 });
 
 test('only the tenant scope the authorizer selected is an authority, and only a validated query reaches the database', async () => {
-  const q = { after: null, limit: 2 };
+  const q = { after: null, limit: 2, search: null };
   const bad: Array<[string, unknown, unknown]> = [
     ['a platform scope', { ...SCOPE, scope: 'platform', tenant: null }, q],
     ['a store scope', { ...SCOPE, scope: 'store', store: STORE }, q],
@@ -207,14 +209,22 @@ test('only the tenant scope the authorizer selected is an authority, and only a 
     ['a malformed scope', { ...SCOPE, actor: 'nobody' }, q],
     ['an unknown limitation', { ...SCOPE, limitation: 'readonly' }, q],
     ['no scope', null, q],
-    ['limit 0', SCOPE, { after: null, limit: 0 }],
-    ['limit 101', SCOPE, { after: null, limit: 101 }],
-    ['a fractional limit', SCOPE, { after: null, limit: 1.5 }],
-    ['a NaN limit', SCOPE, { after: null, limit: Number.NaN }],
-    ['a limit as text', SCOPE, { after: null, limit: '5' }],
-    ['a malformed continuation', SCOPE, { after: 'x', limit: 2 }],
-    ['an uppercase continuation', SCOPE, { after: C(1).toUpperCase(), limit: 2 }],
-    ['a numeric continuation', SCOPE, { after: 7, limit: 2 }],
+    ['limit 0', SCOPE, { after: null, limit: 0, search: null }],
+    ['limit 101', SCOPE, { after: null, limit: 101, search: null }],
+    ['a fractional limit', SCOPE, { after: null, limit: 1.5, search: null }],
+    ['a NaN limit', SCOPE, { after: null, limit: Number.NaN, search: null }],
+    ['a limit as text', SCOPE, { after: null, limit: '5', search: null }],
+    ['a malformed continuation', SCOPE, { after: 'x', limit: 2, search: null }],
+    ['an uppercase continuation', SCOPE, { after: C(1).toUpperCase(), limit: 2, search: null }],
+    ['a numeric continuation', SCOPE, { after: 7, limit: 2, search: null }],
+    // M7A-CUSTOMERS-P8: the search is null or an applied text, never anything else.
+    ['no search field', SCOPE, { after: null, limit: 2 }],
+    ['an empty search', SCOPE, { after: null, limit: 2, search: '' }],
+    ['an untrimmed search', SCOPE, { after: null, limit: 2, search: ' Ada' }],
+    ['a search with a control', SCOPE, { after: null, limit: 2, search: 'A\u0000da' }],
+    ['a search with a Bidi control', SCOPE, { after: null, limit: 2, search: 'A\u202eda' }],
+    ['a 201-character search', SCOPE, { after: null, limit: 2, search: 'x'.repeat(201) }],
+    ['a numeric search', SCOPE, { after: null, limit: 2, search: 7 }],
   ];
   for (const [label, scope, query] of bad) {
     const client = fakeClient([]);
@@ -225,7 +235,7 @@ test('only the tenant scope the authorizer selected is an authority, and only a 
 });
 
 test('only a key of the store-key shape names a session: an absent or malformed key faults before any statement', async () => {
-  const q = { after: null, limit: 2 };
+  const q = { after: null, limit: 2, search: null };
   const bad: Array<[string, unknown]> = [
     ['no key', null], ['undefined', undefined], ['an empty key', ''], ['42 characters', 'k'.repeat(42)], ['44 characters', 'k'.repeat(44)],
     ['padding', `${'k'.repeat(42)}=`], ['a standard base64 character', `${'k'.repeat(42)}+`], ['a space', `${'k'.repeat(42)} `],
@@ -469,4 +479,103 @@ test('M7CPP-04 probeCustomerProfile: true only for the routine\'s one denial of 
 test('M7CPP-05 profile (M7A-CUSTOMERS-P7): the largest version a row can hold is answered exactly, never rounded through a float', async () => {
   assert.equal(((await profileOne([profileRow(1, { o_version: '9007199254740991' })])) as { version: number }).version, Number.MAX_SAFE_INTEGER);
   assert.equal(((await profileOne([profileRow(1, { o_version: '1' })])) as { version: number }).version, 1);
+});
+
+// --- the name search (M7A-CUSTOMERS-P8): migration 025's m7a_customer_search ------------------------------------------------
+
+const SEARCH_STATEMENT = /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_customer_search\.m7a_customer_search\(\?::text, \?::uuid, \?::text, \?::uuid, \?::integer\)$/;
+const search = (rows: unknown, query: Record<string, unknown>, scope: TrustedScope = SCOPE) => {
+  const client = fakeClient(rows);
+  return { client, answer: createPostgresCustomerDirectory({ client }).page(scope, SESSION_KEY, query as never, live()) as Promise<unknown> };
+};
+
+test('M7CSP-01 search: one fixed call to 025\'s routine — the store key, the authorizer\'s tenant, the text, the continuation and one row more than the page', async () => {
+  const signal = live();
+  const client = fakeClient([customerRow(1), customerRow(2), customerRow(3)]);
+  const answer = await createPostgresCustomerDirectory({ client }).page(SCOPE, SESSION_KEY, { after: C(9), limit: 2, search: 'Ada %_\\ é' }, signal);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], SEARCH_STATEMENT);
+  assert.deepEqual(client.values[0], [SESSION_KEY, TENANT, 'Ada %_\\ é', C(9), 3], 'key, expected tenant, the text as sent, after, limit + 1 — in that order');
+  for (const fact of [ACTOR, 'a'.repeat(64), MEMBERSHIP, 'technician']) assert.ok(!client.values[0].includes(fact), `${fact} is not sent`);
+  assert.ok(!client.statements[0].includes('m7a_customer_page_v3') && !client.statements[0].includes('tmpos_customer.'), 'neither the list\'s routine nor 017\'s table');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  assert.deepEqual(answer, { outcome: 'page', hasMore: true, customers: [{ id: C(1), name: 'Customer 1' }, { id: C(2), name: 'Customer 2' }] });
+  const first = search([], { after: null, limit: 100, search: 'x' });
+  assert.deepEqual(await first.answer, { outcome: 'page', customers: [], hasMore: false }, 'no match is an empty page');
+  assert.deepEqual(first.client.values[0], [SESSION_KEY, TENANT, 'x', null, 101], 'no continuation is SQL null; limit 100 asks 101');
+  // A null search still asks 020's page_v3, exactly as before.
+  const plain = search([customerRow(1)], { after: null, limit: 5, search: null });
+  await plain.answer;
+  assert.match(plain.client.statements[0], /from tmpos_role\.m7a_customer_page_v3\(\?::text, \?::uuid, \?::integer\)$/);
+  assert.deepEqual(plain.client.values[0], [SESSION_KEY, null, 6]);
+});
+
+test('M7CSP-02 search: refusals and every out-of-shape answer are judged exactly as the list\'s — invalid is a throw, never a page or a refusal', async () => {
+  for (const outcome of ['denied', 'cursor_unknown']) {
+    assert.deepEqual(await search([refusalRow(outcome)], { after: C(1), limit: 5, search: 'Ada' }).answer, { outcome }, outcome);
+  }
+  const invalid = (err: unknown) => err instanceof Error && err.message === 'customer directory answer invalid';
+  for (const [label, rows] of [
+    ['invalid, the malformed-argument answer', [refusalRow('invalid')]], ['a refusal beside a match', [refusalRow('denied'), customerRow(1)]],
+    ['a match of another tenant', [customerRow(1, { o_tenant_id: OTHER_TENANT })]], ['only the lookahead of another tenant', [customerRow(1), customerRow(2), customerRow(3, { o_tenant_id: OTHER_TENANT })]],
+    ['out of page order', [customerRow(2, { o_name: 'Zoe' }), customerRow(1, { o_name: 'Amy' })]], ['a repeated match', [customerRow(1), customerRow(1)]],
+    ['more rows than limit + 1', [customerRow(1), customerRow(2), customerRow(3), customerRow(4)]], ['an extra column', [{ ...customerRow(1), o_rank: 1 }]],
+    ['a refusal naming a tenant', [refusalRow('denied', { o_tenant_id: TENANT })]], ['a 201-character name', [customerRow(1, { o_name: 'x'.repeat(201) })]],
+    ['not rows', { rows: [] }],
+  ] as const) await assert.rejects(search(rows, { after: null, limit: 2, search: 'Ada' }).answer, invalid, label);
+  await assert.rejects(search(null, { after: null, limit: 2, search: 'Ada' }).answer, invalid, 'null');
+});
+
+test('M7CSP-03 search: only a selected tenant scope, a store-key-shaped key and an applied text reach the database', async () => {
+  for (const [label, scope, query] of [
+    ['a platform scope', { ...SCOPE, scope: 'platform', tenant: null }, { after: null, limit: 2, search: 'Ada' }],
+    ['a tenant scope with no tenant', { ...SCOPE, tenant: null }, { after: null, limit: 2, search: 'Ada' }],
+    ['an empty search', SCOPE, { after: null, limit: 2, search: '' }],
+    ['a trailing space', SCOPE, { after: null, limit: 2, search: 'Ada ' }],
+    ['a line separator', SCOPE, { after: null, limit: 2, search: 'A da' }],
+    ['a lone surrogate', SCOPE, { after: null, limit: 2, search: 'A\ud800' }],
+    ['201 astral characters', SCOPE, { after: null, limit: 2, search: '\u{1F600}'.repeat(201) }],
+    ['a malformed continuation', SCOPE, { after: 'x', limit: 2, search: 'Ada' }],
+    ['limit 101', SCOPE, { after: null, limit: 101, search: 'Ada' }],
+  ] as const) {
+    const { client, answer } = search([customerRow(1)], query, scope as TrustedScope);
+    await assert.rejects(answer, /answer invalid/, label);
+    assert.equal(client.statements.length + client.bounds.length, 0, `${label}: nothing reached the database`);
+  }
+  // 200 code points, astral ones included, are an applied text (control).
+  const { client, answer } = search([], { after: null, limit: 2, search: '\u{1F600}'.repeat(200) });
+  assert.deepEqual(await answer, { outcome: 'page', customers: [], hasMore: false });
+  assert.equal(client.statements.length, 1);
+});
+
+test('M7CSP-04 probeCustomerSearch: true only for the routine\'s one denial of a random key with every other column null', async () => {
+  const client = fakeClient([refusalRow('denied')]);
+  const signal = live();
+  assert.equal(await probeCustomerSearch(client, signal), true);
+  assert.equal(client.statements.length, 1);
+  assert.match(client.statements[0], /select o_outcome, o_tenant_id, o_customer_id, o_name\s+from tmpos_customer_search\.m7a_customer_search\(\?::text, \?::uuid, 'probe'::text, null::uuid, 1::integer\)$/);
+  assert.equal(client.values[0].length, 2, 'the key and a random tenant alone are bound');
+  assert.match(client.values[0][0] as string, /^[A-Za-z0-9_-]{43}$/, 'a store-key-shaped key');
+  assert.match(client.values[0][1] as string, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'a random tenant');
+  assert.equal(client.bounds[0], CUSTOMER_DIRECTORY_BOUNDS);
+  assert.equal(client.signals[0], signal);
+  await probeCustomerSearch(client, live());
+  assert.notEqual(client.values[1][0], client.values[0][0], 'a fresh random key per call');
+});
+
+test('M7CSP-05 probeCustomerSearch: any other answer, a fault or an abort is false — never a throw', async () => {
+  for (const [label, rows] of [
+    ['no row', []], ['two denials', [refusalRow('denied'), refusalRow('denied')]], ['invalid', [refusalRow('invalid')]],
+    ['cursor_unknown', [refusalRow('cursor_unknown')]], ['a customer row', [customerRow(1)]],
+    ['a denial naming a tenant', [refusalRow('denied', { o_tenant_id: TENANT })]], ['a denial naming a name', [refusalRow('denied', { o_name: 'x' })]],
+    ['the profile\'s eight columns', [{ ...refusalRow('denied'), o_phone: null, o_email: null, o_created_at: null, o_version: null }]],
+    ['not rows', { rows: 1 }],
+  ] as const) assert.equal(await probeCustomerSearch(fakeClient(rows), live()), false, label);
+  assert.equal(await probeCustomerSearch(fakeClient(null, Object.assign(new Error('M7CSP-CANARY'), { code: '42501' })), live()), false, 'a driver error');
+  const aborted = new AbortController();
+  aborted.abort();
+  const idle = fakeClient([refusalRow('denied')]);
+  assert.equal(await probeCustomerSearch(idle, aborted.signal), false, 'an aborted probe');
+  assert.equal(idle.statements.length, 0, 'sends nothing once aborted');
 });

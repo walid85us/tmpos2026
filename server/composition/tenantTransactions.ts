@@ -52,14 +52,19 @@
 // requiring edit_customers. It is never classified as a read, so no read-only actor reaches it; it enqueues nothing. The
 // profile read now asks 024's versioned routine (the profile probe with it); nothing else is added to readiness.
 //
-// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, then probeCustomerProfile), answered over the same kernel. The routes are
+// M7A-CUSTOMERS-P8 UPDATE (search). No route is added: GET /api/v1/customers takes an optional name search, and the same
+// directory adapter (postgresCustomerDirectory.ts) asks migration 025's session-bound search routine for it on the kernel's
+// client. Readiness: the reads probe asks the search routine last, after the profile's (probeCustomerSearch), and is
+// ready only when all four refuse an absent key.
+//
+// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, then probeCustomerSearch), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
 import { CUSTOMER_CREATE_MUTATOR } from '../persistence/postgresCustomerCreate.js';
 import { CUSTOMER_UPDATE_MUTATOR } from '../persistence/postgresCustomerUpdate.js';
 import {
   createPostgresCustomerDetail, createPostgresCustomerDirectory, createPostgresCustomerProfile, probeCustomerDetail, probeCustomerDirectory,
-  probeCustomerProfile,
+  probeCustomerProfile, probeCustomerSearch,
 } from '../persistence/postgresCustomerDirectory.js';
 import {
   ROLE_LEVEL_UPDATE_MUTATOR, createPostgresRoleLevelDirectory, createPostgresRoleLevels, readRoleLevels,
@@ -111,10 +116,12 @@ function withCatalogDefaults(stored: (tenant: string, signal: AbortSignal) => Pr
 
 /**
  * The reads' one readiness probe: the directory's routine, then — only once it has refused — the detail's (M7A-CUSTOMERS-P4),
- * then — only once that has refused — the profile's (M7A-CUSTOMERS-P6).
+ * then — only once that has refused — the profile's (M7A-CUSTOMERS-P6), then — only once that has refused — the name
+ * search's (M7A-CUSTOMERS-P8).
  */
 const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> =>
-  (await probeCustomerDirectory(client, signal)) && (await probeCustomerDetail(client, signal)) && probeCustomerProfile(client, signal);
+  (await probeCustomerDirectory(client, signal)) && (await probeCustomerDetail(client, signal)) && (await probeCustomerProfile(client, signal))
+  && probeCustomerSearch(client, signal);
 
 // The tenant route inventory, added to here and only here: the customer directory over its production adapter, the
 // customer create over its mutator (M7A-CUSTOMERS-P3), the role-level edit over its mutator and the role-level reads

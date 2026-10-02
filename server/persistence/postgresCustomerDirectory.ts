@@ -58,11 +58,22 @@
 // 023's on one snapshot and adds the customer's row version (o_version, NULL on every refusal). A 'customer' row must carry
 // it as bigint decimal text from 1 to 2^53-1 with no leading zero, answered to the runtime as a number; anything else is
 // the same bounded throw (503).
+//
+// M7A-CUSTOMERS-P8 UPDATE — THE NAME SEARCH. The directory's one port method dispatches on query.search: null asks 020's
+// page_v3 exactly as before; a search text — already the runtime's applied text, checked again here before any statement
+// (isCustomerSearchText) — asks migration 025's tmpos_customer_search.m7a_customer_search once, with (key, the
+// authorizer's tenant, the text, the continuation's id, limit + 1). That routine derives the tenant from the session
+// itself and compares the authorizer's (a precondition, never a selector), re-decides 022's authority on one snapshot,
+// and answers the matching customers of that tenant in page order, 'denied', 'cursor_unknown' or 'invalid'. Its rows are
+// judged by the same answerOf as the list's: every row the authorizer's tenant, distinct, storable, in page order;
+// 'invalid' or any other shape is the bounded throw (503). Its readiness (probeCustomerSearch) asks it for a random key
+// no session holds and requires its one 'denied' with every other column null; the reads probe asks it last.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import {
-  CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isCustomerCreatedAt, isStorableName, normalizeCustomerEmail, normalizeCustomerPhone,
+  CUSTOMER_DIRECTORY_MAX_LIMIT, inCustomerPageOrder, isCustomerCreatedAt, isCustomerSearchText, isStorableName, normalizeCustomerEmail,
+  normalizeCustomerPhone,
 } from '../runtime/customerDirectory.js';
 import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery, CustomerProfilePort } from '../runtime/customerDirectory.js';
 import type { SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
@@ -139,16 +150,38 @@ export function createPostgresCustomerDirectory(deps: { readonly client: Supervi
       if (!isTrustedScope(scope) || scope.scope !== 'tenant' || scope.tenant === null || !UUID_RE.test(scope.tenant)) throw fault();
       if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) throw fault();
       const tenant = scope.tenant;
-      const { after, limit } = query;
+      const { after, limit, search } = query;
       if (after !== null && (typeof after !== 'string' || !UUID_RE.test(after))) throw fault();
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > CUSTOMER_DIRECTORY_MAX_LIMIT) throw fault();
+      // Only null (the unfiltered list) or an applied search text: anything else never reaches a statement.
+      if (search !== null && !isCustomerSearchText(search)) throw fault();
       return client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
-        const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
-          from tmpos_role.m7a_customer_page_v3(${sessionKey}::text, ${after}::uuid, ${limit + 1}::integer)`;
+        const rows = search === null
+          ? await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+              from tmpos_role.m7a_customer_page_v3(${sessionKey}::text, ${after}::uuid, ${limit + 1}::integer)`
+          : await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+              from tmpos_customer_search.m7a_customer_search(${sessionKey}::text, ${tenant}::uuid, ${search}::text, ${after}::uuid, ${limit + 1}::integer)`;
         return answerOf(rows, limit, tenant);
       });
     },
   });
+}
+
+/** Readiness: true only for the search routine's one refusal of a random key no session holds; anything else is false. */
+export async function probeCustomerSearch(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  const absentKey = randomBytes(32).toString('base64url');
+  try {
+    return await client.transaction(signal, CUSTOMER_DIRECTORY_BOUNDS, async (sql) => {
+      const rows = await sql`select o_outcome, o_tenant_id, o_customer_id, o_name
+        from tmpos_customer_search.m7a_customer_search(${absentKey}::text, ${randomUUID()}::uuid, 'probe'::text, null::uuid, 1::integer)`;
+      if (!Array.isArray(rows) || rows.length !== 1) return false;
+      const row = rowOf(rows[0]);
+      return row.o_outcome === 'denied' && row.o_tenant_id === null && row.o_customer_id === null && row.o_name === null;
+    });
+  } catch {
+    return false; // an outage, an abort, an overrun, a driver fault or a row out of shape: nothing is disclosed
+  }
 }
 
 /** Readiness: true only for the routine's one refusal of a random key no session holds; any other answer or fault is false. */

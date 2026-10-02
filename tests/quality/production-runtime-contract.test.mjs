@@ -956,7 +956,7 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     ['server/composition/tenantTransactions.ts', 'server/entry/tenantEntry.ts'], 'the tenant root is composed by the tenant entry alone');
   assert.deepEqual(names('parseTenantIssuerKey', 'parseTenantIssuerKey(env)'),
     ['server/composition/transactionKernel.ts', 'server/entry/tenantEntry.ts'], 'the issuer key is parsed by the kernel and judged by the tenant entry alone');
-  for (const name of ['createPostgresCustomerDirectory', 'probeCustomerDirectory', 'createPostgresCustomerProfile', 'probeCustomerProfile']) {
+  for (const name of ['createPostgresCustomerDirectory', 'probeCustomerDirectory', 'createPostgresCustomerProfile', 'probeCustomerProfile', 'probeCustomerSearch']) {
     assert.deepEqual(names(name, `ports: ${name}`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresCustomerDirectory.ts'],
       `${name} is bound by the tenant root alone`);
   }
@@ -989,11 +989,11 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     TENANT_INVENTORY, 'the scan must catch a swapped read-back adapter (M7A-CUSTOMERS-P3-R2)');
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'), TENANT_INVENTORY,
     'the tenant inventory is exactly the customer list over the production customer directory, the role levels\' read-back over their one-snapshot read, the customer create and edit and the role-level edit over their mutators, and the production role-levels reads');
-  // The reads' probe (M7A-CUSTOMERS-P4, -P6): exactly the directory's, then the detail's, then the profile's — no other
-  // probe, no swapped order.
+  // The reads' probe (M7A-CUSTOMERS-P4, -P6, -P8): exactly the directory's, then the detail's, then the profile's, then the
+  // name search's — no other probe, no swapped order.
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'),
-    /^const probeTenantReads = async \(client: SupervisedPgClient, signal: AbortSignal\): Promise<boolean> =>\n {2}\(await probeCustomerDirectory\(client, signal\)\) && \(await probeCustomerDetail\(client, signal\)\) && probeCustomerProfile\(client, signal\);$/m,
-    'the tenant reads\' readiness is the directory\'s probe, then the detail\'s, then the profile\'s');
+    /^const probeTenantReads = async \(client: SupervisedPgClient, signal: AbortSignal\): Promise<boolean> =>\n {2}\(await probeCustomerDirectory\(client, signal\)\) && \(await probeCustomerDetail\(client, signal\)\) && \(await probeCustomerProfile\(client, signal\)\)\n {2}&& probeCustomerSearch\(client, signal\);$/m,
+    'the tenant reads\' readiness is the directory\'s probe, then the detail\'s, then the profile\'s, then the search\'s');
   // A census of names cannot follow a capability re-exported under another name, so the modules allowed to hold one export an
   // exact value surface, read from the syntax tree: a new export (an alias, a wrapper, a re-export list, a default) fails here
   // until it is reviewed into the list. Interfaces and type aliases carry no capability and are not listed.

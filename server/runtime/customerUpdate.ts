@@ -11,7 +11,9 @@
 // Request  { expectedVersion, name, phone?, email? } — expectedVersion and name required, no other field.
 // Response 200 { customer: { id, name }, version, changed } — the id, the name as stored, the version the customer is now
 // at, and whether anything moved: changed:true at expectedVersion + 1 once a change committed; changed:false at
-// expectedVersion when every value already held (nothing written, no version moved, no audit record). Never a contact:
+// expectedVersion when every value already held (no customer change, no version moved, no audit record and no outbox
+// event — but the sealed changed:false response is recorded as the key's idempotency completion in the same transaction,
+// so a retry replays it). Never a contact:
 // the profile read (GET /api/v1/customers/{id}/profile) is where they are read, with the version as its strong ETag.
 //
 // NAME IS REQUIRED (a stated deviation: the brief made every field optional). The kernel seals the 200 from the plan before the

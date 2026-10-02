@@ -26,7 +26,7 @@
 // nothing; in a transaction that clears them, it succeeds and leaves exactly the 001-022 surface captured before 023 was
 // applied (schemas, routines and ACLs, the table's columns, constraints, indexes and ACL — 020's create granted back), the
 // preflight names the 023 grants missing and 020's create unexpected, and a re-apply is byte-identical in definition and
-// ACL and is exactly the 023 database (which the P7 runtime accepts only once 024 is applied too); out of order, with 020 rolled back first, 023's create raises at call
+// ACL and is exactly the 023 database (which the P8 runtime accepts only once 024 and 025 are applied too); out of order, with 020 rolled back first, 023's create raises at call
 // and 023's down refuses until 020 is back (M7CN-08).
 // The profile read's access-control parity beyond the owner key (AC-5): every standing, grant, level and tenant refusal 022's read
 // makes — a technician, manager or sales_staff narrowed to none, a suspended account or tenant — is the profile read's, with every
@@ -43,9 +43,10 @@
 // this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. On a shared service
 // it first rolls 024 and 023 back with their own committed down files (which refuse, failing this suite loudly, if any
 // customer is edited or still holds a contact or a creation time), so its legacy rows are seeded on 001-022 exactly as a
-// deployed database would hold them, then applies 023 (only) through the trusted executor; its teardown applies 024. Every
+// deployed database would hold them, then applies 023 (only) through the trusted executor; its teardown applies 024 and 025
+// (M7A-CUSTOMERS-P8: rollBackAbove('022') rolls 025 back first, with its ledger row). Every
 // fixture is synthetic and randomly suffixed; every widening and every successful rollback runs in a transaction that is
-// rolled back. It leaves 023 and 024 applied, the issuer key row it found,
+// rolled back. It leaves 023, 024 and 025 applied, the issuer key row it found,
 // no customer, session, ledger, role-level or version row of its own, and its login dropped; its tenants, identities, audit
 // and idempotency records stay, as every suite's do.
 import test from 'node:test';
@@ -70,6 +71,7 @@ const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/
 const UP_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.up.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 const UP_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`, 'utf8');
+const UP_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
@@ -89,15 +91,19 @@ const RC = 'isolation level read committed';
 /**
  * M7A-CUSTOMERS-P7: this file proves 023 on the chain it was written for. 024 (customer edits) revokes the login's EXECUTE
  * on 023's profile read and adds a column 023's postcondition does not know, so this file applies the chain THROUGH 023 and
- * leaves 024 to its teardown. The P7 runtime's real preflight pins 001-024, so on 023 it names 024's grants missing, 023's
- * profile read unexpected and 024's ledger row missing; with 024 applied (in a rolled-back transaction) it accepts.
+ * leaves 024 to its teardown. The runtime's real preflight pins 001-025 (M7A-CUSTOMERS-P8), so on 023 it names 024's and
+ * 025's grants missing, 023's profile read unexpected and their ledger rows missing; with 024 and 025 applied (in a
+ * rolled-back transaction) it accepts.
  */
 const PREFLIGHT_AT_023 = Object.freeze({ runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] });
-/** 024 applied on `tx`, its ledger row recorded, as the trusted executor would leave them. */
-async function apply024(tx) {
+/** 024 and 025 applied on `tx`, their ledger rows recorded, as the trusted executor would leave them. */
+async function applyLater(tx) {
   await tx.unsafe(UP_024).simple();
   await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
     values ('024', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex')}, false, now(), now())`;
+  await tx.unsafe(UP_025).simple();
+  await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
+    values ('025', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`)).digest('hex')}, false, now(), now())`;
 }
 const PROFILE_NULLS = Object.freeze({ o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null });
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -167,10 +173,10 @@ test.after(async () => {
   // Every customer this file made, legacy or created through 023: a later suite's rollback of 023 refuses while any
   // customer holds a creation time, so none of ours may stay behind.
   if (TENANTS.length > 0) await quietly(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 023 AND 024 applied, whatever failed above: the executor applies what is not (024, which
-  // this file keeps out while it proves 023, always).
+  // The shared service is left with 023, 024 AND 025 applied, whatever failed above: the executor applies what is not (024
+  // and 025, which this file keeps out while it proves 023, always).
   await quietly(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '024') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '025') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -480,9 +486,9 @@ test('M7CN-03: the login executes 023\'s two routines and uses their schema, exe
     assert.equal((await errorOf(runtime.unsafe(statement)))?.code, '42501', statement);
   }
   const verdict = await rolledBack(RC, (tx) => preflightOn(tx));
-  assert.deepEqual(verdict.value, PREFLIGHT_AT_023, `the P7 runtime refuses a 023 database: ${JSON.stringify(verdict)}`);
-  const with024 = await rolledBack(RC, async (tx) => { await apply024(tx); return preflightOn(tx); });
-  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's applied: accepted (${JSON.stringify(with024)})`);
+  assert.deepEqual(verdict.value, PREFLIGHT_AT_023, `the P8 runtime refuses a 023 database: ${JSON.stringify(verdict)}`);
+  const with024 = await rolledBack(RC, async (tx) => { await applyLater(tx); return preflightOn(tx); });
+  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's and 025's applied: accepted (${JSON.stringify(with024)})`);
 });
 
 // ---------------------------------------------------------------------------
@@ -767,7 +773,7 @@ test('M7CN-08: committed, 023\'s down refuses while any customer holds a contact
   assert.deepEqual(alone.value.reapplied, applied, 're-applied: the same definitions, configuration and ACLs');
   assert.deepEqual(alone.value.reappliedSurface.routines, appliedSurface.routines);
   assert.deepEqual(alone.value.reappliedSurface.columns, appliedSurface.columns);
-  assert.deepEqual(alone.value.up, PREFLIGHT_AT_023, 're-applied: exactly the 023 database (the P7 runtime needs 024 as well)');
+  assert.deepEqual(alone.value.up, PREFLIGHT_AT_023, 're-applied: exactly the 023 database (the P8 runtime needs 024 and 025 as well)');
   // Out of order: 020 rolled back under 023 (its own guard cleared first) — 023's create raises at call, and 023's down
   // refuses until 020 is applied again; then it rolls back.
   // Minted first, on the login's own connection: the transaction below holds 020's tables, which the mint would wait on.

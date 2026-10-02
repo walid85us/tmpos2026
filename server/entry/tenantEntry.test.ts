@@ -286,7 +286,7 @@ type Row = Readonly<Record<string, unknown>>;
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
-  | 'customerDetailProbe' | 'customerProfileProbe' | 'storeProbe';
+  | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeProbe';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -309,6 +309,7 @@ function classify(text: string): Kind {
   if (text.includes('m7a_customer_page_v3')) return 'customerProbe';
   if (text.includes('m7a_customer_profile')) return 'customerProfileProbe';
   if (text.includes('m7a_customer_get')) return 'customerDetailProbe';
+  if (text.includes('m7a_customer_search')) return 'customerSearchProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
@@ -349,6 +350,7 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   customerProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   customerDetailProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null, o_version: null }],
+  customerSearchProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   storeProbe: [{ ok: true }],
 });
 
@@ -516,6 +518,10 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ customerProfileProbe: [[GOLDEN.customerDetailProbe[0]]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerProfileProbe: [[]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerProfileProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  // M7A-CUSTOMERS-P8: the name search routine is the fourth part of the same reads probe.
+  await assertRefused({ customerSearchProbe: [[{ ...GOLDEN.customerSearchProbe[0], o_outcome: 'invalid' }]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ customerSearchProbe: [[]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ customerSearchProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
   // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
   await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
   await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);
@@ -534,7 +540,7 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
       'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'customerDetailProbe',
-      'customerProfileProbe', 'storeProbe'],
+      'customerProfileProbe', 'customerSearchProbe', 'storeProbe'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
   } finally {
     await stop();
@@ -623,6 +629,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the customer probe answers two rows', 'customerProbe', [GOLDEN.customerProbe[0], GOLDEN.customerProbe[0]]],
       ['the customer detail probe fails', 'customerDetailProbe', 'reject'],
       ['the customer profile probe fails', 'customerProfileProbe', 'reject'],
+      ['the customer search probe fails', 'customerSearchProbe', 'reject'],
       ['the idempotency store and command port probe fails', 'storeProbe', 'reject'],
       ['the store probe answers false', 'storeProbe', [{ ok: false }]],
       ['the tenant admission fails', 'tenantAdmissionProbe', 'reject'],
@@ -632,7 +639,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the database is down for everything', 'connect', 'default'],
     ];
     for (const [label, kind, entry] of transitions) {
-      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
+      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
       else fake.live[kind] = entry;
       t.mock.timers.tick(1_000);
       assert.equal(await ready(), 503, label);
@@ -645,7 +652,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
     const before = fake.kinds.length;
     await Promise.all(Array.from({ length: 5 }, () => ready()));
     const asked = fake.kinds.slice(before);
-    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
+    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
     assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');

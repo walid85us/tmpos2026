@@ -1395,16 +1395,18 @@ test('M7TK-04 the tenant session store mints under the issuer key and holds the 
   await ttx.close();
 });
 
-test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s', async () => {
+test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s, then the search\'s', async () => {
   let answer: unknown = [{ outcome: 'match' }];
   const denied = [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }];
   const profileDenied = [{ ...denied[0], o_phone: null, o_email: null, o_created_at: null, o_version: null }];
   let page: unknown = denied;
   let got: unknown = denied;
   let profiled: unknown = profileDenied;
+  let searched: unknown = denied;
   let minted: unknown = [{ outcome: 'invalid' }];
   const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
-    : text.includes('m7a_customer_get') ? got : text.includes('m7a_customer_profile') ? profiled : text.includes('m7a_session_create') ? minted : []));
+    : text.includes('m7a_customer_get') ? got : text.includes('m7a_customer_profile') ? profiled : text.includes('m7a_customer_search') ? searched
+      : text.includes('m7a_session_create') ? minted : []));
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
   const signal = new AbortController().signal;
   assert.equal(await ttx.issuerKey(signal), 'match');
@@ -1425,10 +1427,10 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.ok(!JSON.stringify(kernel.statements).includes(keyHex) && !JSON.stringify(kernel.statements).includes(TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY),
     'no statement carries the key in any spelling');
   kernel.statements.length = 0;
-  assert.equal(await ttx.readsProbe(signal), true, 'all three routines\' one refusal of an unknown key');
+  assert.equal(await ttx.readsProbe(signal), true, 'all four routines\' one refusal of an unknown key');
   const asked = (): string[] => kernel.statements.map((st) => (/m7a_customer_page_v3\(/.test(st.text) ? 'page_v3' : /m7a_customer_get\(/.test(st.text) ? 'get'
-    : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : 'other'));
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile'], 'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7)');
+    : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search' : 'other'));
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search'], 'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8)');
   got = [{ o_outcome: 'not_found', o_tenant_id: null, o_customer_id: null, o_name: null }];
   kernel.statements.length = 0;
   assert.equal(await ttx.readsProbe(signal), false, 'the detail routine answering anything else is not ready');
@@ -1438,6 +1440,19 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.equal(await ttx.readsProbe(signal), false, 'the profile routine answering anything else is not ready');
   profiled = denied;
   assert.equal(await ttx.readsProbe(signal), false, 'nor the detail\'s four columns in place of the profile\'s seven');
+  profiled = profileDenied;
+  // M7A-CUSTOMERS-P8: the search routine is asked last, only once the profile's has refused.
+  searched = [{ ...denied[0], o_outcome: 'invalid' }];
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'the search routine answering anything else is not ready');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search']);
+  searched = profileDenied;
+  assert.equal(await ttx.readsProbe(signal), false, 'nor the profile\'s eight columns in place of the search\'s four');
+  searched = denied;
+  profiled = denied;
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'a profile not ready (control)');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile'], 'short-circuit: the search routine is not asked once the profile is not ready');
   profiled = profileDenied;
   page = [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: REVAL_MEMBERSHIP, o_name: 'n' }];
   kernel.statements.length = 0;

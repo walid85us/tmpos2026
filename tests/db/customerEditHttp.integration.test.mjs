@@ -1,5 +1,5 @@
 // M7A-CUSTOMERS-P7 — PATCH /api/v1/customers/{id} END TO END: the tenant entry (server/entry/tenantEntry.ts, startTenantEntry)
-// editing customers over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-024),
+// editing customers over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-025),
 // composed exactly as server/entry/tenantMain.ts composes it but for its construction. The planner
 // (server/runtime/customerUpdate.ts), the tenant command transaction and its revalidator, the mutator
 // (server/persistence/postgresCustomerUpdate.ts), migration 024's tmpos_customer_edit.m7a_customer_update, the audit writer

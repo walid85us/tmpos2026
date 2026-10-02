@@ -271,19 +271,31 @@ const PINNED = {
   // chain through 024; the exact-[005] gate is unchanged and still refuses.
   '024_m7a_customer_edit.up.sql': '04272c40e863a82d9a1f71980da00e38494cd30df1ee90ae90cf02aad6fa35fb',
   '024_m7a_customer_edit.down.sql': 'bf73ed076b7fc7ccec50ff491ae901d9154cedbc35d64a85f45550b605fd7bdb',
+  // Phase 4.0 M7A-CUSTOMERS-P8 — the customer name search: in its OWN schema tmpos_customer_search one SECURITY DEFINER,
+  // STABLE routine, m7a_customer_search (022's session-bound decision restated — the session, its standing, exactly one
+  // tenant grant, the role's current Customers level at View, 017's rechecks, the expected tenant as a precondition — then
+  // one keyset page, in 017's (name collate "C", id) order, of that tenant's customers whose name contains the text after
+  // the ICU root locale's full uppercase of both sides, backslash, '%' and '_' literal). It refuses to apply without the
+  // ICU collation pg_catalog."und-x-icu". tmpos_app gains EXECUTE on it and USAGE on the schema: those are its only ACL
+  // changes; no table, index, column, role or membership is touched, and migrations 001-024 are untouched, byte for byte.
+  // It holds no data, so its rollback has no data guard and returns exactly the 001-024 database. Proved against
+  // disposable PostgreSQL only; applied to no managed, persistent or application database. D4 now names the contiguous
+  // chain through 025; the exact-[005] gate is unchanged and still refuses.
+  '025_m7a_customer_search.up.sql': '85bb78a1332515bf2019f39b131b23f79f9c31ddc36f0be90ccc96ed896b08bd',
+  '025_m7a_customer_search.down.sql': '64b0736c22cd3112df47455ed64f0c243e8b2ff63a54d00b91af8f61e70c3a63',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the forty-eight expected files', () => {
+test('the migrations directory holds exactly the fifty expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

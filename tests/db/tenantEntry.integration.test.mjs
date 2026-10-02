@@ -61,6 +61,10 @@
 // finds the PATCH template behind the session like the detail, M7TE-08 the login's EXECUTE on 024's edit and profile read and
 // refuses 023's profile read given back, M7TE-10 the 001-024 ledger (a fake next row is '025'), and M7TE-11 withdraws 024's
 // profile read after startup. This file edits no customer (024's rollback refuses while any customer is edited).
+//
+// M7A-CUSTOMERS-P8 UPDATE (name search). Migration 025 adds the session-bound name search the list asks for a `q`
+// (tests/db/customerSearch.integration.test.mjs proves the routine and the HTTP search). The chain is 001-025: no route is
+// added, M7TE-08 the login's EXECUTE on 025's search, and M7TE-10 the 001-025 ledger (a fake next row is '026').
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -125,6 +129,8 @@ const PROFILE_GET = 'tmpos_customer_edit.m7a_customer_profile(text, uuid, uuid)'
 const PROFILE_023 = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
 /** 024's customer edit (M7A-CUSTOMERS-P7). */
 const CUSTOMER_UPDATE = 'tmpos_customer_edit.m7a_customer_update(text, uuid, uuid, bigint, text, boolean, text, boolean, text)';
+/** 025's customer name search (M7A-CUSTOMERS-P8). */
+const CUSTOMER_SEARCH = 'tmpos_customer_search.m7a_customer_search(text, uuid, text, uuid, integer)';
 const LEVELS_READ = 'tmpos_role.m7a_role_levels(uuid, text)';
 const LEVEL_SET = 'tmpos_role_edit.m7a_role_level_set_v2(text, text, text, text, uuid, bigint)';
 const LEVEL_STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -1097,6 +1103,9 @@ test('M7TE-08: the database must hold this process\'s issuer key; the limiter mu
   // M7A-CUSTOMERS-P7: 024's customer edit.
   await withoutExecute(CUSTOMER_UPDATE, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
     'the customer edit withdrawn')));
+  // M7A-CUSTOMERS-P8: 025's customer name search.
+  await withoutExecute(CUSTOMER_SEARCH, () => withEntry({}, async (ctx) => assertRefused(ctx, 'database_login_unsafe', ['role_privilege_missing'],
+    'the customer search withdrawn')));
   // 019's create or 018's page_v2 given back to the login (the name-only role decisions 020 closed) is a grant too many; so is
   // 020's unconditional set (M7A-CUSTOMERS-P4: an edit that asserts neither the tenant nor the version).
   for (const [label, fn] of [['019\'s create', 'tmpos_customer_write.m7a_customer_create(text, uuid, text)'], ['018\'s page_v2', 'tmpos_mint.m7a_customer_page_v2(text, uuid, integer)'],
@@ -1145,28 +1154,28 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-024 refuses startup migration_state_invalid', async () => {
+test('M7TE-10: a migration ledger that is not exactly 001-025 refuses startup migration_state_invalid', async () => {
   // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); M7A-CUSTOMERS-P6 made it 023 (the contact
-  // records) and M7A-CUSTOMERS-P7 024 (customer edits), so the fake "next migration" row is '025' — the restore below never
-  // removes the real 024 row it re-inserts.
+  // records), M7A-CUSTOMERS-P7 024 (customer edits) and M7A-CUSTOMERS-P8 025 (the name search), so the fake "next migration"
+  // row is '026' — the restore below never removes the real 025 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '024'`;
-  assert.ok(row !== undefined, '024 is recorded');
+    from public.schema_migrations where version = '025'`;
+  assert.ok(row !== undefined, '025 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('024', '025')`;
+    await sql`delete from public.schema_migrations where version in ('025', '026')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '024'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 023'));
+    await owner`delete from public.schema_migrations where version = '025'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 024'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 024').digest('hex')} where version = '024'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '024 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 025').digest('hex')} where version = '025'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '025 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('025', ${createHash('sha256').update('025').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 025'));
+      values ('026', ${createHash('sha256').update('026').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 026'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1176,7 +1185,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-024 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '024'`;
+    from public.schema_migrations where version = '025'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 

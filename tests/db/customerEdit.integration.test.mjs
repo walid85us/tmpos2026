@@ -43,7 +43,9 @@
 // it first rolls 024 back with its own committed down file (which refuses, failing this suite loudly, if any customer is
 // edited or any audit record names a customer), so its customers are seeded on 001-023 exactly as a deployed database holds
 // them, then applies 024 through the trusted executor. Every fixture is synthetic and randomly suffixed; every widening and
-// every rollback but one runs in a transaction that is rolled back. It leaves 024 applied, the issuer key row it found, no
+// every rollback but one runs in a transaction that is rolled back. (M7A-CUSTOMERS-P8: 025, the name search, sits above 024
+// and holds no data; this file rolls it back with 024 and re-applies it after, newest first and oldest first.) It leaves 024
+// and 025 applied, the issuer key row it found, no
 // customer, session, ledger, role-level or version row of its own, and its login dropped; its tenants and identities stay,
 // as every suite's do.
 import test from 'node:test';
@@ -54,7 +56,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { installTestIssuerKey, resolveDisposableTarget, testClient } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
-import { rollBackAbove } from './migrationsThrough.mjs';
+import { portThrough, rollBackAbove } from './migrationsThrough.mjs';
 import { REQUIRED_MIGRATIONS, createPostgresStartupPreflight } from '../../server/persistence/postgresStartupPreflight.ts';
 import { principalKeyOf } from '../../server/runtime/sessions.ts';
 import { createPostgresCustomerProfile, probeCustomerProfile } from '../../server/persistence/postgresCustomerDirectory.ts';
@@ -63,6 +65,8 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`, 'utf8');
 const DOWN_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.down.sql`, 'utf8');
+const UP_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`, 'utf8');
+const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_024 = UP_024.slice(UP_024.lastIndexOf('do $$'));
@@ -168,7 +172,7 @@ test.after(async () => {
   if (TENANTS.length > 0) await swallow(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
   // The shared service is left with 024 applied, whatever failed above: the executor applies it if it is not.
   await swallow(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '024') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '025') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -200,7 +204,8 @@ await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
 // On a shared service an earlier step applied 024: its own committed down file removes it (and refuses, loudly, while any
 // customer of any suite is edited or any audit record names a customer). On a fresh cluster there is nothing to roll back.
 const rolledBackAtSetup = (await rollBackAbove(owner, MIG_DIR, '023')).rolledBack;
-const ROLL_BACK_PORT = (port) => Object.freeze({ ...port, list: () => port.list().filter((n) => !/^024_/.test(n)) });
+// The chain THROUGH 023: 024 and every later file (025 since M7A-CUSTOMERS-P8) hidden from the executor's file port.
+const ROLL_BACK_PORT = (port) => portThrough(port, '023');
 const applyThrough023 = await (async () => {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
@@ -503,9 +508,9 @@ const applyReport = await trustedApply();
 test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough023.outcome, 'complete', JSON.stringify(applyThrough023).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['024'], `024 alone applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['024', '025'], `024 (and 025 above it, M7A-CUSTOMERS-P8) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 24 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 25 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[23].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_024).simple())).code, undefined, 'the postcondition holds as applied');
@@ -1218,9 +1223,11 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
   assert.equal(outOfOrder.code, '55000', JSON.stringify(outOfOrder));
   assert.match(outOfOrder.message, /roll 024 back before 023/);
   // Cleared (in a transaction rolled back): exactly the 001-023 surface, 023's profile read the login's again; re-applied,
-  // the same definitions and ACLs, accepted.
+  // the same definitions and ACLs, accepted. 025 (M7A-CUSTOMERS-P8) sits above 024 and rolls back first, the supported order,
+  // and is re-applied after it.
   const alone = await rolledBack(RC, async (tx) => {
     await cleared(tx);
+    await tx.unsafe(DOWN_025).simple();
     await tx.unsafe(DOWN_024).simple();
     const down = { surface: await surface(tx), preflight: await preflightOn(tx),
       app023: (await tx`select pg_catalog.has_function_privilege('tmpos_app', ${PROFILE_023}, 'EXECUTE') as e`)[0].e,
@@ -1228,6 +1235,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
       // Run again once rolled back: a stated refusal, never a missing-column error.
       again: await tx.savepoint((sp) => sp.unsafe(DOWN_024).simple()).then(() => null, (err) => ({ code: err.code, message: String(err.message) })) };
     await tx.unsafe(UP_024).simple();
+    await tx.unsafe(UP_025).simple();
     return { down, reapplied: await routineState(tx), reappliedSurface: await surface(tx), up: await preflightOn(tx),
       versions: (await tx`select pg_catalog.array_agg(distinct row_version)::text as v from tmpos_customer.customer`)[0].v };
   });
@@ -1259,7 +1267,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     'customers with contacts, creation times and unknown creation times remain');
   const { rolledBack: down, restore } = await rollBackAbove(owner, MIG_DIR, '023');
   try {
-    assert.deepEqual(down, ['024']);
+    assert.deepEqual(down, ['025', '024'], 'newest first: 025 above 024 (M7A-CUSTOMERS-P8)');
     assert.deepEqual(await keptRows(), kept, 'the rollback dropped no name, contact or creation time');
     assert.deepEqual(await surface(owner), SURFACE_023, 'exactly 001-023');
   } finally {

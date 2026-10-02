@@ -83,9 +83,25 @@
 // (customerUpdate.ts) sends it back as expectedVersion. No If-Match or If-None-Match is processed here, and Cache-Control
 // stays no-store.
 //
+// M7A-CUSTOMERS-P8 UPDATE — THE NAME SEARCH. The list takes a third optional parameter, `q`, under the same rules (each key at
+// most once, nothing else, no empty pair): its raw value is printable ASCII, decoded as application/x-www-form-urlencoded
+// (every '+' a space, then decodeURIComponent — a malformed escape or an encoded surrogate is the 400), then trimmed. Empty
+// after that (absent, `q=`, `q=+`, `q=%20`) is the unfiltered list exactly as before, its cursor included. Anything else is
+// the applied search text, refused (400) when it holds a character no customer field may hold (REFUSED_CHARACTER_RE) or
+// more than 200 characters (code points). `limit` and `cursor` keep their raw grammar; the whole query is bounded at 4096
+// characters (the old 128 could not carry a search). A search asks the same port with `search` set; the PostgreSQL adapter
+// asks migration 025's session-bound routine, which decides the list's authority exactly as 022's read does and matches
+// the text anywhere in the name, case-insensitively (ICU root full uppercase of both sides), in the list's (name, id)
+// order. A filtered page's continuation is a second cursor kind: tag 0x03, the last customer's id and the first 16 bytes of
+// the SHA-256 of the search text's UTF-8 — 33 bytes, 44 base64url characters, canonical spelling only. It is accepted only
+// with the same search text: an unfiltered cursor with a search, a filtered one without, or one made for another text is
+// the same 400. Like the unfiltered cursor it carries no text, name, tenant or authority. The response shape, the policy,
+// the refusals and the logging are the list's: no search text, name or query value reaches a log line or a refusal.
+//
 // PURE AND PORTABLE: part of the emitted runtime artifact, importing only the runtime. It holds no infrastructure; the
 // port is handed to it by the composition root.
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import type { Response } from 'express';
 import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
 import type { TrustedScope } from './principals.js';
@@ -188,10 +204,27 @@ export function inCustomerPageOrder(entries: readonly { readonly id: string; rea
   return true;
 }
 
-/** The continuation to read after, as a customer id, and the page size. Both already validated. */
+/**
+ * The continuation to read after, as a customer id, the page size, and the applied search text — null for the unfiltered
+ * list (M7A-CUSTOMERS-P8). All already validated.
+ */
 export interface CustomerDirectoryQuery {
   readonly after: string | null;
   readonly limit: number;
+  readonly search: string | null;
+}
+
+/** The longest search text, in characters (code points): the longest name a customer can hold (M7A-CUSTOMERS-P8). */
+export const CUSTOMER_SEARCH_MAX_CHARACTERS = 200;
+
+/**
+ * Whether `value` is a search text the list applies: non-empty, already trimmed, no refused character and at most 200
+ * code points. The parser's last step, and the PostgreSQL adapter's check before a statement runs.
+ */
+export function isCustomerSearchText(value: unknown): value is string {
+  // At most two UTF-16 units per code point: a cheap bound before anything is copied.
+  if (typeof value !== 'string' || value === '' || value.length > 2 * CUSTOMER_SEARCH_MAX_CHARACTERS) return false;
+  return value === value.trim() && !REFUSED_CHARACTER_RE.test(value) && [...value].length <= CUSTOMER_SEARCH_MAX_CHARACTERS;
 }
 
 /** One customer as the page shows it. */
@@ -201,7 +234,7 @@ export interface CustomerDirectoryEntry {
 }
 
 /**
- * The port to migration 018's session-bound read, handed the trusted scope and the presenting session's store key
+ * The port to migration 018's session-bound read (025's for a search), handed the trusted scope and the presenting session's store key
  * (RouteContext.sessionKey), a SQL parameter it never logs, echoes or stores. Its answer is untrusted input, expected to be one of
  *   { outcome: 'page', customers: CustomerDirectoryEntry[], hasMore: boolean }  — at most query.limit customers;
  *   { outcome: 'denied' }                                                      — the scope's grant no longer holds;
@@ -223,19 +256,40 @@ export interface CustomerDirectoryPorts {
  * holds it, and a continuation encoding it could never be decoded again.
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const QUERY_PAIR_RE = /^(limit|cursor)=([A-Za-z0-9_-]{1,32})$/;
+/** One pair of the query: a key and its raw value, split at the first '='. */
+const QUERY_PAIR_RE = /^(limit|cursor|q)=(.*)$/s;
+/** `limit` and `cursor` keep their strict raw grammar: no percent-encoding, at most a filtered cursor's 44 characters. */
+const PLAIN_VALUE_RE = /^[A-Za-z0-9_-]{1,44}$/;
+/** `q`'s raw value: printable ASCII only (what a form or percent encoder produces), possibly empty. */
+const SEARCH_VALUE_RE = /^[\x21-\x7e]*$/;
 const LIMIT_RE = /^[1-9][0-9]{0,2}$/;
 /** 17 bytes — a tag byte and a 16-byte customer id — as unpadded base64url. */
 const CURSOR_RE = /^[A-Za-z0-9_-]{23}$/;
+/** 33 bytes — a tag byte, a 16-byte customer id and a 16-byte search digest — as unpadded base64url (M7A-CUSTOMERS-P8). */
+const SEARCH_CURSOR_RE = /^[A-Za-z0-9_-]{44}$/;
 /** Distinct from the tenant directory's, so neither route's continuation is ever read as the other's. */
 const CURSOR_TAG = 0x02;
-const MAX_QUERY_LENGTH = 128;
+/** A filtered page's continuation: distinct from the unfiltered one, so neither kind is ever read as the other. */
+const SEARCH_CURSOR_TAG = 0x03;
+const SEARCH_DIGEST_BYTES = 16;
+/** One bound on the whole raw query (M7A-CUSTOMERS-P8; it was 128): room for 200 percent-encoded 4-byte characters. */
+const MAX_QUERY_LENGTH = 4096;
 const PAGE_KEYS: readonly string[] = ['outcome', 'customers', 'hasMore'];
 const ENTRY_KEYS: readonly string[] = ['id', 'name'];
 
+const idBytesOf = (customerId: string): Buffer => Buffer.from(customerId.replace(/-/g, ''), 'hex');
+/** The canonical text of 16 id bytes, or null (UUID_RE states it again). */
+function idOfBytes(bytes: Buffer): string | null {
+  const hex = bytes.toString('hex');
+  const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return UUID_RE.test(id) ? id : null;
+}
+/** The first 16 bytes of the SHA-256 of the search text's UTF-8: binds a continuation to the text without carrying it. */
+const searchDigestOf = (search: string): Buffer => createHash('sha256').update(search, 'utf8').digest().subarray(0, SEARCH_DIGEST_BYTES);
+
 /** The opaque continuation for a page that ends at `customerId`. */
 export function encodeCustomerCursor(customerId: string): string {
-  return Buffer.concat([Buffer.from([CURSOR_TAG]), Buffer.from(customerId.replace(/-/g, ''), 'hex')]).toString('base64url');
+  return Buffer.concat([Buffer.from([CURSOR_TAG]), idBytesOf(customerId)]).toString('base64url');
 }
 
 /** The customer id a continuation names, or null unless it is exactly the canonical spelling of one. */
@@ -245,35 +299,82 @@ export function decodeCustomerCursor(cursor: string): string | null {
   // Canonical only: decoding ignores the unused low bits of the last character, so a re-encoding that differs means a
   // second spelling of the same bytes, which is refused rather than accepted.
   if (bytes.length !== 17 || bytes[0] !== CURSOR_TAG || bytes.toString('base64url') !== cursor) return null;
-  const hex = bytes.subarray(1).toString('hex');
-  const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  return UUID_RE.test(id) ? id : null;
+  return idOfBytes(bytes.subarray(1));
+}
+
+/** The opaque continuation for a filtered page, searching `search`, that ends at `customerId` (M7A-CUSTOMERS-P8). */
+export function encodeCustomerSearchCursor(customerId: string, search: string): string {
+  return Buffer.concat([Buffer.from([SEARCH_CURSOR_TAG]), idBytesOf(customerId), searchDigestOf(search)]).toString('base64url');
+}
+
+/**
+ * The customer id a filtered continuation names, or null unless it is exactly the canonical spelling of one made for this
+ * same `search` text.
+ */
+export function decodeCustomerSearchCursor(cursor: string, search: string): string | null {
+  if (!SEARCH_CURSOR_RE.test(cursor)) return null;
+  const bytes = Buffer.from(cursor, 'base64url');
+  // 33 bytes are 44 characters with no unused bits, so the re-encoding check refuses only what the pattern let through.
+  if (bytes.length !== 17 + SEARCH_DIGEST_BYTES || bytes[0] !== SEARCH_CURSOR_TAG || bytes.toString('base64url') !== cursor) return null;
+  // The digest is of the client's own text, no secret: a plain comparison.
+  if (!bytes.subarray(17).equals(searchDigestOf(search))) return null;
+  return idOfBytes(bytes.subarray(1, 17));
+}
+
+/**
+ * `q`'s raw value as the applied search text: null when it is empty after decoding and trimming (the unfiltered list), or
+ * undefined for anything the contract refuses — a raw character outside printable ASCII, a malformed escape or encoded
+ * surrogate, a refused character, more than 200 code points.
+ */
+function searchOf(raw: string): string | null | undefined {
+  if (!SEARCH_VALUE_RE.test(raw)) return undefined;
+  let text: string;
+  try {
+    text = decodeURIComponent(raw.replace(/\+/g, ' '));
+  } catch {
+    return undefined; // a URIError: never its message, which would carry the value
+  }
+  text = text.trim();
+  if (text === '') return null;
+  return isCustomerSearchText(text) ? text : undefined;
 }
 
 /** The request target's query as a validated CustomerDirectoryQuery, or null for anything the contract refuses. */
 export function parseCustomerDirectoryQuery(target: string): CustomerDirectoryQuery | null {
   const at = target.indexOf('?');
-  if (at < 0) return Object.freeze({ after: null, limit: CUSTOMER_DIRECTORY_DEFAULT_LIMIT });
+  if (at < 0) return Object.freeze({ after: null, limit: CUSTOMER_DIRECTORY_DEFAULT_LIMIT, search: null });
   const raw = target.slice(at + 1);
   if (raw.length > MAX_QUERY_LENGTH) return null;
-  let after: string | null = null;
+  let cursor: string | null = null;
   let limit: number | null = null;
+  let search: string | null = null;
   const seen = new Set<string>();
   // inv: every pair before this one matched the contract once per key; term: the pairs are finite.
   for (const pair of raw.split('&')) {
     const match = QUERY_PAIR_RE.exec(pair);
     if (match === null || seen.has(match[1])) return null;
     seen.add(match[1]);
-    if (match[1] === 'limit') {
+    if (match[1] === 'q') {
+      const text = searchOf(match[2]);
+      if (text === undefined) return null;
+      search = text;
+    } else if (!PLAIN_VALUE_RE.test(match[2])) {
+      return null;
+    } else if (match[1] === 'limit') {
       if (!LIMIT_RE.test(match[2])) return null;
       limit = Number(match[2]);
       if (limit > CUSTOMER_DIRECTORY_MAX_LIMIT) return null;
     } else {
-      after = decodeCustomerCursor(match[2]);
-      if (after === null) return null;
+      cursor = match[2];
     }
   }
-  return Object.freeze({ after, limit: limit ?? CUSTOMER_DIRECTORY_DEFAULT_LIMIT });
+  // The cursor is read only once the search is known: its kind, and a filtered one's text, must be this request's.
+  let after: string | null = null;
+  if (cursor !== null) {
+    after = search === null ? decodeCustomerCursor(cursor) : decodeCustomerSearchCursor(cursor, search);
+    if (after === null) return null;
+  }
+  return Object.freeze({ after, limit: limit ?? CUSTOMER_DIRECTORY_DEFAULT_LIMIT, search });
 }
 
 const isPlain = (value: unknown): value is Record<string, unknown> => {
@@ -358,10 +459,11 @@ export function createCustomerDirectoryRoute(ports: CustomerDirectoryPorts, opti
     if (page === 'cursor_unknown') return refuse(res, ctx, 400, 'invalid_request', 'customer_directory_cursor_unknown');
     if (page === null) return refuse(res, ctx, 503, 'service_unavailable', 'customer_directory_answer_invalid');
     const last = page.customers[page.customers.length - 1];
-    res.status(200).json({
-      customers: page.customers.map((c) => ({ id: c.id, name: c.name })),
-      nextCursor: page.hasMore && last !== undefined ? encodeCustomerCursor(last.id) : null,
-    });
+    // A filtered page continues as a filtered cursor bound to the same text (M7A-CUSTOMERS-P8).
+    const next = page.hasMore && last !== undefined
+      ? (query.search === null ? encodeCustomerCursor(last.id) : encodeCustomerSearchCursor(last.id, query.search))
+      : null;
+    res.status(200).json({ customers: page.customers.map((c) => ({ id: c.id, name: c.name })), nextCursor: next });
   };
   const route: RouteDefinition = {
     method: 'GET',

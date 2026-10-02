@@ -6,6 +6,10 @@
 // untrusted answer (stored-shape contacts, toISOString's creation time), the handler's every outcome in the detail read's
 // order, and the chain: 401 first, the session-binding witness, a foreign id the missing id's 404, no contact in a log.
 //
+// M7A-CUSTOMERS-P8: the list's name search (M7CS-U01..U08) — `q` decoded, trimmed and bounded, the filtered cursor bound to
+// the search text, both cursor kinds refused across, the query bound of 4096, the search reaching the port and its
+// continuation in the 200, no search text in any refusal body or log line, and the chain's 400/401/403/429/503 around it.
+//
 // Synthetic principals, sessions and ports only. The directory port here is an in-memory stand-in; the real PostgreSQL
 // adapter is proved database-free in server/persistence/postgresCustomerDirectory.test.ts, and the canonical decision
 // of view_customers in server/platform-identity/m5CanonicalPermissions.test.ts and tenantAuthorization.test.ts.
@@ -18,7 +22,8 @@ import type { Request, Response } from 'express';
 import { createApp, createBoundedServer, createReadinessState } from './app.js';
 import { createMemorySessionStore } from './memorySessionStore.testkit.js';
 import type { TrustedScope } from './principals.js';
-import { testRequestLimits } from './rateLimiter.testkit.js';
+import type { DistributedRateLimiter } from './rateLimit.js';
+import { createMemoryRateLimiter, testRequestLimits } from './rateLimiter.testkit.js';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from './requestSecurity.js';
 import { EnforcementSetupError, defineRoutes, sessionPaths } from './routes.js';
 import type { RouteContext } from './routes.js';
@@ -27,9 +32,9 @@ import type { SessionBoundaryDeps } from './sessions.js';
 import { decodeTenantCursor, encodeTenantCursor } from './tenantDirectory.js';
 import {
   CUSTOMER_DETAIL_PATH, CUSTOMER_DIRECTORY_DEFAULT_LIMIT, CUSTOMER_DIRECTORY_MAX_LIMIT, CUSTOMER_DIRECTORY_PATH, CUSTOMER_NAME_MAX_CHARACTERS,
-  CUSTOMER_PROFILE_PATH, createCustomerDetailRoute, createCustomerDirectoryRoute, createCustomerProfileRoute, customerDetailOf,
-  customerDirectoryPageOf, customerProfileOf, decodeCustomerCursor, encodeCustomerCursor, inCustomerPageOrder, isCustomerCreatedAt,
-  parseCustomerDirectoryQuery,
+  CUSTOMER_PROFILE_PATH, CUSTOMER_SEARCH_MAX_CHARACTERS, createCustomerDetailRoute, createCustomerDirectoryRoute, createCustomerProfileRoute,
+  customerDetailOf, customerDirectoryPageOf, customerProfileOf, decodeCustomerCursor, decodeCustomerSearchCursor, encodeCustomerCursor,
+  encodeCustomerSearchCursor, inCustomerPageOrder, isCustomerCreatedAt, isCustomerSearchText, parseCustomerDirectoryQuery,
 } from './customerDirectory.js';
 import type { CustomerDetailPort, CustomerDirectoryPort, CustomerDirectoryQuery, CustomerProfilePort } from './customerDirectory.js';
 
@@ -96,14 +101,14 @@ test('the query takes limit and cursor at most once each, and refuses everything
   const P = CUSTOMER_DIRECTORY_PATH;
   assert.equal(CUSTOMER_DIRECTORY_DEFAULT_LIMIT, 50);
   assert.equal(CUSTOMER_DIRECTORY_MAX_LIMIT, 100);
-  assert.deepEqual(parseCustomerDirectoryQuery(P), { after: null, limit: 50 });
+  assert.deepEqual(parseCustomerDirectoryQuery(P), { after: null, limit: 50, search: null });
   assert.ok(Object.isFrozen(parseCustomerDirectoryQuery(P)));
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=1`), { after: null, limit: 1 });
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=100`), { after: null, limit: 100 });
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=99`), { after: null, limit: 99 });
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?cursor=${c}`), { after: T1, limit: 50 });
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?cursor=${c}&limit=7`), { after: T1, limit: 7 });
-  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=7&cursor=${c}`), { after: T1, limit: 7 });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=1`), { after: null, limit: 1, search: null });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=100`), { after: null, limit: 100, search: null });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=99`), { after: null, limit: 99, search: null });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?cursor=${c}`), { after: T1, limit: 50, search: null });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?cursor=${c}&limit=7`), { after: T1, limit: 7, search: null });
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?limit=7&cursor=${c}`), { after: T1, limit: 7, search: null });
   for (const q of [
     '?', '?&', '?limit=', '?limit=0', '?limit=101', '?limit=999', '?limit=1000', '?limit=01', '?limit=-1', '?limit=1.0', '?limit=1.5',
     '?limit=abc', '?limit=1e1', '?limit=+1', '?limit=%31', '?limit=%35%30', '?limit', '?cursor', '?LIMIT=1', '?Limit=1',
@@ -112,13 +117,18 @@ test('the query takes limit and cursor at most once each, and refuses everything
     `?limit=1&tenantId=${T1}`, '?scope=tenant', '?role=store_owner', '?email=a', '?limit=1;cursor=x', '?limit=1#x', '?limit=1?limit=2',
     '?limit=1 ', '?%6cimit=1', `?limit=1&x=${'a'.repeat(200)}`, `?${'limit=1&'.repeat(20)}`, `?limit=1&${'a'.repeat(128)}`,
   ]) assert.equal(parseCustomerDirectoryQuery(`${P}${q}`), null, q);
-  // The bound is on the query alone: 129 characters are refused before any pair is read.
-  assert.equal(parseCustomerDirectoryQuery(`${P}?${'x'.repeat(129)}`), null, 'an overlong query');
+  // The bound is on the query alone (M7A-CUSTOMERS-P8: 4096 characters, replacing 128): 4097 are refused before any pair
+  // is read, whatever they hold; 4096 are read.
+  assert.equal(parseCustomerDirectoryQuery(`${P}?${'x'.repeat(4097)}`), null, 'an overlong query');
+  const spaced = `q=${'+'.repeat(4096 - 'q=a'.length)}a`;
+  assert.equal(spaced.length, 4096);
+  assert.deepEqual(parseCustomerDirectoryQuery(`${P}?${spaced}`), { after: null, limit: 50, search: 'a' }, '4096 characters are read');
+  assert.equal(parseCustomerDirectoryQuery(`${P}?${spaced}+`), null, '4097 characters of a valid query are not');
 });
 
 // --- 2. the port's answer is untrusted ------------------------------------------------------------------------------------
 
-const Q = (over: Partial<CustomerDirectoryQuery> = {}): CustomerDirectoryQuery => ({ after: null, limit: 3, ...over });
+const Q = (over: Partial<CustomerDirectoryQuery> = {}): CustomerDirectoryQuery => ({ after: null, limit: 3, search: null, ...over });
 
 test('only an exactly shaped answer becomes a page: every field is checked and copied, and anything else is null', () => {
   const page = customerDirectoryPageOf({ outcome: 'page', customers: [customer(1), customer(2)], hasMore: false }, Q());
@@ -325,7 +335,7 @@ test('a malformed query is a 400 decided before the port is asked', async () => 
   // No target at all reads as the bare path: the default page, never a refusal of its own.
   const { out, calls } = await run({ url: undefined });
   assert.equal(out.status, 200);
-  assert.deepEqual(calls[0].query, { after: null, limit: 50 });
+  assert.deepEqual(calls[0].query, { after: null, limit: 50, search: null });
 });
 
 test('without a resolved TENANT scope naming a tenant the handler refuses 403 and never asks the port', async () => {
@@ -357,7 +367,7 @@ test('the port is handed exactly the trusted scope, the session key and the pars
   assert.equal(calls.length, 1);
   assert.equal(calls[0].scope, ctx.trusted, 'the very scope object the chain resolved, not a copy the request shaped');
   assert.equal(calls[0].sessionKey, SESSION_KEY, 'the chain\'s key, unchanged');
-  assert.deepEqual(calls[0].query, { after: idOf(9), limit: 2 });
+  assert.deepEqual(calls[0].query, { after: idOf(9), limit: 2, search: null });
   assert.ok(calls[0].signal instanceof AbortSignal && !calls[0].signal.aborted, 'a live deadline signal');
   assert.equal(out.status, 200);
   assert.equal(out.locals.refusal, undefined, 'a page is no refusal');
@@ -458,7 +468,7 @@ function countingIdleRefreshes<T extends object>(store: T): T {
 }
 
 async function withChain(
-  setup: { answer?: (query: CustomerDirectoryQuery) => unknown; authorize?: (...args: unknown[]) => unknown },
+  setup: { answer?: (query: CustomerDirectoryQuery) => unknown; authorize?: (...args: unknown[]) => unknown; limiter?: DistributedRateLimiter },
   fn: (h: {
     calls: Array<{ scope: TrustedScope; sessionKey: string; query: CustomerDirectoryQuery }>; authorizations: unknown[][]; logs: string[];
     probes: Array<string | null>; storeKey: string; csrf: string; get: (target?: string, headers?: Record<string, string>) => Promise<Reply>;
@@ -486,7 +496,7 @@ async function withChain(
       body: { kind: 'none' }, idempotency: 'none', trustedContext: 'required', recentAuth: 'none',
       handler: (_req, res, ctx) => { probes.push(ctx.sessionKey); res.status(204).end(); },
     }],
-    limits: testRequestLimits(),
+    limits: testRequestLimits(setup.limiter ? { limiter: setup.limiter } : {}),
   });
   const server = createBoundedServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -523,7 +533,7 @@ test('over the enforced chain: the authorizer is asked for view_customers at ten
     assert.deepEqual(JSON.parse(r.body), { customers: [customer(1), customer(2)], nextCursor: encodeCustomerCursor(idOf(2)) });
     assert.equal(h.authorizations.length, 1);
     assert.deepEqual(h.authorizations[0][1], { scope: 'tenant', permission: 'view_customers' }, 'the declared requirement, never one the request names');
-    assert.deepEqual(h.calls, [{ scope: SCOPE, sessionKey: h.storeKey, query: { after: null, limit: 2 } }],
+    assert.deepEqual(h.calls, [{ scope: SCOPE, sessionKey: h.storeKey, query: { after: null, limit: 2, search: null } }],
       'the authorizer\'s scope, unchanged by any header, and the presenting session\'s store key');
     for (const word of [ACTOR, MEMBERSHIP, T1, 'manager', 'sv-1', 'tenant']) assert.ok(!r.body.includes(word), `the page carries no ${word}`);
     // A malformed query is a 400 before the port; a scope-less grant and a denial are refused by the chain itself.
@@ -1232,4 +1242,266 @@ test('profile over the enforced chain: 401 first; the session-binding witness re
       for (const secret of [CID, FOREIGN, ADA.name, ADA.phone, ADA.email, CREATED, h.storeKey]) assert.ok(!line.includes(secret), `no log line carries ${secret}`);
     }
   }, (id) => (id === CID ? profileAnswerOf(id) : { outcome: 'not_found' }));
+});
+
+// --- 7. the name search on the list (M7A-CUSTOMERS-P8) ---------------------------------------------------------------------
+
+/** `text` as a client sends it: percent-encoded UTF-8 (encodeURIComponent), never a raw non-ASCII byte. */
+const qOf = (text: string): string => `q=${encodeURIComponent(text)}`;
+const LIST = CUSTOMER_DIRECTORY_PATH;
+/** A search text no other value in this file shares: a refusal or a log line that carried it would be seen. */
+const CANARY = 'Zyxw-canary-M7CS';
+
+test('M7CS-U01 isCustomerSearchText: non-empty, trimmed, no refused character, at most 200 code points', () => {
+  assert.equal(CUSTOMER_SEARCH_MAX_CHARACTERS, 200);
+  for (const ok of ['a', 'Ada Lovelace', 'é', 'ß', '%_\\', 'x'.repeat(200), '\u{1F600}'.repeat(200), `${'x'.repeat(199)}\u{1F600}`, 'a  b']) {
+    assert.equal(isCustomerSearchText(ok), true, JSON.stringify(ok).slice(0, 40));
+  }
+  for (const [label, bad] of [
+    ['empty', ''], ['a leading space', ' a'], ['a trailing space', 'a '], ['a trailing NBSP', 'a '], ['a BOM edge', '﻿a'],
+    ['201 ASCII', 'x'.repeat(201)], ['201 astral (402 units)', '\u{1F600}'.repeat(201)], ['200 ASCII and 1 astral', `${'x'.repeat(200)}\u{1F600}`],
+    ['NUL', 'a\u0000b'], ['TAB inside', 'a\tb'], ['DEL', 'a\u007fb'], ['a C1 control', 'a\u0085b'], ['U+2028', 'a b'], ['U+2029', 'a b'],
+    ['RLO', 'a‮b'], ['ALM', 'a؜b'], ['LRI', 'a⁦b'], ['a lone high surrogate', 'a\ud800'], ['a lone low surrogate', '\udc00a'],
+    ['a number', 7], ['null', null], ['an array', ['a']],
+  ] as const) assert.equal(isCustomerSearchText(bad), false, label);
+});
+
+test('M7CS-U02 q: absent or blank is the unfiltered list; otherwise form-decoded, trimmed, bounded — and every refusal is null', () => {
+  const parse = (query: string) => parseCustomerDirectoryQuery(`${LIST}?${query}`);
+  // Blank after decoding and trimming: exactly the unfiltered list, its query unchanged.
+  for (const blank of ['q=', 'q=+', 'q=%20%20', 'q=++%20', 'q=%09', 'q=%0A%0D', 'q=%C2%A0', 'q=%E3%80%80', 'q=%EF%BB%BF']) {
+    assert.deepEqual(parse(blank), { after: null, limit: 50, search: null }, blank);
+    assert.deepEqual(parse(`${blank}&limit=7`), { after: null, limit: 7, search: null }, `${blank} with a limit`);
+  }
+  for (const [raw, search] of [
+    ['q=ada', 'ada'], ['q=Ada+Lovelace', 'Ada Lovelace'], ['q=Ada%20Lovelace', 'Ada Lovelace'], ['q=+Ada+', 'Ada'], ['q=%20Ada%09', 'Ada'],
+    ['q=a%2Bb', 'a+b'], ['q=100%25', '100%'], ['q=a_b', 'a_b'], ['q=a%5Cb', 'a\\b'], ['q=%C3%A9', 'é'], ['q=%C3%9F', 'ß'],
+    ['q=a=b', 'a=b'], ['q=%26', '&'], ['q=a++b', 'a  b'], ['q=%F0%9F%98%80', '\u{1F600}'], ['q=O\'Brien', 'O\'Brien'],
+    // Printable ASCII is the value's raw alphabet: a ';' is a character of the text, never a separator.
+    ['q=a;limit=5', 'a;limit=5'], ['q=a?b', 'a?b'], ['q=%3Fa%23', '?a#'],
+  ] as const) {
+    assert.deepEqual(parse(raw), { after: null, limit: 50, search }, raw);
+    assert.ok(Object.isFrozen(parse(raw)), `${raw}: frozen`);
+  }
+  assert.deepEqual(parse('limit=5&q=ada'), { after: null, limit: 5, search: 'ada' }, 'any order');
+  // 200 code points — astral ones included — are a search; 201 are refused.
+  assert.deepEqual(parse(qOf('\u{1F600}'.repeat(200))), { after: null, limit: 50, search: '\u{1F600}'.repeat(200) }, '200 astral characters');
+  assert.deepEqual(parse(qOf('é'.repeat(200))), { after: null, limit: 50, search: 'é'.repeat(200) });
+  assert.deepEqual(parse(qOf(` ${'x'.repeat(200)} `)), { after: null, limit: 50, search: 'x'.repeat(200) }, 'edges trimmed before the bound');
+  for (const [label, raw] of [
+    ['201 characters', qOf('x'.repeat(201))], ['201 astral characters', qOf('\u{1F600}'.repeat(201))],
+    ['a malformed escape', 'q=%E'], ['a bad hex escape', 'q=%zz'], ['a truncated UTF-8 sequence', 'q=%C3'], ['an overlong encoding', 'q=%C0%AF'],
+    ['an encoded lone surrogate', 'q=%ED%A0%80'], ['an invalid UTF-8 byte', 'q=%FF'],
+    ['NUL', 'q=a%00b'], ['TAB inside', 'q=a%09b'], ['DEL', 'q=a%7Fb'], ['a C1 control', 'q=a%C2%85b'], ['U+2028', 'q=a%E2%80%A8b'],
+    ['RLO', 'q=a%E2%80%AEb'], ['ALM', 'q=a%D8%9Cb'],
+    ['a raw non-ASCII character', 'q=é'], ['a raw space', 'q=a b'], ['a raw control', 'q=a\u0001b'], ['a raw DEL', 'q=a\u007fb'],
+    ['a repeated q', 'q=a&q=a'], ['a repeated blank q', 'q=&q='], ['q without =', 'q'], ['q without = beside a limit', 'limit=5&q'],
+    ['an uppercase key', 'Q=a'], ['an encoded key', '%71=a'], ['an unknown key beside q', 'q=a&search=a'], ['an empty pair', 'q=a&'],
+    ['two separators', 'q=a&&limit=5'],
+  ] as const) assert.equal(parse(raw), null, label);
+});
+
+test('M7CS-U03 the filtered cursor: 44 characters, tag 0x03, the id and a digest of the search text — accepted only for that same text', () => {
+  const c = encodeCustomerSearchCursor(T1, 'Ada');
+  assert.match(c, /^[A-Za-z0-9_-]{44}$/);
+  const bytes = Buffer.from(c, 'base64url');
+  assert.equal(bytes.length, 33);
+  assert.equal(bytes[0], 0x03, 'its own tag byte');
+  assert.equal(bytes.subarray(1, 17).toString('hex'), T1.replace(/-/g, ''), 'the id');
+  assert.deepEqual(bytes.subarray(17), createHash('sha256').update('Ada', 'utf8').digest().subarray(0, 16), 'the first 16 bytes of SHA-256(UTF-8)');
+  assert.ok(!c.includes('Ada') && !bytes.includes(Buffer.from('Ada')), 'it carries no text');
+  assert.equal(decodeCustomerSearchCursor(c, 'Ada'), T1, 'round trip');
+  for (let i = 0; i < 20; i++) {
+    const id = randomUUID();
+    const text = `${id.slice(0, 5)} é\u{1F600}`;
+    assert.equal(decodeCustomerSearchCursor(encodeCustomerSearchCursor(id, text), text), id, id);
+  }
+  for (const id of ['00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff']) {
+    assert.equal(decodeCustomerSearchCursor(encodeCustomerSearchCursor(id, 'x'), 'x'), id, `a non-RFC-4122 id round-trips: ${id}`);
+  }
+  // Bound to the exact applied text: another text, another case, another normalization form are all refused.
+  for (const other of ['ada', 'ADA', 'Ad', 'Ada ', 'Adb', 'Adá']) assert.equal(decodeCustomerSearchCursor(c, other), null, JSON.stringify(other));
+  const e = encodeCustomerSearchCursor(T1, 'é');
+  assert.equal(decodeCustomerSearchCursor(e, 'é'), null, 'NFC and NFD are different texts');
+  // Never the other kind, either way round.
+  const plain = encodeCustomerCursor(T1);
+  assert.equal(decodeCustomerCursor(c), null, 'a filtered cursor is not an unfiltered one');
+  assert.equal(decodeCustomerSearchCursor(plain, 'Ada'), null, 'nor an unfiltered one a filtered one');
+  assert.equal(decodeCustomerSearchCursor(encodeTenantCursor(T1), 'Ada'), null, 'nor a tenant-directory cursor');
+  for (const tag of [0, 1, 2, 4, 0x83, 0xff]) {
+    const wrong = Buffer.from(c, 'base64url');
+    wrong[0] = tag;
+    assert.equal(decodeCustomerSearchCursor(wrong.toString('base64url'), 'Ada'), null, `tag ${tag}`);
+  }
+  for (const [label, bad] of [
+    ['empty', ''], ['43 characters', c.slice(1)], ['45 characters', `${c}A`], ['padding', `${c.slice(0, -1)}=`], ['a plus', `${c.slice(0, -1)}+`],
+    ['a slash', `${c.slice(0, -1)}/`], ['a percent', `${c.slice(0, -1)}%`],
+    ['a digest one bit off', (() => { const b = Buffer.from(c, 'base64url'); b[32] ^= 1; return b.toString('base64url'); })()],
+  ] as const) assert.equal(decodeCustomerSearchCursor(bad, 'Ada'), null, label);
+  // The digest binds the text, not the id: another id under the same digest decodes, to that id (control).
+  const moved = Buffer.from(c, 'base64url');
+  moved[16] ^= 1;
+  const movedId = decodeCustomerSearchCursor(moved.toString('base64url'), 'Ada');
+  assert.ok(movedId !== null && movedId !== T1, 'another id, the same text');
+});
+
+test('M7CS-U04 the query reads the cursor by the search: a filtered cursor needs this same text, an unfiltered one no search — every mismatch is null', () => {
+  const parse = (query: string) => parseCustomerDirectoryQuery(`${LIST}?${query}`);
+  const filtered = encodeCustomerSearchCursor(T1, 'Ada Lovelace');
+  const plain = encodeCustomerCursor(T1);
+  for (const q of ['q=Ada+Lovelace', 'q=Ada%20Lovelace', 'q=+Ada+Lovelace+', 'q=%09Ada+Lovelace']) {
+    assert.deepEqual(parse(`${q}&cursor=${filtered}`), { after: T1, limit: 50, search: 'Ada Lovelace' }, `${q}: the same applied text`);
+    assert.deepEqual(parse(`cursor=${filtered}&limit=3&${q}`), { after: T1, limit: 3, search: 'Ada Lovelace' }, `${q}: any order`);
+  }
+  for (const [label, query] of [
+    ['another search text', `q=Ada&cursor=${filtered}`],
+    ['another case', `q=ada+lovelace&cursor=${filtered}`],
+    ['an unfiltered cursor with a search', `q=Ada+Lovelace&cursor=${plain}`],
+    ['a filtered cursor with no search', `cursor=${filtered}`],
+    ['a filtered cursor with a blank search', `q=+&cursor=${filtered}`],
+    ['a filtered cursor with an empty search', `q=&cursor=${filtered}`],
+    ['a tenant-directory cursor with a search', `q=Ada&cursor=${encodeTenantCursor(T1)}`],
+    ['a percent-encoded cursor', `q=Ada+Lovelace&cursor=${filtered.slice(0, -1)}%41`],
+    ['a filtered cursor twice', `q=Ada+Lovelace&cursor=${filtered}&cursor=${filtered}`],
+  ] as const) assert.equal(parse(query), null, label);
+  // A blank search keeps the unfiltered cursor working exactly as before.
+  assert.deepEqual(parse(`q=&cursor=${plain}`), { after: T1, limit: 50, search: null });
+  assert.deepEqual(parse(`q=%20&cursor=${plain}&limit=9`), { after: T1, limit: 9, search: null });
+});
+
+test('M7CS-U05 handler: a search reaches the port as query.search, and a filtered page continues with a filtered cursor bound to it', async () => {
+  const text = 'Ada Lovelace';
+  const after = encodeCustomerSearchCursor(idOf(9), text);
+  const { out, calls } = await run({
+    url: `${LIST}?q=+Ada+Lovelace+&limit=2&cursor=${after}`,
+    answer: () => ({ outcome: 'page', customers: [customer(10), customer(11)], hasMore: true }),
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].query, { after: idOf(9), limit: 2, search: text });
+  assert.equal(out.status, 200);
+  const body = out.body as { customers: unknown[]; nextCursor: string };
+  assert.deepEqual(Object.keys(body), ['customers', 'nextCursor']);
+  assert.deepEqual(body.customers, [{ id: idOf(10), name: 'Customer 10' }, { id: idOf(11), name: 'Customer 11' }]);
+  assert.equal(body.nextCursor, encodeCustomerSearchCursor(idOf(11), text), 'the filtered cursor of the page\'s last customer');
+  assert.equal(decodeCustomerSearchCursor(body.nextCursor, text), idOf(11));
+  assert.equal(decodeCustomerCursor(body.nextCursor), null, 'never an unfiltered cursor for a filtered page');
+  // The last filtered page, and a filtered answer with no customer at all: no continuation.
+  for (const [label, answer] of [['a last page', { outcome: 'page', customers: [customer(1)], hasMore: false }],
+    ['no match', { outcome: 'page', customers: [], hasMore: false }]] as const) {
+    const r = await run({ url: `${LIST}?q=Ada`, answer: () => answer });
+    assert.equal(r.out.status, 200, label);
+    assert.deepEqual(r.out.body, { customers: answer.customers, nextCursor: null }, label);
+    assert.deepEqual(r.calls[0].query, { after: null, limit: 50, search: 'Ada' }, label);
+  }
+  // A blank search is the unfiltered list: its continuation stays the unfiltered kind.
+  const r = await run({ url: `${LIST}?q=+&limit=1`, answer: () => ({ outcome: 'page', customers: [customer(3)], hasMore: true }) });
+  assert.deepEqual(r.calls[0].query, { after: null, limit: 1, search: null });
+  assert.equal((r.out.body as { nextCursor: string }).nextCursor, encodeCustomerCursor(idOf(3)));
+});
+
+test('M7CS-U06 handler: every search refusal is the bounded 400 before the port, and no refusal body or reason carries the search text', async () => {
+  const encoded = encodeURIComponent(CANARY);
+  const filteredForOther = encodeCustomerSearchCursor(T1, 'other');
+  for (const [label, query] of [
+    ['a control character', `q=${encoded}%00`], ['201 characters', `q=${encoded}${'x'.repeat(201)}`], ['a malformed escape', `q=${encoded}%E`],
+    ['a raw non-ASCII character', `q=${encoded}é`], ['a repeated q', `q=${encoded}&q=${encoded}`], ['another key', `q=${encoded}&name=${encoded}`],
+    ['a cursor for another text', `q=${encoded}&cursor=${filteredForOther}`], ['an unfiltered cursor', `q=${encoded}&cursor=${encodeCustomerCursor(T1)}`],
+    ['an overlong query', `q=${encoded}${'+'.repeat(4096)}`],
+  ] as const) {
+    const { out, calls } = await run({ url: `${LIST}?${query}` });
+    assertHandlerRefusal(out, 400, 'invalid_request', 'customer_directory_query_invalid', label);
+    assert.equal(calls.length, 0, `${label}: the port was never asked`);
+    assert.ok(!JSON.stringify(out.body).includes('canary') && !JSON.stringify(out.locals).includes('canary'), `${label}: no echo`);
+  }
+  // The port's answers to a search are the list's: an unknown continuation 400, a denial 403, a fault 503 — none echoing it.
+  const c = encodeCustomerSearchCursor(T1, CANARY);
+  for (const [label, answer, status, error, reason] of [
+    ['an unknown continuation', () => ({ outcome: 'cursor_unknown' }), 400, 'invalid_request', 'customer_directory_cursor_unknown'],
+    ['denied', () => ({ outcome: 'denied' }), 403, 'forbidden', 'customer_directory_denied'],
+    ['a throw', () => { throw new Error(`no match for ${CANARY}`); }, 503, 'service_unavailable', 'customer_directory_unavailable'],
+    ['an out-of-shape answer', () => ({ outcome: 'page', customers: [{ id: idOf(1), name: CANARY, search: CANARY }], hasMore: false }), 503, 'service_unavailable', 'customer_directory_answer_invalid'],
+    ['invalid', () => ({ outcome: 'invalid' }), 503, 'service_unavailable', 'customer_directory_answer_invalid'],
+  ] as const) {
+    const { out, calls } = await run({ url: `${LIST}?q=${encoded}&cursor=${c}`, answer, deadlineMs: 1_000 });
+    assert.equal(calls.length, 1, `${label}: asked once`);
+    assert.deepEqual(calls[0].query, { after: T1, limit: 50, search: CANARY }, label);
+    assertHandlerRefusal(out, status, error, reason, label);
+    assert.ok(!JSON.stringify(out.body).includes('canary'), `${label}: no echo`);
+  }
+});
+
+test('M7CS-U07 over the enforced chain: 401 first, the session-binding witness and a denial 403 before the port, the 400 and the 503 — and no log line carries the search text', async () => {
+  const encoded = encodeURIComponent(CANARY);
+  const answers: Array<(q: CustomerDirectoryQuery) => unknown> = [];
+  await withChain({ answer: (query) => (answers.shift() ?? (() => ({ outcome: 'page', customers: [customer(1), customer(2)], hasMore: true })))(query) }, async (h) => {
+    const anon = await h.anon(`${LIST}?q=${encoded}`);
+    assert.equal(anon.status, 401, anon.body);
+    const noWitness = await h.raw(`${LIST}?q=${encoded}`);
+    assertForbidden(noWitness, 'no CSRF witness');
+    assert.equal(h.calls.length, 0, 'neither reached the port');
+    const ok = await h.get(`${LIST}?q=${encoded}&limit=2`);
+    assert.equal(ok.status, 200, ok.body);
+    assert.equal(ok.headers['cache-control'], 'no-store');
+    assert.deepEqual(JSON.parse(ok.body), { customers: [customer(1), customer(2)], nextCursor: encodeCustomerSearchCursor(idOf(2), CANARY) });
+    assert.deepEqual(h.calls.map((c) => c.query), [{ after: null, limit: 2, search: CANARY }]);
+    assert.equal(h.calls[0].sessionKey, h.storeKey);
+    // The continuation round trip, and the cursor refused once the text changes.
+    answers.push(() => ({ outcome: 'page', customers: [customer(3)], hasMore: false }));
+    const next = await h.get(`${LIST}?q=${encoded}&limit=2&cursor=${encodeCustomerSearchCursor(idOf(2), CANARY)}`);
+    assert.equal(next.status, 200, next.body);
+    assert.deepEqual(JSON.parse(next.body), { customers: [customer(3)], nextCursor: null });
+    assert.deepEqual(h.calls[1].query, { after: idOf(2), limit: 2, search: CANARY });
+    const changed = await h.get(`${LIST}?q=${encoded}x&limit=2&cursor=${encodeCustomerSearchCursor(idOf(2), CANARY)}`);
+    assert.equal(changed.status, 400, changed.body);
+    assert.deepEqual(Object.keys(JSON.parse(changed.body)).sort(), ['error', 'requestId']);
+    assert.equal(reasonOf(h.logs, changed), 'customer_directory_query_invalid');
+    const bad = await h.get(`${LIST}?q=${encoded}%00`);
+    assert.equal(bad.status, 400, bad.body);
+    assert.equal(h.calls.length, 2, 'the refused queries never reached the port');
+    answers.push(() => { throw new Error(`fault near ${CANARY}`); });
+    const down = await h.get(`${LIST}?q=${encoded}`);
+    assert.equal(down.status, 503, down.body);
+    assert.equal(reasonOf(h.logs, down), 'customer_directory_unavailable');
+    for (const r of [anon, noWitness, changed, bad, down]) assert.ok(!r.body.includes('canary'), `${r.status}: no echo`);
+    assert.ok(h.logs.length >= 7, 'the chain logged its requests (control)');
+    for (const line of h.logs) {
+      assert.ok(!line.toLowerCase().includes('canary'), 'no log line carries the search text');
+      assert.ok(!line.includes(encoded) && !line.includes('q='), 'nor the raw query');
+      assert.ok(!line.includes(encodeCustomerSearchCursor(idOf(2), CANARY)), 'nor a filtered continuation');
+    }
+  });
+  await withChain({ authorize: () => false }, async (h) => {
+    const r = await h.get(`${LIST}?q=${encoded}`);
+    assertForbidden(r, 'a denial');
+    assert.equal(h.calls.length, 0, 'the port was never asked');
+    assert.ok(!r.body.includes('canary'));
+  });
+});
+
+test('M7CS-U08 over the enforced chain: a search past the rate limit is the 429 with its Retry-After, before the port, and neither its body nor any log line carries the search text', async () => {
+  const encoded = encodeURIComponent(CANARY);
+  // The memory limiter until the login is in; then every request is refused with a fixed wait.
+  const memory = createMemoryRateLimiter();
+  let limited = false;
+  const limiter: DistributedRateLimiter = {
+    consume: (r, signal) => (limited ? { outcome: 'limited', retryAfterMs: 7_000 } : memory.consume(r, signal)),
+    probe: () => true,
+  };
+  await withChain({ limiter }, async (h) => {
+    limited = true;
+    const at = h.logs.length; // the lines of the login before it
+    const r = await h.get(`${LIST}?q=${encoded}&limit=2`);
+    assert.equal(r.status, 429, r.body);
+    assert.deepEqual(Object.keys(JSON.parse(r.body)).sort(), ['error', 'requestId']);
+    assert.equal((JSON.parse(r.body) as { error: string }).error, 'rate_limited');
+    assert.equal(r.headers['retry-after'], '7', 'the Retry-After is present');
+    assert.equal(h.calls.length, 0, 'the port was never asked');
+    assert.ok(!r.body.toLowerCase().includes('canary') && !r.body.includes(encoded), 'no echo');
+    assert.ok(h.logs.length > at, 'the limited search itself was logged (control)');
+    assert.ok(h.logs.slice(at).some((line) => line.includes('rate_limited')), 'as the rate-limit refusal it was');
+    for (const line of h.logs) {
+      assert.ok(!line.toLowerCase().includes('canary'), 'no log line carries the search text');
+      assert.ok(!line.includes(encoded) && !line.includes('q='), 'nor the raw query');
+    }
+  });
 });

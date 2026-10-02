@@ -4,7 +4,7 @@
 // the production adapter over it; the HTTP route — its 400/401/403/404 chain, the parked revocation and the compiled entry —
 // is tests/db/tenantEntry.integration.test.mjs's (M7TE-14, M7TE-C1).
 //
-// WHAT IS PROVEN. 001-024 applied clean with 022's checksum the sha256 of its up bytes; 022's postcondition re-proven over the
+// WHAT IS PROVEN. 001-025 applied clean with 022's checksum the sha256 of its up bytes; 022's postcondition re-proven over the
 // applied state and refusing the widenings it names; a second apply refused (M7CD-01). The login EXECUTEs the routine and
 // uses its schema, reads nothing of 017's table or page directly, and tmpos_audit_writer, anon and authenticated execute
 // nothing; the real startup preflight accepts the login and the ledger (M7CD-02). The routine's answers: own customer; another
@@ -16,8 +16,8 @@
 // and with EXECUTE withdrawn its probe false and its read a throw (M7CD-06). Reads write nothing (M7CD-07). Rollback: 022
 // down alone leaves exactly the 001-021 grants (the preflight names only missing grants) and a re-apply is byte-identical in
 // definition and ACL; with a 021 version row present 022 still rolls back while 021 refuses; the ledger's newest-first
-// rollBackAbove('020') answers ['024', '023', '022', '021'] and restores all four (M7CD-08; M7A-CUSTOMERS-P6 and -P7: 023
-// and 024 sit above 022); out of order, 020 rolled back under 021 and 022
+// rollBackAbove('020') answers ['025', '024', '023', '022', '021'] and restores all five (M7CD-08; M7A-CUSTOMERS-P6, -P7 and
+// -P8: 023, 024 and 025 sit above 022); out of order, 020 rolled back under 021 and 022
 // leaves the routine RAISING at call and the adapter throwing (a 503, fail closed), 022's rollback refusing until 020 is back,
 // and the supported order 022, 021, 020 succeeding (M7CD-09).
 //
@@ -45,6 +45,7 @@ const UP_022 = readFileSync(`${MIG_DIR}/022_m7a_customer_detail.up.sql`, 'utf8')
 const DOWN_022 = readFileSync(`${MIG_DIR}/022_m7a_customer_detail.down.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 const DOWN_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.down.sql`, 'utf8');
+const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
 const DOWN_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
@@ -126,7 +127,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-024), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-025), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -286,10 +287,10 @@ const [SEED_RO] = await seed(T_RO, [`Ro ${SUFFIX}`]);
 // M7CD-01..02: the migration and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7CD-01: 001-024 applied clean, 022\'s checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
+test('M7CD-01: 001-025 applied clean, 022\'s checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 24 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 25 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal(ledger[21].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/022_m7a_customer_detail.up.sql`)).digest('hex'));
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_022).simple())).code, undefined, 'the postcondition holds as applied');
@@ -588,7 +589,7 @@ test('M7CD-07: reads write nothing — no audit, outbox, idempotency, customer, 
 // M7CD-08..09: rollback — alone, independent of 021's, newest first; and out of order
 // ---------------------------------------------------------------------------
 
-test('M7CD-08: 022 down alone leaves exactly the 001-021 grants and a byte-identical re-apply; it rolls back beside a 021 version row that refuses 021\'s; rollBackAbove(020) answers 024, 023, 022 then 021 and restores all four', async () => {
+test('M7CD-08: 022 down alone leaves exactly the 001-021 grants and a byte-identical re-apply; it rolls back beside a 021 version row that refuses 021\'s; rollBackAbove(020) answers 025, 024, 023, 022 then 021 and restores all five', async () => {
   const applied = await routineState(owner);
   const alone = await rolledBack(RC, async (tx) => {
     await tx.unsafe(DOWN_022).simple();
@@ -625,7 +626,7 @@ test('M7CD-08: 022 down alone leaves exactly the 001-021 grants and a byte-ident
   await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
   const later = await rollBackAbove(owner, MIG_DIR, '020');
   try {
-    assert.deepEqual(later.rolledBack, ['024', '023', '022', '021'], 'newest first');
+    assert.deepEqual(later.rolledBack, ['025', '024', '023', '022', '021'], 'newest first');
     const [gone] = await owner`select pg_catalog.to_regnamespace('tmpos_customer_detail') is null as detail,
       pg_catalog.to_regnamespace('tmpos_role_edit') is null as edit`;
     assert.deepEqual({ ...gone }, { detail: true, edit: true });
@@ -637,7 +638,7 @@ test('M7CD-08: 022 down alone leaves exactly the 001-021 grants and a byte-ident
   assert.equal(await outcomeOf(await mint(OWNER_A), SEED_A[0].id, T_A), 'customer', 'restored: it reads');
 });
 
-test('M7CD-09: out of order, 020 rolled back under 021, 022 and 023 leaves an editable role\'s read raising and the adapter throwing (fail closed); 022\'s rollback refuses until 020 is back; the supported order 024, 023, 022, 021, 020 succeeds', async () => {
+test('M7CD-09: out of order, 020 rolled back under 021, 022 and 023 leaves an editable role\'s read raising and the adapter throwing (fail closed); 022\'s rollback refuses until 020 is back; the supported order 025, 024, 023, 022, 021, 020 succeeds', async () => {
   // An editable role's read consults 020's level table (store_owner's is Full by the literal and never reads it).
   const manager = await actor('manager-a', [{ tenant: T_A, role: 'manager' }]);
   const key = await mint(manager);
@@ -670,12 +671,13 @@ test('M7CD-09: out of order, 020 rolled back under 021, 022 and 023 leaves an ed
   assert.equal(outOfOrder.value.detailGone, true, '020 re-applied: 022 rolls back');
   const supported = await rolledBack(RC, async (tx) => {
     await clear(tx);
-    for (const file of [DOWN_024, DOWN_023, DOWN_022, DOWN_021, DOWN_020]) await tx.unsafe(file).simple();
-    return { ...(await tx`select pg_catalog.to_regnamespace('tmpos_customer_edit') is null as customer_edit,
+    for (const file of [DOWN_025, DOWN_024, DOWN_023, DOWN_022, DOWN_021, DOWN_020]) await tx.unsafe(file).simple();
+    return { ...(await tx`select pg_catalog.to_regnamespace('tmpos_customer_search') is null as customer_search,
+      pg_catalog.to_regnamespace('tmpos_customer_edit') is null as customer_edit,
       pg_catalog.to_regnamespace('tmpos_customer_contact') is null as contact,
       pg_catalog.to_regnamespace('tmpos_customer_detail') is null as detail,
       pg_catalog.to_regnamespace('tmpos_role_edit') is null as edit, pg_catalog.to_regnamespace('tmpos_role') is null as role`)[0] };
   });
-  assert.deepEqual(supported.value, { customer_edit: true, contact: true, detail: true, edit: true, role: true }, JSON.stringify(supported));
+  assert.deepEqual(supported.value, { customer_search: true, customer_edit: true, contact: true, detail: true, edit: true, role: true }, JSON.stringify(supported));
   assert.equal(await outcomeOf(key, SEED_A[0].id, T_A), 'customer', 'all of it rolled back: the service reads as before');
 });
