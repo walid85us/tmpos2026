@@ -8,10 +8,16 @@ import type { Invoice, RepairService } from '../types';
 import type { ShipmentPrefill } from './ShippingCenter';
 import type { ReturnPrefill } from './ReturnsPortal';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
+import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
+import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField } from '../tenant/ServerCustomerPicker';
+
+/** A server customer counts only for the user who chose it, while they may view customers; otherwise it is none. */
+const usableCustomer = (ref: DraftCustomerReference, uid: string | null, canView: boolean): DraftCustomerReference =>
+  ref.source === 'server' && (ref.uid !== uid || !canView) ? NO_CUSTOMER : ref;
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess, session } = useAccess();
   const navigate = useNavigate();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
@@ -26,8 +32,11 @@ export default function Invoices() {
   const [showSmsModal, setShowSmsModal] = useState(false);
   const [showOnlinePayModal, setShowOnlinePayModal] = useState(false);
 
+  // M7A-CUSTOMERS-P9 — a draft names its customer by ONE tagged reference (customerReference.ts): none, a customer of
+  // this browser's list, or a customer saved on the tenant server. Only a local one makes or edits an invoice here; a
+  // server one is never looked up in the local list and never reaches an invoice, shipping or a return.
   const [newInv, setNewInv] = useState({
-    customerId: '',
+    customer: NO_CUSTOMER as DraftCustomerReference,
     dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
     isRecurring: false,
     recurringInterval: 'monthly' as 'monthly' | 'weekly' | 'yearly',
@@ -38,7 +47,7 @@ export default function Invoices() {
   });
 
   const [editInv, setEditInv] = useState({
-    customerId: '',
+    customer: NO_CUSTOMER as DraftCustomerReference,
     dueDate: '',
     isRecurring: false,
     recurringInterval: 'monthly' as 'monthly' | 'weekly' | 'yearly',
@@ -81,6 +90,30 @@ export default function Invoices() {
 
   const canCreate = checkPermission('invoices', 'create');
   const canEdit = checkPermission('invoices', 'edit');
+  // M7A-CUSTOMERS-P9 — the server-customer picker in the create draft. `canViewServerCustomers` is the local role state's
+  // hint (the server decides, and its 403 is the answer that counts), gated like the directory's route: the plan's
+  // customers feature (AccessGuard feature="customers" → canAccess) AND customers:view. A server customer is the
+  // signed-in user's own: another UID, or lost view access, makes it none in this very render and the effect below drops
+  // it. Each open of "Create Invoice" is a new DRAFT (`draftId`): the field is keyed by it, and what an earlier draft's
+  // field reports is ignored (`liveDraft`, bumped when a draft opens or closes).
+  const uid = session?.user.id ?? null;
+  const canViewServerCustomers = canAccess('customers') && checkPermission('customers', 'view');
+  const [draftId, setDraftId] = useState(0);
+  const liveDraft = useRef(0);
+  useEffect(() => {
+    setNewInv(prev => (usableCustomer(prev.customer, uid, canViewServerCustomers) === prev.customer ? prev : { ...prev, customer: NO_CUSTOMER }));
+  }, [uid, canViewServerCustomers]);
+  /** The field's report for draft `mine`: a choice binds only while that draft is open and both permissions still hold. */
+  const serverCustomerChange = (mine: number) => (next: ServerCustomerReference | null) => {
+    if (liveDraft.current !== mine) return;
+    if (next !== null && !(checkPermission('invoices', 'create') && canAccess('customers') && checkPermission('customers', 'view'))) return;
+    setNewInv(prev => (next !== null ? { ...prev, customer: next } : prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
+  };
+  const closeCreate = () => {
+    liveDraft.current += 1;
+    setShowAddModal(false);
+    setNewInv(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
+  };
 
   const filteredInvoices = useMemo(() => {
     let result = invoices;
@@ -117,8 +150,10 @@ export default function Invoices() {
   };
 
   const resetNewInv = () => {
+    liveDraft.current += 1;
+    setDraftId(liveDraft.current);
     setNewInv({
-      customerId: '', dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+      customer: NO_CUSTOMER, dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
       isRecurring: false, recurringInterval: 'monthly', notes: '', terms: '',
       items: [{ name: '', quantity: 1, price: 0, type: 'product', stockItemId: undefined }], discount: 0,
     });
@@ -153,7 +188,8 @@ export default function Invoices() {
   }, [services]);
 
   const handleCreateInvoice = useCallback(() => {
-    const customer = customers.find(c => c.id === newInv.customerId);
+    if (newInv.customer.source !== 'local') return; // a server customer never makes an invoice here (yet)
+    const customer = customers.find(c => c.id === localCustomerIdOf(newInv.customer));
     if (!customer || newInv.items.every(i => !i.name.trim())) return;
     const validItems = newInv.items.filter(i => i.name.trim());
     const { subtotal, tax, total } = computeTotals(validItems, newInv.discount);
@@ -185,7 +221,7 @@ export default function Invoices() {
     const canEditFields = inv.status !== 'Paid' && inv.status !== 'Cancelled';
     if (!canEditFields) return;
     setEditInv({
-      customerId: inv.customerId, dueDate: inv.dueDate,
+      customer: localCustomerReference(inv.customerId), dueDate: inv.dueDate,
       isRecurring: inv.isRecurring ?? false, recurringInterval: inv.recurringInterval || 'monthly',
       notes: inv.notes || '', terms: inv.terms || '',
       items: inv.items.map(it => ({ name: it.name, quantity: it.quantity, price: it.price, type: it.type, stockItemId: it.stockItemId })),
@@ -198,7 +234,8 @@ export default function Invoices() {
   };
 
   const handleSaveEdit = useCallback(() => {
-    const customer = customers.find(c => c.id === editInv.customerId);
+    if (editInv.customer.source !== 'local') return;
+    const customer = customers.find(c => c.id === localCustomerIdOf(editInv.customer));
     if (!customer) return;
     const validItems = editInv.items.filter(i => i.name.trim());
     if (validItems.length === 0) return;
@@ -561,7 +598,10 @@ export default function Invoices() {
     onClose: () => void,
     title: string,
     saveLabel: string,
-  ) => (
+    mode: 'create' | 'edit',
+  ) => {
+    const customer = usableCustomer(data.customer, uid, canViewServerCustomers);
+    return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
       <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }}
@@ -578,12 +618,19 @@ export default function Invoices() {
         <div className="p-8 grid grid-cols-2 gap-8 overflow-y-auto flex-1">
           <div className="space-y-6">
             <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 mb-2 block">Customer *</label>
-              <select value={data.customerId} onChange={(e) => setter(prev => ({ ...prev, customerId: e.target.value }))}
+              <label htmlFor={`invoice-customer-${mode}`} className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 mb-2 block">Customer *</label>
+              {/* A local choice REPLACES a server customer: the draft names one customer, of one source. */}
+              <select id={`invoice-customer-${mode}`} data-testid="invoice-customer-select" value={localCustomerIdOf(customer)} onChange={(e) => setter(prev => ({ ...prev, customer: localCustomerReference(e.target.value) }))}
                 className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                 <option value="">Select Customer...</option>
                 {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
+              {mode === 'create' && (
+                <div className="mt-3 space-y-2">
+                  <ServerCustomerField key={`${uid}:${draftId}`} uid={uid} value={customer.source === 'server' ? customer : null} canView={canViewServerCustomers} onChange={serverCustomerChange(draftId)} />
+                  {customer.source === 'server' && <p id="invoice-server-limit" role="status" data-testid="invoice-server-limit" className="text-xs font-bold text-amber-800">{SERVER_DRAFT_LIMIT_TEXT}</p>}
+                </div>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -619,7 +666,7 @@ export default function Invoices() {
           <div className="space-y-6">
             <div>
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 mb-2 block">Line Items</label>
-              {renderLineItemEditor(data.items, setter, title.includes('Edit') ? 'edit' : 'create')}
+              {renderLineItemEditor(data.items, setter, mode)}
             </div>
             <div>
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 mb-2 block">Discount ($)</label>
@@ -638,14 +685,16 @@ export default function Invoices() {
             <div className="text-right"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Tax (8%)</p><p className="text-lg font-black text-slate-900">${totals.tax.toFixed(2)}</p></div>
             <div className="text-right px-6 border-l border-slate-200"><p className="text-[10px] font-black text-primary uppercase tracking-widest">Total</p><p className="text-2xl font-black text-primary">${totals.total.toFixed(2)}</p></div>
           </div>
-          <button onClick={onSave} disabled={!data.customerId || data.items.every(i => !i.name.trim())}
+          <button onClick={onSave} data-testid={`invoice-${mode}-save`} disabled={customer.source !== 'local' || data.items.every(i => !i.name.trim())}
+            aria-describedby={mode === 'create' && customer.source === 'server' ? 'invoice-server-limit' : undefined}
             className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
             {saveLabel}
           </button>
         </div>
       </motion.div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-8">
@@ -665,7 +714,7 @@ export default function Invoices() {
             <option>All</option><option>Unpaid</option><option>Partially Paid</option><option>Paid</option><option>Overdue</option><option>Cancelled</option>
           </select>
           {canCreate && (
-            <button onClick={() => { resetNewInv(); setShowAddModal(true); }}
+            <button data-testid="invoice-create-open" onClick={() => { resetNewInv(); setShowAddModal(true); }}
               className="bg-primary text-white px-6 py-3 rounded-2xl font-black text-xs shadow-lg shadow-primary/20 flex items-center gap-2 uppercase tracking-widest hover:bg-primary/90 transition-all">
               <span className="material-symbols-outlined text-sm">add</span> Create Invoice
             </button>
@@ -1111,11 +1160,11 @@ export default function Invoices() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {showAddModal && renderInvoiceFormModal(newInv, setNewInv, newInvTotals, handleCreateInvoice, () => setShowAddModal(false), 'Create New Invoice', 'Generate Invoice')}
+        {showAddModal && renderInvoiceFormModal(newInv, setNewInv, newInvTotals, handleCreateInvoice, closeCreate, 'Create New Invoice', 'Generate Invoice', 'create')}
       </AnimatePresence>
 
       <AnimatePresence>
-        {showEditModal && renderInvoiceFormModal(editInv, setEditInv, editInvTotals, handleSaveEdit, () => setShowEditModal(false), 'Edit Invoice', 'Save Changes')}
+        {showEditModal && renderInvoiceFormModal(editInv, setEditInv, editInvTotals, handleSaveEdit, () => setShowEditModal(false), 'Edit Invoice', 'Save Changes', 'edit')}
       </AnimatePresence>
 
       {detailInvoice && (

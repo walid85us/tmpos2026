@@ -142,6 +142,7 @@ export const REQUIRED_SENTINELS = [
   'src/layouts/TenantLayout.customerDirectory.test.tsx',      // the sidebar's Customer Directory entry: gated by the customers feature, longest-path highlight (M7A-CUSTOMERS-P5)
   'src/components/Customers.localBanner.test.tsx',            // the local Customers screen says its records stay in this browser, and its create sends nothing (M7A-CUSTOMERS-P5)
   'src/tenant/ServerCustomerPicker.test.tsx',                 // the server-customer picker: reads only, a choice bound to its session, dropped when that session is over (M7A-CUSTOMERS-P9)
+  'src/components/Invoices.serverCustomer.test.tsx',          // the invoice draft: a server customer never reaches the local list or an invoice; a local one creates as before (M7A-CUSTOMERS-P9)
 ];
 
 export const isTestPath = (f) =>

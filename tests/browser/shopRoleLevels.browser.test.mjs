@@ -148,6 +148,13 @@
 //   SCB-14 SEARCH THEN EDIT: a match opened by its row's link (one profile read); renamed out of the search, the active
 //          search is read again from page one (one GET of q after the PATCH) and the way back lists it no longer, the
 //          search box still holding the text; a search for the new name (by Enter) finds it.
+// Since M7A-CUSTOMERS-P9 a new invoice draft may name a saved server customer, chosen in a picker over the same list route:
+//   SCB-15 INVOICE DRAFT PICKER: 55 matches of one word, others, two customers with one identical name, a second tenant.
+//          The picker opens on the unfiltered page; a search and "Load more" bind a second-page match by its database id
+//          (the server-customer limit is said, Generate stays disabled); of the identical names the second is bound
+//          exactly; Change then Cancel keeps it; Remove clears it; a local customer replaces a server one. Only GETs of the
+//          list, session reads and ONE login are sent; no customer, audit, completion or idempotency record is written;
+//          no answer holds the other tenant's customers; the directory still lists the tenant's customers.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -3008,5 +3015,177 @@ scenario('SCB-14', 'SEARCH THEN EDIT (M7A-CUSTOMERS-P8) — a match opens its pr
   assert.equal(box, word, 'the way back keeps the search box');
   assert.deepEqual(found, [{ id: target.id, name: renamed }], 'the new name, found by its own search');
   assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, boss.uid, boss.id]);
+  await assertNoLeak(page);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P9 — a new invoice draft names a saved server customer chosen in the picker (AC-09)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The rows the picker shows, in the order shown: [{ id, name }]. */
+const pickerRowsOf = (page) => page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('picker-row'))})].map((li) => ({ id: li.dataset.id ?? null, name: li.querySelector('p')?.textContent.trim() ?? null }))`);
+/** Replace the picker's search text and apply it by its Search button or by Enter; answers the record count at the action. */
+async function pickerSearch(page, text, how = 'button') {
+  await retype(page, 'picker-search-input', text);
+  const from = st.api.length;
+  if (how === 'enter') await page.press('Enter');
+  else await page.click(by('picker-search-submit'));
+  return from;
+}
+/** The picker's phase once every list read made since `from` has answered. */
+function pickerSettled(page, from) {
+  return page.waitFor(async () => {
+    const reads = sentBy(page, isList, from);
+    if (reads.length === 0 || reads.some((r) => r.status === null)) return null;
+    const phase = await page.evaluate(`${q('picker-state')}?.dataset.phase ?? null`);
+    return phase === null || phase === 'loading' ? null : phase;
+  }, 30_000, 'the picker read settled');
+}
+/** `id` is shown and has stopped moving (the draft's modal animates in), so a click lands where it is measured. */
+async function still(page, id) {
+  let last = null;
+  let same = 0;
+  await page.waitFor(async () => {
+    const at = await page.evaluate(`JSON.stringify(${q(id)}?.getBoundingClientRect() ?? null)`);
+    same = at !== 'null' && at === last ? same + 1 : 0;
+    last = at;
+    return same >= 3; // unchanged across four reads, 50 ms apart
+  }, 15_000, `${id} has stopped moving`);
+}
+/** Open the picker by `button` (picker-open or picker-change); answers its unfiltered first page's read lines once shown. */
+async function openPicker(page, button) {
+  await still(page, button);
+  const from = st.api.length;
+  await page.click(by(button));
+  await page.waitFor(`!!${q('picker-dialog')}`, 15_000, 'the picker dialog');
+  assert.equal(await pickerSettled(page, from), 'ready', 'the picker\'s first page');
+  return readLines(sentBy(page, isList, from));
+}
+/** Click a row's Select; the dialog closes and the draft shows that customer. */
+async function pickRow(page, id) {
+  await page.click(`${by('picker-row')}[data-id="${id}"] ${by('picker-select')}`);
+  await page.waitFor(`!${q('picker-dialog')} && ${q('picker-value')}?.dataset.id === ${JSON.stringify(id)}`, 15_000, `the draft names ${id}`);
+}
+/** ServerCustomerPicker.tsx's SERVER_DRAFT_LIMIT_TEXT (a literal: this file loads against the entry commit's tree too). */
+const SERVER_DRAFT_LIMIT = "This draft uses a customer saved on the server. Creating an invoice for a server customer isn't available yet, so this draft can't be created. To create the invoice here, choose a customer from this browser's list instead.";
+const boundId = (page) => page.evaluate(`${q('picker-value')}?.dataset.id ?? null`);
+
+scenario('SCB-15', 'INVOICE DRAFT PICKER (M7A-CUSTOMERS-P9, AC-09) — "Create Invoice" opens a draft whose picker reads only GET /api/v1/customers: a search over two pages binds a second-page customer by its database id, the server-customer limit shows and Generate stays disabled; of two identical names the second is bound exactly; Change then Cancel keeps the binding; Remove clears it; a local customer replaces a server one; nothing is written and no other tenant\'s customer is ever answered', async () => {
+  const { tenant, boss } = await shop('c15');
+  const other = await newTenant('c15-other');
+  const word = 'Heron';
+  const matching = Array.from({ length: 55 }, (_, i) => `M7SCB c15 ${i % 2 === 0 ? word.toUpperCase() : word.toLowerCase()} ${String(i).padStart(2, '0')} ${SUFFIX}`);
+  const twin = `M7SCB c15 Twin ${SUFFIX}`;
+  await seedCustomers(tenant, [...matching, ...Array.from({ length: 4 }, (_, i) => `M7SCB c15 Plover ${i} ${SUFFIX}`), twin, twin]);
+  const foreign = await seedCustomers(other, [...matching.slice(0, 4), twin]);
+  const all = await customersOf(tenant);
+  const expected = all.filter((c) => c.name.toUpperCase().includes(word.toUpperCase()));
+  const twins = await named(tenant, twin);
+  assert.equal(expected.length, 55);
+  assert.equal(twins.length, 2);
+  const target = expected[52]; // only on the second page of the search
+  const before = await counts();
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('invoice-create-open')}`, 30_000, 'the Invoices page offers Create Invoice');
+  await page.click(by('invoice-create-open'));
+  await page.waitFor(`!!${q('picker-open')}`, 15_000, 'the draft offers the server-customer picker');
+
+  // 1. A search over two pages; a second-page row is bound.
+  const firstOpen = await openPicker(page, 'picker-open');
+  const unfiltered = await pickerRowsOf(page);
+  let from = await pickerSearch(page, word);
+  const searched = await pickerSettled(page, from);
+  const searchReads = readLines(sentBy(page, isList, from));
+  const pageOne = await pickerRowsOf(page);
+  from = st.api.length;
+  await page.click(by('picker-load-more'));
+  await page.waitFor(async () => (await pickerRowsOf(page)).length === expected.length, 30_000, 'the second page of matches');
+  const moreReads = sentBy(page, isList, from);
+  const bothPages = await pickerRowsOf(page);
+  const moreOffered = await has(page, 'picker-load-more');
+  await pickRow(page, target.id);
+  const bound = { id: await boundId(page), name: await textOf(page, 'picker-value-name') };
+  const limitShown = await textOf(page, 'invoice-server-limit');
+  const saveDisabled = await page.evaluate(`${q('invoice-create-save')}?.disabled === true`);
+  const localWhileServer = await page.evaluate(`${q('invoice-customer-select')}?.value ?? null`);
+
+  // 2. Two identical names: the second one is bound exactly.
+  const changeOpen = await openPicker(page, 'picker-change');
+  from = await pickerSearch(page, twin, 'enter');
+  const twinSearch = await pickerSettled(page, from);
+  const twinReads = readLines(sentBy(page, isList, from));
+  const twinRows = await pickerRowsOf(page);
+  await pickRow(page, twins[1].id);
+  const twinBound = { id: await boundId(page), name: await textOf(page, 'picker-value-name') };
+
+  // 3. Change, then Cancel: the binding stays.
+  const cancelOpen = await openPicker(page, 'picker-change');
+  await page.click(by('picker-cancel'));
+  await page.waitFor(`!${q('picker-dialog')}`, 15_000, 'the picker closed');
+  const afterCancel = await boundId(page);
+
+  // 4. Remove: no server customer, the picker is offered again.
+  await page.click(by('picker-remove'));
+  await page.waitFor(`!${q('picker-value')} && !!${q('picker-open')}`, 15_000, 'the server customer removed');
+  const removed = { limit: await has(page, 'invoice-server-limit'), local: await page.evaluate(`${q('invoice-customer-select')}?.value ?? null`) };
+
+  // 5. A local customer chosen after a server one replaces it.
+  const reopen = await openPicker(page, 'picker-open');
+  const firstRow = (await pickerRowsOf(page))[0];
+  await pickRow(page, firstRow.id);
+  const local = await page.evaluate(`[...${q('invoice-customer-select')}.options].map((o) => o.value).find((v) => v !== '') ?? null`);
+  assert.ok(local, 'the browser\'s own list offers a customer');
+  await page.evaluate(`(() => { const s = ${q('invoice-customer-select')}; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(local)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await page.waitFor(`!${q('picker-value')} && !!${q('picker-open')}`, 15_000, 'the local customer replaced the server one');
+  const replaced = { limit: await has(page, 'invoice-server-limit'), local: await page.evaluate(`${q('invoice-customer-select')}?.value ?? null`) };
+
+  // 6. The directory still lists the tenant's customers.
+  await openDirectory(page);
+  await waitList(page);
+  const directory = await rowsOf(page);
+  await quiet(page, 0);
+  const made = await deltaSince(before);
+  const mine = st.api.filter((r) => r.frameId === page.frameId);
+  const others = mine.filter((r) => !isList(r) && !isSessionRead(r) && !isLogin(r)).map(apiLine);
+  const lists = mine.filter(isList);
+  const answered = lists.map((r) => r.replied?.text ?? '');
+  record('SCB-15', { firstOpen, unfiltered: unfiltered.length, searched, searchReads, more: moreReads.map((r) => r.status), changeOpen: changeOpen.length, twinSearch, cancelOpen: cancelOpen.length, reopen: reopen.length, logins: mine.filter(isLogin).length, sessionReads: mine.filter(isSessionRead).length, lists: lists.length, made });
+
+  assert.deepEqual(firstOpen, [' -> 200'], 'the picker opened on ONE unfiltered read');
+  assert.deepEqual(unfiltered, all.slice(0, 50), 'the unfiltered first page: the tenant\'s first 50, in the server\'s order');
+  assert.equal(searched, 'ready');
+  assert.deepEqual(searchReads, [`?q=${word} -> 200`], 'the Search button sent ONE read of the search');
+  assert.deepEqual(pageOne, expected.slice(0, 50), 'page one: the first 50 matches, both letter cases, in the server\'s order');
+  assert.equal(moreReads.length, 1, 'one read for "Load more"');
+  assert.match(moreReads[0].query, new RegExp(`^\\?q=${word}&cursor=[A-Za-z0-9_-]{44}$`), 'with the search\'s own continuation');
+  assert.equal(moreReads[0].status, 200);
+  assert.deepEqual(bothPages, expected, 'every match exactly once, in order');
+  assert.equal(moreOffered, false, 'and no more after the last');
+  assert.ok(!pageOne.some((r) => r.id === target.id), 'the bound customer was only on the second page');
+  assert.deepEqual(bound, target, 'the draft names the database\'s customer: its id and its name');
+  assert.equal(limitShown, SERVER_DRAFT_LIMIT, 'the server-customer limit is said');
+  assert.equal(saveDisabled, true, 'Generate Invoice stays disabled');
+  assert.equal(localWhileServer, '', 'no local customer beside the server one');
+  assert.deepEqual(changeOpen, [' -> 200'], 'Change opened on ONE unfiltered read');
+  assert.equal(twinSearch, 'ready');
+  assert.deepEqual(twinReads, [`?q=${encodeURIComponent(twin)} -> 200`], 'Enter sent ONE read of the search');
+  assert.deepEqual(twinRows, twins, 'both identical names, in the server\'s order');
+  assert.notEqual(twinRows[0].id, twinRows[1].id, 'two distinct customers');
+  assert.deepEqual(twinBound, twins[1], 'the second of the two is bound, exactly');
+  assert.deepEqual(cancelOpen, [' -> 200']);
+  assert.equal(afterCancel, twins[1].id, 'Cancel keeps the binding');
+  assert.deepEqual(removed, { limit: false, local: '' }, 'Remove: no customer at all');
+  assert.deepEqual(reopen, [' -> 200']);
+  assert.deepEqual(replaced, { limit: false, local }, 'the local customer is the draft\'s one customer');
+  assert.deepEqual(directory, all.slice(0, 50), 'the directory still lists the tenant\'s customers');
+  assert.deepEqual(others, [], 'only customer list reads, session reads and the sign-in: no write, no detail, no invoice route');
+  assert.equal(lists.length, 8, 'eight list reads: four opens, two searches, one "Load more", the directory');
+  assert.equal(mine.filter(isLogin).length, 1, 'ONE tenant login: the picker\'s first connect, reused after');
+  assert.ok(lists.every((r) => r.status === 200 && r.body === ''), 'every list read answered 200');
+  for (const f of [...foreign.map((c) => c.id), other]) assert.ok(!answered.some((t) => t.includes(f)), 'nothing of the other tenant is ever answered');
+  assert.deepEqual(made, { ...NOTHING, U: 0, T: 1 }, `the picker writes nothing; the one audit record is the one login's ${JSON.stringify(made)}`);
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, other, boss.uid, boss.id]);
   await assertNoLeak(page);
 });

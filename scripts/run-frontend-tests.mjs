@@ -41,8 +41,8 @@ export const REPO_ROOT = resolve(HERE, '..');
  * Floors, equal to the exact verified counts of the current suite. Raise them when
  * frontend tests are added; they may never be lowered to accommodate a deletion.
  */
-export const MIN_FRONTEND_FILES = 25; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx; M7A-CUSTOMERS-P5: +3, src/tenant/ServerCustomerDirectory.test.tsx, src/layouts/TenantLayout.customerDirectory.test.tsx, src/components/Customers.localBanner.test.tsx; M7A-CUSTOMERS-P9: +1, src/tenant/ServerCustomerPicker.test.tsx
-export const MIN_FRONTEND_CASES = 664; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52); M7A-CUSTOMERS-P5: +52 (SCD-00..45, NAV-01..04, LCB-01..02), fix batch 1: +10 (SCD-46..55), fix batch 2: +6 (SCD-56..61); M7A-CUSTOMERS-P5-R1: +3 (SCD-62..64); review fixes: +8 (SCD-65..71, SCL-53); SCD-72; M7A-CUSTOMERS-P6: +8 (SCD-73..78, SCL-54..55); fix batch: +3 (SCD-79..81), re-review: SCD-82; contact UI: +10 (SCD-83..92); M7A-CUSTOMERS-P7: +13 (SCD-93..105), review fixes: +7 (SCD-106..112), round 2: +15 (SCD-113..127), round 3: +12 (SCD-128..139), round 4: +4 (SCD-140..143), round 5: +3 (SCD-144..146); M7A-CUSTOMERS-P8: +15 (SCD-147..161), fix batch: +1 (SCD-162), review fixes: +3 (SCD-163..165); M7A-CUSTOMERS-P9: +47 (SCP-01..47)
+export const MIN_FRONTEND_FILES = 26; // M7A-CUSTOMERS-P3-R2: +2, src/tenant/ServerCustomerLevels.test.tsx, src/context/AccessContext.tenantSession.test.tsx; M7A-CUSTOMERS-P5: +3, src/tenant/ServerCustomerDirectory.test.tsx, src/layouts/TenantLayout.customerDirectory.test.tsx, src/components/Customers.localBanner.test.tsx; M7A-CUSTOMERS-P9: +2, src/tenant/ServerCustomerPicker.test.tsx, src/components/Invoices.serverCustomer.test.tsx
+export const MIN_FRONTEND_CASES = 679; // M7A-CUSTOMERS-P3-R2: +28 (SCL-01..25, ATS-01..03); M7A-CUSTOMERS-P4: +27 (SCL-26..52); M7A-CUSTOMERS-P5: +52 (SCD-00..45, NAV-01..04, LCB-01..02), fix batch 1: +10 (SCD-46..55), fix batch 2: +6 (SCD-56..61); M7A-CUSTOMERS-P5-R1: +3 (SCD-62..64); review fixes: +8 (SCD-65..71, SCL-53); SCD-72; M7A-CUSTOMERS-P6: +8 (SCD-73..78, SCL-54..55); fix batch: +3 (SCD-79..81), re-review: SCD-82; contact UI: +10 (SCD-83..92); M7A-CUSTOMERS-P7: +13 (SCD-93..105), review fixes: +7 (SCD-106..112), round 2: +15 (SCD-113..127), round 3: +12 (SCD-128..139), round 4: +4 (SCD-140..143), round 5: +3 (SCD-144..146); M7A-CUSTOMERS-P8: +15 (SCD-147..161), fix batch: +1 (SCD-162), review fixes: +3 (SCD-163..165); M7A-CUSTOMERS-P9: +52 (SCP-01..39, INV-01..13), review fixes: +9 (SCP-40..46, INV-14..15), round 2: +1 (SCP-47)
 
 /**
  * Critical frontend suites, by literal path. A count alone is not enough — unrelated
@@ -68,6 +68,7 @@ export const REQUIRED_FRONTEND_SUITES = [
   'src/layouts/TenantLayout.customerDirectory.test.tsx',              // sidebar Customer Directory entry: the customers feature gates it, exact highlight with sub-paths only for the directory (M7A-CUSTOMERS-P5)
   'src/components/Customers.localBanner.test.tsx',                    // local Customers screen: the browser-only banner, a local create sends no request (M7A-CUSTOMERS-P5)
   'src/tenant/ServerCustomerPicker.test.tsx',                         // server-customer picker: reads only, a choice bound to the session it was read under, dropped when that session is over (M7A-CUSTOMERS-P9)
+  'src/components/Invoices.serverCustomer.test.tsx',                  // invoice draft: a server customer never reaches the local list or an invoice; a local one creates as before (M7A-CUSTOMERS-P9)
 ];
 
 /** A case vitest actually ran. Skipped and todo cases are not executed. */
