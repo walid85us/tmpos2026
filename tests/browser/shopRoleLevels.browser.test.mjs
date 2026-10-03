@@ -155,6 +155,14 @@
 //          exactly; Change then Cancel keeps it; Remove clears it; a local customer replaces a server one. Only GETs of the
 //          list, session reads and ONE login are sent; no customer, audit, completion or idempotency record is written;
 //          no answer holds the other tenant's customers; the directory still lists the tenant's customers.
+// Since M7A-CUSTOMERS-P10 the picker is a modal over any host dialog (z-[190]; Tab and Shift+Tab wrap around its enabled
+// controls; every other <body> child is inert while it is open; Escape closes it alone; focus goes back to "Select a server
+// customer" or Change):
+//   SCB-17 PICKER KEYBOARD (invoice draft): three customers. Tab from the local select reaches "Select a server customer",
+//          Enter opens the picker on the search box with #root inert; Tab x6 then Shift+Tab x3 is the exact wrap over
+//          Search, the three Selects and Cancel, each stop inside the dialog with a visible focus ring; Escape closes the
+//          picker alone (the invoice draft stays, #root no longer inert, focus on the opener); Enter reopens it and a
+//          Select reached by Tab and pressed with Enter binds that row, focus on Change. Two list reads, ONE login.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -3188,4 +3196,145 @@ scenario('SCB-15', 'INVOICE DRAFT PICKER (M7A-CUSTOMERS-P9, AC-09) — "Create I
   assert.deepEqual(made, { ...NOTHING, U: 0, T: 1 }, `the picker writes nothing; the one audit record is the one login's ${JSON.stringify(made)}`);
   assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, other, boss.uid, boss.id]);
   await assertNoLeak(page);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P10 — the picker as a modal over its host dialog (DA-178)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Whether a click at `selector`'s centre lands on it: the browser's own hit test, which is what a user's click (and
+ * page.click) meets — a picker stacked under its host dialog's layer answers false.
+ */
+const onTop = (page, selector) => page.evaluate(`(() => {
+  const n = document.querySelector(${JSON.stringify(selector)});
+  if (n === null) return false;
+  n.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = n.getBoundingClientRect();
+  return n.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+})()`);
+/** The picker is open and every other child of <body> — the app's #root among them — is inert. */
+const behindInert = (page) => page.evaluate(`(() => {
+  const d = ${q('picker-dialog')};
+  const rest = [...document.body.children].filter((n) => !n.contains(d));
+  return d !== null && rest.some((n) => n.id === 'root') && rest.every((n) => n.inert === true);
+})()`);
+const rootInert = (page) => page.evaluate(`document.getElementById('root')?.hasAttribute('inert') === true`);
+const focusedId = (page) => page.evaluate(`document.activeElement?.dataset?.testid ?? document.activeElement?.tagName ?? null`);
+/**
+ * Where focus is: a test id, a row's Select as `select:<its row's place>`, prefixed `outside:` when it is not inside the
+ * picker's dialog; `ring` is :focus-visible with an outline the browser draws (a style, not 'none', at least 2px wide).
+ */
+const FOCUS_AT = `(() => {
+  const n = document.activeElement, d = ${q('picker-dialog')};
+  const id = n?.dataset?.testid ?? n?.tagName ?? 'none';
+  const rows = [...document.querySelectorAll(${JSON.stringify(by('picker-row'))})];
+  const name = id === 'picker-select' ? 'select:' + rows.indexOf(n.closest(${JSON.stringify(by('picker-row'))})) : id;
+  const s = n ? getComputedStyle(n) : null;
+  return { at: d !== null && d.contains(n) ? name : 'outside:' + name, ring: !!s && n.matches(':focus-visible') && s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2 };
+})()`;
+
+/**
+ * The picker driven from the keyboard alone, inside a host dialog whose `host` test id must survive Escape. Focus starts
+ * on the control just before "Select a server customer" (the caller puts it there). Answers what was seen; asserts
+ * nothing, so the entry tree's run records its whole "before" picture.
+ */
+async function keyboardJourney(page, host, rows) {
+  await page.press('Tab');
+  const entry = await focusedId(page);
+  let from = st.api.length;
+  await page.press('Enter');
+  await page.waitFor(`!!${q('picker-dialog')}`, 15_000, 'Enter opened the picker');
+  const firstOpen = await pickerSettled(page, from);
+  const firstReads = readLines(sentBy(page, isList, from));
+  const opened = await page.waitFor(`document.activeElement === ${q('picker-search-input')}`, 15_000, 'focus on the search box').catch(() => false);
+  const shown = await pickerRowsOf(page);
+  const moreOffered = await has(page, 'picker-load-more');
+  const inertOpen = await behindInert(page);
+  const cycle = [];
+  for (const shift of [false, false, false, false, false, false, true, true, true]) {
+    await page.press('Tab', { shift });
+    cycle.push(await page.evaluate(FOCUS_AT));
+  }
+  await page.press('Escape');
+  await page.waitFor(`!${q('picker-dialog')}`, 15_000, 'Escape closed the picker');
+  await page.waitFor(`document.activeElement === ${q('picker-open')}`, 15_000, 'focus back on the opener').catch(() => {});
+  const escaped = { host: await has(page, host), bound: await has(page, 'picker-value'), focus: await focusedId(page), inert: await rootInert(page) };
+
+  from = st.api.length;
+  await page.press('Enter');
+  await page.waitFor(`!!${q('picker-dialog')}`, 15_000, 'Enter reopened the picker');
+  const secondOpen = await pickerSettled(page, from);
+  const secondReads = readLines(sentBy(page, isList, from));
+  const reopened = await page.waitFor(`document.activeElement === ${q('picker-search-input')}`, 15_000, 'focus on the search box').catch(() => false);
+  for (let i = 0; i < 3; i += 1) await page.press('Tab');
+  const onSelect = await page.evaluate(FOCUS_AT);
+  await page.press('Enter');
+  await page.waitFor(`!${q('picker-dialog')} && ${q('picker-value')}?.dataset.id === ${JSON.stringify(rows[1].id)}`, 15_000, `Enter on a Select bound ${rows[1].id}`);
+  await page.waitFor(`document.activeElement === ${q('picker-change')}`, 15_000, 'focus on Change').catch(() => {});
+  const picked = { host: await has(page, host), id: await boundId(page), name: await textOf(page, 'picker-value-name'), focus: await focusedId(page), inert: await rootInert(page) };
+  return { entry, firstOpen, firstReads, opened: opened === true, shown, moreOffered, inertOpen, cycle, escaped, secondOpen, secondReads, reopened: reopened === true, onSelect, picked };
+}
+/** The exact stops keyboardJourney's Tab x6, Shift+Tab x3 meets over three rows (Clear is disabled while nothing is typed). */
+const KEYBOARD_CYCLE = ['picker-search-submit', 'select:0', 'select:1', 'select:2', 'picker-cancel', 'picker-search-input', 'picker-cancel', 'select:2', 'select:1'];
+/** keyboardJourney's observations against `rows` (the tenant's three customers, in the server's order). */
+function assertKeyboardJourney(seen, rows, host) {
+  assert.equal(seen.entry, 'picker-open', 'Tab from the control before it reaches "Select a server customer"');
+  assert.equal(seen.firstOpen, 'ready');
+  assert.deepEqual(seen.firstReads, [' -> 200'], 'Enter opened the picker on ONE unfiltered read');
+  assert.equal(seen.opened, true, 'the opened picker holds focus on its search box');
+  assert.deepEqual(seen.shown, rows, 'the three customers, in the server\'s order');
+  assert.equal(seen.moreOffered, false, 'no "Load more" on a single page');
+  assert.equal(seen.inertOpen, true, 'while the picker is open every other <body> child, #root among them, is inert');
+  assert.deepEqual(seen.cycle.map((s) => s.at), KEYBOARD_CYCLE, 'Tab and Shift+Tab wrap inside the picker, never leaving it');
+  assert.deepEqual(seen.cycle.filter((s) => !s.ring).map((s) => s.at), [], 'every stop shows a visible focus ring');
+  assert.deepEqual(seen.escaped, { host: true, bound: false, focus: 'picker-open', inert: false }, `Escape closed the picker alone (${host} stays), nothing bound, #root live again, focus on the opener`);
+  assert.equal(seen.secondOpen, 'ready');
+  assert.deepEqual(seen.secondReads, [' -> 200'], 'Enter reopened it on ONE unfiltered read');
+  assert.equal(seen.reopened, true, 'the reopened picker holds focus on its search box');
+  assert.deepEqual(seen.onSelect, { at: 'select:1', ring: true }, 'Tab x3 reaches the second row\'s Select, with a focus ring');
+  assert.deepEqual(seen.picked, { host: true, id: rows[1].id, name: rows[1].name, focus: 'picker-change', inert: false }, 'Enter on it bound that row exactly; focus on Change; #root live again');
+}
+/** The wire and the database for one picker case: list GETs only (each unfiltered, 200), session reads, ONE login, nothing written. */
+async function assertPickerWire(page, before, lists, tenant, who, foreign = []) {
+  await quiet(page, 0);
+  const made = await deltaSince(before);
+  const mine = st.api.filter((r) => r.frameId === page.frameId);
+  const others = mine.filter((r) => !isList(r) && !isSessionRead(r) && !isLogin(r)).map(apiLine);
+  const reads = mine.filter(isList);
+  const answered = reads.map((r) => r.replied?.text ?? '');
+  assert.deepEqual(others, [], 'only customer list reads, session reads and the sign-in: no write, no detail, no invoice or repair route');
+  assert.ok(!mine.some((r) => /repair|ticket|invoice/i.test(r.path)), 'no request names a repair, ticket or invoice');
+  assert.equal(reads.length, lists, `${lists} list reads, one per opening`);
+  assert.ok(reads.every((r) => r.status === 200 && r.body === '' && r.query === ''), 'every list read unfiltered and answered 200');
+  assert.equal(mine.filter(isLogin).length, 1, 'ONE tenant login: the picker\'s first connect, reused after');
+  for (const f of foreign) assert.ok(!answered.some((t) => t.includes(f)), 'nothing of the other tenant is ever answered');
+  assert.deepEqual(made, { ...NOTHING, U: 0, T: 1 }, `the picker writes nothing; the one audit record is the one login's ${JSON.stringify(made)}`);
+  assertNoSelector(st.api.filter((r) => r.path.startsWith(CUSTOMERS)), [tenant, who.uid, who.id, ...foreign]);
+  await assertNoLeak(page);
+  return { made, logins: mine.filter(isLogin).length, sessionReads: mine.filter(isSessionRead).length, lists: reads.length };
+}
+
+scenario('SCB-17', 'PICKER KEYBOARD, INVOICE DRAFT (M7A-CUSTOMERS-P10, DA-178) — from the invoice draft, Tab reaches "Select a server customer" and Enter opens the picker on its search box with the page behind inert; Tab and Shift+Tab wrap exactly over its enabled controls with a visible focus ring; Escape closes the picker alone and returns focus; a Select reached by Tab binds on Enter, focus on Change; nothing is written', async () => {
+  const { tenant, boss } = await shop('c17');
+  await seedCustomers(tenant, Array.from({ length: 3 }, (_, i) => `M7SCB c17 Avocet ${i} ${SUFFIX}`));
+  const rows = await customersOf(tenant);
+  const before = await counts();
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('invoice-create-open')}`, 30_000, 'the Invoices page offers Create Invoice');
+  await page.click(by('invoice-create-open'));
+  await page.waitFor(`!!${q('picker-open')}`, 15_000, 'the draft offers the server-customer picker');
+  await still(page, 'picker-open');
+  // The local select is the control before the field (focused by script: a click would open the native list).
+  await page.evaluate(`${q('invoice-customer-select')}.focus()`);
+  const seen = await keyboardJourney(page, 'invoice-create-save', rows);
+  const save = await page.evaluate(`${q('invoice-create-save')}?.disabled === true`);
+  const wire = await assertPickerWire(page, before, 2, tenant, boss);
+  record('SCB-17', { ...seen, shown: seen.shown.length, ...wire });
+
+  assertKeyboardJourney(seen, rows, 'invoice-create-save');
+  assert.equal(await textOf(page, 'invoice-server-limit'), SERVER_DRAFT_LIMIT, 'the server-customer limit is said');
+  assert.equal(save, true, 'Generate Invoice stays disabled');
 });

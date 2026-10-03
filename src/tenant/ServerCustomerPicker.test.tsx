@@ -25,7 +25,7 @@ import {
   NO_CUSTOMER, localCustomerIdOf, localCustomerReference, serverCustomerReference, type ServerCustomerReference, type SessionContext,
 } from './customerReference';
 import { EMPTY_TEXT, LAST_KNOWN_TEXT, SEARCH_RULE_TEXT, searchMatchingText, searchNoneText } from './ServerCustomerDirectory';
-import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
+import { createTenantSessionClient, TENANT_SESSION_PATHS, type EnsureOptions } from './tenantSessionClient';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from './customersClient';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
@@ -176,8 +176,8 @@ function Draft({ uid, canView = true, inject, log }: { uid: string | null; canVi
   const [value, setValue] = useState<ServerCustomerReference | null>(null);
   return <ServerCustomerField uid={uid} value={value} canView={canView} onChange={(next, why) => { log.push({ next, why }); setValue(next); }} {...inject} />;
 }
-function mountField(server: Server, options: { uid?: string | null; canView?: boolean } = {}) {
-  const inject = clients(server);
+function mountField(server: Server, options: { uid?: string | null; canView?: boolean; inject?: Clients } = {}) {
+  const inject = options.inject ?? clients(server);
   const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
   const uid = options.uid === undefined ? 'uid-a' : options.uid;
   const draft = (props: { uid?: string | null; canView?: boolean; draftKey?: string } = {}) => (
@@ -1224,5 +1224,372 @@ describe('ServerCustomerPicker review fixes (M7A-CUSTOMERS-P9)', () => {
     expect(screen.queryByTestId('picker-load-more')).toBeNull();
     expect(document.activeElement).toBe(searchInput());
     expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7A-CUSTOMERS-P10 — the dialog as a keyboard modal (DA-178) and a refusal whose one fresh check is undecided
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The real clients over `server`, with the session's `ensure` recording the mode of every call (undefined: plain). */
+function recording(server: Server) {
+  const inject = clients(server);
+  const modes: Array<EnsureOptions | undefined> = [];
+  const session = Object.freeze({
+    ...inject.session,
+    ensure: (uid: string, idToken: () => Promise<string | null>, options?: EnsureOptions) => {
+      modes.push(options);
+      return inject.session.ensure(uid, idToken, options);
+    },
+  });
+  return { inject: { ...inject, session }, modes };
+}
+
+type Log = Array<{ next: ServerCustomerReference | null; why: Why }>;
+/** A host dialog around the field, as the invoice and repair forms are: its OWN Escape closes it, and it has controls before and after the field. */
+function HostDialog({ inject, log, keys }: { inject: Clients; log: Log; keys: string[] }) {
+  const [open, setOpen] = useState(true);
+  if (!open) return <p data-testid="host-closed">The host dialog closed.</p>;
+  return (
+    <div role="dialog" aria-label="New ticket" data-testid="host" onKeyDown={(e) => { keys.push(e.key); if (e.key === 'Escape') setOpen(false); }}>
+      <button type="button" data-testid="host-before">Before</button>
+      <Draft uid="uid-a" inject={inject} log={log} />
+      <button type="button" data-testid="host-after">After</button>
+    </div>
+  );
+}
+function mountHost(server: Server) {
+  const log: Log = [];
+  const keys: string[] = []; // every key the host's own handler saw
+  return { ...render(<HostDialog inject={clients(server)} log={log} keys={keys} />), log, keys };
+}
+const active = () => document.activeElement;
+const tab = async (shift = false) => { await userEvent.setup().tab({ shift }); };
+const selectOf = (id: string) => within(rows().find((r) => r.getAttribute('data-id') === id)!).getByTestId('picker-select');
+const refusal = (status: number, headers: Record<string, string> = {}): Response =>
+  new Response(JSON.stringify({ error: `e${status}`, requestId: 'req-synthetic' }), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } });
+
+/**
+ * A field holding a server customer is reopened (Change); read 1 (allowed: its rows held at the server) is superseded by
+ * read 2, refused 403 because the store took the user's view away, and a return to the tab while read 2 is out is
+ * checked once it settles. The ONE fresh session check after the 403 gets `fresh` — an undecided answer — so the
+ * refusal stands: the dialog says denied with no row and no Select, the field drops its customer with the denied notice,
+ * and the session was asked plain, plain, fresh, then plain (the deferred focus check, still out on return).
+ */
+async function deniedWithUndecidedCheck(fresh: Response) {
+  const server = fakeServer();
+  const [ada] = server.seed(TENANT_A, ['Ada', 'Bea']);
+  const { inject, modes } = recording(server);
+  const { log } = mountField(server, { inject });
+  await click('picker-open');
+  await ready();
+  await selectRow(ada.id);
+  await click('picker-change');
+  await ready();
+  modes.length = 0;
+  const signedIn = logins(server).length;
+  server.hold.reads = 2;
+  await searchFor('Ad'); // read 1: allowed, decided on arrival — its rows wait at the server
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  server.users['tok-a'].view = false; // the store takes this user's view away
+  await searchFor('Be'); // read 2 supersedes read 1, and is refused 403
+  await waitFor(() => expect(server.held).toHaveLength(2));
+  await focusWindow(); // a return to the tab while read 2 is out: checked once it settles
+  server.hold.checks = 2; // the one fresh check after the 403, and that deferred focus check
+  await act(async () => { server.held[1].release(); });
+  await waitFor(() => expect(server.held).toHaveLength(3));
+  expect(server.held[2].url).toBe(TENANT_SESSION_PATHS.current);
+  await act(async () => { server.held[2].release(fresh); }); // the fresh check decides nothing
+  await waitFor(() => expect(phase()).toBe('denied'));
+  await waitFor(() => expect(server.held).toHaveLength(4)); // the deferred focus check is out
+  expect(state()).toHaveTextContent(PICKER_TEXT.denied);
+  expect(state()).toHaveAttribute('role', 'alert');
+  expect(rows()).toHaveLength(0);
+  expect(screen.queryAllByTestId('picker-select')).toEqual([]);
+  expect(log.map((e) => [e.next?.id ?? null, e.why])).toEqual([[ada.id, 'selected'], [null, 'denied']]);
+  expect(screen.queryByTestId('picker-value')).toBeNull();
+  expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_DENIED_TEXT);
+  expect(modes).toEqual([undefined, undefined, { fresh: true }, undefined]); // never a reconnect
+  return { server, log, modes, signedIn };
+}
+
+/** Then the late answers: the focus check's "ok" (the same token) and read 1's rows. Neither restores a row or a choice. */
+async function lateAnswersChangeNothing({ server, log, modes, signedIn }: Awaited<ReturnType<typeof deniedWithUndecidedCheck>>) {
+  const listed = lists(server).length;
+  server.users['tok-a'].view = true; // the server would answer rows again now: nothing may ask it on its own
+  await act(async () => { server.held[3].release(); }); // the deferred focus check: ok, the same token
+  await act(async () => { server.held[0].release(); }); // read 1's rows (Ada), superseded
+  await settle();
+  expect(phase()).toBe('denied');
+  expect(rows()).toHaveLength(0);
+  expect(screen.queryAllByTestId('picker-select')).toEqual([]);
+  expect(lists(server)).toHaveLength(listed); // nothing was read again
+  expect(log.map((e) => e.why)).toEqual(['selected', 'denied']);
+  expect(screen.queryByTestId('picker-value')).toBeNull();
+  expect(modes.some((mode) => mode?.reconnect === true)).toBe(false);
+  expect(logins(server)).toHaveLength(signedIn);
+}
+
+describe('ServerCustomerPicker refusals and keyboard (M7A-CUSTOMERS-P10)', () => {
+  it('SCP-48. AC-06: a 403 whose one fresh check is UNAVAILABLE: the refusal stands (denied, no row, no Select), the draft drops its customer with the denied notice, the session was never asked to reconnect, and late answers restore nothing', async () => {
+    const context = await deniedWithUndecidedCheck(refusal(503));
+    await lateAnswersChangeNothing(context);
+    expect(screen.getByTestId('picker-search-submit')).toBeEnabled(); // no wait: the user may try again
+    expect(screen.getByTestId('picker-search-hint')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('picker-retry')).toHaveTextContent('Try again');
+    expect(screen.getByTestId('picker-retry')).toBeEnabled();
+  });
+
+  it('SCP-49. AC-06: a 403 whose one fresh check is RATE-LIMITED: the refusal stands and the check\'s wait runs (Search, Clear and Try again disabled, the hint says the wait); late answers restore nothing', async () => {
+    const context = await deniedWithUndecidedCheck(refusal(429, { 'retry-after': '30' }));
+    for (const control of controls()) expect(control).toBeDisabled();
+    expect(screen.getByTestId('picker-search-hint')).toHaveTextContent('Wait 30 seconds.');
+    await lateAnswersChangeNothing(context);
+    for (const control of controls()) expect(control).toBeDisabled(); // the wait still runs after the check settled
+    expect(screen.getByTestId('picker-search-hint')).toHaveTextContent('Wait 30 seconds.');
+    expect(state()).toHaveTextContent(PICKER_TEXT.denied);
+  });
+
+  it('SCP-50. AC-05: after a confirmed session END nothing signs in on its own — a window focus, a return to the tab and reopening the dialog send no login and pass no reconnect; only the Reconnect click does', async () => {
+    const server = fakeServer();
+    const [bob] = server.seed(TENANT_A, ['Bob']);
+    const { inject, modes } = recording(server);
+    const { log } = mountField(server, { inject });
+    await click('picker-open'); // no session confirmed yet for this user: the plain read signs in, once
+    await ready();
+    expect(logins(server)).toHaveLength(1);
+    await selectRow(bob.id);
+    server.sessions.clear(); // the confirmed session ends in the store (expiry, revocation, a logout elsewhere)
+    await focusWindow(); // the dialog is closed: the field's one plain check finds it ended
+    await waitFor(() => expect(log.map((e) => e.why)).toEqual(['selected', 'ended']));
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    let sent = server.sent.length;
+    await focusWindow();
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    expect(server.sent).toHaveLength(sent); // no customer held: nothing to check
+    await click('picker-open'); // reopened: its plain read finds the session ended
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    expect(state()).toHaveTextContent(PICKER_TEXT.ended);
+    expect(screen.getByTestId('picker-retry')).toHaveTextContent('Reconnect');
+    sent = server.sent.length;
+    await focusWindow();
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    expect(server.sent).toHaveLength(sent); // signed out: only Reconnect reads
+    expect(logins(server)).toHaveLength(1);
+    expect(modes).toEqual([undefined, undefined, undefined]); // the first read, the focus check, the reopened read
+    await click('picker-retry');
+    await ready();
+    expect(names()).toEqual(['Bob']);
+    expect(logins(server)).toHaveLength(2);
+    expect(modes).toEqual([undefined, undefined, undefined, { reconnect: true }]);
+  });
+
+  it('SCP-51. Tab and Shift+Tab stay in the dialog: from its last enabled control to its first and back, and from a focused text that is no Tab stop to the first or the last — never to the host dialog\'s controls around it', async () => {
+    const server = fakeServer();
+    const [, bea] = server.seed(TENANT_A, ['Ada', 'Bea']);
+    mountHost(server);
+    await click('picker-open');
+    expect(active()).toBe(searchInput()); // on open
+    await ready();
+    // The stops, in order: Cancel, the search box, Search, Select Ada, Select Bea (Clear is disabled: nothing to clear).
+    const cancel = screen.getByTestId('picker-cancel');
+    const last = selectOf(bea.id);
+    last.focus();
+    await tab();
+    expect(active()).toBe(cancel);
+    await tab(true);
+    expect(active()).toBe(last);
+    await tab();
+    expect(active()).toBe(cancel);
+    await tab(); // inside, Tab moves on as usual
+    expect(active()).toBe(searchInput());
+    // Focus on a text inside the dialog that is no Tab stop (where a script or an assistive tool may put it).
+    state().setAttribute('tabindex', '-1');
+    state().focus();
+    expect(active()).toBe(state());
+    await tab();
+    expect(active()).toBe(cancel);
+    state().focus();
+    await tab(true);
+    expect(active()).toBe(last);
+    expect(screen.getByTestId('host')).toBeInTheDocument();
+  });
+
+  it('SCP-52. a disabled control is no Tab stop: during a rate limit\'s wait (Search, Clear, Try again) and while a check is out (Select, Load more) the wrap skips them', async () => {
+    const limited = fakeServer();
+    limited.reads.push({ limited: '600' });
+    const view = mountPicker(limited);
+    await waitFor(() => expect(phase()).toBe('rate-limited'));
+    for (const control of controls()) expect(control).toBeDisabled();
+    searchInput().focus(); // the stops: Cancel and the search box only
+    await tab();
+    expect(active()).toBe(screen.getByTestId('picker-cancel'));
+    await tab(true);
+    expect(active()).toBe(searchInput());
+    view.unmount();
+
+    const server = fakeServer();
+    server.seed(TENANT_A, numbered('Customer', 60));
+    mountPicker(server);
+    await ready();
+    server.hold.checks = 1;
+    await focusWindow(); // a return to the tab: Select and Load more wait for its check
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    for (const select of screen.getAllByTestId('picker-select')) expect(select).toBeDisabled();
+    expect(screen.getByTestId('picker-load-more')).toBeDisabled();
+    expect(screen.getByTestId('picker-search-clear')).toBeDisabled();
+    const cancel = screen.getByTestId('picker-cancel');
+    const submit = screen.getByTestId('picker-search-submit');
+    submit.focus(); // the stops: Cancel, the search box and Search
+    await tab();
+    expect(active()).toBe(cancel);
+    await tab(true);
+    expect(active()).toBe(submit);
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    const more = screen.getByTestId('picker-load-more');
+    expect(more).toBeEnabled(); // the check answered: Load more is the last stop again
+    cancel.focus();
+    await tab(true);
+    expect(active()).toBe(more);
+    await tab();
+    expect(active()).toBe(cancel);
+  });
+
+  it('SCP-53. while the dialog is open everything else in <body> is inert; closing it — Cancel, Escape, a Select, a user switch — removes exactly what it set, and a node that was inert before stays inert', async () => {
+    const outer = document.createElement('div');
+    outer.setAttribute('inert', ''); // an outer layer's: not this dialog's to restore
+    const plain = document.createElement('div');
+    document.body.append(outer, plain);
+    try {
+      const server = fakeServer();
+      const [bob] = server.seed(TENANT_A, ['Bob']);
+      const { container, again } = mountField(server);
+      const others = () => [...document.body.children].filter((node) => node !== dialog()?.parentElement);
+      const opened = async (testId: string) => {
+        await click(testId);
+        await ready();
+        expect(dialog()!.parentElement!.parentElement).toBe(document.body);
+        expect(dialog()!.closest('[inert]')).toBeNull(); // the dialog itself never is
+        expect(others()).toEqual(expect.arrayContaining([container, outer, plain]));
+        for (const node of others()) expect(node).toHaveAttribute('inert');
+      };
+      const closed = () => {
+        expect(dialog()).toBeNull();
+        expect(container).not.toHaveAttribute('inert');
+        expect(plain).not.toHaveAttribute('inert');
+        expect(outer).toHaveAttribute('inert');
+      };
+      await opened('picker-open');
+      await click('picker-cancel');
+      closed();
+      await opened('picker-open');
+      await userEvent.setup().keyboard('{Escape}');
+      closed();
+      await opened('picker-open');
+      await selectRow(bob.id);
+      closed();
+      await waitFor(() => expect(active()).toBe(screen.getByTestId('picker-change'))); // on a node no longer inert
+      await opened('picker-change');
+      again({ uid: 'uid-b' }); // a user switch unmounts the dialog
+      closed();
+    } finally {
+      outer.remove();
+      plain.remove();
+    }
+  });
+
+  it('SCP-54. Escape inside a host dialog that closes on its own Escape closes the picker ONLY: the host never sees it and stays open, and focus returns to "Select a server customer", then to Change once a customer is held', async () => {
+    const server = fakeServer();
+    const [bob] = server.seed(TENANT_A, ['Bob']);
+    const { keys } = mountHost(server);
+    await click('picker-open');
+    await ready();
+    await userEvent.setup().keyboard('{Escape}');
+    expect(dialog()).toBeNull();
+    expect(screen.getByTestId('host')).toBeInTheDocument();
+    expect(keys).not.toContain('Escape');
+    await waitFor(() => expect(active()).toBe(screen.getByTestId('picker-open')));
+    await click('picker-open');
+    await ready();
+    await selectRow(bob.id);
+    await click('picker-change');
+    await ready();
+    expect(fireEvent.keyDown(searchInput(), { key: 'Escape' })).toBe(false); // its default is prevented too
+    expect(dialog()).toBeNull();
+    expect(screen.getByTestId('host')).toBeInTheDocument();
+    expect(keys).not.toContain('Escape');
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', bob.id); // Escape kept the customer
+    await waitFor(() => expect(active()).toBe(screen.getByTestId('picker-change')));
+    await userEvent.setup().keyboard('{Escape}'); // outside the picker the host's own Escape is live
+    expect(keys).toContain('Escape');
+    expect(screen.getByTestId('host-closed')).toBeInTheDocument();
+  });
+
+  it('SCP-55. a press on the backdrop is default-prevented, so focus never leaves the dialog for <body> (where Escape and Tab would be lost); a press inside the dialog is not', async () => {
+    const server = fakeServer();
+    mountPicker(server);
+    await ready();
+    const backdrop = dialog()!.parentElement!;
+    expect(backdrop.parentElement).toBe(document.body);
+    expect(fireEvent.mouseDown(backdrop)).toBe(false);
+    expect(fireEvent.mouseDown(dialog()!)).toBe(true);
+    expect(fireEvent.mouseDown(searchInput())).toBe(true);
+    expect(active()).toBe(searchInput());
+  });
+
+  it('SCP-56. a press on the dialog\'s own text (its heading, a row\'s name) focuses the dialog itself, never <body>: from there Escape closes the picker ONLY and Tab and Shift+Tab land on its first and last enabled control', async () => {
+    const server = fakeServer();
+    const [, bea] = server.seed(TENANT_A, ['Ada', 'Bea']);
+    const { keys } = mountHost(server);
+    await click('picker-open');
+    await ready();
+    const panel = dialog()!;
+    // The press is not default-prevented, so a browser moves focus to its nearest focusable ancestor — the dialog. jsdom
+    // moves no focus on mousedown, so the press's result is made directly: it takes only if the dialog can hold focus.
+    expect(fireEvent.mouseDown(within(panel).getByRole('heading'))).toBe(true);
+    expect(fireEvent.mouseDown(within(rows()[0]).getByText('Ada'))).toBe(true);
+    panel.focus();
+    expect(active()).toBe(panel);
+    await focusWindow(); // a return to the tab re-renders (busy, then not): the dialog is focus INSIDE, so it stays
+    await settle();
+    expect(active()).toBe(panel);
+    await tab();
+    expect(active()).toBe(screen.getByTestId('picker-cancel'));
+    panel.focus();
+    await tab(true);
+    expect(active()).toBe(selectOf(bea.id));
+    panel.focus();
+    await userEvent.setup().keyboard('{Escape}');
+    expect(dialog()).toBeNull();
+    expect(screen.getByTestId('host')).toBeInTheDocument();
+    expect(keys).not.toContain('Escape');
+    await waitFor(() => expect(active()).toBe(screen.getByTestId('picker-open')));
+  });
+
+  it.each([
+    ['Change', 'picker-change', 'picker-open'],
+    ['Remove', 'picker-remove', 'picker-open'],
+    ['a host control (not the field\'s)', 'host-before', 'host-before'],
+  ])('SCP-57. AC-05: a closed-dialog check that drops the customer while focus is on %s: focus goes to "Select a server customer" when it was in the dropped block, and is left alone when it was elsewhere', async (_, focused, after) => {
+    const server = fakeServer();
+    const [bob] = server.seed(TENANT_A, ['Bob']);
+    const { log } = mountHost(server);
+    await click('picker-open');
+    await ready();
+    await selectRow(bob.id);
+    await waitFor(() => expect(active()).toBe(screen.getByTestId('picker-change')));
+    screen.getByTestId(focused).focus();
+    expect(active()).toBe(screen.getByTestId(focused));
+    server.sessions.clear();
+    await focusWindow();
+    await waitFor(() => expect(log.map((e) => [e.next?.id ?? null, e.why])).toEqual([[bob.id, 'selected'], [null, 'ended']]));
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    await waitFor(() => expect(active()).toBe(screen.getByTestId(after)));
+    await settle();
+    expect(active()).toBe(screen.getByTestId(after));
   });
 });

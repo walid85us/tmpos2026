@@ -1026,8 +1026,9 @@ function UserPage({
     if (editHolds === editHoldStore) bindShopEditHolds();
     editHolds.keepOnly(uid); // a user change or a sign-out: the previous user's held edit goes
     begin(null, true);
-    // A changed session is noticed without a click: reads only, one at a time, and never while a create is out. It never
-    // signs in: an ended session stays ended (`ended`), and only a Reconnect click logs in again.
+    // A changed session is noticed without a click: reads only, one at a time, and never while a create is out. Its
+    // check is plain: it signs in only when no session is confirmed yet for this user or the cookie names another
+    // identity's session; an ended session stays ended (`ended`), and only a Reconnect click logs in again.
     const reconnect = (): void => {
       if (uid === null || document.visibilityState === 'hidden' || gen.current.csrf === null) return;
       if (addRef.current || checkRef.current || editBusy.current || waitRef.current) return;
@@ -1317,7 +1318,9 @@ function UserPage({
     const done = busyEdit();
     putEditStatus(null);
     try {
-      const s = await connect(uid); // plain: a Save never signs in
+      // Plain: it signs in only when no session is confirmed yet for this user or the cookie names another identity's
+      // session; after a confirmed session end it is `ended`, and only the explicit Reconnect signs in.
+      const s = await connect(uid);
       // The page, its connection or its session was replaced: nothing is sent.
       if (!alive.current || mine !== gen.current.n || epoch !== editEpoch.current) return;
       const open = editRef.current === form; // false: cancelled (or reopened) meanwhile — nothing is sent either way
@@ -1546,7 +1549,9 @@ function UserPage({
     setEditNote(null);
     putEditStatus({ alert: false, text: EDIT_TEXT.checking, customerId, named: `Checking your changes to "${held.name}" with the server…` });
     try {
-      const s = await connect(uid); // plain: a check never signs in
+      // Plain, as a Save's: it signs in only when no session is confirmed yet for this user or the cookie names another
+      // identity's session; after a confirmed session end only the explicit Reconnect signs in.
+      const s = await connect(uid);
       if (editHolds.get(uid)?.key !== key) return;
       if (s.kind !== 'ok') {
         editHolds.change(uid, key, { state: 'unresolved' });

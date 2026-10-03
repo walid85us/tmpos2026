@@ -25,7 +25,7 @@
 //     (UID, token) pair in module scope only to hand out one context per session — never React state, storage, a URL,
 //     the DOM or a log (tenantSessionClient.ts lists the holders).
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { customers as customersClient, normalizeCustomerSearch, type CustomerEntry, type CustomersClient } from './customersClient';
@@ -106,8 +106,11 @@ function readFailure(answer: { readonly kind: string; readonly retryAfterSeconds
   return UNAVAILABLE;
 }
 
-const button = 'px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed';
-const quiet = 'px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed';
+// One visible keyboard focus ring on every control of the dialog and the field (M7A-CUSTOMERS-P10), on both the dark
+// and the white buttons, rather than whatever outline the browser draws by default.
+const focusRing = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700';
+const button = `px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
+const quiet = `px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
 const hintClass = 'text-[11px] font-medium text-slate-500';
 
 export interface ServerCustomerPickerProps {
@@ -153,6 +156,7 @@ function PickerDialog({
   const busyRef = useRef(false);
   const checkLater = useRef(false); // a return to the tab came while a read or check was out: check when it settles
   const searchInput = useRef<HTMLInputElement | null>(null);
+  const overlay = useRef<HTMLDivElement | null>(null); // the portal's own node in <body>: never made inert
   const dialog = useRef<HTMLDivElement | null>(null);
   // The caller's latest callbacks: an answer that arrives after a re-render reports to the draft as it is now.
   const events = useRef({ onSelect, onCancel, onLost, onContext });
@@ -294,7 +298,9 @@ function PickerDialog({
 
   /**
    * A changed session is noticed without a click, as on the directory page: on a return to the tab, ONE plain check
-   * (it never signs in) once a token is fixed and while the dialog is not signed out (only Reconnect reads then). Select
+   * once a token is fixed and while the dialog is not signed out (only Reconnect reads then). A plain check signs in
+   * only when no session is confirmed yet for this user or the cookie names another identity's session (the session
+   * client's rule); after a confirmed session end it is `ended`, and only the explicit Reconnect signs in. Select
    * waits for it. A return while a read is out is checked when that read settles, so no row it brings is selectable
    * unchecked. Another token starts a new generation; a definite end clears the dialog; an undecided answer (outage,
    * rate limit) keeps the rows and starts no wait. An answer after a read began, a new generation or the unmount
@@ -370,9 +376,50 @@ function PickerDialog({
     // A dialog serves one UID (see ServerCustomerPicker); the clients are fixed for its life.
   }, []);
 
+  // The page behind is inert while the dialog is open (M7A-CUSTOMERS-P10, DA-178): every child of <body> but this
+  // dialog's own node — in practice the app's root, with the invoice or repair form the field sits in — gets the `inert`
+  // ATTRIBUTE (what React and the browser reflect; jsdom has no `inert` property), so no click, Tab or screen reader
+  // reaches it. Only the nodes THIS dialog made inert are restored, so a node that was already inert (an outer layer's)
+  // stays so. A layout effect: its cleanup runs in the commit that removes the dialog, before the field's passive effect
+  // puts focus back on Change or "Select a server customer" — focus() on a node still inert would do nothing.
+  useLayoutEffect(() => {
+    const own = overlay.current;
+    const made = [...document.body.children].filter((node) => node !== own && !node.hasAttribute('inert'));
+    for (const node of made) node.setAttribute('inert', '');
+    return () => { for (const node of made) node.removeAttribute('inert'); };
+  }, []);
+
+  /**
+   * The dialog's keys (M7A-CUSTOMERS-P10, DA-178), as TenantManagementPage's confirmation dialog: Escape cancels THIS
+   * dialog only — its default prevented and its propagation stopped, so a host dialog around the field (the invoice or
+   * repair form) never sees it and stays open. Tab and Shift+Tab wrap around the dialog's ENABLED controls (a disabled
+   * one — Search during a wait, Select while busy — is no stop), and from anything not among them (the dialog itself,
+   * after a press on its text) they land on the first or the last: focus never leaves for the page behind.
+   */
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      events.current.onCancel();
+      return;
+    }
+    if (e.key !== 'Tab' || dialog.current === null) return;
+    const stops = [...dialog.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])')];
+    if (stops.length === 0) { e.preventDefault(); return; } // Cancel is never disabled: a guard only
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const at = document.activeElement;
+    if (!stops.some((stop) => stop === at)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (e.shiftKey && at === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
+  }
+
   // Focus never falls out of the dialog: a focused control that goes away (Try again or Reconnect after an answer, Load
   // more on the last page) or is disabled (Search during a wait — the browser then moves focus to <body>) leaves it on
-  // <body>; the search box takes it back. Not a full focus trap (Tab can still leave): only a loss the dialog caused.
+  // <body>; the search box takes it back. Tab and Shift+Tab are contained by `onKeyDown`, a press on the backdrop moves
+  // no focus, a press on the dialog's own text focuses the dialog itself (tabIndex -1), and the page behind is inert:
+  // this effect covers only a loss the dialog itself caused. The dialog holding focus is focus INSIDE (`contains` is
+  // true of the node itself), so a re-render leaves it there (M7A-CUSTOMERS-P10).
   useEffect(() => {
     if (dialog.current !== null && !dialog.current.contains(document.activeElement)) searchInput.current?.focus();
   }, [list, busy, wait]);
@@ -384,7 +431,17 @@ function PickerDialog({
   const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
 
   return createPortal(
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/40">
+    // z-[190] (M7A-CUSTOMERS-P10): above every host dialog it can open from (the repair ticket form is z-[110], the
+    // highest modal in the shop z-[160]) and below the z-[200] toasts. A press on the backdrop moves no focus out of the
+    // dialog, where Escape and Tab are handled (TenantManagementPage's confirmation dialog does the same). A press on the
+    // dialog's own text that is no control (the heading, the intro, a row's name, the empty text) would move focus to
+    // <body>, where neither key reaches `onKeyDown`: tabIndex -1 makes the dialog itself take it (no Tab stop, and no
+    // ring of its own — its controls keep theirs), and from there Tab and Shift+Tab land on its first and last control.
+    <div
+      ref={overlay}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) e.preventDefault(); }}
+      className="fixed inset-0 z-[190] flex items-center justify-center p-4 bg-slate-900/40"
+    >
       <div
         ref={dialog}
         role="dialog"
@@ -392,8 +449,9 @@ function PickerDialog({
         aria-labelledby="picker-title"
         aria-busy={busy}
         data-testid="picker-dialog"
-        onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); events.current.onCancel(); } }}
-        className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-3xl border border-slate-200 shadow-2xl p-6 space-y-3"
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-3xl border border-slate-200 shadow-2xl p-6 space-y-3 focus:outline-none"
       >
         <div className="flex items-start justify-between gap-3">
           <h2 id="picker-title" className="text-xl font-black text-primary tracking-tight">{PICKER_TITLE_TEXT}</h2>
@@ -415,7 +473,7 @@ function PickerDialog({
               aria-invalid={refused}
               aria-describedby={refused ? 'picker-search-error' : undefined}
               onChange={(e) => { setDraft(e.target.value); setRefused(false); }}
-              className="flex-1 min-w-[10rem] text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white"
+              className={`flex-1 min-w-[10rem] text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white ${focusRing}`}
             />
             <button type="submit" data-testid="picker-search-submit" disabled={!canSearch} aria-describedby="picker-search-hint" className={button}>Search</button>
             <button type="button" data-testid="picker-search-clear" disabled={!canSearch || (draft === '' && list.query === '')} onClick={clearSearch} className={quiet}>Clear</button>
@@ -487,7 +545,9 @@ export interface ServerCustomerFieldProps extends Pick<ServerCustomerPickerProps
  * The draft's server-customer control: an entry point, the chosen customer (unmistakably the server's), and the dialog.
  * A reference is dropped — with a notice — as soon as the session it was chosen under is known to be over: the dialog
  * says so (`onLost`, or a first context that is not the reference's), and while the dialog is closed a window focus or
- * a return to the tab checks the session once (plain: it never signs in). An undecided check keeps it.
+ * a return to the tab checks the session once, plain: it signs in only when no session is confirmed yet for this user
+ * or the cookie names another identity's session (tenantSessionClient.ts) — after a confirmed session end it is
+ * `ended`, and only the dialog's explicit Reconnect signs in. An undecided check keeps it.
  */
 export function ServerCustomerField({ uid, value, canView, onChange, ...inject }: ServerCustomerFieldProps) {
   const session = inject.session ?? tenantSession;
@@ -502,13 +562,19 @@ export function ServerCustomerField({ uid, value, canView, onChange, ...inject }
   const focusEntry = useRef(false);
   const selectButton = useRef<HTMLButtonElement | null>(null);
   const changeButton = useRef<HTMLButtonElement | null>(null);
+  const valueBlock = useRef<HTMLDivElement | null>(null); // the held customer's block (Change and Remove inside)
   useLayoutEffect(() => { held.current = shown; change.current = onChange; });
   // The module's (UID, token) pair goes with the field: contexts stay stable while it is mounted, none outlives it.
   useEffect(() => () => { latest = null; }, []);
 
-  /** Drop the held reference once, whichever report comes first, and say why. */
+  /**
+   * Drop the held reference once, whichever report comes first, and say why. A drop while the dialog is closed (a window
+   * focus or a return to the tab) unmounts the customer's block; if keyboard focus was on its Change or Remove it would
+   * fall to <body>, so it goes to "Select a server customer" instead (M7A-CUSTOMERS-P10). Focus anywhere else stays put.
+   */
   const drop = (why: keyof typeof NOTICE): void => {
     if (held.current === null) return;
+    if (valueBlock.current?.contains(document.activeElement)) focusEntry.current = true;
     held.current = null;
     setNotice(why);
     change.current(null, why);
@@ -518,7 +584,8 @@ export function ServerCustomerField({ uid, value, canView, onChange, ...inject }
   // Closed by a user switch or lost access (unmounted, so nothing it was reading reaches the draft): it stays closed.
   useEffect(() => { if (openFor !== null && !open) setOpenFor(null); }, [openFor, open]);
 
-  // Focus goes back to the control that stands for the draft's customer now: Change, or "Select a server customer".
+  // Focus goes back to the control that stands for the draft's customer now: Change, or "Select a server customer" —
+  // after the dialog closes, a Remove, or a drop that took the focused Change or Remove with it (`drop`).
   useEffect(() => {
     if (!focusEntry.current || open) return;
     focusEntry.current = false;
@@ -552,7 +619,7 @@ export function ServerCustomerField({ uid, value, canView, onChange, ...inject }
       {shown === null ? (
         <button ref={selectButton} type="button" data-testid="picker-open" onClick={() => setOpenFor(uid)} className={quiet}>Select a server customer</button>
       ) : (
-        <div data-testid="picker-value" data-id={shown.id} className="p-4 rounded-2xl border border-sky-200 bg-sky-50 space-y-2">
+        <div ref={valueBlock} data-testid="picker-value" data-id={shown.id} className="p-4 rounded-2xl border border-sky-200 bg-sky-50 space-y-2">
           <span data-testid="picker-value-badge" className="inline-block px-2 py-0.5 rounded-full bg-sky-100 text-sky-900 text-[10px] font-black uppercase tracking-widest">Server customer</span>
           <p data-testid="picker-value-name" className="text-sm font-bold text-primary break-words">{shown.name}</p>
           <p className={hintClass}>{idEndingText(shown.id)}</p>
