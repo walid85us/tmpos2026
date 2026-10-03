@@ -1,6 +1,6 @@
-// M7A-CUSTOMERS-P9 — which customer a draft (an invoice being created) names: none, a customer of this browser's own
-// customer list, or a customer saved on the tenant server. One tagged field, so a draft can never hold an active local
-// AND an active server reference, and every reader has to say which source it accepts.
+// M7A-CUSTOMERS-P9 — which customer a draft (an invoice being created; since P10 also a new repair ticket) names: none,
+// a customer of this browser's own customer list, or a customer saved on the tenant server. One tagged field, so a draft
+// can never hold an active local AND an active server reference, and every reader has to say which source it accepts.
 //
 //   - A local id (`c1`…, `c<ts>`, `c-<ts>`) and a server id (a canonical lowercase UUID) are different things that may
 //     never be mistaken for each other: a server reference is never looked up in the local list, never matched to a
@@ -49,3 +49,11 @@ export function serverCustomerReference(entry: CustomerEntry, uid: string, conte
 
 /** The local id a draft names, '' for none or for a server customer (never a server id). */
 export const localCustomerIdOf = (ref: DraftCustomerReference): string => (ref.source === 'local' ? ref.id : '');
+
+/**
+ * M7A-CUSTOMERS-P10 — what a draft's reference counts as in this render (shared by the invoice and repair drafts): a
+ * server customer counts only for the user who chose it (`uid`) while they may view customers (`canView`, the local
+ * role state's hint); otherwise it is none. Local and none references pass through unchanged.
+ */
+export const usableDraftCustomer = (ref: DraftCustomerReference, uid: string | null, canView: boolean): DraftCustomerReference =>
+  ref.source === 'server' && (ref.uid !== uid || !canView) ? NO_CUSTOMER : ref;

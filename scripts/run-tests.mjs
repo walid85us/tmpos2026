@@ -143,6 +143,7 @@ export const REQUIRED_SENTINELS = [
   'src/components/Customers.localBanner.test.tsx',            // the local Customers screen says its records stay in this browser, and its create sends nothing (M7A-CUSTOMERS-P5)
   'src/tenant/ServerCustomerPicker.test.tsx',                 // the server-customer picker: reads only, a choice bound to its session, dropped when that session is over (M7A-CUSTOMERS-P9)
   'src/components/Invoices.serverCustomer.test.tsx',          // the invoice draft: a server customer never reaches the local list or an invoice; a local one creates as before (M7A-CUSTOMERS-P9)
+  'src/components/RepairTickets.serverCustomer.test.tsx',     // the new repair ticket: a server customer never reaches the local list or a ticket; local and walk-in tickets create as before (M7A-CUSTOMERS-P10)
 ];
 
 export const isTestPath = (f) =>

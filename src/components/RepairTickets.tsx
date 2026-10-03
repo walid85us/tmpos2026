@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { RepairTicket, RepairTicketStatus, TicketComment, RepairServiceLineItem, Invoice } from '../types';
@@ -7,6 +7,8 @@ import { useAccess } from '../context/AccessContext';
 import type { ShipmentPrefill } from './ShippingCenter';
 import type { ReturnPrefill } from './ReturnsPortal';
 import ContextualHelp from './ContextualHelp';
+import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, usableDraftCustomer, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
+import { ServerCustomerField } from '../tenant/ServerCustomerPicker';
 
 const ALL_STATUSES: RepairTicketStatus[] = ['Pending', 'Diagnosed', 'In Progress', 'Awaiting Parts', 'Ready for Pickup', 'Completed', 'Delivered', 'Cancelled'];
 
@@ -42,9 +44,13 @@ const PRE_REPAIR_CONDITIONS = ['Power On', 'Power Off', 'Cracked Screen', 'Scrat
 
 const DEVICE_CATEGORIES = ['Smartphones', 'Laptops', 'Tablets', 'Game Consoles', 'Desktops', 'Wearables', 'Other'];
 
+/** M7A-CUSTOMERS-P10 — why Create Ticket is disabled while the new ticket names a customer saved on the server. */
+export const SERVER_REPAIR_LIMIT_TEXT =
+  "This ticket uses a customer saved on the server. Creating a repair ticket for a server customer isn't available yet, so this ticket can't be created. To create it here, type the customer's name or choose a customer from this browser's list instead.";
+
 interface NewTicketForm {
-  customerId: string;
-  customerName: string;
+  customer: DraftCustomerReference; // M7A-CUSTOMERS-P10: none (nothing, or a typed walk-in name), local, or server
+  customerName: string; // customerName/Phone/Email: the LOCAL snapshot only — '' for a server customer
   customerPhone: string;
   customerEmail: string;
   device: string;
@@ -66,7 +72,7 @@ interface NewTicketForm {
 }
 
 const EMPTY_FORM: NewTicketForm = {
-  customerId: '', customerName: '', customerPhone: '', customerEmail: '',
+  customer: NO_CUSTOMER, customerName: '', customerPhone: '', customerEmail: '',
   device: '', deviceCategory: '', brand: '', model: '', issue: '', intakeNotes: '',
   priority: 'Medium', technicianId: '', technicianName: '', location: '',
   imei: '', serialNumber: '', passcode: '', network: '',
@@ -117,6 +123,54 @@ export default function RepairTickets() {
   const [showPartDropdown, setShowPartDropdown] = useState(false);
   const [formSaved, setFormSaved] = useState(false);
   const commentInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // M7A-CUSTOMERS-P10 — the NEW ticket names its customer by ONE tagged reference (customerReference.ts), as the invoice
+  // draft does (P9); editing and the ticket detail are untouched. Three sources, never mixed:
+  //   - none: nothing chosen, or a WALK-IN name typed into the customer box. A walk-in id (`walk-in-<ts>`) is minted at
+  //     save only, exactly as before; it is never a draft reference.
+  //   - local: a customer picked from this browser's list (`handleSelectCustomer`); customerName/Phone/Email are its
+  //     snapshot, saved as before.
+  //   - server: a customer saved on the tenant server, chosen in the shared field below the customer box. It is never
+  //     looked up in or matched by name against the local list, fills no contact, device or other field (the local
+  //     snapshot stays ''), and never makes a ticket here (Create is disabled and the handler refuses it).
+  // Typing in the customer box or picking a local customer replaces a server reference; Remove clears the binding only.
+  // The gates are the local role state's presentation hints: the plan's customers feature (canAccess) AND customers:view
+  // offer the field, and repairs:create is re-checked when a choice is reported. The server's 403 governs customer READS
+  // only — it authorizes nothing about repairs; no server route creates or authorizes a repair ticket. A server customer
+  // is the signed-in user's own: another UID, or lost view access, makes it none in this very render and the effect
+  // below drops it. Each open of "New Ticket" is a new DRAFT (`draftId`): the field is keyed by it, and what an earlier
+  // draft's field reports is ignored (`liveDraft`, bumped when a draft opens or closes). Nothing is written to browser
+  // storage, the URL or a log.
+  const uid = session?.user.id ?? null;
+  const canViewServerCustomers = canAccess('customers') && checkPermission('customers', 'view');
+  const draftCustomer = usableDraftCustomer(newForm.customer, uid, canViewServerCustomers);
+  const [draftId, setDraftId] = useState(0);
+  const liveDraft = useRef(0);
+  useEffect(() => {
+    setNewForm(prev => (usableDraftCustomer(prev.customer, uid, canViewServerCustomers) === prev.customer ? prev : { ...prev, customer: NO_CUSTOMER }));
+  }, [uid, canViewServerCustomers]);
+  /** The field's report for draft `mine`: a choice binds only while that draft is open and the permissions still hold. */
+  const serverCustomerChange = (mine: number) => (next: ServerCustomerReference | null) => {
+    if (liveDraft.current !== mine) return;
+    if (next !== null && !(checkPermission('repairs', 'create') && canAccess('customers') && checkPermission('customers', 'view'))) return;
+    if (next === null) {
+      setNewForm(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
+      return;
+    }
+    setCustomerSearch('');
+    setNewForm(prev => ({ ...prev, customer: next, customerName: '', customerPhone: '', customerEmail: '' }));
+  };
+  const openCreate = () => {
+    liveDraft.current += 1;
+    setDraftId(liveDraft.current);
+    setNewForm(EMPTY_FORM); setCustomerSearch(''); setServiceSearch(''); setIsNewTicketModalOpen(true);
+  };
+  /** Every way the new-ticket dialog closes (Cancel, the backdrop, a created ticket): the draft ends, a server customer goes. */
+  const closeCreate = () => {
+    liveDraft.current += 1;
+    setIsNewTicketModalOpen(false);
+    setNewForm(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
+  };
 
   const stats = useMemo(() => ({
     pending: allTickets.filter(t => t.status === 'Pending').length,
@@ -186,7 +240,7 @@ export default function RepairTickets() {
   const estimatedTotal = useMemo(() => selectedServices.reduce((sum, s) => sum + s.price, 0), [selectedServices]);
 
   const handleSelectCustomer = useCallback((c: typeof customers[0]) => {
-    setNewForm(prev => ({ ...prev, customerId: c.id, customerName: c.name, customerPhone: c.phone, customerEmail: c.email || '' }));
+    setNewForm(prev => ({ ...prev, customer: localCustomerReference(c.id), customerName: c.name, customerPhone: c.phone, customerEmail: c.email || '' }));
     setCustomerSearch(c.name);
     setShowCustomerDropdown(false);
   }, []);
@@ -210,6 +264,9 @@ export default function RepairTickets() {
   }, []);
 
   const handleCreateTicket = useCallback(() => {
+    // M7A-CUSTOMERS-P10: a server customer never makes a ticket here (yet) — no ticket, no reset, no close. The effective
+    // customer can only be a server one when the draft's reference is, so this one check refuses both.
+    if (newForm.customer.source === 'server') return;
     if (!newForm.customerName.trim() || !newForm.device.trim() || !newForm.issue.trim()) return;
     const now = new Date().toISOString();
     const ticketNum = `T-${(1000 + allTickets.length + 1)}`;
@@ -222,7 +279,7 @@ export default function RepairTickets() {
     const finalTechName = newForm.technicianName || (autoAssignTech ? currentOperatorName : undefined);
     const ticket: RepairTicket = {
       id: `rt-${Date.now()}`, ticketNumber: ticketNum,
-      customerId: newForm.customerId || `walk-in-${Date.now()}`, customerName: newForm.customerName,
+      customerId: localCustomerIdOf(newForm.customer) || `walk-in-${Date.now()}`, customerName: newForm.customerName,
       customerPhone: newForm.customerPhone, customerEmail: newForm.customerEmail,
       device: newForm.device, deviceCategory: newForm.deviceCategory, brand: newForm.brand, model: newForm.model,
       issue: newForm.issue, intakeNotes: newForm.intakeNotes,
@@ -244,7 +301,7 @@ export default function RepairTickets() {
     setNewForm(EMPTY_FORM);
     setCustomerSearch('');
     setServiceSearch('');
-    setIsNewTicketModalOpen(false);
+    closeCreate();
   }, [newForm, selectedServices, estimatedTotal, allTickets.length, addRepairTicket, isTechnicianRole, currentOperatorId, currentOperatorName]);
 
   const generateRepairInvoice = useCallback((ticket: RepairTicket) => {
@@ -518,7 +575,7 @@ export default function RepairTickets() {
             <span className="material-symbols-outlined">download</span>
           </button>
           {canCreateTickets && (
-            <button onClick={() => { setNewForm(EMPTY_FORM); setCustomerSearch(''); setServiceSearch(''); setIsNewTicketModalOpen(true); }}
+            <button data-testid="repair-create-open" onClick={openCreate}
               className="bg-lime-400 text-teal-950 px-6 py-2 rounded-xl font-bold text-sm shadow-lg active:scale-95 transition-transform flex items-center gap-2">
               <span className="material-symbols-outlined text-sm">add</span> New Ticket
             </button>
@@ -1223,8 +1280,8 @@ export default function RepairTickets() {
       <AnimatePresence>
         {isNewTicketModalOpen && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsNewTicketModalOpen(false)} className="absolute inset-0 bg-teal-950/60 backdrop-blur-sm" />
-            <motion.div initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeCreate} className="absolute inset-0 bg-teal-950/60 backdrop-blur-sm" />
+            <motion.div data-testid="repair-create-dialog" initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
               className="relative w-full max-w-3xl bg-white rounded-[3rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
               <div className="signature-gradient p-7 text-white shrink-0">
                 <h2 className="text-2xl font-black tracking-tight">Create Repair Ticket</h2>
@@ -1232,9 +1289,10 @@ export default function RepairTickets() {
               </div>
               <div className="p-8 space-y-6 overflow-y-auto custom-scrollbar flex-1">
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Customer</label>
+                  <label htmlFor="repair-customer-search" className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Customer</label>
                   <div className="relative">
-                    <input type="text" value={customerSearch} onChange={e => { setCustomerSearch(e.target.value); setShowCustomerDropdown(true); setNewForm(prev => ({ ...prev, customerName: e.target.value, customerId: '', customerPhone: '', customerEmail: '' })); }}
+                    {/* Typing names a walk-in (or searches the local list): it REPLACES a server customer. */}
+                    <input id="repair-customer-search" data-testid="repair-customer-search" type="text" value={customerSearch} onChange={e => { setCustomerSearch(e.target.value); setShowCustomerDropdown(true); setNewForm(prev => ({ ...prev, customerName: e.target.value, customer: NO_CUSTOMER, customerPhone: '', customerEmail: '' })); }}
                       onFocus={() => setShowCustomerDropdown(true)} placeholder="Search by name, phone, or email..."
                       className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner" />
                     {showCustomerDropdown && customerMatches.length > 0 && (
@@ -1247,12 +1305,16 @@ export default function RepairTickets() {
                       </div>
                     )}
                   </div>
+                  <div className="mt-3 space-y-2">
+                    <ServerCustomerField key={`${uid}:${draftId}`} uid={uid} value={draftCustomer.source === 'server' ? draftCustomer : null} canView={canViewServerCustomers} onChange={serverCustomerChange(draftId)} />
+                    {draftCustomer.source === 'server' && <p id="repair-server-limit" role="status" data-testid="repair-server-limit" className="text-xs font-bold text-amber-800">{SERVER_REPAIR_LIMIT_TEXT}</p>}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-5">
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Device Name *</label>
-                    <input type="text" value={newForm.device} onChange={e => setNewForm(prev => ({ ...prev, device: e.target.value }))} placeholder="e.g. iPhone 15 Pro Max"
+                    <input data-testid="repair-device" type="text" value={newForm.device} onChange={e => setNewForm(prev => ({ ...prev, device: e.target.value }))} placeholder="e.g. iPhone 15 Pro Max"
                       className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner" />
                   </div>
                   <div className="space-y-2">
@@ -1306,7 +1368,7 @@ export default function RepairTickets() {
 
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Issue / Problem Description *</label>
-                  <textarea value={newForm.issue} onChange={e => setNewForm(prev => ({ ...prev, issue: e.target.value }))} placeholder="Describe the problem..."
+                  <textarea data-testid="repair-issue" value={newForm.issue} onChange={e => setNewForm(prev => ({ ...prev, issue: e.target.value }))} placeholder="Describe the problem..."
                     className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner h-20" />
                 </div>
 
@@ -1396,8 +1458,9 @@ export default function RepairTickets() {
                 </div>
               </div>
               <div className="p-6 border-t border-slate-100 flex gap-4 shrink-0">
-                <button onClick={() => setIsNewTicketModalOpen(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-                <button onClick={handleCreateTicket} disabled={!newForm.device.trim() || !newForm.issue.trim() || !newForm.customerName.trim()}
+                <button data-testid="repair-create-cancel" onClick={closeCreate} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                <button data-testid="repair-create-save" onClick={handleCreateTicket} disabled={draftCustomer.source === 'server' || !newForm.device.trim() || !newForm.issue.trim() || !newForm.customerName.trim()}
+                  aria-describedby={draftCustomer.source === 'server' ? 'repair-server-limit' : undefined}
                   className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-teal-900/20 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                   Create Ticket
                 </button>

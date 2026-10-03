@@ -157,12 +157,20 @@
 //          no answer holds the other tenant's customers; the directory still lists the tenant's customers.
 // Since M7A-CUSTOMERS-P10 the picker is a modal over any host dialog (z-[190]; Tab and Shift+Tab wrap around its enabled
 // controls; every other <body> child is inert while it is open; Escape closes it alone; focus goes back to "Select a server
-// customer" or Change):
+// customer" or Change), and a new repair ticket may name a server customer too, which Create Ticket refuses:
+//   SCB-16 REPAIR DRAFT PICKER: five customers, a second tenant. Device and issue filled, so only the customer can keep
+//          Create off. A picked row is bound by its database id, the limit is said and names Create's description, Create
+//          stays disabled and a press on it makes no ticket and keeps the draft; the browser's own hit test puts the picker
+//          above the z-[110] ticket form; Change then Cancel keeps it; Remove clears it; a typed name and a local pick
+//          replace it (Create on), a server pick replaces the local one; Cancel and New Ticket again hold no server
+//          customer. Only list GETs, session reads and ONE login; nothing written; no request names a repair.
 //   SCB-17 PICKER KEYBOARD (invoice draft): three customers. Tab from the local select reaches "Select a server customer",
 //          Enter opens the picker on the search box with #root inert; Tab x6 then Shift+Tab x3 is the exact wrap over
 //          Search, the three Selects and Cancel, each stop inside the dialog with a visible focus ring; Escape closes the
 //          picker alone (the invoice draft stays, #root no longer inert, focus on the opener); Enter reopens it and a
 //          Select reached by Tab and pressed with Enter binds that row, focus on Change. Two list reads, ONE login.
+//   SCB-18 PICKER KEYBOARD (repair draft): the same journey from the ticket form's customer box; the ticket form stays
+//          open after Escape, and the keyboard-bound customer keeps Create off with the limit as its description.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -3199,9 +3207,11 @@ scenario('SCB-15', 'INVOICE DRAFT PICKER (M7A-CUSTOMERS-P9, AC-09) — "Create I
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
-// M7A-CUSTOMERS-P10 — the picker as a modal over its host dialog (DA-178)
+// M7A-CUSTOMERS-P10 — the picker as a modal over its host dialog (DA-178), and a new repair ticket names a server customer
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** RepairTickets.tsx's SERVER_REPAIR_LIMIT_TEXT (a literal, as SERVER_DRAFT_LIMIT: this file loads against older trees). */
+const SERVER_REPAIR_LIMIT = "This ticket uses a customer saved on the server. Creating a repair ticket for a server customer isn't available yet, so this ticket can't be created. To create it here, type the customer's name or choose a customer from this browser's list instead.";
 /**
  * Whether a click at `selector`'s centre lands on it: the browser's own hit test, which is what a user's click (and
  * page.click) meets — a picker stacked under its host dialog's layer answers false.
@@ -3233,6 +3243,17 @@ const FOCUS_AT = `(() => {
   const s = n ? getComputedStyle(n) : null;
   return { at: d !== null && d.contains(n) ? name : 'outside:' + name, ring: !!s && n.matches(':focus-visible') && s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2 };
 })()`;
+/** The repair tickets the page lists, by number, in order (the shop's own local list: no server holds tickets). */
+const ticketsOf = (page) => page.evaluate(`[...document.querySelectorAll('tbody > tr')].map((tr) => tr.querySelector('td span')?.textContent.trim() ?? tr.textContent.trim())`);
+/** The ticket form's Create Ticket: disabled, and what describes it. */
+const repairCreate = (page) => page.evaluate(`(() => { const b = ${q('repair-create-save')}; return b === null ? null : { disabled: b.disabled, describedBy: b.getAttribute('aria-describedby') }; })()`);
+/** Open New Ticket on /repairs and wait for its picker field; the form animates in, so wait for it to stand still. */
+async function openTicketForm(page) {
+  await page.waitFor(`!!${q('repair-create-open')}`, 30_000, 'the Repairs page offers New Ticket');
+  await page.click(by('repair-create-open'));
+  await page.waitFor(`!!${q('repair-create-dialog')} && !!${q('picker-field')}`, 15_000, 'the new ticket offers the server-customer picker');
+  await still(page, 'repair-create-dialog');
+}
 
 /**
  * The picker driven from the keyboard alone, inside a host dialog whose `host` test id must survive Escape. Focus starts
@@ -3315,6 +3336,109 @@ async function assertPickerWire(page, before, lists, tenant, who, foreign = []) 
   return { made, logins: mine.filter(isLogin).length, sessionReads: mine.filter(isSessionRead).length, lists: reads.length };
 }
 
+scenario('SCB-16', 'REPAIR DRAFT PICKER (M7A-CUSTOMERS-P10, DA-177) — "New Ticket" opens a form whose picker binds a server customer by its database id above the z-[110] form; the limit describes Create Ticket, which stays disabled and creates nothing when pressed; Change then Cancel keeps it; Remove clears it; a typed name and a local pick replace it and a server pick replaces the local one; closing the form drops it; nothing is written and no other tenant\'s customer is ever answered', async () => {
+  const { tenant, boss } = await shop('c16');
+  const other = await newTenant('c16-other');
+  await seedCustomers(tenant, Array.from({ length: 5 }, (_, i) => `M7SCB c16 Godwit ${i} ${SUFFIX}`));
+  const foreign = await seedCustomers(other, Array.from({ length: 3 }, (_, i) => `M7SCB c16 Godwit ${i} ${SUFFIX}`));
+  const all = await customersOf(tenant);
+  const target = all[3];
+  const second = all[1];
+  const before = await counts();
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/repairs');
+  await page.waitFor(`!!${q('repair-create-open')}`, 30_000, 'the Repairs page offers New Ticket');
+  await page.settle();
+  const tickets = await ticketsOf(page);
+  await openTicketForm(page);
+  // Device and issue first: from here only the customer can keep Create Ticket disabled.
+  await page.fill(by('repair-device'), `M7SCB c16 device ${SUFFIX}`);
+  await page.fill(by('repair-issue'), `M7SCB c16 issue ${SUFFIX}`);
+
+  // 1. A server customer is bound; the limit describes Create Ticket, which stays disabled and creates nothing.
+  const firstOpen = await openPicker(page, 'picker-open');
+  const shown = await pickerRowsOf(page);
+  const inertOpen = await behindInert(page);
+  const selectOnTop = await onTop(page, `${by('picker-row')}[data-id="${target.id}"] ${by('picker-select')}`);
+  await pickRow(page, target.id);
+  const bound = { id: await boundId(page), name: await textOf(page, 'picker-value-name') };
+  const whileServer = {
+    create: await repairCreate(page),
+    limit: await textOf(page, 'repair-server-limit'),
+    limitId: await page.evaluate(`${q('repair-server-limit')}?.id ?? null`),
+    search: await page.evaluate(`${q('repair-customer-search')}?.value ?? null`),
+    inert: await rootInert(page),
+  };
+  await page.click(by('repair-create-save'));
+  await page.settle();
+  const pressed = { form: await has(page, 'repair-create-dialog'), bound: await boundId(page), tickets: await ticketsOf(page) };
+
+  // 2. Change, then the picker's own Cancel: the binding stays, the form stays.
+  const changeOpen = await openPicker(page, 'picker-change');
+  const cancelOnTop = await onTop(page, by('picker-cancel'));
+  await page.click(by('picker-cancel'));
+  await page.waitFor(`!${q('picker-dialog')}`, 15_000, 'the picker closed');
+  const afterCancel = { bound: await boundId(page), form: await has(page, 'repair-create-dialog') };
+
+  // 3. Remove: no server customer, the picker is offered again.
+  await page.click(by('picker-remove'));
+  await page.waitFor(`!${q('picker-value')} && !!${q('picker-open')}`, 15_000, 'the server customer removed');
+  const removed = { limit: await has(page, 'repair-server-limit'), create: await repairCreate(page) };
+
+  // 4. A typed name (a walk-in), then a pick from the browser's own list: Create Ticket is offered (the control).
+  const typedOpen = await openPicker(page, 'picker-open');
+  await pickRow(page, target.id);
+  await retype(page, 'repair-customer-search', 'Alex');
+  await page.waitFor(`!${q('picker-value')} && !!${q('picker-open')}`, 15_000, 'the typed name replaced the server customer');
+  const typed = { limit: await has(page, 'repair-server-limit'), create: await repairCreate(page) };
+  const localPick = `[...${q('repair-create-dialog')}.querySelectorAll('button')].find((b) => b.querySelector('p')?.textContent.trim() === 'Alexander Wright')`;
+  await page.waitFor(`!!${localPick}`, 15_000, 'the browser\'s own list offers Alexander Wright');
+  await page.evaluate(`${localPick}.setAttribute('data-p10', 'local-customer')`);
+  await page.click('[data-p10="local-customer"]');
+  await page.waitFor(`${q('repair-customer-search')}?.value === 'Alexander Wright'`, 15_000, 'the local customer chosen');
+  const local = { bound: await has(page, 'picker-value'), open: await has(page, 'picker-open'), limit: await has(page, 'repair-server-limit'), create: await repairCreate(page) };
+
+  // 5. A server customer chosen after a local one replaces it: the box empties, Create is off again.
+  const replaceOpen = await openPicker(page, 'picker-open');
+  await pickRow(page, second.id);
+  const replaced = { search: await page.evaluate(`${q('repair-customer-search')}?.value ?? null`), limit: await textOf(page, 'repair-server-limit'), create: await repairCreate(page) };
+
+  // 6. Cancel the form, open New Ticket again: no server customer survives the draft.
+  await page.click(by('repair-create-cancel'));
+  await page.waitFor(`!${q('repair-create-dialog')}`, 15_000, 'the new ticket form closed');
+  await openTicketForm(page);
+  await page.settle();
+  const reopened = {
+    bound: await has(page, 'picker-value'), open: await has(page, 'picker-open'), notice: await has(page, 'picker-notice'),
+    limit: await has(page, 'repair-server-limit'), search: await page.evaluate(`${q('repair-customer-search')}?.value ?? null`), create: await repairCreate(page),
+  };
+  const ticketsAfter = await ticketsOf(page);
+  const wire = await assertPickerWire(page, before, 4, tenant, boss, [other, ...foreign.map((c) => c.id)]);
+  record('SCB-16', { firstOpen, changeOpen, typedOpen, replaceOpen, selectOnTop, cancelOnTop, inertOpen, tickets: tickets.length, ...wire });
+
+  assert.deepEqual(firstOpen, [' -> 200'], 'the picker opened on ONE unfiltered read');
+  assert.deepEqual(shown, all, 'the tenant\'s five customers, in the server\'s order');
+  assert.equal(inertOpen, true, 'the ticket form behind the open picker is inert');
+  assert.equal(selectOnTop, true, 'the picker is above the ticket form: a click on its Select lands on it');
+  assert.deepEqual(bound, target, 'the ticket names the database\'s customer: its id and its name');
+  assert.deepEqual(whileServer, {
+    create: { disabled: true, describedBy: 'repair-server-limit' }, limit: SERVER_REPAIR_LIMIT, limitId: 'repair-server-limit', search: '', inert: false,
+  }, 'the limit is said and describes Create Ticket, which stays disabled; the local box is empty; the form is live again');
+  assert.deepEqual(pressed, { form: true, bound: target.id, tickets }, 'pressing the disabled Create makes no ticket and keeps the draft');
+  assert.deepEqual(changeOpen, [' -> 200'], 'Change opened on ONE unfiltered read');
+  assert.equal(cancelOnTop, true, 'the picker\'s Cancel is above the ticket form');
+  assert.deepEqual(afterCancel, { bound: target.id, form: true }, 'the picker\'s Cancel keeps the binding and the form');
+  assert.deepEqual(removed, { limit: false, create: { disabled: true, describedBy: null } }, 'Remove: no customer at all, no limit');
+  assert.deepEqual(typedOpen, [' -> 200']);
+  assert.deepEqual(typed, { limit: false, create: { disabled: false, describedBy: null } }, 'a typed name replaces the server customer and Create is offered');
+  assert.deepEqual(local, { bound: false, open: true, limit: false, create: { disabled: false, describedBy: null } }, 'a local customer is the ticket\'s one customer and Create is offered');
+  assert.deepEqual(replaceOpen, [' -> 200']);
+  assert.deepEqual(replaced, { search: '', limit: SERVER_REPAIR_LIMIT, create: { disabled: true, describedBy: 'repair-server-limit' } }, 'a server pick replaces the local customer');
+  assert.deepEqual(reopened, { bound: false, open: true, notice: false, limit: false, search: '', create: { disabled: true, describedBy: null } }, 'a new form holds no server customer from the closed one');
+  assert.deepEqual(ticketsAfter, tickets, 'no ticket was created');
+});
+
 scenario('SCB-17', 'PICKER KEYBOARD, INVOICE DRAFT (M7A-CUSTOMERS-P10, DA-178) — from the invoice draft, Tab reaches "Select a server customer" and Enter opens the picker on its search box with the page behind inert; Tab and Shift+Tab wrap exactly over its enabled controls with a visible focus ring; Escape closes the picker alone and returns focus; a Select reached by Tab binds on Enter, focus on Change; nothing is written', async () => {
   const { tenant, boss } = await shop('c17');
   await seedCustomers(tenant, Array.from({ length: 3 }, (_, i) => `M7SCB c17 Avocet ${i} ${SUFFIX}`));
@@ -3337,4 +3461,25 @@ scenario('SCB-17', 'PICKER KEYBOARD, INVOICE DRAFT (M7A-CUSTOMERS-P10, DA-178) �
   assertKeyboardJourney(seen, rows, 'invoice-create-save');
   assert.equal(await textOf(page, 'invoice-server-limit'), SERVER_DRAFT_LIMIT, 'the server-customer limit is said');
   assert.equal(save, true, 'Generate Invoice stays disabled');
+});
+
+scenario('SCB-18', 'PICKER KEYBOARD, REPAIR DRAFT (M7A-CUSTOMERS-P10, DA-178) — the same keyboard journey inside the z-[110] ticket form: Tab from the customer box reaches the picker\'s opener, Enter opens it with the form inert, the wrap is exact both ways with a focus ring, Escape closes the picker alone (the form stays), a Select reached by Tab binds on Enter, focus on Change, and Create Ticket stays off with the limit as its description; nothing is written', async () => {
+  const { tenant, boss } = await shop('c18');
+  await seedCustomers(tenant, Array.from({ length: 3 }, (_, i) => `M7SCB c18 Avocet ${i} ${SUFFIX}`));
+  const rows = await customersOf(tenant);
+  const before = await counts();
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/repairs');
+  await openTicketForm(page);
+  await page.click(by('repair-customer-search')); // empty: no local list opens, so Tab goes on to the picker's opener
+  const seen = await keyboardJourney(page, 'repair-create-dialog', rows);
+  const create = await repairCreate(page);
+  const limit = await textOf(page, 'repair-server-limit');
+  const wire = await assertPickerWire(page, before, 2, tenant, boss);
+  record('SCB-18', { ...seen, shown: seen.shown.length, ...wire });
+
+  assertKeyboardJourney(seen, rows, 'repair-create-dialog');
+  assert.equal(limit, SERVER_REPAIR_LIMIT, 'the server-customer limit is said');
+  assert.deepEqual(create, { disabled: true, describedBy: 'repair-server-limit' }, 'Create Ticket stays disabled, described by the limit');
 });

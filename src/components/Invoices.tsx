@@ -8,12 +8,8 @@ import type { Invoice, RepairService } from '../types';
 import type { ShipmentPrefill } from './ShippingCenter';
 import type { ReturnPrefill } from './ReturnsPortal';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
-import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
+import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, usableDraftCustomer, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
 import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField } from '../tenant/ServerCustomerPicker';
-
-/** A server customer counts only for the user who chose it, while they may view customers; otherwise it is none. */
-const usableCustomer = (ref: DraftCustomerReference, uid: string | null, canView: boolean): DraftCustomerReference =>
-  ref.source === 'server' && (ref.uid !== uid || !canView) ? NO_CUSTOMER : ref;
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
@@ -101,7 +97,7 @@ export default function Invoices() {
   const [draftId, setDraftId] = useState(0);
   const liveDraft = useRef(0);
   useEffect(() => {
-    setNewInv(prev => (usableCustomer(prev.customer, uid, canViewServerCustomers) === prev.customer ? prev : { ...prev, customer: NO_CUSTOMER }));
+    setNewInv(prev => (usableDraftCustomer(prev.customer, uid, canViewServerCustomers) === prev.customer ? prev : { ...prev, customer: NO_CUSTOMER }));
   }, [uid, canViewServerCustomers]);
   /** The field's report for draft `mine`: a choice binds only while that draft is open and both permissions still hold. */
   const serverCustomerChange = (mine: number) => (next: ServerCustomerReference | null) => {
@@ -600,7 +596,7 @@ export default function Invoices() {
     saveLabel: string,
     mode: 'create' | 'edit',
   ) => {
-    const customer = usableCustomer(data.customer, uid, canViewServerCustomers);
+    const customer = usableDraftCustomer(data.customer, uid, canViewServerCustomers);
     return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />

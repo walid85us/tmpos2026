@@ -1,7 +1,7 @@
-// M7A-CUSTOMERS-P9 — choosing a customer saved on the tenant server for a draft (an invoice being created): a dialog over
-// GET /api/v1/customers (page one, "Load more", search by name), and the draft's field that holds what was chosen. A
-// reduced copy of the customer directory's LIST read path (ServerCustomerDirectory.tsx): the same session, generation,
-// sequence and failure rules, nothing of its create or edit, and no route.
+// M7A-CUSTOMERS-P9 — choosing a customer saved on the tenant server for a draft (an invoice being created; since P10 also
+// a new repair ticket): a dialog over GET /api/v1/customers (page one, "Load more", search by name), and the draft's field
+// that holds what was chosen. A reduced copy of the customer directory's LIST read path (ServerCustomerDirectory.tsx):
+// the same session, generation, sequence and failure rules, nothing of its create or edit, and no route.
 //
 //   - Choosing a customer only puts a reference in the draft (customerReference.ts): the server's id and name, the user
 //     and an opaque session context. Nothing is written anywhere — no request but reads leaves here, and nothing reaches
@@ -431,9 +431,10 @@ function PickerDialog({
   const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
 
   return createPortal(
-    // z-[190] (M7A-CUSTOMERS-P10): above every host dialog it can open from (the repair ticket form is z-[110], the
-    // highest modal in the shop z-[160]) and below the z-[200] toasts. A press on the backdrop moves no focus out of the
-    // dialog, where Escape and Tab are handled (TenantManagementPage's confirmation dialog does the same). A press on the
+    // z-[190] (M7A-CUSTOMERS-P10): above every host dialog it can open from (the invoice dialog is z-50, the repair
+    // ticket form z-[110]) and below the shop's z-[200] layers (toasts, and the POS supervisor dialog, never a host).
+    // A press on the backdrop moves no focus out of the dialog, where Escape and Tab are handled (TenantManagementPage's
+    // confirmation dialog does the same). A press on the
     // dialog's own text that is no control (the heading, the intro, a row's name, the empty text) would move focus to
     // <body>, where neither key reaches `onKeyDown`: tabIndex -1 makes the dialog itself take it (no Tab stop, and no
     // ring of its own — its controls keep theirs), and from there Tab and Shift+Tab land on its first and last control.
