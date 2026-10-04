@@ -182,7 +182,12 @@
 //          version precondition (409 write_conflict) and writes nothing but its idempotency lease (no row, version or audit
 //          change), shown as a conflict with the server's level, and only Reapply and a new Save (a NEW key) land it, with
 //          exactly one more edit audit; the Customers panel, row, version and audits are untouched throughout.
-//   Both run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
+//   SRL-15/SRL-16 LOST PUT REPLY (M5-INVOICES-AUTH-P1-R1, AC-10), Customers then Invoices: the owner's PUT commits and its
+//          answer is dropped at the front. Before any user action: exactly ONE PUT left the page (no automatic re-send), one
+//          change in the database (level, version 1, one edit audit), and the row says "Not confirmed yet" after its read-back.
+//          Save pressed again sends exactly one more PUT, same Idempotency-Key and byte-identical body, answered as a replay
+//          that writes nothing; the read-back then says "Saved".
+//   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -3650,3 +3655,95 @@ scenario('SRL-14', 'INVOICES COMPETING EDIT — a second browser saves first; th
   await waitRow(first, 'technician', 'view', 'Default'); // the Customers panel on the same page
 });
 const page_conflict = (page) => page.evaluate(`document.querySelector('[data-testid="${INV}-conflict-technician"] p')?.textContent.trim() ?? null`);
+
+// M5-INVOICES-AUTH-P1-R1 (AC-10) — a role-level save never re-sends a PUT on its own. One case per domain.
+const LOST_REPLY = Object.freeze({
+  customers: { id: 'SRL-15', prefix: 'server-level', ready: (page) => waitState(page, 'Ready'), isReadBack: isRead },
+  invoices: { id: 'SRL-16', prefix: INV, ready: invReady, isReadBack: isInvRead },
+});
+/** Tones a held row may show before the owner presses Save again: never 'saved', never a not-saved tone. */
+const HELD_TONES = new Set(['idle', 'saving', 'confirm']);
+for (const [domain, { id, prefix, ready, isReadBack }] of Object.entries(LOST_REPLY)) {
+  scenario(id, `LOST PUT REPLY, ${domain.toUpperCase()} — the PUT commits but its answer never reaches the page: exactly ONE PUT and one change (row, version 1, one audit), the row "Not confirmed yet", never "Saved" or "Not saved", and NO automatic re-send; Save again sends one more PUT with the SAME key and byte-identical body, replayed (nothing written), then "Saved"`, async () => {
+    const { tenant, boss } = await shop(`s${id.slice(4)}`);
+    const reason = `Lost reply check for ${domain} level`;
+    const page = await ownerPanel(boss);
+    await ready(page);
+    await waitRow(page, 'sales_staff', 'create', 'Default', prefix);
+    assert.deepEqual(await domainState(tenant, 'sales_staff', domain), { level: null, version: null, audits: [] }, 'no row, version or audit yet');
+    // EVERY PUT this page sent, whatever its domain: a re-send under any domain is a re-send.
+    const pagePuts = () => st.api.filter((r) => isPut(r) && r.frameId === page.frameId);
+    const isMyPut = (r) => isPut(r) && r.frameId === page.frameId && JSON.parse(r.body).domain === domain;
+    const myReadAfter = (i) => st.api.slice(i).filter((r) => isReadBack(r) && r.frameId === page.frameId);
+    await draft(page, 'sales_staff', 'view', reason, prefix);
+    // Every data-status the row takes from the click on (the element may be replaced: observe the whole document).
+    await page.evaluate(`(() => {
+      const sel = '[data-testid="${prefix}-status-sales_staff"]';
+      const seen = window.__srlTones = [];
+      const look = () => { const t = document.querySelector(sel)?.dataset.status ?? null; if (seen.at(-1) !== t) seen.push(t); };
+      look();
+      window.__srlObserver = new MutationObserver(look);
+      window.__srlObserver.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-status'], characterData: true });
+    })()`);
+    const before = await counts();
+    let lost = 0;
+    let first;
+    let barrier;
+    try {
+      st.lose = (rec, phase) => phase === 'response' && isMyPut(rec) && lost++ === 0;
+      const from = await clickSave(page, 'sales_staff', prefix);
+      // Settled: every request the save sent is answered (its read-back included), the row no longer busy, its line not a
+      // transitional one — no fixed wait.
+      first = await settle(page, 'sales_staff', from, prefix);
+      // Stability barrier: an ordinary focus refresh, its read answered, and only then the PUTs are counted.
+      barrier = st.api.length;
+      await page.evaluate(`dispatchEvent(new Event('focus'))`);
+      await page.waitFor(() => myReadAfter(barrier).some((r) => r.status !== null), 15_000, 'the focus refresh read was answered');
+      await page.waitFor(async () => (await statusOf(page, 'sales_staff', prefix)) === first, 5_000, 'the row line is unchanged by the refresh').catch(() => {});
+    } finally {
+      st.lose = null;
+    }
+    const puts1 = pagePuts();
+    const tones1 = await page.evaluate(`[...window.__srlTones]`);
+    const afterLoss = { delta: await deltaSince(before), state: await domainState(tenant, 'sales_staff', domain) };
+    const readBack = st.api.filter((r) => isReadBack(r) && r.frameId === page.frameId && puts1[0] && r.at > puts1[0].doneAt);
+    const firstNow = await statusOf(page, 'sales_staff', prefix);
+    record(id, {
+      phase: 'lost reply, before any user action', domain, status: first, statusAfterBarrier: firstNow, tones: tones1,
+      puts: puts1.map(apiLine), readBacks: readBack.map(answered), ...afterLoss.delta, version: afterLoss.state.version, audits: afterLoss.state.audits.length,
+    });
+    assert.deepEqual(puts1.map((r) => `${JSON.parse(r.body).domain} ${r.status} ${r.lost ?? 'delivered'}`), [`${domain} 200 response`],
+      `exactly ONE PUT left the page, committed, its answer lost — no automatic re-send (API: ${st.api.map(apiLine).join('; ')})`);
+    assert.deepEqual(afterLoss.state, { level: 'view', version: 1, audits: [[`role_sales_staff_${domain}_to_view`, reason]] }, 'one change: the level, version 1, one audit');
+    assert.deepEqual(afterLoss.delta, { C: 0, A: 0, E: 1, U: 0, K: 1, L: 1, T: 1 }, 'exactly one edit (EDIT, and nothing unlisted)');
+    assert.ok(readBack.length >= 1 && readBack.every((r) => r.status === 200), 'the page read the level back after the PUT');
+    assert.equal(first, SAY.notConfirmed('view'), 'held: "Not confirmed yet", never "Saved" or "Not saved"');
+    assert.equal(firstNow, first, 'still held after the refresh');
+    assert.ok(tones1.every((t) => t === null || HELD_TONES.has(t)) && tones1.at(-1) === 'confirm', `the row never showed a saved or not-saved tone: ${tones1.join(' > ')}`);
+
+    const mid = await counts();
+    const again = await clickSave(page, 'sales_staff', prefix);
+    const second = await settle(page, 'sales_staff', again, prefix);
+    await page.evaluate(`window.__srlObserver?.disconnect()`);
+    const puts2 = pagePuts();
+    const afterReplay = { delta: await deltaSince(mid), state: await domainState(tenant, 'sales_staff', domain) };
+    const replay = puts2[1];
+    const readBack2 = replay ? st.api.filter((r) => isReadBack(r) && r.frameId === page.frameId && r.at > replay.doneAt) : [];
+    record(id, {
+      phase: 'Save pressed again', domain, status: second, puts: puts2.map(apiLine), readBacks: readBack2.map(answered),
+      sameKey: replay?.headers['idempotency-key'] === puts1[0].headers['idempotency-key'], sameBody: replay?.body === puts1[0].body,
+      replayed: replay?.replied?.headers['idempotent-replayed'] ?? null, ...afterReplay.delta, version: afterReplay.state.version, audits: afterReplay.state.audits.length,
+    });
+    assert.equal(puts2.length, 2, `exactly one more PUT, on the click (${puts2.map(apiLine).join('; ')})`);
+    assert.ok(st.api.indexOf(replay) >= again, 'sent only after the click');
+    assert.equal(JSON.parse(replay.body).domain, domain);
+    assert.equal(replay.headers['idempotency-key'], puts1[0].headers['idempotency-key'], 'the SAME Idempotency-Key');
+    assert.equal(replay.body, puts1[0].body, 'the byte-identical body');
+    assert.deepEqual([replay.status, replay.replied.headers['idempotent-replayed']], [200, 'true'], 'answered as a replay');
+    assert.deepEqual(afterReplay.delta, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'the replay wrote nothing (NOTHING, and nothing unlisted)');
+    assert.deepEqual(afterReplay.state, afterLoss.state, 'no second version increment, no duplicate audit');
+    assert.ok(readBack2.length >= 1 && readBack2.every((r) => r.status === 200), 'a read-back after the replay, answered 200');
+    assert.ok(saved(second), `Saved after the replay and its read-back: ${second}`);
+    await waitRow(page, 'sales_staff', 'view', 'Custom', prefix);
+  });
+}

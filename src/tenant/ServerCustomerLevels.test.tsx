@@ -258,20 +258,28 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     expect(screen.queryByTestId('server-level-unsaved-manager')).toBeNull();
   });
 
-  it('SCL-04. no answer: one automatic retry of the same payload under the same key; its 200 and the read-back → Saved', async () => {
+  it('SCL-04. no answer: nothing is re-sent on its own; the row is held, and Save sends the same payload under the same key; its 200 and the read-back → Saved', async () => {
     const server = fakeServer();
-    server.puts.push('lost-after-commit'); // committed, answer lost: the retry is the server's replay of that 200
+    server.puts.push('lost-after-commit'); // committed, answer lost: the explicit Save is the server's replay of that 200
     const keys = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+    expect(status('technician').textContent).toBe(notConfirmed('none'));
+    expect(puts(server)).toHaveLength(1); // no automatic retry
+    await click('server-level-save-technician');
     await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
     expect(puts(server)).toHaveLength(2);
     expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[0]]);
     expect(puts(server)[1].body).toBe(puts(server)[0].body); // the same bytes
 
-    server.puts.push('lost-before-commit'); // never reached the server: the retry executes it once
+    server.puts.push('lost-before-commit'); // never reached the server: the explicit Save executes it once
     await edit('manager', 'view');
+    await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+    expect(status('manager').textContent).toBe(notConfirmed('full'));
+    expect(puts(server)).toHaveLength(3);
+    await click('server-level-save-manager');
     await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
     expect(puts(server).slice(2).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[1], keys[1]]);
     expect(server.stored[TENANT_A].manager).toBe('view');
@@ -446,12 +454,17 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
     expect(status('manager').textContent).toBe(notConfirmed('full'));
     expect(screen.getByTestId('server-level-select-manager')).toHaveValue('view'); // the draft stays
+    expect(puts(server)).toHaveLength(1); // no automatic retry
+    await userEvent.setup().click(screen.getByTestId('server-level-save-manager')); // lost again: still held
+    await waitFor(() => expect(puts(server)).toHaveLength(2));
+    await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+    expect(status('manager').textContent).toBe(notConfirmed('full'));
     await userEvent.setup().click(screen.getByTestId('server-level-save-manager'));
     await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
     expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[0], keys[0]]);
 
-    // Committed, then no answer to the attempt nor to its retry: the server shows the level, but this save is not
-    // confirmed — Save stays usable for the held payload, and its replay confirms it.
+    // Committed, then no answer to the attempt nor to its explicit retry: the server shows the level, but this save is
+    // not confirmed — Save stays usable for the held payload, and its replay confirms it.
     server.puts.push('lost-after-commit');
     const replayed = server.fetch;
     let silenced = 0;
@@ -468,6 +481,10 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys.slice(1));
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+    expect(puts(server)).toHaveLength(4);
+    await userEvent.setup().click(screen.getByTestId('server-level-save-technician')); // the replay's answer is lost too
+    await waitFor(() => expect(puts(server)).toHaveLength(5));
     await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
     expect(status('technician').textContent).toBe(notConfirmed('none'));
     expect(status('technician')).not.toHaveTextContent(/^Saved/);
@@ -870,7 +887,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     expect(busy.versions[TENANT_A].technician).toBe(1);
   });
 
-  it('SCL-25. a refusal of the automatic retry does not say what the lost first attempt did: the key stays held, never "Not saved"', async () => {
+  it('SCL-25. a refusal of the explicit retry does not say what the lost first attempt did: the key stays held, never "Not saved"', async () => {
     const cases: Array<[number, string, string, string]> = [
       [403, 'forbidden', 'confirm', 'Not confirmed yet — the server refused the check. Only the store owner can change these levels.'],
       [403, 'step_up_required', 'confirm', 'Not confirmed yet — sign in again, then press Save again to check.'],
@@ -880,6 +897,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
       [503, 'service_unavailable', 'confirm', 'Not confirmed yet — press Save again to check. The server has None.'],
     ];
     for (const [code, error, tone, text] of cases) {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
       const server = fakeServer();
       const inner = server.fetch;
       let attempts = 0;
@@ -895,14 +913,23 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
       mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
       await waitFor(() => expect(state()).toHaveTextContent('Ready'));
       await edit('technician', 'none');
-      await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', tone));
+      await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+      expect(status('technician').textContent).toBe(notConfirmed('none'));
+      expect(attempts).toBe(1); // no automatic retry
+      await click('server-level-save-technician'); // the explicit retry
+      await waitFor(() => expect(attempts).toBe(2));
+      await waitFor(() => expect(status('technician').textContent).toBe(text));
+      expect(status('technician')).toHaveAttribute('data-status', tone);
       expect(status('technician').textContent).toBe(text);
       expect(row('technician')).toHaveTextContent('Server level: None'); // the read-back ran and matches the draft
       expect(screen.getByTestId('server-level-save-technician')).toBeEnabled(); // the held key can still be checked
+      await act(async () => { await vi.advanceTimersByTimeAsync(600_000); }); // a late automatic PUT would be counted
+      for (let i = 0; i < 4; i++) await flush();
       expect(attempts).toBe(2);
       cleanup();
+      vi.useRealTimers();
     }
-  });
+  }, 30_000);
   it('SCL-26. a stale draft is refused in both 409 write_conflict shapes: nothing written, a conflict with the server level and the choice, never Saved', async () => {
     for (const plan of ['ok', 'conflict-sealed'] as const) {
       const server = fakeServer();
@@ -1024,24 +1051,25 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     }
   });
 
-  it('SCL-31. no answer twice, then 409 in progress: the draft and key stay; each Save re-sends the same key and bytes until the 200 → Saved', async () => {
+  it('SCL-31. no answer, then 409 in progress: the draft and key stay; each Save re-sends the same key and bytes until the 200 → Saved', async () => {
     const server = fakeServer();
-    server.puts.push('lost-before-commit', 'lost-before-commit', 409);
+    server.puts.push('lost-before-commit', 409);
     const keys = ['22222222-3333-4333-8333-222222222222', '23232323-2323-4323-8323-232323232323'];
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     await edit('technician', 'none');
     await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
     expect(status('technician').textContent).toBe(notConfirmed('view'));
+    expect(puts(server)).toHaveLength(1); // no automatic retry
     await click('server-level-save-technician'); // the server answers: that key is still in progress
-    await waitFor(() => expect(puts(server)).toHaveLength(3));
+    await waitFor(() => expect(puts(server)).toHaveLength(2));
     await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
     expect(status('technician').textContent).toBe(notConfirmed('view'));
     await click('server-level-save-technician');
     await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
     expect(new Set(puts(server).map((r) => r.headers.get('idempotency-key')))).toEqual(new Set([keys[0]]));
     expect(new Set(puts(server).map((r) => r.body)).size).toBe(1);
-    expect(puts(server)).toHaveLength(4);
+    expect(puts(server)).toHaveLength(3);
   });
 
   it('SCL-32. a read showing the requested level at the next version without the 200 stays "Not confirmed", through refreshes', async () => {
@@ -1060,6 +1088,10 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
     await edit('manager', 'none');
+    await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+    expect(silenced).toBe(1); // no automatic retry
+    await click('server-level-save-manager'); // the explicit replay's answer is lost too
+    await waitFor(() => expect(silenced).toBe(2));
     await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
     expect([server.stored[TENANT_A].manager, server.versions[TENANT_A].manager]).toEqual(['none', 1]); // it did commit
     await focusRefresh();
@@ -1086,7 +1118,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     expect(server.done.size).toBe(0);
   });
 
-  it('SCL-34. any undecided answer — a 503, a 200 it cannot name, a lost attempt whose retry answers 503 — holds the key; the confirm replays it at the original version, and Saved waits for the read-back', async () => {
+  it('SCL-34. any undecided answer — a 503, a 200 it cannot name, a lost attempt whose explicit retry answers 503 — holds the key; the confirm replays it at the original version, and Saved waits for the read-back', async () => {
     for (const variant of ['commit-then-503', 'commit-bad-body', 'lost-then-503'] as const) {
       const server = fakeServer();
       const inner = server.fetch;
@@ -1106,6 +1138,12 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
       await waitFor(() => expect(state()).toHaveTextContent('Ready'));
       await edit('technician', 'none');
       await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+      if (variant === 'lost-then-503') {
+        expect(sent).toBe(1); // no automatic retry
+        await click('server-level-save-technician'); // the explicit retry answers 503: still undecided
+        await waitFor(() => expect(sent).toBe(2));
+        await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+      }
       expect(status('technician').textContent).toBe(notConfirmed('none')); // it did commit: the read-back shows v1
       expect(status('technician')).not.toHaveTextContent(/Not saved/);
       expect(screen.getByTestId('server-level-unsaved-technician')).toHaveTextContent('Unsaved: None');
@@ -1271,7 +1309,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
 
     // Level changed away and back while the key is held (nothing reached the server): a new key.
     const server = fakeServer();
-    server.puts.push('lost-before-commit', 'lost-before-commit');
+    server.puts.push('lost-before-commit');
     const keys = ['32323232-3232-4232-8232-323232323232', '33333333-3333-4333-8333-333333333333', '34343434-3434-4434-8434-343434343434'];
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
@@ -1282,13 +1320,13 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await user.selectOptions(screen.getByTestId('server-level-select-manager'), 'view');
     await click('server-level-save-manager');
     await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
-    expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[0], keys[1]]);
+    expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[1]]);
 
   });
 
   it('SCL-42. a held attempt stays held through a session failure before the PUT and a refusal of its replay: never "Not saved", the same key until it is decided', async () => {
     const server = fakeServer();
-    server.puts.push('lost-before-commit', 'lost-before-commit', 401);
+    server.puts.push('lost-before-commit', 401);
     const keys = ['42424242-4242-4242-8242-424242424242', '43434343-4343-4343-8343-434343434343'];
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
@@ -1306,7 +1344,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     expect(status('manager')).not.toHaveTextContent(/Not saved/);
     await click('server-level-save-manager');
     await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
-    expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[0], keys[0], keys[0]]);
+    expect(puts(server).map((r) => r.headers.get('idempotency-key'))).toEqual([keys[0], keys[0], keys[0]]); // the down check sent none
     expect(new Set(puts(server).map((r) => r.body)).size).toBe(1);
   });
 
@@ -1357,7 +1395,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
 
   it('SCL-44. changing the reason ends a held confirmation at once: an ordinary unsaved draft, or a conflict when its version moved; never the held key', async () => {
     const server = fakeServer();
-    server.puts.push('lost-before-commit', 'lost-before-commit', 'lost-before-commit', 'lost-before-commit');
+    server.puts.push('lost-before-commit', 'lost-before-commit');
     const keys = ['44444444-4444-4444-8444-444444444444', '45454545-4545-4545-8545-454545454545', '46464646-4646-4646-8646-464646464646', '47474747-4747-4747-8747-474747474747'];
     mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }).identity, keys);
     await waitFor(() => expect(state()).toHaveTextContent('Ready'));
@@ -1385,7 +1423,7 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     await click('server-level-save-manager');
     await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
     const byKey = puts(server).map((r) => [r.headers.get('idempotency-key'), sentBody(r).expectedVersion]);
-    expect(byKey).toEqual([[keys[0], 0], [keys[0], 0], [keys[1], 0], [keys[1], 0], [keys[2], 0], [keys[3], 1]]);
+    expect(byKey).toEqual([[keys[0], 0], [keys[1], 0], [keys[2], 0], [keys[3], 1]]); // one PUT per Save
   });
 
   it('SCL-45. a 200 whose read-back fails shows the level as last known, never as the server level, until a read establishes it', async () => {
@@ -1650,4 +1688,265 @@ describe('ServerCustomerLevels (M7A-CUSTOMERS-P3-R2)', () => {
     expect(logins(server)).toBe(1);
     expect(screen.getByTestId('server-level-select-technician')).toHaveValue('none');
   });
+});
+
+// M5-INVOICES-AUTH-P1-R1 — a save never re-sends its PUT by itself. A PUT with no answer at all leaves the row held
+// ("Not confirmed yet — press Save again to check.", the draft and the key kept); only a click on Save sends it again,
+// under the same key with the same bytes. Rerenders, focus and visibility refreshes, expired timers, session checks
+// and refusals (401/403/429 with Retry-After) send no PUT.
+describe('ServerCustomerLevels: no automatic PUT resend (M5-INVOICES-AUTH-P1-R1)', () => {
+  type Server = ReturnType<typeof fakeServer>;
+  type Mode = 'before' | 'after';
+  // While `lose.on`, every PUT gets no answer: 'before' — it never reaches the server; 'after' — it commits (or replays),
+  // then the answer is lost. Installed before mount, so both clients use it.
+  function losing(server: Server, mode: Mode) {
+    const inner = server.fetch;
+    const lose = { on: true };
+    server.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (init.method !== 'PUT' || !lose.on) return inner(input, init);
+      if (mode === 'after') await inner(input, init);
+      else server.sent.push({ method: 'PUT', url: String(input), headers: new Headers(init.headers), body: String(init.body) });
+      throw new TypeError('network');
+    }) as typeof globalThis.fetch;
+    return lose;
+  }
+  const K1 = '56565656-5656-4656-8656-565656565656';
+  const K2 = '57575757-5757-4757-8757-575757575757';
+  const owner = () => identityFor({ 'uid-a': 'tok-a', 'uid-b': 'tok-b' }).identity;
+  const ready = () => waitFor(() => expect(state()).toHaveTextContent('Ready'));
+  const keysOf = (server: Server) => puts(server).map((r) => r.headers.get('idempotency-key'));
+  // Every timer the panel or its clients could have set (Retry-After's 1..300 s clamp, request timeouts) runs out.
+  const expireTimers = () => act(async () => { await vi.advanceTimersByTimeAsync(600_000); });
+  const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
+  const visible = async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  };
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('SCL-56. one Save whose PUT gets no answer sends exactly ONE PUT and holds the row; rerender, focus, visibility and expired timers send none', async () => {
+    for (const mode of ['before', 'after'] as const) {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = fakeServer();
+      const lose = losing(server, mode);
+      const view = mount('uid-a', server, owner(), [K1, K2]);
+      await ready();
+      await edit('technician', 'none');
+      await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+      await expireTimers();
+      await settle();
+      expect(keysOf(server)).toEqual([K1]); // AC-01: one PUT, no automatic second one
+      expect(status('technician').textContent).toBe(notConfirmed(mode === 'after' ? 'none' : 'view'));
+      expect(screen.getByTestId('server-level-select-technician')).toHaveValue('none'); // the draft is kept
+      expect(screen.getByTestId('server-level-save-technician')).toBeEnabled(); // the explicit retry
+      lose.on = false; // the network is back: still nothing is sent without a click (AC-04)
+      const reads = levelReads(server);
+      view.again('uid-a');
+      await focusRefresh();
+      await settle();
+      await visible();
+      await expireTimers();
+      await settle();
+      expect(levelReads(server)).toBeGreaterThan(reads); // reads are allowed
+      expect(keysOf(server)).toEqual([K1]);
+      expect(status('technician')).toHaveAttribute('data-status', 'confirm');
+      expect(server.stored[TENANT_A].technician).toBe(mode === 'after' ? 'none' : undefined);
+      cleanup();
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('SCL-57. Save again on a held row sends exactly one more PUT, same key and identical bytes; if that is lost too it stays held until the next click', async () => {
+    for (const mode of ['before', 'after'] as const) {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = fakeServer();
+      const lose = losing(server, mode);
+      mount('uid-a', server, owner(), [K1, K2]);
+      await ready();
+      await edit('manager', 'view');
+      await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+      expect(keysOf(server)).toEqual([K1]);
+      await click('server-level-save-manager'); // AC-02 + AC-03: the explicit retry, lost as well
+      await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+      await expireTimers();
+      await settle();
+      expect(keysOf(server)).toEqual([K1, K1]);
+      expect(puts(server)[1].body).toBe(puts(server)[0].body); // the raw bytes
+      expect(status('manager').textContent).toBe(notConfirmed(mode === 'after' ? 'view' : 'full'));
+      expect(screen.getByTestId('server-level-select-manager')).toHaveValue('view');
+      lose.on = false;
+      await click('server-level-save-manager');
+      await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
+      expect(keysOf(server)).toEqual([K1, K1, K1]);
+      expect(new Set(puts(server).map((r) => r.body)).size).toBe(1);
+      expect([server.stored[TENANT_A].manager, server.versions[TENANT_A].manager]).toEqual(['view', 1]); // executed once
+      cleanup();
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('SCL-58. a PUT 200 whose read-back fails sends no second PUT and never says Saved, through a refresh and expired timers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = fakeServer();
+    mount('uid-a', server, owner(), [K1, K2]);
+    await ready();
+    server.holdReads = 1; // the read-back
+    await edit('technician', 'none');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await act(async () => { server.held[0].resolve(json(503, { error: 'service_unavailable' })); });
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'failed'));
+    await expireTimers();
+    await focusRefresh();
+    await settle();
+    expect(keysOf(server)).toEqual([K1]);
+    expect(status('technician')).not.toHaveTextContent(/Saved/);
+  });
+
+  it('SCL-59. a held row is dropped with its user or store: no PUT on the switch, and the next context sends its own new key', async () => {
+    const server = fakeServer();
+    const lose = losing(server, 'before');
+    const view = mount('uid-a', server, owner(), [K1, K2]);
+    await ready();
+    await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+    const sentA = puts(server).length;
+    lose.on = false;
+    server.session = { ...server.session!, uid: 'uid-b', tenant: TENANT_B }; // uid-b's session (tenant B)
+    view.again('uid-b');
+    await ready();
+    await settle();
+    expect(puts(server)).toHaveLength(sentA); // the switch re-sent nothing
+    expect(screen.queryByTestId('server-level-unsaved-technician')).toBeNull();
+    expect(status('technician')).toHaveTextContent(/^$/);
+    await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
+    expect(puts(server).slice(sentA).map((r) => r.headers.get('idempotency-key'))).toEqual([K2]); // never the held key
+    expect(sentBody(puts(server)[sentA]).expectedTenant).toBe(TENANT_B);
+    cleanup();
+
+    // The same user's session moves to another store while a row is held: the store change drops it, nothing is sent.
+    const moved = fakeServer();
+    const off = losing(moved, 'before');
+    mount('uid-a', moved, owner(), [K1, K2]);
+    await ready();
+    await edit('manager', 'view');
+    await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+    const sent = puts(moved).length;
+    off.on = false;
+    moved.session = { uid: 'uid-a', tenant: TENANT_B, owner: true };
+    await focusRefresh();
+    await waitFor(() => expect(screen.getByTestId('server-levels-store-changed')).toBeInTheDocument());
+    await settle();
+    expect(puts(moved)).toHaveLength(sent);
+    expect(screen.queryByTestId('server-level-unsaved-manager')).toBeNull();
+    expect(moved.stored[TENANT_B].manager).toBeUndefined();
+  });
+
+  it('SCL-60. a PUT refused 401, 403, step-up or 429 (Retry-After) is never re-sent on its own: not after the wait, a refresh or a rerender', async () => {
+    const cases: Array<[string, number, Record<string, unknown>, Record<string, string>, string]> = [
+      ['401', 401, { error: 'unauthenticated' }, {}, 'signed-out'],
+      ['403', 403, { error: 'forbidden' }, {}, 'denied'],
+      ['step-up', 403, { error: 'step_up_required', requestId: 'r' }, {}, 'step-up'],
+      ['429', 429, { error: 'rate_limited' }, { 'retry-after': '2' }, 'confirm'],
+    ];
+    for (const [name, code, body, extra, tone] of cases) {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = fakeServer();
+      const inner = server.fetch;
+      let refused = false;
+      server.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        if (init.method !== 'PUT' || refused) return inner(input, init);
+        refused = true;
+        server.sent.push({ method: 'PUT', url: String(input), headers: new Headers(init.headers), body: String(init.body) });
+        return new Response(JSON.stringify(body), { status: code, headers: { 'content-type': 'application/json', ...extra } });
+      }) as typeof globalThis.fetch;
+      const view = mount('uid-a', server, owner(), [K1, K2]);
+      await ready();
+      await edit('sales_staff', 'none');
+      await waitFor(() => expect(status('sales_staff')).toHaveAttribute('data-status', tone));
+      await expireTimers(); // past the Retry-After
+      await focusRefresh();
+      await settle();
+      view.again('uid-a');
+      await expireTimers();
+      await settle();
+      expect({ name, keys: keysOf(server) }).toEqual({ name, keys: [K1] });
+      expect(status('sales_staff')).not.toHaveTextContent(/Saved/);
+      cleanup();
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('SCL-61. Save pressed twice quickly while the first PUT hangs sends exactly one PUT', async () => {
+    const server = fakeServer();
+    server.holdPuts = 1;
+    mount('uid-a', server, owner(), [K1, K2]);
+    await ready();
+    await edit('technician', 'none');
+    await waitFor(() => expect(server.heldPuts).toHaveLength(1));
+    await userEvent.setup().click(screen.getByTestId('server-level-save-technician'));
+    await userEvent.setup().click(screen.getByTestId('server-level-save-technician'));
+    await settle();
+    expect(keysOf(server)).toEqual([K1]);
+    await act(async () => { server.heldPuts[0].resolve(); });
+    await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
+    await settle();
+    expect(keysOf(server)).toEqual([K1]);
+  });
+
+  it('SCL-62. a held row stays held through a step-up re-authentication and through a session end and Reconnect: neither re-sends; only Save does, same key and bytes', async () => {
+    // Step-up: the prompt only comes from a PUT's answer, so the held row's first explicit check is answered step-up.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = fakeServer();
+    const lose = losing(server, 'before');
+    mount('uid-a', server, identityFor({ 'uid-a': 'tok-a' }, { method: 'password', token: 'tok-a' }).identity, [K1, K2]);
+    await ready();
+    await edit('technician', 'none');
+    await waitFor(() => expect(status('technician')).toHaveAttribute('data-status', 'confirm'));
+    lose.on = false;
+    server.puts.push('step-up');
+    await click('server-level-save-technician');
+    await waitFor(() => expect(screen.getByTestId('server-level-reauth-password')).toBeInTheDocument());
+    expect(keysOf(server)).toEqual([K1, K1]);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId('server-level-reauth-password'), 'synthetic-password');
+    await user.click(screen.getByTestId('server-level-reauth-confirm'));
+    await waitFor(() => expect(status('technician')).toHaveTextContent('Signed in again'));
+    await expireTimers();
+    await focusRefresh();
+    await settle();
+    expect(keysOf(server)).toEqual([K1, K1]); // the re-authentication re-sent nothing
+    expect(status('technician')).toHaveAttribute('data-status', 'confirm');
+    await click('server-level-save-technician');
+    await waitFor(() => expect(status('technician')).toHaveTextContent(/^Saved$/));
+    expect(keysOf(server)).toEqual([K1, K1, K1]);
+    expect(new Set(puts(server).map((r) => r.body)).size).toBe(1);
+    cleanup();
+
+    // The session ends under a held row; Reconnect signs in again and re-sends nothing.
+    const ended = fakeServer();
+    const off = losing(ended, 'before');
+    mount('uid-a', ended, owner(), [K1, K2]);
+    await ready();
+    await edit('manager', 'view');
+    await waitFor(() => expect(status('manager')).toHaveAttribute('data-status', 'confirm'));
+    off.on = false;
+    ended.session = null;
+    await focusRefresh();
+    await waitFor(() => expect(state()).toHaveTextContent('Signed out'));
+    const logins = ended.sent.filter((r) => r.url === TENANT_SESSION_PATHS.login).length;
+    await click('server-levels-retry');
+    await ready();
+    expect(ended.sent.filter((r) => r.url === TENANT_SESSION_PATHS.login).length).toBe(logins + 1); // signed in again
+    await expireTimers();
+    await focusRefresh();
+    await settle();
+    expect(keysOf(ended)).toEqual([K1]); // Reconnect itself re-sent nothing
+    expect(status('manager')).toHaveAttribute('data-status', 'confirm');
+    await click('server-level-save-manager');
+    await waitFor(() => expect(status('manager')).toHaveTextContent(/^Saved$/));
+    expect(keysOf(ended)).toEqual([K1, K1]);
+    expect(puts(ended)[1].body).toBe(puts(ended)[0].body);
+  }, 30_000);
 });

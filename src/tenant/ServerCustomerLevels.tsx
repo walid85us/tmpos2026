@@ -21,9 +21,10 @@
 //   - Conflict: a read (or a 409 write_conflict) showing a version other than a draft's baseVersion turns that draft
 //     into a CONFLICT — the server's current level and the unsaved choice, with Discard (drop it) and Reapply (rebase it
 //     onto the version just read; the owner must then press Save, under a new key). It is never resubmitted silently.
-//   - One Idempotency-Key per attempt. No answer at all → one automatic retry of the identical bytes under the same key.
-//     An attempt whose outcome stays unknown is HELD explicitly (per role: its key and the exact change it sent — tenant,
-//     base version, level, reason): a 409 request_in_progress, a 5xx, a body it cannot name, a second silence, or — once
+//   - One Idempotency-Key per attempt, and at most one PUT per Save press: nothing re-sends a PUT on its own (no timer,
+//     read, focus, session renewal or Reconnect). An attempt whose outcome stays unknown is HELD explicitly (per role: its
+//     key and the exact change it sent — tenant, base version, level, reason): no answer at all, a 409
+//     request_in_progress, a 5xx, a body it cannot name, or — once
 //     the key may already have committed (a lost attempt, a held one) — any refusal or session failure that does not say
 //     what that key did. A held row keeps its draft and says "Not confirmed yet", never "Not saved"; Save re-sends the
 //     same key and body (the original expectedVersion). Only an answer that decides the key (a 200, a write_conflict)
@@ -700,15 +701,10 @@ function UserPanel({
       }
       const key = pending?.key ?? nextKey();
       const still: Held = { key, change };
-      let answer = await levels.put(change, key, s.csrf, sent);
+      const answer = await levels.put(change, key, s.csrf, sent);
       if (replaced()) return toPrevious(previousStoreText(answer, pending !== undefined));
+      // No answer at all: never re-sent here. The attempt is held below; only the owner's next Save re-sends its key and bytes.
       const lost = answer.kind === 'unknown' && !answer.responded;
-      if (lost) {
-        // No answer at all: retry the identical payload once under the same key — it replays or executes once.
-        answer = await levels.put(change, key, s.csrf, sent);
-        // a refusal of the retry says nothing about the first attempt, which may have committed
-        if (replaced()) return toPrevious(previousStoreText(answer, true));
-      }
       // Undecided (a 409 in progress, a 5xx, a body it cannot name, silence): it may have committed, and only the same
       // key can find out. Once the key may already have committed (a lost attempt, a held one), a refusal that does not
       // reach the key's record says nothing about it either. Both stay held (R2-2); a 200 or a write_conflict decides.
