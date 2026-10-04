@@ -10,7 +10,7 @@ import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS
 import { subPermissionMatrixStatus } from '../context/tenantAccessDecisions';
 import { isTenantMoneyCapability } from '../authorization/moneyCapabilities';
 import PendingApproval from './PendingApproval';
-import ServerCustomerLevels from '../tenant/ServerCustomerLevels';
+import ServerCustomerLevels, { ServerInvoiceLevels } from '../tenant/ServerCustomerLevels';
 
 const MOCK_EMPLOYEES: Employee[] = [
   {
@@ -809,6 +809,8 @@ export default function Employees() {
       <div className="space-y-8 mt-8">
         {/* M7A-CUSTOMERS-P3-R2: the only server-backed part of this screen — built-in roles' Customers level. */}
         <ServerCustomerLevels uid={session?.user.id ?? null} />
+        {/* M5-INVOICES-AUTH-P1: the built-in roles' Invoices LEVEL only; invoices themselves stay in this browser. */}
+        <ServerInvoiceLevels uid={session?.user.id ?? null} />
 
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
           <h2 className="text-2xl font-black text-primary tracking-tight mb-2">Store Permissions Matrix</h2>
@@ -873,6 +875,9 @@ export default function Employees() {
                             {domain.label}
                             {domain.id === 'customers' && (
                               <span className="block text-[9px] font-medium text-slate-400">Built-in roles: set in Server-enforced Customers access above</span>
+                            )}
+                            {domain.id === 'invoices' && (
+                              <span className="block text-[9px] font-medium text-slate-400">Built-in roles: set in Server-saved Invoices level above</span>
                             )}
                             {hasSubs && (
                               <span className="inline-flex items-center gap-1 text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">

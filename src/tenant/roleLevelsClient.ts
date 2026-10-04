@@ -1,4 +1,4 @@
-// M7A-CUSTOMERS-P3-R2 — the shop's client for the built-in roles' server-enforced Customers levels:
+// M7A-CUSTOMERS-P3-R2 — the shop's client for the built-in roles' server-enforced Customers levels (and, M5-INVOICES-AUTH-P1, their Invoices LEVEL):
 // GET /api/v1/roles/levels (server/runtime/roleLevelDirectory.ts, the owner's read-back) and
 // PUT /api/v1/roles/levels (server/runtime/roleLevelUpdate.ts, R1's owner-only, recent-sign-in, idempotent edit).
 // M7A-CUSTOMERS-P4 (DA-125): every editable level carries the server's `version` (a per-row counter, +1 per effective
@@ -17,6 +17,9 @@
 //     `unknown` or a 409 `request_in_progress` (the same key still in progress) may reuse the same Idempotency-Key (the
 //     caller's policy, createIntentKeys). Nothing here is ever reported as saved: the caller marks an edit saved only after an exact 200
 //     AND a fresh read answering the level it asked for at the committed version.
+//   - M5-INVOICES-AUTH-P1: one client per DOMAIN ('customers' by default; 'invoices' reads GET /api/v1/roles/levels/invoices).
+//     The PUT is the one route for both, with the domain named in the body; a read or a PUT answer naming another domain
+//     is never accepted. Only the stored LEVEL of the role is meant: nothing here says invoices themselves are server-saved.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials.
 
 import { isPermissionLevel } from '../authorization/permissionFamilies';
@@ -24,6 +27,12 @@ import type { PermissionLevel } from '../types';
 import { INTENT_HEADER, JSON_TYPE_RE, REQUEST_TIMEOUT_MS, SESSION_CSRF_HEADER } from './tenantSessionClient';
 
 export const ROLE_LEVELS_PATH = '/api/v1/roles/levels';
+/** The domains whose built-in role levels are server-backed, and the GET path that answers each (the PUT is shared). */
+export type RoleLevelsDomain = 'customers' | 'invoices';
+export const ROLE_LEVELS_READ_PATHS: Readonly<Record<RoleLevelsDomain, string>> = Object.freeze({
+  customers: ROLE_LEVELS_PATH,
+  invoices: `${ROLE_LEVELS_PATH}/invoices`,
+});
 const MAX_BODY_CHARS = 16_384;
 // The server's own tenant rule (roleLevelUpdate.ts TENANT_ID_RE): any canonical lowercase UUID — its GET names the tenant
 // that way, and a PUT's expectedTenant in any other form is refused.
@@ -31,7 +40,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** One of the seven canonical level words the server stores — the family contract's vocabulary, never a second list. */
 export type RoleLevel = PermissionLevel;
-/** The three built-in roles whose Customers level the owner may change, in display order; store_owner is fixed Full. */
+/** The three built-in roles whose level (per domain) the owner may change, in display order; store_owner is fixed Full. */
 export const EDITABLE_ROLE_IDS = ['manager', 'technician', 'sales_staff'] as const;
 export type EditableRoleId = (typeof EDITABLE_ROLE_IDS)[number];
 const ROLE_ORDER = ['store_owner', ...EDITABLE_ROLE_IDS] as const;
@@ -66,7 +75,7 @@ export type PutResult =
   | { readonly kind: 'unknown'; readonly responded: boolean };
 
 export interface RoleLevelsClient {
-  /** The selected tenant's effective built-in Customers levels. Never rejects. */
+  /** The selected tenant's effective built-in levels for this client's domain. Never rejects. */
   read(signal?: AbortSignal): Promise<ReadResult>;
   /** One edit attempt under `idempotencyKey`, on the session whose CSRF token is `csrf`. Never rejects. */
   put(change: LevelChange, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<PutResult>;
@@ -98,10 +107,10 @@ export function conflictKind(body: unknown): 'conflict' | 'in-progress' | null {
 }
 
 /** The read answer when `body` is exactly the contract (then frozen, in display order), otherwise null. Never throws. */
-export function parseRoleLevels(body: unknown): { tenant: string; roles: readonly RoleLevelEntry[] } | null {
+export function parseRoleLevels(body: unknown, expected: RoleLevelsDomain = 'customers'): { tenant: string; roles: readonly RoleLevelEntry[] } | null {
   if (!isPlain(body) || !hasKeys(body, ['tenant', 'domain', 'roles'])) return null;
   const { tenant, domain, roles } = body;
-  if (typeof tenant !== 'string' || !UUID_RE.test(tenant) || domain !== 'customers') return null;
+  if (typeof tenant !== 'string' || !UUID_RE.test(tenant) || domain !== expected) return null;
   if (!Array.isArray(roles) || roles.length !== ROLE_ORDER.length) return null;
   const byRole = new Map<string, RoleLevelEntry>();
   for (const entry of roles) {
@@ -119,19 +128,23 @@ export function parseRoleLevels(body: unknown): { tenant: string; roles: readonl
   return Object.freeze({ tenant, roles: Object.freeze(ROLE_ORDER.map((id) => byRole.get(id)!)) });
 }
 
-export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutMs?: number } = {}): RoleLevelsClient {
+export function createRoleLevelsClient(
+  options: { fetch?: typeof fetch; timeoutMs?: number; domain?: RoleLevelsDomain } = {},
+): RoleLevelsClient {
+  const domain = options.domain ?? 'customers';
+  const readPath = ROLE_LEVELS_READ_PATHS[domain];
   const send = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   /** The answer's status and bounded JSON body, or null when no answer arrived (network failure, timeout, abort). */
-  async function exchange(init: RequestInit, signal?: AbortSignal): Promise<{ status: number; body: unknown } | null> {
+  async function exchange(path: string, init: RequestInit, signal?: AbortSignal): Promise<{ status: number; body: unknown } | null> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     if (signal?.aborted) return null;
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(abort, timeoutMs);
     try {
-      const res = await send(ROLE_LEVELS_PATH, {
+      const res = await send(path, {
         ...init,
         credentials: 'include',
         mode: 'same-origin',
@@ -157,9 +170,9 @@ export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutM
   }
 
   async function read(signal?: AbortSignal): Promise<ReadResult> {
-    const answer = await exchange({ method: 'GET', headers: { Accept: 'application/json' } }, signal);
+    const answer = await exchange(readPath, { method: 'GET', headers: { Accept: 'application/json' } }, signal);
     if (answer?.status === 200) {
-      const parsed = parseRoleLevels(answer.body);
+      const parsed = parseRoleLevels(answer.body, domain);
       if (parsed !== null) return Object.freeze({ kind: 'ok', ...parsed });
     }
     if (answer?.status === 401) return Object.freeze({ kind: 'signed-out' });
@@ -173,7 +186,7 @@ export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutM
     csrf: string,
     signal?: AbortSignal,
   ): Promise<PutResult> {
-    const answer = await exchange({
+    const answer = await exchange(ROLE_LEVELS_PATH, {
       method: 'PUT',
       headers: {
         Accept: 'application/json', 'Content-Type': 'application/json',
@@ -181,7 +194,7 @@ export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutM
       },
       // Fixed key order: a retry under the same key must send the same bytes (the server fingerprints the raw body).
       body: JSON.stringify({
-        roleId: change.roleId, domain: 'customers', level: change.level, reason: change.reason,
+        roleId: change.roleId, domain, level: change.level, reason: change.reason,
         expectedTenant: change.expectedTenant, expectedVersion: change.expectedVersion,
       }),
     }, signal);
@@ -191,7 +204,7 @@ export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutM
       const roleLevel = isPlain(body) && hasKeys(body, ['roleLevel']) ? body.roleLevel : undefined;
       const committed = change.expectedVersion + 1; // the server commits exactly one step past the asserted version
       if (isPlain(roleLevel) && hasKeys(roleLevel, ['roleId', 'domain', 'level', 'version'])
-        && roleLevel.roleId === change.roleId && roleLevel.domain === 'customers' && roleLevel.level === change.level
+        && roleLevel.roleId === change.roleId && roleLevel.domain === domain && roleLevel.level === change.level
         && roleLevel.version === committed && Number.isSafeInteger(committed)) {
         return Object.freeze({ kind: 'ok', level: change.level, version: committed });
       }
@@ -214,5 +227,7 @@ export function createRoleLevelsClient(options: { fetch?: typeof fetch; timeoutM
   return Object.freeze({ read, put });
 }
 
-/** The shop's one role-levels client. */
+/** The shop's Customers role-levels client. */
 export const roleLevels: RoleLevelsClient = createRoleLevelsClient();
+/** The shop's Invoices role-levels client (the level only; invoices themselves are not stored on the server). */
+export const invoiceRoleLevels: RoleLevelsClient = createRoleLevelsClient({ domain: 'invoices' });

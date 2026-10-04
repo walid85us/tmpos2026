@@ -3,7 +3,7 @@
 // with its tenant and version preconditions, the committed version in the 200, and the one 409 decoder.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ROLE_LEVELS_PATH, conflictKind, createRoleLevelsClient, parseRoleLevels } from './roleLevelsClient';
+import { ROLE_LEVELS_PATH, ROLE_LEVELS_READ_PATHS, conflictKind, createRoleLevelsClient, parseRoleLevels } from './roleLevelsClient';
 
 const TENANT = '0b6f1d2e-3c4a-4b5c-8d6e-7f8091a2b3c4';
 // A synthetic v4 Idempotency-Key, assembled at run time so no key-shaped literal sits in the source (secret scanning).
@@ -185,4 +185,48 @@ test('RLC-09. request_in_progress passes the same key check as write_conflict: k
   ]) {
     assert.equal(conflictKind(body), null, JSON.stringify(body));
   }
+});
+
+// M5-INVOICES-AUTH-P1: the same client, parameterised by domain.
+const invoicesOnce = (reply: Response) => {
+  const sent: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+    sent.push({ url: String(input), method: init.method ?? 'GET', body: init.body });
+    return reply;
+  };
+  return { sent, client: createRoleLevelsClient({ fetch: fetch as typeof globalThis.fetch, domain: 'invoices' }) };
+};
+
+test('RLC-10. an Invoices client reads its own path and accepts only an Invoices answer; the Customers client refuses it', async () => {
+  assert.equal(ROLE_LEVELS_READ_PATHS.customers, ROLE_LEVELS_PATH);
+  assert.equal(ROLE_LEVELS_READ_PATHS.invoices, `${ROLE_LEVELS_PATH}/invoices`);
+  const invoices = { ...LEVELS(), domain: 'invoices' };
+  const a = invoicesOnce(json(200, invoices));
+  const read = await a.client.read();
+  assert.equal(read.kind, 'ok');
+  assert.deepEqual(a.sent.map((r) => [r.method, r.url]), [['GET', '/api/v1/roles/levels/invoices']]);
+  assert.equal(parseRoleLevels(invoices), null); // the default (Customers) parser refuses an Invoices answer
+  assert.equal(parseRoleLevels(invoices, 'invoices')?.tenant, TENANT);
+  assert.equal((await invoicesOnce(json(200, LEVELS())).client.read()).kind, 'unavailable'); // a Customers answer is no Invoices answer
+  const c = once(json(200, LEVELS()));
+  assert.equal((await c.client.read()).kind, 'ok');
+  assert.equal(c.sent[0].url, ROLE_LEVELS_PATH); // the default client is unchanged
+});
+
+test('RLC-11. an Invoices PUT names the domain in the same fixed body order and accepts only an Invoices 200', async () => {
+  const change = { roleId: 'manager', level: 'edit', reason: 'Managers edit invoices now', expectedTenant: TENANT, expectedVersion: 3 } as const;
+  const ok = invoicesOnce(json(200, { roleLevel: { roleId: 'manager', domain: 'invoices', level: 'edit', version: 4 } }));
+  assert.deepEqual(await ok.client.put(change, KEY, CSRF), { kind: 'ok', level: 'edit', version: 4 });
+  assert.equal(ok.sent[0].url, ROLE_LEVELS_PATH); // the PUT route is shared
+  assert.equal(ok.sent[0].body, `{"roleId":"manager","domain":"invoices","level":"edit","reason":"Managers edit invoices now","expectedTenant":"${TENANT}","expectedVersion":3}`);
+  const wrong = invoicesOnce(json(200, { roleLevel: { roleId: 'manager', domain: 'customers', level: 'edit', version: 4 } }));
+  assert.deepEqual(await wrong.client.put(change, KEY, CSRF), { kind: 'unknown', responded: true });
+});
+
+test('RLC-12. an Invoices client maps 409/403/422 exactly like the Customers one', async () => {
+  const change = { roleId: 'technician', level: 'none', reason: 'Technicians lose invoices', expectedTenant: TENANT, expectedVersion: 0 } as const;
+  assert.equal((await invoicesOnce(json(409, { error: 'write_conflict', requestId: 'r' })).client.put(change, KEY, CSRF)).kind, 'conflict');
+  assert.equal((await invoicesOnce(json(403, { error: 'step_up_required' })).client.put(change, KEY, CSRF)).kind, 'step-up-required');
+  assert.equal((await invoicesOnce(json(422, { error: 'idempotency_key_reused' })).client.put(change, KEY, CSRF)).kind, 'key-reused');
+  assert.equal((await invoicesOnce(json(403, { error: 'forbidden' })).client.read()).kind, 'denied');
 });

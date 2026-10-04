@@ -171,6 +171,18 @@
 //          Select reached by Tab and pressed with Enter binds that row, focus on Change. Two list reads, ONE login.
 //   SCB-18 PICKER KEYBOARD (repair draft): the same journey from the ticket form's customer box; the ticket form stays
 //          open after Escape, and the keyboard-bound customer keeps Create off with the limit as its description.
+//   SRL-13 INVOICES LEVEL (M5-INVOICES-AUTH-P1): the Permissions tab holds a clearly labelled "Server-saved Invoices level"
+//          panel beside the Customers one (its own ids), saying only the LEVEL is saved on the server and invoices stay in
+//          this browser; the defaults, an owner save held at its read-back (never "Saved" before it), the exact PUT body,
+//          the Customers panel and the Customers level untouched, the stored level surviving a reload and a second
+//          browser, and the local grid's Invoices row pointing to the server section. In the database: 020's row for
+//          (tenant, role, 'invoices') holds the level, 021's version for it is 1, exactly ONE tenant-scope edit audit names
+//          the Invoices edit (reason code and the owner's reason), and the Customers row, version and audits are unchanged.
+//   SRL-14 INVOICES COMPETING EDIT: a second browser saves first; the first browser's older draft is refused by the
+//          version precondition (409 write_conflict) and writes nothing but its idempotency lease (no row, version or audit
+//          change), shown as a conflict with the server's level, and only Reapply and a new Save (a NEW key) land it, with
+//          exactly one more edit audit; the Customers panel, row, version and audits are untouched throughout.
+//   Both run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
 // linked, when the working tree holds large untracked directories — the same variable builds the entry commit's SPA for the
@@ -228,6 +240,7 @@ const DATABASE_ID = FIREBASE.firestoreDatabaseId ?? '(default)';
 
 /** Literals, not imports: this file must load against the entry commit's tree as well. */
 const ROLE_LEVELS = '/api/v1/roles/levels';
+const INVOICES_READ = '/api/v1/roles/levels/invoices';
 const CUSTOMERS = '/api/v1/customers';
 const LOGIN = '/api/v1/session/login';
 const CREATE_ACTION = 'tenant.customer.create';
@@ -408,6 +421,21 @@ async function tenantState(tenant) {
     (select count(*) from public.audit_event where action_id = ${EDIT_ACTION} and tenant_id = ${tenant})::int as edits,
     (select coalesce(jsonb_object_agg(role_id, coalesce(level, 'lock')), '{}') from tmpos_role.tenant_role_level where tenant_id = ${tenant}) as levels,
     (select coalesce(jsonb_object_agg(role_id, version), '{}') from tmpos_role_edit.role_level_version where tenant_id = ${tenant}) as versions`;
+  return r;
+}
+
+/**
+ * One role's footprint in ONE domain of one tenant (M5-INVOICES-AUTH-P1): its stored level (020's lock row: 'lock'; no row:
+ * null), its 021 version (null: none) and every tenant-scope edit audit whose reason code names this role and domain —
+ * the reason code and the owner's reason of each, oldest first.
+ */
+async function domainState(tenant, roleId, domain) {
+  const [r] = await owner`select
+    (select coalesce(level, 'lock') from tmpos_role.tenant_role_level where tenant_id = ${tenant} and role_id = ${roleId} and domain = ${domain}) as level,
+    (select version::int from tmpos_role_edit.role_level_version where tenant_id = ${tenant} and role_id = ${roleId} and domain = ${domain}) as version,
+    (select coalesce(jsonb_agg(jsonb_build_array(reason_code, human_readable_reason) order by occurred_at, event_id), '[]')
+       from public.audit_event where action_id = ${EDIT_ACTION} and scope_type = 'tenant' and tenant_id = ${tenant}
+        and starts_with(reason_code, ${`role_${roleId}_${domain}_to_`})) as audits`;
   return r;
 }
 
@@ -710,7 +738,8 @@ async function call(method, path, { session = null, body, key } = {}) {
     ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     ...(key ? { 'idempotency-key': key } : {}),
   };
-  const res = await send(entry.port, method, path, headers, body === undefined ? (unsafe ? '' : undefined) : JSON.stringify(body));
+  const bodyText = body === undefined ? (unsafe ? '' : undefined) : JSON.stringify(body);
+  const res = await send(entry.port, method, path, headers, bodyText);
   return { status: res.status, headers: res.headers, text: res.body.toString('utf8') };
 }
 
@@ -909,6 +938,8 @@ const apiLine = (r) => `${r.via === 2 ? '[entry2] ' : ''}${r.method} ${r.path}${
 const answered = (r) => `${r.status}${r.error ? ` ${r.error}` : ''}`;
 const isPut = (r) => r.method === 'PUT' && r.path === ROLE_LEVELS;
 const isRead = (r) => r.method === 'GET' && r.path === ROLE_LEVELS;
+const isInvPut = (r) => r.method === 'PUT' && r.path === ROLE_LEVELS && r.body.includes('"domain":"invoices"');
+const isInvRead = (r) => r.method === 'GET' && r.path === INVOICES_READ;
 const isLogout = (r) => r.method === 'POST' && r.path === '/api/v1/session/logout';
 /** The UID whose ID token a login carried (a token this file issued), or null. */
 const bearerUid = (r) => ISSUED.get(/^Bearer (\S+)$/i.exec(r.headers.authorization ?? '')?.[1] ?? '')?.uid ?? null;
@@ -963,35 +994,35 @@ const waitState = (page, state, timeout = 30_000) =>
   page.waitFor(`document.querySelector('[data-testid="server-levels-state"]')?.textContent.trim() === ${JSON.stringify(state)}`, timeout, `the server panel is ${state}`);
 
 /** A role's row as the panel shows it: { level (label), badge }, or null. */
-async function rowOf(page, roleId) {
-  const text = await page.evaluate(`document.querySelector('[data-testid="server-level-row-${roleId}"]')?.textContent ?? null`);
+async function rowOf(page, roleId, prefix = 'server-level') {
+  const text = await page.evaluate(`document.querySelector('[data-testid="${prefix}-row-${roleId}"]')?.textContent ?? null`);
   if (text === null) return null;
   // "Last known level" is the same level not established by a read since (a failed read-back): `known` says which.
   const m = /(Server|Last known) level:\s*(None|View Only|Create|Edit|Manage|Approve|Full Access)\s*(Custom|Default)/.exec(text);
   return m ? { level: m[2], badge: m[3], known: m[1] === 'Server' } : { text };
 }
-async function waitRow(page, roleId, level, badge) {
+async function waitRow(page, roleId, level, badge, prefix = 'server-level') {
   await page.waitFor(async () => {
-    const row = await rowOf(page, roleId);
+    const row = await rowOf(page, roleId, prefix);
     return row?.level === LABELS[level] && row?.badge === badge;
   }, 20_000, `${roleId} shows ${LABELS[level]} (${badge})`);
 }
 
 /** Choose a level and a reason for a role in the server panel (a React-visible value change on each control). */
-async function draft(page, roleId, level, reason = REASON) {
+async function draft(page, roleId, level, reason = REASON, prefix = 'server-level') {
   const set = function (proto, event, value) {
     Object.getOwnPropertyDescriptor(window[proto].prototype, 'value').set.call(this, value);
     this.dispatchEvent(new Event(event, { bubbles: true }));
   };
-  await page.call(`[data-testid="server-level-select-${roleId}"]`, set, 'HTMLSelectElement', 'change', level);
-  await page.call(`[data-testid="server-level-reason-${roleId}"]`, set, 'HTMLInputElement', 'input', reason);
+  await page.call(`[data-testid="${prefix}-select-${roleId}"]`, set, 'HTMLSelectElement', 'change', level);
+  await page.call(`[data-testid="${prefix}-reason-${roleId}"]`, set, 'HTMLInputElement', 'input', reason);
 }
 
-const statusOf = (page, roleId) => page.evaluate(`document.querySelector('[data-testid="server-level-status-${roleId}"]')?.textContent.trim() ?? null`);
+const statusOf = (page, roleId, prefix = 'server-level') => page.evaluate(`document.querySelector('[data-testid="${prefix}-status-${roleId}"]')?.textContent.trim() ?? null`);
 
 /** Press "Save to server"; answers the API record count at the click, for settle(). */
-async function clickSave(page, roleId) {
-  const button = `[data-testid="server-level-save-${roleId}"]`;
+async function clickSave(page, roleId, prefix = 'server-level') {
+  const button = `[data-testid="${prefix}-save-${roleId}"]`;
   await page.waitFor(`document.querySelector(${JSON.stringify(button)})?.disabled === false`, 10_000, `Save enabled for ${roleId}`);
   const from = st.api.length;
   await page.click(button);
@@ -1003,22 +1034,22 @@ async function clickSave(page, roleId) {
  * when a request went out after the click, every one of those has been answered, the row is no longer busy, and its status
  * line is not a transitional one. (A previous attempt's identical text can therefore never be mistaken for this one's.)
  */
-function settle(page, roleId, from) {
+function settle(page, roleId, from, prefix = 'server-level') {
   const mine = (r) => r.frameId === page.frameId;
   return page.waitFor(async () => {
     const sent = st.api.slice(from).filter(mine);
     if (sent.length === 0 || sent.some((r) => r.status === null)) return null;
-    const text = await statusOf(page, roleId);
+    const text = await statusOf(page, roleId, prefix);
     // A disabled select is a save still finishing — or a settled conflict, which locks the row until Discard or Reapply.
-    const busy = await page.evaluate(`(document.querySelector('[data-testid="server-level-select-${roleId}"]')?.disabled ?? false)
-      && document.querySelector('[data-testid="server-level-status-${roleId}"]')?.dataset.status !== 'conflict'`);
+    const busy = await page.evaluate(`(document.querySelector('[data-testid="${prefix}-select-${roleId}"]')?.disabled ?? false)
+      && document.querySelector('[data-testid="${prefix}-status-${roleId}"]')?.dataset.status !== 'conflict'`);
     return !busy && text && text !== 'Not saved yet.' && !text.startsWith('Saving') ? text : null;
   }, 45_000, `the save of ${roleId} settled`);
 }
 
 /** Press "Save to server" and wait for the row's settled status line; answers that text. */
-async function save(page, roleId) {
-  return settle(page, roleId, await clickSave(page, roleId));
+async function save(page, roleId, prefix = 'server-level') {
+  return settle(page, roleId, await clickSave(page, roleId, prefix), prefix);
 }
 /** AM1: exactly "Saved" is the one success line; every other line is not a save. */
 const saved = (text) => text === 'Saved';
@@ -3483,3 +3514,139 @@ scenario('SCB-18', 'PICKER KEYBOARD, REPAIR DRAFT (M7A-CUSTOMERS-P10, DA-178) �
   assert.equal(limit, SERVER_REPAIR_LIMIT, 'the server-customer limit is said');
   assert.deepEqual(create, { disabled: true, describedBy: 'repair-server-limit' }, 'Create Ticket stays disabled, described by the limit');
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M5-INVOICES-AUTH-P1: the Invoices LEVEL editor, on the real tenant entry and database. Only the level is server-backed.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const INV = 'server-invoice-level';
+const invReady = (page) => page.waitFor(`document.querySelector('[data-testid="server-invoice-levels-state"]')?.textContent.trim() === 'Ready'`, 30_000, 'the Invoices panel is Ready');
+/** What an Invoices read on exactly this session answers now, from outside the browser: { status, roles by id }. */
+async function invoiceLevels(session) {
+  const res = await call('GET', INVOICES_READ, { session });
+  return { status: res.status, ...(res.status === 200 ? { roles: Object.fromEntries(JSON.parse(res.text).roles.map((r) => [r.roleId, r])) } : {}) };
+}
+
+scenario('SRL-13', 'INVOICES LEVEL — the Permissions tab holds a labelled, server-saved Invoices level beside Customers: defaults, an owner save held at its read-back then Saved, the exact PUT, Customers untouched, a reload and a second browser see it, the grid row points to it', async () => {
+  const { tenant, boss } = await shop('s13');
+  const session = await directLogin(boss);
+  const page = await ownerPanel(boss);
+  await invReady(page);
+  const customersWas = await domainState(tenant, 'sales_staff', 'customers');
+  assert.deepEqual(await domainState(tenant, 'sales_staff', 'invoices'), { level: null, version: null, audits: [] }, 'no Invoices row, version or audit yet');
+  // The panel says what it is, and does not claim invoices themselves are saved or enforced on the server.
+  const copy = await page.evaluate(`(() => {
+    const section = document.querySelector('[data-testid="server-invoice-levels"]');
+    return { heading: document.getElementById(section.getAttribute('aria-labelledby'))?.textContent.trim(), text: section.textContent };
+  })()`);
+  assert.equal(copy.heading, 'Server-saved Invoices level');
+  assert.ok(copy.text.includes('only the Invoices level of the built-in roles') && copy.text.includes('still saved in this browser') && copy.text.includes('not enforced by the server'), copy.text);
+  assert.equal(await page.evaluate(`document.querySelectorAll('[data-testid="server-customer-levels"]').length`), 1, 'the Customers panel is still there, once');
+  assert.equal(await page.evaluate(`(() => { const ids = [...document.querySelectorAll('[id]')].map((e) => e.id); return ids.length === new Set(ids).size; })()`), true, 'no id is used twice with both panels mounted');
+  assert.equal((await rowOf(page, 'store_owner', INV))?.text?.includes('Full — fixed'), true, 'the store owner row is fixed');
+  await waitRow(page, 'manager', 'full', 'Default', INV);
+  await waitRow(page, 'technician', 'view', 'Default', INV);
+  await waitRow(page, 'sales_staff', 'create', 'Default', INV);
+  assert.equal(await page.evaluate(`(() => {
+    const button = document.querySelector('[data-testid="${INV}-save-sales_staff"]');
+    return button.disabled && document.getElementById(button.getAttribute('aria-describedby'))?.textContent.trim();
+  })()`), 'To save, choose a new level and enter a reason of 10–500 characters.', 'Save is disabled and says why');
+  // The local grid's built-in Invoices cells point to the server section, as the Customers row does.
+  const pointer = await page.evaluate(`(() => {
+    const table = [...document.querySelectorAll('table')].find((t) => t.querySelector('th')?.textContent.includes('Module / Action'));
+    return [...table.querySelectorAll('tbody tr')].find((tr) => tr.querySelector('td')?.textContent.trim().startsWith('Invoices'))?.querySelector('td')?.textContent ?? null;
+  })()`);
+  assert.match(pointer ?? '', /Built-in roles: set in Server-saved Invoices level above/, "the grid's Invoices row points to the server panel");
+
+  await draft(page, 'sales_staff', 'view', 'Sales staff may only view invoices', INV);
+  const before = await counts();
+  // The read-back after the PUT is held: the PUT has committed and the row still does not say "Saved".
+  const readBack = gate((r) => isInvRead(r) && r.frameId === page.frameId && st.api.some(isInvPut), 'request');
+  const from = await clickSave(page, 'sales_staff', INV);
+  assert.ok(await Promise.race([readBack.reached, delay(15_000).then(() => null)]), 'a read-back follows the PUT');
+  assert.deepEqual(st.api.filter(isInvPut).map((r) => r.status), [200], 'the PUT committed first');
+  // No fixed wait: the row is waited into its transitional state, which it must still be in while the read-back is held.
+  await page.waitFor(`document.querySelector('[data-testid="${INV}-status-sales_staff"]')?.dataset.status === 'saving'`, 10_000, 'the row is saving while its read-back is held');
+  const whileHeld = note('status while the read-back is held', await statusOf(page, 'sales_staff', INV));
+  assert.equal(whileHeld, 'Saving to the server…', 'the in-progress line while the read-back is held');
+  assert.ok(!saved(whileHeld), `not "Saved" before the read-back: ${whileHeld}`);
+  readBack.release();
+  assert.ok(saved(await settle(page, 'sales_staff', from, INV)), 'Saved after the read-back');
+  await waitRow(page, 'sales_staff', 'view', 'Custom', INV);
+  const [put] = st.api.filter(isInvPut);
+  const sent = JSON.parse(put.body);
+  assert.deepEqual(Object.keys(sent), ['roleId', 'domain', 'level', 'reason', 'expectedTenant', 'expectedVersion'], 'the six fields, in the fixed order');
+  assert.deepEqual([sent.roleId, sent.domain, sent.level, sent.expectedVersion], ['sales_staff', 'invoices', 'view', 0]);
+  assert.ok(!st.api.some(isPut) || st.api.filter(isPut).every((r) => r.body.includes('"domain":"invoices"')), 'no Customers PUT left the page');
+  // Customers is untouched: the page's Customers panel and the server's Customers answer.
+  await waitRow(page, 'sales_staff', 'create', 'Default');
+  const customers = JSON.parse((await call('GET', ROLE_LEVELS, { session })).text).roles.find((r) => r.roleId === 'sales_staff');
+  assert.deepEqual([customers.level, customers.source, customers.version], ['create', 'default', 0], 'the Customers level did not move');
+  assert.equal((await invoiceLevels(session)).roles.sales_staff.level, 'view', 'the server holds the Invoices level');
+  assert.equal((await invoiceLevels(session)).roles.sales_staff.version, 1);
+  // The database: one edit (its audit, completion and idempotency record, no customer), the Invoices row and version, the
+  // one tenant-scope audit naming it, and the Customers row, version and audits exactly as before.
+  await assertDelta(before, EDIT, 'the Invoices save');
+  assert.deepEqual(note('Invoices state', await domainState(tenant, 'sales_staff', 'invoices')),
+    { level: 'view', version: 1, audits: [['role_sales_staff_invoices_to_view', 'Sales staff may only view invoices']] }, 'the Invoices level, version 1, one audit');
+  assert.deepEqual(await domainState(tenant, 'sales_staff', 'customers'), customersWas, 'the Customers row, version and audits did not move');
+
+  await page.goto(`${SHOP}/employees`, 30_000);
+  await openPermissions(page);
+  await invReady(page);
+  await waitRow(page, 'sales_staff', 'view', 'Custom', INV);
+  const second = await ownerPanel(boss);
+  await invReady(second);
+  await waitRow(second, 'sales_staff', 'view', 'Custom', INV);
+  await waitRow(second, 'sales_staff', 'create', 'Default'); // and Customers there is still its default
+  await assertNoLeak(page);
+});
+
+scenario('SRL-14', 'INVOICES COMPETING EDIT — a second browser saves first; the first browser\'s older draft is refused (409 write_conflict, nothing written), shown as a conflict with the server\'s level, and only Reapply and a new Save (a new key) land it; Customers is untouched', async () => {
+  const { tenant, boss } = await shop('s14');
+  const session = await directLogin(boss);
+  const customersWas = await domainState(tenant, 'technician', 'customers');
+  const first = await ownerPanel(boss);
+  await invReady(first);
+  const second = await ownerPanel(boss);
+  await invReady(second);
+  await waitRow(first, 'technician', 'view', 'Default', INV);
+  await waitRow(second, 'technician', 'view', 'Default', INV);
+
+  await draft(first, 'technician', 'edit', 'Technicians edit invoices now', INV); // made against version 0, not yet saved
+  await draft(second, 'technician', 'none', 'Technicians lose invoices access', INV);
+  assert.ok(saved(await save(second, 'technician', INV)), 'the second browser saved None first');
+  assert.equal((await invoiceLevels(session)).roles.technician.level, 'none');
+  const won = await domainState(tenant, 'technician', 'invoices');
+  assert.deepEqual(won, { level: 'none', version: 1, audits: [['role_technician_invoices_to_none', 'Technicians lose invoices access']] }, 'the second browser\'s edit');
+
+  const beforeLoss = await counts();
+  const lost = await save(first, 'technician', INV);
+  assert.equal(lost, SAY.lostRace('none'), `the stale draft is a conflict: ${lost}`);
+  const puts = st.api.filter((r) => isInvPut(r) && r.frameId === first.frameId);
+  assert.deepEqual(puts.map(answered), ['409 write_conflict'], 'the older draft was refused by the version precondition');
+  const now = await invoiceLevels(session);
+  assert.deepEqual([now.roles.technician.level, now.roles.technician.version], ['none', 1], 'nothing was written by the refused save');
+  await assertDelta(beforeLoss, { ...REFUSED, L: 1 }, 'the losing save wrote nothing but its lease');
+  assert.deepEqual(await domainState(tenant, 'technician', 'invoices'), won, 'the 409 changed no Invoices row, version or audit');
+  assert.equal(await page_conflict(first), 'The server now has None. Your unsaved choice: Edit.');
+  assert.equal(await first.evaluate(`document.querySelector('[data-testid="${INV}-save-technician"]').disabled`), true, 'Save stays off until the conflict is resolved');
+  assert.equal((await rowOf(first, 'technician', INV)).level, LABELS.none, 'the shown level is the server\'s, never the draft');
+  await first.click(`[data-testid="${INV}-reapply-technician"]`);
+  await first.waitFor(`document.querySelector('[data-testid="${INV}-save-technician"]')?.disabled === false`, 10_000, 'Save enabled after Reapply');
+  const beforeReapply = await counts();
+  assert.ok(saved(await save(first, 'technician', INV)), 'Reapply, then a new Save, lands it');
+  const keys = st.api.filter((r) => isInvPut(r) && r.frameId === first.frameId).map((r) => r.headers['idempotency-key']);
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[0], keys[1], 'a changed request gets a new key');
+  const done = await invoiceLevels(session);
+  assert.deepEqual([done.roles.technician.level, done.roles.technician.version], ['edit', 2]);
+  await assertDelta(beforeReapply, EDIT, 'the save after Reapply');
+  assert.deepEqual(note('Invoices state', await domainState(tenant, 'technician', 'invoices')),
+    { level: 'edit', version: 2, audits: [...won.audits, ['role_technician_invoices_to_edit', 'Technicians edit invoices now']] }, 'exactly one more audit, version 2');
+  assert.deepEqual(await domainState(tenant, 'technician', 'customers'), customersWas, 'the Customers row, version and audits never moved');
+  const customers = JSON.parse((await call('GET', ROLE_LEVELS, { session })).text).roles.find((r) => r.roleId === 'technician');
+  assert.deepEqual([customers.level, customers.version], ['view', 0], 'the Customers level never moved');
+  await waitRow(first, 'technician', 'view', 'Default'); // the Customers panel on the same page
+});
+const page_conflict = (page) => page.evaluate(`document.querySelector('[data-testid="${INV}-conflict-technician"] p')?.textContent.trim() ?? null`);

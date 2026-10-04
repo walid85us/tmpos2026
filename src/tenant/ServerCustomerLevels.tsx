@@ -48,6 +48,17 @@
 //     ("Not saved: your server session ended…", or a held row's "Not confirmed yet…") and offers Reconnect; a focus
 //     refresh shows the signed-out state. Only the Reconnect button (server-levels-retry, while signed out or after a
 //     save found the session ended) asks the client to log in again; the drafts are kept for the read that follows.
+//
+// M5-INVOICES-AUTH-P1 — the same panel, parameterised by a domain (DOMAIN_COPY): `domain="invoices"` (the exported
+// ServerInvoiceLevels) edits the built-in roles' Invoices LEVEL through GET /api/v1/roles/levels/invoices and the shared PUT.
+// Only the level is saved on the tenant server: invoices themselves are still kept in this browser and their operations
+// are not enforced by the server, and the Invoices copy says so. Customers keeps its copy, DOM ids and test ids exactly;
+// Invoices uses the `server-invoice-level(s)-` prefix, so both panels can sit on one screen without an id collision.
+// Two panels share ONE tenant session (the shared session client). Only an explicit Reconnect (or a recent-sign-in
+// confirmation) in one panel re-establishes it; that panel then announces "session renewed" and every OTHER panel on the
+// same session client re-reads WITHOUT a login (`ensure` finds the live session): a stuck signed-out/unavailable panel
+// adopts it, a ready one with nothing in flight refreshes (a changed tenant restarts it, clearing its drafts). Nothing
+// else crosses between the panels: no draft, key, status or answer.
 
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { EmailAuthProvider, GoogleAuthProvider, reauthenticateWithCredential, reauthenticateWithPopup } from 'firebase/auth';
@@ -55,7 +66,7 @@ import { auth } from '../firebase';
 import { PERMISSION_DOMAINS, PERMISSION_HIERARCHY, tenantRoles } from '../context/accessConfig';
 import { checkReason, REASON_MAX, REASON_MIN } from '../backend-control-plane/console/tenantManagementClient';
 import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
-import { EDITABLE_ROLE_IDS, roleLevels, type EditableRoleId, type LevelChange, type PutResult, type ReadResult, type RoleLevel, type RoleLevelEntry, type RoleLevelsClient } from './roleLevelsClient';
+import { EDITABLE_ROLE_IDS, invoiceRoleLevels, roleLevels, type EditableRoleId, type LevelChange, type PutResult, type ReadResult, type RoleLevel, type RoleLevelEntry, type RoleLevelsClient, type RoleLevelsDomain } from './roleLevelsClient';
 
 /** The signed-in shop user's provider identity: ID tokens and a real re-authentication. */
 export interface ShopIdentity {
@@ -98,7 +109,6 @@ export const firebaseShopIdentity: ShopIdentity = Object.freeze({
 const LEVEL_LABELS: Record<RoleLevel, string> = {
   none: 'None', view: 'View Only', create: 'Create', edit: 'Edit', manage: 'Manage', approve: 'Approve', full: 'Full Access',
 };
-const CUSTOMER_LEVELS: readonly string[] = PERMISSION_DOMAINS.find((d) => d.id === 'customers')?.levels ?? [];
 const roleName = (id: string): string => tenantRoles.find((r) => r.id === id)?.name ?? id;
 
 type Phase = 'loading' | 'ready' | 'denied' | 'unavailable' | 'signed-out';
@@ -107,8 +117,57 @@ const PHASE_LABELS: Record<Phase, string> = {
 };
 export const DENIED_NOTE =
   'Server-enforced Customers access can only be viewed and changed by the store owner. Changes in the table below affect this browser only.';
+export const INVOICES_DENIED_NOTE =
+  'The server-saved Invoices level can only be viewed and changed by the store owner. Changes in the table below affect this browser only.';
 export const REFRESH_FAILED_NOTE = 'Could not refresh from the server; values may be out of date.';
-const SESSION_ENDED_NOTE = 'Your server session ended. Reconnect to see server-enforced Customers access.';
+
+/** Everything that differs between the panels: the domain, its copy, and its id prefix (Customers' ids are the original ones). */
+interface DomainCopy {
+  readonly domain: RoleLevelsDomain;
+  readonly levels: readonly string[];
+  readonly sectionId: string;
+  readonly titleId: string;
+  readonly title: string;
+  readonly description: string;
+  readonly denied: string;
+  readonly sessionEnded: string;
+  readonly signIn: string;
+  /** The panel's DOM ids and test ids: Customers keeps `server-level(s)-…`, Invoices uses `server-invoice-level(s)-…`. */
+  readonly id: (base: string) => string;
+}
+const levelsOf = (domain: string): readonly string[] => PERMISSION_DOMAINS.find((d) => d.id === domain)?.levels ?? [];
+const DOMAIN_COPY: Record<RoleLevelsDomain, DomainCopy> = {
+  customers: {
+    domain: 'customers',
+    levels: levelsOf('customers'),
+    sectionId: 'server-customer-levels',
+    titleId: 'server-customer-levels-title',
+    title: 'Server-enforced Customers access',
+    description: 'Stored on the store server and enforced on every customer view and create request. Covers the Customers module of the built-in roles only.',
+    denied: DENIED_NOTE,
+    sessionEnded: 'Your server session ended. Reconnect to see server-enforced Customers access.',
+    signIn: 'Sign in with your store account to see server-enforced Customers access.',
+    id: (base) => base,
+  },
+  invoices: {
+    domain: 'invoices',
+    levels: levelsOf('invoices'),
+    sectionId: 'server-invoice-levels',
+    titleId: 'server-invoice-levels-title',
+    title: 'Server-saved Invoices level',
+    description: 'Saved on the store server: only the Invoices level of the built-in roles (store owner fixed). Invoices themselves are still saved in this browser, and invoice actions are not enforced by the server.',
+    denied: INVOICES_DENIED_NOTE,
+    sessionEnded: 'Your server session ended. Reconnect to see the server-saved Invoices level.',
+    signIn: 'Sign in with your store account to see the server-saved Invoices level.',
+    id: (base) => base.replace(/^server-level(s?)-/, 'server-invoice-level$1-'),
+  },
+};
+
+// Panels on one session client tell each other when an explicit Reconnect or recent sign-in renewed it.
+const renewalListeners = new WeakMap<TenantSessionClient, Set<{ readonly self: object; readonly run: () => void }>>();
+function announceRenewed(session: TenantSessionClient, self: object): void {
+  for (const l of [...(renewalListeners.get(session) ?? [])]) if (l.self !== self) l.run();
+}
 export const STORE_CHANGED_NOTICE =
   'The store server now answers for a different store. Unsent changes were cleared. No change was sent to the newly connected store.';
 /** The detached notices for a save whose store connection changed while it was out: its answer, never a read-back. */
@@ -339,6 +398,8 @@ const previousStoreText = (answer: PutResult, unresolved: boolean): string =>
         : PREVIOUS_STORE.notSaved;
 
 export interface ServerCustomerLevelsProps {
+  /** Which domain's level this panel edits (default 'customers'). */
+  readonly domain?: RoleLevelsDomain;
   /** The signed-in shop user's UID (the Firebase UID), or null when nobody is signed in. */
   readonly uid: string | null;
   readonly session?: TenantSessionClient;
@@ -355,9 +416,19 @@ export default function ServerCustomerLevels(props: ServerCustomerLevelsProps) {
   return <UserPanel key={props.uid ?? ''} {...props} />;
 }
 
+/** The Invoices LEVEL editor (M5-INVOICES-AUTH-P1): the same panel over the Invoices domain. */
+export function ServerInvoiceLevels(props: Omit<ServerCustomerLevelsProps, 'domain'>) {
+  return <UserPanel key={props.uid ?? ''} {...props} domain="invoices" />;
+}
+
 function UserPanel({
-  uid, session = tenantSession, levels = roleLevels, identity = firebaseShopIdentity, newKey,
+  uid, domain = 'customers', session = tenantSession, levels = domain === 'invoices' ? invoiceRoleLevels : roleLevels,
+  identity = firebaseShopIdentity, newKey,
 }: ServerCustomerLevelsProps) {
+  const copy = DOMAIN_COPY[domain];
+  const { id } = copy;
+  const self = useRef({}).current;
+  const onRenewed = useRef<() => void>(() => undefined);
   const [st, dispatch] = useReducer(reduce, INITIAL);
   const [phase, setPhase] = useState<Phase>('loading');
   const [note, setNote] = useState('');
@@ -434,13 +505,13 @@ function UserPanel({
   const sessionProblem = (kind: Exclude<SessionResult['kind'], 'ok'>): void => {
     if (kind === 'no-identity') {
       setPhase('signed-out');
-      setNote('Sign in with your store account to see server-enforced Customers access.');
+      setNote(copy.signIn);
     } else if (kind === 'refused') {
       setPhase('signed-out');
       setNote('The store server did not accept this sign-in. Reconnect, or sign out and sign in again.');
     } else if (kind === 'ended') {
       setPhase('signed-out');
-      setNote(SESSION_ENDED_NOTE);
+      setNote(copy.sessionEnded);
     } else {
       setPhase('unavailable');
       setNote(kind === 'rate-limited'
@@ -472,6 +543,7 @@ function UserPanel({
         if (refresh && savingRef.current) return;
         return sessionProblem(s.kind);
       }
+      if (reconnect) announceRenewed(session, self); // the explicit Reconnect re-established the shared session
       seq = ++readSeq.current;
       const answer = await levels.read(signal);
       if (superseded()) return;
@@ -486,10 +558,10 @@ function UserPanel({
         // a save is in flight: its own answer decides what the row says
       } else if (answer.kind === 'denied') {
         setPhase('denied');
-        setNote(DENIED_NOTE);
+        setNote(copy.denied);
       } else if (answer.kind === 'signed-out') {
         setPhase('signed-out');
-        setNote(SESSION_ENDED_NOTE);
+        setNote(copy.sessionEnded);
       } else {
         setPhase('unavailable');
         setNote('The store server could not be reached. Nothing was changed.');
@@ -525,11 +597,26 @@ function UserPanel({
     setConfirming(false);
     if (uid === null) {
       setPhase('signed-out');
-      setNote('Sign in with your store account to see server-enforced Customers access.');
+      setNote(copy.signIn);
       return;
     }
     void load('initial');
   }
+
+  // Another panel on this session client renewed the session: adopt it with no login (a stuck panel), or refresh (a ready one).
+  onRenewed.current = (): void => {
+    if (uid === null || controller.current === null || savingRef.current || confirmingRef.current || stepUpRef.current || refreshingRef.current) return;
+    if (phaseRef.current === 'signed-out' || phaseRef.current === 'unavailable') void load('initial');
+    else if (phaseRef.current === 'ready') void load('refresh');
+  };
+  useEffect(() => {
+    const listener = { self, run: () => onRenewed.current() };
+    const set = renewalListeners.get(session) ?? new Set();
+    set.add(listener);
+    renewalListeners.set(session, set);
+    return () => { set.delete(listener); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     begin('user');
@@ -547,7 +634,7 @@ function UserPanel({
       controller.current?.abort();
       sends.current?.abort();
     };
-    // A panel serves one UID (see ServerCustomerLevels); the clients are fixed for the panel's life.
+    // A panel serves one UID and one domain (see ServerCustomerLevels); the clients are fixed for the panel's life.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
@@ -730,6 +817,7 @@ function UserPanel({
       if (mine !== gen.current) return;
       if (renewed.kind !== 'ok') return setStatus(roleId, failTone, `${held ? 'Not confirmed yet' : 'Not saved'}: the store server did not confirm your sign-in. Try again.`, shown);
       promptStepUp(null);
+      announceRenewed(session, self);
       setStatus(roleId, held ? 'confirm' : 'idle', `Signed in again. Press "Save to server" to ${held ? 'check' : 'save'} this change.`, shown);
     } finally {
       if (mine === gen.current) {
@@ -742,28 +830,26 @@ function UserPanel({
   const ready = phase === 'ready';
   return (
     <section
-      data-testid="server-customer-levels"
-      aria-labelledby="server-customer-levels-title"
+      data-testid={copy.sectionId}
+      aria-labelledby={copy.titleId}
       className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-        <h2 id="server-customer-levels-title" className="text-2xl font-black text-primary tracking-tight">Server-enforced Customers access</h2>
+        <h2 id={copy.titleId} tabIndex={-1} className="text-2xl font-black text-primary tracking-tight focus:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-lg">{copy.title}</h2>
         <span
-          data-testid="server-levels-state"
+          data-testid={id('server-levels-state')}
           data-state={phase}
           className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border bg-slate-50 text-slate-600 border-slate-200"
         >
           {PHASE_LABELS[phase]}
         </span>
       </div>
-      <p className="text-slate-500 text-sm font-medium mb-4">
-        Stored on the store server and enforced on every customer view and create request. Covers the Customers module of the built-in roles only.
-      </p>
+      <p className="text-slate-500 text-sm font-medium mb-4">{copy.description}</p>
       {st.storeChanged && (
-        <p data-testid="server-levels-store-changed" role="alert" className="text-sm font-bold text-amber-800 mb-4">{STORE_CHANGED_NOTICE}</p>
+        <p data-testid={id('server-levels-store-changed')} role="alert" className="text-sm font-bold text-amber-800 mb-4">{STORE_CHANGED_NOTICE}</p>
       )}
       {st.previous.length > 0 && (
-        <div data-testid="server-levels-previous-store" role="alert" className="text-sm font-bold text-amber-800 mb-4 space-y-1">
+        <div data-testid={id('server-levels-previous-store')} role="alert" className="text-sm font-bold text-amber-800 mb-4 space-y-1">
           {st.previous.map((text, n) => <p key={n}>{text}</p>)}
         </div>
       )}
@@ -772,8 +858,9 @@ function UserPanel({
       {(phase === 'unavailable' || phase === 'signed-out' || reconnect) && uid !== null && (
         <button
           type="button"
-          data-testid="server-levels-retry"
-          onClick={() => { setReconnect(false); void load('initial', phase === 'signed-out' || reconnect); }}
+          data-testid={id('server-levels-retry')}
+          // The button unmounts while the panel loads: focus moves to the panel's heading, never to the page body.
+          onClick={() => { focusNext.current = copy.titleId; setReconnect(false); void load('initial', phase === 'signed-out' || reconnect); }}
           disabled={saving !== null}
           className="mb-4 px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50"
         >
@@ -786,7 +873,7 @@ function UserPanel({
           {st.roles.map((entry) => {
             if (!entry.editable) {
               return (
-                <div key={entry.roleId} data-testid={`server-level-row-${entry.roleId}`} className="flex flex-wrap items-center gap-3 p-4 rounded-2xl border border-slate-100 bg-slate-50/50">
+                <div key={entry.roleId} data-testid={id(`server-level-row-${entry.roleId}`)} className="flex flex-wrap items-center gap-3 p-4 rounded-2xl border border-slate-100 bg-slate-50/50">
                   <span className="text-sm font-bold text-slate-700 w-40">{roleName(entry.roleId)}</span>
                   <span className="text-xs font-black text-slate-600">Full — fixed</span>
                 </div>
@@ -797,7 +884,7 @@ function UserPanel({
             const chosen = draft?.level ?? entry.level; // the select shows the choice; the server level is shown apart
             const reason = st.reasons[roleId] ?? '';
             const reasonOk = 'value' in checkReason(reason);
-            const options = PERMISSION_HIERARCHY.filter((l) => CUSTOMER_LEVELS.includes(l) || l === entry.level || l === chosen) as RoleLevel[];
+            const options = PERMISSION_HIERARCHY.filter((l) => copy.levels.includes(l) || l === entry.level || l === chosen) as RoleLevel[];
             const status = st.statuses[roleId];
             const busy = saving !== null || confirming;
             const conflict = status?.tone === 'conflict' && draft !== undefined;
@@ -806,17 +893,17 @@ function UserPanel({
             const locked = busy || conflict; // a conflict needs an explicit Discard or Reapply first
             const changed = draft !== undefined && (draft.level !== entry.level || st.held[roleId] !== undefined);
             const canSave = !locked && changed && reasonOk;
-            const selectId = `server-level-select-${roleId}`;
-            const reasonId = `server-level-reason-${roleId}`;
-            const hintId = `server-level-hint-${roleId}`;
+            const selectId = id(`server-level-select-${roleId}`);
+            const reasonId = id(`server-level-reason-${roleId}`);
+            const hintId = id(`server-level-hint-${roleId}`);
             const reasonRule = `a reason of ${REASON_MIN}–${REASON_MAX} characters`;
-            const saveId = `server-level-save-${roleId}`;
+            const saveId = id(`server-level-save-${roleId}`);
             const hint = busy ? '' : conflict ? (known ? 'To save, discard your choice or reapply it to the current server level.'
               : 'The current server level could not be read. To continue, discard your choice.')
               : !changed && !reasonOk ? `To save, choose a new level and enter ${reasonRule}.`
               : !changed ? 'To save, choose a new level.' : !reasonOk ? `To save, enter ${reasonRule}.` : '';
             return (
-              <div key={roleId} data-testid={`server-level-row-${roleId}`} className="p-4 rounded-2xl border border-slate-100 space-y-3">
+              <div key={roleId} data-testid={id(`server-level-row-${roleId}`)} className="p-4 rounded-2xl border border-slate-100 space-y-3">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="text-sm font-bold text-slate-700 w-40">{roleName(roleId)}</span>
                   <span className="text-xs font-bold text-slate-600">{unread ? 'Last known level: ' : 'Server level: '}<span className="font-black">{LEVEL_LABELS[entry.level]}</span></span>
@@ -824,7 +911,7 @@ function UserPanel({
                     {entry.source === 'stored' ? 'Custom' : 'Default'}
                   </span>
                   {draft !== undefined && (
-                    <span data-testid={`server-level-unsaved-${roleId}`} className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-amber-50 text-amber-800 border-amber-200">
+                    <span data-testid={id(`server-level-unsaved-${roleId}`)} className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-amber-50 text-amber-800 border-amber-200">
                       Unsaved: {LEVEL_LABELS[draft.level]}
                     </span>
                   )}
@@ -873,7 +960,7 @@ function UserPanel({
                 </div>
                 <p id={hintId} data-testid={hintId} className="text-[11px] font-medium text-slate-500 min-h-[1rem]">{hint}</p>
                 <p
-                  data-testid={`server-level-status-${roleId}`}
+                  data-testid={id(`server-level-status-${roleId}`)}
                   data-status={status?.tone ?? 'idle'}
                   aria-live="polite"
                   className="text-xs font-bold text-slate-600 min-h-[1rem]"
@@ -884,7 +971,7 @@ function UserPanel({
                   <div
                     role="group"
                     aria-label={`Resolve the conflict for ${roleName(roleId)}`}
-                    data-testid={`server-level-conflict-${roleId}`}
+                    data-testid={id(`server-level-conflict-${roleId}`)}
                     className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100"
                   >
                     <p className="w-full text-xs font-bold text-amber-900">
@@ -892,7 +979,7 @@ function UserPanel({
                     </p>
                     <button
                       type="button"
-                      data-testid={`server-level-discard-${roleId}`}
+                      data-testid={id(`server-level-discard-${roleId}`)}
                       aria-label={`Discard my choice for ${roleName(roleId)}`}
                       disabled={busy}
                       onClick={() => {
@@ -905,7 +992,7 @@ function UserPanel({
                     </button>
                     <button
                       type="button"
-                      data-testid={`server-level-reapply-${roleId}`}
+                      data-testid={id(`server-level-reapply-${roleId}`)}
                       aria-label={`Reapply to the current level for ${roleName(roleId)}`}
                       disabled={busy || !known}
                       onClick={() => {
@@ -922,18 +1009,18 @@ function UserPanel({
                 {stepUp?.roleId === roleId && (
                   <div
                     role="group"
-                    aria-labelledby={`server-level-reauth-title-${roleId}`}
-                    data-testid="server-level-reauth-group"
+                    aria-labelledby={id(`server-level-reauth-title-${roleId}`)}
+                    data-testid={id('server-level-reauth-group')}
                     className="flex flex-wrap items-end gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100"
                   >
-                    <p id={`server-level-reauth-title-${roleId}`} className="w-full text-xs font-black text-amber-900">Confirm your sign-in to save this change</p>
+                    <p id={id(`server-level-reauth-title-${roleId}`)} className="w-full text-xs font-black text-amber-900">Confirm your sign-in to save this change</p>
                     {stepUp.method === 'password' && (
                       <div className="flex flex-col gap-1">
-                        <label htmlFor={`server-level-reauth-password-${roleId}`} className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Your password</label>
+                        <label htmlFor={id(`server-level-reauth-password-${roleId}`)} className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Your password</label>
                         <input
                           ref={passwordRef}
-                          id={`server-level-reauth-password-${roleId}`}
-                          data-testid="server-level-reauth-password"
+                          id={id(`server-level-reauth-password-${roleId}`)}
+                          data-testid={id('server-level-reauth-password')}
                           type="password"
                           autoComplete="current-password"
                           value={password}
@@ -950,15 +1037,15 @@ function UserPanel({
                         <button
                           ref={confirmRef}
                           type="button"
-                          data-testid="server-level-reauth-confirm"
+                          data-testid={id('server-level-reauth-confirm')}
                           disabled={confirming || (stepUp.method === 'password' && password.length === 0)}
-                          aria-describedby="server-level-reauth-hint"
+                          aria-describedby={id('server-level-reauth-hint')}
                           onClick={() => { void confirmSignIn(); }}
                           className="px-4 py-2 bg-amber-600 text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50"
                         >
                           {stepUp.method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
                         </button>
-                        <p id="server-level-reauth-hint" data-testid="server-level-reauth-hint" className="w-full text-[11px] font-medium text-amber-800 min-h-[1rem]">
+                        <p id={id('server-level-reauth-hint')} data-testid={id('server-level-reauth-hint')} className="w-full text-[11px] font-medium text-amber-800 min-h-[1rem]">
                           {stepUp.method === 'google'
                             ? 'A Google sign-in window opens.'
                             : password.length === 0 ? 'Enter your password to confirm your sign-in.' : ''}
