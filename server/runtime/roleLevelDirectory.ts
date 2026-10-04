@@ -2,6 +2,12 @@
 // role's Customers access on, shown to the one person who may change it (M7A-CUSTOMERS-P3-R2; G-IAM, DA-85; migration 020),
 // with each editable level's version, the precondition an edit asserts (M7A-CUSTOMERS-P4; DA-125; migration 021).
 //
+// M5-INVOICES-AUTH-P1 SIBLING. GET /api/v1/roles/levels/invoices reads back the built-in roles' INVOICES levels the same way
+// (same requirement, same no-query rule, same untrusted-answer validation, same 503 rules; migration 026), answering
+// { tenant, domain: 'invoices', roles: [...4] }. The Invoices level is CONFIGURATION ONLY: the server stores and shows it but
+// decides no invoice operation on it. The Customers route below is unchanged byte for byte; both are built by one factory
+// that differs only in the domain, the path and the port it reads.
+//
 // GET /api/v1/roles/levels — a session route of the TENANT boundary, beside the edit (PUT, roleLevelUpdate.ts) on the same
 // literal path. It carries no tenant, and it takes no query: any `?` in the target is a 400 invalid_request, decided before
 // the port is asked. The tenant read is the trusted scope's — the one the authorizer resolved for the presenting session —
@@ -135,9 +141,26 @@ function refuse(res: Response, ctx: RouteContext, status: number, error: string,
   res.status(status).json({ error, requestId: ctx.requestId });
 }
 
-/** The read-back route over `ports`, for a route table; refused at construction without its port. */
+/** The Invoices sibling's literal path: under the Customers read-back's, never a template (routes.ts). */
+export const INVOICE_ROLE_LEVEL_DIRECTORY_PATH = `${ROLE_LEVELS_PATH}/invoices`;
+
+/** What the Invoices read-back is built from: its own port, so the two reads can never be handed one another's. */
+export interface InvoiceRoleLevelDirectoryPorts {
+  readonly invoiceRoleLevels: RoleLevelDirectoryPort;
+}
+
+/** The Customers read-back route over `ports`, for a route table; refused at construction without its port. */
 export function createRoleLevelDirectoryRoute(ports: RoleLevelDirectoryPorts, options: { deadlineMs?: number } = {}): RouteDefinition {
-  const reader = ports?.roleLevels;
+  return directoryRoute('customers', ROLE_LEVEL_DIRECTORY_PATH, ports?.roleLevels, options);
+}
+
+/** The Invoices read-back route over `ports` (configuration only, header); refused at construction without its port. */
+export function createInvoiceRoleLevelDirectoryRoute(ports: InvoiceRoleLevelDirectoryPorts, options: { deadlineMs?: number } = {}): RouteDefinition {
+  return directoryRoute('invoices', INVOICE_ROLE_LEVEL_DIRECTORY_PATH, ports?.invoiceRoleLevels, options);
+}
+
+function directoryRoute(domain: string, path: string, reader: RoleLevelDirectoryPort | undefined, options: { deadlineMs?: number }): RouteDefinition {
+  if (!ROLE_LEVEL_DOMAINS.includes(domain)) throw new EnforcementSetupError('route_handler_invalid');
   if (typeof reader?.levels !== 'function') throw new EnforcementSetupError('route_handler_invalid');
   const deadlineMs = options.deadlineMs ?? PORT_DEADLINE_MS;
   // One more port call in the chain, bounded like the rest so the whole chain fits the socket timeout.
@@ -160,13 +183,13 @@ export function createRoleLevelDirectoryRoute(ports: RoleLevelDirectoryPorts, op
     if (roles === null) return refuse(res, ctx, 503, 'service_unavailable', 'role_level_directory_answer_invalid');
     res.status(200).json({
       tenant,
-      domain: ROLE_LEVEL_DOMAINS[0],
+      domain,
       roles: roles.map((r) => ({ roleId: r.roleId, level: r.level, defaultLevel: r.defaultLevel, source: r.source, editable: r.editable, version: r.version })),
     });
   };
   const route: RouteDefinition = {
     method: 'GET',
-    path: ROLE_LEVEL_DIRECTORY_PATH,
+    path,
     policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: ROLE_LEVELS_REQUIREMENT }),
     body: Object.freeze({ kind: 'none' }),
     idempotency: 'none',

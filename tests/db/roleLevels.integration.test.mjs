@@ -1,6 +1,6 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-025, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-026, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 //
 // M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
 // the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
@@ -50,8 +50,9 @@
 //            for a create holding the role row FOR SHARE; the create commits (201), the edit is refused on the database clock
 //            after the routine answered (503, level unchanged, no edit audit record, no completion, its lease kept: 409 for
 //            the same key within it); M7RLH-09b the same shape with the deadline far off commits both (201, 200);
-//   M7RLH-C1 the compiled tenant artifact serves exactly its ten routes (the customer detail read since P4), the owner's PUT, its read-back and the narrowed
-//            POST refusal.
+//   M7RLH-C1 the compiled tenant artifact serves exactly its thirteen routes (the customer detail read since P4, the profile read
+//            since P6, the customer edit since P7, the Invoices read-back since M5-INVOICES-AUTH-P1), the owner's PUT, its
+//            read-back, the Invoices read-back (the catalog defaults of a fresh tenant) and the narrowed POST refusal.
 //   M7RL-G01..G03 (M7A-CUSTOMERS-P3-R2) the owner's read-back, GET /api/v1/roles/levels: a fresh tenant reads every catalog
 //            default, 020's NULL lock row reads as the default, an edit reads as stored — in a second session and under a
 //            stale sign-in too — with no-store and no session material, and the read writes nothing; only the tenant's store
@@ -331,7 +332,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-025 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-026 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 
@@ -917,14 +918,15 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
 /**
- * The tenant artifact's twelve intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
- * read; P6: the profile read; P7: the customer edit).
+ * The tenant artifact's thirteen intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
+ * read; P6: the profile read; P7: the customer edit; M5-INVOICES-AUTH-P1: the Invoices read-back).
  */
-const TENANT_TWELVE = Object.freeze([
+const TENANT_THIRTEEN = Object.freeze([
   'GET /api/v1/customers session none none',
   'GET /api/v1/customers/{id} session none none',
   'GET /api/v1/customers/{id}/profile session none none',
   'GET /api/v1/roles/levels session none none',
+  'GET /api/v1/roles/levels/invoices session none none',
   'GET /api/v1/session session none none',
   'GET /health public none none',
   'GET /readiness public none none',
@@ -1865,8 +1867,8 @@ test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write
 // M7RLH-C1: the COMPILED tenant entry
 // ===========================================================================
 
-test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the owner\'s PUT and its read-back among them — applies an owner\'s edit, reads it back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_TWELVE], 'the source tenant inventory');
+test('M7RLH-C1: the compiled tenant entry serves exactly its thirteen routes — the owner\'s PUT, its read-back and the Invoices read-back among them — applies an owner\'s edit, reads it back, reads the Invoices defaults back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_THIRTEEN], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1892,13 +1894,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the 
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_TWELVE], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_THIRTEEN], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_TWELVE], 'the compiled entry serves exactly the twelve');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_THIRTEEN], 'the compiled entry serves exactly the thirteen');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');
@@ -1907,6 +1909,19 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its ten routes — the 
       await edit(ctx, o, 'sales_staff', 'view', 'compiled: the owner\'s edit');
       await assertDelta(before, { ...EDIT, L: 1 }, 'compiled: the edit');
       readBackOf(await ctx.levels(o), tenant, { sales_staff: 'view' }, 'compiled: the owner reads the edit back', { sales_staff: 1 });
+      // M5-INVOICES-AUTH-P1: the compiled artifact serves the Invoices read-back too — the catalog defaults, untouched by the
+      // Customers edit (tests/db/invoiceRoleLevels.integration.test.mjs proves the Invoices edit over HTTP).
+      const invoices = await send(ctx.port, 'GET', `${ROLE_LEVELS_PATH}/invoices`, { host: TENANT_HOST, cookie: o.cookie }, undefined, { localAddress: ctx.clientAddress });
+      assert.equal(invoices.status, 200, `compiled: the Invoices read-back: ${invoices.body}`);
+      assert.deepEqual(JSON.parse(invoices.body), {
+        tenant, domain: 'invoices', roles: [
+          { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
+          { roleId: 'manager', level: 'full', defaultLevel: 'full', source: 'default', editable: true, version: 0 },
+          { roleId: 'technician', level: 'view', defaultLevel: 'view', source: 'default', editable: true, version: 0 },
+          { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'default', editable: true, version: 0 },
+        ],
+      }, 'compiled: the Invoices defaults, apart from the Customers edit');
+      assert.equal(invoices.headers['cache-control'], 'no-store', 'compiled: the Invoices read-back is never cached');
       before = await counts();
       assertRefusal(await ctx.post(s, { name: nameOf('m7rlh-c1 narrowed') }), 403, 'forbidden', 'compiled: the narrowed role');
       await assertDelta(before, { ...NOTHING, L: 0 }, 'compiled: the narrowed role');

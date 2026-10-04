@@ -38,7 +38,7 @@
 // it first rolls 025 back with its own committed down file (no data guard: 025 holds no data), so its customers are seeded
 // on 001-024 exactly as a deployed database holds them, then applies 025 through the trusted executor. It never rolls back
 // 024 or earlier, so it can run after the customer edit's HTTP step (which leaves 024 non-rollbackable). Every fixture is
-// synthetic and randomly suffixed. It leaves 025 applied, the issuer key row and limiter fingerprint it found, no customer,
+// synthetic and randomly suffixed. It leaves 025 and 026 applied, the issuer key row and limiter fingerprint it found, no customer,
 // session, ledger or role-level row of its own, and its login dropped; its tenants and identities stay, as every suite's do.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,6 +71,8 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`, 'utf8');
 const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
+/** M5-INVOICES-AUTH-P1: 026 sits above 025 and is rolled back first wherever a proof needs exactly the 001-024 surface. */
+const DOWN_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_025 = UP_025.slice(UP_025.lastIndexOf('do $$'));
 const SEARCH = 'tmpos_customer_search.m7a_customer_search(text, uuid, text, uuid, integer)';
@@ -151,9 +153,9 @@ test.after(async () => {
   if (UIDS.length > 0) await swallow(() => owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`);
   // Every customer this file made, edited or not: a later suite's rollback of 024 refuses while any customer is edited.
   if (TENANTS.length > 0) await swallow(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 025 applied, whatever failed above: the executor applies it if it is not.
+  // The shared service is left with 025 and 026 applied, whatever failed above: the executor applies them if not.
   await swallow(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '025') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '026') as applied`;
     if (!applied) await trustedApply();
   });
   if (issuerKeyBefore !== undefined) {
@@ -369,9 +371,9 @@ const applyReport = await trustedApply();
 test('M7CS-01: 025 applied by the trusted executor over a populated 001-024, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough024.outcome, 'complete', JSON.stringify(applyThrough024).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['025'], `025 alone applied over the populated 001-024 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['025', '026'], `025 applied over the populated 001-024 chain, and 026 above it (M5-INVOICES-AUTH-P1) (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 25 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 26 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[24].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_025).simple())).code, undefined, 'the postcondition holds as applied');
@@ -473,6 +475,7 @@ test('M7CS-02: no row rewritten; the routine is a pinned STABLE SECURITY DEFINER
 
 test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte-identical; refused while a 001-024 read is withdrawn or once applied away; committed, the P8 preflight refuses the 024 database and the executor re-applies 025 over the same rows', async () => {
   const down = await rolledBack(RC, async (tx) => {
+    await tx.unsafe(DOWN_026).simple();
     await tx.unsafe(DOWN_025).simple();
     return { surface: await surface(tx), again: await errorOf(tx.savepoint((sp) => sp.unsafe(DOWN_025).simple())) };
   });
@@ -494,7 +497,7 @@ test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte
   }
   // Committed: the ledger's own row with it (rollBackAbove), then the trusted executor applies it again.
   const later = await rollBackAbove(owner, MIG_DIR, '024');
-  assert.deepEqual(later.rolledBack, ['025']);
+  assert.deepEqual(later.rolledBack, ['026', '025'], 'newest first: 026 above 025');
   try {
     assert.deepEqual(await surface(owner), SURFACE_024, 'committed: the 001-024 surface');
     assert.deepEqual(await rowsOf(UPGRADED), ROWS_024, 'committed: every customer row byte-identical, the edited one included');
@@ -503,7 +506,7 @@ test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte
   } finally {
     const reapplied = await trustedApply();
     assert.equal(reapplied.outcome, 'complete', JSON.stringify(reapplied).slice(0, 400));
-    assert.deepEqual(reapplied.applied, ['025']);
+    assert.deepEqual(reapplied.applied, ['025', '026']);
   }
   assert.deepEqual(await rowsOf(UPGRADED), ROWS_024, 're-applied: every row byte-identical');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_025).simple())).code, undefined, 're-applied: the postcondition holds');

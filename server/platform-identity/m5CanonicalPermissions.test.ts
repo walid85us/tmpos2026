@@ -477,3 +477,42 @@ test('the catalog materializer applies edits before the entitlement gate and the
   assert.deepEqual(materializeTenantPermissions('manager', {}, false, { customers: 'writer' }), {}, 'a malformed edit materializes nothing');
   assert.deepEqual(materializeTenantPermissions('manager', {}, false, null), {}, 'an unreadable edit is not "no edit"');
 });
+
+test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit says, defaults without it, and never moves a Customers decision (nor the reverse)', () => {
+  const levelOf = (role: string, levels: unknown, domain: string) => materializeTenantPermissions(role, {}, false, levels)[domain];
+  for (const [role, level] of [['manager', 'full'], ['technician', 'view'], ['sales_staff', 'create'], ['store_owner', 'full']] as const) {
+    assert.equal(levelOf(role, {}, 'invoices'), level, `${role} default`);
+  }
+  for (const role of ['manager', 'technician', 'sales_staff']) {
+    for (const level of ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full']) assert.equal(levelOf(role, { invoices: level }, 'invoices'), level, `${role}/${level}`);
+  }
+  assert.equal(levelOf('store_owner', { invoices: 'none' }, 'invoices'), 'full', 'the owner is fixed');
+  for (const role of ['manager', 'technician', 'sales_staff']) {
+    assert.equal(levelOf(role, { invoices: 'none' }, 'customers'), levelOf(role, {}, 'customers'), `${role}: an Invoices edit leaves Customers at its default`);
+    assert.equal(levelOf(role, { customers: 'none' }, 'invoices'), levelOf(role, {}, 'invoices'), `${role}: a Customers edit leaves Invoices at its default`);
+    for (const permission of ['view_customers', 'create_customers', 'edit_customers']) {
+      for (const invoices of ['none', 'view', 'create', 'edit', 'full']) {
+        for (const customers of [undefined, 'none', 'view', 'create', 'edit', 'full']) {
+          const base = customers === undefined ? {} : { customers };
+          assert.equal(
+            evaluateCanonicalPermission({ scope: 'tenant', roleId: role, permission, limitation: 'none', levels: { ...base, invoices } }),
+            evaluateCanonicalPermission({ scope: 'tenant', roleId: role, permission, limitation: 'none', levels: base }),
+            `${role}/${permission}/customers=${String(customers)}: invoices=${invoices} changes nothing`,
+          );
+        }
+      }
+    }
+  }
+  assert.ok(![...TENANT_ROUTE_PERMISSIONS.values()].some((e) => e.parent === 'invoices'), 'no invoice route permission: configuration only');
+  for (const levels of [{ invoices: 'Full' }, { invoices: null }, { invoices: '' }, { Invoices: 'view' }, { invoice: 'view' }, { customers: 'view', invoices: 'x' }, null, [], 'invoices']) {
+    for (const roleId of TENANT_ROLE_IDS) {
+      assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: 'view_customers', limitation: 'none', levels }), 'denied', `${roleId} ${JSON.stringify(levels)}`);
+    }
+    assert.deepEqual(materializeTenantPermissions('manager', {}, false, levels), {});
+  }
+  for (const roleId of ['cashier', 'Manager', '', 'system_owner', 'store_owner_2']) {
+    assert.deepEqual(materializeTenantPermissions(roleId, {}, false, { invoices: 'full' }), {}, roleId);
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: 'view_customers', limitation: 'none', levels: { invoices: 'full' } }), 'denied', roleId);
+  }
+  assert.equal(materializeTenantPermissions('manager', {}, true, { invoices: 'full' }).invoices, 'view');
+});

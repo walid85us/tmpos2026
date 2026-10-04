@@ -44,7 +44,9 @@
 // optional contacts; — M7A-CUSTOMERS-P7 — PATCH /api/v1/customers/{id}, a versioned edit of that customer's name and
 // contacts (the third template and the only templated command: the same segment, judged after authentication, bound into
 // the idempotency fingerprint), idempotent and committed through the tenant store; the profile read now carries the
-// customer's version as its strong ETag — then the bounded 404.
+// customer's version as its strong ETag; — M5-INVOICES-AUTH-P1 — GET /api/v1/roles/levels/invoices, the owner's read-back of
+// the built-in roles' Invoices levels (configuration only: no invoice route exists, and the PUT above now also accepts
+// domain 'invoices') — then the bounded 404.
 // No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -91,6 +93,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'PATCH', path: '/api/v1/customers/{id}', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/roles/levels/invoices', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 

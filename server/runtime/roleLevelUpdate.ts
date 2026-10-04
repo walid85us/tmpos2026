@@ -1,7 +1,7 @@
-// Phase 4.0 M7a — an owner's durable edit of a built-in tenant role's Customers level: the first tenant IAM command, and the
-// server-authoritative configuration the customer routes are decided on (M7A-CUSTOMERS-P3-R1; G-IAM, G-IDEMPOT, G-AUDIT,
-// DA-85; migration 020). Since M7A-CUSTOMERS-P4 conditional on the tenant and the version the owner reviewed (DA-125;
-// migration 021).
+// Phase 4.0 M7a — an owner's durable edit of a built-in tenant role's Customers or Invoices level: the first tenant IAM
+// command, and the server-authoritative configuration the customer routes are decided on (M7A-CUSTOMERS-P3-R1; G-IAM,
+// G-IDEMPOT, G-AUDIT, DA-85; migration 020). Since M7A-CUSTOMERS-P4 conditional on the tenant and the version the owner
+// reviewed (DA-125; migration 021). Since M5-INVOICES-AUTH-P1 the Invoices level is stored the same way (migration 026).
 //
 // PUT /api/v1/roles/levels — a session route of the TENANT boundary. The path carries no tenant, and no body value selects
 // one: the tenant is the one the owner's session is admitted to, derived in the database from the presenting session's key.
@@ -25,10 +25,12 @@
 // asserts another tenant or version is another request and needs another key (422 otherwise).
 //
 // WHAT CAN BE EDITED, AND WHY SO LITTLE. roleId is one of the three built-in roles an owner may edit — manager, technician,
-// sales_staff; the owner role itself is locked (Full everywhere, never edited). domain is exactly 'customers': the one
-// domain the server decides (GET and POST /api/v1/customers), since storing a level the server does not enforce would read
-// as enforced. level is one of the seven canonical levels. A stored level REPLACES the role's catalog default for that
-// domain, in that tenant only; until edited, a role keeps its default. No custom role, no deletion, no other domain and no
+// sales_staff; the owner role itself is locked (Full everywhere, never edited). domain is 'customers' or 'invoices'.
+// Customers is the one domain the server DECIDES (GET and POST /api/v1/customers). Invoices is CONFIGURATION ONLY: the level
+// is stored, read back and materialized into the role's tenant grant, but NO invoice business operation is decided or
+// enforced by the server on it — no invoice route exists, and the browser remains what applies an invoice level. It must
+// never be read as a server-enforced invoice permission. level is one of the seven canonical levels. A stored level REPLACES the role's catalog default for that
+// domain, in that tenant only; until edited, a role keeps its default. No custom role, no deletion, no third domain and no
 // delegated editor exists here: each is an owner decision this stage records rather than invents.
 //
 // AUTHORITY. The route requires edit_role_levels — the OWNER RULE (m5CanonicalPermissions.ts): the selected tenant grant's
@@ -52,8 +54,9 @@
 // once the idempotency record is acquired; it commits and records nothing, and the attempt's lease waits out its time.
 //
 // WHAT IT RECORDS. The level, in migration 020's row for (tenant, role, domain), its version one step on in 021's, and one
-// audit record at tenant scope: the reason code role_<role>_customers_to_<level> names the edit and the reason is the
-// owner's own words. The level before an edit can be rebuilt from the audit history (the first one the catalog default) ONLY
+// audit record at tenant scope: the reason code role_<role>_<domain>_to_<level> names the edit (and so its domain) and the
+// reason is the owner's own words. The domain is also in the body bytes the idempotency fingerprint covers, so a Customers
+// and an Invoices edit never share a key's request. Each domain has its own per-(tenant, role) version. The level before an edit can be rebuilt from the audit history (the first one the catalog default) ONLY
 // for edits made through this route: a holder of the runtime role with a live store-owner key can call 021's set routine
 // directly, which writes no audit record (020's residual, now preconditioned; a G-AUDIT exception). A create-mode command:
 // each edit is its own aggregate (a fresh server id, type tenant_role_level, never the tenant — so the audit record names no
@@ -72,8 +75,8 @@ export const ROLE_LEVELS_PERMISSION = 'edit_role_levels';
 export const ROLE_LEVELS_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: ROLE_LEVELS_PERMISSION });
 /** The built-in tenant roles an owner may edit: every one but the owner role (migration 020's CHECK restates them). */
 export const EDITABLE_TENANT_ROLES: readonly string[] = Object.freeze(['manager', 'technician', 'sales_staff']);
-/** The domains the server decides, and so the only ones a level is stored for. */
-export const ROLE_LEVEL_DOMAINS: readonly string[] = Object.freeze(['customers']);
+/** The domains a level is stored for: Customers (decided by the server) and Invoices (configuration only, not enforced). */
+export const ROLE_LEVEL_DOMAINS: readonly string[] = Object.freeze(['customers', 'invoices']);
 /**
  * The seven canonical level WORDS (permissionCatalog.ts PERMISSION_TOKENS, which this runtime module may not import), kept
  * alphabetically: a vocabulary the body is checked against, never an ordering — the one ordering is the family contract's

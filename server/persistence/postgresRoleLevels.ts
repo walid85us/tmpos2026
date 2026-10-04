@@ -1,6 +1,8 @@
 // Phase 4.0 M7a — the PostgreSQL tenant role levels: the owner's durable edits of a built-in tenant role, read for every
 // tenant route decision and written by the one command that edits them (M7A-CUSTOMERS-P3-R1; G-IAM, G-PERSIST, DA-85;
-// migration 020, schema tmpos_role — and since M7A-CUSTOMERS-P4 migration 021, schema tmpos_role_edit; DA-125).
+// migration 020, schema tmpos_role — and since M7A-CUSTOMERS-P4 migration 021, schema tmpos_role_edit; DA-125). Since
+// M5-INVOICES-AUTH-P1 the Invoices level is stored beside the Customers one, through migration 026's own routines (schema
+// tmpos_role_invoice). That level is CONFIGURATION ONLY: no invoice business operation is decided by the server on it.
 //
 // THE READ (readRoleLevels, createPostgresRoleLevels). For one tenant and one role, migration 020's SECURITY DEFINER
 // routine tmpos_role.m7a_role_levels answers the levels stored for it by domain — {} when nothing is stored, and then the
@@ -9,14 +11,16 @@
 //   - the tenant route authorizer, once per decided request, on the kernel's own client (createPostgresRoleLevels);
 //   - the tenant command revalidator, on the committing transaction after the standing is held and re-read (readRoleLevels,
 //     composed through the tenant inventory, so the administrative artifact never carries this module).
-// The answer must be a JSON object naming only the domains 020 stores, each at one of the seven canonical levels: anything
+// The answer must be a JSON object naming only the domains stored (ROLE_LEVEL_DOMAINS: customers, invoices; 020's read aggregates every domain), each at one of the seven canonical levels: anything
 // else — no row, two rows, a null, an array, another domain, a level outside the seven — is a FAULT, a throw the route
 // answers as a bounded 503, never a decision and never "no edits". The canonical decision then judges the value again.
 //
 // THE DIRECTORY READ (readRoleLevelDirectory, createPostgresRoleLevelDirectory; M7A-CUSTOMERS-P3-R2, P4). For GET
 // /api/v1/roles/levels (server/runtime/roleLevelDirectory.ts): the stored Customers level AND the version of every editable
 // role of one tenant — the trusted scope's, never the request's — in ONE statement: migration 021's STABLE definer routine
-// tmpos_role_edit.m7a_role_level_states, which reads 020's levels and 021's counters on that one statement's snapshot, so
+// tmpos_role_edit.m7a_role_level_states (for Invoices, 026's tmpos_role_invoice.m7a_invoice_role_level_states, of the same
+// shape — the read takes the domain and picks one of the two fixed statements; any other domain throws before a statement),
+// which reads 020's levels and 021's counters on that one statement's snapshot, so
 // the three levels and their versions are one moment's, never a mix of before and after an edit. Its answer must be exactly
 // a JSON array of three plain objects of exactly { roleId, level, version }, in EDITABLE_TENANT_ROLES order: roleId that
 // role, level null (nothing stored, or only 020's NULL lock row) or one of the seven level words, version a safe integer of
@@ -26,7 +30,7 @@
 // THE WRITE (ROLE_LEVEL_UPDATE_MUTATOR). The one business mutation the tenant store commits for PUT /api/v1/roles/levels
 // (server/runtime/roleLevelUpdate.ts), handed to the store in trusted source by the tenant transaction root alone. It runs
 // inside the command's transaction, after the idempotency fence and the tenant revalidator, and before the audit record and
-// the completion (postgresTransactionalStore.ts commit). ONE FIXED CALL to 021's definer routine
+// the completion (postgresTransactionalStore.ts commit). ONE FIXED CALL (per domain, below; for Customers) to 021's definer routine
 // tmpos_role_edit.m7a_role_level_set_v2 — 020's m7a_role_level_set with two preconditions — whose ONE authority input is the
 // presenting session's key — the key the revalidator just held on this transaction — from which the routine derives the
 // owner, their one tenant grant and the tenant, requires that grant to be the owner role's, and then: answers
@@ -35,6 +39,10 @@
 // UPDATE — the lock every edit and create of that role in that tenant takes); and otherwise writes the level and moves the
 // version one step on. The role, domain, level, asserted tenant and asserted version are the planner's validated values;
 // every value is bound as a parameter. The runtime role no longer holds EXECUTE on 020's unconditional set (021 revoked it).
+// The mutator DISPATCHES BY DOMAIN to one fixed statement each: customers -> 021's set_v2 (unchanged), invoices -> 026's
+// tmpos_role_invoice.m7a_invoice_role_level_set, which has no domain parameter (the domain is fixed inside it, so an Invoices
+// edit can never write a Customers row); its answer is judged identically. Any other domain is 'unavailable', before any
+// statement.
 //
 // ANSWERS. 'applied' only when the routine answered exactly one row, outcome 'applied', naming the tenant, the actor and the
 // grant this transaction revalidated, the level it was asked to store and the version exactly one past the asserted one —
@@ -120,7 +128,7 @@ export function createPostgresRoleLevels(deps: { readonly client: SupervisedPgCl
     client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevels(sql, tenantId, roleId));
 }
 
-/** One editable role's stored Customers level — null when nothing is stored, and then it holds its catalog default — and its version. */
+/** One editable role's stored level in the domain asked — null when nothing is stored, and then it holds its catalog default — and its version. */
 export interface StoredRoleLevel {
   readonly roleId: string;
   readonly stored: string | null;
@@ -131,13 +139,18 @@ export interface StoredRoleLevel {
 const STATE_KEYS: readonly string[] = ['roleId', 'level', 'version'];
 
 /**
- * The stored Customers level and version of every editable role of `tenantId`, in EDITABLE_TENANT_ROLES order, from ONE
+ * The stored level and version, in `domain` (customers or invoices), of every editable role of `tenantId`, in EDITABLE_TENANT_ROLES order, from ONE
  * statement (one snapshot, header). The tenant is a canonical lowercase UUID or this throws before any statement; any doubt
  * about the answer throws.
  */
-export async function readRoleLevelDirectory(sql: PgTransactionScope, tenantId: string): Promise<readonly StoredRoleLevel[]> {
+export async function readRoleLevelDirectory(sql: PgTransactionScope, tenantId: string, domain: string): Promise<readonly StoredRoleLevel[]> {
   if (typeof tenantId !== 'string' || !UUID_RE.test(tenantId)) throw fault();
-  const states: unknown = onlyRow(await sql`select tmpos_role_edit.m7a_role_level_states(${tenantId}::uuid) as states`, ['states']).states;
+  // One FIXED statement per domain; any other domain throws before a statement.
+  let rows: unknown;
+  if (domain === 'customers') rows = await sql`select tmpos_role_edit.m7a_role_level_states(${tenantId}::uuid) as states`;
+  else if (domain === 'invoices') rows = await sql`select tmpos_role_invoice.m7a_invoice_role_level_states(${tenantId}::uuid) as states`;
+  else throw fault();
+  const states: unknown = onlyRow(rows, ['states']).states;
   // Exactly 021's three roles — 020's CHECK — in order: a longer, shorter or reordered answer fails closed.
   if (!Array.isArray(states) || states.length !== EDITABLE_TENANT_ROLES.length) throw fault();
   return Object.freeze(EDITABLE_TENANT_ROLES.map((roleId, i) => {
@@ -152,11 +165,11 @@ export async function readRoleLevelDirectory(sql: PgTransactionScope, tenantId: 
   }));
 }
 
-/** The read GET /api/v1/roles/levels makes, over the M6 runtime client the composition root already built. */
-export function createPostgresRoleLevelDirectory(deps: { readonly client: SupervisedPgClient }): (tenantId: string, signal: AbortSignal) => Promise<readonly StoredRoleLevel[]> {
+/** The read GET /api/v1/roles/levels (and /invoices) makes for `domain`, over the M6 runtime client the composition root already built. */
+export function createPostgresRoleLevelDirectory(deps: { readonly client: SupervisedPgClient }, domain: string = 'customers'): (tenantId: string, signal: AbortSignal) => Promise<readonly StoredRoleLevel[]> {
   const { client } = deps;
   return (tenantId: string, signal: AbortSignal): Promise<readonly StoredRoleLevel[]> =>
-    client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevelDirectory(sql, tenantId));
+    client.transaction(signal, ROLE_LEVELS_BOUNDS, (sql) => readRoleLevelDirectory(sql, tenantId, domain));
 }
 
 async function applyRoleLevelUpdate(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<string> {
@@ -171,10 +184,15 @@ async function applyRoleLevelUpdate(sql: PgStatement, mutation: TransactionMutat
     || typeof roleId !== 'string' || typeof domain !== 'string' || typeof level !== 'string'
     || typeof expectedTenant !== 'string' || !UUID_RE.test(expectedTenant)
     || typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
-    || !Number.isSafeInteger(expectedVersion + 1)) return 'unavailable';
-  const rows = await sql`select o_outcome, o_tenant_id, o_actor_id, o_membership_id, o_level, o_version
-    from tmpos_role_edit.m7a_role_level_set_v2(${sessionKey}::text, ${roleId}::text, ${domain}::text, ${level}::text,
-      ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint)`;
+    || !Number.isSafeInteger(expectedVersion + 1) || !ROLE_LEVEL_DOMAINS.includes(domain)) return 'unavailable';
+  // One FIXED statement per domain, every value bound. 026's routine has no domain parameter: the domain is hard-coded in it.
+  const rows = domain === 'invoices'
+    ? await sql`select o_outcome, o_tenant_id, o_actor_id, o_membership_id, o_level, o_version
+      from tmpos_role_invoice.m7a_invoice_role_level_set(${sessionKey}::text, ${roleId}::text, ${level}::text,
+        ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint)`
+    : await sql`select o_outcome, o_tenant_id, o_actor_id, o_membership_id, o_level, o_version
+      from tmpos_role_edit.m7a_role_level_set_v2(${sessionKey}::text, ${roleId}::text, ${domain}::text, ${level}::text,
+        ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint)`;
   if (rows.length === 0) return 'refused';
   if (rows.length !== 1) return 'mismatch';
   const {

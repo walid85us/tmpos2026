@@ -1257,12 +1257,14 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the four reads classified as reads, the three commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the five reads classified as reads, the three commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3') || text.includes('m7a_customer_get')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
     : text.includes('m7a_customer_profile') ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n',
       o_phone: '+1 555 0100', o_email: null, o_created_at: '2026-09-30T08:15:42.123Z', o_version: '2' }]
+    : text.includes('m7a_invoice_role_level_states') ? [{ states: [{ roleId: 'manager', level: 'edit', version: 1 }, { roleId: 'technician', level: null, version: 0 },
+      { roleId: 'sales_staff', level: null, version: 0 }] }]
     : text.includes('m7a_role_level_states') ? [{ states: [{ roleId: 'manager', level: null, version: 0 }, { roleId: 'technician', level: 'none', version: 2 },
       { roleId: 'sales_staff', level: 'view', version: 5 }] }]
       : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
@@ -1277,14 +1279,15 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/customers/{id}', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/customers/{id}/profile', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'none'],
+    ['GET', '/api/v1/roles/levels/invoices', 'session', 'tenant', 'none', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
-  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels'],
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
-    ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'POST /api/v1/customers',
+    ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'POST /api/v1/customers',
       'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels']);
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
@@ -1359,6 +1362,23 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     { roleId: 'technician', level: 'none', defaultLevel: 'view', source: 'stored', editable: true, version: 2 },
     { roleId: 'sales_staff', level: 'view', defaultLevel: 'create', source: 'stored', editable: true, version: 5 },
   ] }], 'the catalog defaults (manager Full, technician View, sales_staff Create), the stored overrides and their versions');
+  // M5-INVOICES-AUTH-P1: the Invoices read-back over the same kernel — ONE statement into 026's states routine, the trusted
+  // tenant alone; the defaults are the catalog's Invoices ones (manager Full, technician View, sales_staff Create).
+  kernel.statements.length = 0;
+  const invoiceReadBack = ttx.routes[4];
+  assert.ok(invoiceReadBack.path === '/api/v1/roles/levels/invoices' && invoiceReadBack.idempotency === 'none' && typeof invoiceReadBack.handler === 'function');
+  levelsReply.status = null;
+  levelsReply.body = undefined;
+  await invoiceReadBack.handler({ url: '/api/v1/roles/levels/invoices' } as never, levelsRes as never,
+    { requestId: 'req-m7tk03-invoice-levels', principal: null, session: null, authenticatedAt: null, trusted: { ...scope, roleId: 'store_owner' }, sessionKey: null } as never);
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[REVAL_TENANT]], 'one statement: the trusted tenant alone');
+  assert.match(kernel.statements[0].text, /^select tmpos_role_invoice\.m7a_invoice_role_level_states\(\?::uuid\) as states$/);
+  assert.deepEqual([levelsReply.status, levelsReply.body], [200, { tenant: REVAL_TENANT, domain: 'invoices', roles: [
+    { roleId: 'store_owner', level: 'full', defaultLevel: 'full', source: 'fixed', editable: false, version: null },
+    { roleId: 'manager', level: 'edit', defaultLevel: 'full', source: 'stored', editable: true, version: 1 },
+    { roleId: 'technician', level: 'view', defaultLevel: 'view', source: 'default', editable: true, version: 0 },
+    { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'default', editable: true, version: 0 },
+  ] }], 'the Invoices catalog defaults, one stored override and its version');
   await ttx.close();
   assert.equal(kernel.ended(), 1);
 });

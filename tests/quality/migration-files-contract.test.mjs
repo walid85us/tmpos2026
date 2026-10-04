@@ -283,19 +283,32 @@ const PINNED = {
   // chain through 025; the exact-[005] gate is unchanged and still refuses.
   '025_m7a_customer_search.up.sql': '85bb78a1332515bf2019f39b131b23f79f9c31ddc36f0be90ccc96ed896b08bd',
   '025_m7a_customer_search.down.sql': '64b0736c22cd3112df47455ed64f0c243e8b2ff63a54d00b91af8f61e70c3a63',
+  // Phase 4.0 M5-INVOICES-AUTH-P1 — the owner's Invoices level, stored and versioned beside the Customers one (authorization
+  // configuration only: no invoice table, route or decision). In its OWN schema tmpos_role_invoice two SECURITY DEFINER
+  // routines, m7a_invoice_role_level_states (STABLE) and m7a_invoice_role_level_set (VOLATILE) — 021's read-back and
+  // conditional edit with the domain fixed to 'invoices', so an Invoices edit can never write or version a Customers row.
+  // It replaces, under the same names, the two domain CHECKs 020 and 021 created (check (domain = 'customers')) with
+  // check (domain in ('customers', 'invoices')); tmpos_app gains EXECUTE on the two routines and USAGE on the schema: those,
+  // and the two constraint replacements, are its only effects on objects earlier migrations created, and migrations 001-025
+  // are untouched, byte for byte. Its rollback refuses while any row whose domain is 'invoices' exists in either level
+  // table and otherwise returns exactly the 001-025 database. Proved against disposable PostgreSQL only; applied to no
+  // managed, persistent or application database. D4 now names the contiguous chain through 026; the exact-[005] gate is
+  // unchanged and still refuses.
+  '026_m5_invoice_role_levels.up.sql': '62b1c69e16cf190bcd2ffe38a436dacb27d5de4c857adeb1b76b13207d2bdf5b',
+  '026_m5_invoice_role_levels.down.sql': '93aaba2e899e28a44952f3c6d08ca32184f2c673214a34b9c6daf4c81edbbead',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the fifty expected files', () => {
+test('the migrations directory holds exactly the fifty-two expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

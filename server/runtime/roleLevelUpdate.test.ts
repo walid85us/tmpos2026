@@ -52,8 +52,11 @@ const plan = (body: unknown) => planRoleLevelUpdate({ audience: 'tenant', body, 
 test('the vocabulary is the catalog\'s: the seven levels, every built-in tenant role but the owner, and the domains a level-decided route names', () => {
   assert.deepEqual([...ROLE_LEVELS], [...PERMISSION_TOKENS].sort(), 'the seven canonical level words, as a sorted vocabulary — never an ordering');
   assert.deepEqual([...EDITABLE_TENANT_ROLES], TENANT_ROLE_IDS.filter((r) => r !== TENANT_OWNER_ROLE_ID), 'the owner role is never editable');
+  // Every domain the server DECIDES is stored; Invoices is stored as configuration only (M5-INVOICES-AUTH-P1: no route decides on it).
   const decidedDomains = [...new Set([...TENANT_ROUTE_PERMISSIONS.values()].filter((e) => !e.sensitive).map((e) => e.parent))];
-  assert.deepEqual([...ROLE_LEVEL_DOMAINS], decidedDomains, 'a level is stored only for a domain the server decides');
+  assert.deepEqual(decidedDomains, ['customers'], 'the one domain a route decides');
+  assert.deepEqual([...ROLE_LEVEL_DOMAINS], [...decidedDomains, 'invoices'], 'the decided domain, then Invoices (configuration only)');
+  assert.ok(![...TENANT_ROUTE_PERMISSIONS.values()].some((e) => e.parent === 'invoices'), 'no invoice route permission exists to enforce it');
   for (const domain of ROLE_LEVEL_DOMAINS) assert.ok(TENANT_PERMISSION_DOMAINS.includes(domain), domain);
   for (const list of [ROLE_LEVELS, EDITABLE_TENANT_ROLES, ROLE_LEVEL_DOMAINS]) assert.ok(Object.isFrozen(list));
 });
@@ -93,6 +96,24 @@ test('the plan: the runtime\'s new id, no store version, the edit and its two pr
     assert.notEqual(p, COMMAND_REQUEST_INVALID, `${roleId}/${level}`);
     assert.equal((p as { audit: { reasonCode: string } }).audit.reasonCode, `role_${roleId}_customers_to_${level}`);
   }
+});
+
+test('Invoices is accepted for every editable role and level; its reason code and body bytes differ from a Customers edit; unknown domains and roles stay refused', () => {
+  const INVOICES_BODY = { ...BODY, domain: 'invoices' };
+  for (const roleId of EDITABLE_TENANT_ROLES) for (const level of ROLE_LEVELS) {
+    const p = plan({ ...INVOICES_BODY, roleId, level }) as { changes: Record<string, unknown>; audit: { reasonCode: string }; response: { body: unknown } };
+    assert.notEqual(p, COMMAND_REQUEST_INVALID, `${roleId}/${level}`);
+    assert.equal(p.audit.reasonCode, `role_${roleId}_invoices_to_${level}`);
+    assert.equal(p.changes.domain, 'invoices');
+  }
+  const customers = plan(BODY) as { audit: { reasonCode: string }; response: { body: unknown } };
+  const invoices = plan(INVOICES_BODY) as { audit: { reasonCode: string }; response: { body: unknown } };
+  assert.notEqual(invoices.audit.reasonCode, customers.audit.reasonCode, 'the reason code names the domain');
+  assert.deepEqual(invoices.response.body, { roleLevel: { roleId: 'sales_staff', domain: 'invoices', level: 'view', version: 4 } });
+  // The idempotency fingerprint covers the body bytes (app.ts), so the two edits are never one request.
+  assert.notEqual(JSON.stringify(INVOICES_BODY), JSON.stringify(BODY));
+  for (const domain of ['sales', 'Invoices', 'invoice', 'refunds', '', null, 1]) assert.equal(plan({ ...BODY, domain }), COMMAND_REQUEST_INVALID, String(domain));
+  for (const roleId of ['store_owner', 'cashier', 'system_owner']) assert.equal(plan({ ...INVOICES_BODY, roleId }), COMMAND_REQUEST_INVALID, roleId);
 });
 
 test('a body the contract refuses plans nothing: exactly the six fields, an editable role, the one domain, a canonical level, a bounded reason and two well-formed preconditions', () => {
@@ -146,7 +167,7 @@ test('the contract registers with no event, as a create of its own aggregate typ
   const [contract] = defineCommands([ROLE_LEVEL_UPDATE_CONTRACT], defineOutboxEvents([])).list();
   assert.deepEqual(contract, {
     kind: 'tenant.role.level.update', mode: 'create', aggregateType: 'tenant_role_level', events: [],
-    changes: { roleId: { type: 'enum', values: ['manager', 'technician', 'sales_staff'] }, domain: { type: 'enum', values: ['customers'] },
+    changes: { roleId: { type: 'enum', values: ['manager', 'technician', 'sales_staff'] }, domain: { type: 'enum', values: ['customers', 'invoices'] },
       level: { type: 'enum', values: ['approve', 'create', 'edit', 'full', 'manage', 'none', 'view'] },
       expectedTenant: { type: 'string', maxLength: 36 }, expectedVersion: { type: 'integer', min: 0, max: Number.MAX_SAFE_INTEGER } },
   });

@@ -200,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 12 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 13 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -215,6 +215,8 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 12 frozen tenant routes', ()
     // M7A-CUSTOMERS-P7: the customer edit, the route table's one templated command.
     { method: 'PATCH', path: '/api/v1/customers/{id}', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
+    // M5-INVOICES-AUTH-P1: the Invoices level read-back (configuration only), beside the Customers one.
+    { method: 'GET', path: '/api/v1/roles/levels/invoices', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
@@ -233,7 +235,7 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
   const tenantAdmission: TenantAdmissionPort = Object.freeze({ admit: async () => Object.freeze({ outcome: 'refused' }), probe: async () => true });
   const limiter: DistributedRateLimiter = { consume: async () => ({ outcome: 'unavailable' }), probe: async () => true };
   const sessions = composeProductionSessions(VALID_ENV, {
-    store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels']),
+    store: createMemorySessionStore(), tenantAdmission, rateLimiter: () => limiter, tenantReads: new Set(['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices']),
     roleLevels: async () => ({}),
   }, { audiences: ['tenant'], tokenVerifier: SYNTHETIC_VERIFIER });
   const readiness = createReadinessState();

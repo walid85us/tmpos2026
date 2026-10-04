@@ -123,7 +123,7 @@ const statesRow = (s0: unknown = state('manager'), s1: unknown = state('technici
 
 test('the directory read is ONE statement into 021 on the trusted tenant, answering stored ?? null and the version in role order, frozen', async () => {
   const r = recording([statesRow(state('manager', 'view', 3), state('technician'), state('sales_staff', 'none', 1))]);
-  const answer = await readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, TENANT);
+  const answer = await readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, TENANT, 'customers');
   assert.deepEqual(answer, [{ roleId: 'manager', stored: 'view', version: 3 }, { roleId: 'technician', stored: null, version: 0 },
     { roleId: 'sales_staff', stored: 'none', version: 1 }]);
   assert.ok(Object.isFrozen(answer) && answer.every((e) => Object.isFrozen(e)));
@@ -131,12 +131,12 @@ test('the directory read is ONE statement into 021 on the trusted tenant, answer
   assert.match(r.texts[0], DIRECTORY_TEXT);
   assert.deepEqual(r.values, [[TENANT]], 'the trusted tenant alone, bound');
   for (const level of ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full']) {
-    const all = await readRoleLevelDirectory(recording([statesRow(state('manager', level), state('technician', level), state('sales_staff', level))]).sql as unknown as PgTransactionScope, TENANT);
+    const all = await readRoleLevelDirectory(recording([statesRow(state('manager', level), state('technician', level), state('sales_staff', level))]).sql as unknown as PgTransactionScope, TENANT, 'customers');
     assert.deepEqual(all.map((e) => e.stored), [level, level, level], level);
   }
-  assert.deepEqual((await readRoleLevelDirectory(recording([statesRow()]).sql as unknown as PgTransactionScope, TENANT)).map((e) => [e.stored, e.version]),
+  assert.deepEqual((await readRoleLevelDirectory(recording([statesRow()]).sql as unknown as PgTransactionScope, TENANT, 'customers')).map((e) => [e.stored, e.version]),
     [[null, 0], [null, 0], [null, 0]], 'nothing stored, never edited');
-  assert.equal((await readRoleLevelDirectory(recording([statesRow(state('manager', 'view', Number.MAX_SAFE_INTEGER))]).sql as unknown as PgTransactionScope, TENANT))[0].version,
+  assert.equal((await readRoleLevelDirectory(recording([statesRow(state('manager', 'view', Number.MAX_SAFE_INTEGER))]).sql as unknown as PgTransactionScope, TENANT, 'customers'))[0].version,
     Number.MAX_SAFE_INTEGER);
 });
 
@@ -168,15 +168,15 @@ test('a directory answer out of shape — in any of the three roles — is a FAU
     ['020\'s three-column row', [{ r0: {}, r1: {}, r2: {} }]], ['a readRoleLevels row', [{ levels: {} }]],
   );
   for (const [label, answer] of bad) {
-    await assert.rejects(readRoleLevelDirectory(recording(answer).sql as unknown as PgTransactionScope, TENANT), /role levels answer invalid/, label);
+    await assert.rejects(readRoleLevelDirectory(recording(answer).sql as unknown as PgTransactionScope, TENANT, 'customers'), /role levels answer invalid/, label);
   }
   for (const tenant of ['not-a-uuid', TENANT.toUpperCase(), '', ` ${TENANT}`, null, 42]) {
     const r = recording([statesRow()]);
-    await assert.rejects(readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, tenant as never), /role levels answer invalid/, String(tenant));
+    await assert.rejects(readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, tenant as never, 'customers'), /role levels answer invalid/, String(tenant));
     assert.deepEqual(r.texts, [], 'no statement');
   }
   // A driver error is not caught or rewritten here: it propagates, and the route answers the bounded 503.
-  await assert.rejects(readRoleLevelDirectory(recording(new Error('connection reset')).sql as unknown as PgTransactionScope, TENANT), /connection reset/);
+  await assert.rejects(readRoleLevelDirectory(recording(new Error('connection reset')).sql as unknown as PgTransactionScope, TENANT, 'customers'), /connection reset/);
 });
 
 test('the directory read runs in one bounded transaction on the composition\'s client, with the request\'s signal, and a fault propagates', async () => {
@@ -302,6 +302,100 @@ test('a routine error propagates uncaught, and nothing is called without the rev
     const r = recording([DERIVED]);
     assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(r.sql, m, authority as never), 'unavailable', label);
     assert.deepEqual(r.texts, [], `${label}: no statement`);
+  }
+});
+
+// --- M5-INVOICES-AUTH-P1: the Invoices domain beside Customers -------------------------------------------------------------
+
+test('the all-domain read admits exactly customers and invoices, each at a canonical level, and faults on any other domain or level', async () => {
+  const both = await readRoleLevels(recording([{ levels: { customers: 'view', invoices: 'edit' } }]).sql as unknown as PgTransactionScope, TENANT, 'manager');
+  assert.deepEqual(both, { customers: 'view', invoices: 'edit' });
+  assert.ok(Object.isFrozen(both));
+  assert.deepEqual(await readRoleLevels(recording([{ levels: { invoices: 'none' } }]).sql as unknown as PgTransactionScope, TENANT, 'manager'), { invoices: 'none' });
+  for (const levels of [{ sales: 'view' }, { customers: 'view', refunds: 'full' }, { Invoices: 'view' }, { invoices: 'Full' }, { invoices: null }, { invoices: 3 }]) {
+    await assert.rejects(readRoleLevels(recording([{ levels }]).sql as unknown as PgTransactionScope, TENANT, 'manager'), /role levels answer invalid/, JSON.stringify(levels));
+  }
+});
+
+const INVOICE_DIRECTORY_TEXT = /^select tmpos_role_invoice\.m7a_invoice_role_level_states\(\?::uuid\) as states$/;
+
+test('the directory read is one FIXED statement per domain — 021 for customers, 026 for invoices — validated identically; any other domain throws before a statement', async () => {
+  const invoices = recording([statesRow(state('manager', 'edit', 4), state('technician'), state('sales_staff', 'none', 1))]);
+  assert.deepEqual(await readRoleLevelDirectory(invoices.sql as unknown as PgTransactionScope, TENANT, 'invoices'), [
+    { roleId: 'manager', stored: 'edit', version: 4 }, { roleId: 'technician', stored: null, version: 0 }, { roleId: 'sales_staff', stored: 'none', version: 1 }]);
+  assert.equal(invoices.texts.length, 1);
+  assert.match(invoices.texts[0], INVOICE_DIRECTORY_TEXT);
+  assert.deepEqual(invoices.values, [[TENANT]], 'the trusted tenant alone — the domain is in the routine, never a value');
+  const customers = recording([statesRow()]);
+  await readRoleLevelDirectory(customers.sql as unknown as PgTransactionScope, TENANT, 'customers');
+  assert.match(customers.texts[0], DIRECTORY_TEXT);
+  for (const domain of ['sales', 'Invoices', 'invoice', '', null, undefined, 1, 'customers; select 1']) {
+    const r = recording([statesRow()]);
+    await assert.rejects(readRoleLevelDirectory(r.sql as unknown as PgTransactionScope, TENANT, domain as never), /role levels answer invalid/, String(domain));
+    assert.deepEqual(r.texts, [], 'no statement');
+  }
+  for (const bad of [[], [statesRow(), statesRow()], [{ states: [state('technician'), state('manager'), state('sales_staff')] }], [{ states: [state('manager'), state('technician', 'Full'), state('sales_staff')] }],
+    [{ states: [state('manager'), state('technician'), state('sales_staff', null, -1)] }], [{ states: null }]] as Array<readonly Record<string, unknown>[]>) {
+    await assert.rejects(readRoleLevelDirectory(recording(bad).sql as unknown as PgTransactionScope, TENANT, 'invoices'), /role levels answer invalid/);
+  }
+});
+
+test('the composed directory read binds its domain: the Invoices reader asks 026, the default reader 021', async () => {
+  const texts: string[] = [];
+  const client: SupervisedPgClient = Object.freeze({
+    transaction: async <T>(_signal: AbortSignal, _bounds: TransactionBounds, work: (scope: PgTransactionScope) => Promise<T>): Promise<T> => {
+      const r = recording([statesRow()]);
+      const out = await work(r.sql as unknown as PgTransactionScope);
+      texts.push(...r.texts);
+      return out;
+    },
+    end: async (): Promise<void> => undefined,
+  });
+  const signal = new AbortController().signal;
+  await createPostgresRoleLevelDirectory({ client }, 'invoices')(TENANT, signal);
+  await createPostgresRoleLevelDirectory({ client }, 'customers')(TENANT, signal);
+  await createPostgresRoleLevelDirectory({ client })(TENANT, signal);
+  assert.match(texts[0], INVOICE_DIRECTORY_TEXT);
+  assert.match(texts[1], DIRECTORY_TEXT);
+  assert.match(texts[2], DIRECTORY_TEXT);
+});
+
+test('the mutator dispatches by domain to one fixed statement each: invoices into 026 (no domain parameter, five bound values), customers into 021 unchanged; judged identically; any other domain is unavailable before a statement', async () => {
+  const invoicesChanges = { ...mutation().changes, domain: 'invoices' };
+  const r = recording([DERIVED]);
+  assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(r.sql, mutation({ changes: invoicesChanges }), AUTHORITY), 'applied');
+  assert.equal(r.texts.length, 2, 'the routine, then the recent sign-in judged again');
+  assert.match(r.texts[0].replace(/\s+/g, ' '),
+    /^select o_outcome, o_tenant_id, o_actor_id, o_membership_id, o_level, o_version from tmpos_role_invoice\.m7a_invoice_role_level_set\(\?::text, \?::text, \?::text, \?::uuid, \?::bigint\)$/);
+  assert.deepEqual(r.values[0], [SESSION_KEY, 'sales_staff', 'view', TENANT, String(EXPECTED_VERSION)], 'key, role, level, asserted tenant and version — the domain is hard-coded in the routine');
+  assert.ok(!r.texts[0].includes('role_level_set_v2'), 'never the Customers routine');
+  const customers = recording([DERIVED]);
+  assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(customers.sql, mutation(), AUTHORITY), 'applied');
+  assert.match(customers.texts[0], /tmpos_role_edit\.m7a_role_level_set_v2/);
+  assert.ok(!customers.texts[0].includes('tmpos_role_invoice'));
+  // The same judgement per domain.
+  const cases: Array<[string, readonly Record<string, unknown>[], string]> = [
+    ['no row', [], 'refused'], ['two rows', [DERIVED, DERIVED], 'mismatch'], ['another tenant', [{ ...DERIVED, o_tenant_id: OTHER }], 'mismatch'],
+    ['another actor', [{ ...DERIVED, o_actor_id: OTHER }], 'mismatch'], ['another grant', [{ ...DERIVED, o_membership_id: OTHER }], 'mismatch'],
+    ['another level', [{ ...DERIVED, o_level: 'none' }], 'mismatch'], ['a wrong version', [{ ...DERIVED, o_version: String(EXPECTED_VERSION) }], 'mismatch'],
+    ['a tenant mismatch', [REFUSED_AS('tenant_mismatch')], 'precondition_failed'], ['a version conflict', [REFUSED_AS('version_conflict')], 'precondition_failed'],
+    ['a version conflict naming a level', [{ ...REFUSED_AS('version_conflict'), o_level: 'view' }], 'mismatch'],
+  ];
+  for (const [label, answer, expected] of cases) {
+    assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(recording(answer).sql, mutation({ changes: invoicesChanges }), AUTHORITY), expected, label);
+  }
+  // The post-wait recent-auth recheck is the same for Invoices.
+  const stale = recording([DERIVED], false);
+  assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(stale.sql, mutation({ changes: invoicesChanges }), AUTHORITY), 'refused');
+  assert.ok(stale.texts[0].includes('m7a_invoice_role_level_set') && stale.texts[1].includes('clock_timestamp'));
+  const failed = recording([REFUSED_AS('version_conflict')], false);
+  assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(failed.sql, mutation({ changes: invoicesChanges }), AUTHORITY), 'precondition_failed');
+  assert.equal(failed.texts.length, 1, 'no clock for a failed precondition');
+  // Unknown domains never reach a statement.
+  for (const domain of ['sales', 'Invoices', '', 'customers,invoices', null, 7]) {
+    const u = recording([DERIVED]);
+    assert.equal(await ROLE_LEVEL_UPDATE_MUTATOR.apply(u.sql, mutation({ changes: { ...mutation().changes, domain } }), AUTHORITY), 'unavailable', String(domain));
+    assert.deepEqual(u.texts, [], 'no statement');
   }
 });
 
