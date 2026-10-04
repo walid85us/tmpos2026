@@ -21,6 +21,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp, createBoundedServer, createReadinessState } from './app.js';
 import { defineCommands, prepareCommand } from './commandTransaction.js';
 import type { CommandTransactionPort, TransactionCommand } from './commandTransaction.js';
+import { isValidRequestId } from './correlation.js';
 import {
   CUSTOMER_CREATE_CONTRACT, CUSTOMER_CREATE_PERMISSION, CUSTOMER_CREATE_ROUTE, normalizeCustomerName, planCustomerCreate,
 } from './customerCreate.js';
@@ -478,6 +479,22 @@ async function withChain(fn: (h: Harness) => Promise<void>): Promise<void> {
 
 const errorOf = (r: Reply): unknown => (JSON.parse(r.body) as { error?: unknown }).error;
 
+// DA-182: a refusal is exactly { error, requestId }. `error` is the code; `requestId` is the request's correlator, echoed in
+// X-Request-Id: the client's own valid X-Request-Id, else a random UUID, which may spell "555". So the contact check reads
+// every field but the correlator, and the correlator is pinned to the header (and, with no inbound ID, to a generated UUID).
+function assertRefusalNamesNoContact(r: Reply, code: string, label: string, inboundRequestId?: string): void {
+  const body = JSON.parse(r.body) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], `${label}: bounded`);
+  assert.equal(body.error, code, `${label}: ${r.body}`);
+  assert.equal(body.requestId, r.headers['x-request-id'], `${label}: requestId is the correlator`);
+  assert.ok(isValidRequestId(body.requestId), `${label}: a bounded correlator`);
+  if (inboundRequestId === undefined) assert.match(body.requestId as string, UUID_V4_RE, `${label}: a generated correlator`);
+  else assert.equal(body.requestId, inboundRequestId, `${label}: the client's own correlator`);
+  const { requestId: _correlator, ...named } = body;
+  const text = JSON.stringify(named);
+  assert.ok(!text.includes('555') && !text.includes('@'), `${label}: the refusal names no contact`);
+}
+
 test('a committed create answers 201 { customer: { id, name } }, and the port receives the trusted scope and the presenting session', async () => {
   await withChain(async (h) => {
     const r = await h.post({ body: JSON.stringify({ name: '  Ada  Lovelace ' }), headers: { 'x-tenant-id': T2, 'x-role': 'store_owner' } });
@@ -639,8 +656,8 @@ test('contacts ride in the fingerprint as bytes: the same key and bytes replay t
       ['the same values, padded', JSON.stringify({ name: 'Ada Lovelace', phone: ' +1 555 0100', email: 'ada@example.test' })],
     ] as const) {
       const r = await h.post({ key, body: changed });
-      assert.deepEqual([r.status, errorOf(r)], [422, 'idempotency_key_reused'], `${label}: ${r.body}`);
-      assert.ok(!r.body.includes('555') && !r.body.includes('@'), `${label}: the refusal names no contact`);
+      assert.equal(r.status, 422, `${label}: ${r.body}`);
+      assertRefusalNamesNoContact(r, 'idempotency_key_reused', label);
     }
     // A name-only body and the same name with an explicit null phone are two spellings: the bytes, not the parsed value, bind.
     const nameOnly = randomUUID();
@@ -650,6 +667,33 @@ test('contacts ride in the fingerprint as bytes: the same key and bytes replay t
     assert.equal(h.commits.length, 2, 'one commit per key; no refusal re-planned');
     for (const line of h.logs) assert.ok(!line.includes('555 0') && !line.includes('example.test'), 'no log line carries a contact');
   });
+});
+
+test('DA-182: a 422 whose correlator spells "555" meets the refusal contract; a refusal that reflects a contact, or a foreign correlator, does not', async () => {
+  // The correlator is pinned through the chain's existing inbound X-Request-Id rule, so the "555" is certain, not a dice roll.
+  const correlator = 'b5550100-5550-4555-9555-555055505550';
+  await withChain(async (h) => {
+    const key = randomUUID();
+    assert.equal((await h.post({ key, body: JSON.stringify({ name: 'Ada Lovelace', phone: '+1 555 0100' }) })).status, 201);
+    const r = await h.post({ key, body: JSON.stringify({ name: 'Ada Lovelace', phone: '+1 555 0199' }), headers: { 'x-request-id': correlator } });
+    assert.equal(r.status, 422, r.body);
+    assert.ok(r.body.includes('555'), 'the correlator does spell "555": a blanket body scan would refuse this valid refusal');
+    assertRefusalNamesNoContact(r, 'idempotency_key_reused', 'a "555" correlator', correlator);
+  });
+  // The contract check still fails a refusal that names a contact, or whose requestId is not the request's correlator.
+  const reply = (body: object, requestId = correlator): Reply => ({ status: 422, headers: { 'x-request-id': requestId }, body: JSON.stringify(body) });
+  // Each case names the one check that must refuse it, so a case cannot pass on another check's failure.
+  const foreign = 'req-another-valid-correlator';
+  for (const [label, r, refusedBy] of [
+    ['a reflected phone', reply({ error: 'idempotency_key_reused +1 555 0199', requestId: correlator }), /a reflected phone: \{/],
+    ['a reflected email', reply({ error: 'ada@example.test', requestId: correlator }), /a reflected email: \{/],
+    ['an extra field', reply({ error: 'idempotency_key_reused', requestId: correlator, phone: '+1 555 0199' }), /an extra field: bounded/],
+    ['a valid correlator that is not the header', reply({ error: 'idempotency_key_reused', requestId: foreign }), /requestId is the correlator/],
+    ['the header and body agreeing on a foreign correlator', reply({ error: 'idempotency_key_reused', requestId: foreign }, foreign), /the client's own correlator/],
+  ] as const) assert.throws(() => assertRefusalNamesNoContact(r, 'idempotency_key_reused', label, correlator), { name: 'AssertionError', message: refusedBy }, label);
+  // With no inbound ID the correlator must be one the chain generated: a valid token that is not a UUID is refused.
+  assert.throws(() => assertRefusalNamesNoContact(reply({ error: 'idempotency_key_reused', requestId: foreign }, foreign), 'idempotency_key_reused', 'no inbound ID'),
+    { name: 'AssertionError', message: /a generated correlator/ });
 });
 
 test('a name-only body keeps the fingerprint the pre-contact code computed: pinned, and a record sealed with Location before contacts replays unchanged', async () => {

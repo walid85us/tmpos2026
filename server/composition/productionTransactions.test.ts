@@ -1590,8 +1590,11 @@ test('M7TK-08 the composed tenant store commits the customer create in the ADR-3
   const withContacts = prepared({ name: 'Ada', phone: '+1 555 0100', email: 'ada@example.test' });
   assert.deepEqual(await ttx.transactions.port.commit(withContacts.command, new AbortController().signal), { outcome: 'committed' });
   assert.deepEqual(kernel.statements.find((st) => step(st.text) === '023')?.values, [REVAL_SESSION_KEY, withContacts.id, 'Ada', '+1 555 0100', 'ada@example.test']);
-  const contactAudit = JSON.stringify(kernel.statements.find((st) => step(st.text) === 'audit')?.values);
-  assert.ok(!contactAudit.includes('555') && !contactAudit.includes('example.test'), 'no contact in the audit record');
+  // DA-182: the record's ids (its event id among them) are random UUIDs that may spell "555", so the contact scan reads every
+  // bound value but a canonical UUID — a value that holds a whole UUID and nothing else cannot carry a phone or an email.
+  const auditValues = kernel.statements.find((st) => step(st.text) === 'audit')?.values ?? [];
+  const contactAudit = JSON.stringify(auditValues.filter((v) => !(typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v))));
+  assert.ok(auditValues.length > 0 && !contactAudit.includes('555') && !contactAudit.includes('example.test'), 'no contact in the audit record');
   // A logout that committed between the peek and the hold: the held read finds nothing, and nothing is written.
   kernel.statements.length = 0;
   endedAfterPeek = true;
