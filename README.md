@@ -65,7 +65,8 @@ Status labels used below:
 - Plans that switch modules on as a shop grows: a starter plan covers checkout, customers, invoices and support, and higher plans add repairs, inventory, services, purchasing, staff, warranties, marketing, prospects, shipping and returns. *(Preview)*
 - Per-role permissions with graded levels (view, create, edit, manage, approve and full), so a team member can, for example, view repair tickets without being able to close or reassign them. *(Preview)*
 - Approving refunds and return payouts is a separate permission. The built-in owner and manager roles include it by default, custom roles start without it, and it can be granted or removed role by role. *(Preview)*
-- Server-checked shop staff sessions: removing a person's access, or suspending their business or store, refuses their next request; a sign-in never completes on access that has already been removed; an ended session is never brought back; and each sign-in, re-confirmation and sign-out is kept in a durable record. *(Built, not deployed; the shop app uses it for the owner's customer-access settings on its role screen and for its customer directory)*
+- Server-checked shop staff sessions: removing a person's access, or suspending their business or store, refuses their next request; a sign-in never completes on access that has already been removed; an ended session is never brought back; and each sign-in, re-confirmation and sign-out is kept in a durable record. *(Built, not deployed; the shop app uses it for the owner's customer- and invoice-access settings on its role screen and for its customer directory)*
+- The business owner choosing, role by role, how much invoice access the built-in Manager, Technician and Sales Associate roles have, saved on the server. Each change needs a recent sign-in and a reason, and changes made through the product are recorded in the audit trail. *(Built, not deployed; the shop app's role screen shows it beside the customer-access settings and shows a change as saved only once the server confirms it. Only the owner can see or change it. This is the saved setting only: invoices themselves are still kept in the browser, and the server does not yet check this setting for any invoice action)*
 
 ### At the counter: point of sale
 - Cart-based checkout for products, services and repairs, with line-item quantity and price edits. *(Preview)*
@@ -246,7 +247,7 @@ TM POS2026 is delivered in stages. "Done" means the work is complete and tested;
 - **Next:** putting this foundation to work in each shop area as it moves onto the platform.
 
 ### Next up
-1. **The first server-backed actions inside an individual shop.** Adding a customer, and the owner's per-role customer access, are built and not yet deployed.
+1. **The first server-backed actions inside an individual shop.** Adding a customer, and the owner's per-role customer access, are built and not yet deployed. The owner's per-role invoice access setting is built too, ahead of invoices themselves moving to the server.
 2. **Secure shop staff sign-in** connected to the server, matching what already exists for administrators.
 
 ### Stage 5: Shop data moves onto the platform *(Planned)*
