@@ -6,7 +6,7 @@
 // AUTHORIZATION CONFIGURATION only: no invoice table, route or decision exists, and nothing here claims that one is
 // server-enforced.
 //
-// WHAT IS PROVEN. 001-026 applied clean, every ledger checksum the pinned one, 026's postcondition re-proven over the
+// WHAT IS PROVEN. 001-027 applied clean, every ledger checksum the pinned one, 026's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M5IRL-01); the installed inventory, the
 // two widened CHECKs and the login's effective privileges — EXECUTE on the two new routines and on 020's and 021's, nothing
 // on either table, nothing for the audit writer, anon, authenticated or PUBLIC (M5IRL-02); the defaults — every role reads
@@ -29,7 +29,7 @@
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a
 // cluster this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every
 // fixture is synthetic and randomly suffixed, and every issuer key is random bytes made here. It leaves the shared service
-// as it found it: 026 applied, the ledger 001-026, the issuer key row it found, no Invoices or Customers level, version,
+// as it found it: 026 (and 027) applied, the ledger 001-027, the issuer key row it found, no Invoices or Customers level, version,
 // session or customer row of its own, and its login dropped — every cleanup step runs even after another fails, these
 // postconditions are then asserted, and any failure fails the suite.
 import test from 'node:test';
@@ -169,7 +169,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-026), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-027), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -345,11 +345,11 @@ async function surface(db) {
 // M5IRL-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M5IRL-01: 001-026 applied clean, every checksum the pinned one; 026\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M5IRL-01: 001-027 applied clean, every checksum the pinned one; 026\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 26 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 27 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   const onDisk = (version) => {
     const [name] = readdirSync(MIG_DIR).filter((f) => f.startsWith(`${version}_`) && f.endsWith('.up.sql'));
@@ -689,7 +689,7 @@ test('M5IRL-08: 026 applied by the trusted executor over a 025 database (ledger 
   // Back to a real 025 database: 026's committed down file and its ledger row removed in one READ COMMITTED transaction
   // (no Invoices row exists, so the rollback runs). `restore` re-applies the file and re-inserts the exact row, for a failure.
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '025');
-  assert.deepEqual(undone, ['026'], 'only 026 was above 025');
+  assert.deepEqual(undone, ['027', '026'], 'only 026 (and 027 above it, M7B-INVOICES-P1) was above 025');
   try {
     assert.deepEqual((await owner`select pg_catalog.to_regnamespace('tmpos_role_invoice') is null as gone`)[0].gone, true);
     assert.deepEqual((await owner`select version from public.schema_migrations order by version`).map((r) => r.version),
@@ -711,10 +711,10 @@ test('M5IRL-08: 026 applied by the trusted executor over a 025 database (ledger 
     assert.equal(before.levels[0].length, 2, 'A holds two Customers rows');
     // The upgrade as a deployment runs it: the trusted executor finds 026 pending and applies it, recording its ledger row.
     const upgrade = await trustedApply();
-    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['026']], JSON.stringify(upgrade).slice(0, 400));
+    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['026', '027']], JSON.stringify(upgrade).slice(0, 400));
     const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
     assert.deepEqual(ledger.map((r) => [r.version, r.dirty, r.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, false, m.checksum]),
-      'the ledger is 001-026 again, 026 at its pinned checksum');
+      'the ledger is 001-027 again, 026 at its pinned checksum');
     assert.deepEqual({
       levels: [await storedRows(T_A), await storedRows(T_B)], versions: [await versionRows(T_A), await versionRows(T_B)],
       states: [await statesCus(T_A), await statesCus(T_B)],
@@ -821,5 +821,5 @@ test('M5IRL-09: 026 down refuses while an Invoices level row and its version, on
   assert.deepEqual(await setInv(ownerKey, 'manager', 'view', T_A, 0), [await applied(OWNER_A, 'view', 1)], 're-applied, the edit works');
   await resetState();
   const ledger = await owner`select version from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => r.version), Array.from({ length: 26 }, (_, i) => String(i + 1).padStart(3, '0')), 'the ledger is still 001-026');
+  assert.deepEqual(ledger.map((r) => r.version), Array.from({ length: 27 }, (_, i) => String(i + 1).padStart(3, '0')), 'the ledger is still 001-027');
 });

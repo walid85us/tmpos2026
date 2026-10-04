@@ -296,19 +296,29 @@ const PINNED = {
   // unchanged and still refuses.
   '026_m5_invoice_role_levels.up.sql': '62b1c69e16cf190bcd2ffe38a436dacb27d5de4c857adeb1b76b13207d2bdf5b',
   '026_m5_invoice_role_levels.down.sql': '93aaba2e899e28a44952f3c6d08ca32184f2c673214a34b9c6daf4c81edbbead',
+  // Phase 4.0 M7B-INVOICES-P1 — the stores a tenant session may act at. In its OWN schema tmpos_store_access one STABLE
+  // SECURITY DEFINER routine, m7b_store_directory, derives from the session key alone (the minted, live session under the
+  // installed issuer key, the 016 standing it was minted at, a read-status account) every store where that standing names
+  // exactly one usable store-scope grant whose store is in the grant's tenant, ambiguous stores left out; tmpos_app gains
+  // EXECUTE on it and USAGE on the schema, and nothing earlier is touched (001-026 byte for byte). Its rollback refuses only
+  // while an invoice draft object of migration 028 exists. Proved against disposable PostgreSQL only; applied to no
+  // managed, persistent or application database. D4 now names the contiguous chain through 027; the exact-[005] gate is
+  // unchanged and still refuses.
+  '027_m7b_store_access.up.sql': 'ca06d7a01dded533155bf90a7f2e7414ac8364b5c704691a8f879a8b7babe487',
+  '027_m7b_store_access.down.sql': '6bb51777be3ce40e20b79eb338f85a2ec5f528e40a57cbc92419ef1be3b7c170',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the fifty-two expected files', () => {
+test('the migrations directory holds exactly the fifty-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

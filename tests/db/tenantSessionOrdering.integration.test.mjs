@@ -28,6 +28,9 @@
 //   * THE RATE LIMITER: the testkit's in-memory limiter, fresh for every instance.
 //   * THE ROUTES: no tenant business route ships (D1/GAP-11), so the protected tenant requests are the harness-only witness
 //     routes (tenantAdmissionWitness.harness.mjs), served beside the production inventory; M5T-L1 asserts they stay out of it.
+//     Since M7B-INVOICES-P1 the STORE witness is served on the closed store template /api/v1/stores/{storeId}/invoice-drafts
+//     (a store-scope route registers nowhere else) and requested at the actor's own store; the literal store witness it
+//     replaced is asserted refused at registration (M5T-G2).
 //   * PASS-THROUGH GATES on the session root's side only: the store's get and update and the tenant admission read as the
 //     root receives them, each holding ONE armed call (by session key or provider reference) until the scenario releases it.
 //     Establish's own hold and re-read run over the root's client inside its transaction and are never wrapped.
@@ -58,7 +61,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, testDriverVia, childEnv } from './localPostgres.harness.mjs';
-import { STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES } from './tenantAdmissionWitness.harness.mjs';
+import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, storeWitnessPath } from './tenantAdmissionWitness.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -72,7 +75,7 @@ import { SHIPPING_ROUTES } from '../../server/entry/productionEntry.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { testRequestLimits } from '../../server/runtime/rateLimiter.testkit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
-import { sessionPaths } from '../../server/runtime/routes.ts';
+import { defineRoutes, sessionPaths } from '../../server/runtime/routes.ts';
 import { REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES, SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
 import { TENANT_DISPLAY_NAME_EVENTS } from '../../server/runtime/tenantDisplayName.ts';
 import { TENANT_STATUS_EVENTS } from '../../server/runtime/tenantStatus.ts';
@@ -906,13 +909,27 @@ test('M5T-C2: a login parked inside its transaction: the suspension waits for it
 // M5T-D, H2-H5: round trips on an IDLE session — a standing that returns never revives it (DA-41)
 // ---------------------------------------------------------------------------
 
+/**
+ * The witness path a fixture is served on: the tenant witness for a tenant grant, and (M7B-INVOICES-P1) the store witness
+ * on the store template at the fixture's own store for a store grant.
+ */
+const witnessPathOf = (f) => (f.store === null ? WITNESS_PATH : storeWitnessPath(f.store));
+/** `s` served on its fixture's witness: 200, and the trusted tenant, store and role the authorizer selected for it. */
+async function servedAs(inst, s, f, why) {
+  const reply = await inst.witness(s, witnessPathOf(f));
+  assert.equal(reply.status, 200, `${why}: ${reply.body}`);
+  const body = JSON.parse(reply.body);
+  assert.deepEqual([body.tenant, body.store, body.roleId], [f.tenant, f.store, f.store === null ? 'store_owner' : 'manager'], `${why}: the selected scope`);
+}
+
 /** An idle session across `roundTrip`, all committed before its next request: refused for its witness, never revived. */
-async function idleAcross({ A, B }, fixture, roundTrip, path = WITNESS_PATH) {
+async function idleAcross({ A, B }, fixture, roundTrip) {
   const f = await fixture;
+  const path = witnessPathOf(f);
   const lab = labeller();
   const s = await A.signIn(f.who);
   lab.name('K1', s.key);
-  assert.equal((await A.witness(s, path)).status, 200, 'served before the episode');
+  await servedAs(A, s, f, 'served before the episode');
   const bound = await witnessOf(s.key);
   await roundTrip(f);
   assert.deepEqual(await liveLabels(f.who, lab), ['K1'], 'the idle session made no request: nothing ended it');
@@ -924,7 +941,7 @@ async function idleAcross({ A, B }, fixture, roundTrip, path = WITNESS_PATH) {
   const fresh = await B.signIn(f.who);
   lab.name('K2', fresh.key);
   assert.notEqual(await witnessOf(fresh.key), bound, 'admitted anew under a witness the old cookie never had');
-  assert.equal((await A.witness(fresh, path)).status, 200, 'a fresh login works');
+  await servedAs(A, fresh, f, 'a fresh login works');
   assert.deepEqual(await liveLabels(f.who, lab), ['K2']);
 }
 
@@ -1142,15 +1159,29 @@ test('M5T-G2: a tenant-grant session on the store route and a store-grant sessio
   withPair(async ({ A, B }) => {
     const byTenant = await tenantActor('g2-tenant');
     const byStore = await storeActor('g2-store');
+    // A store of the tenant the tenant grant names, made before any sign-in (M7B-INVOICES-P1: the store route's path names it).
+    const storeOfTenant = await newStore(byTenant.tenant, 'g2-tenant-store');
+    // A second store of the store grant's OWN tenant, which no grant of byStore names: a selector that let a store grant
+    // reach every store of its tenant would serve it, so this — not the cross-tenant store above — isolates store selection.
+    const sibling = await newStore(byStore.tenant, 'g2-sibling-store');
+    assert.notEqual(sibling, byStore.store, 'the sibling is not the granted store');
+    const [{ n: siblingGrants }] = await owner`
+      select count(*)::int as n from user_membership where internal_user_id = ${byStore.who.id} and store_id = ${sibling}`;
+    assert.equal(siblingGrants, 0, 'byStore holds no grant at the sibling store');
     const lab = labeller();
     const sT = await A.signIn(byTenant.who);
     const sS = await A.signIn(byStore.who);
     lab.name('T1', sT.key);
     lab.name('S1', sS.key);
-    await refusedWith(B, await B.witness(sT, STORE_WITNESS_PATH), 403, 'authz_denied', 'a tenant grant selects no store');
+    // M7B-INVOICES-P1: the literal store witness this test once asked on is refused at registration; the store route is the
+    // store template, asked here at a store of the tenant the tenant grant names — a tenant grant still selects no store.
+    assert.throws(() => defineRoutes([STORE_WITNESS_ROUTE]), /route_path_invalid/, 'no store route without a path naming the store');
+    await refusedWith(B, await B.witness(sT, storeWitnessPath(storeOfTenant)), 403, 'authz_denied', 'a tenant grant selects no store');
     await refusedWith(B, await B.witness(sS, WITNESS_PATH), 403, 'authz_denied', 'a store grant selects no tenant scope');
-    assert.equal((await A.witness(sT, WITNESS_PATH)).status, 200, 'the tenant session still serves its own scope');
-    assert.equal((await A.witness(sS, STORE_WITNESS_PATH)).status, 200, 'the store session still serves its own scope');
+    await refusedWith(B, await B.witness(sS, storeWitnessPath(sibling)), 403, 'authz_denied', 'a store grant selects no other store of its own tenant');
+    await refusedWith(B, await B.witness(sS, storeWitnessPath(storeOfTenant)), 403, 'authz_denied', 'cross-tenant: a store grant selects no store of another tenant');
+    await servedAs(A, sT, byTenant, 'the tenant session still serves its own scope');
+    await servedAs(A, sS, byStore, 'the store session still serves its own scope');
     assert.deepEqual([await liveLabels(byTenant.who, lab), await liveLabels(byStore.who, lab)], [['T1'], ['S1']], 'a 403 ends no session');
   }));
 
@@ -1185,25 +1216,26 @@ test('M5T-G4: a tenant grant never admits an administrative login', () =>
 
 test('M5T-H1: a store suspended under an active tenant ends an ACTIVE store session at once and refuses its login; reactivated, a new login works', () =>
   withPair(async ({ A, B }) => {
-    const { who, store } = await storeActor('h1');
+    const f = await storeActor('h1');
+    const { who, store } = f;
     const lab = labeller();
     const s = await A.signIn(who);
     lab.name('K1', s.key);
-    assert.equal((await A.witness(s, STORE_WITNESS_PATH)).status, 200);
+    await servedAs(A, s, f, 'served at its store before the suspension');
     await setStore(store, 'suspended');
-    await refusedWith(B, await B.witness(s, STORE_WITNESS_PATH), 401, 'session_admission_denied', 'the next request while suspended');
+    await refusedWith(B, await B.witness(s, witnessPathOf(f)), 401, 'session_admission_denied', 'the next request while suspended');
     assert.deepEqual(await liveLabels(who, lab), [], 'the session ended, not merely refused');
     await refusedWith(A, await A.login(who), 401, 'login_admission_denied', 'no login under a suspended store');
     await setStore(store, 'active');
     const fresh = await A.signIn(who);
-    assert.equal((await B.witness(fresh, STORE_WITNESS_PATH)).status, 200);
+    await servedAs(B, fresh, f, 'a new login after the reactivation is served at its store');
   }));
 
 test('M5T-H2: a store suspended and reactivated while a store session is idle: 401 session_version_mismatch, never revived (DA-41)', () =>
   withPair((pair) => idleAcross(pair, storeActor('h2'), async ({ store }) => {
     await setStore(store, 'suspended');
     await setStore(store, 'active');
-  }, STORE_WITNESS_PATH)));
+  })));
 
 /** A store moved to `tenant` by the owner, committed. */
 const reparent = (store, tenant) => committed('store re-parented', (sql) => sql`update public.store set tenant_id = ${tenant} where store_id = ${store}`);
@@ -1219,21 +1251,22 @@ test('M5T-H3: a store moved to another tenant and back by the owner while a stor
   withPair((pair) => idleAcross(pair, storeActor('h3'), async ({ tenant, store }) => {
     await reparent(store, await newTenant('h3-elsewhere'));
     await reparent(store, tenant);
-  }, STORE_WITNESS_PATH)));
+  })));
 
 test('M5T-H4: a store deleted and re-inserted as a replica, naming its old access version, while a store session is idle: 401 session_version_mismatch, never revived', () =>
   withPair((pair) => idleAcross(pair, storeActor('h4'), async ({ store }) => {
     await reinsertedAsReplica('public.store', 'store_id', store);
-  }, STORE_WITNESS_PATH)));
+  })));
 
 test('M5T-H5: the tenant row deleted and re-inserted as a replica while a store session is idle: 401 session_version_mismatch, never revived', () =>
   withPair((pair) => idleAcross(pair, storeActor('h5'), async ({ tenant }) => {
     await reinsertedAsReplica('public.tenant', 'tenant_id', tenant);
-  }, STORE_WITNESS_PATH)));
+  })));
 
 test('M5T-H6: another store of the same tenant moved away and back while a store session is idle: served, its witness unchanged', () =>
   withPair(async ({ A, B }) => {
-    const { who, tenant } = await storeActor('h6');
+    const f = await storeActor('h6');
+    const { who, tenant } = f;
     const unrelated = await newStore(tenant, 'h6-unrelated');
     const lab = labeller();
     const s = await A.signIn(who);
@@ -1241,8 +1274,7 @@ test('M5T-H6: another store of the same tenant moved away and back while a store
     const bound = await witnessOf(s.key);
     await reparent(unrelated, await newTenant('h6-elsewhere'));
     await reparent(unrelated, tenant);
-    const served = await B.witness(s, STORE_WITNESS_PATH);
-    assert.equal(served.status, 200, `a store no grant of this actor names moved nothing it is bound to: ${served.body}`);
+    await servedAs(B, s, f, 'a store no grant of this actor names moved nothing it is bound to');
     assert.equal(await witnessOf(s.key), bound);
     assert.deepEqual(await liveLabels(who, lab), ['K1']);
   }));
@@ -1285,7 +1317,7 @@ test('M5T-H8: a store login parked inside its transaction: the store suspension 
     await waitIdle();
     const records = await assertRecords(who, lab, ['login:K1', 'login:K2<-K1'], 'the login rotated K1 and was recorded');
     await assertCommitOrder(t, 'login before store suspension', records.find((x) => x.session === 'K2').xid, r.xid);
-    await refusedWith(A, await A.witness(successor, STORE_WITNESS_PATH), 401, 'session_admission_denied', 'the store suspension then takes effect');
+    await refusedWith(A, await A.witness(successor, storeWitnessPath(store)), 401, 'session_admission_denied', 'the store suspension then takes effect');
     assert.deepEqual(await liveLabels(who, lab), []);
   }));
 

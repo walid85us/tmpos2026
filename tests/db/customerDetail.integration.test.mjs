@@ -4,7 +4,7 @@
 // the production adapter over it; the HTTP route — its 400/401/403/404 chain, the parked revocation and the compiled entry —
 // is tests/db/tenantEntry.integration.test.mjs's (M7TE-14, M7TE-C1).
 //
-// WHAT IS PROVEN. 001-026 applied clean with 022's checksum the sha256 of its up bytes; 022's postcondition re-proven over the
+// WHAT IS PROVEN. 001-027 applied clean with 022's checksum the sha256 of its up bytes; 022's postcondition re-proven over the
 // applied state and refusing the widenings it names; a second apply refused (M7CD-01). The login EXECUTEs the routine and
 // uses its schema, reads nothing of 017's table or page directly, and tmpos_audit_writer, anon and authenticated execute
 // nothing; the real startup preflight accepts the login and the ledger (M7CD-02). The routine's answers: own customer; another
@@ -16,8 +16,8 @@
 // and with EXECUTE withdrawn its probe false and its read a throw (M7CD-06). Reads write nothing (M7CD-07). Rollback: 022
 // down alone leaves exactly the 001-021 grants (the preflight names only missing grants) and a re-apply is byte-identical in
 // definition and ACL; with a 021 version row present 022 still rolls back while 021 refuses; the ledger's newest-first
-// rollBackAbove('020') answers ['026', '025', '024', '023', '022', '021'] and restores all five (M7CD-08; M7A-CUSTOMERS-P6, -P7 and
-// -P8: 023, 024 and 025 sit above 022); out of order, 020 rolled back under 021 and 022
+// rollBackAbove('020') answers ['027', '026', '025', '024', '023', '022', '021'] and restores all five (M7CD-08; M7A-CUSTOMERS-P6, -P7 and
+// -P8: 023, 024 and 025 sit above 022; M5-INVOICES-AUTH-P1 and M7B-INVOICES-P1: 026 and 027 above those); out of order, 020 rolled back under 021 and 022
 // leaves the routine RAISING at call and the adapter throwing (a 503, fail closed), 022's rollback refusing until 020 is back,
 // and the supported order 022, 021, 020 succeeding (M7CD-09).
 //
@@ -47,6 +47,8 @@ const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'u
 const DOWN_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.down.sql`, 'utf8');
 const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
 const DOWN_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.down.sql`, 'utf8');
+/** M7B-INVOICES-P1: 027 (store discovery) sits above 026 and rolls back first. */
+const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
 const DOWN_021 = readFileSync(`${MIG_DIR}/021_m7a_role_level_precondition.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
@@ -128,7 +130,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-026), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-027), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -288,10 +290,10 @@ const [SEED_RO] = await seed(T_RO, [`Ro ${SUFFIX}`]);
 // M7CD-01..02: the migration and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7CD-01: 001-026 applied clean, 022\'s checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
+test('M7CD-01: 001-027 applied clean, 022\'s checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 26 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 27 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal(ledger[21].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/022_m7a_customer_detail.up.sql`)).digest('hex'));
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_022).simple())).code, undefined, 'the postcondition holds as applied');
@@ -627,7 +629,7 @@ test('M7CD-08: 022 down alone leaves exactly the 001-021 grants and a byte-ident
   await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
   const later = await rollBackAbove(owner, MIG_DIR, '020');
   try {
-    assert.deepEqual(later.rolledBack, ['026', '025', '024', '023', '022', '021'], 'newest first');
+    assert.deepEqual(later.rolledBack, ['027', '026', '025', '024', '023', '022', '021'], 'newest first');
     const [gone] = await owner`select pg_catalog.to_regnamespace('tmpos_customer_detail') is null as detail,
       pg_catalog.to_regnamespace('tmpos_role_edit') is null as edit`;
     assert.deepEqual({ ...gone }, { detail: true, edit: true });
@@ -672,7 +674,7 @@ test('M7CD-09: out of order, 020 rolled back under 021, 022 and 023 leaves an ed
   assert.equal(outOfOrder.value.detailGone, true, '020 re-applied: 022 rolls back');
   const supported = await rolledBack(RC, async (tx) => {
     await clear(tx);
-    for (const file of [DOWN_026, DOWN_025, DOWN_024, DOWN_023, DOWN_022, DOWN_021, DOWN_020]) await tx.unsafe(file).simple();
+    for (const file of [DOWN_027, DOWN_026, DOWN_025, DOWN_024, DOWN_023, DOWN_022, DOWN_021, DOWN_020]) await tx.unsafe(file).simple();
     return { ...(await tx`select pg_catalog.to_regnamespace('tmpos_customer_search') is null as customer_search,
       pg_catalog.to_regnamespace('tmpos_customer_edit') is null as customer_edit,
       pg_catalog.to_regnamespace('tmpos_customer_contact') is null as contact,

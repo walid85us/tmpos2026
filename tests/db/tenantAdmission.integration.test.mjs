@@ -8,7 +8,10 @@
 // WHAT IS NOT REAL HERE, STATED EXACTLY. Three things, none of them on the path under test.
 //   * THE ROUTE. There is no shipped tenant business route — every tenant-scope permission is
 //     undecidable until owner decision D1 — so the protected request is a witness route declared in
-//     the harness beside this file (tenantAdmissionWitness.harness.mjs) and injected here.
+//     the harness beside this file (tenantAdmissionWitness.harness.mjs) and injected here. Since
+//     M7B-INVOICES-P1 its STORE witness is served on the closed store template
+//     /api/v1/stores/{storeId}/invoice-drafts (a store-scope route registers nowhere else), requested
+//     at the actor's own store; the literal store witness it replaced is asserted refused at registration.
 //   * THE IDENTITY VERIFIER. A disposable cluster has no identity provider, so a bearer token is
 //     mapped to a synthetic provider reference. Everything AFTER that point — admission, the session
 //     record, revalidation, authorization and the lifecycle decision — is the composed production
@@ -42,7 +45,7 @@ import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
-import { STORE_WITNESS_PATH, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES } from './tenantAdmissionWitness.harness.mjs';
+import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, storeWitnessPath } from './tenantAdmissionWitness.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -62,7 +65,7 @@ import {
 } from '../../server/composition/tenantAuthorization.ts';
 import { createAdmittedPlatformAuthorizer, createPlatformSessionAdmission } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
-import { sessionPaths } from '../../server/runtime/routes.ts';
+import { defineRoutes, sessionPaths } from '../../server/runtime/routes.ts';
 import { ADMISSION_REVALIDATE_MS } from '../../server/runtime/sessions.ts';
 import { assertSessionStoreContract, SESSION_CONTRACT_EPOCH, createMemorySessionStore } from '../../server/runtime/memorySessionStore.testkit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
@@ -124,7 +127,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-026, a real non-owner runtime login, real adapters, the issuer key installed by the owner
+// setup: real migrations 001-027, a real non-owner runtime login, real adapters, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -322,6 +325,16 @@ const reasonOf = (logs, reply) => {
   assert.equal(lines.length, 1, 'exactly one log line for the request');
   return lines[0].reason;
 };
+/**
+ * A STORE-ONLY session on the TENANT witness (M7B-INVOICES-P1): the boundary admits it and the authorizer then refuses it —
+ * 403 authz_denied, a store grant selects no tenant scope — which is reached only after admission said yes (a refused
+ * admission is a 401 before any authorizer runs).
+ */
+async function storeOnlyAdmitted(witness, logs, session, why) {
+  const reply = await witness(session);
+  assert.equal(reply.status, 403, `${why}: ${reply.body}`);
+  assert.equal(reasonOf(logs, reply), 'authz_denied', why);
+}
 /** A refusal's body is the fixed `{ error, requestId }` and nothing else: no scope, no reason, no tenant. */
 const assertRefusalBody = (reply, error) => {
   const body = JSON.parse(reply.body);
@@ -427,13 +440,13 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-026 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
+test('M5A-01: migrations 001-027 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-026, so this run applies nothing and its report lists no version.
+  // 001-027, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027']
       .map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.
@@ -672,22 +685,39 @@ test('M5A-04b: THE REVIVAL PROOF — a session IDLE across a whole suspend-and-r
 // ---------------------------------------------------------------------------
 
 test('M5A-05: a STORE session is denied by its parent tenant\'s suspension, and restored by its reactivation', async () => {
-  await withRuntime(async ({ login, witness }) => {
+  // M7B-INVOICES-P1: the literal store witness is refused at registration (a store-scope route sits on a store template
+  // only); the store witness is served on the store template, requested at the actor's own store.
+  assert.throws(() => defineRoutes([STORE_WITNESS_ROUTE]), /route_path_invalid/, 'the literal store witness is refused at registration');
+  const atStore = storeWitnessPath(STORE_B);
+  /** The one store grant, at its own tenant and store, as admission reads it now. */
+  const storeGrantAdmitted = async (why) => {
+    const answer = await tenantAdmission.admit(STORE_ACTOR.principal, AbortSignal.timeout(10_000));
+    assert.deepEqual(answer.principal.memberships.map((m) => [m.scopeType, m.tenant, m.store, m.roleId]), [['store', TENANT_B, STORE_B, 'manager']], why);
+  };
+  await withRuntime(async ({ login, witness, logs }) => {
     const session = await login(STORE_ACTOR);
     assert.equal(session.status, 200);
-    const served = await witness(session, STORE_WITNESS_PATH);
+    const served = await witness(session, atStore);
     assert.equal(served.status, 200, served.body);
     assert.deepEqual([bodyOf(served).tenant, bodyOf(served).store, bodyOf(served).roleId], [TENANT_B, STORE_B, 'manager']);
+    // A store grant answers its store and nothing above it: on the tenant witness the admitted session is refused by the
+    // authorizer (403), not by admission (401).
+    await storeOnlyAdmitted(witness, logs, session, 'a store grant selects no tenant scope');
+    await storeGrantAdmitted('the standing the boundary admitted it at');
 
     await suspend(TENANT_B);
-    assert.equal((await witness(session, STORE_WITNESS_PATH)).status, 401, 'the store is denied by its tenant, which it never names');
+    assert.equal((await witness(session, atStore)).status, 401, 'the store is denied by its tenant, which it never names');
     assert.equal(await sessionsOf(STORE_ACTOR), 0);
     assert.equal((await login(STORE_ACTOR)).status, 401, 'and cannot sign in again beneath a suspended tenant');
 
     await reactivate(TENANT_B);
     const after = await login(STORE_ACTOR);
     assert.equal(after.status, 200);
-    assert.equal((await witness(after, STORE_WITNESS_PATH)).status, 200);
+    const restored = await witness(after, atStore);
+    assert.equal(restored.status, 200, restored.body);
+    assert.deepEqual([bodyOf(restored).tenant, bodyOf(restored).store, bodyOf(restored).roleId], [TENANT_B, STORE_B, 'manager'],
+      'the reactivation restored the same store grant at the same store');
+    await storeGrantAdmitted('and admission reads the restored store grant again');
   });
 });
 
@@ -702,10 +732,15 @@ test('M5A-05b: a STORE suspended under an ACTIVE tenant ends the ACTIVE session 
   const keeper = await actor('store-keeper', { scope: 'store', tenant, store, role: 'manager' });
   const idler = await actor('store-idler', { scope: 'store', tenant, store, role: 'manager' });
   const setStore = (status) => owner`update store set status = ${status} where store_id = ${store}`;
+  const atStore = storeWitnessPath(store);
+  const servedAtStore = async (reply, why) => {
+    assert.equal(reply.status, 200, `${why}: ${reply.body}`);
+    assert.deepEqual([bodyOf(reply).tenant, bodyOf(reply).store, bodyOf(reply).roleId], [tenant, store, 'manager'], why);
+  };
   await withRuntime(async ({ login, witness, logs }) => {
     const session = await login(keeper);
     assert.equal(session.status, 200);
-    assert.equal((await witness(session, STORE_WITNESS_PATH)).status, 200);
+    await servedAtStore(await witness(session, atStore), 'served at its store before the suspension');
     const boundBefore = await witnessOf(keeper);
     // A second actor on the same store signs in and then makes NO request until the episode is over.
     const idle = await login(idler);
@@ -713,7 +748,7 @@ test('M5A-05b: a STORE suspended under an ACTIVE tenant ends the ACTIVE session 
     const idleBound = await witnessOf(idler);
 
     await setStore('suspended');
-    assert.equal((await witness(session, STORE_WITNESS_PATH)).status, 401, 'the next request is refused at once');
+    assert.equal((await witness(session, atStore)).status, 401, 'the next request is refused at once');
     assert.equal(reasonsIn(logs).at(-1), 'session_admission_denied', 'admission refused: no tenant or store grant remains');
     assert.equal(await sessionsOf(keeper), 0, 'and the session is ended, not merely refused');
     assert.equal((await login(keeper)).status, 401, 'nor can the actor sign in while the store is suspended');
@@ -733,11 +768,11 @@ test('M5A-05b: a STORE suspended under an ACTIVE tenant ends the ACTIVE session 
     assert.equal(after.status, 200);
     assert.notEqual(await witnessOf(keeper), boundBefore,
       'the witness did NOT return to its pre-suspension value: the store access version moved twice');
-    assert.equal((await witness(after, STORE_WITNESS_PATH)).status, 200);
+    await servedAtStore(await witness(after, atStore), 'a fresh login is served at its store again');
     // THE CLOSURE ITSELF: the idle session, admitted before the suspension and untouched since, is
     // refused on its next request for the version — exactly what M5A-04b proves for a tenant — and ended.
     assert.equal(await witnessOf(idler), idleBound, 'still bound to the witness it was admitted at');
-    assert.equal((await witness(idle, STORE_WITNESS_PATH)).status, 401, 'not revived by the reactivation');
+    assert.equal((await witness(idle, atStore)).status, 401, 'not revived by the reactivation');
     assert.equal(reasonsIn(logs).at(-1), 'session_version_mismatch',
       'refused because the witness moved, not because the cookie was unknown');
     assert.equal(await sessionsOf(idler), 0, 'and ended, so it cannot be presented again');

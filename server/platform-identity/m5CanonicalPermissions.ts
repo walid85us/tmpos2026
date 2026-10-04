@@ -78,6 +78,17 @@
 // create_customers is — same materializer, same owner-edited levels, no role default changed, no role-name shortcut —
 // and the read_only rule denies it like every threshold above View. The load-time threshold set widens to exactly View,
 // Create and Edit; nothing above Edit is admitted except the owner rule.
+//
+// M7B-INVOICES-P1 UPDATE — THE FIRST STORE ROUTE PERMISSIONS. The owner's stage brief makes invoice drafts owned by a real
+// store, decided by an explicit active STORE-scope grant at exactly the requested store (no tenant-to-store inheritance).
+// So two STORE route permissions are decidable here, at STORE scope ONLY (STORE_ROUTE_PERMISSIONS): view_invoice_drafts,
+// the Invoices domain at View or above, and create_invoice_drafts, the Invoices domain at Create or above AND the Customers
+// domain at View or above on the SAME role (its `corequisite`: a draft names a customer of the store's tenant). Each is
+// decided by the same tenant materializer, ordering, owner-edited levels and read_only rule as the tenant route permissions
+// — the store grant's role is one of the four tenant roles, and its levels are its TENANT's (no store-level edits exist).
+// Neither is a tenant key: canonicalPermission('tenant', k) does not find them, so a tenant route naming one names nothing,
+// and the tenant route permissions stay undecidable at store scope. No key, default or ordering of the catalog changes, no
+// sub-permission (reopen_invoice included) is reused, and no money approval is implied by any level.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -112,6 +123,12 @@ export interface CanonicalPermission {
   readonly sensitive: boolean;
   /** The parent level this grant is gated behind, for the platform plane. */
   readonly threshold: PermissionLevelValue | null;
+  /**
+   * A second domain the SAME role must hold at the given level for this permission to be granted — present only on a store
+   * route permission that names one (M7B-INVOICES-P1: create_invoice_drafts requires Customers at View). One permission,
+   * one decision: the authorizer, the revalidator and the database routine all evaluate both conditions.
+   */
+  readonly corequisite?: Readonly<{ parent: string; threshold: PermissionLevelValue }>;
 }
 
 /**
@@ -146,7 +163,8 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
 /**
  * The tenant plane's ROUTE permissions (M7A-CUSTOMERS-P1, -P3): each names exactly one tenant DOMAIN and the level a role
  * must hold on it, as the owner fixed it for one route. They are the only tenant keys this module decides, and only at
- * TENANT scope: a store-scope route naming one is naming nothing (no store route has been decided). A route permission
+ * TENANT scope: a store-scope route naming one is naming nothing (store scope decides only STORE_ROUTE_PERMISSIONS,
+ * M7B-INVOICES-P1). A route permission
  * never shares a key with a sub-permission, and every one but the owner-only edit_role_levels is non-sensitive at View,
  * Create or Edit — the module refuses to load otherwise.
  *   * view_customers   — GET /api/v1/customers: the Customers domain at View or above.
@@ -184,6 +202,36 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
   }
 }
 
+/**
+ * The STORE route permissions (M7B-INVOICES-P1): decided at STORE scope only, for a store-scope grant at exactly the
+ * requested store (tenantAuthorization.ts). Each names one tenant DOMAIN and the level the store grant's role must hold on
+ * it — its tenant's owner-edited level, the catalog default otherwise — and, where a draft also names a customer, a
+ * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View or Create,
+ * shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain.
+ *   * view_invoice_drafts   — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
+ *   * create_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts: the Invoices domain at Create or above AND the
+ *     Customers domain at View or above.
+ */
+export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
+  ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
+  ['create_invoice_drafts', Object.freeze({
+    key: 'create_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'create' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
+]));
+
+const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create']);
+for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
+  if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
+  if (entry.sensitive || entry.threshold === null || !STORE_ROUTE_THRESHOLDS.has(entry.threshold)) {
+    throw new Error('store route permission is not a non-sensitive View or Create threshold');
+  }
+  const corequisite = entry.corequisite;
+  if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {
+    throw new Error('a store route permission corequisite is not View on another domain');
+  }
+}
+
 /** The one message a refusal to evaluate the tenant plane carries, so every caller says the same thing. */
 export const GAP_11_TENANT_ORDERING_UNRESOLVED =
   'tenant and store permissions are undecidable until owner decision D1 defines a specific route and its authoritative product rules (docs/phase-4/04 section 3, M5-GAP11-P5)';
@@ -193,25 +241,28 @@ export const GAP_11_TENANT_ORDERING_UNRESOLVED =
  * lowercasing, no alias, no prefix match. A platform scope reads the platform plane; tenant and store
  * scopes read the tenant plane, which is the same plane for both (a store role is a tenant role). Any
  * other scope names no plane, so nothing is found in it (M5-GAP11-P1-R1: it used to read the tenant
- * plane, as if an unknown scope were a tenant one).
+ * plane, as if an unknown scope were a tenant one). Each route-permission map is read at its own scope alone: the tenant
+ * route permissions at tenant scope, the store route permissions (M7B-INVOICES-P1) at store scope.
  */
 export function canonicalPermission(scope: CanonicalPermissionScope, key: unknown): CanonicalPermission | null {
   if (typeof key !== 'string' || key.length === 0) return null;
   if (scope === 'platform') return CANONICAL_PLATFORM_PERMISSIONS.get(key) ?? null;
   if (scope === 'tenant') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? TENANT_ROUTE_PERMISSIONS.get(key) ?? null;
-  if (scope === 'store') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? null;
+  if (scope === 'store') return CANONICAL_TENANT_PERMISSIONS.get(key) ?? STORE_ROUTE_PERMISSIONS.get(key) ?? null;
   return null;
 }
 
 /**
  * Whether (scope, key) is a permission this module DECIDES — answers 'granted' or 'denied' for, never 'undecidable':
- * every platform key, and the tenant route permissions at tenant scope. A deployment serves only routes whose
- * permission this answers true for (productionTransactions.ts uncataloguedRoutePermissions).
+ * every platform key, the tenant route permissions at tenant scope, and the store route permissions at store scope
+ * (M7B-INVOICES-P1). A deployment serves only routes whose permission this answers true for (productionTransactions.ts
+ * uncataloguedRoutePermissions).
  */
 export function isDecidablePermission(scope: CanonicalPermissionScope, key: unknown): boolean {
   if (typeof key !== 'string') return false;
   if (scope === 'platform') return CANONICAL_PLATFORM_PERMISSIONS.has(key);
   if (scope === 'tenant') return TENANT_ROUTE_PERMISSIONS.has(key);
+  if (scope === 'store') return STORE_ROUTE_PERMISSIONS.has(key);
   return false;
 }
 
@@ -300,8 +351,9 @@ function platformSubGranted(role: PlatformRoleDefinition, key: string, visiting:
  * permission's domain — its default, removed if the domain's plan gate is not entitled (the empty entitlement set here,
  * so a plan-gated domain materializes 'none' and denies; Customers is a core domain and never gated), capped to View
  * for a read-only limitation — must meet the threshold on the tenant family ordering. A role the materializer does not
- * know (a platform role, a custom or misspelled id) materializes nothing and is denied. Every other tenant or store
- * key remains 'undecidable'.
+ * know (a platform role, a custom or misspelled id) materializes nothing and is denied. A store ROUTE permission
+ * (M7B-INVOICES-P1) is decided the same way at store scope, its corequisite domain (if any) on the same materialized role.
+ * Every other tenant or store key remains 'undecidable'.
  *
  * M7A-CUSTOMERS-P3-R1: on that branch `levels` — the owner's durable edits of the selected role, as the database answered
  * them — are REQUIRED and replace the role's defaults for the domains they name; missing or malformed, the permission is
@@ -320,6 +372,20 @@ export function evaluateCanonicalPermission(input: {
   const entry = canonicalPermission(scope, permission);
   if (entry === null) return 'denied';
   if (limitation !== 'none' && limitation !== 'read_only') return 'denied';
+  // M7B-INVOICES-P1: a store route permission is decided exactly as a tenant one — the same required levels, read_only rule,
+  // materializer and ordering — and, when it names a corequisite, the same materialized role must meet that too.
+  if (scope === 'store' && STORE_ROUTE_PERMISSIONS.get(entry.key) === entry) {
+    if (typeof roleId !== 'string' || !isPlainRecord(levels)) return 'denied';
+    if (limitation === 'read_only' && (entry.threshold !== 'view' || entry.sensitive)) return 'denied';
+    const materialized = materializeTenantPermissions(roleId, {}, limitation === 'read_only', levels);
+    const meets = (parent: string, threshold: PermissionLevelValue | null): boolean => {
+      const level = hasOwn(materialized, parent) ? materialized[parent] : 'none';
+      return isPermissionLevel(level) && threshold !== null && meetsTenantPermissionLevel(level, threshold);
+    };
+    const corequisite = entry.corequisite;
+    if (!meets(entry.parent, entry.threshold) || (corequisite !== undefined && !meets(corequisite.parent, corequisite.threshold))) return 'denied';
+    return 'granted';
+  }
   if (scope === 'tenant' && TENANT_ROUTE_PERMISSIONS.get(entry.key) === entry) {
     if (typeof roleId !== 'string') return 'denied';
     // The role's current definition is required: no edits read is not "no edits" (R3).

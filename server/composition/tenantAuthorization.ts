@@ -69,6 +69,20 @@
 // revalidation does (postgresPrincipalResolver.ts), and it still refuses a deadline on a route whose permission is not
 // sensitive — no such route declares one — so neither kind can commit under the other's evidence.
 //
+// M7B-INVOICES-P1 UPDATE — REAL STORE SCOPE. The owner's stage brief settles the store-route half of D1 for invoice drafts:
+// a request at store S is authorized only through the actor's OWN active store-scope grant at exactly S (no tenant-to-store
+// inheritance: a tenant grant never answers a store route, and a grant at another store never counts for S). The store
+// templates (routes.ts) carry the store the path names, and the chain hands it to this authorizer as RouteView.storeTarget —
+// a REQUESTED TARGET that only narrows among the actor's own store grants: exactly one grant with scopeType 'store' and that
+// store selects it, through selectScope's lifecycle decision; none (a missing store, a foreign store, a non-canonical
+// segment, a store the actor holds nothing at) and two or more (different roles at one store: ambiguous) are the same
+// denial. Without a target there is no store selection at all: a store-scope requirement whose view carries no string
+// target (a literal path — which routes.ts refuses to register at store scope anyway) is denied, never answered by the one
+// store grant the actor happens to hold, whatever the key. The decided store keys are the catalog's store route
+// permissions (m5CanonicalPermissions.ts STORE_ROUTE_PERMISSIONS), on the store grant's role and its TENANT's owner-edited
+// levels. The revalidator accepts a store scope for exactly those keys — checked before anything is read — and re-selects
+// with the trusted scope's own store. Tenant-scope decisions are unchanged.
+//
 // EVERY DENIAL IS ONE VALUE, `false` — the chain's generic 403 — whatever failed: no actor, no grant,
 // an ambiguous grant, a suspended tenant, a stale witness, an uncatalogued permission, a read-only
 // actor on a route that is not a read. A caller cannot tell which, so none of them is a probe.
@@ -244,10 +258,15 @@ export function readKey(method: string, path: string): string {
 
 /**
  * The ONE selection both the authorizer and the command revalidator make: the actor's own grants at `scope` — exactly
- * one, never a choice between several — through selectScope's lifecycle decision. The selected scope, or null.
+ * one, never a choice between several — through selectScope's lifecycle decision. The selected scope, or null. At STORE
+ * scope only a TARGET selects (M7B-INVOICES-P1: a store template's path names its store, the revalidator the trusted
+ * scope's own): only the store grants AT `storeTarget` count, so a grant at another store never answers, and anything but a
+ * string — a null target (a non-canonical segment), no target at all (a view without one), any other value — selects
+ * nothing. The tenant-scope selection ignores the argument and is exactly what it was before M7B.
  */
-function scopeOf(resolved: TrustedPrincipal, scope: AuthorizationScope): TrustedScope | null {
-  const atScope = resolved.memberships.filter((m) => m.scopeType === scope);
+function scopeOf(resolved: TrustedPrincipal, scope: AuthorizationScope, storeTarget?: unknown): TrustedScope | null {
+  if (scope === 'store' && typeof storeTarget !== 'string') return null;
+  const atScope = resolved.memberships.filter((m) => m.scopeType === scope && (scope !== 'store' || m.store === storeTarget));
   if (atScope.length !== 1) return null;
   const selection = selectScope(resolved, scope, { tenant: atScope[0].tenant, store: atScope[0].store });
   return selection.outcome === 'selected' ? selection.scope : null;
@@ -278,7 +297,8 @@ export interface TenantRevalidatorDeps<Handle> {
 
 /**
  * The tenant store's ContextRevalidator (postgresTransactionalStore.ts, `contextScope: 'tenant'`; M7A-CUSTOMERS-P3, ADR-34):
- * exactly true only when the scope is one this authorizer could have handed out — tenant, not read-only — the tenant
+ * exactly true only when the scope is one this authorizer could have handed out — tenant, or (M7B-INVOICES-P1) store for a
+ * store route permission the catalog decides, judged before any read; not read-only — the tenant
  * session that presented the command is still live and now held by the committing transaction, the standing it is bound
  * to still admits it at its own witness and selects exactly this scope, and `permission` is still granted to that role.
  *
@@ -316,9 +336,12 @@ export function createTenantContextRevalidator<Handle>(
     throw new TypeError('tenant revalidator dependencies invalid');
   }
   return async (sql: Handle, scope: TrustedScope, permission: string, authNotAfter: number | null, sessionKey: string | null): Promise<boolean> => {
-    if (scope.scope !== 'tenant' || scope.limitation !== 'none' || scope.tenant === null || sessionKey === null) return false;
+    // A tenant scope, or (M7B-INVOICES-P1) a store scope naming its store for a permission the catalog decides there — that
+    // last checked before anything is read, so a store scope never reaches a read for a key no store route may require.
+    const store = scope.scope === 'store' && scope.store !== null && isDecidablePermission('store', permission);
+    if ((scope.scope !== 'tenant' && !store) || scope.limitation !== 'none' || scope.tenant === null || sessionKey === null) return false;
     // A deadline exactly when the permission is sensitive: the route that requires it declares a recent authentication.
-    const sensitive = canonicalPermission('tenant', permission)?.sensitive === true;
+    const sensitive = canonicalPermission(scope.scope, permission)?.sensitive === true;
     if (sensitive ? !(typeof authNotAfter === 'number' && Number.isSafeInteger(authNotAfter) && authNotAfter > 0) : authNotAfter !== null) return false;
     const seen = await peek(sql, sessionKey);
     if (seen === undefined) return false;
@@ -333,13 +356,14 @@ export function createTenantContextRevalidator<Handle>(
     // the command was authorized on — the actor, the very grant, its role and tenant — and the permission decided again.
     const answer = admittedOf(await read(sql, principal));
     if (!answer.admitted || answer.securityVersion !== live.securityVersion) return false;
-    const selected = scopeOf(answer.principal, 'tenant');
+    // At store scope the selection is made again with the trusted scope's own store, never anything the request carried.
+    const selected = scopeOf(answer.principal, scope.scope, scope.scope === 'store' ? scope.store : undefined);
     if (selected === null || !sameScope(selected, scope)) return false;
     // The recent authentication, when the permission requires one, on the database's clock — after every lock above.
     if (authNotAfter !== null && (await fresh(sql, authNotAfter)) !== true) return false;
     // The role's current definition, on this transaction, for exactly the grant the database just confirmed.
     const edits = await levels(sql, scope.tenant, scope.roleId);
-    return evaluateCanonicalPermission({ scope: 'tenant', roleId: scope.roleId, permission, limitation: 'none', levels: edits }) === 'granted';
+    return evaluateCanonicalPermission({ scope: scope.scope, roleId: scope.roleId, permission, limitation: 'none', levels: edits }) === 'granted';
   };
 }
 
@@ -370,13 +394,16 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       // route's scope. Exactly one names the tenant (and store) this request may act under; none is
       // unauthorized and several are ambiguous, and no authoritative document says which to prefer.
       //
-      // ITS COST, STATED. No route path carries a tenant or store segment, so there is nothing a
-      // request could legitimately narrow WITH. An actor holding grants on two stores is therefore
-      // denied EVERY store route, and one holding only a tenant grant is denied every store route as
-      // well. Both fail closed, which is the right direction, but a genuine multi-store operator
-      // cannot use a store route under this rule. Settling that is part of owner decision D1, which
-      // also gates the first such route, so nothing is blocked by it today.
-      const scope = scopeOf(resolved, requirement.scope);
+      // ITS COST, STATED. No route path carries a tenant segment, so there is nothing a request could legitimately narrow a
+      // tenant route WITH: an actor holding two tenant grants is denied it. A store route exists only as a STORE template
+      // (routes.ts, M7B-INVOICES-P1), whose path names its store: the view's storeTarget, read once, here, narrows the store
+      // grants to those at that store — so a multi-store operator is served at each store it holds exactly one grant at, two
+      // roles at one store are ambiguous, a tenant-only actor is denied every store route (no inheritance), and a null
+      // target (any non-canonical spelling) selects nothing. The target is a SELECTOR, never proof: a store the actor holds
+      // no grant at selects nothing, whatever exists in the database. A store requirement on a view WITHOUT a target selects
+      // nothing either — never the actor's one store grant by default, whatever the key (routes.ts refuses to register such
+      // a route at all). A tenant requirement ignores the target.
+      const scope = scopeOf(resolved, requirement.scope, route.storeTarget);
       if (scope === null) return false;
 
       // The permission must NAME something: a key the catalog does not define is a typo or an
@@ -388,7 +415,7 @@ export function createTenantRouteAuthorizer(deps: TenantAuthorizerDeps): RouteAu
       // undecidable and is not decided here (see the header: the production inventory refuses such a route at startup).
       if (canonicalPermission(requirement.scope, requirement.permission) === null) return false;
       if (isDecidablePermission(requirement.scope, requirement.permission)) {
-        if (scope.tenant === null) return false; // a decided key is tenant scope, which always names its tenant
+        if (scope.tenant === null) return false; // a decided key is tenant or store scope, which always names its tenant
         const levels = await readLevels(scope.tenant, scope.roleId, signal);
         if (evaluateCanonicalPermission({
           scope: requirement.scope, roleId: scope.roleId, permission: requirement.permission, limitation: scope.limitation, levels,

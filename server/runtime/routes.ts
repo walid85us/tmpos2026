@@ -42,7 +42,22 @@
 // suffix. The route's own handler (for the PATCH, the runtime) judges the id segment only after the
 // chain has authenticated and authorized the request, so an unauthenticated caller learns nothing
 // about an id's shape;
-// no literal route may sit anywhere below a template's prefix. Definitions are copied and
+// no literal route may sit anywhere below a template's prefix.
+// M7B-INVOICES-P1 — A SECOND CLOSED TEMPLATE SET, THE STORE TEMPLATES: exactly
+// GET /api/v1/stores/{storeId}/invoice-drafts, POST /api/v1/stores/{storeId}/invoice-drafts and
+// GET /api/v1/stores/{storeId}/invoice-drafts/{id}. {storeId} is a SELECTOR segment separate from the {id} target and matches
+// what {id} matches (one raw segment, 1-128 characters, no '/'); each must be a tenant-session route requiring a STORE-scope
+// permission, the POST alone an idempotency-required `command`, the two GETs taking none — and no other route may require a
+// store-scope permission at all, so no store is ever selected without a path naming it. The chain hands the store segment
+// to the authorizer as RouteView.storeTarget — the canonical lowercase uuid, or null for any other spelling, which then
+// selects no grant (a 403 like a missing or foreign store) — and nothing else ever reads it. A path outside that grammar is
+// no route (the terminal 404). No literal route may sit below /api/v1/stores/.
+// M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
+// beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
+// handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
+// and the client must name the session it checked in the session CSRF header), no trusted context, no recent sign-in, no
+// body and no idempotency: its database routine derives every store the session's actor may act at from that key alone. No
+// other path may take that shape, and that path may take no other bodiless authorization-free shape. Definitions are copied and
 // frozen at registration; the table cannot change afterwards. Handlers receive
 // (req, res, ctx) and no `next`: dispatch belongs to the chain alone, and a body reaches a
 // handler only as the parsed ctx.body. A `perform` or a planner receives no request or response at all.
@@ -94,12 +109,14 @@ export type TrustedContextPolicy = 'none' | 'required';
 export type RecentAuthPolicy = 'none' | 'required';
 
 /**
- * Whether a route's handler receives the presenting session's store key (M7A-CUSTOMERS-P2): never, or always. Only a
+ * Whether a route's handler receives the presenting session's session key (M7A-CUSTOMERS-P2): never, or always. Only a
  * session route with a declared authorization, a required trusted context and no idempotency may require it — a read
  * whose database routine binds the read to the very minted session that presented it, and derives its authority from
  * that session rather than from the scope a caller could name. Since M7A-CUSTOMERS-P5-R1 such a read, though a GET,
  * also requires the session CSRF header (app.ts), so it is bound to the session its client checked as well: a request
- * whose cookie is another session's is refused before anything is read (DA-138).
+ * whose cookie is another session's is refused before anything is read (DA-138). M7B-INVOICES-P1: the store directory,
+ * GET /api/v1/stores, is the one route that must require it with NO authorization (and so no trusted context): its routine
+ * derives every store from the session key alone (parseSessionBinding).
  */
 export type SessionBindingPolicy = 'none' | 'required';
 
@@ -147,7 +164,7 @@ export interface RouteContext {
    */
   readonly trusted: TrustedScope | null;
   /**
-   * The presenting session's store key, only on a route declaring `sessionBinding: 'required'`; a SQL parameter,
+   * The presenting session's session key, only on a route declaring `sessionBinding: 'required'`; a SQL parameter,
    * never logged, echoed or stored. Null on every other route.
    */
   readonly sessionKey: string | null;
@@ -388,8 +405,21 @@ const TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
  * target); every other template must be a GET that takes no idempotency.
  */
 const IDEMPOTENT_TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['PATCH /api/v1/customers/{id}']);
-/** Every template's path before its `/{id}`: no literal path may sit anywhere below one. */
-const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, key.indexOf(PATH_ID_SEGMENT))));
+/** The store selector segment of the store templates (M7B-INVOICES-P1). */
+export const STORE_SEGMENT = '/{storeId}';
+/** The store templates' common prefix; the store directory (below) is exactly this literal path. */
+export const STORE_DIRECTORY_PATH = '/api/v1/stores';
+/** The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1): any other {storeId} template is refused. */
+const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
+]);
+/** The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create. */
+const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([`POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`]);
+/** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
+const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
+  ...[...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, key.indexOf(PATH_ID_SEGMENT))), STORE_DIRECTORY_PATH,
+]);
 /** The longest raw segment a template matches; a longer one is no route (the terminal 404). */
 export const MAX_PATH_ID_SEGMENT_LENGTH = 128;
 /** Any uuid in PostgreSQL's canonical lowercase text form (customerDirectory.ts: 017 accepts every uuid). */
@@ -410,6 +440,19 @@ export function pathIdOf(path: string): string | null {
  */
 export function pathIdBeforeSuffixOf(path: string, suffix: string): string | null {
   return typeof path === 'string' && path.endsWith(suffix) ? pathIdOf(path.slice(0, path.length - suffix.length)) : null;
+}
+
+/**
+ * The store a request path under a STORE template names (M7B-INVOICES-P1): the canonical lowercase uuid of the segment
+ * directly after /api/v1/stores/, followed by '/', or null for any other spelling. The chain asks this of the req.path the
+ * table matched to a store template and hands it to the authorizer as RouteView.storeTarget: a selector among the actor's
+ * own store grants, never proof of access. Fixed-length slices, no backtracking.
+ */
+export function storeTargetOf(path: string): string | null {
+  const prefix = `${STORE_DIRECTORY_PATH}/`;
+  if (typeof path !== 'string' || !path.startsWith(prefix) || path.length < prefix.length + 37) return null;
+  const segment = path.slice(prefix.length, prefix.length + 36);
+  return path[prefix.length + 36] === '/' && CANONICAL_UUID_RE.test(segment) ? segment : null;
 }
 // Lowercase tokens joined by `.`, `:` or `-`, e.g. `bcp.readiness:read`.
 const PERMISSION_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
@@ -479,15 +522,18 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
  * the authorizer's trusted tenant and actor into the operation's fingerprint, so one tenant's recorded
  * response never replays in another's context, and the tenant store re-proves both inside the committing
  * transaction while holding the presenting session — which a Bearer-authenticated tenant route does not
- * have, and a `perform` never reaches. A store-scoped route may not require one: no store command has
- * been decided.
+ * have, and a `perform` never reaches. A store-scoped route may require one only as the one store command decided
+ * (M7B-INVOICES-P1): a tenant-session `command` on the closed store POST template, whose fingerprint binds the trusted
+ * tenant, store and actor the same way; every other store-scoped route may not.
  */
-function parseIdempotency(raw: unknown, method: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
+function parseIdempotency(raw: unknown, method: string, path: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
   if (raw === undefined || raw === null) throw new EnforcementSetupError('route_idempotency_policy_missing');
   if (raw === 'none') return 'none';
   const requirement = requirementOf(policy);
+  const tenantSessionCommand = command && policy.access === 'session' && policy.audience === 'tenant';
   if (raw === 'required' && method !== 'GET' && requirement !== null && (requirement.scope === 'platform'
-    || (requirement.scope === 'tenant' && command && policy.access === 'session' && policy.audience === 'tenant'))) return 'required';
+    || (requirement.scope === 'tenant' && tenantSessionCommand)
+    || (requirement.scope === 'store' && tenantSessionCommand && IDEMPOTENT_STORE_TEMPLATED_ROUTES.has(`${method} ${path}`)))) return 'required';
   throw new EnforcementSetupError('route_idempotency_policy_invalid');
 }
 
@@ -524,15 +570,23 @@ function parseRecentAuth(raw: unknown, policy: RoutePolicy): RecentAuthPolicy {
 /**
  * The session-binding policy (M7A-CUSTOMERS-P2). `required` only on a session route with a declared authorization, a
  * required trusted context and no idempotency: the key exists only on a session route, and the one route that needs it
- * is a read resolved under a trusted scope.
+ * is a read resolved under a trusted scope. M7B-INVOICES-P1: the store directory (`directory`, the header's one closed
+ * exception) MUST declare it, with no authorization and so no trusted context — its routine derives everything from the key.
  */
-function parseSessionBinding(raw: unknown, policy: RoutePolicy, trustedContext: TrustedContextPolicy, idempotency: IdempotencyPolicy): SessionBindingPolicy {
+function parseSessionBinding(raw: unknown, policy: RoutePolicy, trustedContext: TrustedContextPolicy, idempotency: IdempotencyPolicy, directory: boolean): SessionBindingPolicy {
   const declared = raw === undefined || raw === null ? 'none' : raw;
-  if (declared === 'none') return 'none';
-  if (declared === 'required' && policy.access === 'session' && policy.authorization !== null
-    && trustedContext === 'required' && idempotency === 'none') return 'required';
+  if (declared === 'none' && !directory) return 'none';
+  if (declared === 'required' && policy.access === 'session' && idempotency === 'none'
+    && (directory ? trustedContext === 'none' : policy.authorization !== null && trustedContext === 'required')) return 'required';
   throw new EnforcementSetupError('route_session_binding_invalid');
 }
+
+/**
+ * Whether a definition is the store directory's one closed shape (M7B-INVOICES-P1): GET /api/v1/stores, a TENANT session
+ * route declaring no authorization. Only that path may be a session route without one beside the session endpoints.
+ */
+const isStoreDirectory = (method: string, path: string, policy: RoutePolicy): boolean =>
+  method === 'GET' && path === STORE_DIRECTORY_PATH && policy.access === 'session' && policy.audience === 'tenant' && policy.authorization === null;
 
 /** The session-boundary rules in the header: a path's namespace and its policy's audience agree. */
 function checkBoundary(method: string, path: string, policy: RoutePolicy, body: BodyPolicy): void {
@@ -543,10 +597,11 @@ function checkBoundary(method: string, path: string, policy: RoutePolicy, body: 
   const login = method === 'POST' && path === paths.login;
   const endpoint = (method === 'GET' && path === paths.current) || (method === 'POST' && path === paths.logout);
   // Each session endpoint takes exactly its own policy and no body, whatever the registration
-  // order, and no route but the current-session and logout endpoints omits its requirement.
+  // order, and no route but the current-session and logout endpoints — and the store directory's one closed shape
+  // (M7B-INVOICES-P1) — omits its requirement.
   const valid = policy.access === 'login'
     ? login
-    : policy.access === 'session' && !login && endpoint === (policy.authorization === null);
+    : policy.access === 'session' && !login && (endpoint === (policy.authorization === null) || isStoreDirectory(method, path, policy));
   // The three session paths carry only their own endpoints: no other method may borrow one.
   const reserved = path === paths.login || path === paths.current || path === paths.logout;
   if (!valid || (reserved && !login && !endpoint) || ((login || endpoint) && body.kind !== 'none')) {
@@ -573,9 +628,13 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const { method, path, handler, perform, command } = raw;
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
-  // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one.
-  const templated = path.includes(PATH_ID_SEGMENT);
-  if (templated ? !TEMPLATED_ROUTES.has(`${method} ${path}`) || templateOf(path) === null
+  // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
+  // store template (M7B-INVOICES-P1) is one of exactly three declared strings, so its grammar is that set's.
+  const key = `${method} ${path}`;
+  const storeTemplated = path.includes(STORE_SEGMENT);
+  const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
+  if (storeTemplated ? !STORE_TEMPLATED_ROUTES.has(key)
+    : templated ? !TEMPLATED_ROUTES.has(key) || templateOf(path) === null
     : !PATH_RE.test(path) || [...TEMPLATE_PREFIXES].some((prefix) => path.startsWith(`${prefix}/`))) {
     throw new EnforcementSetupError('route_path_invalid');
   }
@@ -583,18 +642,26 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (policy.access === 'public' && method !== 'GET') throw new EnforcementSetupError('route_public_unsafe');
   const body = parseBody(raw.body, method);
   checkBoundary(method, path, policy, body);
-  const idempotency = parseIdempotency(raw.idempotency, method, policy, 'command' in raw);
+  const idempotency = parseIdempotency(raw.idempotency, method, path, policy, 'command' in raw);
   // A templated GET takes no idempotency; the closed set of templated commands takes nothing else — app.ts binds their
   // validated path id into the fingerprint (idempotency.ts `target`) and the planner context. Every other combination
-  // (a templated GET under a key, a templated write without one, a templated `perform`) is refused.
-  if (templated && (IDEMPOTENT_TEMPLATED_ROUTES.has(`${method} ${path}`)
+  // (a templated GET under a key, a templated write without one, a templated `perform`) is refused. A store template must
+  // also be a tenant-session route requiring a STORE-scope permission: its {storeId} selects among store grants only. And a
+  // STORE-scope requirement sits on a store template and nowhere else: on any other path nothing names the store, and a
+  // store may never be chosen implicitly (the tenant authorizer denies a store requirement without a target, too).
+  if (storeTemplated
+    ? policy.access !== 'session' || policy.audience !== 'tenant' || policy.authorization?.scope !== 'store'
+    : requirementOf(policy)?.scope === 'store') {
+    throw new EnforcementSetupError('route_path_invalid');
+  }
+  if ((templated || storeTemplated) && (IDEMPOTENT_TEMPLATED_ROUTES.has(key) || IDEMPOTENT_STORE_TEMPLATED_ROUTES.has(key)
     ? idempotency !== 'required' || !('command' in raw) || 'perform' in raw
     : method !== 'GET' || idempotency !== 'none')) {
     throw new EnforcementSetupError('route_path_invalid');
   }
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
-  const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency);
+  const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency, isStoreDirectory(method, path, policy));
   const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth, sessionBinding };
   // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {
@@ -625,25 +692,43 @@ const isIdSegment = (segment: string): boolean =>
  * a template by its declared path. A literal path always matches exactly. Otherwise a request path matches the template
  * ending in {id} when it is that prefix, '/', and one id segment (raw, 1-128 characters, no '/'); failing that, the
  * template with {id} before a suffix when it is that prefix, '/', one id segment, and exactly that suffix. A request
- * literally spelling a template's path is such a segment ('{id}'), never the template itself.
+ * literally spelling a template's path is such a segment ('{id}'), never the template itself. Failing all of those, a path
+ * below /api/v1/stores/ matches a STORE template (M7B-INVOICES-P1) when the segment after that prefix is an id segment (the
+ * store selector) and the rest is exactly the template's own rest — its literal segments, then, for the one ending in {id},
+ * one more id segment. The store selector is never part of any other lookup.
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
   const templates = new Map<string, RouteDefinition>();
+  const storeTemplates = new Map<string, RouteDefinition>();
   const ordered: RouteDefinition[] = [];
   for (const raw of defs) {
     const def = parseDefinition(raw);
-    const map = def.path.includes(PATH_ID_SEGMENT) ? templates : table;
+    const map = def.path.includes(STORE_SEGMENT) ? storeTemplates : def.path.includes(PATH_ID_SEGMENT) ? templates : table;
     const key = `${def.method} ${def.path}`;
     if (map.has(key)) throw new EnforcementSetupError('route_duplicate');
     map.set(key, def);
     ordered.push(def);
   }
   const list = Object.freeze(ordered);
+  const storePrefix = `${STORE_DIRECTORY_PATH}/`;
+  /** A store template for `path`: its store segment replaced by {storeId}, then its last segment by {id} if that is what matches. */
+  const storeLookup = (method: string, path: string): RouteDefinition | undefined => {
+    if (storeTemplates.size === 0 || !path.startsWith(storePrefix)) return undefined;
+    const end = path.indexOf('/', storePrefix.length);
+    if (end < 0 || !isIdSegment(path.slice(storePrefix.length, end))) return undefined;
+    const rest = path.slice(end);
+    const literal = storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest}`);
+    if (literal !== undefined) return literal;
+    const last = rest.lastIndexOf('/');
+    return last > 0 && isIdSegment(rest.slice(last + 1))
+      ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, last)}${PATH_ID_SEGMENT}`) : undefined;
+  };
   return Object.freeze({
     lookup: (method: string, path: string) => {
       const exact = table.get(`${method} ${path}`);
-      if (exact !== undefined || templates.size === 0 || typeof path !== 'string') return exact;
+      if (exact !== undefined || typeof path !== 'string') return exact;
+      if (templates.size === 0) return storeLookup(method, path);
       // prefix/{id}: the last segment is the id.
       const last = path.lastIndexOf('/');
       if (last <= 0) return undefined;
@@ -651,8 +736,9 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
       if (final !== undefined) return final;
       // prefix/{id}/suffix: the segment before the last is the id, and the last is the template's own literal suffix.
       const before = path.lastIndexOf('/', last - 1);
-      return before > 0 && isIdSegment(path.slice(before + 1, last))
+      const suffixed = before > 0 && isIdSegment(path.slice(before + 1, last))
         ? templates.get(`${method} ${path.slice(0, before)}${PATH_ID_SEGMENT}${path.slice(last)}`) : undefined;
+      return suffixed ?? storeLookup(method, path);
     },
     list: () => list,
   });

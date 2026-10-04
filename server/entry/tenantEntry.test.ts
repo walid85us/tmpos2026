@@ -200,7 +200,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 13 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 14 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -218,6 +218,8 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 13 frozen tenant routes', ()
     // M5-INVOICES-AUTH-P1: the Invoices level read-back (configuration only), beside the Customers one.
     { method: 'GET', path: '/api/v1/roles/levels/invoices', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
+    // M7B-INVOICES-P1: the store directory, the route table's one closed authorization-free business route.
+    { method: 'GET', path: '/api/v1/stores', access: 'session', body: 'none', idempotency: 'none' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
@@ -288,7 +290,7 @@ type Row = Readonly<Record<string, unknown>>;
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
-  | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeProbe';
+  | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeDirectoryProbe' | 'storeProbe';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -312,6 +314,7 @@ function classify(text: string): Kind {
   if (text.includes('m7a_customer_profile')) return 'customerProfileProbe';
   if (text.includes('m7a_customer_get')) return 'customerDetailProbe';
   if (text.includes('m7a_customer_search')) return 'customerSearchProbe';
+  if (text.includes('m7b_store_directory')) return 'storeDirectoryProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
@@ -353,6 +356,7 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   customerDetailProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null, o_version: null }],
   customerSearchProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
+  storeDirectoryProbe: [{ o_outcome: 'denied', o_store_id: null, o_tenant_id: null, o_store_name: null, o_read_only: null }],
   storeProbe: [{ ok: true }],
 });
 
@@ -524,6 +528,11 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ customerSearchProbe: [[{ ...GOLDEN.customerSearchProbe[0], o_outcome: 'invalid' }]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerSearchProbe: [[]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ customerSearchProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  // M7B-INVOICES-P1: the store directory routine is the fifth part of the same reads probe.
+  await assertRefused({ storeDirectoryProbe: [[{ ...GOLDEN.storeDirectoryProbe[0], o_outcome: 'invalid' }]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ storeDirectoryProbe: [[GOLDEN.customerSearchProbe[0]]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ storeDirectoryProbe: [[]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ storeDirectoryProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
   // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
   await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
   await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);
@@ -542,7 +551,7 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
       'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'customerDetailProbe',
-      'customerProfileProbe', 'customerSearchProbe', 'storeProbe'],
+      'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'storeProbe'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
   } finally {
     await stop();
@@ -576,7 +585,7 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
     assert.equal(result.outcome, 'listening');
     const port = (result.address as { port: number }).port;
     for (const host of [ADMIN_HOST, 'unknown.tmpos.test', `${TENANT_HOST}.evil.test`, '127.0.0.1', `${TENANT_HOST}:443`]) {
-      for (const [method, path] of [['GET', '/api/v1/customers'], ['GET', `/api/v1/customers/${DETAIL_ID}`], ['GET', '/api/v1/customers/NOT-AN-ID'], ['GET', `/api/v1/customers/${DETAIL_ID}/profile`], ['POST', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants']]) {
+      for (const [method, path] of [['GET', '/api/v1/customers'], ['GET', `/api/v1/customers/${DETAIL_ID}`], ['GET', '/api/v1/customers/NOT-AN-ID'], ['GET', `/api/v1/customers/${DETAIL_ID}/profile`], ['POST', '/api/v1/customers'], ['POST', '/api/v1/session/login'], ['GET', '/admin/v1/tenants'], ['GET', '/api/v1/stores']]) {
         const reply = await send(port, method, path, { host, origin: `https://${TENANT_HOST}` });
         assert.equal(reply.status, 404, `${method} ${path} on ${host}`);
         assert.equal(JSON.parse(reply.body).error, 'not_found');
@@ -604,6 +613,9 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
     }
     assert.equal((await send(port, 'GET', '/admin/v1/tenants', { host: TENANT_HOST })).status, 404, 'no administrative route on the tenant host');
+    // M7B-INVOICES-P1: the store directory reaches the chain on the tenant host (no session: 401); no store template is served.
+    assert.equal((await send(port, 'GET', '/api/v1/stores', { host: TENANT_HOST })).status, 401);
+    assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host: TENANT_HOST })).status, 404, 'no draft route in commit A');
     // The probes answer on any host.
     for (const host of [TENANT_HOST, ADMIN_HOST]) assert.equal((await send(port, 'GET', '/health', { host })).status, 200);
   } finally {
@@ -632,6 +644,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the customer detail probe fails', 'customerDetailProbe', 'reject'],
       ['the customer profile probe fails', 'customerProfileProbe', 'reject'],
       ['the customer search probe fails', 'customerSearchProbe', 'reject'],
+      ['the store directory probe fails', 'storeDirectoryProbe', 'reject'],
       ['the idempotency store and command port probe fails', 'storeProbe', 'reject'],
       ['the store probe answers false', 'storeProbe', [{ ok: false }]],
       ['the tenant admission fails', 'tenantAdmissionProbe', 'reject'],
@@ -641,7 +654,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the database is down for everything', 'connect', 'default'],
     ];
     for (const [label, kind, entry] of transitions) {
-      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
+      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
       else fake.live[kind] = entry;
       t.mock.timers.tick(1_000);
       assert.equal(await ready(), 503, label);
@@ -654,7 +667,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
     const before = fake.kinds.length;
     await Promise.all(Array.from({ length: 5 }, () => ready()));
     const asked = fake.kinds.slice(before);
-    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
+    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
     assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');

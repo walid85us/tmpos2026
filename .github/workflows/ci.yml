@@ -379,6 +379,18 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/customerSearch.integration.test.mjs
+      # M7B-INVOICES-P1 — migration 027's store discovery as the runtime login (the postcondition and its refusals, the ACL —
+      # no PUBLIC, tmpos_app EXECUTE only —, two stores of one tenant, a second and a third tenant, exactly one usable grant per
+      # store, a tenant-only actor reading none, statuses and read-only flags, every stale or unknown key denied, 027's down
+      # refused while a 028 draft object exists and otherwise rolled back and restored with 026 left byte for byte), then
+      # GET /api/v1/stores end to end over real loopback HTTP on the tenant entry, against the SAME disposable service. It
+      # rolls back 027 alone and writes no draft, so it runs after every step above; it leaves 027 applied. Synthetic data and
+      # keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Tenant store discovery against disposable PostgreSQL (M7B-INVOICES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/storeAccess.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

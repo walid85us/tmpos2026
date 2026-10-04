@@ -145,8 +145,10 @@ export function kernelOver(client: KernelFactories['client'], endpoint: RuntimeD
  * The blockers a route inventory earns for the permissions it declares (M5-ID-P1; docs/phase-4/04
  * §2-§3, 03 §6). Every permission a DEPLOYED route requires must be one canonical catalog entry,
  * matched exactly and case-sensitively: a key the catalog does not define is a typo or an invented
- * permission, and a catalogued key the catalog cannot DECIDE — every tenant- or store-scope key except the tenant route
- * permissions owner decision D1 fixed (view_customers, M7A-CUSTOMERS-P1; m5CanonicalPermissions.ts isDecidablePermission)
+ * permission, and a catalogued key the catalog cannot DECIDE — every tenant- or store-scope key except the route
+ * permissions owner decisions fixed (the tenant ones since view_customers, M7A-CUSTOMERS-P1, and the two store draft keys,
+ * M7B-INVOICES-P1, which a route may declare only on a store template — routes.ts refuses a store-scope requirement anywhere
+ * else, so defineRoutes below throws for such a route before any key is judged; m5CanonicalPermissions.ts isDecidablePermission)
  * — is undecidable until D1 defines a specific route and its authoritative product rules (M5-GAP11-P5). Either way the
  * deployment refuses to start rather than denying at run time
  * — or, worse, allowing on a comparison whose meaning has not been settled.

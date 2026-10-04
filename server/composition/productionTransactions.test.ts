@@ -654,7 +654,9 @@ test('a deployed route may require only a canonical platform permission, and sta
   assert.throws(() => uncataloguedRoutePermissions([route('View_Command_Center', 'platform')]), /route_policy_invalid/);
   // A real tenant key is undecidable until owner decision D1 defines a specific route (M5-GAP11-P5).
   assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'tenant')]), ['route_permission_undecidable']);
-  assert.deepEqual(uncataloguedRoutePermissions([route('process_refunds', 'store')]), ['route_permission_undecidable']);
+  // M7B-INVOICES-P1: a store-scope requirement registers only on a store template (routes.ts), so this Bearer route never
+  // reaches the census; the store-scope census itself is pinned below, on a store template.
+  assert.throws(() => uncataloguedRoutePermissions([route('process_refunds', 'store')]), /route_path_invalid/);
   // A public route declares no permission and needs none.
   assert.deepEqual(uncataloguedRoutePermissions([Object.freeze({
     method: 'GET' as const, path: '/v1/open', policy: Object.freeze({ access: 'public' as const }),
@@ -665,7 +667,7 @@ test('a deployed route may require only a canonical platform permission, and sta
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
 });
 
-test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are the decidable tenant keys: the customer routes clear the gate, every other tenant key and any store use does not', () => {
+test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are decidable tenant keys and, since M7B-INVOICES-P1, view_invoice_drafts and create_invoice_drafts the decidable store keys: each clears the gate at its own scope alone, every other tenant or store key does not, and a store-scope route off a store template never registers', () => {
   const customerRoute = createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } });
   assert.deepEqual(uncataloguedRoutePermissions([customerRoute]), [], 'the customer directory\'s requirement is catalogued and decidable');
   assert.deepEqual(uncataloguedRoutePermissions(tenantRouteDeclarations()), [], 'M7A-CUSTOMERS-P3: so is the customer create\'s, create_customers');
@@ -676,17 +678,28 @@ test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are the 
     handler: () => undefined,
   });
   assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'tenant')]), [], 'the same key on a synthetic tenant route (control)');
+  // A store-scope requirement registers only on a store template (routes.ts, M7B-INVOICES-P1): the store cases sit on one.
+  const STORE_TEMPLATE = '/api/v1/stores/{storeId}/invoice-drafts';
+  const at = (permission: string, scope: 'platform' | 'tenant' | 'store') => route(permission, scope, scope === 'store' ? STORE_TEMPLATE : '/api/v1/unit');
   // Every existing tenant sub-permission is still undecidable, at either tenant-plane scope.
   for (const sub of TENANT_SUB_PERMISSIONS) {
     for (const scope of ['tenant', 'store'] as const) {
-      assert.deepEqual(uncataloguedRoutePermissions([route(sub.id, scope)]), ['route_permission_undecidable'], `${scope}/${sub.id}`);
+      assert.deepEqual(uncataloguedRoutePermissions([at(sub.id, scope)]), ['route_permission_undecidable'], `${scope}/${sub.id}`);
     }
   }
   // view_customers names nothing outside tenant scope.
-  assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'store')]), ['route_permission_uncatalogued'], 'store scope');
-  assert.deepEqual(uncataloguedRoutePermissions([route('view_customers', 'platform')]), ['route_permission_uncatalogued'], 'platform scope');
+  assert.deepEqual(uncataloguedRoutePermissions([at('view_customers', 'store')]), ['route_permission_uncatalogued'], 'store scope');
+  assert.deepEqual(uncataloguedRoutePermissions([at('view_customers', 'platform')]), ['route_permission_uncatalogued'], 'platform scope');
+  // The two store route permissions clear the gate at store scope, on a store template, and name nothing at any other scope.
+  for (const key of ['view_invoice_drafts', 'create_invoice_drafts']) {
+    assert.deepEqual(uncataloguedRoutePermissions([at(key, 'store')]), [], `store/${key}`);
+    assert.deepEqual(uncataloguedRoutePermissions([at(key, 'tenant')]), ['route_permission_uncatalogued'], `tenant/${key}`);
+    assert.deepEqual(uncataloguedRoutePermissions([at(key, 'platform')]), ['route_permission_uncatalogued'], `platform/${key}`);
+    // Off a store template a store requirement never registers, so the census refuses the whole inventory first.
+    assert.throws(() => uncataloguedRoutePermissions([route(key, 'store')]), /route_path_invalid/, `a literal path: ${key}`);
+  }
   // One blocker per offending route, in order, beside a clean one.
-  assert.deepEqual(uncataloguedRoutePermissions([customerRoute, route('process_refunds', 'tenant', '/api/v1/a'), route('view_customers', 'store', '/api/v1/b')]),
+  assert.deepEqual(uncataloguedRoutePermissions([customerRoute, route('process_refunds', 'tenant', '/api/v1/a'), at('view_customers', 'store')]),
     ['route_permission_undecidable', 'route_permission_uncatalogued']);
   // The deployable entry serves the administrative inventory only: no tenant business route is declared or composed.
   const declared = productionRouteDeclarations();
@@ -1257,7 +1270,7 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the five reads classified as reads, the three commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the six reads classified as reads, the three commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3') || text.includes('m7a_customer_get')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
@@ -1267,7 +1280,8 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
       { roleId: 'sales_staff', level: null, version: 0 }] }]
     : text.includes('m7a_role_level_states') ? [{ states: [{ roleId: 'manager', level: null, version: 0 }, { roleId: 'technician', level: 'none', version: 2 },
       { roleId: 'sales_staff', level: 'view', version: 5 }] }]
-      : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }] : []));
+      : text.includes('m7a_role_levels') ? [{ levels: { customers: 'view' } }]
+        : text.includes('m7b_store_directory') ? [{ o_outcome: 'store', o_store_id: customerId, o_tenant_id: REVAL_TENANT, o_store_name: 'Main', o_read_only: false }] : []));
   let calls = 0;
   let seen: unknown;
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, (endpoint) => { calls++; seen = endpoint; return kernel.client; });
@@ -1280,15 +1294,19 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/customers/{id}/profile', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'none'],
     ['GET', '/api/v1/roles/levels/invoices', 'session', 'tenant', 'none', 'required', 'none'],
+    // M7B-INVOICES-P1: the store directory — session-bound, and the route table's one closed authorization-free shape.
+    ['GET', '/api/v1/stores', 'session', 'tenant', 'required', 'none', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
-  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices'],
+  assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
+    'GET /api/v1/stores'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
-    ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'POST /api/v1/customers',
-      'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels']);
+    ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
+      'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels']);
+  assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
@@ -1379,6 +1397,18 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     { roleId: 'technician', level: 'view', defaultLevel: 'view', source: 'default', editable: true, version: 0 },
     { roleId: 'sales_staff', level: 'create', defaultLevel: 'create', source: 'default', editable: true, version: 0 },
   ] }], 'the Invoices catalog defaults, one stored override and its version');
+  // M7B-INVOICES-P1: the store directory through its production adapter over this kernel — ONE statement into 027's routine
+  // with the session key alone; no trusted scope exists for it.
+  kernel.statements.length = 0;
+  const stores = ttx.routes[5];
+  assert.ok(stores.path === '/api/v1/stores' && stores.idempotency === 'none' && typeof stores.handler === 'function');
+  levelsReply.status = null;
+  levelsReply.body = undefined;
+  await stores.handler({ url: '/api/v1/stores' } as never, levelsRes as never,
+    { requestId: 'req-m7tk03-stores', principal: null, session: null, authenticatedAt: null, trusted: null, sessionKey } as never);
+  assert.deepEqual(kernel.statements.map((st) => st.values), [[sessionKey]], 'one statement: the session key alone');
+  assert.match(kernel.statements[0].text, /from tmpos_store_access\.m7b_store_directory\(\?::text\)$/);
+  assert.deepEqual([levelsReply.status, levelsReply.body], [200, { stores: [{ id: customerId, tenantId: REVAL_TENANT, name: 'Main', readOnly: false }] }]);
   await ttx.close();
   assert.equal(kernel.ended(), 1);
 });
@@ -1415,7 +1445,7 @@ test('M7TK-04 the tenant session store mints under the issuer key and holds the 
   await ttx.close();
 });
 
-test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s, then the search\'s', async () => {
+test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s, then the search\'s, then the store directory\'s', async () => {
   let answer: unknown = [{ outcome: 'match' }];
   const denied = [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }];
   const profileDenied = [{ ...denied[0], o_phone: null, o_email: null, o_created_at: null, o_version: null }];
@@ -1423,10 +1453,12 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   let got: unknown = denied;
   let profiled: unknown = profileDenied;
   let searched: unknown = denied;
+  const storesDenied = [{ o_outcome: 'denied', o_store_id: null, o_tenant_id: null, o_store_name: null, o_read_only: null }];
+  let stored: unknown = storesDenied;
   let minted: unknown = [{ outcome: 'invalid' }];
   const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
     : text.includes('m7a_customer_get') ? got : text.includes('m7a_customer_profile') ? profiled : text.includes('m7a_customer_search') ? searched
-      : text.includes('m7a_session_create') ? minted : []));
+      : text.includes('m7b_store_directory') ? stored : text.includes('m7a_session_create') ? minted : []));
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
   const signal = new AbortController().signal;
   assert.equal(await ttx.issuerKey(signal), 'match');
@@ -1447,10 +1479,20 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.ok(!JSON.stringify(kernel.statements).includes(keyHex) && !JSON.stringify(kernel.statements).includes(TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY),
     'no statement carries the key in any spelling');
   kernel.statements.length = 0;
-  assert.equal(await ttx.readsProbe(signal), true, 'all four routines\' one refusal of an unknown key');
+  assert.equal(await ttx.readsProbe(signal), true, 'all five routines\' one refusal of an unknown key');
   const asked = (): string[] => kernel.statements.map((st) => (/m7a_customer_page_v3\(/.test(st.text) ? 'page_v3' : /m7a_customer_get\(/.test(st.text) ? 'get'
-    : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search' : 'other'));
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search'], 'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8)');
+    : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search'
+      : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : 'other'));
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores'],
+    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s (M7B-INVOICES-P1)');
+  // M7B-INVOICES-P1: the store directory's routine is asked last, only once the search's has refused.
+  stored = [{ ...storesDenied[0], o_outcome: 'invalid' }];
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'the store routine answering anything else is not ready');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores']);
+  stored = denied;
+  assert.equal(await ttx.readsProbe(signal), false, 'nor the customer reads\' four columns in place of the store routine\'s five');
+  stored = storesDenied;
   got = [{ o_outcome: 'not_found', o_tenant_id: null, o_customer_id: null, o_name: null }];
   kernel.statements.length = 0;
   assert.equal(await ttx.readsProbe(signal), false, 'the detail routine answering anything else is not ready');
@@ -1465,7 +1507,7 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   searched = [{ ...denied[0], o_outcome: 'invalid' }];
   kernel.statements.length = 0;
   assert.equal(await ttx.readsProbe(signal), false, 'the search routine answering anything else is not ready');
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search']);
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search'], 'short-circuit: the store routine is not asked once the search is not ready');
   searched = profileDenied;
   assert.equal(await ttx.readsProbe(signal), false, 'nor the profile\'s eight columns in place of the search\'s four');
   searched = denied;

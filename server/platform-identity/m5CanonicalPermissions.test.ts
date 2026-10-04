@@ -7,6 +7,7 @@ import {
   CANONICAL_PLATFORM_PERMISSIONS,
   CANONICAL_TENANT_PERMISSIONS,
   BUILT_IN_PLATFORM_ROLES,
+  STORE_ROUTE_PERMISSIONS,
   TENANT_ROUTE_PERMISSIONS,
   canonicalPermission,
   evaluateCanonicalPermission,
@@ -355,8 +356,12 @@ test('edit_customers (M7A-CUSTOMERS-P7) is the Customers domain at Edit or above
   }
 });
 
-test('isDecidablePermission: every platform key and the four tenant route permissions at tenant scope — nothing else', () => {
+test('isDecidablePermission: every platform key, the four tenant route permissions at tenant scope and the two store route permissions at store scope — nothing else', () => {
   for (const sub of PLATFORM_SUB_PERMISSIONS) assert.equal(isDecidablePermission('platform', sub.id), true, sub.id);
+  for (const key of ['view_invoice_drafts', 'create_invoice_drafts']) {
+    assert.equal(isDecidablePermission('store', key), true, key);
+    for (const scope of ['tenant', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${key}`);
+  }
   for (const key of ['view_customers', 'create_customers', 'edit_customers', 'edit_role_levels']) {
     assert.equal(isDecidablePermission('tenant', key), true, key);
     for (const scope of ['store', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${key}`);
@@ -515,4 +520,71 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
     assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: 'view_customers', limitation: 'none', levels: { invoices: 'full' } }), 'denied', roleId);
   }
   assert.equal(materializeTenantPermissions('manager', {}, true, { invoices: 'full' }).invoices, 'view');
+});
+
+// --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
+
+test('M7B: exactly two store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()], ['view_invoice_drafts', 'create_invoice_drafts']);
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
+    { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
+    { key: 'create_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'create', corequisite: { parent: 'customers', threshold: 'view' } });
+  const subIds = new Set(TENANT_SUB_PERMISSIONS.map((sub) => sub.id));
+  for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
+    assert.ok(Object.isFrozen(entry) && (entry.corequisite === undefined || Object.isFrozen(entry.corequisite)), key);
+    assert.equal(subIds.has(key), false, `${key}: no sub-permission shares the key (reopen_invoice is not reused)`);
+    assert.equal(TENANT_ROUTE_PERMISSIONS.has(key), false, key);
+    assert.equal(canonicalPermission('store', key), entry, `${key}: the store lookup answers this very entry`);
+    assert.equal(canonicalPermission('tenant', key), null, `${key}: names nothing at tenant scope`);
+    assert.equal(canonicalPermission('platform', key), null, `${key}: names nothing at platform scope`);
+    assert.ok(TENANT_PERMISSION_DOMAINS.includes(entry.parent) && TENANT_DOMAIN_ENTITLEMENT[entry.parent] === null, `${key}: a core domain, never plan-gated`);
+    for (const roleId of TENANT_ROLE_IDS) {
+      assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: key, limitation: 'none', levels: {} }), 'denied', `${key} at tenant scope`);
+    }
+  }
+  // The tenant route permissions still decide nothing at store scope.
+  for (const key of TENANT_ROUTE_PERMISSIONS.keys()) {
+    assert.equal(canonicalPermission('store', key), null, key);
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission: key, limitation: 'none', levels: {} }), 'denied', key);
+  }
+});
+
+test('M7B: the store route permissions on every built-in role, both limitations, at the defaults and under the owner\'s edits — Customers View is the create\'s corequisite', () => {
+  const decide = (roleId: string, permission: string, levels: unknown = {}, limitation: 'none' | 'read_only' = 'none') =>
+    evaluateCanonicalPermission({ scope: 'store', roleId, permission, limitation, levels });
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r, 'view_invoice_drafts'), decide(r, 'create_invoice_drafts'),
+    decide(r, 'view_invoice_drafts', {}, 'read_only'), decide(r, 'create_invoice_drafts', {}, 'read_only')]), [
+    ['store_owner', 'granted', 'granted', 'granted', 'denied'],
+    ['manager', 'granted', 'granted', 'granted', 'denied'],
+    ['technician', 'granted', 'denied', 'granted', 'denied'],
+    ['sales_staff', 'granted', 'granted', 'granted', 'denied'],
+  ], 'Invoices View for every role; Create for owner, manager and sales staff; read-only reaches View alone');
+  // Each condition denies alone, the owner excepted.
+  for (const levels of [{ invoices: 'view' }, { customers: 'none' }, { invoices: 'none' }, { invoices: 'create', customers: 'none' }]) {
+    assert.equal(decide('manager', 'create_invoice_drafts', levels), 'denied', JSON.stringify(levels));
+    assert.equal(decide('store_owner', 'create_invoice_drafts', levels), 'granted', `owner ${JSON.stringify(levels)}`);
+  }
+  for (const level of ['create', 'edit', 'manage', 'approve', 'full']) {
+    assert.equal(decide('technician', 'create_invoice_drafts', { invoices: level }), 'granted', `technician invoices=${level}`);
+  }
+  for (const level of ['view', 'create', 'edit', 'manage', 'approve', 'full']) {
+    assert.equal(decide('sales_staff', 'create_invoice_drafts', { customers: level }), 'granted', `sales staff customers=${level}`);
+  }
+  assert.equal(decide('manager', 'view_invoice_drafts', { invoices: 'none' }), 'denied');
+  assert.equal(decide('manager', 'view_invoice_drafts', { customers: 'none' }), 'granted', 'View needs no Customers level');
+  // Levels are required and validated; unknown roles and limitations deny.
+  for (const levels of [null, [], 'x', { invoices: 'Full' }, { invoice: 'view' }]) {
+    for (const permission of STORE_ROUTE_PERMISSIONS.keys()) assert.equal(decide('manager', permission, levels), 'denied', `${permission} ${JSON.stringify(levels)}`);
+  }
+  for (const permission of STORE_ROUTE_PERMISSIONS.keys()) {
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission, limitation: 'none' }), 'denied', `${permission}: no edits read`);
+  }
+  for (const roleId of ['system_owner', 'cashier', '', 'Manager']) assert.equal(decide(roleId, 'view_invoice_drafts'), 'denied', roleId);
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission: 'view_invoice_drafts', limitation: 'limited' as never, levels: {} }), 'denied');
+  // The parity the 028 routine restates: Invoices and Customers defaults from the one catalog.
+  for (const roleId of ['manager', 'technician', 'sales_staff']) {
+    assert.equal(materializeTenantPermissions(roleId, {}, false, {}).invoices, ({ manager: 'full', technician: 'view', sales_staff: 'create' } as Record<string, string>)[roleId]);
+    assert.ok(meetsTenantPermissionLevel(materializeTenantPermissions(roleId, {}, false, {}).customers, 'view'), `${roleId}: Customers View by default`);
+  }
 });

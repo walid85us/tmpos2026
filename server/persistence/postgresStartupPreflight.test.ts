@@ -21,11 +21,11 @@ const MIGRATIONS_DIR = resolve(HERE, '..', 'platform-identity', 'migrations');
 
 // --- A. REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS, bound to the real migration files ------------------
 
-test('the migrations directory holds exactly the up files 001..026, and REQUIRED_MIGRATIONS is each one\'s sha256', () => {
+test('the migrations directory holds exactly the up files 001..027, and REQUIRED_MIGRATIONS is each one\'s sha256', () => {
   const upFiles = readdirSync(MIGRATIONS_DIR).filter((f) => /\.up\.sql$/.test(f));
   const versions = upFiles.map((f) => /^(\d{3})_/.exec(f)?.[1]).sort();
-  assert.deepEqual(versions, Array.from({ length: 26 }, (_, i) => String(i + 1).padStart(3, '0')),
-    'the up files are exactly 001..026: a new migration must update the pin');
+  assert.deepEqual(versions, Array.from({ length: 27 }, (_, i) => String(i + 1).padStart(3, '0')),
+    'the up files are exactly 001..027: a new migration must update the pin');
   assert.deepEqual(REQUIRED_MIGRATIONS.map((m) => m.version), versions, 'REQUIRED_MIGRATIONS names the same versions, in order');
   for (const { version, checksum } of REQUIRED_MIGRATIONS) {
     const file = upFiles.find((f) => f.startsWith(`${version}_`));
@@ -166,7 +166,7 @@ test('M7A-CUSTOMERS-P8: a runtime login missing either of 025\'s two grants is r
   assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: at024 }), ['role_privilege_missing'], 'the P7 database: the P8 runtime refuses it');
   assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: [...APPROVED_ROLE_GRANTS, 'tmpos_app|a|function|tmpos_customer_search.m7a_customer_search_v2(pg_catalog.text)|EXECUTE'] }),
     ['role_privilege_unexpected'], 'a second search routine granted beside 025\'s');
-  assert.equal(REQUIRED_MIGRATIONS[REQUIRED_MIGRATIONS.length - 1].version, '026', 'the newest required migration');
+  assert.equal(REQUIRED_MIGRATIONS[REQUIRED_MIGRATIONS.length - 1].version, '027', 'the newest required migration');
 });
 
 test('M5-INVOICES-AUTH-P1: a runtime login missing any of 026\'s three grants is refused; a database at 025 (none of them) is refused', () => {
@@ -183,6 +183,23 @@ test('M5-INVOICES-AUTH-P1: a runtime login missing any of 026\'s three grants is
   assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: at025 }), ['role_privilege_missing'], 'the 025 database: this runtime refuses it');
   assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: [...APPROVED_ROLE_GRANTS, 'tmpos_app|a|function|tmpos_role_invoice.m7a_invoice_role_level_set_v2(pg_catalog.text)|EXECUTE'] }),
     ['role_privilege_unexpected'], 'a second Invoices routine granted beside 026\'s');
+});
+
+test('M7B-INVOICES-P1: a runtime login missing either of 027\'s two grants is refused; a database at 026 (none of them) is refused', () => {
+  const STORE_ACCESS_GRANTS = [
+    'tmpos_app|a|function|tmpos_store_access.m7b_store_directory(pg_catalog.text)|EXECUTE',
+    'tmpos_app|a|schema|tmpos_store_access|USAGE',
+  ];
+  assert.deepEqual(APPROVED_ROLE_GRANTS.filter((g) => g.includes('tmpos_store_access')), STORE_ACCESS_GRANTS, 'exactly the two grants 027 issues');
+  for (const line of STORE_ACCESS_GRANTS) {
+    assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: APPROVED_ROLE_GRANTS.filter((g) => g !== line) }), ['role_privilege_missing'], line);
+  }
+  const at026 = APPROVED_ROLE_GRANTS.filter((g) => !g.includes('tmpos_store_access'));
+  assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: at026 }), ['role_privilege_missing'], 'the 026 database: this runtime refuses it');
+  assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: [...APPROVED_ROLE_GRANTS, 'tmpos_app|a|function|tmpos_store_access.m7b_store_directory_v2(pg_catalog.text)|EXECUTE'] }),
+    ['role_privilege_unexpected'], 'a second store routine granted beside 027\'s');
+  assert.deepEqual(evaluateRuntimeLogin({ ...BASE_FACTS, roleGrants: [...APPROVED_ROLE_GRANTS, 'tmpos_audit_writer|a|function|tmpos_store_access.m7b_store_directory(pg_catalog.text)|EXECUTE'] }),
+    ['role_privilege_unexpected'], 'the audit writer granted the routine');
 });
 
 test('evaluateRuntimeLogin: inheritOption null falls back to login.inherit', () => {
@@ -238,13 +255,13 @@ test('evaluateMigrationLedger: each ledger code', () => {
     ['migration_ledger_missing', { present: false, readable: false, rows: [] }],
     ['migration_ledger_missing', { present: false, readable: true, rows: [] }],
     ['migration_ledger_unreadable', { present: true, readable: false, rows: [] }],
-    ['migration_unknown', { present: true, readable: true, rows: [...GOLDEN_ROWS, { version: '027', checksum: 'f'.repeat(64), dirty: false, finished: true }] }],
+    ['migration_unknown', { present: true, readable: true, rows: [...GOLDEN_ROWS, { version: '028', checksum: 'f'.repeat(64), dirty: false, finished: true }] }],
     ['migration_dirty', withRow(0, { dirty: true })],
     ['migration_dirty', withRow(0, { finished: false })],
     ['migration_checksum_mismatch', withRow(0, { checksum: '0'.repeat(64) })],
     ['migration_checksum_mismatch', withRow(0, { checksum: 'not-a-checksum' })],
-    ['migration_missing', { present: true, readable: true, rows: GOLDEN_ROWS.slice(0, -1) }], // 026 absent, above the newest recorded
-    ['migration_not_contiguous', { present: true, readable: true, rows: GOLDEN_ROWS.filter((r) => r.version !== '007') }], // gap below 026
+    ['migration_missing', { present: true, readable: true, rows: GOLDEN_ROWS.slice(0, -1) }], // 027 absent, above the newest recorded
+    ['migration_not_contiguous', { present: true, readable: true, rows: GOLDEN_ROWS.filter((r) => r.version !== '007') }], // gap below 027
   ];
   for (const [code, facts] of cases) {
     assert.deepEqual(evaluateMigrationLedger(facts), [code], `${code}: ${JSON.stringify(facts)}`);
@@ -261,7 +278,7 @@ test('evaluateMigrationLedger: each ledger code', () => {
     const violations = evaluateMigrationLedger({ present: true, readable: true, rows: [malformed] });
     assert.ok(violations.includes('migration_ledger_malformed'), JSON.stringify(malformed));
   }
-  // The 26 required rows plus a second, clean, identical row for '026': the key no longer holds — malformed,
+  // The 27 required rows plus a second, clean, identical row for '027': the key no longer holds — malformed,
   // and nothing else (every required version is still recorded exactly once as far as the chain is concerned).
   assert.deepEqual(
     evaluateMigrationLedger({ present: true, readable: true, rows: [...GOLDEN_ROWS, GOLDEN_ROWS[GOLDEN_ROWS.length - 1]] }),

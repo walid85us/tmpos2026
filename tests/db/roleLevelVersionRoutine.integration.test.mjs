@@ -5,7 +5,7 @@
 // alone, with no runtime in front of it; the HTTP route over it, its audit, idempotency and step-up, and the runtime's
 // comparison of each answer with its trusted context, are tests/db/roleLevels.integration.test.mjs's.
 //
-// WHAT IS PROVEN. 001-026 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
+// WHAT IS PROVEN. 001-027 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M7RV-01); the installed inventory and
 // the login's effective privileges: EXECUTE on the two new routines and on 020's levels read, create and page_v3, NONE on
 // 020's unconditional edit (has_function_privilege, and 42501 when called), nothing on the version table (M7RV-02); the
@@ -58,6 +58,8 @@ const UP_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`, 'utf8')
 const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
 const UP_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.up.sql`, 'utf8');
 const DOWN_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.down.sql`, 'utf8');
+const UP_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.up.sql`, 'utf8');
+const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_021 = UP_021.slice(UP_021.lastIndexOf('do $$'));
 const STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -164,7 +166,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-026), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-027), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -277,9 +279,13 @@ const setV2 = async (key, role, level, tenant, version, db = runtime, domain = '
  * M5-INVOICES-AUTH-P1: 026 (the Invoices level routines and the widened domain CHECKs) sits above 025 and widens 021's own
  * version table's CHECK, which 021's re-apply would narrow again: it rolls back first (it refuses while an Invoices row exists —
  * this file stores none) and is re-applied last.
+ * M7B-INVOICES-P1: 027 (store discovery, no data) sits above 026: it rolls back before it and is re-applied after it.
  */
 const down023 = async () => {
   await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
+  if (!(await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent) {
+    await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_027).simple());
+  }
   if (!(await owner`select pg_catalog.to_regnamespace('tmpos_role_invoice') is null as absent`)[0].absent) {
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_026).simple());
   }
@@ -303,6 +309,9 @@ const up023IfAbsent = async () => {
   }
   if ((await owner`select pg_catalog.to_regnamespace('tmpos_role_invoice') is null as absent`)[0].absent) {
     await owner.begin((tx) => tx.unsafe(UP_026).simple());
+  }
+  if ((await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent) {
+    await owner.begin((tx) => tx.unsafe(UP_027).simple());
   }
 };
 /** 021's read-back, as the runtime login. */
@@ -374,11 +383,11 @@ const onRoleRow = (locks) => locks.length > 0 && locks.every((l) => l.locktype =
 // M7RV-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7RV-01: 001-026 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M7RV-01: 001-027 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 26 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 27 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   // 001-020 byte-identical: the ledger, the startup pins and the files on disk agree (the pins are bound to the committed
   // bytes by tests/quality/migration-files-contract.test.mjs).
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');

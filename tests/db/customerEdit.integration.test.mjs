@@ -70,6 +70,9 @@ const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'ut
 /** M5-INVOICES-AUTH-P1: 026 sits above 025 and is rolled back first wherever a proof needs exactly the 001-023 surface. */
 const UP_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.up.sql`, 'utf8');
 const DOWN_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.down.sql`, 'utf8');
+/** M7B-INVOICES-P1: 027 (store discovery) sits above 026 and is rolled back first, re-applied last. */
+const UP_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.up.sql`, 'utf8');
+const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_024 = UP_024.slice(UP_024.lastIndexOf('do $$'));
@@ -175,7 +178,7 @@ test.after(async () => {
   if (TENANTS.length > 0) await swallow(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
   // The shared service is left with 024 applied, whatever failed above: the executor applies it if it is not.
   await swallow(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '026') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '027') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -511,9 +514,9 @@ const applyReport = await trustedApply();
 test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough023.outcome, 'complete', JSON.stringify(applyThrough023).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['024', '025', '026'], `024 (and 025 and 026 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['024', '025', '026', '027'], `024 (and 025, 026 and 027 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 26 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 27 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[23].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_024).simple())).code, undefined, 'the postcondition holds as applied');
@@ -1230,6 +1233,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
   // and is re-applied after it.
   const alone = await rolledBack(RC, async (tx) => {
     await cleared(tx);
+    await tx.unsafe(DOWN_027).simple();
     await tx.unsafe(DOWN_026).simple();
     await tx.unsafe(DOWN_025).simple();
     await tx.unsafe(DOWN_024).simple();
@@ -1241,6 +1245,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     await tx.unsafe(UP_024).simple();
     await tx.unsafe(UP_025).simple();
     await tx.unsafe(UP_026).simple();
+    await tx.unsafe(UP_027).simple();
     return { down, reapplied: await routineState(tx), reappliedSurface: await surface(tx), up: await preflightOn(tx),
       versions: (await tx`select pg_catalog.array_agg(distinct row_version)::text as v from tmpos_customer.customer`)[0].v };
   });
@@ -1272,7 +1277,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     'customers with contacts, creation times and unknown creation times remain');
   const { rolledBack: down, restore } = await rollBackAbove(owner, MIG_DIR, '023');
   try {
-    assert.deepEqual(down, ['026', '025', '024'], 'newest first: 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1)');
+    assert.deepEqual(down, ['027', '026', '025', '024'], 'newest first: 027 above 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1)');
     assert.deepEqual(await keptRows(), kept, 'the rollback dropped no name, contact or creation time');
     assert.deepEqual(await surface(owner), SURFACE_023, 'exactly 001-023');
   } finally {

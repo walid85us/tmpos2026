@@ -513,12 +513,12 @@ async function assertLoginContained(label) {
 // migration 014 as applied
 // ---------------------------------------------------------------------------
 
-test('M6R-01: 001-026 apply clean; 014 is exactly its declared objects and privileges, holds no identifying column, and creates no role', async () => {
+test('M6R-01: 001-027 apply clean; 014 is exactly its declared objects and privileges, holds no identifying column, and creates no role', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite may already have applied the chain.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027'].map((v) => [v, false]));
 
   await assertDeclared(owner, 'as applied');
   await assertLoginContained('as applied');
@@ -1099,7 +1099,7 @@ test('M6R-11: migrations 005-013 are byte-identical to their pins, and the ledge
   for (const [name, digest] of Object.entries(PINNED)) assert.equal(sha256(name), digest, name);
   const files = readdirSync(MIG_DIR);
   const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-  assert.equal(ledger.length, 26);
+  assert.equal(ledger.length, 27);
   for (const { version, checksum } of ledger) {
     const up = files.filter((f) => f.startsWith(`${version}_`) && f.endsWith('.up.sql'));
     assert.equal(up.length, 1, version);

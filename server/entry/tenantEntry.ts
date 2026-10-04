@@ -14,7 +14,7 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–024, clean, checksums pinned (each of 020-024 moves with its build);
+//    5. the migration ledger — exactly 001–027, clean, checksums pinned (each of 020-027 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
@@ -27,7 +27,8 @@
 //   10. readiness — the session store reads, the session mint answers its probe (018's refusal of all-null arguments,
 //       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready, the
 //       customer reads answer their probe (the directory's routine, then the detail's — M7A-CUSTOMERS-P4 — then the
-//       profile's — M7A-CUSTOMERS-P6, over 024's versioned routine since -P7 — each refusing an absent key), and the idempotency store and the command port answer
+//       profile's — M7A-CUSTOMERS-P6, over 024's versioned routine since -P7 — then the search's — -P8 — then the store
+//       directory's — M7B-INVOICES-P1, 027's — each refusing an absent key), and the idempotency store and the command port answer
 //       theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
@@ -46,8 +47,10 @@
 // the idempotency fingerprint), idempotent and committed through the tenant store; the profile read now carries the
 // customer's version as its strong ETag; — M5-INVOICES-AUTH-P1 — GET /api/v1/roles/levels/invoices, the owner's read-back of
 // the built-in roles' Invoices levels (configuration only: no invoice route exists, and the PUT above now also accepts
-// domain 'invoices') — then the bounded 404.
-// No administrative or store route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
+// domain 'invoices'); — M7B-INVOICES-P1 — GET /api/v1/stores, the stores the session's actor may act at (exactly one usable
+// store-scope grant each), derived by migration 027's routine from the session key alone: the route table's one closed
+// authorization-free business route, bound to the session and its CSRF token — then the bounded 404.
+// No administrative route, no store-scoped business route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
 // hostname to this entry alone and pass its Host through unaltered (docs/phase-4/08 DA-107 — not proven here).
@@ -95,6 +98,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/roles/levels/invoices', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores', access: 'session', body: 'none', idempotency: 'none' },
 ].map((route) => Object.freeze(route)));
 
 /**

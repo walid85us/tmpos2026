@@ -9,7 +9,7 @@
 // the reserved /api and /admin namespaces.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, pathIdBeforeSuffixOf, pathIdOf, sessionPaths } from './routes.js';
+import { defineRoutes, EnforcementSetupError, MAX_JSON_BODY_BYTES, pathIdBeforeSuffixOf, pathIdOf, sessionPaths, storeTargetOf } from './routes.js';
 
 const handler = (): void => {};
 const PUBLIC = { access: 'public' };
@@ -307,7 +307,7 @@ test('only a state-changing route of a verified principal under a declared autho
   assert.equal(setupCode([required({ path: '/api/v1/probe', policy: SESSION('tenant') })]), 'route_idempotency_policy_invalid',
     'a tenant-scoped perform: it runs outside the store transaction that re-proves the tenant');
   assert.equal(setupCode([command({ policy: SESSION('tenant', { scope: 'store', permission: 'probe.write' }) })]),
-    'route_idempotency_policy_invalid', 'a store-scoped tenant-session command: no store command is decided');
+    'route_idempotency_policy_invalid', 'a store-scoped tenant-session command outside the closed store POST template (M7B-INVOICES-P1)');
   assert.equal(setupCode([command({ method: 'PATCH', path: '/admin/v1/probe', policy: SESSION('admin', { scope: 'tenant', permission: 'probe.write' }) })]),
     'route_idempotency_policy_invalid', 'a tenant-scoped command on the admin boundary');
   assert.equal(setupCode([command({ policy: { access: 'authenticated', authorization: { scope: 'tenant', permission: 'probe.write' } }, path: '/v1/probe' })]),
@@ -577,4 +577,160 @@ test('pathIdOf: the final segment as a canonical lowercase uuid, or null', () =>
   ]) {
     assert.equal(pathIdOf(path), null, String(path));
   }
+});
+
+// --- M7B-INVOICES-P1: the closed store templates and the store directory ------------------------------------------------
+
+const STORE_VIEW = { scope: 'store', permission: 'view_invoice_drafts' };
+const STORE_CREATE = { scope: 'store', permission: 'create_invoice_drafts' };
+const DRAFTS = '/api/v1/stores/{storeId}/invoice-drafts';
+const DRAFT = '/api/v1/stores/{storeId}/invoice-drafts/{id}';
+const storeRead = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+  route({ path: DRAFTS, policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required', sessionBinding: 'required', ...over });
+const storeCreate = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  method: 'POST', path: DRAFTS, policy: SESSION('tenant', STORE_CREATE), body: { kind: 'json', maxBytes: 65_536, required: true },
+  idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: {}, plan: () => ({}) }, ...over,
+});
+const directory = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+  route({ path: '/api/v1/stores', policy: BARE_SESSION('tenant'), sessionBinding: 'required', ...over });
+const STORE = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+test('M7B: exactly the three store templates register — the two GETs without idempotency, the POST as an idempotency-required command, each a tenant-session store-scope route', () => {
+  const all = [storeRead(), storeRead({ path: DRAFT }), storeCreate()];
+  assert.equal(setupCode(all), undefined);
+  assert.equal(setupCode([...all, directory(), list(), detail(), profile(), patch()]), undefined, 'beside the store directory and the customer templates');
+  const table = defineRoutes(all);
+  assert.deepEqual(table.list().map((r) => `${r.method} ${r.path}`), [`GET ${DRAFTS}`, `GET ${DRAFT}`, `POST ${DRAFTS}`]);
+  assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts`)?.idempotency, 'required');
+  const { command: _command, ...noCommand } = storeCreate();
+  for (const [label, def] of [
+    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/invoices' })],
+    ['a bare store template', storeRead({ path: '/api/v1/stores/{storeId}' })],
+    ['a store segment elsewhere', storeRead({ path: '/api/v1/customers/{storeId}/invoice-drafts' })],
+    ['a deeper store template', storeRead({ path: `${DRAFT}/lines` })],
+    ['two store segments', storeRead({ path: '/api/v1/stores/{storeId}/{storeId}' })],
+    ['a PATCH on the draft template', storeCreate({ method: 'PATCH', path: DRAFT })],
+    ['a PUT on the list template', storeCreate({ method: 'PUT' })],
+    ['a DELETE on the draft template', storeRead({ method: 'DELETE', path: DRAFT })],
+    ['the POST without idempotency, as a handler', { ...noCommand, idempotency: 'none', trustedContext: 'required', handler }],
+    ['the GET list as a command', storeCreate({ method: 'GET', body: { kind: 'none' } })],
+    ['a literal store below the prefix', storeRead({ path: `/api/v1/stores/${STORE}/invoice-drafts` })],
+    ['a literal word below the prefix', route({ path: '/api/v1/stores/mine', policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required' })],
+    // The {storeId} selects among store grants only: a tenant-scope or platform requirement on a store template is refused.
+    ['a tenant-scope requirement', storeRead({ policy: SESSION('tenant', { scope: 'tenant', permission: 'view_customers' }) })],
+    ['a platform-scope requirement', storeRead({ policy: SESSION('tenant', { scope: 'platform', permission: 'probe.read' }) })],
+    ['no requirement', storeRead({ policy: BARE_SESSION('tenant'), trustedContext: 'none', sessionBinding: 'none' })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  for (const [label, def] of [
+    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/invoices' })],
+    ['a literal store below the prefix', storeRead({ path: `/api/v1/stores/${STORE}/invoice-drafts` })],
+    ['a tenant-scope requirement', storeRead({ policy: SESSION('tenant', { scope: 'tenant', permission: 'view_customers' }) })],
+    ['a PUT command on the list template', storeCreate({ method: 'PUT' })],
+    ['a POST handler on the draft template', storeRead({ path: DRAFT, policy: SESSION('tenant', STORE_CREATE), method: 'POST', sessionBinding: 'none' })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  // A GET can never take a key at all, whatever the template: the idempotency rule answers first.
+  assert.equal(setupCode([storeCreate({ method: 'GET', path: DRAFT, body: { kind: 'none' } })]), 'route_idempotency_policy_invalid', 'the GET draft template as a command');
+  assert.equal(setupCode([storeCreate(), storeCreate()]), 'route_duplicate');
+  // The store POST is the only store-scoped route that may require idempotency.
+  assert.equal(setupCode([storeCreate({ path: '/api/v1/probe' })]), 'route_idempotency_policy_invalid', 'a store command on a literal path');
+});
+
+test('M7B: a STORE-scope requirement registers on the three store templates and nowhere else — no store is ever selected without a path naming it', () => {
+  const UNDECIDED = { scope: 'store', permission: 'view_shipping_costs' };
+  for (const [label, def] of [
+    ['a literal tenant-session read', route({ path: '/api/v1/probe', policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required' })],
+    ['the same read, session-bound', route({ path: '/api/v1/probe', policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required', sessionBinding: 'required' })],
+    ['the create key on a literal read', route({ path: '/api/v1/probe', policy: SESSION('tenant', STORE_CREATE), trustedContext: 'required' })],
+    ['an undecidable store key on a literal read (the old harness witness shape)', route({ path: '/api/v1/probe', policy: SESSION('tenant', UNDECIDED), trustedContext: 'required' })],
+    ['a literal read without a trusted context', route({ path: '/api/v1/probe', policy: SESSION('tenant', STORE_VIEW) })],
+    ['a Bearer read', route({ policy: { access: 'authenticated', authorization: STORE_VIEW } })],
+    ['a customer template', detail({ policy: SESSION('tenant', STORE_VIEW) })],
+    ['the directory path', route({ path: '/api/v1/stores', policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required', sessionBinding: 'required' })],
+    ['the admin boundary', route({ path: '/admin/v1/probe', policy: SESSION('admin', STORE_VIEW), trustedContext: 'required' })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  // Controls: each shape registers at tenant scope, and the store template at store scope, so the refusals are the scope's.
+  for (const [label, def] of [
+    ['a literal tenant-session read', route({ path: '/api/v1/probe', policy: SESSION('tenant'), trustedContext: 'required' })],
+    ['a Bearer read', route({ policy: { access: 'authenticated', authorization: { scope: 'tenant', permission: 'probe.read' } } })],
+    ['a customer template', detail()],
+    ['the admin boundary', route({ path: '/admin/v1/probe', policy: SESSION('admin'), trustedContext: 'required' })],
+    ['the store template', storeRead()],
+    ['the store template under an undecidable store key', storeRead({ policy: SESSION('tenant', UNDECIDED) })],
+  ] as const) {
+    assert.equal(setupCode([def]), undefined, label);
+  }
+  // A literal store command is still refused by the idempotency rule first (the closed store POST template alone may take a key).
+  assert.equal(setupCode([storeCreate({ path: '/api/v1/probe' })]), 'route_idempotency_policy_invalid');
+});
+
+test('M7B: lookup — /api/v1/stores/ plus ONE store segment plus exactly the template rest reaches a store template; nothing else does', () => {
+  const table = defineRoutes([directory(), storeRead(), storeRead({ path: DRAFT }), storeCreate(), list(), detail()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  for (const segment of [STORE, STORE.toUpperCase(), '{storeId}', 'x', '..', '%2F', 'a'.repeat(128)]) {
+    assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts`), DRAFTS, segment);
+    assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts`, 'POST'), DRAFTS, `POST ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts/${ID}`), DRAFT, `${segment} + draft`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}`), DRAFT, `draft ${segment}`);
+  }
+  assert.equal(hit('/api/v1/stores'), '/api/v1/stores', 'the literal directory');
+  assert.equal(hit(`/api/v1/customers/${ID}`), '/api/v1/customers/{id}', 'the customer template is unchanged');
+  for (const miss of [
+    '/api/v1/stores/', `/api/v1/stores/${STORE}`, `/api/v1/stores/${STORE}/`, `/api/v1/stores//invoice-drafts`, `/api/v1/stores/${STORE}/invoice-drafts/`,
+    `/api/v1/stores/${STORE}/invoice-drafts/${ID}/`, `/api/v1/stores/${STORE}/invoice-drafts/${ID}/lines`, `/api/v1/stores/${STORE}/invoices`,
+    `/api/v1/stores/${STORE}/Invoice-drafts`, `/api/v1/stores/${'a'.repeat(129)}/invoice-drafts`, `/api/v1/stores/${STORE}/invoice-drafts/${'a'.repeat(129)}`,
+    `/api/v1/stores/${STORE}/x/invoice-drafts`, `/api/v1/storesx/${STORE}/invoice-drafts`, `/API/v1/stores/${STORE}/invoice-drafts`,
+    `/api/v1/stores/${STORE}//invoice-drafts`, `/api/v1/stores/${STORE}/invoice-drafts//${ID}`,
+  ]) {
+    assert.equal(hit(miss), undefined, miss);
+  }
+  for (const method of ['HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'get']) {
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts`, method), undefined, method);
+  }
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}`, 'POST'), undefined, 'POST names no draft');
+  // A table without store templates matches none of their paths.
+  assert.equal(defineRoutes([directory(), list(), detail()]).lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts`), undefined);
+});
+
+test('M7B: storeTargetOf — the store segment as a canonical lowercase uuid, or null', () => {
+  assert.equal(storeTargetOf(`/api/v1/stores/${STORE}/invoice-drafts`), STORE);
+  assert.equal(storeTargetOf(`/api/v1/stores/${STORE}/invoice-drafts/${ID}`), STORE);
+  for (const path of [
+    `/api/v1/stores/${STORE.toUpperCase()}/invoice-drafts`, `/api/v1/stores/${STORE.slice(1)}/invoice-drafts`, `/api/v1/stores/x${STORE}/invoice-drafts`,
+    `/api/v1/stores/${STORE}x/invoice-drafts`, `/api/v1/stores/${STORE}`, '/api/v1/stores/{storeId}/invoice-drafts', `/api/v1/stores/${STORE.replace(/-/g, '')}/invoice-drafts`,
+    `/api/v1/stores/${STORE.replace('-', '%2d')}/invoice-drafts`, `/api/v1/customers/${STORE}/invoice-drafts`, '/api/v1/stores', '', 42 as unknown as string,
+  ]) {
+    assert.equal(storeTargetOf(path), null, String(path));
+  }
+});
+
+test('M7B: GET /api/v1/stores is the ONE closed authorization-free business route — session-bound, no trusted context, no body, no idempotency — and no other path may take that shape', () => {
+  assert.equal(setupCode([directory()]), undefined);
+  const registered = defineRoutes([directory()]).lookup('GET', '/api/v1/stores');
+  assert.deepEqual([registered?.policy, registered?.sessionBinding, registered?.trustedContext, registered?.recentAuth, registered?.idempotency],
+    [{ access: 'session', audience: 'tenant', authorization: null }, 'required', 'none', 'none', 'none']);
+  for (const [label, def, code] of [
+    ['the directory without the session binding', directory({ sessionBinding: 'none' }), 'route_session_binding_invalid'],
+    ['the directory with the binding undeclared', directory({ sessionBinding: undefined }), 'route_session_binding_invalid'],
+    ['the directory with a trusted context', directory({ trustedContext: 'required' }), 'route_trusted_context_invalid'],
+    ['the directory requiring a recent sign-in', directory({ recentAuth: 'required' }), 'route_recent_auth_invalid'],
+    ['the directory with a body', directory({ body: JSON_BODY }), 'route_body_policy_invalid'],
+    ['the directory under a key', required({ method: 'GET', path: '/api/v1/stores', policy: BARE_SESSION('tenant'), trustedContext: 'none', sessionBinding: 'required' }), 'route_idempotency_policy_invalid'],
+    ['POST at the directory path', directory({ method: 'POST' }), 'route_session_endpoint_invalid'],
+    ['another tenant path', directory({ path: '/api/v1/storefronts' }), 'route_session_endpoint_invalid'],
+    ['the admin boundary', directory({ path: '/admin/v1/stores', policy: BARE_SESSION('admin') }), 'route_session_endpoint_invalid'],
+    ['the customer list without an authorization', directory({ path: '/api/v1/customers' }), 'route_session_endpoint_invalid'],
+    ['the current-session endpoint with the binding', route({ path: '/api/v1/session', policy: BARE_SESSION('tenant'), sessionBinding: 'required' }), 'route_session_binding_invalid'],
+    ['the logout endpoint with the binding', route({ method: 'POST', path: '/api/v1/session/logout', policy: BARE_SESSION('tenant'), sessionBinding: 'required' }), 'route_session_binding_invalid'],
+  ] as const) {
+    assert.equal(setupCode([def]), code, label);
+  }
+  // The directory path may still carry an ordinary authorized read shape; only the authorization-free shape is its own.
+  assert.equal(setupCode([route({ path: '/api/v1/stores', policy: SESSION('tenant'), trustedContext: 'required', sessionBinding: 'required' })]), undefined);
+  assert.equal(setupCode([directory(), directory()]), 'route_duplicate');
 });

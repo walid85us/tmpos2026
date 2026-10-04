@@ -64,7 +64,14 @@
 // The PUT's mutator now dispatches by domain inside the persistence layer; nothing else is added. Invoices is configuration
 // only: no invoice business route is served, and no readiness probe is added (the owner read-back fails closed itself).
 //
-// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, then probeCustomerSearch), answered over the same kernel. The routes are
+// M7B-INVOICES-P1 UPDATE (store directory). A sixth read, GET /api/v1/stores (storeDirectory.ts createStoreDirectoryRoute):
+// the stores the presenting session's actor may act at, over migration 027's session-bound routine (postgresStoreDirectory.ts)
+// on the kernel's client. It is the route table's one closed authorization-free business route (routes.ts): no authorizer
+// runs, the routine derives every store from the session key, and it is listed with the reads (a read-only actor's session
+// reads its stores, marked read-only). Readiness: the reads probe asks 027's routine last (probeStoreDirectory), after the
+// search's, and is ready only when all five refuse an absent key.
+//
+// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, probeCustomerSearch, then probeStoreDirectory), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
 import { CUSTOMER_CREATE_MUTATOR } from '../persistence/postgresCustomerCreate.js';
@@ -77,6 +84,7 @@ import {
   ROLE_LEVEL_UPDATE_MUTATOR, createPostgresRoleLevelDirectory, createPostgresRoleLevels, readRoleLevels,
 } from '../persistence/postgresRoleLevels.js';
 import type { StoredRoleLevel } from '../persistence/postgresRoleLevels.js';
+import { createPostgresStoreDirectory, probeStoreDirectory } from '../persistence/postgresStoreDirectory.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
 import { TENANT_OWNER_ROLE_ID, materializeTenantPermissions } from '../platform-identity/permissionCatalog.js';
@@ -87,15 +95,19 @@ import type { CustomerDetailPorts, CustomerDirectoryPorts, CustomerProfilePorts 
 import { createInvoiceRoleLevelDirectoryRoute, createRoleLevelDirectoryRoute } from '../runtime/roleLevelDirectory.js';
 import type { InvoiceRoleLevelDirectoryPorts, RoleLevelDirectoryPort, RoleLevelDirectoryPorts } from '../runtime/roleLevelDirectory.js';
 import { ROLE_LEVEL_UPDATE_ROUTE } from '../runtime/roleLevelUpdate.js';
+import { createStoreDirectoryRoute } from '../runtime/storeDirectory.js';
+import type { StoreDirectoryPorts } from '../runtime/storeDirectory.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import { TransactionCompositionError, composeReadTransactions, uncataloguedRoutePermissions } from './transactionKernel.js';
 import type { ReadInventory, ReadTransactions } from './transactionKernel.js';
 
 /**
  * The tenant reads' ports: the customer directory's, the customer detail's (M7A-CUSTOMERS-P4), the customer profile's
- * (M7A-CUSTOMERS-P6) and the role levels' read-backs (Customers, M7A-CUSTOMERS-P3-R2; Invoices, M5-INVOICES-AUTH-P1).
+ * (M7A-CUSTOMERS-P6), the role levels' read-backs (Customers, M7A-CUSTOMERS-P3-R2; Invoices, M5-INVOICES-AUTH-P1) and the
+ * store directory's (M7B-INVOICES-P1).
  */
-type TenantReadPorts = CustomerDirectoryPorts & CustomerDetailPorts & CustomerProfilePorts & RoleLevelDirectoryPorts & InvoiceRoleLevelDirectoryPorts;
+type TenantReadPorts = CustomerDirectoryPorts & CustomerDetailPorts & CustomerProfilePorts & RoleLevelDirectoryPorts & InvoiceRoleLevelDirectoryPorts
+  & StoreDirectoryPorts;
 
 const notComposed = (): never => { throw new Error('read port not composed'); };
 /** A port that answers nothing: the routes' declarations are built over it, before any client exists. */
@@ -105,6 +117,7 @@ const INERT: TenantReadPorts = Object.freeze({
   customerProfile: Object.freeze({ get: notComposed }),
   roleLevels: Object.freeze({ levels: notComposed }),
   invoiceRoleLevels: Object.freeze({ levels: notComposed }),
+  stores: Object.freeze({ stores: notComposed }),
 });
 
 /** A role's catalog default on `domain`: the tenant authorizer's own materializer, with no edit, unlimited. */
@@ -125,22 +138,22 @@ function withCatalogDefaults(domain: string, stored: (tenant: string, signal: Ab
 /**
  * The reads' one readiness probe: the directory's routine, then — only once it has refused — the detail's (M7A-CUSTOMERS-P4),
  * then — only once that has refused — the profile's (M7A-CUSTOMERS-P6), then — only once that has refused — the name
- * search's (M7A-CUSTOMERS-P8).
+ * search's (M7A-CUSTOMERS-P8), then — only once that has refused — the store directory's (M7B-INVOICES-P1).
  */
 const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> =>
   (await probeCustomerDirectory(client, signal)) && (await probeCustomerDetail(client, signal)) && (await probeCustomerProfile(client, signal))
-  && probeCustomerSearch(client, signal);
+  && (await probeCustomerSearch(client, signal)) && probeStoreDirectory(client, signal);
 
 // The tenant route inventory, added to here and only here: the customer directory over its production adapter, the
 // customer create over its mutator (M7A-CUSTOMERS-P3), the role-level edit over its mutator and the role-level reads
 // (M7A-CUSTOMERS-P3-R1), the role levels' read-back over its one-snapshot read (M7A-CUSTOMERS-P3-R2), the customer
 // detail over its session-bound read (M7A-CUSTOMERS-P4), the customer profile over its session-bound read
-// (M7A-CUSTOMERS-P6), the customer edit over its mutator (M7A-CUSTOMERS-P7), and the Invoices role levels' read-back
-// (M5-INVOICES-AUTH-P1).
+// (M7A-CUSTOMERS-P6), the customer edit over its mutator (M7A-CUSTOMERS-P7), the Invoices role levels' read-back
+// (M5-INVOICES-AUTH-P1), and the store directory over its session-bound read (M7B-INVOICES-P1).
 export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({
-  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute]),
+  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute]),
   writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR]) }),
-  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')) }),
+  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }) }),
   inert: INERT,
   probe: probeTenantReads,
   roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => createPostgresRoleLevels({ client }), held: readRoleLevels }),

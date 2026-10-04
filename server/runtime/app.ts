@@ -53,7 +53,11 @@
 //                  admission when due (401, or 503 when the store or admission is
 //                  unavailable), the session-bound CSRF token on an unsafe method (403),
 //                  then the authorizer when the route declares a requirement (403) — and
-//                  only such a route's 2xx slides the session's idle window;
+//                  only such a route's 2xx slides the session's idle window. A STORE template's
+//                  authorizer is also handed the store its path selects (RouteView.storeTarget,
+//                  M7B-INVOICES-P1); the store directory, GET /api/v1/stores, declares no
+//                  requirement, so no authorizer runs and its window does not slide — its
+//                  handler receives the session key and its routine decides;
 //             6b. the target of a templated command (M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id}):
 //                the path's final segment must be a canonical lowercase uuid -> else 400, judged only
 //                now that the chain has authenticated and authorized the request and before anything
@@ -142,7 +146,7 @@ import type { CommandContract, CommandTransactionDeps, CommandTransactions } fro
 import { defineOutboxEvents } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
-import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, defineRoutes, pathIdOf, sessionPaths } from './routes.js';
+import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_SEGMENT, defineRoutes, pathIdOf, sessionPaths, storeTargetOf } from './routes.js';
 import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 import type { TrustedScope } from './principals.js';
 
@@ -503,9 +507,15 @@ function forwardedForOf(req: Request): string | string[] | undefined {
   return lines.length > 1 ? lines : lines[0];
 }
 
-/** The frozen route view an authorizer is handed: never the request or the response. */
-const viewOf = (route: RouteDefinition, audience: SessionAudience | null): RouteView =>
-  Object.freeze({ method: route.method, path: route.path, audience });
+/**
+ * The frozen route view an authorizer is handed: never the request or the response. A STORE template's view alone also
+ * carries the store its path selects (M7B-INVOICES-P1, routes.ts storeTargetOf: the canonical uuid, or null for any other
+ * spelling); every other view is exactly { method, path, audience }.
+ */
+const viewOf = (route: RouteDefinition, audience: SessionAudience | null, requestPath: string): RouteView =>
+  route.path.includes(STORE_SEGMENT)
+    ? Object.freeze({ method: route.method, path: route.path, audience, storeTarget: storeTargetOf(requestPath) })
+    : Object.freeze({ method: route.method, path: route.path, audience });
 
 export interface AppDeps {
   readiness: ReadinessState;
@@ -822,7 +832,7 @@ export function createApp(deps: AppDeps): Express {
       // The provider-verified authentication time bound to this request's session, when it has one: read
       // from the session record alone (sessions.ts), never from the request.
       let authenticatedAt: number | null = null;
-      // The store key of the session that presented this request (a digest, never the cookie), for a session route:
+      // The session key of the session that presented this request (a digest, never the cookie), for a session route:
       // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1), and
       // (M7A-CUSTOMERS-P3) a tenant command's store also hands it, inside that transaction, to its mutator's session-bound
       // routine (migration 019), which derives the command's authority from it alone. It goes nowhere else — no log line, no handler, no context — with ONE declared exception: the handler of a route
@@ -834,7 +844,7 @@ export function createApp(deps: AppDeps): Express {
         // Both ports are proven present at startup for any authenticated route.
         const authn = await authenticate(req, authenticator as RequestAuthenticator, deadlineMs);
         if (typeof authn === 'string') return challenge(req, res, authn);
-        const allowed = await authorize(authorizer as RouteAuthorizer, authn.principal, policy.authorization, viewOf(route, null), deadlineMs);
+        const allowed = await authorize(authorizer as RouteAuthorizer, authn.principal, policy.authorization, viewOf(route, null, req.path), deadlineMs);
         if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
         principal = authn.principal;
         context = allowed.context;
@@ -878,7 +888,7 @@ export function createApp(deps: AppDeps): Express {
         }
         if (policy.authorization !== null) {
           // The scope this request's own admission selected travels with it: the authorizer decides on that snapshot.
-          const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience), deadlineMs, active.admitted);
+          const allowed = await authorize(boundary.authorizer, active.principal, policy.authorization, viewOf(route, policy.audience, req.path), deadlineMs, active.admitted);
           if (typeof allowed === 'string') return verdict(req, res, allowed, 403);
           context = allowed.context;
           // The idle window slides only when an authorized route answers 2xx — never on a

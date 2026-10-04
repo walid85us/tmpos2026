@@ -20,7 +20,7 @@
 //     happened, and with which second factor — which a boundary's login policy judges
 //     (sessions.ts). A malformed value is no evidence, and nothing the client asserts is.
 //   - RouteAuthorizer is handed that principal, the route's declared requirement, a frozen route
-//     view { method, path, audience }, the deadline signal and — on a session route — the trusted
+//     view { method, path, audience } (a store template's view also its storeTarget, M7B-INVOICES-P1), the deadline signal and — on a session route — the trusted
 //     scope THIS request's own session admission selected, or null when it selected none
 //     (sessions.ts ActiveSession.admitted, M5-GIAM-D1-P4), so an authorizer can decide on the very
 //     snapshot admission read instead of taking a second one that could disagree. Only an exact
@@ -55,6 +55,12 @@ export interface RouteView {
   readonly method: string;
   readonly path: string;
   readonly audience: SessionAudience | null;
+  /**
+   * Present ONLY on a view of a STORE template (routes.ts, M7B-INVOICES-P1): the store the request path names, as a
+   * canonical lowercase uuid, or null for any other spelling. A requested target that narrows among the actor's own store
+   * grants — never proof of access, and absent on every other route's view.
+   */
+  readonly storeTarget?: string | null;
 }
 
 export interface RouteAuthorizer {
