@@ -45,5 +45,7 @@ export const TENANT_DISPLAY_NAME_MUTATOR: AggregateMutator = Object.freeze({
   kind: TENANT_DISPLAY_NAME_CONTRACT.kind,
   mode: 'update',
   aggregateType: TENANT_DISPLAY_NAME_CONTRACT.aggregateType,
+  // Its contract's scope, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'platform',
   apply: applyDisplayName,
 });

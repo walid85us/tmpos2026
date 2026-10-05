@@ -21,7 +21,8 @@
 // careless schema, never proof of what a value holds — that rests on the planner seeing no such material
 // and on closed, reviewed contracts. Release policy, which no code can enforce across releases: registries
 // are append-only while events can be claimed, a type keeps one aggregate type in every release, the record
-// limits only ever tighten, and a new type@version ships to the workers before any command emits it. A
+// limits only ever tighten, and a new type@version ships to the workers before any command emits it. (A command's CHANGE
+// set — the mutation's input, never an event — may since M7B-INVOICES-P1 also carry `rows` fields: see MAX_CHANGE_ROWS.) A
 // worker that meets a well-formed envelope whose type@version it lacks (a rolling deploy) retries it —
 // within the attempt cap every event has, so one still unknown when its attempts are spent is dead-lettered
 // (attempts_exhausted) for an audited redrive, never retried forever; anything less than a well-formed
@@ -86,6 +87,18 @@ export const MAX_STRING_FIELD_LENGTH = 256;
  * MAX_STRING_FIELD_LENGTH, and MAX_RECORD_BYTES bounds every record (a full customer change set is under 2.2 KB).
  */
 export const MAX_CHANGE_STRING_FIELD_LENGTH = 508;
+/**
+ * M7B-INVOICES-P1 — the one COMMAND change field that is not a scalar: `rows`, a bounded list of flat records (an invoice
+ * draft's ordered lines). Its own bounds, never an event's or an envelope's: at most MAX_CHANGE_ROWS rows of at most
+ * MAX_ROW_FIELDS scalar fields each, a row string at most MAX_ROW_STRING_FIELD_LENGTH UTF-16 units (a 256-scalar line
+ * description is at most 512; the planner enforces the scalar count), each row within MAX_RECORD_BYTES, and a change set
+ * that carries a rows field within MAX_ROWS_CHANGE_BYTES serialized — every other record keeps MAX_RECORD_BYTES. Only
+ * parseChangeSchema admits it: an event payload schema never does, so a row never reaches an event or an envelope.
+ */
+export const MAX_CHANGE_ROWS = 50;
+export const MAX_ROW_FIELDS = 8;
+export const MAX_ROW_STRING_FIELD_LENGTH = 512;
+export const MAX_ROWS_CHANGE_BYTES = 64 * 1024;
 /** The largest serialized outbox envelope: a bounded payload beside the fixed, format-bounded fields. */
 export const MAX_OUTBOX_ENVELOPE_BYTES = MAX_RECORD_BYTES + 1_024;
 /** The most events one command may enqueue. */
@@ -148,6 +161,15 @@ export type RecordSchema = Readonly<Record<string, FieldSchema>>;
 
 /** A value in contract with its schema: bounded scalars only. */
 export type RecordValue = Readonly<Record<string, string | number | boolean>>;
+
+/** A COMMAND change field holding up to `maxRows` flat records of `fields` (M7B-INVOICES-P1): never an event's. */
+export type RowsFieldSchema = Readonly<{ type: 'rows'; maxRows: number; fields: RecordSchema }>;
+
+/** A command change-set schema: scalar fields, and (M7B-INVOICES-P1) `rows` fields. */
+export type ChangeSchema = Readonly<Record<string, FieldSchema | RowsFieldSchema>>;
+
+/** A change set in contract with its schema: scalars, and for a rows field a frozen list of frozen flat records. */
+export type ChangeValue = Readonly<Record<string, string | number | boolean | readonly RecordValue[]>>;
 
 /** One closed event contract. */
 export interface EventContract {
@@ -309,14 +331,26 @@ function isRefusedFieldName(name: string): boolean {
   return FORBIDDEN_NAMES.includes(lower) || lower.endsWith('key') || FORBIDDEN_NAME_PARTS.some((part) => lower.includes(part));
 }
 
-function parseSchema(raw: unknown, maxStringLength: number): RecordSchema | null {
+/** A rows field (M7B-INVOICES-P1): exactly { type: 'rows', maxRows, fields }, its fields a scalar schema of its own bounds. */
+function parseRowsField(raw: unknown): RowsFieldSchema | null {
+  if (!isRecord(raw) || !hasExactKeys(raw, ['type', 'maxRows', 'fields'])) return null;
+  const { type, maxRows, fields } = raw;
+  if (type !== 'rows' || !isInteger(maxRows, 1, MAX_CHANGE_ROWS) || !isRecord(fields)) return null;
+  const count = Reflect.ownKeys(fields).length;
+  if (count < 1 || count > MAX_ROW_FIELDS) return null;
+  const schema = parseSchema(fields, MAX_ROW_STRING_FIELD_LENGTH, false);
+  return schema === null ? null : Object.freeze({ type, maxRows, fields: schema as RecordSchema });
+}
+
+function parseSchema(raw: unknown, maxStringLength: number, rows: boolean): ChangeSchema | null {
   if (!isRecord(raw)) return null;
   const names = Reflect.ownKeys(raw);
   if (names.length > MAX_RECORD_FIELDS) return null;
-  const schema: Record<string, FieldSchema> = {};
+  const schema: Record<string, FieldSchema | RowsFieldSchema> = {};
   for (const name of names) {
     if (typeof name !== 'string' || isRefusedFieldName(name)) return null;
-    const field = parseField(raw[name], maxStringLength);
+    const value: unknown = raw[name];
+    const field = rows && isRecord(value) && value.type === 'rows' ? parseRowsField(value) : parseField(value, maxStringLength);
     if (field === null) return null;
     schema[name] = field;
   }
@@ -325,12 +359,15 @@ function parseSchema(raw: unknown, maxStringLength: number): RecordSchema | null
 
 /** A strictly valid record schema as a frozen copy, or null. Definitions are source code, validated once at startup. */
 export function parseRecordSchema(raw: unknown): RecordSchema | null {
-  return parseSchema(raw, MAX_STRING_FIELD_LENGTH);
+  return parseSchema(raw, MAX_STRING_FIELD_LENGTH, false) as RecordSchema | null;
 }
 
-/** A command change-set schema: parseRecordSchema's rules, its strings up to MAX_CHANGE_STRING_FIELD_LENGTH. Never an event's. */
-export function parseChangeSchema(raw: unknown): RecordSchema | null {
-  return parseSchema(raw, MAX_CHANGE_STRING_FIELD_LENGTH);
+/**
+ * A command change-set schema: parseRecordSchema's rules, its strings up to MAX_CHANGE_STRING_FIELD_LENGTH, and — the one
+ * difference beside that bound (M7B-INVOICES-P1) — `rows` fields. Never an event's.
+ */
+export function parseChangeSchema(raw: unknown): ChangeSchema | null {
+  return parseSchema(raw, MAX_CHANGE_STRING_FIELD_LENGTH, true);
 }
 
 function fieldAccepts(field: FieldSchema, value: unknown): boolean {
@@ -364,6 +401,47 @@ export function recordOf(schema: RecordSchema, raw: unknown): RecordValue | null
     return Buffer.byteLength(JSON.stringify(value), 'utf8') <= MAX_RECORD_BYTES ? Object.freeze(value) : null;
   } catch {
     return null; // a hostile getter: not in contract
+  }
+}
+
+/**
+ * A change set in contract with its change schema (M7B-INVOICES-P1) as a fresh frozen copy, or null: exactly the schema's
+ * fields, each read once; a scalar field as recordOf judges one; a rows field a plain dense array of at most its maxRows
+ * entries, each a record in contract with its row schema (recordOf: exactly its fields, each row within MAX_RECORD_BYTES),
+ * copied row by row into a frozen list. The whole set within MAX_ROWS_CHANGE_BYTES serialized when it carries a rows field,
+ * otherwise within MAX_RECORD_BYTES — so a scalar-only change set is judged exactly as recordOf judges it.
+ */
+export function changesOf(schema: ChangeSchema, raw: unknown): ChangeValue | null {
+  try {
+    if (!isRecord(raw)) return null;
+    const names = Object.keys(schema);
+    if (!hasExactKeys(raw, names)) return null;
+    const value: Record<string, string | number | boolean | readonly RecordValue[]> = {};
+    let rows = false;
+    for (const name of names) {
+      const field = schema[name];
+      const given: unknown = raw[name];
+      if (field.type === 'rows') {
+        if (!isPlainArray(given)) return null;
+        const count = given.length; // read once: the bound checked is the bound the loop runs to
+        if (count > field.maxRows) return null;
+        const copy: RecordValue[] = [];
+        // inv: copy holds a checked frozen copy of each row below i; term: i rises to count (at most MAX_CHANGE_ROWS).
+        for (let i = 0; i < count; i++) {
+          const row = i in given ? recordOf(field.fields, given[i]) : null;
+          if (row === null) return null;
+          copy.push(row);
+        }
+        value[name] = Object.freeze(copy);
+        rows = true;
+      } else {
+        if (!fieldAccepts(field, given)) return null;
+        value[name] = given as string | number | boolean;
+      }
+    }
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') <= (rows ? MAX_ROWS_CHANGE_BYTES : MAX_RECORD_BYTES) ? Object.freeze(value) : null;
+  } catch {
+    return null; // a hostile getter or proxy trap: not in contract
   }
 }
 

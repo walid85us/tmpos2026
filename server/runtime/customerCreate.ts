@@ -82,6 +82,8 @@ export const CUSTOMER_CREATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'tenant.customer.create',
   mode: 'create',
   aggregateType: 'customer',
+  // The scope of the trusted context it commits under, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   changes: Object.freeze({ name: NAME_FIELD, phone: PHONE_FIELD, email: EMAIL_FIELD }),
   events: Object.freeze([]),
 });
@@ -89,13 +91,22 @@ export const CUSTOMER_CREATE_CONTRACT: CommandContract = Object.freeze({
 /** One scalar that renders: not White_Space, Default_Ignorable_Code_Point, a format character, a mark or U+2800. */
 const VISIBLE_RE = /[^\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cf}\p{M}\u2800]/u;
 
+/**
+ * Plain text as it is stored — trimmed, 1 to `maxScalars` scalars, no refused character, at least one visible scalar — or
+ * null: the customer name's pipeline, which M7B-INVOICES-P1's invoice draft line description shares at 256 scalars
+ * (invoiceDrafts.ts) under migration 028's restatement of 017's CHECK.
+ */
+export function normalizePlainText(raw: unknown, maxScalars: number): string | null {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (REFUSED_CHARACTER_RE.test(text) || !VISIBLE_RE.test(text)) return null;
+  const scalars = [...text].length; // code points; with no lone surrogate, exactly the scalar values (017's char_length)
+  return scalars >= 1 && scalars <= maxScalars ? text : null;
+}
+
 /** The name as it is stored — trimmed, 1-200 scalars, no refused character, at least one visible scalar — or null. */
 export function normalizeCustomerName(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  const name = raw.trim();
-  if (REFUSED_CHARACTER_RE.test(name) || !VISIBLE_RE.test(name)) return null;
-  const scalars = [...name].length; // code points; with no lone surrogate, exactly the scalar values (017's char_length)
-  return scalars >= 1 && scalars <= CUSTOMER_NAME_MAX_CHARACTERS ? name : null;
+  return normalizePlainText(raw, CUSTOMER_NAME_MAX_CHARACTERS);
 }
 
 const BODY_KEYS: readonly string[] = ['name', 'phone', 'email'];

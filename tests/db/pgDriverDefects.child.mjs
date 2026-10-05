@@ -182,7 +182,8 @@ function kernel(who, w, transport, max = 1, driver = postgres) {
 const EVENTS = defineOutboxEvents(TEST_EVENTS);
 const COMMANDS = defineCommands([TEST_CREATE], EVENTS);
 const KEYRING = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
-const mutatorOf = (apply) => Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply });
+// Its scope declared (M7B-INVOICES-P1, design R4: a mutator's scope is required): the administrative store's platform.
+const mutatorOf = (apply) => Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', contextScope: 'platform', apply });
 const ownerSql = () => postgres(targets.owner.dsn, { ...targets.owner.options, max: 1, onnotice: () => {} });
 
 /** A fresh operation acquired on `store`, and a create command held by it. */

@@ -442,7 +442,11 @@ test('the GET {id} templates register only as GET /api/v1/customers/{id} and GET
 });
 
 const EDIT = { scope: 'tenant', permission: 'edit_customers' };
-/** M7A-CUSTOMERS-P7: the one templated command — PATCH /api/v1/customers/{id}, idempotency required, a command, no handler. */
+/**
+ * M7A-CUSTOMERS-P7: the customer template's one templated command — PATCH /api/v1/customers/{id}, idempotency required, a
+ * command, no handler. (The route table's other templated command, since M7B-INVOICES-P1, is the store template's draft
+ * save, POST /api/v1/stores/{storeId}/invoice-drafts.)
+ */
 const patch = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   method: 'PATCH', path: '/api/v1/customers/{id}', policy: SESSION('tenant', EDIT), body: { kind: 'json', maxBytes: 8_192, required: true },
   idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: {}, plan: () => ({}) }, ...over,

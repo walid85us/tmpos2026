@@ -67,6 +67,19 @@
 // nothing committed and nothing was recorded, no completion either: the runtime answers an UNSEALED 409 write_conflict and
 // the attempt's lease waits out its time, exactly as for the other rollbacks below.
 //
+// M7B-INVOICES-P1 — A REQUIRED SCOPE DECLARATION AND ONE NARROW, OPT-IN WIDENING:
+//   - Every contract DECLARES its CONTEXT SCOPE (`contextScope`, design R4): the scope of the trusted context its route
+//     decides, its mutator declares and its committing store re-proves — 'platform' for the administrative commands, 'tenant'
+//     for the tenant ones (each earlier contract states the scope it always had), 'store' for the invoice draft create. It
+//     is never defaulted: the registry refuses a contract without one (command_registry_invalid), and each composition root
+//     requires route scope = contract scope = mutator scope with no fallback (command_scope_mismatch); the store commits a
+//     command only under a context of its mutator's declared scope.
+//   - A CREATE contract may opt into ONE typed sealed refusal (`sealedRefusal: 'customer_not_found'`): its mutator may
+//     answer 'customer_not_found' having written NOTHING, and the store then records the runtime's own sealed 422
+//     { "error": "customer_not_found" } as the completion and commits only that — exactly as it records the sealed 409s.
+//     The slot is minted here, from the runtime's fixed word (idempotency.ts refusalEnvelope), only for a contract that
+//     declares it; every other command carries null there, and a mutator of one that answers the word commits nothing.
+//
 // The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
 // 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
 // attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
@@ -95,8 +108,8 @@ import { types } from 'node:util';
 import { outage, withDeadline } from './deadline.js';
 import { envelopeFromOutcome, refusalEnvelope } from './idempotency.js';
 import type { ReplayEnvelope } from './idempotency.js';
-import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, isContractName, parseChangeSchema, recordOf } from './outbox.js';
-import type { EventContract, OutboxEventDraft, OutboxEventRegistry, RecordSchema, RecordValue } from './outbox.js';
+import { AGGREGATE_TYPE_RE, MAX_EVENTS_PER_COMMAND, UUID_RE, changesOf, isContractName, parseChangeSchema, recordOf } from './outbox.js';
+import type { ChangeSchema, ChangeValue, EventContract, OutboxEventDraft, OutboxEventRegistry } from './outbox.js';
 import { EnforcementSetupError } from './routes.js';
 import type { AuthorizationRequirement, AuthorizationScope } from './routes.js';
 import { isTrustedScope } from './principals.js';
@@ -141,14 +154,28 @@ function auditAnnexOf(raw: unknown): Readonly<{ reasonCode: string; reason: stri
   return Object.freeze({ reasonCode, reason });
 }
 
+/** The scopes a command's trusted context may have (M7B-INVOICES-P1: declared by a contract and its mutator). */
+export type CommandContextScope = 'platform' | 'tenant' | 'store';
+
 /** One closed command contract: whether it creates or updates, the aggregate, its change schema and the events it may enqueue. */
 export interface CommandContract {
   readonly kind: string;
   readonly mode: 'create' | 'update';
   readonly aggregateType: string;
-  readonly changes: RecordSchema;
+  readonly changes: ChangeSchema;
   /** Each a registered event contract of the same aggregate type, at most one per type. */
   readonly events: readonly Readonly<{ type: string; version: number }>[];
+  /**
+   * The scope of the trusted context this command commits under (M7B-INVOICES-P1, design R4): REQUIRED, never defaulted —
+   * 'platform' for an administrative command, 'tenant' or 'store' for a tenant root's. Composition requires it to equal its
+   * route's requirement scope and its mutator's declared scope.
+   */
+  readonly contextScope: CommandContextScope;
+  /**
+   * The one typed sealed refusal a CREATE may opt into (M7B-INVOICES-P1): its mutator may answer it before writing anything,
+   * and the store records the runtime's sealed 422 as the completion. Absent on every other contract.
+   */
+  readonly sealedRefusal?: 'customer_not_found';
 }
 
 export interface CommandRegistry {
@@ -162,7 +189,8 @@ export interface TransactionMutation {
   readonly aggregateType: string;
   readonly aggregateId: string;
   readonly expectedVersion: number | null;
-  readonly changes: RecordValue;
+  /** Scalars, and for a contract's rows field (M7B-INVOICES-P1) a frozen list of frozen flat records. */
+  readonly changes: ChangeValue;
 }
 
 /**
@@ -224,8 +252,11 @@ export interface TransactionCommand {
    *
    * The runtime mints both from its own fixed refusal words: a plan may not spell them, and neither is
    * ever built from an outcome, a body or a request.
+   *
+   * `customerNotFound` (M7B-INVOICES-P1) is the sealed 422 a CREATE contract that opts into it (`sealedRefusal`) may record
+   * when its mutator answers 'customer_not_found' having written nothing; null for every other command.
    */
-  readonly rejected: Readonly<{ conflict: string; invalidState: string | null }>;
+  readonly rejected: Readonly<{ conflict: string; invalidState: string | null; customerNotFound: string | null }>;
   readonly mutation: TransactionMutation;
   readonly audit: TransactionAudit;
   readonly events: readonly OutboxEventDraft[];
@@ -296,18 +327,23 @@ export interface PreparedCommand {
   readonly response: ReplayEnvelope;
   /** An update's response when the store answers 'unchanged' — which it recorded, sealed, in that commit; null when the plan names none. */
   readonly unchanged: ReplayEnvelope | null;
-  /** The two deterministic rejections as the store recorded whichever it answered: sent once, then replayed for the rest of the retention. */
-  readonly rejected: Readonly<{ conflict: ReplayEnvelope; invalidState: ReplayEnvelope | null }>;
+  /**
+   * The deterministic rejections as the store recorded whichever it answered: sent once, then replayed for the rest of the
+   * retention. `customerNotFound` only for a create that opted into it (M7B-INVOICES-P1), null otherwise.
+   */
+  readonly rejected: Readonly<{ conflict: ReplayEnvelope; invalidState: ReplayEnvelope | null; customerNotFound: ReplayEnvelope | null }>;
 }
 
 /**
  * What a commit answered other than 'committed': a refusal or, for an update, a missing aggregate.
  *
- * Three of these are COMMITTED answers, not rollbacks — each recorded its own sealed response as the
+ * Four of these are COMMITTED answers, not rollbacks — each recorded its own sealed response as the
  * completion in the same transaction that decided it, and wrote nothing else:
  *   - 'transaction_unchanged' — changes already in place, the plan's unchanged response recorded;
  *   - 'transaction_conflict' — the aggregate was not at the version named, the sealed 409 recorded;
- *   - 'transaction_invalid_state' — the state did not admit the change, the sealed 409 recorded.
+ *   - 'transaction_invalid_state' — the state did not admit the change, the sealed 409 recorded;
+ *   - 'transaction_customer_not_found' — a create that opted into it (M7B-INVOICES-P1) named a customer missing from its
+ *     trusted tenant, or another tenant's, the sealed 422 recorded.
  * The last two are M5-GIAM-D1-P2-R1: before it they rolled back and left the lease in progress, so the
  * key could later be replanned and could mutate. An adapter that cannot record the sealed refusal rolls
  * its transaction back and answers 'transaction_unavailable' instead, which changes nothing at all.
@@ -322,6 +358,7 @@ export type CommandRefusal =
   | 'transaction_precondition_failed'
   | 'transaction_not_found'
   | 'transaction_invalid_state'
+  | 'transaction_customer_not_found'
   | 'transaction_unchanged'
   | 'transaction_unavailable'
   | 'transaction_timeout'
@@ -350,19 +387,33 @@ function eventRefOf(raw: unknown, aggregateType: string, events: OutboxEventRegi
   return contract !== undefined && contract.aggregateType === aggregateType ? Object.freeze({ type, version }) : null;
 }
 
+const CONTRACT_FIELDS: readonly string[] = ['kind', 'mode', 'aggregateType', 'changes', 'events', 'contextScope'];
+const CONTEXT_SCOPES: readonly string[] = ['platform', 'tenant', 'store'];
+
 function parseCommandContract(raw: unknown, events: OutboxEventRegistry): CommandContract {
-  if (isRecord(raw) && hasExactKeys(raw, ['kind', 'mode', 'aggregateType', 'changes', 'events'])) {
-    const { kind, mode, aggregateType, changes, events: refs } = raw;
-    const schema = parseChangeSchema(changes); // strings up to MAX_CHANGE_STRING_FIELD_LENGTH (M7A-CUSTOMERS-P3)
+  // The six fields every contract has — its context scope among them, required (M7B-INVOICES-P1, R4) — and at most the one
+  // opt-in, only when declared.
+  const optional = isRecord(raw) ? ['sealedRefusal'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
+  if (isRecord(raw) && hasExactKeys(raw, [...CONTRACT_FIELDS, ...optional])) {
+    const { kind, mode, aggregateType, changes, events: refs, contextScope, sealedRefusal } = raw;
+    const schema = parseChangeSchema(changes); // strings up to MAX_CHANGE_STRING_FIELD_LENGTH (M7A-CUSTOMERS-P3); rows (M7B)
+    // The scope is one of the three, never absent, never undefined; a declared opt-in carries a valid value.
+    const scopeValid = typeof contextScope === 'string' && CONTEXT_SCOPES.includes(contextScope);
+    // Only a create may opt into the typed sealed refusal, and only the one word the runtime mints.
+    const refusalValid = !optional.includes('sealedRefusal') || (sealedRefusal === 'customer_not_found' && mode === 'create');
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string'
-      && AGGREGATE_TYPE_RE.test(aggregateType) && schema !== null && isPlainArray(refs) && refs.length <= MAX_EVENTS_PER_COMMAND) {
+      && AGGREGATE_TYPE_RE.test(aggregateType) && schema !== null && isPlainArray(refs) && refs.length <= MAX_EVENTS_PER_COMMAND
+      && scopeValid && refusalValid) {
       const parsed: Readonly<{ type: string; version: number }>[] = [];
       for (const ref of refs) {
         const valid = eventRefOf(ref, aggregateType, events);
         if (valid === null || parsed.some((seen) => seen.type === valid.type)) throw new EnforcementSetupError('command_registry_invalid');
         parsed.push(valid);
       }
-      return Object.freeze({ kind, mode, aggregateType, changes: schema, events: Object.freeze(parsed) });
+      return Object.freeze({
+        kind, mode, aggregateType, changes: schema, events: Object.freeze(parsed), contextScope: contextScope as CommandContextScope,
+        ...(optional.includes('sealedRefusal') ? { sealedRefusal: 'customer_not_found' as const } : {}),
+      });
     }
   }
   throw new EnforcementSetupError('command_registry_invalid');
@@ -433,7 +484,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     if (contract.mode === 'create' ? expectedVersion !== null || aggregateId !== binding.newAggregateId
       : !(typeof aggregateId === 'string' && UUID_RE.test(aggregateId) && typeof expectedVersion === 'number'
         && Number.isSafeInteger(expectedVersion) && expectedVersion >= 1 && expectedVersion <= MAX_EXPECTED_VERSION)) return null;
-    const mutationChanges = recordOf(contract.changes, changes);
+    const mutationChanges = changesOf(contract.changes, changes);
     if (mutationChanges === null || !isPlainArray(planned)) return null;
     const count = planned.length;
     if (count > contract.events.length) return null;
@@ -474,11 +525,14 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     // The two deterministic post-authorization rejections, sealed here so the store can record one as
     // the completion inside the very transaction that determined it (M5-GIAM-D1-P2-R1). Minted from the
     // runtime's own words, never from the plan: a body an operation supplied may not spell one of them.
-    // Only an update can be in a state that refuses its change, so a create seals no invalid_state.
+    // Only an update can be in a state that refuses its change, so a create seals no invalid_state. A create that opted into
+    // the typed sealed refusal (M7B-INVOICES-P1) seals its 422 too; no other command carries one.
     const conflict = refusalEnvelope('write_conflict');
     const invalidState = update ? refusalEnvelope('invalid_state') : null;
-    if (conflict === null || (update && invalidState === null)) return null;
-    const rejected = Object.freeze({ conflict, invalidState });
+    const optedIn = !update && contract.sealedRefusal === 'customer_not_found';
+    const customerNotFound = optedIn ? refusalEnvelope('customer_not_found') : null;
+    if (conflict === null || (update && invalidState === null) || (optedIn && customerNotFound === null)) return null;
+    const rejected = Object.freeze({ conflict, invalidState, customerNotFound });
     const command: TransactionCommand = Object.freeze({
       scope: binding.scope,
       lease: binding.lease,
@@ -487,6 +541,7 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
       rejected: Object.freeze({
         conflict: binding.seal(conflict),
         invalidState: invalidState === null ? null : binding.seal(invalidState),
+        customerNotFound: customerNotFound === null ? null : binding.seal(customerNotFound),
       }),
       mutation: Object.freeze({
         kind: contract.kind, aggregateType: contract.aggregateType, aggregateId: id, expectedVersion: expectedVersion as number | null, changes: mutationChanges,
@@ -531,6 +586,7 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'precondition_failed') return 'transaction_precondition_failed';
     if (outcome === 'not_found') return 'transaction_not_found';
     if (outcome === 'invalid_state') return 'transaction_invalid_state';
+    if (outcome === 'customer_not_found') return 'transaction_customer_not_found';
     if (outcome === 'unchanged') return 'transaction_unchanged';
     return outcome === 'unavailable' ? 'transaction_unavailable' : 'transaction_outcome_invalid';
   } catch {

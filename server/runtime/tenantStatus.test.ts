@@ -151,7 +151,7 @@ test('the route registers as one PATCH behind the admin session and change_tenan
   assert.ok(Object.isFrozen(TENANT_STATUS_ROUTE));
   const [contract] = defineCommands([TENANT_STATUS_CONTRACT], defineOutboxEvents(TENANT_STATUS_EVENTS)).list();
   assert.deepEqual(contract, {
-    kind: 'platform.tenant.status.change', mode: 'update', aggregateType: 'tenant',
+    kind: 'platform.tenant.status.change', mode: 'update', aggregateType: 'tenant', contextScope: 'platform',
     changes: { status: { type: 'enum', values: ['active', 'suspended'] } },
     events: [{ type: 'tenant.suspended', version: 1 }, { type: 'tenant.reactivated', version: 1 }],
   });

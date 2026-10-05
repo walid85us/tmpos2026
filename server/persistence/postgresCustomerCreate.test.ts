@@ -47,7 +47,8 @@ const mutation = (over: Partial<TransactionMutation> = {}): TransactionMutation 
 } as TransactionMutation);
 
 test('the mutator registers for exactly the customer create contract, as a create of a customer, frozen', () => {
-  assert.deepEqual(Object.keys(CUSTOMER_CREATE_MUTATOR).sort(), ['aggregateType', 'apply', 'kind', 'mode']);
+  assert.deepEqual(Object.keys(CUSTOMER_CREATE_MUTATOR).sort(), ['aggregateType', 'apply', 'contextScope', 'kind', 'mode']);
+  assert.equal(CUSTOMER_CREATE_MUTATOR.contextScope, 'tenant', 'its declared scope (M7B-INVOICES-P1, design R4): tenant, as it always committed');
   assert.deepEqual([CUSTOMER_CREATE_MUTATOR.kind, CUSTOMER_CREATE_MUTATOR.mode, CUSTOMER_CREATE_MUTATOR.aggregateType],
     ['tenant.customer.create', 'create', 'customer']);
   assert.ok(Object.isFrozen(CUSTOMER_CREATE_MUTATOR));

@@ -4,8 +4,8 @@
 //
 // M5-INVOICES-AUTH-P1 SIBLING. GET /api/v1/roles/levels/invoices reads back the built-in roles' INVOICES levels the same way
 // (same requirement, same no-query rule, same untrusted-answer validation, same 503 rules; migration 026), answering
-// { tenant, domain: 'invoices', roles: [...4] }. The Invoices level is CONFIGURATION ONLY: the server stores and shows it but
-// decides no invoice operation on it. The Customers route below is unchanged byte for byte; both are built by one factory
+// { tenant, domain: 'invoices', roles: [...4] }. The server stores and shows the Invoices level; since M7B-INVOICES-P1 it also
+// decides the store-scope invoice draft routes on it (invoiceDrafts.ts, migration 028) and no other invoice operation. The Customers route below is unchanged byte for byte; both are built by one factory
 // that differs only in the domain, the path and the port it reads.
 //
 // GET /api/v1/roles/levels — a session route of the TENANT boundary, beside the edit (PUT, roleLevelUpdate.ts) on the same
@@ -154,7 +154,7 @@ export function createRoleLevelDirectoryRoute(ports: RoleLevelDirectoryPorts, op
   return directoryRoute('customers', ROLE_LEVEL_DIRECTORY_PATH, ports?.roleLevels, options);
 }
 
-/** The Invoices read-back route over `ports` (configuration only, header); refused at construction without its port. */
+/** The Invoices read-back route over `ports` (header); refused at construction without its port. */
 export function createInvoiceRoleLevelDirectoryRoute(ports: InvoiceRoleLevelDirectoryPorts, options: { deadlineMs?: number } = {}): RouteDefinition {
   return directoryRoute('invoices', INVOICE_ROLE_LEVEL_DIRECTORY_PATH, ports?.invoiceRoleLevels, options);
 }

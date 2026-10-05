@@ -26,11 +26,12 @@
 //     tmpos_audit_writer only (in M5T-J5, through a byte relay that can drop one COMMIT answer).
 //   * THE IDENTITY VERIFIER: a bearer token maps to a synthetic provider reference, authenticated now with a TOTP factor.
 //   * THE RATE LIMITER: the testkit's in-memory limiter, fresh for every instance.
-//   * THE ROUTES: no tenant business route ships (D1/GAP-11), so the protected tenant requests are the harness-only witness
-//     routes (tenantAdmissionWitness.harness.mjs), served beside the production inventory; M5T-L1 asserts they stay out of it.
-//     Since M7B-INVOICES-P1 the STORE witness is served on the closed store template /api/v1/stores/{storeId}/invoice-drafts
-//     (a store-scope route registers nowhere else) and requested at the actor's own store; the literal store witness it
-//     replaced is asserted refused at registration (M5T-G2).
+//   * THE ROUTES: the protected TENANT-scope request is the harness-only witness route (tenantAdmissionWitness.harness.mjs),
+//     served beside the production inventory; M5T-L1 asserts it stays out of it. Since M7B-INVOICES-P1 the protected STORE-
+//     scope request is the REAL draft list, GET /api/v1/stores/{storeId}/invoice-drafts — the tenant root's own route over
+//     its own 028 read, requested at the actor's own store with the session CSRF header it requires — and the exact scope
+//     each 200 was served under is read from the harness's recordingAuthorizer, a pass-through around the session root's
+//     real tenant authorizer; the literal store witness is asserted refused at registration (M5T-G2).
 //   * PASS-THROUGH GATES on the session root's side only: the store's get and update and the tenant admission read as the
 //     root receives them, each holding ONE armed call (by session key or provider reference) until the scenario releases it.
 //     Establish's own hold and re-read run over the root's client inside its transaction and are never wrapped.
@@ -61,7 +62,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver, testDriverVia, childEnv } from './localPostgres.harness.mjs';
-import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, storeWitnessPath } from './tenantAdmissionWitness.harness.mjs';
+import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, recordingAuthorizer, storeDraftsPath } from './tenantAdmissionWitness.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -77,6 +78,7 @@ import { testRequestLimits } from '../../server/runtime/rateLimiter.testkit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { defineRoutes, sessionPaths } from '../../server/runtime/routes.ts';
 import { REAUTHENTICATE_HEADER, REAUTHENTICATE_VALUE, SESSION_COOKIES, SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
+import { INVOICE_DRAFTS_PATH } from '../../server/runtime/invoiceDrafts.ts';
 import { TENANT_DISPLAY_NAME_EVENTS } from '../../server/runtime/tenantDisplayName.ts';
 import { TENANT_STATUS_EVENTS } from '../../server/runtime/tenantStatus.ts';
 
@@ -317,12 +319,19 @@ async function compose(label, relay = null) {
     },
   });
   const limits = testRequestLimits();
+  // The tenant route authorizer over the tenant root's own durable role-level read (migration 020, M7A-CUSTOMERS-P3-R1),
+  // recorded — never altered — so a 200 on the real draft list names the scope it was served under (M7B-INVOICES-P1).
+  const durable = durableSessionAdapters({
+    store: tenantStore, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS, roleLevels: ttx.roleLevels,
+  });
+  const recorder = recordingAuthorizer(durable.authorizer.tenant);
+  // The store-scope protected request: the tenant root's REAL draft list over its own 028 read.
+  const draftList = ttx.routes.find((r) => r.method === 'GET' && r.path === INVOICE_DRAFTS_PATH);
+  assert.ok(draftList !== undefined, 'the tenant root serves the draft list');
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: limits.trustedProxies, keySecret: limits.keySecret,
-    // The tenant route authorizer over the tenant root's own durable role-level read (migration 020, M7A-CUSTOMERS-P3-R1).
-    ...durableSessionAdapters({
-      store: tenantStore, tenantAdmission, platformAdmission: tx.platformAdmission, tenantReads: WITNESS_READS, roleLevels: ttx.roleLevels,
-    }),
+    ...durable,
+    authorizer: Object.freeze({ ...durable.authorizer, tenant: recorder.authorizer }),
     // Each audience on its own root's store: the tenant root's mints under the issuer key, the administrative root's never does.
     store: Object.freeze({ tenant: tenantStore, admin: gated(tx.sessionStore) }),
     limiter: limits.limiter,
@@ -331,7 +340,7 @@ async function compose(label, relay = null) {
   const readiness = createReadinessState();
   readiness.setReady();
   const app = createApp({
-    readiness, log: { log: (line) => { logs.push(line); } }, routes: [...tx.routes, ...WITNESS_ROUTES], limits: sessions.limits,
+    readiness, log: { log: (line) => { logs.push(line); } }, routes: [...tx.routes, ...WITNESS_ROUTES, draftList], limits: sessions.limits,
     idempotency: tx.idempotency, transactions: tx.transactions, events: EVENTS, sessions: sessions.sessions,
   });
   const server = createBoundedServer(app);
@@ -361,7 +370,10 @@ async function compose(label, relay = null) {
       ...guarded(audience), [SESSION_CSRF_HEADER]: s.csrf, cookie: s.cookie,
     })),
     current: (s, audience = 'tenant') => quietly(send(port, 'GET', sessionPaths(audience).current, { cookie: s.cookie })),
-    witness: (s, path = WITNESS_PATH) => quietly(send(port, 'GET', path, { cookie: s.cookie })),
+    // The session CSRF token rides along (the real draft list is session-bound); the tenant witness ignores it.
+    witness: (s, path = WITNESS_PATH) => quietly(send(port, 'GET', path, { cookie: s.cookie, ...(typeof s.csrf === 'string' ? { [SESSION_CSRF_HEADER]: s.csrf } : {}) })),
+    /** The exact [tenant, store, roleId] this instance's real tenant authorizer last granted `who` at `store`, or null. */
+    scopeAt: (who, store) => recorder.lastScopeAt(who.uid, store),
     /** The request log line of one reply, found by its request id (null when none was written within the bound). */
     async line(reply) {
       const id = reply.headers['x-request-id'];
@@ -910,16 +922,25 @@ test('M5T-C2: a login parked inside its transaction: the suspension waits for it
 // ---------------------------------------------------------------------------
 
 /**
- * The witness path a fixture is served on: the tenant witness for a tenant grant, and (M7B-INVOICES-P1) the store witness
- * on the store template at the fixture's own store for a store grant.
+ * The protected path a fixture is served on: the tenant witness for a tenant grant, and (M7B-INVOICES-P1) the REAL draft
+ * list at the fixture's own store for a store grant.
  */
-const witnessPathOf = (f) => (f.store === null ? WITNESS_PATH : storeWitnessPath(f.store));
-/** `s` served on its fixture's witness: 200, and the trusted tenant, store and role the authorizer selected for it. */
+const witnessPathOf = (f) => (f.store === null ? WITNESS_PATH : storeDraftsPath(f.store));
+/**
+ * `s` served on its fixture's protected path: 200, and the trusted tenant, store and role the authorizer selected for it —
+ * the tenant witness echoes them; for the real draft list (whose body is the store's drafts: none here) they are the
+ * instance's recorded decision for that very request.
+ */
 async function servedAs(inst, s, f, why) {
   const reply = await inst.witness(s, witnessPathOf(f));
   assert.equal(reply.status, 200, `${why}: ${reply.body}`);
   const body = JSON.parse(reply.body);
-  assert.deepEqual([body.tenant, body.store, body.roleId], [f.tenant, f.store, f.store === null ? 'store_owner' : 'manager'], `${why}: the selected scope`);
+  if (f.store === null) {
+    assert.deepEqual([body.tenant, body.store, body.roleId], [f.tenant, null, 'store_owner'], `${why}: the selected scope`);
+  } else {
+    assert.deepEqual(body, { drafts: [], nextCursor: null }, `${why}: the real draft list of its store`);
+    assert.deepEqual(inst.scopeAt(f.who, f.store), [f.tenant, f.store, 'manager'], `${why}: the selected scope`);
+  }
 }
 
 /** An idle session across `roundTrip`, all committed before its next request: refused for its witness, never revived. */
@@ -1174,12 +1195,12 @@ test('M5T-G2: a tenant-grant session on the store route and a store-grant sessio
     lab.name('T1', sT.key);
     lab.name('S1', sS.key);
     // M7B-INVOICES-P1: the literal store witness this test once asked on is refused at registration; the store route is the
-    // store template, asked here at a store of the tenant the tenant grant names — a tenant grant still selects no store.
+    // REAL draft list, asked here at a store of the tenant the tenant grant names — a tenant grant still selects no store.
     assert.throws(() => defineRoutes([STORE_WITNESS_ROUTE]), /route_path_invalid/, 'no store route without a path naming the store');
-    await refusedWith(B, await B.witness(sT, storeWitnessPath(storeOfTenant)), 403, 'authz_denied', 'a tenant grant selects no store');
+    await refusedWith(B, await B.witness(sT, storeDraftsPath(storeOfTenant)), 403, 'authz_denied', 'a tenant grant selects no store');
     await refusedWith(B, await B.witness(sS, WITNESS_PATH), 403, 'authz_denied', 'a store grant selects no tenant scope');
-    await refusedWith(B, await B.witness(sS, storeWitnessPath(sibling)), 403, 'authz_denied', 'a store grant selects no other store of its own tenant');
-    await refusedWith(B, await B.witness(sS, storeWitnessPath(storeOfTenant)), 403, 'authz_denied', 'cross-tenant: a store grant selects no store of another tenant');
+    await refusedWith(B, await B.witness(sS, storeDraftsPath(sibling)), 403, 'authz_denied', 'a store grant selects no other store of its own tenant');
+    await refusedWith(B, await B.witness(sS, storeDraftsPath(storeOfTenant)), 403, 'authz_denied', 'cross-tenant: a store grant selects no store of another tenant');
     await servedAs(A, sT, byTenant, 'the tenant session still serves its own scope');
     await servedAs(A, sS, byStore, 'the store session still serves its own scope');
     assert.deepEqual([await liveLabels(byTenant.who, lab), await liveLabels(byStore.who, lab)], [['T1'], ['S1']], 'a 403 ends no session');
@@ -1317,7 +1338,7 @@ test('M5T-H8: a store login parked inside its transaction: the store suspension 
     await waitIdle();
     const records = await assertRecords(who, lab, ['login:K1', 'login:K2<-K1'], 'the login rotated K1 and was recorded');
     await assertCommitOrder(t, 'login before store suspension', records.find((x) => x.session === 'K2').xid, r.xid);
-    await refusedWith(A, await A.witness(successor, storeWitnessPath(store)), 401, 'session_admission_denied', 'the store suspension then takes effect');
+    await refusedWith(A, await A.witness(successor, storeDraftsPath(store)), 401, 'session_admission_denied', 'the store suspension then takes effect');
     assert.deepEqual(await liveLabels(who, lab), []);
   }));
 

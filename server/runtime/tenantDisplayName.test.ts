@@ -138,7 +138,7 @@ test('the route registers as one PATCH behind the admin session and edit_tenant_
   assert.ok(Object.isFrozen(TENANT_DISPLAY_NAME_ROUTE));
   const [contract] = defineCommands([TENANT_DISPLAY_NAME_CONTRACT], defineOutboxEvents(TENANT_DISPLAY_NAME_EVENTS)).list();
   assert.deepEqual(contract, {
-    kind: 'platform.tenant.display_name.update', mode: 'update', aggregateType: 'tenant',
+    kind: 'platform.tenant.display_name.update', mode: 'update', aggregateType: 'tenant', contextScope: 'platform',
     changes: { displayName: { type: 'string', maxLength: 240 } }, events: [{ type: 'tenant.display_name_changed', version: 1 }],
   });
   assert.deepEqual(TENANT_DISPLAY_NAME_EVENTS.map((e) => [e.type, e.version, e.aggregateType, e.payload]),

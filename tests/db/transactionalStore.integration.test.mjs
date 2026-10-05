@@ -380,15 +380,16 @@ async function witness() {
 }
 const ranSince = (before, after) => Object.fromEntries(Object.keys(before).map((k) => [k, after[k] - before[k]]));
 
-/** The synthetic aggregate's two commands, as trusted source defines a kind's mutator: fixed, parameterized SQL. */
+/** The synthetic aggregate's two commands, as trusted source defines a kind's mutator: fixed, parameterized SQL; each declares
+ * its scope (M7B-INVOICES-P1, design R4: required) — platform, the administrative store's. */
 const MUTATORS = Object.freeze([
   Object.freeze({
-    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item',
+    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', contextScope: 'platform',
     apply: async (sql, m) => ((await sql`insert into m6_proof.item (aggregate_id, version, name, quantity)
       values (${m.aggregateId}, 1, ${m.changes.name}, ${m.changes.quantity}) on conflict (aggregate_id) do nothing`).count === 1 ? 'applied' : 'conflict'),
   }),
   Object.freeze({
-    kind: TEST_RENAME.kind, mode: 'update', aggregateType: 'item',
+    kind: TEST_RENAME.kind, mode: 'update', aggregateType: 'item', contextScope: 'platform',
     apply: async (sql, m) => ((await sql`update m6_proof.item set name = ${m.changes.name}, version = version + 1
       where aggregate_id = ${m.aggregateId} and version = ${m.expectedVersion}`).count === 1 ? 'applied' : 'conflict'),
   }),
@@ -677,7 +678,7 @@ const insertRecord = (r) => observer`insert into tmpos_internal.idempotency_reco
 test('M6-PG-01: migration 006 applies on 001-005, refuses a destructive rollback, reverses cleanly and re-applies', async () => {
   assert.equal(applyReport.outcome, 'complete', `the trusted apply failed: ${applyReport.code}`);
   const ledger = await observer`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027'].map((v) => [v, false]),
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028'].map((v) => [v, false]),
     '001-006 are recorded clean in the ledger of the disposable database');
   await assertStorePosture('after the trusted apply');
   const [{ roles }] = await observer`select count(*)::int as roles from pg_catalog.pg_roles where rolname in ('tmpos_app', 'tmpos_audit_writer')`;

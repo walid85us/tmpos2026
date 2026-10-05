@@ -2,7 +2,8 @@
 // tenant route decision and written by the one command that edits them (M7A-CUSTOMERS-P3-R1; G-IAM, G-PERSIST, DA-85;
 // migration 020, schema tmpos_role — and since M7A-CUSTOMERS-P4 migration 021, schema tmpos_role_edit; DA-125). Since
 // M5-INVOICES-AUTH-P1 the Invoices level is stored beside the Customers one, through migration 026's own routines (schema
-// tmpos_role_invoice). That level is CONFIGURATION ONLY: no invoice business operation is decided by the server on it.
+// tmpos_role_invoice). That level was configuration only until M7B-INVOICES-P1: migration 028's invoice draft routines now
+// decide the store-scope draft routes on it, re-reading it themselves; no other invoice operation is decided by the server.
 //
 // THE READ (readRoleLevels, createPostgresRoleLevels). For one tenant and one role, migration 020's SECURITY DEFINER
 // routine tmpos_role.m7a_role_levels answers the levels stored for it by domain — {} when nothing is stored, and then the
@@ -213,5 +214,7 @@ export const ROLE_LEVEL_UPDATE_MUTATOR: AggregateMutator = Object.freeze({
   kind: ROLE_LEVEL_UPDATE_CONTRACT.kind,
   mode: 'create',
   aggregateType: ROLE_LEVEL_UPDATE_CONTRACT.aggregateType,
+  // Its contract's scope, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   apply: applyRoleLevelUpdate,
 });

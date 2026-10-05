@@ -2,11 +2,13 @@
 // phone and email in the tenant a session is admitted to (M7A-CUSTOMERS-P7; G-IAM, G-PERSIST, G-IDEMPOT, G-AUDIT).
 //
 // PATCH /api/v1/customers/{id} — a session route of the TENANT boundary, beside the detail GET on the same template
-// (customerDirectory.ts). It is the one templated command the route table admits (routes.ts IDEMPOTENT_TEMPLATED_ROUTES):
-// the runtime judges the path id only after the chain has authenticated and authorized the request, binds the canonical
-// id into the idempotency fingerprint (so one key sent to two customers is the 422 changed-request refusal, never a
-// replay of one customer's response for the other) and hands it to the planner as ctx.targetId (app.ts). The path names
-// the customer; it is never authority, and neither is the body.
+// (customerDirectory.ts). It is one of the route table's two templated commands, the one on the customer template (routes.ts
+// IDEMPOTENT_TEMPLATED_ROUTES; the other, since M7B-INVOICES-P1, is the draft save, POST
+// /api/v1/stores/{storeId}/invoice-drafts, in IDEMPOTENT_STORE_TEMPLATED_ROUTES): the runtime judges the path id only after
+// the chain has authenticated and authorized the request, binds the canonical id into the idempotency fingerprint (so one
+// key sent to two customers is the 422 changed-request refusal, never a replay of one customer's response for the other)
+// and hands it to the planner as ctx.targetId (app.ts). The path names the customer; it is never authority, and neither is
+// the body.
 //
 // Request  { expectedVersion, name, phone?, email? } — expectedVersion and name required, no other field.
 // Response 200 { customer: { id, name }, version, changed } — the id, the name as stored, the version the customer is now
@@ -77,6 +79,8 @@ export const CUSTOMER_UPDATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'tenant.customer.update',
   mode: 'update',
   aggregateType: 'customer',
+  // The scope of the trusted context it commits under, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   changes: Object.freeze({ name: NAME_FIELD, setPhone: FLAG_FIELD, phone: PHONE_FIELD, setEmail: FLAG_FIELD, email: EMAIL_FIELD }),
   events: Object.freeze([]),
 });

@@ -214,19 +214,23 @@ export interface CommandContext {
    * The canonical lowercase uuid the request path names, set by the runtime ONLY for a templated command route
    * (M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id}) after the chain has authenticated and authorized the request; the
    * same id is bound into the idempotency fingerprint. Absent on every literal route. Still untrusted as a target: the
-   * planner validates it and the store's mutator decides whether it names anything.
+   * planner validates it and the store's mutator decides whether it names anything. For the store template's command
+   * (M7B-INVOICES-P1: POST /api/v1/stores/{storeId}/invoice-drafts) it is the store the path selects — the one the
+   * authorizer selected the actor's grant at — so one key and body at two stores never replay each other's answer.
    */
   readonly targetId?: string;
 }
 
 type PlanRecord = Readonly<Record<string, string | number | boolean>>;
+/** A plan's change set: scalars, and for a contract's rows field (M7B-INVOICES-P1, outbox.ts) a list of flat records. */
+type PlanChanges = Readonly<Record<string, string | number | boolean | readonly PlanRecord[]>>;
 
 /** A command's plan: one aggregate's change, the events it enqueues and the response to send once committed. */
 export interface CommandPlan {
   /** For a create (expectedVersion null) exactly ctx.newAggregateId; for an update the aggregate's UUID. */
   readonly aggregateId: string;
   readonly expectedVersion: number | null;
-  readonly changes: PlanRecord;
+  readonly changes: PlanChanges;
   readonly events: readonly Readonly<{ type: string; payload: PlanRecord }>[];
   /** 200 or 201 only. */
   readonly response: IdempotentOutcome;

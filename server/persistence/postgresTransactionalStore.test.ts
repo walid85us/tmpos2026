@@ -22,6 +22,7 @@ import { defineOutboxEvents } from '../runtime/outbox.js';
 import { TEST_CREATE, TEST_EVENTS } from '../runtime/transactionalOutbox.testkit.js';
 import { TENANT_DISPLAY_NAME_CONTRACT, TENANT_DISPLAY_NAME_EVENTS, planTenantDisplayName } from '../runtime/tenantDisplayName.js';
 import { CUSTOMER_UPDATE_CONTRACT, planCustomerUpdate } from '../runtime/customerUpdate.js';
+import { INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_EVENTS, planInvoiceDraftCreate } from '../runtime/invoiceDrafts.js';
 
 const UNAVAILABLE = { outcome: 'unavailable' };
 const LEASE_LOST = { outcome: 'lease_lost' };
@@ -31,7 +32,9 @@ const OUTCOME_UNKNOWN = 'transactional_store_outcome_unknown';
 
 const digest = (): string => randomBytes(32).toString('base64url');
 const live = (): AbortSignal => new AbortController().signal;
-const CREATE_MUTATOR: AggregateMutator = Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply: async () => 'applied' });
+const CREATE_MUTATOR: AggregateMutator = Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', contextScope: 'platform', apply: async () => 'applied' });
+/** The same mutator declaring the tenant root's scope (M7B-INVOICES-P1, R4: a mutator's scope is declared, never the store's). */
+const TENANT_CREATE_MUTATOR: AggregateMutator = Object.freeze({ ...CREATE_MUTATOR, contextScope: 'tenant' });
 
 /** A client the adapter must never reach: every transaction it opens is counted and refused. */
 function untouched(): { readonly client: SupervisedPgClient; readonly begins: () => number } {
@@ -172,6 +175,11 @@ test('construction refuses a malformed client, a raw driver pool or a malformed 
     [{ ...CREATE_MUTATOR, apply: 'insert into item' }],
     [{ ...CREATE_MUTATOR, table: 'item' }],
     [CREATE_MUTATOR, { ...CREATE_MUTATOR }],
+    // M7B-INVOICES-P1 (R4): the scope is required — absent, undefined or outside the three, the table is refused (an untyped
+    // caller gets no default).
+    [Object.fromEntries(Object.entries(CREATE_MUTATOR).filter(([key]) => key !== 'contextScope'))],
+    [{ ...CREATE_MUTATOR, contextScope: undefined }],
+    [{ ...CREATE_MUTATOR, contextScope: 'shop' }],
   ]) assert.throws(() => createPostgresTransactionalStore({ client, mutators } as never), TypeError, 'a mutator table in contract only, one per kind');
   assert.throws(() => createPostgresTransactionalStore({ client: Object.assign(() => undefined, { begin: async () => undefined }), mutators: [] } as never), TypeError,
     'a driver pool is refused: only the transaction kernel');
@@ -350,7 +358,7 @@ test('a trusted context is re-read after the fence and before any business state
   const c = command(TRUSTED);
   const client = scripted(c.lease);
   const mutator: AggregateMutator = Object.freeze({
-    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item',
+    kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', contextScope: 'platform',
     apply: async () => { order.push('mutator'); return 'applied'; },
   });
   const store = createPostgresTransactionalStore({
@@ -394,7 +402,7 @@ test('a context that no longer holds commits nothing — no mutation, completion
     const client = scripted(c.lease);
     const store = createPostgresTransactionalStore({
       client,
-      mutators: [Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', apply: async () => { applied++; return 'applied'; } })],
+      mutators: [Object.freeze({ kind: TEST_CREATE.kind, mode: 'create', aggregateType: 'item', contextScope: 'platform', apply: async () => { applied++; return 'applied'; } })],
       revalidate: answer,
     });
     assert.deepEqual(await store.transactions.commit(c, live()), UNAVAILABLE, label);
@@ -523,7 +531,7 @@ function renaming(context: TrustedScope | null = TRUSTED): TransactionCommand {
   return prepared.command;
 }
 const tenantMutator = (answer: string): AggregateMutator => Object.freeze({
-  kind: TENANT_DISPLAY_NAME_CONTRACT.kind, mode: 'update', aggregateType: 'tenant', apply: async () => answer,
+  kind: TENANT_DISPLAY_NAME_CONTRACT.kind, mode: 'update', aggregateType: 'tenant', contextScope: 'platform', apply: async () => answer,
 });
 
 test('changes already in place commit exactly their sealed unchanged response as the completion, in the same transaction — no audit record, no event', async () => {
@@ -610,7 +618,7 @@ test('the audit record names a tenant command\'s own target as its subject — n
 const TENANT = '22222222-2222-4222-8222-222222222222';
 /** A tenant context as the tenant authorizer selects one: the actor's one tenant grant, no store. */
 const TENANT_CONTEXT: TrustedScope = Object.freeze({ ...TRUSTED, scope: 'tenant', tenant: TENANT, roleId: 'manager' });
-const tenantStore = (client: SupervisedPgClient, mutators: readonly AggregateMutator[] = [CREATE_MUTATOR]) =>
+const tenantStore = (client: SupervisedPgClient, mutators: readonly AggregateMutator[] = [TENANT_CREATE_MUTATOR]) =>
   createPostgresTransactionalStore({ client, mutators, contextScope: 'tenant', revalidate: async () => true });
 
 test('a tenant store commits a tenant context audited at tenant scope, naming its tenant and no store', async () => {
@@ -639,7 +647,7 @@ test('M7A-CUSTOMERS-P7: a customer UPDATE names its own validated target as the 
     context: TENANT_CONTEXT, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
   });
   assert.ok(prepared !== null);
-  const updater: AggregateMutator = Object.freeze({ kind: CUSTOMER_UPDATE_CONTRACT.kind, mode: 'update', aggregateType: 'customer', apply: async () => 'applied' });
+  const updater: AggregateMutator = Object.freeze({ kind: CUSTOMER_UPDATE_CONTRACT.kind, mode: 'update', aggregateType: 'customer', contextScope: 'tenant', apply: async () => 'applied' });
   const client = scripted(prepared.command.lease);
   assert.deepEqual(await tenantStore(client, [updater]).transactions.commit(prepared.command, live()), COMMITTED);
   const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
@@ -689,11 +697,12 @@ test('a tenant store needs its revalidator, and no other scope is ever admitted:
 
 test('the mutator is handed the context, session key and recent-sign-in deadline this transaction revalidated — the store\'s frozen copy, never the caller\'s object', async () => {
   const seen: unknown[] = [];
-  const capturing: AggregateMutator = Object.freeze({ ...CREATE_MUTATOR, apply: async (_sql: PgStatement, _m: unknown, authority: unknown) => { seen.push(authority); return 'applied'; } });
+  const capturing: AggregateMutator = Object.freeze({ ...TENANT_CREATE_MUTATOR, apply: async (_sql: PgStatement, _m: unknown, authority: unknown) => { seen.push(authority); return 'applied'; } });
   const c = command(TENANT_CONTEXT);
   assert.deepEqual(await tenantStore(scripted(c.lease), [capturing]).transactions.commit(c, live()), COMMITTED);
   const contextless = command();
-  assert.deepEqual(await createPostgresTransactionalStore({ client: scripted(contextless.lease), mutators: [capturing] }).transactions.commit(contextless, live()), COMMITTED);
+  // The administrative store's contextless command, through the same capture declaring platform (R4: one scope per mutator).
+  assert.deepEqual(await createPostgresTransactionalStore({ client: scripted(contextless.lease), mutators: [{ ...capturing, contextScope: 'platform' }] }).transactions.commit(contextless, live()), COMMITTED);
   assert.deepEqual(seen, [{ context: TENANT_CONTEXT, sessionKey: SESSION_KEY, authNotAfter: null }, { context: null, sessionKey: null, authNotAfter: null }]);
   // A sensitive command's deadline reaches the mutator as the store checked it (M7A-CUSTOMERS-P3-R1: the role-level edit
   // judges it again after its routine's lock wait).
@@ -729,7 +738,9 @@ test('an audit INSERT that did not insert exactly one row rolls the whole comman
 // ---------------------------------------------------------------------------
 
 test('precondition_failed from a tenant create rolls everything back with NO completion — unlike the sealed conflict — and from any other shape is the fault', async () => {
-  const failing = Object.freeze({ ...CREATE_MUTATOR, apply: async () => 'precondition_failed' });
+  const failing = Object.freeze({ ...TENANT_CREATE_MUTATOR, apply: async () => 'precondition_failed' });
+  // The same mutator declaring the administrative scope, for the platform shapes below (R4: one declared scope per mutator).
+  const platformFailing = Object.freeze({ ...failing, contextScope: 'platform' as const });
   const c = command(TENANT_CONTEXT);
   const client = scripted(c.lease);
   assert.deepEqual(await tenantStore(client, [failing]).transactions.commit(c, live()), { outcome: 'precondition_failed' });
@@ -740,15 +751,131 @@ test('precondition_failed from a tenant create rolls everything back with NO com
   assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], 'rolled back, never committed');
   // The sealed conflict, for contrast: it commits its own completion.
   const sealed = scripted(c.lease);
-  assert.deepEqual(await tenantStore(sealed, [Object.freeze({ ...CREATE_MUTATOR, apply: async () => 'conflict' })]).transactions.commit(c, live()), { outcome: 'conflict' });
+  assert.deepEqual(await tenantStore(sealed, [Object.freeze({ ...TENANT_CREATE_MUTATOR, apply: async () => 'conflict' })]).transactions.commit(c, live()), { outcome: 'conflict' });
   assert.deepEqual(sealed.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
   assert.ok(sealed.texts.some((t) => t.includes('m6_idempotency_complete')), 'the conflict records its sealed 409');
   // Only a create, in a tenant store, under its revalidated tenant context: a platform command or an update answering it is a fault.
   for (const [label, run] of [
-    ['a platform create', () => { const p = command(TRUSTED); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [failing], revalidate: async () => true }).transactions.commit(p, live()); }],
-    ['a contextless create', () => { const p = command(); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [failing] }).transactions.commit(p, live()); }],
+    ['a platform create', () => { const p = command(TRUSTED); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [platformFailing], revalidate: async () => true }).transactions.commit(p, live()); }],
+    ['a contextless create', () => { const p = command(); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [platformFailing] }).transactions.commit(p, live()); }],
     ['an update', () => { const p = renaming(); return createPostgresTransactionalStore({ client: scripted(p.lease), mutators: [tenantMutator('precondition_failed')], revalidate: async () => true }).transactions.commit(p, live()); }],
   ] as const) {
     assert.deepEqual(await run(), UNAVAILABLE, label);
   }
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-P1 — store contexts, a rows change set, the typed sealed 422 and a store create's precondition
+// ---------------------------------------------------------------------------
+
+const STORE_ID = '88888888-8888-4888-8888-888888888888';
+/** A store context as the tenant authorizer selects one at a store template: the actor's one grant at that store. */
+const STORE_CONTEXT: TrustedScope = Object.freeze({ ...TRUSTED, scope: 'store', tenant: TENANT, store: STORE_ID, roleId: 'sales_staff' });
+const draftEvents = defineOutboxEvents(INVOICE_DRAFT_EVENTS);
+/** The draft create's mutator answering `answer`, declaring `scope` (null: NO declaration — an untyped caller's, which R4 refuses). */
+const draftMutator = (answer: string, scope: 'store' | 'tenant' | null = 'store'): AggregateMutator => Object.freeze({
+  kind: INVOICE_DRAFT_CREATE_CONTRACT.kind, mode: 'create', aggregateType: 'invoice_draft', ...(scope === null ? {} : { contextScope: scope }),
+  apply: async () => answer,
+}) as AggregateMutator;
+/** A draft create exactly as the runtime prepares one under `context`: the real contract, planner and sealing. */
+function drafting(context: TrustedScope | null = STORE_CONTEXT, contract = INVOICE_DRAFT_CREATE_CONTRACT): TransactionCommand {
+  const id = randomUUID();
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', audience: 'tenant', tenant: TENANT, store: STORE_ID, actor: TRUSTED.actor,
+    body: Buffer.from('{}'), target: STORE_ID,
+  });
+  const plan = planInvoiceDraftCreate({ audience: 'tenant', newAggregateId: id, targetId: STORE_ID, body: {
+    expectedTenant: TENANT, customerId: '99999999-9999-4999-8999-999999999999', currency: 'USD',
+    lines: [{ description: 'Glass', quantity: 2, unitPriceCents: 50 }, { description: 'Labour', quantity: 1, unitPriceCents: 0 }],
+  } });
+  const prepared = prepareCommand(contract, draftEvents, plan, {
+    scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'store', permission: 'create_invoice_drafts' }),
+    context, authNotAfter: null, sessionKey: context === null ? null : SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null);
+  return prepared.command;
+}
+
+test('M7B-INVOICES-P1 AC-01: a tenant store commits a STORE context only for a store mutator — audited at store scope with its tenant and store, the draft as subject_invoice_draft_id, the rows reaching the mutator deep-frozen', async () => {
+  const seen: unknown[] = [];
+  const capturing: AggregateMutator = Object.freeze({ ...draftMutator('applied'), apply: async (_sql: PgStatement, m: unknown) => { seen.push(m); return 'applied'; } });
+  const c = drafting();
+  assert.deepEqual([c.audit.scope, c.audit.tenant, c.audit.store], ['store', TENANT, STORE_ID]);
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [capturing]).transactions.commit(c, live()), COMMITTED);
+  const audit = client.texts.findIndex((t) => t.includes('insert into public.audit_event'));
+  assert.ok(audit >= 0 && client.texts[audit].includes('subject_invoice_draft_id'));
+  assert.ok(!client.texts[audit].includes('subject_customer_id') && !client.texts[audit].includes('subject_tenant_id'), 'exactly one subject');
+  const bound = client.values[audit];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11], bound[bound.length - 1]],
+    [STORE_CONTEXT.actor, 'store', TENANT, STORE_ID, 'store.invoice_draft.create', 'create_invoice_drafts', c.mutation.aggregateId],
+    'the actor, the store scope with its tenant and store, the kind, the route permission and the new draft');
+  assert.deepEqual(bound[bound.length - 2], { json: {} }, 'metadata {}: no description, amount or customer');
+  const enqueue = client.values[client.texts.findIndex((t) => t.includes('m6_command_enqueue'))];
+  assert.deepEqual(enqueue.slice(8, 11), [null, null, null], 'the event names no tenant, store or actor');
+  assert.deepEqual(enqueue[12], { json: { storeId: STORE_ID, customerId: '99999999-9999-4999-8999-999999999999', lineCount: 2 } });
+  const [m] = seen as Array<{ changes: { lines: readonly object[] } }>;
+  assert.deepEqual(m.changes.lines, [{ description: 'Glass', quantity: 2, unitPriceCents: 50 }, { description: 'Labour', quantity: 1, unitPriceCents: 0 }]);
+  assert.ok(Object.isFrozen(m.changes.lines) && Object.isFrozen(m.changes.lines[0]), 'the store\'s own deep-frozen copy');
+  assert.notStrictEqual(m.changes.lines, c.mutation.changes.lines);
+});
+
+test('M7B-INVOICES-P1 AC-02: a store mutator refuses a tenant or no context, a tenant mutator a store context, and the administrative store every store command — each before any statement', async () => {
+  const s = drafting();
+  for (const [label, store, raw] of [
+    ['a store context through a mutator declaring tenant', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied', 'tenant')]), s],
+    ['a tenant context through a store mutator', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]), drafting(TENANT_CONTEXT)],
+    ['a contextless command through a store mutator', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]), drafting(null)],
+    ['a store context audited at tenant scope', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]), { ...s, audit: { ...s.audit, scope: 'tenant', store: null } }],
+    ['a store context audited at another store', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]), { ...s, audit: { ...s.audit, store: TENANT } }],
+    ['the administrative store', (client: SupervisedPgClient) => createPostgresTransactionalStore({ client, mutators: [draftMutator('applied')], revalidate: async () => true }), s],
+    ['a read-only store context', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]), drafting({ ...STORE_CONTEXT, limitation: 'read_only' })],
+    ['rows that are not plain records', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]),
+      { ...s, mutation: { ...s.mutation, changes: { ...s.mutation.changes, lines: [['Glass', 2, 50]] } } }],
+    ['51 rows', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]),
+      { ...s, mutation: { ...s.mutation, changes: { ...s.mutation.changes, lines: Array.from({ length: 51 }, () => ({ description: 'x', quantity: 1, unitPriceCents: 0 })) } } }],
+    ['an update carrying the sealed 422', (client: SupervisedPgClient) => tenantStore(client, [draftMutator('applied')]),
+      { ...s, rejected: { ...s.rejected, invalidState: s.rejected.conflict } }],
+  ] as const) {
+    const { client, begins } = untouched();
+    assert.deepEqual(await store(client).transactions.commit(raw as TransactionCommand, live()), UNAVAILABLE, label);
+    assert.equal(begins(), 0, `${label}: no transaction opens`);
+  }
+  assert.throws(() => createPostgresTransactionalStore({ client: untouched().client, mutators: [{ ...draftMutator('applied'), contextScope: 'shop' } as never] }), TypeError);
+  // R4: a mutator declaring NO scope never takes the store's — the tenant store and the administrative store both refuse it
+  // at construction, before any command (the store-context-through-an-undeclared-mutator case can no longer be built).
+  assert.throws(() => tenantStore(untouched().client, [draftMutator('applied', null)]), TypeError, 'the tenant store: no default scope');
+  assert.throws(() => createPostgresTransactionalStore({ client: untouched().client, mutators: [draftMutator('applied', null)] }), TypeError, 'the administrative store: no default scope');
+});
+
+test('M7B-INVOICES-P1 AC-05: customer_not_found COMMITS exactly the sealed 422 as the completion — no audit, no event — only for a create carrying it; a store create\'s precondition rolls back with nothing', async () => {
+  const c = drafting();
+  assert.ok(c.rejected.customerNotFound !== null && c.rejected.invalidState === null);
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [draftMutator('customer_not_found')]).transactions.commit(c, live()), { outcome: 'customer_not_found' });
+  const completion = client.values[client.texts.findIndex((t) => t.includes('m6_idempotency_complete'))];
+  assert.equal(completion[2], c.rejected.customerNotFound, 'the sealed 422 is the completion');
+  for (const absent of ['insert into public.audit_event', 'm6_command_enqueue']) assert.ok(!client.texts.some((t) => t.includes(absent)), `no ${absent}`);
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+  // A completion that does not hold commits nothing.
+  const lost = scripted(c.lease, { completion: 'lease_lost' });
+  assert.deepEqual(await tenantStore(lost, [draftMutator('customer_not_found')]).transactions.commit(c, live()), UNAVAILABLE);
+  assert.deepEqual(lost.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+  // A create that did not opt in carries no 422: its mutator answering the word is the fault.
+  const { sealedRefusal: _off, ...plain } = INVOICE_DRAFT_CREATE_CONTRACT;
+  const unopted = drafting(STORE_CONTEXT, plain);
+  assert.equal(unopted.rejected.customerNotFound, null);
+  const fault = scripted(unopted.lease);
+  assert.deepEqual(await tenantStore(fault, [draftMutator('customer_not_found')]).transactions.commit(unopted, live()), UNAVAILABLE);
+  assert.ok(!fault.texts.some((t) => t.includes('m6_idempotency_complete')));
+  assert.deepEqual(fault.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+  // A store create's precondition: rolled back, nothing recorded.
+  const pre = scripted(c.lease);
+  assert.deepEqual(await tenantStore(pre, [draftMutator('precondition_failed')]).transactions.commit(c, live()), { outcome: 'precondition_failed' });
+  for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event', 'm6_command_enqueue']) assert.ok(!pre.texts.some((t) => t.includes(recorded)), recorded);
+  assert.deepEqual(pre.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+  // 'refused' (the routine's authority refusal) rolls everything back as the generic outage.
+  const refused = scripted(c.lease);
+  assert.deepEqual(await tenantStore(refused, [draftMutator('refused')]).transactions.commit(c, live()), UNAVAILABLE);
+  assert.deepEqual(refused.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
 });

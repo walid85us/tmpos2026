@@ -25,6 +25,13 @@
 // (tenantAuthorization.ts createTenantContextRevalidator) over the session store's tenant reads and 016's hold and read. It
 // hands back the idempotency store with its key and the command port — never a delivery port, and no event contract.
 //
+// M7B-INVOICES-P1 UPDATE. The tenant root's store also admits STORE contexts, for a store mutator alone
+// (postgresTransactionalStore.ts), and the write slot requires every command route's requirement scope, its contract's
+// declared context scope and its mutator's declared one to be ONE scope of the closed set {tenant, store} — no default
+// for a scope that is absent (a caller outside the type system), which is a mismatch — else `command_scope_mismatch`. The
+// revalidator re-proves a store scope with the same hold, session and admission reads, re-selecting the grant at the trusted
+// scope's own store (tenantAuthorization.ts).
+//
 // M7A-CUSTOMERS-P3-R1 UPDATE. A tenant inventory also hands in the owner's durable role edits as two reads (RoleLevelReads):
 // the kernel binds one to its client for the tenant route authorizer (ReadTransactions.roleLevels, which the entry passes to
 // the session root) and composes the other into the tenant revalidator, with the recent-authentication check on the
@@ -65,6 +72,12 @@ export type TransactionCompositionBlocker =
   | 'idempotency_key_invalid'
   | 'idempotency_key_shared'
   | 'command_mutator_unavailable'
+  /**
+   * A command route's requirement scope, its contract's declared context scope and its mutator's are not one scope the root
+   * admits, or one of them declares none (M7B-INVOICES-P1, design R4): a store command commits only through a store mutator, a
+   * tenant command only through a tenant one, an administrative command only through a platform one.
+   */
+  | 'command_scope_mismatch'
   /** A route requires a permission no canonical catalog entry defines, at its declared scope. */
   | 'route_permission_uncatalogued'
   /** A route requires a tenant- or store-scope permission, which GAP-11 leaves undecidable. */
@@ -168,6 +181,9 @@ export function uncataloguedRoutePermissions(routes: readonly RouteDefinition[])
   }
   return blockers;
 }
+
+/** The command scopes the tenant root admits (M7B-INVOICES-P1, design R4): its store commits tenant and store contexts alone. */
+const TENANT_ROOT_SCOPES: readonly string[] = Object.freeze(['tenant', 'store']);
 
 /** The recorded test-vector key (M7A-CUSTOMERS-P2 design B §4): bytes 0x00..0x1f, published with its proofs. */
 const TEST_VECTOR_ISSUER_KEY = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
@@ -278,7 +294,7 @@ export function composeReadTransactions<P>(
   // A write slot requires this process's own idempotency key — present, canonical and never RATE_LIMIT_KEY or the issuer
   // key — and each command route committing through exactly one mutator of its contract's kind, mode and aggregate type:
   // the administrative root's rules (productionTransactions.ts), applied to the tenant root's commands.
-  // ponytail: copied from assembleTransactions, which stays byte-identical; share one helper when a third root appears.
+  // ponytail: mirrors assembleTransactions' checks (its scope set is {platform}); share one helper when a third root appears.
   const rawKey = writes === undefined ? undefined : env.IDEMPOTENCY_KEY;
   const keySecret = rawKey === undefined || rawKey === '' ? null : parseKeyMaterial(rawKey);
   if (writes !== undefined) {
@@ -295,6 +311,16 @@ export function composeReadTransactions<P>(
       const matching = writes.mutators.filter((mutator) => mutator.kind === contract.kind);
       return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType;
     })) blockers.push('command_mutator_unavailable');
+    // M7B-INVOICES-P1 (design R4): route scope = contract scope = mutator scope, one of the tenant root's {tenant, store} —
+    // each scope as DECLARED, none defaulted: a contract or mutator without one (an untyped caller) is a mismatch.
+    else if (writes.routes.some((route) => {
+      if (!('command' in route)) return true;
+      const requirement = route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null;
+      const contract = route.command.contract;
+      const mutator = writes.mutators.find((candidate) => candidate.kind === contract.kind);
+      return requirement === null || !TENANT_ROOT_SCOPES.includes(requirement.scope)
+        || contract.contextScope !== requirement.scope || mutator?.contextScope !== requirement.scope;
+    })) blockers.push('command_scope_mismatch');
   }
   if (blockers.length > 0) throw new TransactionCompositionError(blockers);
   const key = issuerKey as Buffer;

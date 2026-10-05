@@ -130,15 +130,20 @@ const MAX_ENVELOPE_BYTES = 2 * MAX_REPLAY_BODY_BYTES + 1_024;
 export const MAX_SEALED_LENGTH = Math.ceil(((IV_BYTES + MAX_ENVELOPE_BYTES + TAG_BYTES) * 4) / 3);
 
 // The error words only the runtime answers with: an operation's outcome may not borrow one.
-const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state']);
+const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state', 'customer_not_found']);
 /**
  * The deterministic post-authorization rejections a command seals as its own completion
  * (M5-GIAM-D1-P2-R1): the aggregate was not at the version the request named, or its current state does
  * not admit the change. Both are decided inside the committing transaction — after the fence, the
  * authority revalidation and the row lock — so each is a property of the intent, not of the moment,
  * which is what makes it safe to record and replay. Every other refusal stays unsealed.
+ *
+ * M7B-INVOICES-P1 adds one TYPED word, sealed only by a create contract that opts into it (commandTransaction.ts
+ * `sealedRefusal`): `customer_not_found` — the draft named a customer missing from its trusted tenant, or another tenant's,
+ * decided after authority was established and before anything was written. Each word has ONE fixed status, here: the two
+ * conflicts 409, the typed refusal 422. A record read back carrying one of these words with any other status is no record.
  */
-const SEALED_REFUSALS: ReadonlySet<string> = new Set(['write_conflict', 'invalid_state']);
+const SEALED_REFUSAL_STATUS: ReadonlyMap<string, number> = new Map([['write_conflict', 409], ['invalid_state', 409], ['customer_not_found', 422]]);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
 const LOCATION_RE = /^\/(?!\/)(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$/;
@@ -304,7 +309,7 @@ function envelopeOf(raw: unknown, fromOutcome: boolean): ReplayEnvelope | null {
   // (refusalEnvelope, M5-GIAM-D1-P2-R1): those ARE the runtime answering, and a record that could not be
   // read back would be a record no retry could replay.
   if (isRecord(value) && typeof value.error === 'string'
-    && RESERVED_ERRORS.has(value.error) && (fromOutcome || !SEALED_REFUSALS.has(value.error))) return null;
+    && RESERVED_ERRORS.has(value.error) && (fromOutcome || SEALED_REFUSAL_STATUS.get(value.error) !== status)) return null;
   return Object.freeze({ status, contentType, headers: Object.freeze(typeof location === 'string' ? { location } : {}), body });
 }
 
@@ -329,8 +334,9 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
 
 /**
  * The runtime's OWN sealed refusal for a deterministic post-authorization rejection (M5-GIAM-D1-P2-R1):
- * a bounded 409 carrying exactly one refusal word and nothing else, or null for any word that is not
- * one of the two. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
+ * a bounded response carrying exactly one refusal word and nothing else, at that word's one fixed status — 409 for the
+ * two conflicts, 422 for M7B-INVOICES-P1's typed `customer_not_found` — or null for any word that is not one of the
+ * three. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
  * one — and this is the single place that mints it, from a fixed token this module owns: never from a
  * plan, a port, a handler or a request.
  *
@@ -339,9 +345,10 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
  * is long over; the fresh one travels on the X-Request-Id header of every replay instead.
  */
 export function refusalEnvelope(error: string): ReplayEnvelope | null {
-  if (!SEALED_REFUSALS.has(error)) return null;
+  const status = SEALED_REFUSAL_STATUS.get(error);
+  if (status === undefined) return null;
   return Object.freeze({
-    status: 409, contentType: REPLAY_CONTENT_TYPE, headers: Object.freeze({}), body: JSON.stringify({ error }),
+    status, contentType: REPLAY_CONTENT_TYPE, headers: Object.freeze({}), body: JSON.stringify({ error }),
   });
 }
 

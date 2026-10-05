@@ -203,7 +203,8 @@ test('the directory read runs in one bounded transaction on the composition\'s c
 // --- the write -----------------------------------------------------------------------------------------------------------
 
 test('the mutator registers for exactly the role-level edit contract, as a create of a tenant_role_level, frozen', () => {
-  assert.deepEqual(Object.keys(ROLE_LEVEL_UPDATE_MUTATOR).sort(), ['aggregateType', 'apply', 'kind', 'mode']);
+  assert.deepEqual(Object.keys(ROLE_LEVEL_UPDATE_MUTATOR).sort(), ['aggregateType', 'apply', 'contextScope', 'kind', 'mode']);
+  assert.equal(ROLE_LEVEL_UPDATE_MUTATOR.contextScope, 'tenant', 'its declared scope (M7B-INVOICES-P1, design R4): tenant, as it always committed');
   assert.deepEqual([ROLE_LEVEL_UPDATE_MUTATOR.kind, ROLE_LEVEL_UPDATE_MUTATOR.mode, ROLE_LEVEL_UPDATE_MUTATOR.aggregateType],
     ['tenant.role.level.update', 'create', 'tenant_role_level']);
   assert.ok(Object.isFrozen(ROLE_LEVEL_UPDATE_MUTATOR));

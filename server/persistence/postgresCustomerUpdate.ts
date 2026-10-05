@@ -69,5 +69,7 @@ export const CUSTOMER_UPDATE_MUTATOR: AggregateMutator = Object.freeze({
   kind: CUSTOMER_UPDATE_CONTRACT.kind,
   mode: 'update',
   aggregateType: CUSTOMER_UPDATE_CONTRACT.aggregateType,
+  // Its contract's scope, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   apply: applyCustomerUpdate,
 });

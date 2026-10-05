@@ -16,6 +16,7 @@ import { tenantRouteDeclarations } from '../composition/tenantTransactions.js';
 import { APPROVED_ROLE_GRANTS, REQUIRED_MIGRATIONS, RUNTIME_PRIVILEGE_ROLES } from '../persistence/postgresStartupPreflight.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from '../persistence/supervisedPgClient.js';
 import { createMemoryIdempotencyStore } from '../runtime/idempotencyStore.testkit.js';
+import { INVOICE_DRAFT_EVENTS } from '../runtime/invoiceDrafts.js';
 import { createMemorySessionStore } from '../runtime/memorySessionStore.testkit.js';
 import type { TenantAdmissionPort } from '../runtime/principals.js';
 import type { DistributedRateLimiter } from '../runtime/rateLimit.js';
@@ -200,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 14 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 17 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -212,7 +213,7 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 14 frozen tenant routes', ()
     // M7A-CUSTOMERS-P6: the contact profile, the route table's second template.
     { method: 'GET', path: '/api/v1/customers/{id}/profile', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/customers', access: 'session', body: 'json', idempotency: 'required' },
-    // M7A-CUSTOMERS-P7: the customer edit, the route table's one templated command.
+    // M7A-CUSTOMERS-P7: the customer edit, the route table's first templated command (the draft save below is the second).
     { method: 'PATCH', path: '/api/v1/customers/{id}', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/roles/levels', access: 'session', body: 'none', idempotency: 'none' },
     // M5-INVOICES-AUTH-P1: the Invoices level read-back (configuration only), beside the Customers one.
@@ -220,6 +221,10 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 14 frozen tenant routes', ()
     { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
     // M7B-INVOICES-P1: the store directory, the route table's one closed authorization-free business route.
     { method: 'GET', path: '/api/v1/stores', access: 'session', body: 'none', idempotency: 'none' },
+    // M7B-INVOICES-P1: the three store templates — a store's drafts, one draft, and the idempotent save.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
@@ -242,8 +247,9 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
   }, { audiences: ['tenant'], tokenVerifier: SYNTHETIC_VERIFIER });
   const readiness = createReadinessState();
   // M7A-CUSTOMERS-P3: the POST requires the idempotency store and the command port, handed in as the tenant root hands them.
+  // M7B-INVOICES-P1: and the draft save's one event contract, as the tenant entry composes it.
   const app = createApp({
-    readiness, routes: tenantRouteDeclarations(), limits: sessions.limits, sessions: sessions.sessions, hsts: true, hosts: [TENANT_HOST],
+    readiness, routes: tenantRouteDeclarations(), limits: sessions.limits, sessions: sessions.sessions, hsts: true, hosts: [TENANT_HOST], events: INVOICE_DRAFT_EVENTS,
     idempotency: { store: createMemoryIdempotencyStore(), keySecret: Buffer.from(IDEMPOTENCY_KEY, 'base64url') },
     transactions: { port: { commit: async () => ({ outcome: 'unavailable' }), probe: async () => true } },
   });
@@ -290,7 +296,8 @@ type Row = Readonly<Record<string, unknown>>;
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
-  | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeDirectoryProbe' | 'storeProbe';
+  | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeDirectoryProbe' | 'invoiceDraftPageProbe' | 'invoiceDraftGetProbe'
+  | 'storeProbe';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -315,6 +322,8 @@ function classify(text: string): Kind {
   if (text.includes('m7a_customer_get')) return 'customerDetailProbe';
   if (text.includes('m7a_customer_search')) return 'customerSearchProbe';
   if (text.includes('m7b_store_directory')) return 'storeDirectoryProbe';
+  if (text.includes('m7b_invoice_draft_page')) return 'invoiceDraftPageProbe';
+  if (text.includes('m7b_invoice_draft_get')) return 'invoiceDraftGetProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
@@ -357,6 +366,8 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   customerProfileProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null, o_version: null }],
   customerSearchProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }],
   storeDirectoryProbe: [{ o_outcome: 'denied', o_store_id: null, o_tenant_id: null, o_store_name: null, o_read_only: null }],
+  invoiceDraftPageProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_store_id: null, o_draft_id: null, o_customer_id: null, o_status: null, o_currency: null, o_line_count: null, o_subtotal_cents: null, o_created_at: null }],
+  invoiceDraftGetProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_store_id: null, o_draft_id: null, o_customer_id: null, o_status: null, o_currency: null, o_version: null, o_created_at: null, o_line_count: null, o_subtotal_cents: null, o_position: null, o_description: null, o_quantity: null, o_unit_price_cents: null, o_line_total_cents: null }],
   storeProbe: [{ ok: true }],
 });
 
@@ -533,6 +544,13 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ storeDirectoryProbe: [[GOLDEN.customerSearchProbe[0]]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ storeDirectoryProbe: [[]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ storeDirectoryProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  // M7B-INVOICES-P1: the invoice drafts' two reads are the sixth part of the same reads probe.
+  await assertRefused({ invoiceDraftPageProbe: [[{ ...GOLDEN.invoiceDraftPageProbe[0], o_outcome: 'invalid' }]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ invoiceDraftPageProbe: [[]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ invoiceDraftPageProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ invoiceDraftGetProbe: [[{ ...GOLDEN.invoiceDraftGetProbe[0], o_outcome: 'not_found' }]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ invoiceDraftGetProbe: [[GOLDEN.invoiceDraftPageProbe[0]]] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ invoiceDraftGetProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
   // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
   await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
   await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);
@@ -551,7 +569,7 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
       'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'customerDetailProbe',
-      'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'storeProbe'],
+      'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'storeProbe'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
   } finally {
     await stop();
@@ -613,9 +631,18 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
     }
     assert.equal((await send(port, 'GET', '/admin/v1/tenants', { host: TENANT_HOST })).status, 404, 'no administrative route on the tenant host');
-    // M7B-INVOICES-P1: the store directory reaches the chain on the tenant host (no session: 401); no store template is served.
+    // M7B-INVOICES-P1: the store directory and the three store templates reach the chain on the tenant host (no session: 401);
+    // a path outside the template grammar is no route.
     assert.equal((await send(port, 'GET', '/api/v1/stores', { host: TENANT_HOST })).status, 401);
-    assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host: TENANT_HOST })).status, 404, 'no draft route in commit A');
+    for (const path of [`/api/v1/stores/${DETAIL_ID}/invoice-drafts`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}`]) {
+      assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 401, path);
+    }
+    for (const path of [`/api/v1/stores/${DETAIL_ID}`, `/api/v1/stores/${DETAIL_ID}/invoices`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/lines`]) {
+      assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
+    }
+    for (const host of [ADMIN_HOST, 'unknown.tmpos.test']) {
+      assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host })).status, 404, `the draft list on ${host}`);
+    }
     // The probes answer on any host.
     for (const host of [TENANT_HOST, ADMIN_HOST]) assert.equal((await send(port, 'GET', '/health', { host })).status, 200);
   } finally {
@@ -645,6 +672,8 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the customer profile probe fails', 'customerProfileProbe', 'reject'],
       ['the customer search probe fails', 'customerSearchProbe', 'reject'],
       ['the store directory probe fails', 'storeDirectoryProbe', 'reject'],
+      ['the invoice drafts\' page probe fails', 'invoiceDraftPageProbe', 'reject'],
+      ['the invoice drafts\' get probe fails', 'invoiceDraftGetProbe', 'reject'],
       ['the idempotency store and command port probe fails', 'storeProbe', 'reject'],
       ['the store probe answers false', 'storeProbe', [{ ok: false }]],
       ['the tenant admission fails', 'tenantAdmissionProbe', 'reject'],
@@ -654,7 +683,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       ['the database is down for everything', 'connect', 'default'],
     ];
     for (const [label, kind, entry] of transitions) {
-      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
+      if (kind === 'connect') for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'tenantAdmissionProbe', 'rateLimitProbe', 'storeProbe'] as const) fake.live[k] = 'reject';
       else fake.live[kind] = entry;
       t.mock.timers.tick(1_000);
       assert.equal(await ready(), 503, label);
@@ -667,7 +696,7 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
     const before = fake.kinds.length;
     await Promise.all(Array.from({ length: 5 }, () => ready()));
     const asked = fake.kinds.slice(before);
-    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
+    for (const k of ['issuerKey', 'logging', 'sessionGet', 'sessionMint', 'customerProbe', 'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'tenantAdmissionProbe', 'rateLimitProbe'] as const) {
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
     assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');

@@ -73,6 +73,8 @@ export const TENANT_DISPLAY_NAME_CONTRACT: CommandContract = Object.freeze({
   kind: 'platform.tenant.display_name.update',
   mode: 'update',
   aggregateType: 'tenant',
+  // The scope of the trusted context it commits under, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'platform',
   changes: Object.freeze({ displayName: DISPLAY_NAME_FIELD }),
   events: Object.freeze([Object.freeze({ type: TENANT_DISPLAY_NAME_CHANGED.type, version: TENANT_DISPLAY_NAME_CHANGED.version })]),
 });

@@ -14,12 +14,14 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–027, clean, checksums pinned (each of 020-027 moves with its build);
+//    5. the migration ledger — exactly 001–028, clean, checksums pinned (each of 020-028 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
-//       edits), the request limits, the durable ports, the tenant store's idempotency and command ports (no event contract)
-//       and the route table, validated by the runtime itself; the served inventory must equal TENANT_SHIPPING_ROUTES exactly;
+//       edits), the request limits, the durable ports, the tenant store's idempotency and command ports, the ONE event
+//       contract this entry composes (M7B-INVOICES-P1: invoice_draft.created v1, the draft save's — invoiceDrafts.ts
+//       INVOICE_DRAFT_EVENTS, and nothing else) and the route table, validated by the runtime itself; the served inventory
+//       must equal TENANT_SHIPPING_ROUTES exactly;
 //    8. the issuer key — the database must hold this process's key: its fingerprint alone is sent, and only `match` passes.
 //       Before the limiter's step, so a wrong key refuses before 014's fingerprint is registered;
 //    9. the limiter key — as the administrative entry's: registered when the store has none, compared otherwise. Both
@@ -28,7 +30,8 @@
 //       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready, the
 //       customer reads answer their probe (the directory's routine, then the detail's — M7A-CUSTOMERS-P4 — then the
 //       profile's — M7A-CUSTOMERS-P6, over 024's versioned routine since -P7 — then the search's — -P8 — then the store
-//       directory's — M7B-INVOICES-P1, 027's — each refusing an absent key), and the idempotency store and the command port answer
+//       directory's — M7B-INVOICES-P1, 027's — then the invoice drafts' two reads — M7B-INVOICES-P1, 028's — each refusing an
+//       absent key), and the idempotency store and the command port answer
 //       theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
@@ -43,14 +46,18 @@
 // judged after authentication); — M7A-CUSTOMERS-P6 — GET /api/v1/customers/{id}/profile, that customer's phone, email and
 // creation time (the second template: the same segment, then exactly '/profile'), and POST /api/v1/customers taking the
 // optional contacts; — M7A-CUSTOMERS-P7 — PATCH /api/v1/customers/{id}, a versioned edit of that customer's name and
-// contacts (the third template and the only templated command: the same segment, judged after authentication, bound into
+// contacts (the third template and the first templated command: the same segment, judged after authentication, bound into
 // the idempotency fingerprint), idempotent and committed through the tenant store; the profile read now carries the
 // customer's version as its strong ETag; — M5-INVOICES-AUTH-P1 — GET /api/v1/roles/levels/invoices, the owner's read-back of
-// the built-in roles' Invoices levels (configuration only: no invoice route exists, and the PUT above now also accepts
-// domain 'invoices'); — M7B-INVOICES-P1 — GET /api/v1/stores, the stores the session's actor may act at (exactly one usable
+// the built-in roles' Invoices levels (the PUT above now also accepts domain 'invoices'; since M7B-INVOICES-P1 the draft
+// routes below decide on that level); — M7B-INVOICES-P1 — GET /api/v1/stores, the stores the session's actor may act at (exactly one usable
 // store-scope grant each), derived by migration 027's routine from the session key alone: the route table's one closed
-// authorization-free business route, bound to the session and its CSRF token — then the bounded 404.
-// No administrative route, no store-scoped business route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
+// authorization-free business route, bound to the session and its CSRF token; and the three STORE-scope invoice draft
+// routes (invoiceDrafts.ts, migration 028): POST /api/v1/stores/{storeId}/invoice-drafts, a draft saved at that store —
+// idempotent, committed through the tenant store with its audit record, its one outbox event and its completion — and
+// GET /api/v1/stores/{storeId}/invoice-drafts[/{id}], the store's drafts and one draft, read-only; each authorized only
+// through the actor's own store grant at exactly that store — then the bounded 404.
+// No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
 // hostname to this entry alone and pass its Host through unaltered (docs/phase-4/08 DA-107 — not proven here).
@@ -78,6 +85,7 @@ import type { ProductionSessions } from '../composition/productionSessions.js';
 import { TransactionCompositionError, parseTenantIssuerKey } from '../composition/transactionKernel.js';
 import type { ReadTransactions } from '../composition/transactionKernel.js';
 import { composeTenantTransactions } from '../composition/tenantTransactions.js';
+import { INVOICE_DRAFT_EVENTS } from '../runtime/invoiceDrafts.js';
 import {
   SHUTDOWN_FORCE_TIMEOUT_MS, bounded, canonicalRoutes, present, refusalLines, servableHost, validateCommonEntryConfig,
 } from './entryStartup.js';
@@ -99,6 +107,9 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/roles/levels/invoices', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PUT', path: '/api/v1/roles/levels', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/stores', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -264,6 +275,8 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
         routes: tx.routes,
         idempotency: tx.idempotency,
         transactions: tx.transactions,
+        // The one event contract the tenant runtime composes (M7B-INVOICES-P1): the draft save's invoice_draft.created.
+        events: INVOICE_DRAFT_EVENTS,
         limits: sessions.limits,
         sessions: sessions.sessions,
         hsts: true,

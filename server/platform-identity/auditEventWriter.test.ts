@@ -538,6 +538,49 @@ test('S3-W-23: a customer subject that is not a UUID, or one beside a tenant sub
   assert.equal(both.calls.length, 0, 'nothing sent');
 });
 
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-P1 — the record's invoice draft subject (migration 028)
+// ---------------------------------------------------------------------------
+
+const DRAFT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const STORE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+test('M7B-INVOICES-P1 AC-08: a subject invoice draft is its own bound column after metadata, at store scope; without one the statements are exactly the earlier ones', async () => {
+  const withSubject = recorder();
+  const event = { ...baseEvent(), scopeType: 'store' as const, tenantId: T1, storeId: STORE, subjectInvoiceDraftId: DRAFT };
+  await writeAuditEvent(event, { executor: withSubject.executor });
+  const { strings, values, sql } = withSubject.calls[0];
+  assert.equal(withSubject.calls.length, 1, 'one statement');
+  assert.equal(values.length, 21);
+  assert.equal(strings.length, 22);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_invoice_draft_id\s*\)/, 'the draft subject column follows metadata');
+  assert.ok(!sql.includes('subject_tenant_id') && !sql.includes('subject_customer_id'), 'no other subject column is named');
+  assert.ok(!strings.join(' ').includes(DRAFT), 'bound as a value, never spliced into the text');
+  assert.deepEqual([values[7], values[8], values[9]], ['store', T1, STORE], 'store scope, its tenant and store');
+  assert.equal(values[20], DRAFT, 'the draft subject is the last binding, its own column');
+  for (const absent of [undefined, null]) {
+    const without = recorder();
+    await writeAuditEvent({ ...baseEvent(), subjectInvoiceDraftId: absent }, { executor: without.executor });
+    assert.equal(without.calls[0].values.length, 20, `subject ${String(absent)}: 20 values`);
+    assert.ok(!without.calls[0].sql.includes('subject_invoice_draft_id'), `subject ${String(absent)}: the column is not named`);
+  }
+});
+
+test('M7B-INVOICES-P1: a draft subject that is not a UUID, or one beside another subject, is refused before any statement', async () => {
+  for (const subjectInvoiceDraftId of ['not-a-uuid', '', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa', `${DRAFT} `, 7]) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), subjectInvoiceDraftId: subjectInvoiceDraftId as never }, { executor: r.executor }),
+      AuditEventValidationError, JSON.stringify(subjectInvoiceDraftId));
+    assert.equal(r.calls.length, 0, 'nothing sent');
+  }
+  for (const [label, other] of [['a customer', { subjectCustomerId: CUSTOMER }], ['a tenant', { subjectTenantId: T1 }]] as const) {
+    const both = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), scopeType: 'store', tenantId: T1, storeId: STORE, subjectInvoiceDraftId: DRAFT, ...other },
+      { executor: both.executor }), AuditEventValidationError, `a draft beside ${label}`);
+    assert.equal(both.calls.length, 0, 'nothing sent');
+  }
+});
+
 test('S3-W-19: the session metadata keys persist for the three administrative session events alone, and are all those events keep', async () => {
   const ids = Object.values(ADMIN_SESSION_AUDIT_EVENTS).map((shape) => shape.actionId);
   assert.deepEqual(ids, ['platform.admin.session.login', 'platform.admin.session.reauthenticate', 'platform.admin.session.logout']);
@@ -587,6 +630,7 @@ test('S3-W-20: a row under a session action id must match that event\'s fixed sh
     ['an on-behalf actor', { ...login, onBehalfOfInternalUserId: BEHALF }],
     ['a subject tenant', { ...login, subjectTenantId: T1 }],
     ['a subject customer', { ...login, subjectCustomerId: T1 }],
+    ['a subject invoice draft', { ...login, subjectInvoiceDraftId: T1 }],
     ['another scope', { ...login, scopeType: 'none' }],
     ['a tenant scope, itself consistent', { ...login, scopeType: 'tenant', tenantId: T1 }],
     ['advisory evidence', { ...login, evidenceLevel: 'dev_sidecar_log_advisory' }],

@@ -18,7 +18,7 @@ import type { DurableIdempotencyStore, OperationIdentity } from './idempotency.j
 import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyState, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
 import type { MemoryIdempotencyState } from './idempotencyStore.testkit.js';
 import { OUTBOX_DELIVERY_POLICY, defineOutboxEvents } from './outbox.js';
-import type { DeadLetterReason, EventContract, OutboxDeliveryStore, OutboxEnvelope, RecordValue } from './outbox.js';
+import type { ChangeValue, DeadLetterReason, EventContract, OutboxDeliveryStore, OutboxEnvelope } from './outbox.js';
 
 const NAME = Object.freeze({ type: 'string', maxLength: 64 } as const);
 const QUANTITY = Object.freeze({ type: 'integer', min: 0, max: 1_000 } as const);
@@ -29,15 +29,15 @@ export const TEST_EVENTS: readonly EventContract[] = Object.freeze([
   Object.freeze({ type: 'conformance.item.renamed', version: 1, aggregateType: 'item', payload: Object.freeze({ name: NAME }) }),
 ]);
 
-/** A synthetic create command: a new item and its `created` event. */
+/** A synthetic create command: a new item and its `created` event — platform scope, the administrative root's (R4: declared). */
 export const TEST_CREATE: CommandContract = Object.freeze({
-  kind: 'conformance.item.create', mode: 'create', aggregateType: 'item', changes: Object.freeze({ name: NAME, quantity: QUANTITY }),
+  kind: 'conformance.item.create', mode: 'create', aggregateType: 'item', contextScope: 'platform', changes: Object.freeze({ name: NAME, quantity: QUANTITY }),
   events: Object.freeze([Object.freeze({ type: 'conformance.item.created', version: 1 })]),
 });
 
 /** A synthetic update command: an item's new name at its version, and its `renamed` event. */
 export const TEST_RENAME: CommandContract = Object.freeze({
-  kind: 'conformance.item.rename', mode: 'update', aggregateType: 'item', changes: Object.freeze({ name: NAME }),
+  kind: 'conformance.item.rename', mode: 'update', aggregateType: 'item', contextScope: 'platform', changes: Object.freeze({ name: NAME }),
   events: Object.freeze([Object.freeze({ type: 'conformance.item.renamed', version: 1 })]),
 });
 
@@ -64,7 +64,7 @@ interface StoredEvent {
 export interface MemoryTransactionalState {
   readonly now: () => number;
   readonly idempotency: MemoryIdempotencyState;
-  readonly aggregates: Map<string, Readonly<{ version: number; state: RecordValue }>>;
+  readonly aggregates: Map<string, Readonly<{ version: number; state: ChangeValue }>>;
   readonly audit: CommittedAudit[];
   readonly outbox: Map<string, StoredEvent>;
   /**
@@ -99,11 +99,13 @@ export function createMemoryCommandTransaction(state: MemoryTransactionalState):
       const { mutation } = command;
       // Every command carries the sealed 409 for each deterministic rejection its own mode can reach
       // (M5-GIAM-D1-P2-R1): a create can only conflict, an update can also be in a state that refuses
-      // its change. A command missing the one it needs commits nothing, here as in the durable adapter.
+      // its change. A command missing the one it needs commits nothing, here as in the durable adapter. The typed
+      // sealed 422 (M7B-INVOICES-P1) is a create's alone: an update carrying one commits nothing either.
       const isUpdate = mutation.expectedVersion !== null;
       const slots = command.rejected;
       const sealedSlot = (v) => typeof v === 'string' && v.length > 0;
       if (!sealedSlot(slots?.conflict) || (isUpdate ? !sealedSlot(slots.invalidState) : slots.invalidState !== null)) return { outcome: 'unavailable' };
+      if (slots.customerNotFound !== null && (isUpdate || !sealedSlot(slots.customerNotFound))) return { outcome: 'unavailable' };
       const key = aggregateKey(mutation.aggregateType, mutation.aggregateId);
       const current = state.aggregates.get(key);
       if (mutation.expectedVersion === null ? current !== undefined : current?.version !== mutation.expectedVersion) {
@@ -178,7 +180,7 @@ export function testTransactions(state: MemoryTransactionalState): CommandTransa
 
 /** What a store has committed: aggregates, audit records, and events with their delivery status. */
 export interface CommittedState {
-  readonly aggregates: readonly Readonly<{ type: string; id: string; version: number; state: RecordValue }>[];
+  readonly aggregates: readonly Readonly<{ type: string; id: string; version: number; state: ChangeValue }>[];
   readonly audit: readonly CommittedAudit[];
   readonly events: readonly Readonly<{ envelope: OutboxEnvelope; status: DeliveryStatus; attempt: number }>[];
 }
@@ -474,8 +476,12 @@ export async function assertCommandTransactionContract(h: TransactionalOutboxHar
 
   const m = await k.begin();
   const missing = k.renaming(m, id, 7);
-  assert.deepEqual(await k.settled(k.commit(Object.freeze({ ...missing, rejected: Object.freeze({ conflict: missing.rejected.conflict, invalidState: null }) }))),
+  assert.deepEqual(await k.settled(k.commit(Object.freeze({ ...missing, rejected: Object.freeze({ conflict: missing.rejected.conflict, invalidState: null, customerNotFound: null }) }))),
     UNAVAILABLE, 'an update carrying no sealed invalid_state response commits nothing');
+  assert.deepEqual(await k.footprint(missing), { aggregate: fa.aggregate, audit: [], events: [] }, 'and wrote nothing');
+  // M7B-INVOICES-P1: the typed sealed 422 is a create's alone — an update carrying one commits nothing.
+  assert.deepEqual(await k.settled(k.commit(Object.freeze({ ...missing, rejected: Object.freeze({ ...missing.rejected, customerNotFound: missing.rejected.conflict }) }))),
+    UNAVAILABLE, 'an update carrying a sealed customer_not_found slot commits nothing');
   assert.deepEqual(await k.footprint(missing), { aggregate: fa.aggregate, audit: [], events: [] }, 'and wrote nothing');
   assert.deepEqual(await k.commit(missing), CONFLICT, 'the lease it left alone still serves the command in contract');
 

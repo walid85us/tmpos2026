@@ -161,7 +161,7 @@ test('the route registers as the one templated PATCH behind the tenant session a
 
 test('the contract: an update of a customer with no event, its five fields within the record caps, and the outbox accepts every field name', () => {
   assert.deepEqual(CUSTOMER_UPDATE_CONTRACT, {
-    kind: 'tenant.customer.update', mode: 'update', aggregateType: 'customer',
+    kind: 'tenant.customer.update', mode: 'update', aggregateType: 'customer', contextScope: 'tenant',
     changes: {
       name: { type: 'string', maxLength: 400 }, setPhone: { type: 'boolean' }, phone: { type: 'string', maxLength: 128 },
       setEmail: { type: 'boolean' }, email: { type: 'string', maxLength: 508 },

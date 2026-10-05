@@ -209,7 +209,7 @@ function assertSessionShape(event: AuditEventWriteInput, shape: SessionAuditShap
   // The request id is the server's random operation id (sessions.ts), never a client's value.
   const matches = UUID_RE.test(event.requestId) && (event.traceId ?? null) === null && event.actorAuthProvider === null
     && (event.onBehalfOfInternalUserId ?? null) === null && (event.subjectTenantId ?? null) === null
-    && (event.subjectCustomerId ?? null) === null
+    && (event.subjectCustomerId ?? null) === null && (event.subjectInvoiceDraftId ?? null) === null
     && event.scopeType === scopeType && event.tenantId === null && event.storeId === null
     && event.requiredPermission === 'n_a' && event.decision === shape.decision && event.reasonCode === shape.reasonCode
     && event.humanReadableReason === shape.humanReadableReason && event.resultStatus === 'succeeded'
@@ -308,6 +308,14 @@ export interface AuditEventWriteInput {
    * subject: never both this and subjectTenantId. Absent or null, the row is written exactly as before 024.
    */
   subjectCustomerId?: string | null;
+
+  /**
+   * The invoice draft the recorded action created (migration 028, M7B-INVOICES-P1): a store command that saves one draft
+   * names it here. A UUID or null; set only by a caller that derived it from a server-generated target (the transactional
+   * store, from the aggregate its mutator inserted) — never from request metadata. An event names at most one subject.
+   * Absent or null, the row is written exactly as before 028.
+   */
+  subjectInvoiceDraftId?: string | null;
 }
 
 /** Non-sensitive validation error (carries a label only — never an input value). */
@@ -382,7 +390,10 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
   if (event.subjectCustomerId != null && !UUID_RE.test(event.subjectCustomerId)) {
     throw new AuditEventValidationError('audit event subjectCustomerId must be a UUID or null');
   }
-  if (event.subjectTenantId != null && event.subjectCustomerId != null) {
+  if (event.subjectInvoiceDraftId != null && !UUID_RE.test(event.subjectInvoiceDraftId)) {
+    throw new AuditEventValidationError('audit event subjectInvoiceDraftId must be a UUID or null');
+  }
+  if ([event.subjectTenantId, event.subjectCustomerId, event.subjectInvoiceDraftId].filter((subject) => subject != null).length > 1) {
     throw new AuditEventValidationError('audit event names at most one subject');
   }
 
@@ -611,9 +622,60 @@ export async function writeAuditEvent(
   const eventId = randomUUID();
 
   // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
-  // Three fixed statements, never a fragment: subject_tenant_id (migration 009) or subject_customer_id (migration 024)
-  // is named only when the event names that subject, so every other caller's statement — and every database before
-  // 009 or 024 — is exactly as it was. Validation proved at most one subject is named.
+  // Four fixed statements, never a fragment: subject_tenant_id (migration 009), subject_customer_id (migration 024) or
+  // subject_invoice_draft_id (migration 028) is named only when the event names that subject, so every other caller's
+  // statement — and every database before 009, 024 or 028 — is exactly as it was. Validation proved at most one subject is
+  // named.
+  if (validated.subjectInvoiceDraftId != null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_invoice_draft_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectInvoiceDraftId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
   if (validated.subjectCustomerId != null) {
     await executor`
       insert into public.audit_event (

@@ -202,6 +202,16 @@ export function assembleTransactions(
     const matching = inventory.mutators.filter((mutator) => mutator.kind === contract.kind);
     return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType;
   })) blockers.push('command_mutator_unavailable');
+  // M7B-INVOICES-P1 (design R4): each command route's requirement scope, its contract's DECLARED context scope and its
+  // mutator's are one scope, and this root's store admits platform contexts alone — none defaulted: a contract or mutator
+  // without a declaration (an untyped caller) is a mismatch. A `perform` route carries no contract and is not a command.
+  else if (required.some((route) => {
+    if (!('command' in route)) return false;
+    const requirement = route.policy.access === 'session' || route.policy.access === 'authenticated' ? route.policy.authorization : null;
+    const contract = route.command.contract;
+    const mutator = inventory.mutators.find((candidate) => candidate.kind === contract.kind);
+    return requirement === null || requirement.scope !== 'platform' || contract.contextScope !== 'platform' || mutator?.contextScope !== 'platform';
+  })) blockers.push('command_scope_mismatch');
   if (blockers.length > 0) throw new TransactionCompositionError(blockers);
 
   const client = kernelOver(factories.client, endpoint as RuntimeDatabaseEndpoint);

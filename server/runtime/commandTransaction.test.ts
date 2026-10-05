@@ -188,8 +188,11 @@ test('M5-ADMIN-REVOKE-P1 the presenting session key travels unchanged beside a c
 
 test('command contracts are closed at startup against the event contracts', () => {
   assert.equal(commands.list().length, 2);
-  const base = { kind: 'x.create', mode: 'create', aggregateType: 'item', changes: {}, events: [{ type: 'conformance.item.created', version: 1 }] };
+  const base = { kind: 'x.create', mode: 'create', aggregateType: 'item', changes: {}, events: [{ type: 'conformance.item.created', version: 1 }], contextScope: 'platform' };
+  const { contextScope: _scope, ...undeclared } = base;
   for (const [label, defs] of [
+    // M7B-INVOICES-P1 (design R4): the context scope is required — absent, undefined or outside the three, refused.
+    ['no context scope', [undeclared]], ['an undefined context scope', [{ ...base, contextScope: undefined }]], ['an unknown context scope', [{ ...base, contextScope: 'shop' }]],
     ['an unregistered event', [{ ...base, events: [{ type: 'conformance.item.deleted', version: 1 }] }]], ['an event of another aggregate', [{ ...base, aggregateType: 'order' }]],
     ['one event twice', [{ ...base, events: [...base.events, ...base.events] }]], ['a mode it cannot have', [{ ...base, mode: 'upsert' }]],
     ['a kind outside the grammar', [{ ...base, kind: 'Create' }]], ['a secret-named change', [{ ...base, changes: { password: { type: 'string', maxLength: 8 } } }]],
@@ -279,6 +282,8 @@ function transactionHarness(defect: TxDefect | null): TransactionalOutboxHarness
       const sealedSlot = (v) => typeof v === 'string' && v.length > 0;
       if (defect !== 'rejectionBlind'
         && (!sealedSlot(slots?.conflict) || (isUpdate ? !sealedSlot(slots.invalidState) : slots.invalidState !== null))) return UNAVAILABLE;
+      // The typed sealed 422 is a create's alone (M7B-INVOICES-P1).
+      if (defect !== 'rejectionBlind' && slots.customerNotFound !== null && (isUpdate || !sealedSlot(slots.customerNotFound))) return UNAVAILABLE;
       if (!inVersion) {
         // The rejection is decided under the lease already held, so its own sealed 409 is recorded as the
         // completion in the same step and nothing else is written.
@@ -851,4 +856,37 @@ test('the runtime makes no completion of its own for unchanged: the store\'s com
     assert.equal(completions, 0, 'no completion call beside the commit');
     assert.deepEqual([commits.length, inspectMemoryState(state).aggregates.length], [1, 0], 'one commit, and no aggregate moved');
   });
+});
+
+// --- M7B-INVOICES-P1: the two opt-ins — a declared context scope and the typed sealed 422 ------------------------------
+
+test('M7B-INVOICES-P1 AC-05: customer_not_found is obeyed only as an exact answer; the scope (required) and the opt-in register only in their one shape; a contract that does not opt in carries its declared scope and nothing more', async () => {
+  const command = commandOf();
+  const verdictOf = (answer: unknown): Promise<unknown> =>
+    commitCommand(createCommandTransactions({ port: { commit: () => answer, probe: () => true } }), command, 1_000);
+  assert.equal(await verdictOf({ outcome: 'customer_not_found' }), 'transaction_customer_not_found');
+  for (const answer of [{ outcome: 'customer_not_found', status: 422 }, { outcome: 'CUSTOMER_NOT_FOUND' }, { outcome: 'not_found_customer' }]) {
+    assert.equal(await verdictOf(answer), 'transaction_outcome_invalid', JSON.stringify(answer));
+  }
+  const base = { kind: 'conformance.thing.create', mode: 'create', aggregateType: 'item', changes: {}, events: [], contextScope: 'tenant' };
+  const registered = defineCommands([base, { ...base, kind: 'conformance.thing.store', contextScope: 'store', sealedRefusal: 'customer_not_found' }], events);
+  assert.deepEqual(Object.keys(registered.contract('conformance.thing.create') as object), ['kind', 'mode', 'aggregateType', 'changes', 'events', 'contextScope'],
+    'a contract that does not opt in keeps exactly its six fields, its declared scope among them');
+  assert.equal(registered.contract('conformance.thing.create')?.contextScope, 'tenant', 'its scope as declared');
+  assert.deepEqual([registered.contract('conformance.thing.store')?.contextScope, registered.contract('conformance.thing.store')?.sealedRefusal], ['store', 'customer_not_found']);
+  const { contextScope: _scope, ...undeclared } = base;
+  for (const [label, bad] of [
+    ['no scope (R4: required, never defaulted)', undeclared],
+    ['an unknown scope', { ...base, contextScope: 'shop' }], ['an undefined scope', { ...base, contextScope: undefined }],
+    ['an update opting in', { ...base, mode: 'update', sealedRefusal: 'customer_not_found' }], ['another word', { ...base, sealedRefusal: 'write_conflict' }],
+    ['a seventh unknown field', { ...base, sealed: true }],
+  ] as const) assert.throws(() => defineCommands([bad], events), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', label);
+  // A create that did not opt in carries a null 422 slot; one that did carries the sealed 422.
+  const b = binding();
+  assert.equal(prepareCommand(create, events, createPlan(b.newAggregateId), b)?.command.rejected.customerNotFound, null);
+  const opted = defineCommands([{ ...TEST_CREATE, sealedRefusal: 'customer_not_found' }], events).contract(TEST_CREATE.kind) as CommandContract;
+  const prepared = prepareCommand(opted, events, createPlan(b.newAggregateId), b);
+  assert.ok(prepared !== null && prepared.command.rejected.customerNotFound !== null);
+  assert.deepEqual(keyring.unseal(prepared.command.rejected.customerNotFound, op), prepared.rejected.customerNotFound);
+  assert.deepEqual(prepared.rejected.customerNotFound, { status: 422, contentType: 'application/json; charset=utf-8', headers: {}, body: '{"error":"customer_not_found"}' });
 });

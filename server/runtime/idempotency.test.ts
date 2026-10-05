@@ -748,7 +748,7 @@ test('a perform route refuses without a resolved actor, before its key is acquir
   });
 });
 
-test('the runtime mints its own sealed refusal for exactly two words, and an outcome may borrow neither', () => {
+test('the runtime mints its own sealed refusal for exactly two conflict words (M7B-INVOICES-P1 adds one typed 422, below), and an outcome may borrow neither', () => {
   // M5-GIAM-D1-P2-R1. A command's deterministic rejection is recorded and replayed, so the runtime needs
   // an envelope carrying its own refusal word. That word may be minted HERE and nowhere else.
   for (const error of ['write_conflict', 'invalid_state']) {
@@ -788,4 +788,26 @@ test('the runtime mints its own sealed refusal for exactly two words, and an out
     method: 'PATCH', path: '/admin/v1/x', audience: 'admin', tenant: null, store: null, actor: null, body: Buffer.from('{}'),
   });
   assert.equal(keyring.unseal(sealed, other), null, 'and for no other');
+});
+
+test('M7B-INVOICES-P1 AC-05: the typed sealed refusal customer_not_found is minted at its one status, 422; an outcome may not borrow it; a record reads back only at its own word\'s status', () => {
+  assert.deepEqual(refusalEnvelope('customer_not_found'), {
+    status: 422, contentType: REPLAY_CONTENT_TYPE, headers: {}, body: '{"error":"customer_not_found"}',
+  });
+  assert.ok(Object.isFrozen(refusalEnvelope('customer_not_found')));
+  for (const status of [200, 201, 409, 422]) {
+    assert.equal(envelopeFromOutcome({ status, body: { error: 'customer_not_found' } }), null, `an outcome may not borrow it at ${status}`);
+  }
+  const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
+  const operation = keyring.operationOf(randomUUID(), { authProvider: 'p', authProviderUid: 'u' }, {
+    method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', audience: 'tenant', tenant: randomUUID(), store: randomUUID(), actor: randomUUID(),
+    body: Buffer.from('{}'), target: randomUUID(),
+  });
+  const sealed = keyring.seal(refusalEnvelope('customer_not_found')!, operation);
+  assert.deepEqual(keyring.unseal(sealed, operation), refusalEnvelope('customer_not_found'), 'it reads back for its own operation');
+  // A record pairing a sealed word with any status but its own is no record: each word has exactly one.
+  for (const [error, status] of [['customer_not_found', 409], ['write_conflict', 422], ['invalid_state', 422]] as const) {
+    const forged = keyring.seal({ status, contentType: REPLAY_CONTENT_TYPE, headers: {}, body: JSON.stringify({ error }) }, operation);
+    assert.equal(keyring.unseal(forged, operation), null, `${error} at ${status}`);
+  }
 });

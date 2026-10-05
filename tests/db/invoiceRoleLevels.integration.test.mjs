@@ -1,8 +1,10 @@
 // M5-INVOICES-AUTH-P1 — THE OWNER'S INVOICES LEVEL OVER HTTP: the tenant entry (server/entry/tenantEntry.ts,
-// startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-027),
+// startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-028),
 // composed as tests/db/roleLevels.integration.test.mjs composes it. PUT /api/v1/roles/levels with domain 'invoices' writes
 // through migration 026's tmpos_role_invoice.m7a_invoice_role_level_set; GET /api/v1/roles/levels/invoices reads 026's
-// m7a_invoice_role_level_states. The Invoices level is AUTHORIZATION CONFIGURATION ONLY: no invoice route exists, and
+// m7a_invoice_role_level_states. (M7B-INVOICES-P1 UPDATE: migration 028's invoice-draft routes now decide on this level;
+// tests/db/invoiceDraftsHttp.integration.test.mjs proves it.) As first written: the Invoices level is AUTHORIZATION
+// CONFIGURATION ONLY: no invoice route exists, and
 // nothing here claims an invoice operation is decided or enforced by the server on it.
 //
 // WHAT IS SUBSTITUTED, STATED EXACTLY — the same three things roleLevels.integration substitutes, none on the path under

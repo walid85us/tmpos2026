@@ -9,9 +9,11 @@
 //   * THE ROUTE. There is no shipped tenant business route — every tenant-scope permission is
 //     undecidable until owner decision D1 — so the protected request is a witness route declared in
 //     the harness beside this file (tenantAdmissionWitness.harness.mjs) and injected here. Since
-//     M7B-INVOICES-P1 its STORE witness is served on the closed store template
-//     /api/v1/stores/{storeId}/invoice-drafts (a store-scope route registers nowhere else), requested
-//     at the actor's own store; the literal store witness it replaced is asserted refused at registration.
+//     M7B-INVOICES-P1 the STORE-scope protected request is the REAL draft list,
+//     GET /api/v1/stores/{storeId}/invoice-drafts (the production route over 028's real read, a store-scope
+//     route registering nowhere but a store template), requested at the actor's own store; the exact scope
+//     each 200 was served under is read from the harness's recordingAuthorizer, a pass-through around the
+//     real tenant authorizer; the literal store witness is asserted refused at registration.
 //   * THE IDENTITY VERIFIER. A disposable cluster has no identity provider, so a bearer token is
 //     mapped to a synthetic provider reference. Everything AFTER that point — admission, the session
 //     record, revalidation, authorization and the lifecycle decision — is the composed production
@@ -45,7 +47,7 @@ import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
-import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, storeWitnessPath } from './tenantAdmissionWitness.harness.mjs';
+import { STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_READS, WITNESS_ROUTES, recordingAuthorizer, storeDraftsPath } from './tenantAdmissionWitness.harness.mjs';
 import {
   assertDisposableTestDsn,
   createPostgresExecutor,
@@ -58,6 +60,7 @@ import { createPostgresSessionStore } from '../../server/persistence/postgresSes
 import { createPostgresTenantAdmission, holdTenantStanding, readTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
 import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
 import { createPostgresRoleLevels } from '../../server/persistence/postgresRoleLevels.ts';
+import { createPostgresInvoiceDrafts } from '../../server/persistence/postgresInvoiceDrafts.ts';
 import {
   createTenantEstablishCheck,
   createTenantRouteAuthorizer,
@@ -66,7 +69,8 @@ import {
 import { createAdmittedPlatformAuthorizer, createPlatformSessionAdmission } from '../../server/composition/platformAuthorization.ts';
 import { createApp, createBoundedServer, createReadinessState } from '../../server/runtime/app.ts';
 import { defineRoutes, sessionPaths } from '../../server/runtime/routes.ts';
-import { ADMISSION_REVALIDATE_MS } from '../../server/runtime/sessions.ts';
+import { ADMISSION_REVALIDATE_MS, SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
+import { createInvoiceDraftListRoute } from '../../server/runtime/invoiceDrafts.ts';
 import { assertSessionStoreContract, SESSION_CONTRACT_EPOCH, createMemorySessionStore } from '../../server/runtime/memorySessionStore.testkit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { testRequestLimits } from '../../server/runtime/rateLimiter.testkit.ts';
@@ -127,7 +131,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: real migrations 001-027, a real non-owner runtime login, real adapters, the issuer key installed by the owner
+// setup: real migrations 001-028, a real non-owner runtime login, real adapters, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -381,10 +385,14 @@ async function withRuntime(fn, over = {}) {
       return uid === undefined ? null : { verified: true, authProvider: 'firebase', authProviderUid: uid, authenticatedAt: Date.now(), secondFactor: 'totp' };
     },
   };
+  // The real tenant route authorizer, recorded (never altered) so a 200 on the real draft list names the scope it was
+  // served under (tenantAdmissionWitness.harness.mjs recordingAuthorizer).
+  const recorder = recordingAuthorizer(createTenantRouteAuthorizer({ admission: authorizerAdmission, reads: over.reads ?? WITNESS_READS, levels: roleLevels }));
   const app = createApp({
     readiness,
     log: { log: (line) => { logs.push(line); } },
-    routes: WITNESS_ROUTES,
+    // The tenant witness, and the store scope's protected request: the REAL draft list over 028's real read (M7B-INVOICES-P1).
+    routes: [...WITNESS_ROUTES, createInvoiceDraftListRoute({ invoiceDrafts: createPostgresInvoiceDrafts({ client }) })],
     limits: testRequestLimits(),
     dependencyChecks: [(s) => tenantAdmission.probe(s)],
     sessions: {
@@ -392,7 +400,7 @@ async function withRuntime(fn, over = {}) {
         trustedOrigins: [TENANT_ORIGIN],
         verifier,
         admission: createTenantSessionAdmission({ admission }),
-        authorizer: createTenantRouteAuthorizer({ admission: authorizerAdmission, reads: over.reads ?? WITNESS_READS, levels: roleLevels }),
+        authorizer: recorder.authorizer,
         store: over.store ?? sessionStore,
       },
       admin: {
@@ -424,11 +432,16 @@ async function withRuntime(fn, over = {}) {
       csrf: JSON.parse(reply.body).csrfToken,
     };
   };
+  // The session CSRF token rides along (the real draft list is session-bound, as the shop sends it); the tenant witness
+  // ignores it, and a 401 is decided before it is read.
   const witness = (session, path = WITNESS_PATH) =>
-    send(port, 'GET', path, { cookie: session.cookie, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin' });
+    send(port, 'GET', path, { cookie: session.cookie, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin',
+      ...(typeof session.csrf === 'string' ? { [SESSION_CSRF_HEADER]: session.csrf } : {}) });
+  /** The exact [tenant, store, roleId] the real authorizer last granted `who` at `store`, or null. */
+  const scopeAt = (who, store) => recorder.lastScopeAt(who.uid, store);
 
   try {
-    await fn({ port, login, witness, logs, send: (method, path, headers) => send(port, method, path, headers) });
+    await fn({ port, login, witness, scopeAt, logs, send: (method, path, headers) => send(port, method, path, headers) });
   } finally {
     await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -440,13 +453,13 @@ const bodyOf = (reply) => (reply.body === '' ? null : JSON.parse(reply.body));
 // M5A-01..03: the composition itself
 // ---------------------------------------------------------------------------
 
-test('M5A-01: migrations 001-027 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
+test('M5A-01: migrations 001-028 applied, and the runtime role reaches the session table only through 011\'s routines and 018\'s mint', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied
-  // 001-027, so this run applies nothing and its report lists no version.
+  // 001-028, so this run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028']
       .map((v) => [v, false]));
 
   // The privilege containment migration 011 section 6 asserts, observed from the runtime role itself.
@@ -686,20 +699,22 @@ test('M5A-04b: THE REVIVAL PROOF — a session IDLE across a whole suspend-and-r
 
 test('M5A-05: a STORE session is denied by its parent tenant\'s suspension, and restored by its reactivation', async () => {
   // M7B-INVOICES-P1: the literal store witness is refused at registration (a store-scope route sits on a store template
-  // only); the store witness is served on the store template, requested at the actor's own store.
+  // only); the store-scope request is the REAL draft list at the actor's own store, its scope read from the recorded
+  // decision of the real authorizer.
   assert.throws(() => defineRoutes([STORE_WITNESS_ROUTE]), /route_path_invalid/, 'the literal store witness is refused at registration');
-  const atStore = storeWitnessPath(STORE_B);
+  const atStore = storeDraftsPath(STORE_B);
   /** The one store grant, at its own tenant and store, as admission reads it now. */
   const storeGrantAdmitted = async (why) => {
     const answer = await tenantAdmission.admit(STORE_ACTOR.principal, AbortSignal.timeout(10_000));
     assert.deepEqual(answer.principal.memberships.map((m) => [m.scopeType, m.tenant, m.store, m.roleId]), [['store', TENANT_B, STORE_B, 'manager']], why);
   };
-  await withRuntime(async ({ login, witness, logs }) => {
+  await withRuntime(async ({ login, witness, scopeAt, logs }) => {
     const session = await login(STORE_ACTOR);
     assert.equal(session.status, 200);
     const served = await witness(session, atStore);
     assert.equal(served.status, 200, served.body);
-    assert.deepEqual([bodyOf(served).tenant, bodyOf(served).store, bodyOf(served).roleId], [TENANT_B, STORE_B, 'manager']);
+    assert.deepEqual(bodyOf(served), { drafts: [], nextCursor: null }, 'the real draft list of its store (no draft saved here)');
+    assert.deepEqual(scopeAt(STORE_ACTOR, STORE_B), [TENANT_B, STORE_B, 'manager']);
     // A store grant answers its store and nothing above it: on the tenant witness the admitted session is refused by the
     // authorizer (403), not by admission (401).
     await storeOnlyAdmitted(witness, logs, session, 'a store grant selects no tenant scope');
@@ -715,7 +730,8 @@ test('M5A-05: a STORE session is denied by its parent tenant\'s suspension, and 
     assert.equal(after.status, 200);
     const restored = await witness(after, atStore);
     assert.equal(restored.status, 200, restored.body);
-    assert.deepEqual([bodyOf(restored).tenant, bodyOf(restored).store, bodyOf(restored).roleId], [TENANT_B, STORE_B, 'manager'],
+    assert.deepEqual(bodyOf(restored), { drafts: [], nextCursor: null });
+    assert.deepEqual(scopeAt(STORE_ACTOR, STORE_B), [TENANT_B, STORE_B, 'manager'],
       'the reactivation restored the same store grant at the same store');
     await storeGrantAdmitted('and admission reads the restored store grant again');
   });
@@ -732,15 +748,18 @@ test('M5A-05b: a STORE suspended under an ACTIVE tenant ends the ACTIVE session 
   const keeper = await actor('store-keeper', { scope: 'store', tenant, store, role: 'manager' });
   const idler = await actor('store-idler', { scope: 'store', tenant, store, role: 'manager' });
   const setStore = (status) => owner`update store set status = ${status} where store_id = ${store}`;
-  const atStore = storeWitnessPath(store);
-  const servedAtStore = async (reply, why) => {
+  const atStore = storeDraftsPath(store);
+  let scopeOf = null;
+  const servedAtStore = async (reply, who, why) => {
     assert.equal(reply.status, 200, `${why}: ${reply.body}`);
-    assert.deepEqual([bodyOf(reply).tenant, bodyOf(reply).store, bodyOf(reply).roleId], [tenant, store, 'manager'], why);
+    assert.deepEqual(bodyOf(reply), { drafts: [], nextCursor: null }, `${why}: the real draft list of its store`);
+    assert.deepEqual(scopeOf(who, store), [tenant, store, 'manager'], why);
   };
-  await withRuntime(async ({ login, witness, logs }) => {
+  await withRuntime(async ({ login, witness, scopeAt, logs }) => {
+    scopeOf = scopeAt;
     const session = await login(keeper);
     assert.equal(session.status, 200);
-    await servedAtStore(await witness(session, atStore), 'served at its store before the suspension');
+    await servedAtStore(await witness(session, atStore), keeper, 'served at its store before the suspension');
     const boundBefore = await witnessOf(keeper);
     // A second actor on the same store signs in and then makes NO request until the episode is over.
     const idle = await login(idler);
@@ -768,7 +787,7 @@ test('M5A-05b: a STORE suspended under an ACTIVE tenant ends the ACTIVE session 
     assert.equal(after.status, 200);
     assert.notEqual(await witnessOf(keeper), boundBefore,
       'the witness did NOT return to its pre-suspension value: the store access version moved twice');
-    await servedAtStore(await witness(after, atStore), 'a fresh login is served at its store again');
+    await servedAtStore(await witness(after, atStore), keeper, 'a fresh login is served at its store again');
     // THE CLOSURE ITSELF: the idle session, admitted before the suspension and untouched since, is
     // refused on its next request for the version — exactly what M5A-04b proves for a tenant — and ended.
     assert.equal(await witnessOf(idler), idleBound, 'still bound to the witness it was admitted at');

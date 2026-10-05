@@ -343,7 +343,7 @@ test('the route registers as one POST behind the tenant session and create_custo
 test('the contract registers with no event contract at all, and declares the name, phone and email as 400, 128 and 508 UTF-16 units — the record caps they need', () => {
   const [contract] = defineCommands([CUSTOMER_CREATE_CONTRACT], defineOutboxEvents([])).list();
   assert.deepEqual(contract, {
-    kind: 'tenant.customer.create', mode: 'create', aggregateType: 'customer', events: [],
+    kind: 'tenant.customer.create', mode: 'create', aggregateType: 'customer', events: [], contextScope: 'tenant',
     changes: { name: { type: 'string', maxLength: 400 }, phone: { type: 'string', maxLength: 128 }, email: { type: 'string', maxLength: 508 } },
   });
   // The longest legal record — a 200-, a 64- and a 254-scalar field, every scalar astral — plans, and the runtime prepares it

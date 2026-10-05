@@ -183,15 +183,17 @@ jobs:
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/adminRevocation.integration.test.mjs
       # Phase 4.0 M5-TENANT-SESSION-P1 — migration 016 and tenant session ordering: tenant logins, recent sign-ins and
       # logouts raced against account, grant, anchor, tenant and store changes across two separately composed production
-      # roots over real local sockets, with the tenant session audit rows, against the SAME disposable service. Witness
-      # routes are test-only. Same binding, no new service, no secret, no permission change.
+      # roots over real local sockets, with the tenant session audit rows, against the SAME disposable service. The
+      # tenant-scope witness route is test-only; since M7B-INVOICES-P1 the store-scope request is the real draft list,
+      # which saves nothing. Same binding, no new service, no secret, no permission change.
       - name: Tenant session ordering against disposable PostgreSQL (M5-TENANT-SESSION-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/tenantSessionOrdering.integration.test.mjs
       # Phase 4.0 M7A-CUSTOMERS-P1 — migration 017 and the tenant customer directory: GET /api/v1/customers composed on
-      # the tenant session boundary over real local sockets, the routine's re-check, isolation, paging and 017's rollback,
+      # the tenant session boundary over real local sockets, the routine's re-check, isolation, paging and 017's rollback
+      # (028 down to 020, then 018, rolled back first and re-applied after it in order, the catalog left exactly as found),
       # against the SAME disposable service. Synthetic data only. Same binding, no new service, no secret, no permission change.
       - name: Tenant customer directory against disposable PostgreSQL (M7A-CUSTOMERS-P1)
         env:
@@ -384,13 +386,33 @@ jobs:
       # store, a tenant-only actor reading none, statuses and read-only flags, every stale or unknown key denied, 027's down
       # refused while a 028 draft object exists and otherwise rolled back and restored with 026 left byte for byte), then
       # GET /api/v1/stores end to end over real loopback HTTP on the tenant entry, against the SAME disposable service. It
-      # rolls back 027 alone and writes no draft, so it runs after every step above; it leaves 027 applied. Synthetic data and
-      # keys made at run time only. Same binding, no new service, no secret, no permission change.
+      # rolls back 027 (with 028 above it) and writes no draft, so it runs after every step above; it leaves 027 and 028
+      # applied. Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
       - name: Tenant store discovery against disposable PostgreSQL (M7B-INVOICES-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/storeAccess.integration.test.mjs
+      # M7B-INVOICES-P1 — migration 028's store-owned invoice drafts as the runtime login (the postcondition and its
+      # refusals, the ACL, the create, page and get routines over two stores and two tenants, every refusal before any write,
+      # lock order, the down refused while a draft or a draft audit subject exists and otherwise rolled back and restored),
+      # then the three draft routes end to end over real loopback HTTP on two tenant entries and a restart (authority both
+      # directions with the owner's own level edits, the sealed customer_not_found 422, injected faults, concurrent saves,
+      # ordering against revocation, both lost-COMMIT branches, pagination), against the SAME disposable service. These are
+      # the only steps that store drafts: 028's down refuses while one or a draft audit subject exists, so they run AFTER
+      # every step that rolls 028 back, and each removes every draft, line, Invoices lock anchor and audit subject of its own
+      # before it ends (R8). Synthetic data and keys made at run time only. Same binding, no new service, no secret, no
+      # permission change.
+      - name: Invoice draft routines against disposable PostgreSQL (M7B-INVOICES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftRoutine.integration.test.mjs
+      - name: Invoice drafts over HTTP against the tenant entry and disposable PostgreSQL (M7B-INVOICES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftsHttp.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

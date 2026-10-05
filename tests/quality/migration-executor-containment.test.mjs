@@ -604,6 +604,14 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // its target with the same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment
     // property above is untouched.
     'tests/db/storeAccess.integration.test.mjs',
+    // M7B-INVOICES-P1: the invoice draft proofs need 001-028 applied (and 028 rolled back through its down file, refused while
+    // a draft or a draft-naming audit record exists, and re-applied; the 027 database upgraded to 028) before they can say
+    // anything about migration 028's routines, tables or privilege containment, and the HTTP proof then stands up the tenant
+    // entry over every migration in the directory; both apply them through the SAME trusted executor, validating their
+    // target with the same assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment
+    // property above is untouched.
+    'tests/db/invoiceDraftRoutine.integration.test.mjs',
+    'tests/db/invoiceDraftsHttp.integration.test.mjs',
     // M7A-CUSTOMERS-P3-R2: the shop's real-browser gate stands up the tenant entry over a disposable PostgreSQL and needs
     // 001-020 applied first; it applies them through the SAME trusted executor (and validates its target with the same
     // assertDisposableTestDsn), never a second apply path. A test suite that runs the database lane, like the tests/db/

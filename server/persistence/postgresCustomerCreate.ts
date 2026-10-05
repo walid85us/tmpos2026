@@ -58,5 +58,7 @@ export const CUSTOMER_CREATE_MUTATOR: AggregateMutator = Object.freeze({
   kind: CUSTOMER_CREATE_CONTRACT.kind,
   mode: 'create',
   aggregateType: CUSTOMER_CREATE_CONTRACT.aggregateType,
+  // Its contract's scope, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   apply: applyCustomerCreate,
 });

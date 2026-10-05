@@ -433,7 +433,7 @@ test('M6E-T02 the production factories build a non-null preflight exposing conne
 test('a command route needs its mutator, a partial construction composes nothing, and no fallback stands in', async () => {
   const command: RouteDefinition = { method: 'POST', path: '/v1/orders', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_CREATE, plan: () => assert.fail('never planned') } };
   assert.deepEqual(blockersOf({ routes: [command], mutators: [] }, CONFIGURED), ['command_mutator_unavailable']);
-  const mutator: AggregateMutator = { kind: TEST_CREATE.kind, mode: 'create', aggregateType: TEST_CREATE.aggregateType, apply: async () => 'applied' };
+  const mutator: AggregateMutator = { kind: TEST_CREATE.kind, mode: 'create', aggregateType: TEST_CREATE.aggregateType, contextScope: 'platform', apply: async () => 'applied' };
   const ok = counted();
   assert.ok(assembleTransactions({ routes: [command], mutators: [mutator] }, CONFIGURED, ok.factories) !== null);
   // Only the one mutator matching the contract's kind, mode and aggregate type serves it: nothing that would fail every command later.
@@ -443,6 +443,24 @@ test('a command route needs its mutator, a partial construction composes nothing
     ['two mutators of one kind', [mutator, { ...mutator }]],
   ] as const) {
     assert.deepEqual(blockersOf({ routes: [command], mutators: mutators as readonly AggregateMutator[] }, CONFIGURED), ['command_mutator_unavailable'], label);
+  }
+  // M7B-INVOICES-P1 (design R4): route scope = contract scope = mutator scope, and this root admits platform alone — each as
+  // DECLARED: a contract or a mutator with no scope (an untyped caller, outside the type system) gets no default.
+  const { contextScope: _contractScope, ...undeclaredContract } = TEST_CREATE;
+  const { contextScope: _mutatorScope, ...undeclaredMutator } = mutator;
+  const withContract = (contract: unknown): RouteDefinition => ({ ...command, command: { contract: contract as never, plan: () => assert.fail('never planned') } }) as RouteDefinition;
+  for (const [label, routes, mutators] of [
+    ['a contract declaring no scope', [withContract(undeclaredContract)], [mutator]],
+    ['a mutator declaring no scope', [command], [undeclaredMutator]],
+    ['a contract declaring tenant', [withContract({ ...TEST_CREATE, contextScope: 'tenant' })], [mutator]],
+    ['a mutator declaring store', [command], [{ ...mutator, contextScope: 'store' }]],
+    ['a contract and a mutator agreeing on tenant at a platform route', [withContract({ ...TEST_CREATE, contextScope: 'tenant' })], [{ ...mutator, contextScope: 'tenant' }]],
+    ['a tenant-session command route, its contract and its mutator all declaring tenant', [{
+      ...withContract({ ...TEST_CREATE, contextScope: 'tenant' }), path: '/api/v1/orders',
+      policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'items.write' } },
+    }], [{ ...mutator, contextScope: 'tenant' }]],
+  ] as const) {
+    assert.deepEqual(blockersOf({ routes: routes as readonly RouteDefinition[], mutators: mutators as readonly AggregateMutator[] }, CONFIGURED), ['command_scope_mismatch'], label);
   }
 
   // The store refuses its mutator table: the client already built is ended, and nothing is returned.
@@ -1270,7 +1288,7 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the six reads classified as reads, the three commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the eight reads classified as reads, the four commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3') || text.includes('m7a_customer_get')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
@@ -1296,17 +1314,28 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/roles/levels/invoices', 'session', 'tenant', 'none', 'required', 'none'],
     // M7B-INVOICES-P1: the store directory — session-bound, and the route table's one closed authorization-free shape.
     ['GET', '/api/v1/stores', 'session', 'tenant', 'required', 'none', 'none'],
+    // M7B-INVOICES-P1: the invoice drafts' two store-scope reads, session-bound under a resolved store scope.
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'required', 'required', 'none'],
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
+    // M7B-INVOICES-P1: the draft save, the store template's one command.
+    ['POST', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
   assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
-    'GET /api/v1/stores'],
+    'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
     ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
-      'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels']);
+      'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
+      'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts']);
   assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
+  assert.deepEqual([6, 7, 11].map((i) => ttx.routes[i].policy), [
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
+  ], 'the draft routes require the STORE route permissions');
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
@@ -1445,7 +1474,7 @@ test('M7TK-04 the tenant session store mints under the issuer key and holds the 
   await ttx.close();
 });
 
-test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s, then the search\'s, then the store directory\'s', async () => {
+test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key, the mint probe is the session store\'s, and the reads\' probe is the customer directory\'s, then the detail\'s, then the profile\'s, then the search\'s, then the store directory\'s, then the invoice drafts\'', async () => {
   let answer: unknown = [{ outcome: 'match' }];
   const denied = [{ o_outcome: 'denied', o_tenant_id: null, o_customer_id: null, o_name: null }];
   const profileDenied = [{ ...denied[0], o_phone: null, o_email: null, o_created_at: null, o_version: null }];
@@ -1455,10 +1484,17 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   let searched: unknown = denied;
   const storesDenied = [{ o_outcome: 'denied', o_store_id: null, o_tenant_id: null, o_store_name: null, o_read_only: null }];
   let stored: unknown = storesDenied;
+  const draftPageDenied = [{ o_outcome: 'denied', o_tenant_id: null, o_store_id: null, o_draft_id: null, o_customer_id: null, o_status: null, o_currency: null,
+    o_line_count: null, o_subtotal_cents: null, o_created_at: null }];
+  const draftGetDenied = [{ ...draftPageDenied[0], o_version: null, o_position: null, o_description: null, o_quantity: null, o_unit_price_cents: null,
+    o_line_total_cents: null }];
+  let draftPage: unknown = draftPageDenied;
+  let draftGot: unknown = draftGetDenied;
   let minted: unknown = [{ outcome: 'invalid' }];
   const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
     : text.includes('m7a_customer_get') ? got : text.includes('m7a_customer_profile') ? profiled : text.includes('m7a_customer_search') ? searched
-      : text.includes('m7b_store_directory') ? stored : text.includes('m7a_session_create') ? minted : []));
+      : text.includes('m7b_store_directory') ? stored : text.includes('m7b_invoice_draft_page') ? draftPage : text.includes('m7b_invoice_draft_get') ? draftGot
+        : text.includes('m7a_session_create') ? minted : []));
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
   const signal = new AbortController().signal;
   assert.equal(await ttx.issuerKey(signal), 'match');
@@ -1479,17 +1515,29 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.ok(!JSON.stringify(kernel.statements).includes(keyHex) && !JSON.stringify(kernel.statements).includes(TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY),
     'no statement carries the key in any spelling');
   kernel.statements.length = 0;
-  assert.equal(await ttx.readsProbe(signal), true, 'all five routines\' one refusal of an unknown key');
+  assert.equal(await ttx.readsProbe(signal), true, 'all seven routines\' one refusal of an unknown key');
   const asked = (): string[] => kernel.statements.map((st) => (/m7a_customer_page_v3\(/.test(st.text) ? 'page_v3' : /m7a_customer_get\(/.test(st.text) ? 'get'
     : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search'
-      : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : 'other'));
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores'],
-    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s (M7B-INVOICES-P1)');
-  // M7B-INVOICES-P1: the store directory's routine is asked last, only once the search's has refused.
+      : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : /tmpos_invoice_draft\.m7b_invoice_draft_page\(/.test(st.text) ? 'draft_page'
+        : /tmpos_invoice_draft\.m7b_invoice_draft_get\(/.test(st.text) ? 'draft_get' : 'other'));
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get'],
+    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then 028\'s two (M7B-INVOICES-P1)');
+  // M7B-INVOICES-P1: the invoice drafts' two reads are asked last, only once the store directory's has refused.
+  draftGot = [{ ...draftGetDenied[0], o_outcome: 'not_found' }];
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'the draft get answering anything else is not ready');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get']);
+  draftGot = draftGetDenied;
+  draftPage = draftGetDenied;
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'nor the get\'s sixteen columns in place of the page\'s ten');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page'], 'short-circuit: the get is not asked once the page is not ready');
+  draftPage = draftPageDenied;
+  // M7B-INVOICES-P1: the store directory's routine is asked once the search's has refused.
   stored = [{ ...storesDenied[0], o_outcome: 'invalid' }];
   kernel.statements.length = 0;
   assert.equal(await ttx.readsProbe(signal), false, 'the store routine answering anything else is not ready');
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores']);
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores'], 'short-circuit: the draft reads are not asked once the store routine is not ready');
   stored = denied;
   assert.equal(await ttx.readsProbe(signal), false, 'nor the customer reads\' four columns in place of the store routine\'s five');
   stored = storesDenied;
@@ -1572,6 +1620,43 @@ test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; only
     } catch (err) {
       assert.ok(err instanceof TransactionCompositionError, `${label}: ${String(err)}`);
       assert.deepEqual(err.blockers, ['command_mutator_unavailable'], label);
+    }
+  }
+  // M7B-INVOICES-P1 (design R4): a command route's requirement scope, its contract's DECLARED context scope and its mutator's
+  // are ONE scope of {tenant, store} — none defaulted: a missing declaration (an untyped caller) is a mismatch.
+  const draftRoute = slot.routes.find((r) => r.path === '/api/v1/stores/{storeId}/invoice-drafts');
+  const draftMutator = slot.mutators.find((m) => m.kind === 'store.invoice_draft.create');
+  assert.ok(draftRoute !== undefined && 'command' in draftRoute && draftMutator !== undefined);
+  assert.deepEqual([draftRoute.policy.access === 'session' ? draftRoute.policy.authorization?.scope : null, draftRoute.command.contract.contextScope,
+    draftMutator.contextScope], ['store', 'store', 'store'], 'the composed draft save: store, store, store');
+  const { contextScope: _scope, ...undeclared } = draftMutator;
+  const customerRoute = slot.routes.find((r) => 'command' in r && r.command.contract.kind === 'tenant.customer.create');
+  const customerMutator = slot.mutators.find((m) => m.kind === 'tenant.customer.create');
+  assert.ok(customerRoute !== undefined && 'command' in customerRoute && customerRoute.policy.access === 'session' && customerMutator !== undefined);
+  assert.deepEqual([customerRoute.policy.authorization?.scope, customerRoute.command.contract.contextScope, customerMutator.contextScope],
+    ['tenant', 'tenant', 'tenant'], 'the composed customer create: tenant, tenant, tenant — declared, not defaulted');
+  const { contextScope: _contractScope, ...undeclaredContract } = customerRoute.command.contract;
+  const { contextScope: _customerScope, ...undeclaredCustomer } = customerMutator;
+  const withCustomer = (route: unknown) => ({ ...slot, routes: slot.routes.map((r) => (r === customerRoute ? route : r)) });
+  for (const [label, writes] of [
+    ['a store command over a mutator declaring no scope', { ...slot, mutators: slot.mutators.map((m) => (m === draftMutator ? undeclared : m)) }],
+    ['a tenant command over a mutator declaring no scope', { ...slot, mutators: slot.mutators.map((m) => (m === customerMutator ? undeclaredCustomer : m)) }],
+    ['a tenant command whose contract declares no scope', withCustomer({ ...customerRoute, command: { ...customerRoute.command, contract: undeclaredContract } })],
+    ['route, contract and mutator agreeing on platform, which the tenant root does not admit', {
+      ...withCustomer({ ...customerRoute, policy: { ...customerRoute.policy, authorization: { ...customerRoute.policy.authorization, scope: 'platform' } },
+        command: { ...customerRoute.command, contract: { ...customerRoute.command.contract, contextScope: 'platform' } } }),
+      mutators: slot.mutators.map((m) => (m === customerMutator ? { ...m, contextScope: 'platform' } : m)) }],
+    ['a store command over a mutator declaring tenant', { ...slot, mutators: slot.mutators.map((m) => (m === draftMutator ? { ...m, contextScope: 'tenant' } : m)) }],
+    ['a tenant command over a mutator declaring store', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'tenant.customer.create' ? { ...m, contextScope: 'store' } : m)) }],
+    ['a store contract on a tenant route', { ...slot, routes: slot.routes.map((r) => (r === draftRoute
+      ? { ...draftRoute, command: { ...draftRoute.command, contract: { ...draftRoute.command.contract, contextScope: 'tenant' } } } : r)) }],
+  ] as const) {
+    try {
+      composeReadTransactions({ ...TENANT_INVENTORY, writes } as never, TENANT_CONFIGURED, () => assert.fail('no client may be built'));
+      assert.fail(`${label}: composition must refuse`);
+    } catch (err) {
+      assert.ok(err instanceof TransactionCompositionError, `${label}: ${String(err)}`);
+      assert.deepEqual(err.blockers, ['command_scope_mismatch'], label);
     }
   }
 });

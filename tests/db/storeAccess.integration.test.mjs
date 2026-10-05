@@ -3,7 +3,7 @@
 // login, and GET /api/v1/stores through the REAL tenant entry over loopback HTTP.
 //
 // WHAT IS PROVEN.
-//   STA-01 001-027 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
+//   STA-01 001-028 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
 //          and refusing every widening it names (tmpos_app made a member of the owner among them); a second apply refused,
 //          and an apply over a chain missing 026's routine, 016's admission read or 002's membership table refused.
 //   STA-02 the inventory and ACL: one STABLE plpgsql SECURITY DEFINER routine pinned to pg_catalog, pg_temp with
@@ -22,10 +22,11 @@
 //          change since the mint (a grant added, a store suspended, the account suspended) are one 'denied' row, as are a
 //          session whose expiry the owner moved after the mint and an ADMIN-audience session (with or without a ledger row);
 //          a malformed key is 'invalid'; the routine writes and locks nothing.
-//   STA-08 027's down: refused while not applied, while 028's schema tmpos_invoice_draft or the audit subject column of 028
-//          exists — but NOT for a relation of 028's table names in another schema — and committed otherwise through the
-//          executor's own path — the schema gone, 026's surface byte for byte as before, the 026 runtime login refused by the
-//          startup preflight — then restored, the preflight accepting again.
+//   STA-08 027's down: refused while not applied, while 028 itself is applied (M7B-INVOICES-P1), and — 028 rolled back in
+//          the same rolled-back transaction — while 028's schema tmpos_invoice_draft or the audit subject column of 028
+//          exists, but NOT for a relation of 028's table names in another schema; committed otherwise through the executor's
+//          own path (028 rolled back above it) — the schema gone, 026's surface byte for byte as before, the 026 runtime
+//          login refused by the startup preflight — then restored, the preflight accepting again.
 //   STA-09 the status matrix: each of the six statuses on the account, the tenant and the store axis, with a session minted
 //          at that standing, answers exactly what the runtime's own lifecycle decision (tenantState.ts decideTenantState)
 //          says — a writable row, a read-only row, no row, or (the account axis) one 'denied' row.
@@ -34,16 +35,18 @@
 //   STAH-01 over HTTP through the real tenant entry: ready with 027's probe; 401 without a session; 403 without the session
 //          CSRF token (and with another session's); a store-only actor served exactly { stores: [{ id, tenantId, name,
 //          readOnly }] }, no-store and the baseline headers; a tenant-only actor an empty list; any query a 400; reads
-//          write no audit, outbox or idempotency row; no draft route is served; a grant change ends the session; unservable
-//          names served as null; the session's idle window NOT slid by the directory (an authorized read slides it);
-//          POST /api/v1/stores a 404; an administrative session's key under the tenant cookie a 401.
+//          write no audit, outbox or idempotency row; the store's (empty) draft list is served (M7B-INVOICES-P1, 028); a grant
+//          change ends the session; unservable names served as null; the session's idle window NOT slid by the directory
+//          (an authorized read slides it); POST /api/v1/stores a 404; an administrative session's key under the tenant
+//          cookie a 401.
 //
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic
-// and randomly suffixed; every key is random bytes made here. It leaves the shared service with 027 applied, the ledger
-// 001-027, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its login
-// dropped; its synthetically named identities, tenants, stores and memberships stay, as every suite's do. It writes no
-// invoice draft, so it may run anywhere after the steps that apply 027.
+// and randomly suffixed; every key is random bytes made here. It leaves the shared service with 027 and 028 applied, the
+// ledger 001-028, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its
+// login dropped; its synthetically named identities, tenants, stores and memberships stay, as every suite's do. It writes no
+// invoice draft; STA-08 rolls 028 back with 027 (refused while a draft exists), so on a shared service it runs before every
+// step that stores one.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -71,6 +74,8 @@ const MIG_REL = 'server/platform-identity/migrations';
 const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/\/$/, '');
 const UP_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.up.sql`, 'utf8');
 const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
+/** M7B-INVOICES-P1: 028 (invoice drafts) sits above 027 and rolls back before it. */
+const DOWN_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_027 = UP_027.slice(UP_027.lastIndexOf('do $$'));
 const DIRECTORY = 'tmpos_store_access.m7b_store_directory(text)';
@@ -153,10 +158,11 @@ test.after(async () => {
   const failures = [];
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
-    // A failed STA-08 may have left 027 rolled back: the executor applies it again.
+    // A failed STA-08 may have left 027 (and 028 above it) rolled back: the executor applies them again.
     await step(async () => {
       if ((await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent
-        || !(await owner`select exists (select 1 from public.schema_migrations where version = '027') as applied`)[0].applied) {
+        || (await owner`select pg_catalog.to_regnamespace('tmpos_invoice_draft') is null as absent`)[0].absent
+        || !(await owner`select exists (select 1 from public.schema_migrations where version = '028') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -193,10 +199,12 @@ test.after(async () => {
       const [state] = await owner`select
           pg_catalog.to_regnamespace('tmpos_store_access') is not null as schema_027,
           exists (select 1 from public.schema_migrations where version = '027') as ledger_027,
+          pg_catalog.to_regnamespace('tmpos_invoice_draft') is not null as schema_028,
+          exists (select 1 from public.schema_migrations where version = '028') as ledger_028,
           (select count(*) from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[]))::int as sessions,
           exists (select 1 from pg_catalog.pg_roles where rolname = ${RUNTIME_LOGIN}) as login`;
-      assert.deepEqual({ ...state }, { schema_027: true, ledger_027: true, sessions: 0, login: false },
-        'left as found: 027 applied and recorded, no session of this suite, the probe login dropped');
+      assert.deepEqual({ ...state }, { schema_027: true, ledger_027: true, schema_028: true, ledger_028: true, sessions: 0, login: false },
+        'left as found: 027 and 028 applied and recorded, no session of this suite, the probe login dropped');
     });
   } finally {
     await step(() => owner.end({ timeout: 5 }));
@@ -206,7 +214,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-027), a real non-owner runtime login, the keys installed by the owner
+// setup: every migration in the directory (001-028), a real non-owner runtime login, the keys installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -371,10 +379,10 @@ async function preflightVerdict() {
 // STA-01..02: the migration, the inventory and the ACL
 // ---------------------------------------------------------------------------
 
-test('STA-01: 001-027 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('STA-01: 001-028 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 27 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 28 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'every ledger checksum is the pinned one');
   assert.equal(ledger[26].checksum, createHash('sha256').update(UP_027).digest('hex'), '027\'s checksum is its up bytes');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_027).simple())).code, undefined, 'the applied state satisfies the postcondition');
@@ -405,7 +413,8 @@ test('STA-01: 001-027 applied clean, every checksum the pinned one; 027\'s postc
   const again = await rolledBack(RC, (tx) => tx.unsafe(UP_027).simple());
   assert.equal(again.code, '55000');
   assert.match(again.message, /schema tmpos_store_access already exists/);
-  // Over a chain missing what it builds on, the up file refuses with a stated reason (027 rolled back first, all rolled back).
+  // Over a chain missing what it builds on, the up file refuses with a stated reason (028 and then 027 rolled back first —
+  // M7B-INVOICES-P1: 027's down refuses while 028 is applied — all rolled back).
   for (const [label, remove, pattern] of [
     ['026\'s routine missing', 'alter function tmpos_role_invoice.m7a_invoice_role_level_states(uuid) rename to m7a_states_moved',
       /migration 027 refused: migration 026 must be applied first/],
@@ -414,7 +423,9 @@ test('STA-01: 001-027 applied clean, every checksum the pinned one; 027\'s postc
     ['002\'s membership table missing', 'alter table public.user_membership rename to user_membership_moved',
       /migration 027 refused: the session table, the mint ledger, the issuer key, 016's admission or 002's tables are missing/],
   ]) {
-    const out = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_027).simple(); await tx.unsafe(remove); await tx.unsafe(UP_027).simple(); });
+    const out = await rolledBack(RC, async (tx) => {
+      await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(remove); await tx.unsafe(UP_027).simple();
+    });
     assert.equal(out.code, '55000', `${label}: ${JSON.stringify(out)}`);
     assert.match(out.message, pattern, label);
   }
@@ -632,22 +643,29 @@ test('STA-07: unknown, revoked, expired, unminted, foreign-issuer and stale-stan
 
 test('STA-08: 027\'s down refuses while not applied or while an invoice draft object of 028 exists — matched exactly — and otherwise removes exactly 027, leaving 026 as it was; restored, the runtime is accepted again', async () => {
   const before026 = await surface026();
+  // M7B-INVOICES-P1: 028 itself is applied above 027, so 027's down refuses as it stands; each fake below is judged with
+  // 028 rolled back first (its own down, in the same rolled-back transaction), so it is the fake alone that refuses.
+  const real = await rolledBack(RC, (tx) => tx.unsafe(DOWN_027).simple());
+  assert.equal(real.code, '55000', `028 applied: refused (${JSON.stringify(real)})`);
+  assert.match(real.message, /migration 027 rollback refused: an invoice draft object of migration 028 exists/);
   // 028's own objects, by their exact names: its schema (with or without its tables) and the audit subject column.
   for (const [label, fake] of [
     ['028\'s schema', 'create schema tmpos_invoice_draft'],
     ['028\'s schema with its two tables', 'create schema tmpos_invoice_draft; create table tmpos_invoice_draft.invoice_draft (draft_id uuid); create table tmpos_invoice_draft.invoice_draft_line (draft_id uuid)'],
     ['the audit subject column', 'alter table public.audit_event add column subject_invoice_draft_id uuid'],
   ]) {
-    const out = await rolledBack(RC, async (tx) => { await tx.unsafe(fake).simple(); await tx.unsafe(DOWN_027).simple(); });
+    const out = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_028).simple(); await tx.unsafe(fake).simple(); await tx.unsafe(DOWN_027).simple(); });
     assert.equal(out.code, '55000', `${label}: refused (${JSON.stringify(out)})`);
     assert.match(out.message, /migration 027 rollback refused: an invoice draft object of migration 028 exists/, label);
   }
-  // A relation that merely shares 028's table names, in a schema that is not 028's, is not 028's: the rollback proceeds.
+  // A relation that merely shares 028's table names, in a schema that is not 028's, is not 028's: the rollback proceeds
+  // (028 itself rolled back first in the same rolled-back transaction, as above).
   for (const [label, unrelated] of [
     ['an invoice_draft table in public', 'create table public.invoice_draft (draft_id uuid)'],
     ['both table names in an unrelated schema', 'create schema sta_unrelated; create table sta_unrelated.invoice_draft (draft_id uuid); create table sta_unrelated.invoice_draft_line (draft_id uuid)'],
   ]) {
     const out = await rolledBack(RC, async (tx) => {
+      await tx.unsafe(DOWN_028).simple();
       await tx.unsafe(unrelated).simple();
       await tx.unsafe(DOWN_027).simple();
       return (await tx`select pg_catalog.to_regnamespace('tmpos_store_access') is null as gone`)[0].gone;
@@ -655,14 +673,14 @@ test('STA-08: 027\'s down refuses while not applied or while an invoice draft ob
     assert.deepEqual(out, { value: true }, `${label}: rolled back, not refused (${JSON.stringify(out)})`);
   }
   assert.ok(!(await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent, 'each refusal left 027 in place');
-  const twice = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_027).simple(); await tx.unsafe(DOWN_027).simple(); });
+  const twice = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(DOWN_027).simple(); });
   assert.equal(twice.code, '55000');
   assert.match(twice.message, /migration 027 is not applied/);
   // The executor's own path: the down file and the ledger row, then restored.
-  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-027 runtime is accepted');
+  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-028 runtime is accepted');
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '026');
   try {
-    assert.deepEqual(undone, ['027'], 'only 027 sits above 026');
+    assert.deepEqual(undone, ['028', '027'], 'only 027 (and 028 above it, M7B-INVOICES-P1) sits above 026');
     const [state] = await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as gone,
       (select max(version) from public.schema_migrations) as newest`;
     assert.deepEqual({ ...state }, { gone: true, newest: '026' });
@@ -801,7 +819,11 @@ test('STAH-01: GET /api/v1/stores through the real tenant entry — 401, the ses
     assert.deepEqual(JSON.parse(none.body), { stores: [] }, 'a tenant-only actor: no store, no inheritance');
     assertRefusal(await stores(port, storeOnly, { path: `${STORES_PATH}?tenantId=${T_A}` }), 400, 'invalid_request', 'a query');
     assertRefusal(await stores(port, storeOnly, { headers: { host: 'admin.tmpos.test' } }), 404, 'not_found', 'the wrong host');
-    assertRefusal(await stores(port, storeOnly, { path: `${STORES_PATH}/${S_ALPHA}/invoice-drafts` }), 404, 'not_found', 'no draft route is served');
+    // M7B-INVOICES-P1: 028 serves the store's draft list (tests/db/invoiceDraftsHttp.integration.test.mjs proves it); this
+    // suite stores no draft, so the store-only actor's list at its sales_staff store is empty.
+    const drafts = await stores(port, storeOnly, { path: `${STORES_PATH}/${S_ALPHA}/invoice-drafts` });
+    assert.equal(drafts.status, 200, drafts.body);
+    assert.deepEqual(JSON.parse(drafts.body), { drafts: [], nextCursor: null }, 'the draft list is served, empty');
     assert.deepEqual(await rowCounts(), before, 'reads write no audit, outbox or idempotency row');
     // A grant change after login: the chain re-asks admission, the witness moved, the session ends (401).
     const changed = await actor('stah-changed', [storeGrant(T_A, S_ALPHA, 'manager')]);

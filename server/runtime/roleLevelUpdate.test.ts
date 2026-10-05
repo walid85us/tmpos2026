@@ -166,7 +166,7 @@ test('the route registers as one PUT behind the tenant session and edit_role_lev
 test('the contract registers with no event, as a create of its own aggregate type, and prepares with the audit annex and the deadline', () => {
   const [contract] = defineCommands([ROLE_LEVEL_UPDATE_CONTRACT], defineOutboxEvents([])).list();
   assert.deepEqual(contract, {
-    kind: 'tenant.role.level.update', mode: 'create', aggregateType: 'tenant_role_level', events: [],
+    kind: 'tenant.role.level.update', mode: 'create', aggregateType: 'tenant_role_level', events: [], contextScope: 'tenant',
     changes: { roleId: { type: 'enum', values: ['manager', 'technician', 'sales_staff'] }, domain: { type: 'enum', values: ['customers', 'invoices'] },
       level: { type: 'enum', values: ['approve', 'create', 'edit', 'full', 'manage', 'none', 'view'] },
       expectedTenant: { type: 'string', maxLength: 36 }, expectedVersion: { type: 'integer', min: 0, max: Number.MAX_SAFE_INTEGER } },

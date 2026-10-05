@@ -25,8 +25,8 @@ const mutation = (over: Partial<TransactionMutation> = {}): TransactionMutation 
 
 test('the mutator registers for exactly its command kind, as an update of a tenant', () => {
   assert.deepEqual(
-    { kind: TENANT_STATUS_MUTATOR.kind, mode: TENANT_STATUS_MUTATOR.mode, aggregateType: TENANT_STATUS_MUTATOR.aggregateType },
-    { kind: 'platform.tenant.status.change', mode: 'update', aggregateType: 'tenant' });
+    { kind: TENANT_STATUS_MUTATOR.kind, mode: TENANT_STATUS_MUTATOR.mode, aggregateType: TENANT_STATUS_MUTATOR.aggregateType, contextScope: TENANT_STATUS_MUTATOR.contextScope },
+    { kind: 'platform.tenant.status.change', mode: 'update', aggregateType: 'tenant', contextScope: 'platform' });
   assert.ok(Object.isFrozen(TENANT_STATUS_MUTATOR));
 });
 

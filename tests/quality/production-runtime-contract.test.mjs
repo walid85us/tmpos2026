@@ -36,7 +36,7 @@ import ts from 'typescript';
 // what makes the containment assertions below name the REAL declaration rather than a copy of its
 // text that could drift away from it. The module declares route values and runs nothing.
 import {
-  STORE_TEMPLATE_WITNESS_PATH, STORE_WITNESS_PATH, STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_PERMISSION, WITNESS_ROUTES,
+  STORE_WITNESS_PATH, STORE_WITNESS_ROUTE, WITNESS_PATH, WITNESS_PERMISSION, WITNESS_ROUTES,
 } from '../db/tenantAdmissionWitness.harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -81,26 +81,27 @@ const ARTIFACT = [
 // plus the owner's role-level edit (its route module) and the role levels' adapter (the read every tenant route decision
 // makes, and the edit's mutator) — never in the administrative artifact. M7A-CUSTOMERS-P3-R2: plus the owner's read-back of
 // those levels (its route module; its read is the same adapter's). M7A-CUSTOMERS-P7: plus the customer edit (its route module
-// and its mutator). M7B-INVOICES-P1: plus the store directory (its route module and its production adapter).
+// and its mutator). M7B-INVOICES-P1: plus the store directory (its route module and its production adapter), and the invoice
+// drafts (their one route module and their production adapter, the save's mutator beside the two reads).
 const TENANT_ARTIFACT = [
   ...['platformAuthorization', 'productionSessions', 'tenantAuthorization', 'tenantTransactions', 'transactionKernel'].map((m) => `server/composition/${m}.js`),
   ...['entryStartup', 'tenantEntry', 'tenantMain'].map((m) => `server/entry/${m}.js`),
   ...['postgresCustomerCreate', 'postgresCustomerDirectory', 'postgresCustomerUpdate', 'postgresRateLimiter', 'postgresRoleLevels', 'postgresSessionStore', 'postgresStartupPreflight',
-    'postgresStoreDirectory', 'postgresTenantAdmission', 'postgresTransactionalStore', 'supervisedPgClient'].map((m) => `server/persistence/${m}.js`),
+    'postgresInvoiceDrafts', 'postgresStoreDirectory', 'postgresTenantAdmission', 'postgresTransactionalStore', 'supervisedPgClient'].map((m) => `server/persistence/${m}.js`),
   ...['auditEventContract', 'auditEventWriter', 'authorizationConstants', 'authorizationContract', 'config', 'databaseEndpoint', 'db',
     'firebaseAdminAuthAdapter', 'm5CanonicalPermissions', 'permissionCatalog'].map((m) => `server/platform-identity/${m}.js`),
   ...['access', 'app', 'clientAddress', 'commandTransaction', 'config', 'correlation', 'customerCreate', 'customerDirectory', 'customerUpdate', 'deadline', 'idempotency',
-    'keyMaterial', 'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'roleLevelDirectory', 'roleLevelUpdate', 'routes',
+    'invoiceDrafts', 'keyMaterial', 'lifecycle', 'logging', 'outbox', 'principals', 'rateLimit', 'requestSecurity', 'roleLevelDirectory', 'roleLevelUpdate', 'routes',
     'securityHeaders', 'sessions', 'storeDirectory', 'tenantState'].map((m) => `server/runtime/${m}.js`),
   'src/authorization/moneyCapabilities.js', 'src/authorization/permissionFamilies.js', 'src/types.js',
 ].sort();
 // A module that declares a servable route: a `create…Route` factory or a `…_ROUTE` constant. Each artifact ships exactly
 // its own: the tenant's the customer directory, the customer create (M7A-CUSTOMERS-P3), the customer edit (M7A-CUSTOMERS-P7),
-// the role-level edit (M7A-CUSTOMERS-P3-R1) and its read-back (M7A-CUSTOMERS-P3-R2) and the store directory (M7B-INVOICES-P1),
-// the administrative one its three tenant-management routes.
+// the role-level edit (M7A-CUSTOMERS-P3-R1) and its read-back (M7A-CUSTOMERS-P3-R2), the store directory and the invoice
+// drafts (M7B-INVOICES-P1), the administrative one its three tenant-management routes.
 const ROUTE_DEFINITION = /^export (?:async )?function create\w*Route\(|^export const [A-Z0-9_]*_ROUTE\b/m;
 const TENANT_ROUTE_MODULES = ['server/runtime/customerCreate.js', 'server/runtime/customerDirectory.js', 'server/runtime/customerUpdate.js',
-  'server/runtime/roleLevelDirectory.js', 'server/runtime/roleLevelUpdate.js', 'server/runtime/storeDirectory.js'];
+  'server/runtime/invoiceDrafts.js', 'server/runtime/roleLevelDirectory.js', 'server/runtime/roleLevelUpdate.js', 'server/runtime/storeDirectory.js'];
 const ADMIN_ROUTE_MODULES = ['server/runtime/tenantDirectory.js', 'server/runtime/tenantDisplayName.js', 'server/runtime/tenantStatus.js'];
 // Its only bare (package) imports, each from exactly one module: the web framework, the database driver, the identity
 // provider's admin SDK and one built-in. Any other — the Firebase client SDK, @supabase, pg — fails.
@@ -296,7 +297,7 @@ test('the compiled tenant artifact is exactly its executable\'s closure: the cus
     assert.ok(!emitted.some((f) => /\.test\.js$|\.testkit\.js$/.test(f)), 'no test or test support module is compiled into the tenant artifact');
     assert.deepEqual(scanArtifact(out, emitted), ARTIFACT_BARE_IMPORTS, 'the tenant artifact imports exactly the administrative artifact\'s packages');
     assert.deepEqual(routeModulesOf(out, emitted), TENANT_ROUTE_MODULES,
-      'the tenant artifact declares exactly six route modules: the customer directory, the customer create, the customer edit, the role-level edit and its read-back, and the store directory');
+      'the tenant artifact declares exactly seven route modules: the customer directory, the customer create, the customer edit, the role-level edit and its read-back, the store directory and the invoice drafts');
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
@@ -394,9 +395,13 @@ test('the compiled tenant executable runs under node and fails closed on missing
       ['GET', '/api/v1/roles/levels/invoices', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required', 'none', 'none', 'none'],
       // M7B-INVOICES-P1: the store directory, the route table's one closed authorization-free shape — session-bound, no trusted context.
       ['GET', '/api/v1/stores', 'session', 'tenant', null, null, 'required', 'none', 'none', 'none', 'none'],
+      // M7B-INVOICES-P1: the invoice drafts — two STORE-scope reads, session-bound under a resolved store scope, and the save.
+      ['GET', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'store', 'view_invoice_drafts', 'required', 'required', 'none', 'none', 'none'],
+      ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}', 'session', 'tenant', 'store', 'view_invoice_drafts', 'required', 'required', 'none', 'none', 'none'],
       ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required', 'none', 'json', 'required'],
       ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'tenant', 'edit_customers', 'none', 'required', 'none', 'json', 'required'],
       ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required', 'required', 'json', 'required'],
+      ['POST', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'store', 'create_invoice_drafts', 'none', 'required', 'none', 'json', 'required'],
     ], 'the compiled tenant routes are exactly the pinned declarations');
     const { TENANT_SHIPPING_ROUTES } = await import('../../server/entry/tenantEntry.ts');
     assert.deepEqual(compiled.shipping, JSON.parse(JSON.stringify(TENANT_SHIPPING_ROUTES)), 'the compiled inventory is the source literal');
@@ -555,13 +560,14 @@ test('the in-memory session store is imported by test files only, anywhere in th
 test('the tenant-admission witness is harness-only: no production source declares it, the administrative inventory carries no tenant route, and the tenant inventory exactly the customer routes', async () => {
   // 1. IT IS A REAL ROUTE. Without this the rest of the test would pass vacuously. Since M7B-INVOICES-P1 the literal
   // store-scope witness is a definition the route table REFUSES (a store-scope requirement registers only on a store
-  // template), so the suites serve the store witness on the closed store template, through the ordinary registration rule.
-  assert.equal(WITNESS_ROUTES.length, 2, 'the tenant-scope witness and the store-scope witness');
+  // template), and the store template the harness briefly served is the REAL draft list now (the tenant inventory's, pinned
+  // in step 4): the harness serves the tenant-scope witness alone, and the suites ask the real list for the store scope.
+  assert.equal(WITNESS_ROUTES.length, 1, 'the tenant-scope witness alone');
   const { defineRoutes } = await import('../../server/runtime/routes.ts');
   assert.deepEqual(defineRoutes(WITNESS_ROUTES).list().map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization.scope]), [
     ['GET', WITNESS_PATH, 'session', 'tenant', 'tenant'],
-    ['GET', STORE_TEMPLATE_WITNESS_PATH, 'session', 'tenant', 'store'],
-  ], 'both witnesses register');
+  ], 'the witness registers');
+  assert.ok(!WITNESS_ROUTES.some((r) => r.path.startsWith('/api/v1/stores')), 'the harness serves no store template: the draft list is production\'s alone');
   assert.deepEqual([STORE_WITNESS_ROUTE.method, STORE_WITNESS_ROUTE.path, STORE_WITNESS_ROUTE.policy.authorization.scope], ['GET', STORE_WITNESS_PATH, 'store']);
   assert.throws(() => defineRoutes([STORE_WITNESS_ROUTE]), /route_path_invalid/, 'the literal store witness never registers');
   assert.ok([...WITNESS_ROUTES, STORE_WITNESS_ROUTE].every((r) => r.policy.authorization.permission === WITNESS_PERMISSION && r.trustedContext === 'required'));
@@ -597,7 +603,7 @@ test('the tenant-admission witness is harness-only: no production source declare
   // Every route the inventory would serve, its read routes included (M5-GIAM-D1-P3), built over ports that answer nothing.
   const served = productionRouteDeclarations();
   const paths = served.map((r) => r.path);
-  assert.equal([WITNESS_PATH, STORE_WITNESS_PATH, STORE_TEMPLATE_WITNESS_PATH].some((p) => paths.includes(p)), false, 'no witness is registered');
+  assert.equal([WITNESS_PATH, STORE_WITNESS_PATH].some((p) => paths.includes(p)), false, 'no witness is registered');
   const tenantScoped = served
     .filter((r) => (r.policy.authorization ?? null) !== null && r.policy.authorization.scope !== 'platform')
     .map((r) => `${r.method} ${r.path}`);
@@ -608,9 +614,11 @@ test('the tenant-admission witness is harness-only: no production source declare
   // bound to the presenting session, and (M7A-CUSTOMERS-P3) the create, a tenant-scope create_customers command whose
   // session is held by the tenant store — no store scope, no witness, nothing administrative. M7A-CUSTOMERS-P4 adds the
   // detail read, the table's one template, under the list's permission and binding; M7A-CUSTOMERS-P6 the profile read, the
-  // second template, under exactly the detail's; M7A-CUSTOMERS-P7 the edit, the one templated command, a tenant-scope
+  // second template, under exactly the detail's; M7A-CUSTOMERS-P7 the edit, the first templated command, a tenant-scope
   // edit_customers command whose session is held by the tenant store. M7B-INVOICES-P1 adds the store directory, the route
-  // table's one closed authorization-free shape (no requirement, the session binding) — still no store-scope route.
+  // table's one closed authorization-free shape (no requirement, the session binding), and the first STORE-scope routes: the
+  // invoice drafts' two reads (view_invoice_drafts, session-bound) and their save (create_invoice_drafts, a command, the
+  // second templated command — the table's two are PATCH /api/v1/customers/{id} and POST /api/v1/stores/{storeId}/invoice-drafts).
   const { tenantRouteDeclarations } = await import('../../server/composition/tenantTransactions.ts');
   assert.deepEqual(tenantRouteDeclarations().map((r) => [r.method, r.path, r.policy.access, r.policy.audience, r.policy.authorization?.scope ?? null,
     r.policy.authorization?.permission ?? null, r.sessionBinding ?? 'none', r.idempotency]), [
@@ -620,10 +628,13 @@ test('the tenant-admission witness is harness-only: no production source declare
     ['GET', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'none'],
     ['GET', '/api/v1/roles/levels/invoices', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'none'],
     ['GET', '/api/v1/stores', 'session', 'tenant', null, null, 'required', 'none'],
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'store', 'view_invoice_drafts', 'required', 'none'],
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}', 'session', 'tenant', 'store', 'view_invoice_drafts', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'tenant', 'create_customers', 'none', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'tenant', 'edit_customers', 'none', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'tenant', 'edit_role_levels', 'none', 'required'],
-  ], 'the tenant inventory is the customer routes, the owner\'s role-level edit and its Customers and Invoices read-backs, and the store directory alone');
+    ['POST', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'store', 'create_invoice_drafts', 'none', 'required'],
+  ], 'the tenant inventory is the customer routes, the owner\'s role-level edit and its Customers and Invoices read-backs, the store directory and the three invoice draft routes alone');
 });
 
 test('no per-process limiter, fallback or second proxy contract exists in the production runtime or composition', () => {
@@ -653,7 +664,7 @@ test('no per-process limiter, fallback or second proxy contract exists in the pr
   assert.deepEqual(assemblers, ['server/composition/productionSessions.ts'], 'assembleSessions is called by the composition root alone');
 });
 
-test('durable idempotency is composed only by the transaction roots, for a route that requires it: only the two tenant-management commands, the tenant customer create and the role-level edit require one, and its port imports no database or provider adapter', () => {
+test('durable idempotency is composed only by the transaction roots, for a route that requires it: only the two tenant-management commands, the tenant customer create and the role-level edit require one, and its port imports no database or provider adapter', async () => {
   // M6-IDEMPOT-P2, M6-PG-P7-R1: the port is provider-independent; the transaction root (productionTransactions.ts) is the one
   // production authority for it, composing the approved PostgreSQL store only for a route in its inventory that requires
   // idempotency — and nothing in the production graph registers such a route yet.
@@ -666,10 +677,10 @@ test('durable idempotency is composed only by the transaction roots, for a route
   // M5-GIAM-D1-P1 (owner decision D1) and M5-GIAM-D1-P2: the production routes that require idempotency are the tenant
   // display-name command and the tenant status command, each declared in its own runtime module; M7A-CUSTOMERS-P3 adds the
   // tenant customer create (customerCreate.ts), M7A-CUSTOMERS-P3-R1 the owner's role-level edit (roleLevelUpdate.ts), and
-  // M7A-CUSTOMERS-P7 the tenant customer edit (customerUpdate.ts), all served by the tenant executable alone. Any other
-  // production file that registers one fails.
+  // M7A-CUSTOMERS-P7 the tenant customer edit (customerUpdate.ts), and M7B-INVOICES-P1 the invoice draft save
+  // (invoiceDrafts.ts), all served by the tenant executable alone. Any other production file that registers one fails.
   const REQUIRED_ROUTE_FILES = [join(RUNTIME_DIR, 'tenantDisplayName.ts'), join(RUNTIME_DIR, 'tenantStatus.ts'), join(RUNTIME_DIR, 'customerCreate.ts'),
-    join(RUNTIME_DIR, 'roleLevelUpdate.ts'), join(RUNTIME_DIR, 'customerUpdate.ts')];
+    join(RUNTIME_DIR, 'roleLevelUpdate.ts'), join(RUNTIME_DIR, 'customerUpdate.ts'), join(RUNTIME_DIR, 'invoiceDrafts.ts')];
   const registering = [];
   for (const f of production) {
     const code = readFileSync(f, 'utf8').replace(/\/\/.*$/gm, ''); // code only: a comment may name what it explains
@@ -677,7 +688,7 @@ test('durable idempotency is composed only by the transaction roots, for a route
     if (REQUIRED_ROUTE.test(code)) registering.push(f);
   }
   assert.deepEqual(registering.sort(), [...REQUIRED_ROUTE_FILES].sort(),
-    'only the two tenant-management commands, the tenant customer create and edit, and the role-level edit register a route that requires idempotency');
+    'only the two tenant-management commands, the tenant customer create and edit, the role-level edit and the invoice draft save register a route that requires idempotency');
   // M5-GIAM-D1-P3: and exactly one read route factory, the platform tenant directory (GET /admin/v1/tenants), which requires no key.
   const INVENTORY = /^export const PRODUCTION_INVENTORY: TransactionInventory = Object\.freeze\(\{\n {2}routes: Object\.freeze\(\[TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE\]\),\n {2}mutators: Object\.freeze\(\[TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR\]\),\n {2}reads: Object\.freeze\(\[createTenantDirectoryRoute\]\),\n\}\);$/m;
   assert.doesNotMatch("export const PRODUCTION_INVENTORY: TransactionInventory = Object.freeze({\n  routes: Object.freeze([TENANT_DISPLAY_NAME_ROUTE, TENANT_STATUS_ROUTE, ORDERS]),\n  mutators: Object.freeze([TENANT_DISPLAY_NAME_MUTATOR, TENANT_STATUS_MUTATOR]),\n  reads: Object.freeze([createTenantDirectoryRoute]),\n});", INVENTORY,
@@ -738,7 +749,31 @@ test('durable idempotency is composed only by the transaction roots, for a route
     'sessions: sessions\\.sessions', 'hsts: true', 'hosts: \\[tenantHost\\]']) {
     assert.match(tenantApp[0], new RegExp(`(?:^|\\s)${field},`), `the tenant runtime's ${field.replace(/\\/g, '')}`);
   }
-  assert.doesNotMatch(tenantApp[0], /\bevents\s*:/, 'the tenant runtime composes no event contract');
+  // M7B-INVOICES-P1 (the stage brief requires the draft save's invoice_draft.created event, design R6): the tenant runtime
+  // composes EXACTLY ONE event registry — the invoice drafts' own, imported from their route module — and nothing else. A
+  // brief-required composition change, not a scanner weakening: any other `events:` value, a second one, or an import of
+  // the outbox module itself still fails (the specifier check above).
+  // A value runs to the next comma or closing brace ACROSS lines, its whitespace normalized, so a last property with no
+  // trailing comma is read too, and a value continued on the next line (`.concat(EXTRA)`) is read whole, never as its first line.
+  const TENANT_EVENTS = /(?:^|[\s{,])events\s*:\s*([^,}]*)/g;
+  const eventsOf = (text) => [...text.matchAll(TENANT_EVENTS)].map((m) => m[1].replace(/\s+/g, ' ').trim());
+  for (const [sample, found] of [
+    ['  events: INVOICE_DRAFT_EVENTS,', ['INVOICE_DRAFT_EVENTS']], ['  events: [...INVOICE_DRAFT_EVENTS, ...OTHER_EVENTS],', ['[...INVOICE_DRAFT_EVENTS']],
+    ['  events:TEST_EVENTS,', ['TEST_EVENTS']], ['  events: [],\n  events: INVOICE_DRAFT_EVENTS,', ['[]', 'INVOICE_DRAFT_EVENTS']],
+    ['  events: OTHER_EVENTS\n', ['OTHER_EVENTS']], ['{ events: X }', ['X']], ['{events:X}', ['X']], ['a,events: Y', ['Y']],
+    ['  routes: tx.routes,\n  events: INVOICE_DRAFT_EVENTS,\n  events: OTHER_EVENTS\n', ['INVOICE_DRAFT_EVENTS', 'OTHER_EVENTS']],
+    ['  events: INVOICE_DRAFT_EVENTS\n    .concat(EXTRA),', ['INVOICE_DRAFT_EVENTS .concat(EXTRA)']],
+  ]) assert.deepEqual(eventsOf(sample), found, `the scan must read: ${sample}`);
+  for (const sample of ['  events: INVOICE_DRAFT_EVENTS\n    .concat(EXTRA),', '  events: INVOICE_DRAFT_EVENTS\n    .concat(EXTRA)\n']) {
+    assert.notDeepEqual(eventsOf(sample), ['INVOICE_DRAFT_EVENTS'], `a continued value is never read as its first line alone: ${sample}`);
+  }
+  assert.deepEqual(eventsOf(tenantApp[0]), ['INVOICE_DRAFT_EVENTS'], 'the tenant runtime composes exactly the invoice drafts\' one event registry');
+  assert.equal([...tenantApp[0].matchAll(/\bevents\b/g)].length, 1, 'and names `events` once: no shorthand or second registry beside it');
+  assert.deepEqual([...tenant.matchAll(/^import \{ INVOICE_DRAFT_EVENTS \} from '(\.\.\/runtime\/invoiceDrafts\.js)';$/gm)].map((m) => m[1]), ['../runtime/invoiceDrafts.js'],
+    'imported once, from the invoice drafts\' route module');
+  const { INVOICE_DRAFT_EVENTS } = await import('../../server/runtime/invoiceDrafts.ts');
+  assert.deepEqual(INVOICE_DRAFT_EVENTS.map((e) => [e.type, e.version, e.aggregateType, Object.keys(e.payload)]),
+    [['invoice_draft.created', 1, 'invoice_draft', ['storeId', 'customerId', 'lineCount']]], 'that registry is exactly the one event, identifiers and a count');
   assert.deepEqual([...tenant.matchAll(/\bcreateBoundedServer\([^)]*\)/g)].map((m) => m[0]), ['createBoundedServer(app, { hsts: true })'],
     'the tenant entry binds one listener, with HSTS');
   assert.deepEqual([...tenant.matchAll(/^.*\btenantHost\s*(?::[^=\n]*)?=(?!=).*$/gm)].map((m) => m[0].trim()),
@@ -972,9 +1007,13 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
     assert.deepEqual(names(name, `ports: ${name}`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresCustomerDirectory.ts'],
       `${name} is bound by the tenant root alone`);
   }
-  // M7B-INVOICES-P1: the store directory's production adapter and probe, likewise.
+  // M7B-INVOICES-P1: the store directory's production adapter and probe, likewise; and the invoice drafts' adapter, probe and mutator.
   for (const name of ['createPostgresStoreDirectory', 'probeStoreDirectory']) {
     assert.deepEqual(names(name, `ports: ${name}`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresStoreDirectory.ts'],
+      `${name} is bound by the tenant root alone`);
+  }
+  for (const name of ['createPostgresInvoiceDrafts', 'probeInvoiceDrafts', 'INVOICE_DRAFT_CREATE_MUTATOR']) {
+    assert.deepEqual(names(name, `ports: ${name}`), ['server/composition/tenantTransactions.ts', 'server/persistence/postgresInvoiceDrafts.ts'],
       `${name} is bound by the tenant root alone`);
   }
   // The tenant inventory, exactly (as PRODUCTION_INVENTORY is pinned above): the customer list over its production adapter
@@ -983,40 +1022,55 @@ test('the PostgreSQL transactional store is composed by the transaction root alo
   // or probe swapped for another, fails here. (M7A-CUSTOMERS-P4) The customer detail read over its production adapter, and
   // the reads' one probe: the directory's routine, then the detail's. (M7A-CUSTOMERS-P6) The customer profile read over its
   // production adapter, and the profile's routine last in the reads' probe.
-  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute\]\),\n {2}writes: Object\.freeze\(\{ routes: Object\.freeze\(\[CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE\]\), mutators: Object\.freeze\(\[CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR\]\) \}\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\), customerDetail: createPostgresCustomerDetail\(\{ client \}\), customerProfile: createPostgresCustomerProfile\(\{ client \}\), roleLevels: withCatalogDefaults\('customers', createPostgresRoleLevelDirectory\(\{ client \}, 'customers'\)\), invoiceRoleLevels: withCatalogDefaults\('invoices', createPostgresRoleLevelDirectory\(\{ client \}, 'invoices'\)\), stores: createPostgresStoreDirectory\(\{ client \}\) \}\),\n {2}inert: INERT,\n {2}probe: probeTenantReads,\n {2}roleLevels: Object\.freeze\(\{ read: \(client: SupervisedPgClient\) => createPostgresRoleLevels\(\{ client \}\), held: readRoleLevels \}\),\n\}\);$/m;
-  const READS = 'createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute';
-  const tenantInventory = (reads, adapter, writes = 'CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE', mutators = 'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR', levels = 'createPostgresRoleLevels', directory = 'createPostgresRoleLevelDirectory', stores = 'createPostgresStoreDirectory') => `export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  writes: Object.freeze({ routes: Object.freeze([${writes}]), mutators: Object.freeze([${mutators}]) }),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', ${directory}({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', ${directory}({ client }, 'invoices')), stores: ${stores}({ client }) }),\n  inert: INERT,\n  probe: probeTenantReads,\n  roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => ${levels}({ client }), held: readRoleLevels }),\n});`;
+  // M7B-INVOICES-P1: plus the invoice drafts' two reads over their production adapter, and their save over its one store-scope
+  // mutator.
+  const TENANT_INVENTORY = /^export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object\.freeze\(\{\n {2}reads: Object\.freeze\(\[createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute\]\),\n {2}writes: Object\.freeze\(\{ routes: Object\.freeze\(\[CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE\]\), mutators: Object\.freeze\(\[CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR\]\) \}\),\n {2}ports: \(client: SupervisedPgClient\) => Object\.freeze\(\{ customers: createPostgresCustomerDirectory\(\{ client \}\), customerDetail: createPostgresCustomerDetail\(\{ client \}\), customerProfile: createPostgresCustomerProfile\(\{ client \}\), roleLevels: withCatalogDefaults\('customers', createPostgresRoleLevelDirectory\(\{ client \}, 'customers'\)\), invoiceRoleLevels: withCatalogDefaults\('invoices', createPostgresRoleLevelDirectory\(\{ client \}, 'invoices'\)\), stores: createPostgresStoreDirectory\(\{ client \}\), invoiceDrafts: createPostgresInvoiceDrafts\(\{ client \}\) \}\),\n {2}inert: INERT,\n {2}probe: probeTenantReads,\n {2}roleLevels: Object\.freeze\(\{ read: \(client: SupervisedPgClient\) => createPostgresRoleLevels\(\{ client \}\), held: readRoleLevels \}\),\n\}\);$/m;
+  const READS = 'createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute';
+  const WRITES = 'CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE';
+  const MUTATORS = 'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR';
+  const tenantInventory = (reads, adapter, writes = WRITES, mutators = MUTATORS, levels = 'createPostgresRoleLevels', directory = 'createPostgresRoleLevelDirectory', stores = 'createPostgresStoreDirectory', drafts = 'createPostgresInvoiceDrafts') => `export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({\n  reads: Object.freeze([${reads}]),\n  writes: Object.freeze({ routes: Object.freeze([${writes}]), mutators: Object.freeze([${mutators}]) }),\n  ports: (client: SupervisedPgClient) => Object.freeze({ customers: ${adapter}({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', ${directory}({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', ${directory}({ client }, 'invoices')), stores: ${stores}({ client }), invoiceDrafts: ${drafts}({ client }) }),\n  inert: INERT,\n  probe: probeTenantReads,\n  roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => ${levels}({ client }), held: readRoleLevels }),\n});`;
+  const withoutRead = (name) => READS.split(', ').filter((r) => r !== name).join(', ');
   assert.match(tenantInventory(READS, 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the pin reads the real shape');
   assert.doesNotMatch(tenantInventory(`${READS}, createOrdersRoute`, 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a route added');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the read-back removed');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the detail read removed');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createCustomerDetailRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute', 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the profile read removed (M7A-CUSTOMERS-P6)');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createStoreDirectoryRoute', 'createPostgresCustomerDirectory'),
+  assert.doesNotMatch(tenantInventory(withoutRead('createRoleLevelDirectoryRoute'), 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the read-back removed');
+  assert.doesNotMatch(tenantInventory(withoutRead('createCustomerDetailRoute'), 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the detail read removed');
+  assert.doesNotMatch(tenantInventory(withoutRead('createCustomerProfileRoute'), 'createPostgresCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch the profile read removed (M7A-CUSTOMERS-P6)');
+  assert.doesNotMatch(tenantInventory(withoutRead('createInvoiceRoleLevelDirectoryRoute'), 'createPostgresCustomerDirectory'),
     TENANT_INVENTORY, 'the scan must catch the Invoices read-back removed (M5-INVOICES-AUTH-P1)');
-  assert.doesNotMatch(tenantInventory('createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute', 'createPostgresCustomerDirectory'),
+  assert.doesNotMatch(tenantInventory(withoutRead('createStoreDirectoryRoute'), 'createPostgresCustomerDirectory'),
     TENANT_INVENTORY, 'the scan must catch the store directory removed (M7B-INVOICES-P1)');
   assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, undefined, undefined, 'createMemoryStoreDirectory'),
     TENANT_INVENTORY, 'the scan must catch a swapped store directory adapter (M7B-INVOICES-P1)');
+  // M7B-INVOICES-P1: the invoice drafts' reads, save, mutator and adapter, each exactly.
+  for (const name of ['createInvoiceDraftListRoute', 'createInvoiceDraftDetailRoute']) {
+    assert.doesNotMatch(tenantInventory(withoutRead(name), 'createPostgresCustomerDirectory'), TENANT_INVENTORY, `the scan must catch ${name} removed (M7B-INVOICES-P1)`);
+  }
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE'),
+    TENANT_INVENTORY, 'the scan must catch the draft save removed (M7B-INVOICES-P1)');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, 'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, CUSTOMER_CREATE_MUTATOR'),
+    TENANT_INVENTORY, 'the scan must catch the draft mutator swapped (M7B-INVOICES-P1)');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, undefined, undefined, undefined, 'createMemoryInvoiceDrafts'),
+    TENANT_INVENTORY, 'the scan must catch a swapped invoice draft adapter (M7B-INVOICES-P1)');
   assert.doesNotMatch(tenantInventory(READS, 'createMemoryCustomerDirectory'), TENANT_INVENTORY, 'the scan must catch a swapped adapter');
-  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, ORDER_CREATE_ROUTE'),
-    TENANT_INVENTORY, 'the scan must catch a fourth write route');
-  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE',
-    'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, TENANT_STATUS_MUTATOR'), TENANT_INVENTORY, 'the scan must catch a swapped mutator');
-  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE',
-    'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR'), TENANT_INVENTORY, 'the scan must catch the edit route removed (M7A-CUSTOMERS-P7)');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', `${WRITES}, ORDER_CREATE_ROUTE`),
+    TENANT_INVENTORY, 'the scan must catch a fifth write route');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', WRITES,
+    'CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, TENANT_STATUS_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR'), TENANT_INVENTORY, 'the scan must catch a swapped mutator');
+  assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', 'CUSTOMER_CREATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE',
+    MUTATORS), TENANT_INVENTORY, 'the scan must catch the edit route removed (M7A-CUSTOMERS-P7)');
   assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined,
-    'CUSTOMER_CREATE_MUTATOR, CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR'), TENANT_INVENTORY, 'the scan must catch the edit mutator swapped (M7A-CUSTOMERS-P7)');
+    'CUSTOMER_CREATE_MUTATOR, CUSTOMER_CREATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR'), TENANT_INVENTORY, 'the scan must catch the edit mutator swapped (M7A-CUSTOMERS-P7)');
   assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, 'createMemoryRoleLevels'),
     TENANT_INVENTORY, 'the scan must catch a swapped role-levels read (M7A-CUSTOMERS-P3-R1)');
   assert.doesNotMatch(tenantInventory(READS, 'createPostgresCustomerDirectory', undefined, undefined, undefined, 'createMemoryRoleLevelDirectory'),
     TENANT_INVENTORY, 'the scan must catch a swapped read-back adapter (M7A-CUSTOMERS-P3-R2)');
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'), TENANT_INVENTORY,
-    'the tenant inventory is exactly the customer list over the production customer directory, the role levels\' read-back over their one-snapshot read, the store directory over its production adapter, the customer create and edit and the role-level edit over their mutators, and the production role-levels reads');
+    'the tenant inventory is exactly the customer list over the production customer directory, the role levels\' read-back over their one-snapshot read, the store directory and the invoice drafts over their production adapters, the customer create and edit, the role-level edit and the draft save over their mutators, and the production role-levels reads');
   // The reads' probe (M7A-CUSTOMERS-P4, -P6, -P8): exactly the directory's, then the detail's, then the profile's, then the
   // name search's — no other probe, no swapped order.
   assert.match(readFileSync(join(REPO, 'server', 'composition', 'tenantTransactions.ts'), 'utf8'),
-    /^const probeTenantReads = async \(client: SupervisedPgClient, signal: AbortSignal\): Promise<boolean> =>\n {2}\(await probeCustomerDirectory\(client, signal\)\) && \(await probeCustomerDetail\(client, signal\)\) && \(await probeCustomerProfile\(client, signal\)\)\n {2}&& \(await probeCustomerSearch\(client, signal\)\) && probeStoreDirectory\(client, signal\);$/m,
-    'the tenant reads\' readiness is the directory\'s probe, then the detail\'s, then the profile\'s, then the search\'s, then the store directory\'s (M7B-INVOICES-P1)');
+    /^const probeTenantReads = async \(client: SupervisedPgClient, signal: AbortSignal\): Promise<boolean> =>\n {2}\(await probeCustomerDirectory\(client, signal\)\) && \(await probeCustomerDetail\(client, signal\)\) && \(await probeCustomerProfile\(client, signal\)\)\n {2}&& \(await probeCustomerSearch\(client, signal\)\) && \(await probeStoreDirectory\(client, signal\)\) && probeInvoiceDrafts\(client, signal\);$/m,
+    'the tenant reads\' readiness is the directory\'s probe, then the detail\'s, then the profile\'s, then the search\'s, then the store directory\'s, then the invoice drafts\' (M7B-INVOICES-P1)');
   // A census of names cannot follow a capability re-exported under another name, so the modules allowed to hold one export an
   // exact value surface, read from the syntax tree: a new export (an alias, a wrapper, a re-export list, a default) fails here
   // until it is reviewed into the list. Interfaces and type aliases carry no capability and are not listed.

@@ -52,5 +52,7 @@ export const TENANT_STATUS_MUTATOR: AggregateMutator = Object.freeze({
   kind: TENANT_STATUS_CONTRACT.kind,
   mode: 'update',
   aggregateType: TENANT_STATUS_CONTRACT.aggregateType,
+  // Its contract's scope, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'platform',
   apply: applyStatus,
 });

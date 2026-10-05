@@ -10,7 +10,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { AUDIT_FORBIDDEN_FIELDS } from '../platform-identity/auditEventContract.js';
 import {
   MAX_CLAIM_BATCH, MAX_OUTBOX_ENVELOPE_BYTES, MAX_PUBLISH_DEADLINE_MS, MAX_RECORD_BYTES, MAX_CHANGE_STRING_FIELD_LENGTH, MAX_STRING_FIELD_LENGTH, OUTBOX_DEADLINE_MS, OUTBOX_DELIVERY_POLICY,
-  acknowledgeOutbox, claimOutbox, createOutboxDelivery, deadLetterOutbox, defineOutboxEvents, deliverOutboxBatch, envelopeOf,
+  MAX_CHANGE_ROWS, MAX_ROW_FIELDS, MAX_ROW_STRING_FIELD_LENGTH, MAX_ROWS_CHANGE_BYTES,
+  acknowledgeOutbox, changesOf, claimOutbox, createOutboxDelivery, deadLetterOutbox, defineOutboxEvents, deliverOutboxBatch, envelopeOf,
   parseChangeSchema, parseRecordSchema, recordOf, retryDelayMs, retryOutbox,
 } from './outbox.js';
 import type { OutboxClaimRequest, OutboxDelivery, OutboxDeliveryStore, OutboxEnvelope, OutboxSettleRequest } from './outbox.js';
@@ -445,4 +446,46 @@ test('startup refuses a malformed delivery store or event contracts', () => {
   assert.equal(code({ store, events: TEST_EVENTS, fallback: store }), 'outbox_delivery_invalid', 'no extra part, least of all a fallback');
   assert.equal(code({ store, events: [{ type: 'x' }] }), 'outbox_registry_invalid');
   void randomBytes;
+});
+
+// --- M7B-INVOICES-P1: the one non-scalar COMMAND change field, `rows` -----------------------------------------------------
+
+test('M7B-INVOICES-P1 AC-06: a rows field is a command change-set field alone — bounded rows of a scalar schema, deep-copied and frozen, its own byte bound; an event schema never admits one', () => {
+  const rows = { type: 'rows', maxRows: 3, fields: { description: { type: 'string', maxLength: 512 }, quantity: { type: 'integer', min: 1, max: 9 } } };
+  const schema = parseChangeSchema({ customerId: { type: 'string', maxLength: 36 }, lines: rows });
+  assert.ok(schema !== null);
+  assert.deepEqual(schema.lines, rows);
+  assert.ok(Object.isFrozen(schema.lines) && Object.isFrozen((schema.lines as { fields: object }).fields));
+  assert.equal(parseRecordSchema({ lines: rows }), null, 'an event payload schema refuses a rows field');
+  for (const [label, bad] of [
+    ['maxRows 0', { ...rows, maxRows: 0 }], ['maxRows above MAX_CHANGE_ROWS', { ...rows, maxRows: MAX_CHANGE_ROWS + 1 }], ['no fields', { ...rows, fields: {} }],
+    ['nine fields', { ...rows, fields: Object.fromEntries(Array.from({ length: MAX_ROW_FIELDS + 1 }, (_, i) => [`f${i}`, { type: 'boolean' }])) }],
+    ['a nested rows field', { ...rows, fields: { inner: rows } }], ['a row string above 512 units', { ...rows, fields: { d: { type: 'string', maxLength: MAX_ROW_STRING_FIELD_LENGTH + 1 } } }],
+    ['an extra key', { ...rows, min: 1 }], ['a refused row field name', { ...rows, fields: { sessionKey: { type: 'boolean' } } }],
+  ] as const) assert.equal(parseChangeSchema({ lines: bad }), null, label);
+  const raw = { customerId: randomUUID(), lines: [{ description: 'Glass', quantity: 2 }, { description: 'é', quantity: 9 }] };
+  const value = changesOf(schema, raw);
+  assert.deepEqual(value, raw);
+  assert.ok(value !== null && Object.isFrozen(value) && Object.isFrozen(value.lines) && Object.isFrozen((value.lines as object[])[0]), 'deep-frozen');
+  assert.notEqual(value?.lines, raw.lines, 'a copy, never the caller\'s array');
+  raw.lines[0].quantity = 3;
+  assert.equal((value?.lines as { quantity: number }[])[0].quantity, 2, 'later changes to the input never reach the copy');
+  for (const [label, bad] of [
+    ['four rows', { customerId: 'x', lines: Array.from({ length: 4 }, () => ({ description: 'a', quantity: 1 })) }],
+    ['a row with an extra key', { customerId: 'x', lines: [{ description: 'a', quantity: 1, price: 1 }] }],
+    ['a row out of bounds', { customerId: 'x', lines: [{ description: 'a', quantity: 10 }] }], ['a sparse array', { customerId: 'x', lines: [, { description: 'a', quantity: 1 }] }],
+    ['not an array', { customerId: 'x', lines: { 0: { description: 'a', quantity: 1 } } }], ['a row that is an array', { customerId: 'x', lines: [['a', 1]] }],
+  ] as const) assert.equal(changesOf(schema, bad), null, label);
+  // A scalar-only change set keeps MAX_RECORD_BYTES; one carrying rows is bounded by MAX_ROWS_CHANGE_BYTES instead.
+  const scalar = parseChangeSchema({ a: { type: 'string', maxLength: 508 }, b: { type: 'string', maxLength: 508 }, c: { type: 'string', maxLength: 508 },
+    d: { type: 'string', maxLength: 508 }, e: { type: 'string', maxLength: 508 }, f: { type: 'string', maxLength: 508 }, g: { type: 'string', maxLength: 508 },
+    h: { type: 'string', maxLength: 508 }, i: { type: 'string', maxLength: 508 } });
+  assert.ok(scalar !== null);
+  assert.equal(changesOf(scalar, Object.fromEntries('abcdefghi'.split('').map((k) => [k, 'x'.repeat(508)]))), null, 'over MAX_RECORD_BYTES without rows');
+  const wide = parseChangeSchema({ lines: { type: 'rows', maxRows: 50, fields: { d: { type: 'string', maxLength: 512 } } } });
+  assert.ok(wide !== null);
+  const many = { lines: Array.from({ length: 50 }, () => ({ d: 'é'.repeat(512) })) }; // 50 x 1 KiB serialized: above 4 KiB, below 64 KiB
+  assert.ok(Buffer.byteLength(JSON.stringify(many)) > MAX_RECORD_BYTES && Buffer.byteLength(JSON.stringify(many)) <= MAX_ROWS_CHANGE_BYTES);
+  assert.deepEqual(changesOf(wide, many), many);
+  assert.equal(changesOf(wide, { lines: Array.from({ length: 50 }, () => ({ d: '一'.repeat(512) })) }), null, 'over MAX_ROWS_CHANGE_BYTES (50 x 1.5 KiB)');
 });

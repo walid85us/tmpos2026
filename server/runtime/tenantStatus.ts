@@ -90,6 +90,8 @@ export const TENANT_STATUS_CONTRACT: CommandContract = Object.freeze({
   kind: 'platform.tenant.status.change',
   mode: 'update',
   aggregateType: 'tenant',
+  // The scope of the trusted context it commits under, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'platform',
   // The target status alone. The status the tenant leaves is not a change: it is the precondition the
   // mutator requires, derived here from the target because only two transitions exist.
   changes: Object.freeze({ status: STATUS_FIELD }),

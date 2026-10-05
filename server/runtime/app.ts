@@ -62,7 +62,11 @@
 //                the path's final segment must be a canonical lowercase uuid -> else 400, judged only
 //                now that the chain has authenticated and authorized the request and before anything
 //                is read or reserved; it is bound into the idempotency fingerprint and handed to the
-//                planner as ctx.targetId;
+//                planner as ctx.targetId. For the store template's command (M7B-INVOICES-P1: POST
+//                /api/v1/stores/{storeId}/invoice-drafts) the target is the store its path selects —
+//                the very store the authorizer selected the actor's grant at: a trusted scope at
+//                any other store, or none, -> 403 (authz_context_missing), so the fingerprint, the
+//                planner and the mutator's revalidated store are always one store;
 //             7. body: only now is a declared JSON body read, capped on the bytes
 //                actually streamed (readBoundedBody), and parsed as strict UTF-8
 //                JSON -> 413 / 400 (trailer fields -> 400);
@@ -792,8 +796,9 @@ export function createApp(deps: AppDeps): Express {
     try {
       // Map lookups: nothing is read or parsed. A template (routes.ts) matches its prefix, one raw id segment and its own
       // literal suffix, if it has one; the route's view and log class carry the template's path, never the segment. Only
-      // the one templated command (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7) carries its validated segment further:
-      // into the idempotency fingerprint's target slot and the planner's ctx.targetId (below), never a log.
+      // the two templated commands (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7, whose target is its id; and
+      // POST /api/v1/stores/{storeId}/invoice-drafts, M7B-INVOICES-P1, whose target is its store) carry their validated
+      // segment further: into the idempotency fingerprint's target slot and the planner's ctx.targetId (below), never a log.
       const route = table.lookup(req.method, req.path);
       // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
       // a served authority exactly (DNS names compare case-insensitively). The probes answer on any host.
@@ -920,12 +925,24 @@ export function createApp(deps: AppDeps): Express {
         && (authenticatedAt === null || now() - authenticatedAt > RECENT_AUTH_MAX_AGE_MS)) {
         return refuse(req, res, 403, 'step_up_required', 'recent_auth_required');
       }
-      // The target of a templated command (routes.ts admits exactly one: PATCH /api/v1/customers/{id}), judged only now —
+      // The target of a templated command (routes.ts admits exactly two: PATCH /api/v1/customers/{id}, whose target is its id,
+      // and, since M7B-INVOICES-P1, POST /api/v1/stores/{storeId}/invoice-drafts, whose target is its store), judged only now —
       // after authentication, authorization and the trusted context, so an unauthenticated caller learns nothing about an
       // id's shape — and before the body is read or a key acquired, so a malformed id reserves nothing. null on every
-      // literal route.
+      // literal route. The store template's one command (M7B-INVOICES-P1) targets the store its path selects: the store
+      // segment the authorizer narrowed the actor's grants with (a non-canonical one selected none, so it never gets here),
+      // bound into the fingerprint so one key and body at two stores never replay each other's answer, and handed to the
+      // planner (its Location and its change set). It must BE the trusted scope's store — the one the authorizer selected
+      // the grant at and the store revalidates and the mutator binds — so a scope at any other store (or none) is refused
+      // here, before the body is read or a key acquired, rather than letting the target and the authority diverge.
       let targetId: string | null = null;
-      if ('command' in route && route.path.includes(PATH_ID_SEGMENT)) {
+      if ('command' in route && route.path.includes(STORE_SEGMENT)) {
+        targetId = storeTargetOf(req.path);
+        if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
+        if (context === null || context.scope !== 'store' || context.store !== targetId) {
+          return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
+        }
+      } else if ('command' in route && route.path.includes(PATH_ID_SEGMENT)) {
         targetId = pathIdOf(req.path);
         if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
       }
@@ -1028,6 +1045,13 @@ export function createApp(deps: AppDeps): Express {
           // 'invalid_state' from one committed nothing and is the 503 below.
           if (refused === 'transaction_invalid_state' && contract.mode === 'update' && prepared.rejected.invalidState !== null) {
             return sendRecorded(res, prepared.rejected.invalidState, false, refused);
+          }
+          // The typed sealed refusal a create opted into (M7B-INVOICES-P1): its mutator found the customer missing from the
+          // trusted tenant (or another tenant's) before writing anything, and the store recorded this exact 422 as the
+          // completion in that transaction — so it is a decided answer every retry under the key replays. Any other
+          // command answering it committed nothing and is the 503 below.
+          if (refused === 'transaction_customer_not_found' && contract.mode === 'create' && prepared.rejected.customerNotFound !== null) {
+            return sendRecorded(res, prepared.rejected.customerNotFound, false, refused);
           }
           // Changes already in place: the store recorded the plan's unchanged response as the completion in the
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as

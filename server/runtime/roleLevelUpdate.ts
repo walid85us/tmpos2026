@@ -26,10 +26,11 @@
 //
 // WHAT CAN BE EDITED, AND WHY SO LITTLE. roleId is one of the three built-in roles an owner may edit — manager, technician,
 // sales_staff; the owner role itself is locked (Full everywhere, never edited). domain is 'customers' or 'invoices'.
-// Customers is the one domain the server DECIDES (GET and POST /api/v1/customers). Invoices is CONFIGURATION ONLY: the level
-// is stored, read back and materialized into the role's tenant grant, but NO invoice business operation is decided or
-// enforced by the server on it — no invoice route exists, and the browser remains what applies an invoice level. It must
-// never be read as a server-enforced invoice permission. level is one of the seven canonical levels. A stored level REPLACES the role's catalog default for that
+// Customers is the one domain the server decides on TENANT routes (GET and POST /api/v1/customers). Invoices was
+// CONFIGURATION ONLY when this route was written (M5-INVOICES-AUTH-P1); since M7B-INVOICES-P1 the server decides the
+// STORE-scope invoice draft routes on it (invoiceDrafts.ts, migration 028: View lists and reads, Create saves, with
+// Customers View as a corequisite) and on nothing else — every other invoice operation is still the browser's, and the level
+// must not be read as a server-enforced permission for any of them. level is one of the seven canonical levels. A stored level REPLACES the role's catalog default for that
 // domain, in that tenant only; until edited, a role keeps its default. No custom role, no deletion, no third domain and no
 // delegated editor exists here: each is an owner decision this stage records rather than invents.
 //
@@ -75,7 +76,7 @@ export const ROLE_LEVELS_PERMISSION = 'edit_role_levels';
 export const ROLE_LEVELS_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: ROLE_LEVELS_PERMISSION });
 /** The built-in tenant roles an owner may edit: every one but the owner role (migration 020's CHECK restates them). */
 export const EDITABLE_TENANT_ROLES: readonly string[] = Object.freeze(['manager', 'technician', 'sales_staff']);
-/** The domains a level is stored for: Customers (decided by the server) and Invoices (configuration only, not enforced). */
+/** The domains a level is stored for: Customers (decided by the server) and Invoices (decided only by the store-scope draft routes, M7B-INVOICES-P1). */
 export const ROLE_LEVEL_DOMAINS: readonly string[] = Object.freeze(['customers', 'invoices']);
 /**
  * The seven canonical level WORDS (permissionCatalog.ts PERMISSION_TOKENS, which this runtime module may not import), kept
@@ -97,6 +98,8 @@ export const ROLE_LEVEL_UPDATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'tenant.role.level.update',
   mode: 'create',
   aggregateType: 'tenant_role_level',
+  // The scope of the trusted context it commits under, declared (M7B-INVOICES-P1, design R4: required, never defaulted).
+  contextScope: 'tenant',
   changes: Object.freeze({
     roleId: enumOf(EDITABLE_TENANT_ROLES), domain: enumOf(ROLE_LEVEL_DOMAINS), level: enumOf(ROLE_LEVELS),
     // The two preconditions (M7A-CUSTOMERS-P4): judged by the mutator's routine, never a selector.
