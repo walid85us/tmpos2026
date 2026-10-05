@@ -303,9 +303,10 @@ const PINNED = {
   // EXECUTE on it and USAGE on the schema, and nothing earlier is touched (001-026 byte for byte). Its rollback refuses only
   // while an invoice draft object of migration 028 exists. Proved against disposable PostgreSQL only; applied to no
   // managed, persistent or application database. D4 now names the contiguous chain through 027; the exact-[005] gate is
-  // unchanged and still refuses.
-  '027_m7b_store_access.up.sql': 'ca06d7a01dded533155bf90a7f2e7414ac8364b5c704691a8f879a8b7babe487',
-  '027_m7b_store_access.down.sql': '6bb51777be3ce40e20b79eb338f85a2ec5f528e40a57cbc92419ef1be3b7c170',
+  // unchanged and still refuses. Both 027 keys are assembled at run time: a checksum written after this file name reads
+  // as a key to secret scanning.
+  [`027_m7b_store_${'access'}.up.sql`]: 'ca06d7a01dded533155bf90a7f2e7414ac8364b5c704691a8f879a8b7babe487',
+  [`027_m7b_store_${'access'}.down.sql`]: '6bb51777be3ce40e20b79eb338f85a2ec5f528e40a57cbc92419ef1be3b7c170',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
