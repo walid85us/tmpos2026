@@ -17,7 +17,8 @@
 //   IDH-02 (AC-02) another store of the tenant, another tenant's store, a missing store and a non-canonical segment are one
 //          403 for list, get and save, writing nothing; a foreign draft through the actor's own store is the missing id's 404.
 //   IDH-03 (AC-03) the owner's own PUT /api/v1/roles/levels edits the Invoices (and Customers) levels and the draft routes
-//          follow them, both directions (DA-184's HTTP witness).
+//          follow them, both directions (DA-184's HTTP witness): the save, the list, and the reopen (a technician at its
+//          default View reopens a draft; at None the reopen is the list's 403; back at View it reopens the same draft).
 //   IDH-04 (AC-04) a store owner's Full stops at the store it holds a grant at; a tenant-only owner reaches no store route.
 //   IDH-05 (AC-05) a missing and another tenant's customer: byte-identical sealed 422s, each writing only its completion, each
 //          replayed under its key.
@@ -28,8 +29,11 @@
 //   IDH-08 (AC-09) concurrent identical saves across two instances: one draft and exactly one fresh 201, every other answer
 //          that 201 replayed, in progress (409) or unavailable while it commits (503, design R9; customerCreate's M7CC-06
 //          set); a changed body under the key is the 422 before any write.
-//   IDH-09 (AC-10) a level narrowing, a grant suspension, a session revocation and a store suspension committed while the
-//          save waits on 016's hold leave nothing; each attempted while the save holds its locks waits for its COMMIT.
+//   IDH-09 (AC-10) a level narrowing, a grant suspension, a store grant DELETED, a session revocation, an account
+//          suspension, a tenant suspended or made read-only and a store suspension committed while the save waits on 016's
+//          hold leave nothing (no draft, line, audit record, event or completion; the lease left open); each attempted while
+//          the save holds its locks is seen waiting on a lock the save holds (pg_stat_activity: a Lock wait, the save's
+//          backend among its blockers — never a sleep), and applies only after the save commits.
 //   IDH-10 (AC-11) the COMMIT lands and its answer is lost: 503, the draft whole, the same-key retry replays — and only under
 //          current authority; the COMMIT never lands: 503, nothing, 409 until the lease expires, then one new draft.
 //   IDH-11 (AC-12) pages of 20 by default and at most 50, equal creation times walked without loss or repeat, the cursor
@@ -765,7 +769,7 @@ test('IDH-02 (AC-02): another store of the tenant, another tenant\'s store, a mi
   });
 });
 
-test('IDH-03 (AC-03): the owner\'s own PUT /api/v1/roles/levels edits the Invoices and Customers levels, and the draft routes follow, both directions (DA-184 HTTP witness)', async () => {
+test('IDH-03 (AC-03): the owner\'s own PUT /api/v1/roles/levels edits the Invoices and Customers levels, and the save, the list and the reopen follow, both directions (DA-184 HTTP witness)', async () => {
   const T = await newTenant('idh03');
   const S = await newStore(T, 'IDH03 store');
   const C = await newCustomer(T, 'idh03');
@@ -783,6 +787,10 @@ test('IDH-03 (AC-03): the owner\'s own PUT /api/v1/roles/levels edits the Invoic
       assert.equal(reply.status, 200, `the owner's edit ${roleId} ${domain} ${value}: ${reply.body}`);
     };
     const body = () => bodyOf(T, C, [line(described('idh03'), 1, 10)]);
+    // A draft for the technician to reopen, saved by sales_staff at its default Create before any edit.
+    const seed = createdOf(await ctx.save(ss, S, body()), S, { lineCount: 1, subtotalCents: 10 }, 'the seed: sales_staff default Create');
+    const reopened = draftOf(await ctx.get(st, S, seed), 'technician default: View reopens');
+    assert.deepEqual([reopened.id, reopened.storeId, reopened.customerId, reopened.subtotalCents, reopened.lines.length], [seed, S, C, 10, 1]);
     assert.equal((await ctx.list(st, S)).status, 200, 'technician default: View lists');
     assertRefusal(await ctx.save(st, S, body()), 403, 'forbidden', 'technician default: no Create');
     await level('invoices', 'technician', 'create');
@@ -798,6 +806,18 @@ test('IDH-03 (AC-03): the owner\'s own PUT /api/v1/roles/levels edits the Invoic
     assertRefusal(await ctx.list(ss, S), 403, 'forbidden', 'and to None: no list');
     await level('invoices', 'sales_staff', 'create');
     createdOf(await ctx.save(ss, S, body()), S, { lineCount: 1, subtotalCents: 10 }, 'and back up: saves again');
+    // The reopen, both directions: the owner takes the technician's Invoices level to None — the reopen is the list's own 403 —
+    // and back to View, where the same draft reopens exactly as before.
+    await level('invoices', 'technician', 'none');
+    const closed = [await ctx.get(st, S, seed), await ctx.list(st, S)];
+    assertRefusal(closed[0], 403, 'forbidden', 'technician Invoices None: no reopen');
+    assertRefusal(closed[1], 403, 'forbidden', 'technician Invoices None: no list');
+    const { requestId: _reopenId, ...reopenRefusal } = JSON.parse(closed[0].body);
+    const { requestId: _listId, ...listRefusal } = JSON.parse(closed[1].body);
+    assert.deepEqual(reopenRefusal, listRefusal, 'the reopen\'s refusal body equals the list\'s in every field but requestId');
+    await level('invoices', 'technician', 'view');
+    assert.deepEqual(draftOf(await ctx.get(st, S, seed), 'technician back to View: reopens again'), reopened, 'the same draft, exactly');
+    assert.equal((await ctx.list(st, S)).status, 200, 'and lists again');
   });
 });
 
@@ -982,15 +1002,24 @@ test('IDH-08 (AC-09): concurrent identical saves across two instances make ONE d
 // IDH-09: ordering against the commit, both ways
 // ===========================================================================
 
-test('IDH-09 (AC-10): a level narrowing, a grant suspension, a session revocation and a store suspension committed while the save waits on 016\'s hold leave nothing; each attempted while the save holds its locks waits for its COMMIT', async () => {
+test('IDH-09 (AC-10): a level narrowing, a grant suspension or deletion, a session revocation, an account suspension, a tenant suspended or made read-only and a store suspension committed while the save waits on 016\'s hold leave nothing; each attempted while the save holds its locks waits for its COMMIT, then applies', async () => {
+  /** The owner's change touches exactly one row (an UPDATE or DELETE that matched nothing would also commit). */
+  const one = async (statement, what) => assert.equal((await statement).count, 1, `${what}: exactly one row changed`);
   await withEntry(async (ctx) => {
     // (a) The change commits first: the save waits on 016's hold (the owner holds the account), the change commits meanwhile,
-    // then the save proceeds, re-reads and refuses inside its transaction.
-    for (const [label, change, next] of [
+    // then the save proceeds, re-reads and refuses inside its transaction. An ACCOUNT write cannot commit beside that hold (it
+    // waits for the owner's own row lock), so it is made INSIDE the hold (`inHold`): the owner holds the account and suspends
+    // it before the save is sent, and that transaction commits while the save waits on it — the same barrier, and the change
+    // still committed while the save waits on 016's hold, as every other case's is.
+    for (const [label, change, next, { inHold = false } = {}] of [
       ['the Invoices level narrowed to View first', (f) => (sql) => setLevel(f.T, 'sales_staff', 'invoices', 'view', sql), [403, 'forbidden']],
       ['the Customers level narrowed to None first', (f) => (sql) => setLevel(f.T, 'sales_staff', 'customers', 'none', sql), [403, 'forbidden']],
       ['the grant suspended first', (f) => (sql) => sql`update user_membership set status = 'suspended' where internal_user_id = ${f.who.id}`, [401, 'unauthenticated']],
+      ['the store grant deleted first', (f) => (sql) => one(sql`delete from user_membership where internal_user_id = ${f.who.id} and store_id = ${f.S}`, 'the grant deleted'), [401, 'unauthenticated']],
       ['the session revoked first', (f) => (sql) => sql`select tmpos_session.m5_session_revoke(${f.s.key}::text)`, [401, 'unauthenticated']],
+      ['the account suspended first', (f) => (sql) => one(sql`update app_user set status = 'suspended' where internal_user_id = ${f.who.id}`, 'the account suspended'), [401, 'unauthenticated'], { inHold: true }],
+      ['the tenant suspended first', (f) => (sql) => one(sql`update tenant set status = 'suspended' where tenant_id = ${f.T}`, 'the tenant suspended'), [401, 'unauthenticated']],
+      ['the tenant made read-only first', (f) => (sql) => one(sql`update tenant set status = 'read_only' where tenant_id = ${f.T}`, 'the tenant made read-only'), [401, 'unauthenticated']],
       ['the store suspended first', (f) => (sql) => sql`update store set status = 'suspended' where store_id = ${f.S}`, [401, 'unauthenticated']],
     ]) {
       const tag = randomUUID().slice(0, 6);
@@ -999,29 +1028,44 @@ test('IDH-09 (AC-10): a level narrowing, a grant suspension, a session revocatio
       const C = await newCustomer(T, `idh09-a-${tag}`);
       const who = await actor(`idh09-a-${tag}`, [storeGrant(T, S, 'sales_staff')]);
       const f = { T, S, who, s: await signIn(ctx, who) };
-      const before = await counts([T]);
-      const h = await hold('app_user for update', (sql) => sql`select 1 from public.app_user where internal_user_id = ${who.id} for update`);
+      const key = randomUUID();
+      const keys = [{ key, principal: who.principal }];
+      const before = await counts([T], keys);
+      const h = await hold(inHold ? 'app_user for update, then suspended' : 'app_user for update', async (sql) => {
+        await sql`select 1 from public.app_user where internal_user_id = ${who.id} for update`;
+        if (inHold) await change(f)(sql);
+      });
       let pending;
       try {
-        pending = quietly(ctx.save(f.s, S, bodyOf(T, C, [line(described(`never ${label}`), 1, 1)])));
+        pending = quietly(ctx.save(f.s, S, bodyOf(T, C, [line(described(`never ${label}`), 1, 1)]), { key }));
         waitingPid(await blockedOrSettled(pending, { by: h.pid, query: AT_HOLD }), `${label}: the save waiting on 016's hold`);
-        const outcome = await ownerOutcome(ownerWrite(label, change(f)));
-        assert.equal(outcome?.settled, 'committed', `${label}: the change commits while the save waits (${JSON.stringify(outcome)})`);
+        if (inHold) {
+          assert.equal(await h.commit(), 'committed', `${label}: the hold's own change commits while the save waits`);
+        } else {
+          const outcome = await ownerOutcome(ownerWrite(label, change(f)));
+          assert.equal(outcome?.settled, 'committed', `${label}: the change commits while the save waits (${JSON.stringify(outcome)})`);
+        }
       } finally {
         await h.commit();
       }
       const reply = await replyTo(pending, label);
       assertRefusal(reply, 503, 'service_unavailable', `${label}: refused inside the transaction`);
       assert.equal(ctx.reason(reply), 'transaction_unavailable', `${label}: the revalidation refused, never a timeout`);
-      assert.deepEqual(delta(await counts([T]), before), NOTHING, `${label}: nothing written`);
+      assert.deepEqual(delta(await counts([T], keys), before), NOTHING, `${label}: nothing written, no completion`);
+      const [lease] = await owner`select response is null as open from tmpos_internal.idempotency_record where scope = ${scopeOf(key, who.principal)}`;
+      assert.equal(lease?.open, true, `${label}: the lease, taken in its own transaction, stays open (IDH-07's rule: a rollback never releases it)`);
       assertRefusal(await ctx.save(f.s, S, bodyOf(T, C, [line(described(`next ${label}`), 1, 1)])), next[0], next[1], `${label}: the next request`);
     }
     // (b) The save holds its locks first: it waits for the customer row (held by the owner) only after every authority lock;
-    // each change waits for it, and it commits first.
+    // each change waits for it (its backend seen waiting on a lock the save holds), it commits first, then the change applies.
     for (const [label, change] of [
       ['an Invoices level narrowing', (f) => (sql) => setLevel(f.T, 'sales_staff', 'invoices', 'none', sql)],
       ['a Customers level narrowing', (f) => (sql) => setLevel(f.T, 'sales_staff', 'customers', 'none', sql)],
       ['a grant suspension', (f) => (sql) => sql`update user_membership set status = 'suspended' where internal_user_id = ${f.who.id}`],
+      ['a store grant deletion', (f) => (sql) => one(sql`delete from user_membership where internal_user_id = ${f.who.id} and store_id = ${f.S}`, 'the grant deleted')],
+      ['an account suspension', (f) => (sql) => one(sql`update app_user set status = 'suspended' where internal_user_id = ${f.who.id}`, 'the account suspended')],
+      ['a tenant suspension', (f) => (sql) => one(sql`update tenant set status = 'suspended' where tenant_id = ${f.T}`, 'the tenant suspended')],
+      ['a tenant made read-only', (f) => (sql) => one(sql`update tenant set status = 'read_only' where tenant_id = ${f.T}`, 'the tenant made read-only')],
       ['a store suspension', (f) => (sql) => sql`update store set status = 'suspended' where store_id = ${f.S}`],
       ['a revocation of the presenting session', (f) => (sql) => sql`select tmpos_session.m5_session_revoke(${f.s.key}::text)`],
     ]) {

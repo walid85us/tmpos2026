@@ -19,7 +19,8 @@
 //          nothing — no draft, line or role row — and the reads disclose no foreign draft (one not_found, one cursor_unknown).
 //   IDR-05 (AC-03) the persisted Invoices View/Create thresholds and the Customers View corequisite decide, in both
 //          directions, with owner-edited levels (technician, sales_staff, manager), the owner Full throughout — each read
-//          exactly the page of the store's draft or exactly the denial, each save exactly applied or exactly refused.
+//          (the page AND the get, which always agree) exactly the store's draft or exactly the denial, each save exactly
+//          applied or exactly refused; sales_staff's Invoices taken View -> None -> View closes and reopens both reads.
 //   IDR-06 (AC-05) a missing and another tenant's customer: one identical customer_not_found answer, decided before any
 //          write (not even a role row); a tenant_mismatch precondition likewise.
 //   IDR-07 (AC-06) every invalid argument raises invalid_parameter_value with a fixed message that never carries the value,
@@ -531,7 +532,7 @@ test('IDR-04 (AC-01 AC-02 AC-04): a grant reaches its own store alone — never 
     values (${atA1.id}, ${T_A}, ${S_A1}, 'store', 'shift_lead', 'active')`))?.code, '23514', 'a custom role id is refused by the membership CHECK');
 });
 
-test('IDR-05 (AC-03): the persisted Invoices View/Create thresholds and the Customers View corequisite decide, both directions, with owner-edited levels; the owner is Full throughout', async () => {
+test('IDR-05 (AC-03): the persisted Invoices View/Create thresholds and the Customers View corequisite decide the save, the page and the get, both directions, with owner-edited levels; the owner is Full throughout', async () => {
   const T = await newTenant('levels');
   const S = await newStore(T, `Levels ${SUFFIX}`);
   const C = await newCustomer(T, 'levels');
@@ -544,8 +545,10 @@ test('IDR-05 (AC-03): the persisted Invoices View/Create thresholds and the Cust
   const kMgr = await mint(manager);
   const kOwner = await mint(storeOwner);
   // The owner (Full) saves one draft first, so a granted read always has a draft to answer: a read is then EXACTLY a page of
-  // the store's draft and a refusal EXACTLY the denial — never an empty page or another outcome taken for either.
-  assert.deepEqual((await create(kOwner, S, T, C, LINES)).rows, [applied(storeOwner, T, S)], 'the seed');
+  // the store's draft (and EXACTLY the seed's reopen) and a refusal EXACTLY the denial — never an empty page or another
+  // outcome taken for either.
+  const seed = await create(kOwner, S, T, C, LINES);
+  assert.deepEqual(seed.rows, [applied(storeOwner, T, S)], 'the seed');
   const can = async (who, key) => {
     const made = (await create(key, S, T, C, LINES)).rows;
     const saved = made.length === 1 && made[0].o_outcome === 'applied';
@@ -554,6 +557,17 @@ test('IDR-05 (AC-03): the persisted Invoices View/Create thresholds and the Cust
     const read = !(rows.length === 1 && rows[0].o_outcome === 'denied');
     if (read) assert.deepEqual(rows.map((r) => [r.o_outcome, r.o_tenant_id, r.o_store_id]), [['draft', T, S]], `${who.label}: a read is exactly the store's page`);
     else assert.deepEqual(rows, [{ o_outcome: 'denied', ...PAGE_NULLS }], `${who.label}: a refused read is exactly the denial`);
+    // The get (the reopen) decides on the same Invoices View threshold: exactly the seed's lines, or exactly the denial —
+    // and always the page's verdict, so every expectation below holds for both reads.
+    const got = await get(key, T, S, seed.draft);
+    const reopened = !(got.length === 1 && got[0].o_outcome === 'denied');
+    if (reopened) {
+      assert.deepEqual(got.map((r) => [r.o_outcome, r.o_tenant_id, r.o_store_id, r.o_draft_id, r.o_position, r.o_description]),
+        LINES.map((l, i) => ['draft', T, S, seed.draft, i + 1, l.description]), `${who.label}: a reopen is exactly the seed`);
+    } else {
+      assert.deepEqual(got, [{ o_outcome: 'denied', ...GET_NULLS }], `${who.label}: a refused reopen is exactly the denial`);
+    }
+    assert.equal(reopened, read, `${who.label}: the get and the page agree`);
     return { create: saved, read };
   };
   assert.deepEqual(await can(tech, kTech), { create: false, read: true }, 'technician default: Invoices View');
@@ -567,6 +581,8 @@ test('IDR-05 (AC-03): the persisted Invoices View/Create thresholds and the Cust
   assert.deepEqual(await can(sales, kSales), { create: false, read: true }, 'the owner lowers sales_staff Invoices to View');
   await setLevel(T, 'sales_staff', 'invoices', 'none');
   assert.deepEqual(await can(sales, kSales), { create: false, read: false }, 'and to None: no read either');
+  await setLevel(T, 'sales_staff', 'invoices', 'view');
+  assert.deepEqual(await can(sales, kSales), { create: false, read: true }, 'and back to View: the page and the get answer again');
   await setLevel(T, 'manager', 'invoices', 'edit');
   await setLevel(T, 'manager', 'customers', 'view');
   assert.deepEqual(await can(manager, kMgr), { create: true, read: true }, 'Edit and View: above both thresholds');
