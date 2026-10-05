@@ -52,8 +52,9 @@
 //
 // M5-INVOICES-AUTH-P1 — the same panel, parameterised by a domain (DOMAIN_COPY): `domain="invoices"` (the exported
 // ServerInvoiceLevels) edits the built-in roles' Invoices LEVEL through GET /api/v1/roles/levels/invoices and the shared PUT.
-// Only the level is saved on the tenant server: invoices themselves are still kept in this browser and their operations
-// are not enforced by the server, and the Invoices copy says so. Customers keeps its copy, DOM ids and test ids exactly;
+// Only the level is saved on the tenant server. Since M7B-INVOICES-P1 the server decides the three server-draft operations
+// (save, list, reopen — server/runtime/invoiceDrafts.ts) by it, at each store, for the role of the user's store grant there;
+// every other invoice is still kept in this browser and not checked by the server, and the Invoices copy says exactly that. Customers keeps its copy, DOM ids and test ids exactly;
 // Invoices uses the `server-invoice-level(s)-` prefix, so both panels can sit on one screen without an id collision.
 // Two panels share ONE tenant session (the shared session client). Only an explicit Reconnect (or a recent-sign-in
 // confirmation) in one panel re-establishes it; that panel then announces "session renewed" and every OTHER panel on the
@@ -156,7 +157,7 @@ const DOMAIN_COPY: Record<RoleLevelsDomain, DomainCopy> = {
     sectionId: 'server-invoice-levels',
     titleId: 'server-invoice-levels-title',
     title: 'Server-saved Invoices level',
-    description: 'Saved on the store server: only the Invoices level of the built-in roles (store owner fixed). Invoices themselves are still saved in this browser, and invoice actions are not enforced by the server.',
+    description: 'Saved on the store server: only the Invoices level of the built-in roles (store owner fixed). The server uses it to decide who may save, list and open server drafts at a store. Other invoices are still saved in this browser and are not checked by the server.',
     denied: INVOICES_DENIED_NOTE,
     sessionEnded: 'Your server session ended. Reconnect to see the server-saved Invoices level.',
     signIn: 'Sign in with your store account to see the server-saved Invoices level.',

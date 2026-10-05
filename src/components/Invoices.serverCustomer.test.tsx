@@ -5,6 +5,9 @@
 // names only), and the real server-customer field behind a pass-through that records what each render hands it. Ordering
 // is controlled with the fake's hold/release (no sleeps). Every assertion about a request is made on what the fake
 // recorded — the wire — and every assertion about an invoice on what the page handed the local store.
+// M7B-INVOICES-P1: the page's "Server drafts" section (ServerInvoiceDrafts.tsx) rides along with the REAL invoice drafts
+// client over the same fake (stores, a store's drafts, one create): a server customer is no longer a dead end — "Save as
+// server draft" hands its id and name (only) to that section — and a server draft never reaches the local invoices.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -55,10 +58,10 @@ vi.mock('../context/AccessContext', async () => {
 });
 // The shop's singletons, as the page uses them by default: each delegates to this test's real client over its fake server.
 const net = vi.hoisted(() => {
-  const current = { session: null as unknown, customers: null as unknown };
+  const current = { session: null as unknown, customers: null as unknown, drafts: null as unknown };
   const delegate = (key: keyof typeof current) =>
     new Proxy({}, { get: (_, method) => (...args: unknown[]) => (current[key] as Record<PropertyKey, (...a: unknown[]) => unknown>)[method](...args) });
-  return { current, session: delegate('session'), customers: delegate('customers') };
+  return { current, session: delegate('session'), customers: delegate('customers'), drafts: delegate('drafts') };
 });
 vi.mock('../tenant/tenantSessionClient', async (original) => ({
   ...(await original<typeof import('../tenant/tenantSessionClient')>()),
@@ -67,6 +70,10 @@ vi.mock('../tenant/tenantSessionClient', async (original) => ({
 vi.mock('../tenant/customersClient', async (original) => ({
   ...(await original<typeof import('../tenant/customersClient')>()),
   customers: net.customers,
+}));
+vi.mock('../tenant/invoiceDraftsClient', async (original) => ({
+  ...(await original<typeof import('../tenant/invoiceDraftsClient')>()),
+  invoiceDrafts: net.drafts,
 }));
 // The draft's server-customer field, passed through unchanged, recording what each render hands it: no render may hand it
 // another user's customer, or any customer once view access is gone (the page treats such a reference as none at once).
@@ -105,6 +112,8 @@ import Invoices from './Invoices';
 import { NOT_AVAILABLE_TEXT, PICK_ENDED_TEXT, SERVER_DRAFT_LIMIT_TEXT } from '../tenant/ServerCustomerPicker';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from '../tenant/customersClient';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
+import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, type InvoiceDraftsClient } from '../tenant/invoiceDraftsClient';
+import { DRAFTS_TEXT } from '../tenant/ServerInvoiceDrafts';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -113,11 +122,15 @@ const activeBody = (uid: string, csrfToken: string) =>
 const uuid = (n: number): string => `${n.toString(16).padStart(8, '0')}-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
 const TENANT_A = uuid(0xa);
 const TENANT_B = uuid(0xb);
+const STORE = uuid(0x51);
 
 interface Sent { readonly method: string; readonly url: string; readonly headers: Headers }
 interface User { uid: string; tenant: string; view: boolean }
 
-/** One fake tenant server, reduced to the session and the list read. `cookie` is the session the browser presents. */
+/**
+ * One fake tenant server, reduced to the session, the customer list read and — M7B-INVOICES-P1 — uid-a's one store with
+ * its drafts (list, one create that stores what it was sent, the read-back). `cookie` is the session the browser presents.
+ */
 function fakeServer() {
   const users: Record<string, User> = {
     'tok-a': { uid: 'uid-a', tenant: TENANT_A, view: true },
@@ -127,14 +140,17 @@ function fakeServer() {
   const rows: Record<string, CustomerEntry[]> = { [TENANT_A]: [], [TENANT_B]: [] };
   let sessionCount = 0;
   let idCount = 0xa00;
-  const reply = (status: number, body?: unknown): Response =>
-    new Response(body === undefined ? null : JSON.stringify(body), { status, headers: body === undefined ? {} : { 'content-type': 'application/json; charset=utf-8' } });
+  const drafts: Array<{ id: string; customerId: string; body: { lines: Array<{ description: string; quantity: number; unitPriceCents: number }> } }> = [];
+  const reply = (status: number, body?: unknown, extra: Record<string, string> = {}): Response =>
+    new Response(body === undefined ? null : JSON.stringify(body), { status, headers: body === undefined ? extra : { 'content-type': 'application/json; charset=utf-8', ...extra } });
   const refuse = (status: number): Response => reply(status, { error: `e${status}`, requestId: 'req-synthetic' });
   const byteOrder = (x: CustomerEntry, y: CustomerEntry): number =>
     Buffer.compare(Buffer.from(x.name, 'utf8'), Buffer.from(y.name, 'utf8')) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);
 
   const server = {
     sent: [] as Sent[],
+    bodies: [] as string[], // what each draft POST sent, as the exact string
+    drafts,
     users,
     cookie: null as string | null,
     hold: { reads: 0 }, // list answers to hold: computed on arrival, released by the test (or replaced by a late one)
@@ -187,6 +203,27 @@ function fakeServer() {
         }
         return answer;
       }
+      if (method === 'GET' && url === STORES_PATH) {
+        if (session === undefined) return refuse(401);
+        return reply(200, { stores: session.user.uid === 'uid-a' ? [{ id: STORE, tenantId: TENANT_A, name: 'Main Street', readOnly: false }] : [] });
+      }
+      if (session !== undefined && url.startsWith(draftsPathOf(STORE))) {
+        const subtotal = (d: (typeof drafts)[number]) => d.body.lines.reduce((sum, l) => sum + l.quantity * l.unitPriceCents, 0);
+        if (method === 'POST') {
+          const body = String(init.body);
+          server.bodies.push(body);
+          const draft = { id: uuid(++idCount), customerId: (JSON.parse(body) as { customerId: string }).customerId, body: JSON.parse(body) as (typeof drafts)[number]['body'] };
+          drafts.push(draft);
+          return reply(201, { draft: { id: draft.id, status: 'draft', currency: 'USD', lineCount: draft.body.lines.length, subtotalCents: subtotal(draft) } }, { location: draftPathOf(STORE, draft.id) });
+        }
+        const one = drafts.find((d) => url === draftPathOf(STORE, d.id));
+        if (one !== undefined) {
+          const lines = one.body.lines.map((l, i) => ({ position: i + 1, ...l, lineTotalCents: l.quantity * l.unitPriceCents }));
+          return reply(200, { draft: { id: one.id, storeId: STORE, customerId: one.customerId, status: 'draft', currency: 'USD', version: 1, createdAt: '2026-10-04T12:00:00.000001Z', subtotalCents: subtotal(one), lines } });
+        }
+        const rows = [...drafts].reverse().map((d, i) => ({ id: d.id, customerId: d.customerId, status: 'draft', currency: 'USD', lineCount: d.body.lines.length, subtotalCents: subtotal(d), createdAt: `2026-10-04T12:00:${String(59 - i).padStart(2, '0')}.000001Z` }));
+        return reply(200, { drafts: rows, nextCursor: null });
+      }
       return refuse(404); // nothing else exists here: a write would be recorded, and refused
     }) as typeof globalThis.fetch,
   };
@@ -198,6 +235,7 @@ type Server = ReturnType<typeof fakeServer>;
 function mount(server: Server) {
   net.current.session = createTenantSessionClient({ fetch: server.fetch }) satisfies TenantSessionClient;
   net.current.customers = createCustomersClient({ fetch: server.fetch }) satisfies CustomersClient;
+  net.current.drafts = createInvoiceDraftsClient({ fetch: server.fetch }) satisfies InvoiceDraftsClient;
   return render(<MemoryRouter initialEntries={['/invoices']}><Invoices /></MemoryRouter>);
 }
 
@@ -210,7 +248,7 @@ const dialog = () => screen.queryByTestId('picker-dialog');
 const value = () => screen.queryByTestId('picker-value');
 const limit = () => screen.queryByTestId('invoice-server-limit');
 const pickerReady = () => waitFor(() => expect(screen.getByTestId('picker-state')).toHaveAttribute('data-phase', 'ready'));
-const writes = (s: Server) => s.sent.filter((r) => r.method !== 'GET' && r.url.startsWith(CUSTOMERS_PATH));
+const writes = (s: Server) => s.sent.filter((r) => r.method !== 'GET' && (r.url.startsWith(CUSTOMERS_PATH) || r.url.startsWith(STORES_PATH)));
 const pickLocal = (id: string) => fireEvent.change(customerSelect(), { target: { value: id } });
 /** A named line item: the first stock item, chosen from the product search. */
 const addItem = async () => {
@@ -264,7 +302,7 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(server.sent).toEqual([]); // the server-customer entry point reads nothing until it is opened
   });
 
-  it('INV-02. AC-03: a server customer is shown as the server\'s, Generate is disabled with the limit text, and choosing it reaches neither the local list nor an invoice', async () => {
+  it('INV-02. AC-03 (M7B-INVOICES-P1): a server customer is shown as the server\'s, Generate stays disabled with the limit text that now points to "Save as server draft", and choosing it reaches neither the local list nor an invoice', async () => {
     const server = fakeServer();
     const [ada] = server.seed(TENANT_A, ['Ada Server']);
     mount(server);
@@ -279,6 +317,9 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(limit()).toHaveAttribute('role', 'status');
     expect(limit()).toHaveTextContent(SERVER_DRAFT_LIMIT_TEXT);
     expect(screen.getByTestId('picker-field')).not.toHaveTextContent(/saved|created/i); // a selection is not a save
+    expect(SERVER_DRAFT_LIMIT_TEXT).toMatch(/no invoice can be generated here/);
+    expect(SERVER_DRAFT_LIMIT_TEXT).toMatch(/Save as server draft/);
+    expect(screen.getByTestId('invoice-server-draft')).toHaveTextContent('Save as server draft'); // offered, not taken
     // React never calls a disabled button's onClick, so a click here would prove nothing more than `disabled`:
     // handleCreateInvoice's own `customer.source === 'local'` guard is defence in depth, recorded as untested.
     expect(addInvoice).not.toHaveBeenCalled();
@@ -354,7 +395,7 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(addInvoice).not.toHaveBeenCalled();
   });
 
-  it('INV-06. AC-05: a reopened draft starts with no customer, and a read the closed draft\'s picker had out (a late 401) never drops the new draft\'s server customer', async () => {
+  it('INV-06. AC-05: a reopened draft starts with no customer, and a read the closed draft\'s picker had out (a late 401) never drops the new draft\'s server customer (which still offers "Save as server draft", M7B-INVOICES-P1)', async () => {
     const server = fakeServer();
     const [ada, bea] = server.seed(TENANT_A, ['Ada Server', 'Bea Server']);
     mount(server);
@@ -377,6 +418,7 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(dialog()).toBeNull();
     expect(value()).toHaveAttribute('data-id', bea.id);
     expect(limit()).toHaveTextContent(SERVER_DRAFT_LIMIT_TEXT);
+    expect(screen.getByTestId('invoice-server-draft')).toBeInTheDocument();
     expect(screen.queryByTestId('picker-notice')).toBeNull();
   });
 
@@ -493,7 +535,7 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(server.sent).toEqual([]);
   });
 
-  it('INV-15. the disabled Generate is described by the limit text while a server customer is held, and by nothing once a local one replaces it', async () => {
+  it('INV-15. the disabled Generate is described by the limit text (M7B-INVOICES-P1: naming "Save as server draft") while a server customer is held, and by nothing once a local one replaces it', async () => {
     const server = fakeServer();
     const [ada] = server.seed(TENANT_A, ['Ada Server']);
     mount(server);
@@ -504,9 +546,60 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     expect(save()).toBeDisabled();
     expect(save()).toHaveAttribute('aria-describedby', 'invoice-server-limit');
     expect(save()).toHaveAccessibleDescription(SERVER_DRAFT_LIMIT_TEXT);
+    expect(screen.getByTestId('invoice-server-draft')).toBeEnabled();
     pickLocal('c1');
     expect(save()).toBeEnabled();
     expect(save()).not.toHaveAttribute('aria-describedby');
+    expect(screen.queryByTestId('invoice-server-draft')).toBeNull();
+  });
+
+  it('INV-16. M7B-INVOICES-P1: "Save as server draft" closes the invoice form and hands ONLY the customer to the Server drafts dialog; the draft saved there never becomes a local invoice', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    const before = screen.getAllByRole('row').length;
+    await click('invoice-create-open');
+    await addItem(); // a local line with a price: never carried over
+    await chooseServer(ada.id);
+    await click('invoice-server-draft');
+    await waitFor(() => expect(screen.queryByText('Create New Invoice')).toBeNull());
+    await waitFor(() => expect(screen.getByTestId('drafts-handoff')).toHaveTextContent('Ada Server'));
+    fireEvent.change(screen.getByTestId('drafts-store'), { target: { value: STORE } });
+    await waitFor(() => expect(screen.getByTestId('draft-new')).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByTestId('draft-new')).getByTestId('picker-value')).toHaveAttribute('data-id', ada.id));
+    expect(screen.getByTestId('draft-new-description')).toHaveValue(''); // the invoice form's lines stay behind
+    expect(screen.getByTestId('draft-new-price')).toHaveValue('');
+    fireEvent.change(screen.getByTestId('draft-new-description'), { target: { value: 'Battery' } });
+    fireEvent.change(screen.getByTestId('draft-new-price'), { target: { value: '49.90' } });
+    await click('draft-new-save');
+    await waitFor(() => expect(screen.getByTestId('drafts-notice')).toHaveTextContent(DRAFTS_TEXT.saved));
+    expect(server.bodies).toEqual([JSON.stringify({ expectedTenant: TENANT_A, customerId: ada.id, currency: 'USD', lines: [{ description: 'Battery', quantity: 1, unitPriceCents: 4990 }] })]);
+    expect(addInvoice).not.toHaveBeenCalled();
+    expect(find).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getAllByTestId('drafts-row')).toHaveLength(1));
+    expect(screen.getAllByRole('row')).toHaveLength(before); // the local invoice table is untouched
+  });
+
+  it('INV-17. M7B-INVOICES-P1: the Server drafts section reads nothing until shown, and its drafts never reach the local invoice list or its counters', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    server.drafts.push({ id: uuid(0xdd1), customerId: ada.id, body: { lines: [{ description: 'Fan', quantity: 2, unitPriceCents: 999999 }] } });
+    mount(server);
+    const counters = () => screen.getByText('Total Outstanding').parentElement!.textContent;
+    const outstanding = counters();
+    const table = () => screen.getAllByRole('row').map((r) => r.textContent);
+    const rowsBefore = table();
+    await settle();
+    expect(server.sent).toEqual([]);
+    await click('drafts-show');
+    await waitFor(() => expect(screen.getByTestId('drafts-store')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('drafts-store'), { target: { value: STORE } });
+    await waitFor(() => expect(screen.getAllByTestId('drafts-row')).toHaveLength(1));
+    expect(screen.getByTestId('drafts-row-subtotal')).toHaveTextContent('Draft subtotal $19,999.98');
+    expect(table()).toEqual(rowsBefore);
+    expect(counters()).toBe(outstanding);
+    expect(addInvoice).not.toHaveBeenCalled();
+    expect(writes(server)).toEqual([]);
   });
 
   it('INV-13. the draft writes no browser storage and logs nothing, and the page source reaches neither', async () => {

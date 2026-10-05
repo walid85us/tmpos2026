@@ -191,8 +191,9 @@ describe('ServerInvoiceLevels (M5-INVOICES-AUTH-P1)', () => {
     const section = screen.getByTestId('server-invoice-levels');
     expect(within(section).getByRole('heading', { name: 'Server-saved Invoices level' })).toBeInTheDocument();
     expect(section).toHaveTextContent('Saved on the store server: only the Invoices level of the built-in roles');
-    expect(section).toHaveTextContent('Invoices themselves are still saved in this browser');
-    expect(section).toHaveTextContent('not enforced by the server');
+    expect(section).toHaveTextContent('The server uses it to decide who may save, list and open server drafts at a store.');
+    expect(section).toHaveTextContent('Other invoices are still saved in this browser and are not checked by the server.');
+    expect(section.textContent).not.toMatch(/not enforced by the server/); // the M5-INVOICES-AUTH-P1 copy, no longer true for server drafts
     expect(section.textContent).not.toMatch(/Customers/);
     expect(invoiceReads(server)).toBe(1);
     expect(server.sent.some((r) => r.url === ROLE_LEVELS_PATH && r.method === 'GET')).toBe(false); // never the Customers read

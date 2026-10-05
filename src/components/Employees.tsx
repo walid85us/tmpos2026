@@ -809,7 +809,7 @@ export default function Employees() {
       <div className="space-y-8 mt-8">
         {/* M7A-CUSTOMERS-P3-R2: the only server-backed part of this screen — built-in roles' Customers level. */}
         <ServerCustomerLevels uid={session?.user.id ?? null} />
-        {/* M5-INVOICES-AUTH-P1: the built-in roles' Invoices LEVEL only; invoices themselves stay in this browser. */}
+        {/* M5-INVOICES-AUTH-P1: the built-in roles' Invoices LEVEL only; it decides server drafts (M7B-INVOICES-P1), other invoices stay in this browser. */}
         <ServerInvoiceLevels uid={session?.user.id ?? null} />
 
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">

@@ -5,14 +5,21 @@
 //     "include", and this module never constructs, reads or sends a cookie.
 //   - The only credential it ever sends is the signed-in user's own Firebase ID token, once, as the login Bearer; the
 //     server verifies it and decides who this is. Nothing here knows or builds an issuer key, a proof or a database key.
-//   - The session CSRF token lives in this closure only (beside the UID it was issued for) — never in React state,
-//     storage, a URL, the DOM or a log — and is handed to the caller only to ride the next unsafe request. The customer
+//   - The session CSRF token lives in this closure only (beside the UID it was issued for) — never in React state (one
+//     exception, below), storage, a URL, the DOM or a log — and is handed to the caller only to ride its next request (an
+//     unsafe one, or a session-bound read). The customer
 //     directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5) is its second in-memory holder: it keeps the token
 //     it was handed in refs, and beside an unresolved create in its in-memory hold store, only to compare it with the
 //     next one and to re-send that create on the same session — under the same rule (no state, storage, URL, DOM, log).
 //     The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9) is the third: its dialog keeps the token
 //     it was handed in a ref only to compare it with the next one, and its `sessionContextOf` keeps the latest (UID,
-//     token) pair in module scope only to hand out one opaque context per session — under the same rule.
+//     token) pair in module scope only to hand out one opaque context per session — under the same rule. The Invoices
+//     page's server drafts section (ServerInvoiceDrafts.tsx, M7B-INVOICES-P1) is the fourth: it keeps the token in refs
+//     to compare it with the next one and send its reads, in an open new-draft dialog's state to send that dialog's save
+//     (the one React-state exception), and on each save attempt in its in-memory hold store, to re-send an unresolved one
+//     on the same session (Check again) and to read a created one back only under that session — until the attempt is
+//     detached, read back or removed or another user's section renders (a sign-out unmounts the page; a reload drops
+//     it). Otherwise the same rule: never storage, a URL, the DOM or a log.
 //   - A session is only ever reused for the user it belongs to. Every `ensure` first reads the session this browser
 //     already holds (M7A-CUSTOMERS-P5-R1, DA-143) and reuses it — with no login — only when the server's `subject` for it
 //     equals the digest of the UID asked for; the digest is recomputed here from that UID and never sent. No session, or

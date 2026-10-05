@@ -398,11 +398,11 @@ jobs:
       # lock order, the down refused while a draft or a draft audit subject exists and otherwise rolled back and restored),
       # then the three draft routes end to end over real loopback HTTP on two tenant entries and a restart (authority both
       # directions with the owner's own level edits, the sealed customer_not_found 422, injected faults, concurrent saves,
-      # ordering against revocation, both lost-COMMIT branches, pagination), against the SAME disposable service. These are
-      # the only steps that store drafts: 028's down refuses while one or a draft audit subject exists, so they run AFTER
-      # every step that rolls 028 back, and each removes every draft, line, Invoices lock anchor and audit subject of its own
-      # before it ends (R8). Synthetic data and keys made at run time only. Same binding, no new service, no secret, no
-      # permission change.
+      # ordering against revocation, both lost-COMMIT branches, pagination), against the SAME disposable service. These and
+      # the real-browser step below (its SDB scenarios) are the steps that store drafts: 028's down refuses while one or a
+      # draft audit subject exists, so they run AFTER every step that rolls 028 back, and each removes every draft, line,
+      # Invoices lock anchor and audit subject of its own before it ends (R8). Synthetic data and keys made at run time only.
+      # Same binding, no new service, no secret, no permission change.
       - name: Invoice draft routines against disposable PostgreSQL (M7B-INVOICES-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
@@ -422,6 +422,12 @@ jobs:
       # tenant isolation, a narrowed grant, a lost reply and a moved grant) against the same tenant entries and service.
       # The step limit stays 12: the six directory scenarios are about 12 s of a 2m49s local run (the step took 3m07s in
       # CI at the stage's entry), so the limit is still more than three times the run.
+      # M7B-INVOICES-P1 — it also drives the Invoices page's Server drafts section (SDB-01..04: save, reload, list and
+      # reopen; a lost reply and its Check again; store and session changes and a late answer ignored; a lost request and
+      # its Check again), so it STORES DRAFTS in the shared service: it runs after every step that rolls 028 back (it sits
+      # after them), and before it finishes it removes its drafts, lines and draft events and clears their audit subjects,
+      # then checks none is left (R8). The four scenarios are about 18 s of a 3m57s local run under the Firestore emulator;
+      # the limit stays 12.
       - name: Shop role levels and customer directory in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2, M7A-CUSTOMERS-P5)
         timeout-minutes: 12
         env:

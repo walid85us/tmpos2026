@@ -83,14 +83,20 @@ export interface CustomerEntry {
 /** Whether `value` is a customer id in the one spelling the detail route admits. */
 export const isCustomerId = (value: unknown): value is string => typeof value === 'string' && CUSTOMER_ID_RE.test(value);
 
-/** The name as the server would store it — trimmed, 1-200 scalars, no refused character, one visible scalar — or null. */
-export function normalizeCustomerName(raw: unknown): string | null {
+/**
+ * Plain text as the customer name rule stores it, at most `max` scalars — trimmed, no refused character, one visible
+ * scalar — or null. M7B-INVOICES-P1: an invoice draft line's description follows the same rule with a 256 limit.
+ */
+export function normalizePlainText(raw: unknown, max: number): string | null {
   if (typeof raw !== 'string') return null;
-  const name = raw.trim();
-  if (REFUSED_CHARACTER_RE.test(name) || !VISIBLE_RE.test(name)) return null;
-  const scalars = [...name].length;
-  return scalars >= 1 && scalars <= CUSTOMER_NAME_MAX_CHARACTERS ? name : null;
+  const text = raw.trim();
+  if (REFUSED_CHARACTER_RE.test(text) || !VISIBLE_RE.test(text)) return null;
+  const scalars = [...text].length;
+  return scalars >= 1 && scalars <= max ? text : null;
 }
+
+/** The name as the server would store it — trimmed, 1-200 scalars, no refused character, one visible scalar — or null. */
+export const normalizeCustomerName = (raw: unknown): string | null => normalizePlainText(raw, CUSTOMER_NAME_MAX_CHARACTERS);
 
 /**
  * The search text as the server applies it (M7A-CUSTOMERS-P8): trimmed; '' is no search (the unfiltered list); null for

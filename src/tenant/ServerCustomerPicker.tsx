@@ -40,9 +40,12 @@ export const PICK_ENDED_TEXT =
 export const PICK_CHANGED_TEXT =
   'The store connection changed, so the server customer was removed from this draft. Select the customer again.';
 export const PICK_DENIED_TEXT = "You can't view the customers saved on the server, so the server customer was removed from this draft.";
-/** Said beside a draft that holds a server customer: it cannot be created (yet), and how to create it here instead. */
+/**
+ * Said beside an invoice draft that holds a server customer: no invoice can be generated here for it; it can continue as
+ * a server draft (M7B-INVOICES-P1: "Save as server draft" carries the customer only); or a local customer makes the invoice.
+ */
 export const SERVER_DRAFT_LIMIT_TEXT =
-  "This draft uses a customer saved on the server. Creating an invoice for a server customer isn't available yet, so this draft can't be created. To create the invoice here, choose a customer from this browser's list instead.";
+  "This draft uses a customer saved on the server, so no invoice can be generated here for it. To keep this customer, use \"Save as server draft\": only the customer is carried over, not these lines. To generate the invoice here, choose a customer from this browser's list instead.";
 export const PICKER_TEXT = Object.freeze({
   loading: 'Loading customers from the server…',
   denied: 'This account may not view the customers saved on the server for this store.',
@@ -60,8 +63,11 @@ export const idEndingText = (id: string): string => `ID ending ${id.slice(-8)}`;
 const DEFAULT_WAIT_SECONDS = 60;
 
 // The latest (UID, token) pair and the one context handed out for it: the only place a token sits beside a context.
-// Forgotten when the draft's field unmounts (ServerCustomerField), so a pair outlives no sign-out in module scope.
+// Forgotten when the LAST mounted draft field unmounts (ServerCustomerField), so a pair outlives no sign-out in module
+// scope. M7B-INVOICES-P1: two fields can be mounted at once — the invoice form's, still closing, and the server draft
+// dialog's it handed its customer to — and the closing one must not orphan the context the other holds.
 let latest: { readonly uid: string; readonly csrf: string; readonly context: SessionContext } | null = null;
+let mountedFields = 0;
 
 /**
  * The opaque context of the session whose token is `csrf`, for `uid`: the SAME frozen object as the last call for the
@@ -540,6 +546,12 @@ export interface ServerCustomerFieldProps extends Pick<ServerCustomerPickerProps
   /** The local role state's hint that this user may view customers. The server decides. */
   readonly canView: boolean;
   readonly onChange: (next: ServerCustomerReference | null, why: 'selected' | 'removed' | 'ended' | 'denied' | 'changed') => void;
+  /**
+   * The host form says no customer is chosen (its own error is shown): "Select a server customer" is then marked invalid
+   * and described by the element `errorId` names (M7B-INVOICES-P1, the server draft dialog). Off by default.
+   */
+  readonly invalid?: boolean;
+  readonly errorId?: string;
 }
 
 /**
@@ -550,7 +562,7 @@ export interface ServerCustomerFieldProps extends Pick<ServerCustomerPickerProps
  * or the cookie names another identity's session (tenantSessionClient.ts) — after a confirmed session end it is
  * `ended`, and only the dialog's explicit Reconnect signs in. An undecided check keeps it.
  */
-export function ServerCustomerField({ uid, value, canView, onChange, ...inject }: ServerCustomerFieldProps) {
+export function ServerCustomerField({ uid, value, canView, onChange, invalid = false, errorId, ...inject }: ServerCustomerFieldProps) {
   const session = inject.session ?? tenantSession;
   const identity = inject.identity ?? firebaseShopIdentity;
   const shown = uid !== null && canView && value !== null && value.uid === uid ? value : null;
@@ -565,8 +577,11 @@ export function ServerCustomerField({ uid, value, canView, onChange, ...inject }
   const changeButton = useRef<HTMLButtonElement | null>(null);
   const valueBlock = useRef<HTMLDivElement | null>(null); // the held customer's block (Change and Remove inside)
   useLayoutEffect(() => { held.current = shown; change.current = onChange; });
-  // The module's (UID, token) pair goes with the field: contexts stay stable while it is mounted, none outlives it.
-  useEffect(() => () => { latest = null; }, []);
+  // The module's (UID, token) pair goes with the last field: contexts stay stable while one is mounted, none outlives them.
+  useEffect(() => {
+    mountedFields += 1;
+    return () => { mountedFields -= 1; if (mountedFields === 0) latest = null; };
+  }, []);
 
   /**
    * Drop the held reference once, whichever report comes first, and say why. A drop while the dialog is closed (a window
@@ -618,7 +633,17 @@ export function ServerCustomerField({ uid, value, canView, onChange, ...inject }
   return (
     <div data-testid="picker-field" className="space-y-2">
       {shown === null ? (
-        <button ref={selectButton} type="button" data-testid="picker-open" onClick={() => setOpenFor(uid)} className={quiet}>Select a server customer</button>
+        <button
+          ref={selectButton}
+          type="button"
+          data-testid="picker-open"
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={invalid ? errorId : undefined}
+          onClick={() => setOpenFor(uid)}
+          className={quiet}
+        >
+          Select a server customer
+        </button>
       ) : (
         <div ref={valueBlock} data-testid="picker-value" data-id={shown.id} className="p-4 rounded-2xl border border-sky-200 bg-sky-50 space-y-2">
           <span data-testid="picker-value-badge" className="inline-block px-2 py-0.5 rounded-full bg-sky-100 text-sky-900 text-[10px] font-black uppercase tracking-widest">Server customer</span>

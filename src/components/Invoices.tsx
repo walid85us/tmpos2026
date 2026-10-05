@@ -10,6 +10,7 @@ import type { ReturnPrefill } from './ReturnsPortal';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, usableDraftCustomer, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
 import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField } from '../tenant/ServerCustomerPicker';
+import { ServerInvoiceDrafts } from '../tenant/ServerInvoiceDrafts';
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
@@ -30,7 +31,8 @@ export default function Invoices() {
 
   // M7A-CUSTOMERS-P9 — a draft names its customer by ONE tagged reference (customerReference.ts): none, a customer of
   // this browser's list, or a customer saved on the tenant server. Only a local one makes or edits an invoice here; a
-  // server one is never looked up in the local list and never reaches an invoice, shipping or a return.
+  // server one is never looked up in the local list and never reaches an invoice, shipping or a return. Since
+  // M7B-INVOICES-P1 a server one can be carried (id and name only) into a server draft: "Save as server draft".
   const [newInv, setNewInv] = useState({
     customer: NO_CUSTOMER as DraftCustomerReference,
     dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
@@ -110,6 +112,15 @@ export default function Invoices() {
     setShowAddModal(false);
     setNewInv(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
   };
+  // M7B-INVOICES-P1 — "Save as server draft": a draft that holds a server customer continues in the "Server drafts"
+  // section's own dialog (ServerInvoiceDrafts.tsx). Only the customer's id and name are handed over — never this form's
+  // lines, prices, notes or totals — and that dialog confirms its own session and makes its own reference before using
+  // them. This draft closes; nothing is added to this browser's invoices.
+  const [draftHandoff, setDraftHandoff] = useState<{ readonly id: string; readonly name: string } | null>(null);
+  const saveAsServerDraft = (ref: ServerCustomerReference) => {
+    closeCreate();
+    setDraftHandoff({ id: ref.id, name: ref.name });
+  };
 
   const filteredInvoices = useMemo(() => {
     let result = invoices;
@@ -184,7 +195,7 @@ export default function Invoices() {
   }, [services]);
 
   const handleCreateInvoice = useCallback(() => {
-    if (newInv.customer.source !== 'local') return; // a server customer never makes an invoice here (yet)
+    if (newInv.customer.source !== 'local') return; // a server customer never makes an invoice here (a server draft instead)
     const customer = customers.find(c => c.id === localCustomerIdOf(newInv.customer));
     if (!customer || newInv.items.every(i => !i.name.trim())) return;
     const validItems = newInv.items.filter(i => i.name.trim());
@@ -624,7 +635,15 @@ export default function Invoices() {
               {mode === 'create' && (
                 <div className="mt-3 space-y-2">
                   <ServerCustomerField key={`${uid}:${draftId}`} uid={uid} value={customer.source === 'server' ? customer : null} canView={canViewServerCustomers} onChange={serverCustomerChange(draftId)} />
-                  {customer.source === 'server' && <p id="invoice-server-limit" role="status" data-testid="invoice-server-limit" className="text-xs font-bold text-amber-800">{SERVER_DRAFT_LIMIT_TEXT}</p>}
+                  {customer.source === 'server' && (
+                    <>
+                      <p id="invoice-server-limit" role="status" data-testid="invoice-server-limit" className="text-xs font-bold text-amber-800">{SERVER_DRAFT_LIMIT_TEXT}</p>
+                      <button type="button" data-testid="invoice-server-draft" onClick={() => saveAsServerDraft(customer)}
+                        className="px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700">
+                        Save as server draft
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -787,6 +806,9 @@ export default function Invoices() {
           </tbody>
         </table>
       </div>
+
+      {/* M7B-INVOICES-P1 — store-owned drafts saved on the server: their own section, never in the list or counters above. */}
+      <ServerInvoiceDrafts uid={uid} canCreate={canCreate} canViewCustomers={canViewServerCustomers} handoff={draftHandoff} onHandoffTaken={() => setDraftHandoff(null)} />
 
       <AnimatePresence>
         {detailInvoice && !showPaymentModal && !showEditModal && !showEmailModal && !showSmsModal && !showOnlinePayModal && !showPrintModal && (

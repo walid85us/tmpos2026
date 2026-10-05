@@ -187,6 +187,52 @@
 //          change in the database (level, version 1, one edit audit), and the row says "Not confirmed yet" after its read-back.
 //          Save pressed again sends exactly one more PUT, same Idempotency-Key and byte-identical body, answered as a replay
 //          that writes nothing; the read-back then says "Saved".
+// M7B-INVOICES-P1 — the Invoices page's "Server drafts" section (src/tenant/ServerInvoiceDrafts.tsx): store-owned invoice
+// drafts over GET /api/v1/stores and /api/v1/stores/{storeId}/invoice-drafts[/{id}], migration 028's routines behind them.
+// Each case's owner holds the tenant grant the shop signs in with (and the server customer picker reads through) AND a
+// store grant at each of its stores: a draft route is decided only by the store grant at the store the path names (design
+// D1), the picker only by the tenant grant (R2). D/L/A/O are that tenant's drafts, lines, draft create audits and draft
+// events, read by the database owner; K and L of counts() its completions and idempotency records.
+//   SDB-01 (AC-13) SAVE, RELOAD, LIST, REOPEN: the owner chooses one of two real stores (nothing preselected, nothing read
+//          before Show and the choice), picks an existing server customer, types three lines (dollars parsed to exact
+//          cents) and presses Save draft: ONE POST of exactly { expectedTenant, customerId, currency, lines } under a v4
+//          key, 201 with its Location, ONE draft with its three ordered lines, one store-scope audit naming it, one event,
+//          one completion; "Draft saved on the server." after one read-back GET. The row (customer name, creation time, line
+//          count, Draft subtotal) survives a reload, and the read-only reopen shows the persisted lines, amounts and the
+//          creation time the database holds (to the microsecond in the answer); the other store lists nothing; a second
+//          browser through the second entry reopens the same draft; the local invoice table never gains a row. No draft
+//          id, key, customer id, description or body in the address, browser storage (local, session, IndexedDB), the
+//          page's own console or either entry's log.
+//   SDB-02 (AC-14) LOST REPLY: the POST reaches the entry and commits, and its answer is dropped at the front (st.lose, after
+//          the entry answered). A double press sends ONE POST; the attempt is held "Not confirmed yet" (never saved). A
+//          window focus and a visibilitychange event, closing the dialog, leaving the page and coming back, and a list
+//          read that SHOWS the draft
+//          send nothing: still one POST and one draft (rows counted). "Check again" sends exactly one more POST with the
+//          SAME Idempotency-Key and byte-identical body, answered 201 as a replay naming the stored draft; the database
+//          still holds ONE draft, one audit, one event, one completion; the list shows it once.
+//   SDB-03 (AC-15) STORE AND SESSION CHANGES: an unresolved create held for store W (its answer lost). Choosing another store
+//          clears the scoped list at once; a list answer for the store left behind, parked at the front until the user has
+//          moved back, changes nothing when released (its rows never appear); the held attempt keeps its own store and is
+//          never re-sent or retargeted. Then the tenant session cookie is swapped (CDP Storage.setCookies, SCB-08's
+//          substitution) for another valid session of the same owner while a reopen read's answer is parked: a window
+//          focus starts a new connection — the store list is read again with nothing chosen, the open draft and the rows
+//          are gone, the held attempt is detached (no Check again) — and the parked answer for the old session, released,
+//          shows nothing. Those two parked answers belong to reads the PAGE ABORTS on the change (a store choice cancels the
+//          list read, a new connection every read), so their fetch is gone before the release: they prove that nothing of
+//          the old scope shows, not the section's staleness checks (the jsdom cases SID-06 and SID-19 pin those). Until
+//          then ONE POST from the page (the two drafts seeded from outside the browser aside); the database holds exactly
+//          the seeded drafts and the one the lost reply committed. Then a late answer the page does NOT abort reaches it:
+//          after Stop tracking, a new draft for W is saved (201) and its one read-back GET — sent under that session, with
+//          no abort signal — has its answer parked while the cookie is swapped again and a focus starts a third
+//          connection. Released, that answer IS delivered (the page receives it) and is ignored: no "Draft saved on the
+//          server." from it; the next render says "A server draft was saved under an earlier connection." and W's list,
+//          read under the new session, shows the draft once. Two POSTs from the page in the whole case.
+//   SDB-04 (AC-14) LOST REQUEST: the first POST never reaches the entry (st.lose, before it is forwarded). ONE POST; the
+//          attempt is held "Not confirmed yet" and NOTHING is stored (no draft, line, audit, event, completion or
+//          idempotency record) — the dangerous branch, since the server never saw the key. A window focus sends nothing.
+//          "Check again" sends exactly one more POST with the SAME Idempotency-Key and byte-identical body, answered 201 as
+//          the key's FIRST create (no Idempotent-Replayed): exactly ONE draft row, with its line, audit, event and one
+//          completion; the list shows it once.
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -197,8 +243,12 @@
 // DISPOSABLE ONLY: the database target is tests/db/localPostgres.harness.mjs's (a supplied CI service or a cluster made and
 // destroyed here). On a shared service this file removes its customers, role levels and their 021 versions (or 021's
 // rollback would refuse), sessions and mint rows, restores the
-// limiter fingerprint and issuer key row it found, and drops its login. What it leaves is what every suite leaves: its
-// synthetically named identities, tenants and grants, their audit records and idempotency records.
+// limiter fingerprint and issuer key row it found, and drops its login. Since M7B-INVOICES-P1 it first removes its tenants'
+// drafts, lines and draft events and clears every audit subject naming one of its drafts (an owner transaction lifting
+// 002's append-only trigger, then restoring it — the HTTP draft suite's technique): their foreign keys hold its customers
+// (no CASCADE), and a draft or a draft audit subject left behind would make 028's rollback refuse (R8). What it leaves is
+// what every suite leaves: its synthetically named identities, tenants, stores and grants, their audit records and
+// idempotency records.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -347,12 +397,45 @@ async function teardownDatabase() {
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
     if (TENANTS.length > 0) {
+      // M7B-INVOICES-P1 (R8): drafts before the customers their foreign keys hold; their audit subjects cleared and their
+      // events removed, so nothing of this file blocks 028's rollback (an entry commit before 028 has no such table).
+      await step(async () => {
+        const [{ present }] = await owner`select to_regclass('tmpos_invoice_draft.invoice_draft') is not null as present`;
+        if (!present) return;
+        await owner.begin('isolation level read committed', async (sql) => {
+          const drafts = (await sql`select draft_id from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[])`).map((r) => r.draft_id);
+          if (drafts.length > 0) {
+            // 002's append-only trigger is lifted for this one update and put back in exactly the mode it was found in.
+            const [{ mode }] = await sql`select tgenabled as mode from pg_catalog.pg_trigger
+              where tgrelid = 'public.audit_event'::regclass and tgname = 'trg_audit_event_reject_mutation'`;
+            const restore = { O: 'enable trigger', D: 'disable trigger', R: 'enable replica trigger', A: 'enable always trigger' }[mode];
+            assert.ok(restore, `the append-only trigger's mode is known: ${mode}`);
+            await sql.unsafe('alter table public.audit_event disable trigger trg_audit_event_reject_mutation');
+            await sql`update public.audit_event set subject_invoice_draft_id = null where subject_invoice_draft_id = any(${drafts}::uuid[])`;
+            await sql.unsafe(`alter table public.audit_event ${restore} trg_audit_event_reject_mutation`);
+          }
+          await sql`delete from tmpos_invoice_draft.invoice_draft_line where tenant_id = any(${TENANTS}::uuid[])`;
+          await sql`delete from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[])`;
+          await sql`delete from tmpos_internal.outbox_event where event_type = 'invoice_draft.created'
+            and (payload ->> 'storeId')::uuid in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`;
+        });
+      });
       await step(async () => { // 021's version rows first (an entry commit before 021 has no such table)
         const [{ present }] = await owner`select to_regclass('tmpos_role_edit.role_level_version') is not null as present`;
         if (present) await owner`delete from tmpos_role_edit.role_level_version where tenant_id = any(${TENANTS}::uuid[])`;
       });
       await step(() => owner`delete from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[])`);
       await step(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
+      await step(async () => { // R8, checked rather than assumed
+        const [{ present }] = await owner`select to_regclass('tmpos_invoice_draft.invoice_draft') is not null as present`;
+        if (!present) return;
+        const [state] = await owner`select
+          (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[]))::int as drafts,
+          (select count(*) from tmpos_invoice_draft.invoice_draft_line where tenant_id = any(${TENANTS}::uuid[]))::int as lines,
+          (select count(*) from public.audit_event where subject_invoice_draft_id is not null and tenant_id = any(${TENANTS}::uuid[]))::int as subjects,
+          (select count(*) from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[]))::int as anchors`;
+        assert.deepEqual({ ...state }, { drafts: 0, lines: 0, subjects: 0, anchors: 0 }, 'R8: nothing of this file blocks 028\'s rollback');
+      });
     }
     if (UIDS.length > 0) {
       await step(async () => {
@@ -788,7 +871,7 @@ async function actor(label, memberships, { role = null } = {}) {
   await owner`insert into app_user (internal_user_id, status) values (${id}, 'active')`;
   for (const m of memberships) {
     await owner`insert into user_membership (internal_user_id, tenant_id, store_id, scope_type, role_id, status)
-      values (${id}, ${m.tenant}, null, 'tenant', ${m.role}, 'active')`;
+      values (${id}, ${m.tenant}, ${m.store ?? null}, ${m.store === undefined ? 'tenant' : 'store'}, ${m.role}, 'active')`;
   }
   UIDS.push(uid);
   const who = { id, uid, label, email: `${label}-${SUFFIX}@shop.tmpos.test`, password: `synthetic-${label}-password` };
@@ -799,6 +882,8 @@ async function actor(label, memberships, { role = null } = {}) {
   return who;
 }
 const grant = (tenant, role) => ({ tenant, role });
+/** A STORE-scope grant (M7B-INVOICES-P1): what the draft routes decide on, at exactly that store. */
+const storeGrant = (tenant, store, role) => ({ tenant, store, role });
 
 async function newTenant(label) {
   const [{ tenant_id: tenant }] = await owner`insert into tenant (display_name, status) values (${`m7srl-${label}-${SUFFIX}`}, 'active') returning tenant_id`;
@@ -915,6 +1000,9 @@ async function shopApi(ev, u) {
   await passGates(s, rec, 'response');
   // st.lose: the entry answered (and committed whatever it committed); the answer never reaches the page.
   if (s.lose?.(rec, 'response')) { rec.lost = 'response'; return null; }
+  // handedBack: the answer is on its way to the page (SDB-03 waits for it before sampling a released answer's effect). A
+  // request the page has aborted meanwhile is gone: Chrome refuses the fulfilment and the page never receives the answer.
+  rec.handedBack = true;
   return { status: res.status, headers: res.pairs, body: res.body };
 }
 
@@ -1170,7 +1258,23 @@ async function assertNoLeak(page) {
 // the suite
 // ---------------------------------------------------------------------------------------------------------------------
 
+/**
+ * Every scenario this file must register, by id: a lost registration (a deleted or mis-merged scenario) fails the run in
+ * after(), instead of leaving a smaller run green (M7B-INVOICES-P1). Add an id with its scenario.
+ */
+const REQUIRED_SCENARIOS = Object.freeze([
+  'SRL-W', 'SRL-01', 'SRL-02', 'SRL-03', 'SRL-04', 'SRL-05', 'SRL-06', 'SRL-07', 'SRL-08', 'SRL-08T', 'SRL-09', 'SRL-10',
+  'SRL-11', 'SRL-12', 'SRL-13', 'SRL-14', 'SRL-15', 'SRL-16',
+  'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
+  'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
+  'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04',
+]);
+const registered = new Set();
+const repeated = [];
+
 function scenario(id, title, fn, timeout = 180_000) {
+  if (registered.has(id)) repeated.push(id);
+  registered.add(id);
   test(`${id}: ${title}`, { timeout }, async () => {
     st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
@@ -1236,6 +1340,13 @@ after(async () => {
   await stopped(entry2).catch((e) => console.warn(redact(`second entry teardown: ${e.message}`)));
   entry2 = null;
   await teardownDatabase();
+  // Checked here, after the teardown: node runs the first scenario (and with it before()) while later ones still register.
+  // The list and the registrations must match exactly: none missing, none unlisted, no id registered twice.
+  assert.deepEqual(
+    { missing: REQUIRED_SCENARIOS.filter((id) => !registered.has(id)), unlisted: [...registered].filter((id) => !REQUIRED_SCENARIOS.includes(id)), repeated },
+    { missing: [], unlisted: [], repeated: [] },
+    'the browser scenario inventory',
+  );
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3118,8 +3229,12 @@ async function pickRow(page, id) {
   await page.click(`${by('picker-row')}[data-id="${id}"] ${by('picker-select')}`);
   await page.waitFor(`!${q('picker-dialog')} && ${q('picker-value')}?.dataset.id === ${JSON.stringify(id)}`, 15_000, `the draft names ${id}`);
 }
-/** ServerCustomerPicker.tsx's SERVER_DRAFT_LIMIT_TEXT (a literal: this file loads against the entry commit's tree too). */
-const SERVER_DRAFT_LIMIT = "This draft uses a customer saved on the server. Creating an invoice for a server customer isn't available yet, so this draft can't be created. To create the invoice here, choose a customer from this browser's list instead.";
+/**
+ * ServerCustomerPicker.tsx's SERVER_DRAFT_LIMIT_TEXT (a literal: this file loads against the entry commit's tree too). Since
+ * M7B-INVOICES-P1 it names "Save as server draft" (design R10 changes this text deliberately); the limit itself — no
+ * invoice for a server customer, Generate disabled — is unchanged and still asserted.
+ */
+const SERVER_DRAFT_LIMIT = "This draft uses a customer saved on the server, so no invoice can be generated here for it. To keep this customer, use \"Save as server draft\": only the customer is carried over, not these lines. To generate the invoice here, choose a customer from this browser's list instead.";
 const boundId = (page) => page.evaluate(`${q('picker-value')}?.dataset.id ?? null`);
 
 scenario('SCB-15', 'INVOICE DRAFT PICKER (M7A-CUSTOMERS-P9, AC-09) — "Create Invoice" opens a draft whose picker reads only GET /api/v1/customers: a search over two pages binds a second-page customer by its database id, the server-customer limit shows and Generate stays disabled; of two identical names the second is bound exactly; Change then Cancel keeps the binding; Remove clears it; a local customer replaces a server one; nothing is written and no other tenant\'s customer is ever answered', async () => {
@@ -3539,13 +3654,14 @@ scenario('SRL-13', 'INVOICES LEVEL — the Permissions tab holds a labelled, ser
   await invReady(page);
   const customersWas = await domainState(tenant, 'sales_staff', 'customers');
   assert.deepEqual(await domainState(tenant, 'sales_staff', 'invoices'), { level: null, version: null, audits: [] }, 'no Invoices row, version or audit yet');
-  // The panel says what it is, and does not claim invoices themselves are saved or enforced on the server.
+  // The panel says what it is: the level decides server drafts (M7B-INVOICES-P1); other invoices stay in this browser, unchecked.
   const copy = await page.evaluate(`(() => {
     const section = document.querySelector('[data-testid="server-invoice-levels"]');
     return { heading: document.getElementById(section.getAttribute('aria-labelledby'))?.textContent.trim(), text: section.textContent };
   })()`);
   assert.equal(copy.heading, 'Server-saved Invoices level');
-  assert.ok(copy.text.includes('only the Invoices level of the built-in roles') && copy.text.includes('still saved in this browser') && copy.text.includes('not enforced by the server'), copy.text);
+  assert.ok(copy.text.includes('only the Invoices level of the built-in roles') && copy.text.includes('decide who may save, list and open server drafts at a store')
+    && copy.text.includes('Other invoices are still saved in this browser and are not checked by the server'), copy.text);
   assert.equal(await page.evaluate(`document.querySelectorAll('[data-testid="server-customer-levels"]').length`), 1, 'the Customers panel is still there, once');
   assert.equal(await page.evaluate(`(() => { const ids = [...document.querySelectorAll('[id]')].map((e) => e.id); return ids.length === new Set(ids).size; })()`), true, 'no id is used twice with both panels mounted');
   assert.equal((await rowOf(page, 'store_owner', INV))?.text?.includes('Full — fixed'), true, 'the store owner row is fixed');
@@ -3747,3 +3863,706 @@ for (const [domain, { id, prefix, ready, isReadBack }] of Object.entries(LOST_RE
     await waitRow(page, 'sales_staff', 'view', 'Custom', prefix);
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P1 — store-owned invoice drafts saved on the server (the Invoices page's "Server drafts" section)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Literals, as above: this file must load against the entry commit's tree as well. */
+const DRAFT_ACTION = 'store.invoice_draft.create';
+const DRAFT_EVENT = 'invoice_draft.created';
+const STORES = '/api/v1/stores';
+const draftsPath = (store) => `${STORES}/${store}/invoice-drafts`;
+/** ServerInvoiceDrafts.tsx DRAFTS_TEXT.saved. */
+const DRAFT_SAVED = 'Draft saved on the server.';
+const SAVED_EARLIER = 'A server draft was saved under an earlier connection.';
+const MICROS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const isStoresRead = (r) => r.method === 'GET' && r.path === STORES;
+const isDraftsRoute = (r) => r.path.startsWith(`${STORES}/`);
+const isDraftCreate = (r) => r.method === 'POST' && /^\/api\/v1\/stores\/[^/]+\/invoice-drafts$/.test(r.path);
+const isDraftList = (store) => (r) => r.method === 'GET' && r.path === draftsPath(store);
+const isDraftGet = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}`;
+const minus = (a, b) => Object.fromEntries(Object.keys(a).map((k) => [k, a[k] - b[k]]));
+
+/** Integer cents as the shop shows them ($1,234.56): digit arithmetic only. */
+const usd = (cents) => `$${String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${String(cents % 100).padStart(2, '0')}`;
+/** ServerCustomerDirectory.tsx createdText: the UTC date and minute of a stored instant. */
+const minuteOf = (iso) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+
+/** A line as the user types it (a description, a whole quantity, a price in dollars) and the cents it must become. */
+const typed = (description, quantity, price, cents) => ({ description, quantity, price, cents });
+/** The exact POST body the shop must send (invoiceDraftsClient.ts draftBody: these keys in this order, amounts as numbers). */
+const bodyFor = (tenant, customerId, lines) => JSON.stringify({
+  expectedTenant: tenant, customerId, currency: 'USD',
+  lines: lines.map((l) => ({ description: l.description, quantity: Number(l.quantity), unitPriceCents: l.cents })),
+});
+/** The lines as stored and answered: in order, each total quantity x unit price. */
+const linesFor = (lines) => lines.map((l, i) => ({
+  position: i + 1, description: l.description, quantity: Number(l.quantity), unitPriceCents: l.cents, lineTotalCents: Number(l.quantity) * l.cents,
+}));
+const subtotalOf = (lines) => lines.reduce((n, l) => n + Number(l.quantity) * l.cents, 0);
+/** The reopen dialog's table cells for `lines`: position, description, quantity, unit price, line total. */
+const viewCells = (lines) => linesFor(lines).map((l) => [String(l.position), l.description, String(l.quantity), usd(l.unitPriceCents), usd(l.lineTotalCents)]);
+
+async function newStore(tenant, name) {
+  const [{ store_id: id }] = await owner`insert into store (tenant_id, store_name, status) values (${tenant}, ${name}, 'active') returning store_id`;
+  return id;
+}
+
+/**
+ * A tenant of its own with stores named `M7SDB <label> <each> <suffix>` (their byte order is the order given) and an owner
+ * who signs in to the shop: its tenant grant (the shop's sign-in, the customer picker and the customer names) and a
+ * store_owner STORE grant at every store (the draft routes, decided at the store the path names only).
+ */
+async function draftShop(label, storeLabels) {
+  const tenant = await newTenant(label);
+  const stores = [];
+  for (const s of storeLabels) {
+    const name = `M7SDB ${label} ${s} ${SUFFIX}`;
+    stores.push({ id: await newStore(tenant, name), name });
+  }
+  const boss = await actor(`${label}-owner`, [grant(tenant, 'store_owner'), ...stores.map((s) => storeGrant(tenant, s.id, 'store_owner'))], { role: 'store_owner' });
+  return { tenant, stores, boss };
+}
+
+/** D/L/A/O: one tenant's drafts, lines, draft create audits and draft events, as the database owner reads them. */
+async function draftCounts(tenant) {
+  const [r] = await owner`select
+    (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = ${tenant})::int as d,
+    (select count(*) from tmpos_invoice_draft.invoice_draft_line where tenant_id = ${tenant})::int as l,
+    (select count(*) from public.audit_event where action_id = ${DRAFT_ACTION} and tenant_id = ${tenant})::int as a,
+    (select count(*) from tmpos_internal.outbox_event where event_type = ${DRAFT_EVENT}
+      and (payload ->> 'storeId')::uuid in (select store_id from public.store where tenant_id = ${tenant}))::int as o`;
+  return { D: r.d, L: r.l, A: r.a, O: r.o };
+}
+
+/** One tenant's drafts as stored, in the list's order ((created_at, draft_id) newest first), each with its lines in order. */
+async function storedDrafts(tenant) {
+  const drafts = await owner`select draft_id, store_id, customer_id, status, currency, version::int as version, line_count,
+      subtotal_cents::text as subtotal, to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as created_at
+    from tmpos_invoice_draft.invoice_draft where tenant_id = ${tenant} order by created_at desc, draft_id desc`;
+  const lines = await owner`select draft_id, position, description, quantity::text as quantity, unit_price_cents::text as price,
+      line_total_cents::text as total
+    from tmpos_invoice_draft.invoice_draft_line where tenant_id = ${tenant} order by draft_id, position`;
+  return Array.from(drafts, (d) => ({
+    id: d.draft_id, storeId: d.store_id, customerId: d.customer_id, status: d.status, currency: d.currency, version: d.version,
+    lineCount: d.line_count, subtotalCents: Number(d.subtotal), createdAt: d.created_at,
+    lines: Array.from(lines).filter((l) => l.draft_id === d.draft_id).map((l) => ({
+      position: l.position, description: l.description, quantity: Number(l.quantity), unitPriceCents: Number(l.price), lineTotalCents: Number(l.total),
+    })),
+  }));
+}
+
+/** The draft create audits of one tenant: their scope, store and subject, oldest first. */
+async function draftAudits(tenant) {
+  const rows = await owner`select scope_type, store_id, subject_invoice_draft_id from public.audit_event
+    where action_id = ${DRAFT_ACTION} and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => ({ scope: r.scope_type, store: r.store_id, subject: r.subject_invoice_draft_id }));
+}
+
+/** The Invoices page by in-app navigation, then "Show server drafts"; answers the draft requests sent BEFORE that press. */
+async function openDrafts(page) {
+  const from = st.api.length;
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the Server drafts section offers Show');
+  await page.settle();
+  const early = sentBy(page, (r) => isStoresRead(r) || isDraftsRoute(r), from).map(apiLine);
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  return early;
+}
+const storeOptions = (page) => page.evaluate(`[...(${q('drafts-store')}?.options ?? [])].map((o) => ({ value: o.value, text: o.textContent.trim() }))`);
+const chosenStore = (page) => page.evaluate(`${q('drafts-store')}?.value ?? null`);
+const listPhase = (page) => page.evaluate(`${q('drafts-list-state')}?.dataset.phase ?? null`);
+const holdState = (page) => page.evaluate(`${q('drafts-hold')}?.dataset.state ?? null`);
+/** Choose `id` in the store select as a user does: the select's own change event. */
+async function pickStore(page, id) {
+  await page.evaluate(`(() => { const s = ${q('drafts-store')}; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+}
+const draftRowsOf = (page) => page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('drafts-row'))})].map((li) => ({
+  id: li.dataset.id ?? null,
+  customer: li.querySelector(${JSON.stringify(by('drafts-row-customer'))})?.textContent.trim() ?? null,
+  created: li.querySelector(${JSON.stringify(by('drafts-row-created'))})?.textContent.trim() ?? null,
+  lines: li.querySelector(${JSON.stringify(by('drafts-row-lines'))})?.textContent.trim() ?? null,
+  subtotal: li.querySelector(${JSON.stringify(by('drafts-row-subtotal'))})?.textContent.trim() ?? null,
+}))`);
+/** The list's read settled ('ready') showing exactly `ids` in that order, and (when given) `customer` on its first row. */
+async function waitDraftRows(page, ids, label, customer = null) {
+  let seen;
+  await page.waitFor(async () => {
+    seen = await draftRowsOf(page);
+    return JSON.stringify(seen.map((r) => r.id)) === JSON.stringify(ids) && (await listPhase(page)) === 'ready' && (customer === null || seen[0]?.customer === customer);
+  }, 30_000, label).catch((e) => { throw new Error(`${e.message}; rows shown: ${JSON.stringify(seen)?.slice(0, 600)}`); });
+  return seen;
+}
+/** Type over one field of line `i` (0-based) of the New server draft dialog as a user does: select it all, then type. */
+async function typeLineField(page, i, field, text) {
+  const mark = `[data-sdb="line-${i}-${field}"]`;
+  await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('draft-new-line'))})][${i}].querySelector(${JSON.stringify(by(`draft-new-${field}`))}).setAttribute('data-sdb', 'line-${i}-${field}')`);
+  await page.click(mark);
+  await page.evaluate(`document.querySelector(${JSON.stringify(mark)}).select()`);
+  await page.type(text);
+  await page.waitFor(`document.querySelector(${JSON.stringify(mark)})?.value === ${JSON.stringify(text)}`, 10_000, `line ${i + 1} ${field} reads what was typed`);
+}
+/** "New server draft" for the chosen store: a server customer picked by its database id in the picker, then `lines` typed. */
+async function composeDraft(page, customerId, lines) {
+  await page.click(by('drafts-new'));
+  await page.waitFor(`!!${q('draft-new')}`, 15_000, 'the New server draft dialog');
+  await openPicker(page, 'picker-open');
+  await pickRow(page, customerId);
+  for (const [i, line] of lines.entries()) {
+    if (i > 0) {
+      await page.click(by('draft-new-add-line'));
+      await page.waitFor(`document.querySelectorAll(${JSON.stringify(by('draft-new-line'))}).length === ${i + 1}`, 10_000, `line ${i + 1} added`);
+    }
+    await typeLineField(page, i, 'description', line.description);
+    await typeLineField(page, i, 'quantity', line.quantity);
+    await typeLineField(page, i, 'price', line.price);
+  }
+}
+/** What the read-only reopen dialog shows. */
+const viewOf = (page) => page.evaluate(`({
+  customer: ${q('draft-view-customer')}?.textContent.trim() ?? null,
+  store: ${q('draft-view-store')}?.textContent.trim() ?? null,
+  created: ${q('draft-view-created')}?.textContent.trim() ?? null,
+  status: ${q('draft-view-status')}?.textContent.trim() ?? null,
+  subtotal: ${q('draft-view-subtotal')}?.textContent.trim() ?? null,
+  lines: [...document.querySelectorAll(${JSON.stringify(by('draft-view-line'))})].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
+})`);
+/** Open row `id` read-only; answers what the dialog shows once the customer's name has been read. */
+async function reopenDraft(page, id, customerName) {
+  await page.click(`${by('drafts-row')}[data-id="${id}"] ${by('drafts-open')}`);
+  await page.waitFor(`!!${q('draft-view-lines')} && ${q('draft-view-customer')}?.textContent.trim() === ${JSON.stringify(customerName)}`, 30_000, 'the reopened draft, its customer named');
+  return viewOf(page);
+}
+async function closeView(page) {
+  await page.click(by('draft-view-close'));
+  await page.waitFor(`!${q('draft-view')}`, 15_000, 'the reopen dialog closed');
+}
+/** The browser's own invoice table (the Invoices page's list): its row count and text. */
+const localInvoices = (page) => page.evaluate(`(() => {
+  const table = [...document.querySelectorAll('table')].find((t) => t.querySelector('th')?.textContent.trim() === 'Invoice #');
+  return table ? { rows: table.querySelectorAll('tbody > tr').length, text: table.textContent } : null;
+})()`);
+
+/** Every value in the page's address, its local and session storage and every IndexedDB object store (as JSON text). */
+const STORAGE_DUMP = `(async () => {
+  const out = { address: location.href, local: JSON.stringify(Object.entries(localStorage)), session: JSON.stringify(Object.entries(sessionStorage)), indexedDB: '' };
+  for (const { name } of await indexedDB.databases()) {
+    const db = await new Promise((ok, no) => { const r = indexedDB.open(name); r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); });
+    for (const store of db.objectStoreNames) {
+      out.indexedDB += JSON.stringify(await new Promise((ok, no) => { const r = db.transaction(store).objectStore(store).getAll(); r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); }));
+    }
+    db.close();
+  }
+  return JSON.stringify(out);
+})()`;
+/**
+ * Wrappers installed in every document of a page before any script of the app runs: each value written to local or session
+ * storage, each address pushed or replaced, and each value put or added to IndexedDB is told to the test (a CDP binding),
+ * so a value written and removed again before the end is still seen.
+ */
+const WRITE_HOOKS = `(() => {
+  const tell = (where, values) => { let text; try { text = JSON.stringify(values); } catch { text = String(values); } try { window.__sdbWrite(where + ' ' + text); } catch { /* no binding */ } };
+  const setItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (key, value) { tell('storage', [key, value]); return setItem.call(this, key, value); };
+  for (const name of ['pushState', 'replaceState']) {
+    const original = History.prototype[name];
+    History.prototype[name] = function (state, title, url) { tell('address', [String(url ?? ''), state]); return original.call(this, state, title, url); };
+  }
+  for (const name of ['put', 'add']) {
+    const original = IDBObjectStore.prototype[name];
+    IDBObjectStore.prototype[name] = function (value, key) { tell('indexedDB', [value, key ?? null]); return original.apply(this, arguments); };
+  }
+})()`;
+/** Record every write WRITE_HOOKS sees on `page` into page.writes, from its next document on (call before signIn). */
+async function recordWrites(page) {
+  page.writes = [];
+  page.on('Runtime.bindingCalled', (e) => { if (e.name === '__sdbWrite') page.writes.push(e.payload); });
+  await page.send('Runtime.addBinding', { name: '__sdbWrite' });
+  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: WRITE_HOOKS });
+  return page;
+}
+
+/**
+ * None of `values` (draft ids, Idempotency-Keys, customer ids, descriptions, bodies) in a page's address, browser storage,
+ * own console or exceptions (the browser's network log lines are its own, not the shop's), or in any log line either
+ * tenant entry wrote — at the end, and (recordWrites) in anything written to the address or storage on the way.
+ */
+async function assertDraftsNowhere(pages, values) {
+  assert.ok(values.every((v) => typeof v === 'string' && v.length >= 8), 'every value is a real one');
+  for (const page of pages) {
+    assert.ok(page.writes?.some((w) => w.startsWith('address ')), 'the write recorder saw the page\'s own navigations');
+    for (const w of page.writes) for (const v of values) assert.ok(!w.includes(v), `written on the way: ${w.slice(0, w.indexOf(' '))} held draft data (${v.slice(0, 8)}…)`);
+    const seen = JSON.parse(await page.evaluate(STORAGE_DUMP));
+    for (const [where, text] of Object.entries(seen)) for (const v of values) assert.ok(!text.includes(v), `${where} holds draft data (${v.slice(0, 8)}…)`);
+    for (const line of page.logs.filter((l) => l.startsWith('console.') || l.startsWith('exception:'))) {
+      for (const v of values) assert.ok(!line.includes(v), `the page's console holds draft data (${v.slice(0, 8)}…)`);
+    }
+  }
+  const lines = [...(entry?.cap.lines ?? []), ...(entry2?.cap.lines ?? [])];
+  assert.ok(lines.length > 0, 'the entries\' log lines were captured');
+  for (const line of lines) for (const v of values) assert.ok(!line.includes(v), `a tenant entry log line holds draft data (${v.slice(0, 8)}…)`);
+}
+
+scenario('SDB-01', 'AC-13 SAVE, RELOAD, LIST, REOPEN — the owner chooses a real store (nothing preselected), picks an existing server customer and saves a three-line draft: ONE POST of the exact body, 201, one draft with its ordered lines, one store-scope audit, one event, one completion; after a reload the store\'s list shows it and the read-only reopen shows the persisted lines, amounts and creation time; the other store lists nothing; a second browser through the second entry reopens it; nothing in the address, storage or logs', async () => {
+  const { tenant, stores: [north, south], boss } = await draftShop('d1', ['north', 'south']);
+  const customers = await seedCustomers(tenant, [`M7SDB d1 Avery ${SUFFIX}`, `M7SDB d1 Blake ${SUFFIX}`, `M7SDB d1 Casey ${SUFFIX}`]);
+  const customer = customers[1];
+  const lines = [
+    typed(`Screen repair, café counter ${SUFFIX}`, '1', '129.99', 12_999),
+    typed(`Battery pack ${SUFFIX}`, '2', '45.50', 4_550),
+    typed(`Labour hour ${SUFFIX}`, '3', '60', 6_000),
+  ];
+  const subtotal = subtotalOf(lines);
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+
+  // 1. Nothing is read before Show; the stores are the server's, in its order, and none is chosen for the user.
+  const early = await openDrafts(page);
+  const options = await storeOptions(page);
+  const unchosen = { value: await chosenStore(page), hint: await has(page, 'drafts-choose'), listReads: sentBy(page, isDraftsRoute).map(apiLine) };
+  await pickStore(page, north.id);
+  await waitDraftRows(page, [], 'the north store has no draft yet');
+  const localBefore = await localInvoices(page);
+
+  // 2. The draft: a server customer, three lines, Save draft.
+  await composeDraft(page, customer.id, lines);
+  const dialog = { store: await textOf(page, 'draft-new-store'), subtotal: await textOf(page, 'draft-new-subtotal') };
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+  const from = st.api.length;
+  await page.click(by('draft-new-save'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DRAFT_SAVED)}`, 30_000, 'saved, read back, the dialog closed');
+  const stored = await storedDrafts(tenant);
+  assert.equal(stored.length, 1, 'ONE draft stored');
+  const [draft] = stored;
+  const shown = await waitDraftRows(page, [draft.id], 'the north store lists the new draft', customer.name);
+  await quiet(page, from);
+  const posts = sentBy(page, isDraftCreate);
+  const readBack = sentBy(page, isDraftGet(north.id, draft.id), from);
+  const dDelta = minus(await draftCounts(tenant), dBefore);
+  const audits = await draftAudits(tenant);
+  const localAfter = await localInvoices(page);
+  record('SDB-01', { phase: 'saved', early, options: options.length, unchosen, dialog, posts: posts.map(apiLine), readBack: readBack.map(answered), ...dDelta });
+
+  assert.deepEqual(early, [], 'nothing about stores or drafts is read before "Show server drafts"');
+  assert.deepEqual(options, [{ value: '', text: 'Choose a store…' }, { value: north.id, text: north.name }, { value: south.id, text: south.name }],
+    'the server\'s stores, in its order, under their own names');
+  assert.deepEqual(unchosen, { value: '', hint: true, listReads: [] }, 'no store is chosen for the user, and no list is read before the choice');
+  assert.deepEqual(dialog, { store: north.name, subtotal: `Draft subtotal ${usd(subtotal)}` }, 'the dialog names the chosen store and the exact Draft subtotal');
+  assert.equal(posts.length, 1, `ONE POST: ${posts.map(apiLine).join('; ')}`);
+  const [post] = posts;
+  assert.equal(post.path, draftsPath(north.id), 'to the chosen store');
+  assert.equal(post.query, '', 'nothing rides the query');
+  assert.equal(post.body, bodyFor(tenant, customer.id, lines), 'exactly the typed draft, the dollar prices parsed to exact cents');
+  assert.match(post.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.deepEqual(Object.keys(post.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], 'no selecting header');
+  assert.equal(post.status, 201);
+  assert.equal(post.replied.headers.location, `${draftsPath(north.id)}/${draft.id}`, 'its Location');
+  assert.deepEqual(JSON.parse(post.replied.text), { draft: { id: draft.id, status: 'draft', currency: 'USD', lineCount: 3, subtotalCents: subtotal } });
+  assert.deepEqual(readBack.map(answered), ['200'], 'read back once, never a second POST');
+  assert.ok(readBack[0].at > post.doneAt, 'the read-back follows the 201');
+  assert.deepEqual(draft, {
+    id: draft.id, storeId: north.id, customerId: customer.id, status: 'draft', currency: 'USD', version: 1, lineCount: 3, subtotalCents: subtotal,
+    createdAt: draft.createdAt, lines: linesFor(lines),
+  }, 'the draft as stored: its store, customer, USD cents, subtotal and ordered lines');
+  assert.match(draft.createdAt, MICROS);
+  assert.deepEqual(dDelta, { D: 1, L: 3, A: 1, O: 1 }, 'one draft, three lines, one audit, one event');
+  assert.deepEqual(audits, [{ scope: 'store', store: north.id, subject: draft.id }], 'the audit is store-scope and names the draft');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'the save');
+  assert.deepEqual(shown, [{ id: draft.id, customer: customer.name, created: minuteOf(draft.createdAt), lines: '3 lines', subtotal: `Draft subtotal ${usd(subtotal)}` }]);
+  assert.ok(localBefore !== null && localAfter !== null, 'the local invoice table is on the page');
+  assert.equal(localAfter.rows, localBefore.rows, 'the browser\'s own invoice list gains no row');
+  assert.ok(lines.every((l) => !localAfter.text.includes(l.description)), 'no server draft line in the local invoice list');
+
+  // 3. A reload: the hold is gone with the page; the server's list and reopen show what was saved.
+  const reload = st.api.length;
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the reloaded Invoices page');
+  const reloaded = { hold: await has(page, 'drafts-hold'), notice: await has(page, 'drafts-notice') };
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  const chosenAfterReload = await chosenStore(page);
+  await pickStore(page, north.id);
+  const rowsAfterReload = await waitDraftRows(page, [draft.id], 'the saved draft after a reload', customer.name);
+  const view = await reopenDraft(page, draft.id, customer.name);
+  const got = sentBy(page, isDraftGet(north.id, draft.id), reload);
+  await closeView(page);
+  await pickStore(page, south.id);
+  await waitDraftRows(page, [], 'the south store lists nothing');
+  const localReloaded = await localInvoices(page);
+  record('SDB-01', { phase: 'reloaded', reloaded, chosenAfterReload, view, got: got.map(answered) });
+
+  assert.deepEqual(reloaded, { hold: false, notice: false }, 'a fresh page: nothing held, nothing said');
+  assert.equal(chosenAfterReload, '', 'no store is remembered');
+  assert.deepEqual(rowsAfterReload, shown, 'the same row from the server');
+  assert.deepEqual(got.map(answered), ['200'], 'the reopen is one read of its own');
+  assert.deepEqual(JSON.parse(got[0].replied.text), {
+    draft: {
+      id: draft.id, storeId: north.id, customerId: customer.id, status: 'draft', currency: 'USD', version: 1, createdAt: draft.createdAt,
+      subtotalCents: subtotal, lines: linesFor(lines),
+    },
+  }, 'the answer: the stored draft, its creation time to the microsecond');
+  assert.deepEqual(view, {
+    customer: customer.name, store: north.name, created: minuteOf(draft.createdAt), status: 'Draft · USD',
+    subtotal: `Draft subtotal ${usd(subtotal)}`, lines: viewCells(lines),
+  }, 'the read-only reopen: the persisted lines, amounts and creation time');
+  assert.equal(localReloaded?.rows, localBefore.rows, 'after the reload, list and reopen, the local invoice list still has no new row');
+  assert.ok(lines.every((l) => !localReloaded.text.includes(l.description)), 'nor any server draft line');
+
+  // 4. Another authorized session: a second browser through the second tenant entry.
+  const other = viaSecond(await recordWrites(await openPage()));
+  await signIn(other, boss);
+  await openDrafts(other);
+  await pickStore(other, north.id);
+  await waitDraftRows(other, [draft.id], 'the second browser lists the draft', customer.name);
+  const otherView = await reopenDraft(other, draft.id, customer.name);
+  const otherReads = sentBy(other, isDraftsRoute);
+  assert.deepEqual(otherView, view, 'the same draft in another session');
+  assert.ok(otherReads.length > 0 && otherReads.every((r) => r.via === 2 && r.status === 200), `through the second entry: ${otherReads.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(other, isDraftCreate), [], 'the second browser sent no POST');
+  await closeView(other);
+  const otherLocal = await localInvoices(other);
+  assert.ok(otherLocal !== null && lines.every((l) => !otherLocal.text.includes(l.description)), 'no server draft line in the second browser\'s local invoice list');
+
+  await assertDraftsNowhere([page, other], [draft.id, post.headers['idempotency-key'], customer.id, post.body, ...lines.map((l) => l.description)]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-02', 'AC-14 LOST REPLY — the POST commits and its answer is dropped at the front: a double press sends ONE POST, held "Not confirmed yet"; a focus and a visibilitychange event, closing the dialog, leaving and coming back and a list that shows the draft send nothing; "Check again" sends exactly one more POST with the SAME key and byte-identical body, a 201 replay; ONE draft row in the database', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d2', ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d2 Dana ${SUFFIX}`]);
+  const lines = [typed(`Diagnostics ${SUFFIX}`, '1', '35', 3_500), typed(`Charging port ${SUFFIX}`, '2', '89.95', 8_995)];
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [], 'no draft yet');
+  await composeDraft(page, customer.id, lines);
+  const myPosts = () => sentBy(page, isDraftCreate);
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+  let lost = 0;
+  try {
+    // st.lose: the entry answered (and committed); that answer never reaches the page.
+    st.lose = (rec, phase) => phase === 'response' && isDraftCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-new-save'));
+    await page.click(by('draft-new-save')); // a second press, at once: in flight, it sends nothing
+    await waitData(page, 'drafts-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const [first] = myPosts();
+  const afterLoss = { posts: myPosts().map((r) => `${r.status} ${r.lost ?? 'delivered'}`), d: await draftCounts(tenant), stored: await storedDrafts(tenant) };
+  const card = await textOf(page, 'drafts-hold');
+  record('SDB-02', { phase: 'lost reply', posts: afterLoss.posts, ...minus(afterLoss.d, dBefore), card });
+  assert.deepEqual(afterLoss.posts, ['201 response'], 'ONE POST for a double press: it committed, its answer lost at the front');
+  assert.equal(first.body, bodyFor(tenant, customer.id, lines));
+  assert.match(first.headers['idempotency-key'] ?? '', UUID_V4_RE);
+  assert.deepEqual(minus(afterLoss.d, dBefore), { D: 1, L: 2, A: 1, O: 1 }, 'the lost create committed: one draft, its lines, audit and event');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'the create whose answer was lost');
+  assert.ok(card.startsWith('Not confirmed yet'), `held, never saved: ${card}`);
+  assert.equal(await has(page, 'drafts-notice'), false, 'never "saved" on an answer that did not arrive');
+  const [stored] = afterLoss.stored;
+
+  // Nothing re-sends on its own: a focus and a visibilitychange event, the dialog closed, the page left and opened again, a list read
+  // that SHOWS the committed draft (a list is not proof of an uncertain create), and time.
+  const mid = await counts();
+  const barrier = st.api.length;
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await page.evaluate(`document.dispatchEvent(new Event('visibilitychange'))`);
+  await page.click(by('draft-new-cancel'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-hold')}?.dataset.state === 'unresolved'`, 15_000, 'the dialog hidden, the attempt still held in the section');
+  await go(page, '/');
+  await page.waitFor(`!${q('drafts-section')}`, 15_000, 'the Invoices page left');
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [stored.id], 'the list shows the committed draft');
+  await quiet(page, barrier);
+  await delay(2_000); // whatever it would still send on its own, it has sent
+  const held = { posts: myPosts().length, state: await holdState(page), check: await offered(page, 'drafts-check-again'), notice: await has(page, 'drafts-notice') };
+  record('SDB-02', { phase: 'before the retry click', ...held, requests: st.api.slice(barrier).filter((r) => r.frameId === page.frameId).map(apiLine) });
+  assert.deepEqual(held, { posts: 1, state: 'unresolved', check: true, notice: false }, 'still ONE POST, still held, Check again offered');
+  assert.deepEqual(await draftCounts(tenant), afterLoss.d, 'nothing more stored');
+  await assertDelta(mid, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no completion or idempotency record without a press');
+
+  // Check again: the SAME key and the SAME bytes, once; the server answers the stored draft as a replay.
+  const again = st.api.length;
+  await page.click(by('drafts-check-again'));
+  await page.waitFor(`${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DRAFT_SAVED)} && !${q('drafts-hold')}`, 30_000, 'confirmed by the check and read back');
+  await waitDraftRows(page, [stored.id], 'the list shows it once');
+  await quiet(page, again);
+  const posts = myPosts();
+  const [{ n: rows }] = await owner`select count(*)::int as n from tmpos_invoice_draft.invoice_draft where tenant_id = ${tenant}`;
+  record('SDB-02', { phase: 'Check again', posts: posts.map(apiLine), rows });
+  assert.equal(posts.length, 2, `exactly one more POST, on the press (${posts.map(apiLine).join('; ')})`);
+  const second = posts[1];
+  assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
+  assert.equal(second.path, first.path, 'to the attempt\'s own store');
+  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.equal(second.body, first.body, 'the byte-identical body');
+  assert.deepEqual([second.status, second.replied.headers['idempotent-replayed']], [201, 'true'], 'answered as a replay');
+  assert.deepEqual(JSON.parse(second.replied.text), { draft: { id: stored.id, status: 'draft', currency: 'USD', lineCount: 2, subtotalCents: subtotalOf(lines) } }, 'the sealed answer names the stored draft');
+  assert.equal(second.replied.headers.location, `${draftsPath(main.id)}/${stored.id}`);
+  assert.equal(rows, 1, 'exactly ONE draft row');
+  assert.deepEqual(await draftCounts(tenant), afterLoss.d, 'the replay wrote no draft, line, audit or event');
+  await assertDelta(mid, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'the replay wrote no completion or idempotency record');
+  await assertDraftsNowhere([page], [stored.id, first.headers['idempotency-key'], customer.id, first.body, ...lines.map((l) => l.description)]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-03', 'AC-15 STORE AND SESSION CHANGES — with an unresolved create held for one store: another store clears the scoped list at once, and a list answer for the store left behind (its read aborted by the page), released after the user moved back, shows nothing; the hold keeps its store and is never re-sent; a swapped session cookie (another session of the same owner) noticed on focus clears the stores, rows and open draft, detaches the hold, and a parked reopen answer of the old session (aborted too) shows nothing; then a late read-back answer the page does NOT abort is delivered after a third connection starts and is ignored; one POST until then, two in the whole case', async () => {
+  const { tenant, stores: [east, west], boss } = await draftShop('d3', ['east', 'west']);
+  const [cEast, cWest] = await seedCustomers(tenant, [`M7SDB d3 Ellis ${SUFFIX}`, `M7SDB d3 Wren ${SUFFIX}`]);
+  // One draft per store, saved from outside the browser by the owner's own session.
+  const direct = await directLogin(boss);
+  const seed = async (store, customer, lines) => {
+    const res = await call('POST', draftsPath(store.id), { session: direct, body: JSON.parse(bodyFor(tenant, customer.id, lines)), key: randomUUID() });
+    assert.equal(res.status, 201, res.text);
+    return JSON.parse(res.text).draft.id;
+  };
+  const eastLines = [typed(`East seed ${SUFFIX}`, '1', '10', 1_000)];
+  const westLines = [typed(`West seed one ${SUFFIX}`, '1', '20', 2_000), typed(`West seed two ${SUFFIX}`, '2', '5', 500)];
+  const dEast = await seed(east, cEast, eastLines);
+  const dWest = await seed(west, cWest, westLines);
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, [dWest], 'west lists its draft', cWest.name);
+
+  // 1. An unresolved create for west: it commits, its answer is lost; the dialog is closed (the attempt stays held).
+  const heldLines = [typed(`West held ${SUFFIX}`, '4', '2.25', 225)];
+  await composeDraft(page, cWest.id, heldLines);
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isDraftCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-new-save'));
+    await waitData(page, 'drafts-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await page.click(by('draft-new-cancel'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-hold')}?.dataset.state === 'unresolved'`, 15_000, 'the attempt held in the section');
+  const posts = () => sentBy(page, isDraftCreate);
+  const [first] = posts();
+  const stored = await storedDrafts(tenant);
+  const heldDraft = stored.find((d) => d.lines[0]?.description === heldLines[0].description);
+  assert.ok(heldDraft, 'the lost create committed');
+  const westIds = stored.filter((d) => d.storeId === west.id).map((d) => d.id);
+  const what = await textOf(page, 'drafts-hold-what');
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+
+  // 2. Store change: east's list answer is parked at the front; the user moves back to west before it is released.
+  const parkedList = gate((r) => r.frameId === page.frameId && isDraftList(east.id)(r), 'response');
+  await pickStore(page, east.id);
+  const eastRead = await Promise.race([parkedList.reached, delay(30_000).then(() => null)]);
+  assert.ok(eastRead, 'east\'s list read reached the entry; its answer is parked');
+  const whileParked = { rows: (await draftRowsOf(page)).map((r) => r.id), chosen: await chosenStore(page), phase: await listPhase(page) };
+  await pickStore(page, west.id);
+  await waitDraftRows(page, westIds, 'back on west: its rows', cWest.name);
+  parkedList.release();
+  await page.waitFor(() => eastRead.handedBack === true, 15_000, 'the parked east answer was handed back to the browser');
+  await page.settle(); // two frames, then 500 ms
+  await delay(1_000); // and a margin: whatever reaching the page would make it do, it has done (the page aborted this read
+  // when the store changed, so the answer is refused at the browser: this shows no effect of the old scope — the late
+  // answer the page does receive is step 5's)
+  const storeChange = {
+    rows: (await draftRowsOf(page)).map((r) => r.id), chosen: await chosenStore(page),
+    eastShown: (await page.evaluate('document.documentElement.outerHTML')).includes(dEast),
+    hold: await holdState(page), what: await textOf(page, 'drafts-hold-what'), posts: posts().length,
+  };
+  record('SDB-03', { phase: 'store change', parked: answered(eastRead), whileParked, storeChange });
+  assert.equal(eastRead.status, 200);
+  assert.ok(eastRead.replied.text.includes(dEast), 'the parked answer was a real one, for the store left behind');
+  assert.deepEqual(whileParked, { rows: [], chosen: east.id, phase: 'loading' }, 'choosing another store clears the scoped list at once');
+  assert.deepEqual(storeChange, { rows: westIds, chosen: west.id, eastShown: false, hold: 'unresolved', what, posts: 1 },
+    'the late answer for the store left behind changes nothing; the hold keeps its own store and nothing is re-sent');
+  assert.ok(what.startsWith(`${west.name} · 1 line · Draft subtotal ${usd(subtotalOf(heldLines))}`), `the hold names its own store: ${what}`);
+
+  // 3. Session change: a reopen read's answer is parked; the jar's session cookie becomes another valid session of the
+  //    same owner (made outside the page, as SCB-08 swaps one); a window focus lets the page notice.
+  const parkedGet = gate((r) => r.frameId === page.frameId && isDraftGet(west.id, dWest)(r), 'response');
+  await page.click(`${by('drafts-row')}[data-id="${dWest}"] ${by('drafts-open')}`);
+  const oldRead = await Promise.race([parkedGet.reached, delay(30_000).then(() => null)]);
+  assert.ok(oldRead, 'the reopen read reached the entry; its answer is parked');
+  await page.waitFor(`${q('draft-view-state')}?.dataset.phase === 'loading'`, 10_000, 'the reopen dialog waits for its read');
+  const swapped = await directLogin(boss);
+  const cookieName = swapped.cookie.slice(0, swapped.cookie.indexOf('='));
+  await browser.send('Storage.setCookies', {
+    browserContextId: page.contextId,
+    cookies: [{ name: cookieName, value: cookieValue(swapped.cookie), url: `${SHOP}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Strict' }],
+  });
+  const change = st.api.length;
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await page.waitFor(`!!${q('drafts-connection-changed')} && ${q('drafts-stores-state')}?.dataset.phase === 'ready' && !${q('draft-view')}`, 30_000,
+    'a new connection: the stores read again, the open draft gone');
+  parkedGet.release();
+  await page.waitFor(() => oldRead.handedBack === true, 15_000, 'the parked reopen answer was handed back to the browser');
+  await page.settle(); // two frames, then 500 ms
+  await delay(1_000); // and a margin, as above
+  await quiet(page, change);
+  const html = await page.evaluate('document.documentElement.outerHTML');
+  const sessionChange = {
+    chosen: await chosenStore(page), rows: (await draftRowsOf(page)).length, view: await has(page, 'draft-view'),
+    oldLinesShown: westLines.some((l) => html.includes(l.description)), hold: await holdState(page), check: await has(page, 'drafts-check-again'),
+    posts: posts().length,
+  };
+  const carried = (r) => ((r.headers.cookie ?? '').includes(cookieValue(swapped.cookie)) ? 'swapped' : 'other');
+  const checks = sentBy(page, isSessionRead, change).map(carried);
+  const storesAgain = sentBy(page, isStoresRead, change).map((r) => `${carried(r)} ${answered(r)}`);
+  record('SDB-03', { phase: 'session change', parked: answered(oldRead), sessionChange, checks, storesAgain, logins: sentBy(page, isLogin, change).map(answered) });
+  assert.equal(oldRead.status, 200);
+  assert.ok(westLines.every((l) => oldRead.replied.text.includes(l.description)), 'the parked answer was a real one, under the old session');
+  assert.ok(checks.length > 0 && checks[0] === 'swapped', 'the page checked its session with the swapped cookie');
+  assert.deepEqual(sentBy(page, isLogin, change), [], 'no login: the other session is reused');
+  assert.deepEqual(storesAgain, ['swapped 200'], 'the stores are read again, once, under the new session');
+  assert.deepEqual((await storeOptions(page)).map((o) => o.value), ['', east.id, west.id], 'the new connection\'s stores, none chosen');
+  assert.deepEqual(sessionChange, { chosen: '', rows: 0, view: false, oldLinesShown: false, hold: 'detached', check: false, posts: 1 },
+    'the stores read again with nothing chosen, no rows, no open draft, the old answer never shown, the hold detached, nothing re-sent');
+
+  // 4. Under the new session each store lists its own; still nothing is sent.
+  await pickStore(page, east.id);
+  await waitDraftRows(page, [dEast], 'east under the new session', cEast.name);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, westIds, 'west under the new session', cWest.name);
+  await quiet(page, change);
+  await delay(2_000); // whatever it would still send on its own, it has sent
+  record('SDB-03', { phase: 'after', posts: posts().map(apiLine) });
+  assert.deepEqual(posts().map((r) => `${r.status} ${r.lost ?? 'delivered'}`), ['201 response'], 'ONE POST from the page in the whole case: the lost one');
+  assert.deepEqual(await draftCounts(tenant), dBefore, 'no draft, line, audit or event after the lost create');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no completion or idempotency record after the lost create');
+  assert.deepEqual((await storedDrafts(tenant)).map((d) => d.id).sort(), [dEast, dWest, heldDraft.id].sort(), 'exactly the seeded drafts and the one the lost reply committed');
+
+  // 5. A late answer the page does NOT abort: a created draft's one read-back GET (sent under the session it was saved
+  //    with, no abort signal) has its answer parked while the cookie is swapped again and a focus starts a third
+  //    connection. Released, it reaches the page (a resource-timing entry says the fetch completed) and is ignored: it
+  //    never says "Draft saved on the server.", and the next render reports the save as one of an earlier connection.
+  await page.click(by('drafts-stop')); // the detached hold is let go: a new draft may be saved
+  await page.waitFor(`!${q('drafts-hold')} && ${q('drafts-new')}?.disabled === false`, 15_000, 'no hold; New offered');
+  const lateLines = [typed(`West late ${SUFFIX}`, '3', '1.5', 150)];
+  await composeDraft(page, cWest.id, lateLines);
+  const isReadBack = (r) => r.frameId === page.frameId && r.method === 'GET' && r.path.startsWith(`${draftsPath(west.id)}/`);
+  const parkedBack = gate(isReadBack, 'response');
+  const dLate = await draftCounts(tenant);
+  const saved = st.api.length;
+  await page.click(by('draft-new-save'));
+  const backRead = await Promise.race([parkedBack.reached, delay(30_000).then(() => null)]);
+  assert.ok(backRead, 'the read-back GET reached the entry; its answer is parked');
+  const parkedAt = performance.now();
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-hold')}?.dataset.state === 'created'`, 15_000, 'created: the dialog closed, the read-back out');
+  const [lateCreate] = sentBy(page, isDraftCreate, saved);
+  const lateId = JSON.parse(lateCreate.replied.text).draft.id;
+  assert.equal(backRead.path, `${draftsPath(west.id)}/${lateId}`, 'the parked read is the new draft\'s read-back');
+  const third = await directLogin(boss);
+  await browser.send('Storage.setCookies', {
+    browserContextId: page.contextId,
+    cookies: [{ name: cookieName, value: cookieValue(third.cookie), url: `${SHOP}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Strict' }],
+  });
+  const thirdFrom = st.api.length;
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await page.waitFor(`!!${q('drafts-connection-changed')} && ${q('drafts-stores-state')}?.dataset.phase === 'ready' && ${q('drafts-store')}?.value === ''`, 30_000,
+    'a third connection: the stores read again, nothing chosen');
+  await quiet(page, thirdFrom);
+  // The page's own record that the read-back fetch COMPLETED (an aborted fetch leaves no resource entry).
+  await page.evaluate(`(() => { window.__sdbDone = []; new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__sdbDone.push(e.name); }).observe({ type: 'resource' }); })()`);
+  const heldFor = performance.now() - parkedAt;
+  assert.ok(heldFor < 12_000, `released well inside the client's 15 s request timeout (${Math.round(heldFor)} ms): the page still waits for it`);
+  parkedBack.release();
+  await page.waitFor(() => backRead.handedBack === true, 15_000, 'the parked read-back answer was handed back to the browser');
+  await page.waitFor(`window.__sdbDone.some((n) => n.endsWith(${JSON.stringify(backRead.path)}))`, 15_000, 'the page received the late read-back answer');
+  await page.settle();
+  await delay(1_000); // whatever that answer makes the page do, it has done
+  const lateSeen = { notice: await textOf(page, 'drafts-notice'), hold: await holdState(page), posts: posts().length };
+  await pickStore(page, west.id); // the next render: the created attempt is reported under the new connection
+  await waitDraftRows(page, [lateId, ...westIds], 'west under the third session: the late draft once, newest first', cWest.name);
+  await page.waitFor(`${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(SAVED_EARLIER)}`, 15_000, 'reported as saved under an earlier connection');
+  await quiet(page, thirdFrom);
+  record('SDB-03', { phase: 'late read-back', parked: answered(backRead), heldMs: Math.round(heldFor), lateSeen, notice: await textOf(page, 'drafts-notice') });
+  assert.equal(backRead.status, 200);
+  assert.ok(backRead.replied.text.includes(lateLines[0].description), 'the parked answer was a real one, the new draft as stored');
+  assert.notEqual(lateSeen.notice, DRAFT_SAVED, 'the late answer of the old connection never says "Draft saved on the server."');
+  // Ignored: the created attempt is kept for the new connection to report (on its next render, which may already have run).
+  assert.ok(lateSeen.hold === 'created' ? lateSeen.notice === null : lateSeen.hold === null && lateSeen.notice === SAVED_EARLIER, `ignored: ${JSON.stringify(lateSeen)}`);
+  assert.equal(lateSeen.posts, 2, 'nothing re-sent');
+  assert.equal(await has(page, 'drafts-hold'), false);
+  assert.deepEqual(sentBy(page, isReadBack, thirdFrom).filter((r) => r.path === backRead.path), [], 'no second read-back under the new connection');
+  assert.deepEqual(posts().map((r) => `${r.status} ${r.lost ?? 'delivered'}`), ['201 response', '201 delivered'], 'two POSTs in the whole case: the lost one and the late draft');
+  assert.deepEqual(minus(await draftCounts(tenant), dLate), { D: 1, L: 1, A: 1, O: 1 }, 'the late draft: one draft, its line, audit and event');
+  await assertDraftsNowhere([page], [dEast, dWest, heldDraft.id, lateId, first.headers['idempotency-key'], lateCreate.headers['idempotency-key'], cEast.id, cWest.id,
+    first.body, lateCreate.body, ...[...eastLines, ...westLines, ...heldLines, ...lateLines].map((l) => l.description)]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-04', 'AC-14 LOST REQUEST — the first POST never reaches the entry (dropped at the front): ONE POST, held "Not confirmed yet", nothing stored; a focus sends nothing; "Check again" sends exactly one more POST with the SAME key and byte-identical body, answered 201 as the key\'s FIRST create (no replay): exactly ONE draft row', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d4', ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d4 Drew ${SUFFIX}`]);
+  const lines = [typed(`Battery swap ${SUFFIX}`, '1', '49.5', 4_950)];
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [], 'no draft yet');
+  await composeDraft(page, customer.id, lines);
+  const myPosts = () => sentBy(page, isDraftCreate);
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+  let lost = 0;
+  try {
+    // st.lose before forwarding: the entry never sees this request (or its key); the page's fetch fails as a cut
+    // connection does. The dangerous branch: a re-send under any other key would create afresh.
+    st.lose = (rec, phase) => phase === 'request' && isDraftCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-new-save'));
+    await waitData(page, 'drafts-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const [first] = myPosts();
+  const afterLoss = { posts: myPosts().map((r) => `${r.status} ${r.lost ?? 'delivered'}`), d: minus(await draftCounts(tenant), dBefore) };
+  const card = await textOf(page, 'drafts-hold');
+  record('SDB-04', { phase: 'lost request', ...afterLoss, card });
+  assert.deepEqual(afterLoss.posts, ['0 request'], 'ONE POST, dropped before it reached the entry');
+  assert.equal(first.body, bodyFor(tenant, customer.id, lines));
+  assert.match(first.headers['idempotency-key'] ?? '', UUID_V4_RE);
+  assert.deepEqual(afterLoss.d, { D: 0, L: 0, A: 0, O: 0 }, 'nothing stored: the request never arrived');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no completion or idempotency record for a request that never arrived');
+  assert.ok(card.startsWith('Not confirmed yet'), `held, never saved and never refused: ${card}`);
+  assert.equal(await has(page, 'drafts-notice'), false);
+
+  // Nothing re-sends on its own: a window focus (a session check), the dialog closed, and time.
+  const barrier = st.api.length;
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await page.click(by('draft-new-cancel'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-hold')}?.dataset.state === 'unresolved'`, 15_000, 'the dialog hidden, the attempt still held');
+  await quiet(page, barrier);
+  await delay(1_000); // whatever it would still send on its own, it has sent
+  assert.equal(myPosts().length, 1, 'still ONE POST before the press');
+  assert.equal(await offered(page, 'drafts-check-again'), true, 'Check again offered');
+
+  // Check again: the SAME key and the SAME bytes, once; the server sees the key for the first time and creates.
+  const again = st.api.length;
+  await page.click(by('drafts-check-again'));
+  await page.waitFor(`${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DRAFT_SAVED)} && !${q('drafts-hold')}`, 30_000, 'created by the check and read back');
+  await quiet(page, again);
+  const posts = myPosts();
+  const stored = await storedDrafts(tenant);
+  record('SDB-04', { phase: 'Check again', posts: posts.map(apiLine), rows: stored.length });
+  assert.equal(posts.length, 2, `exactly one more POST, on the press (${posts.map(apiLine).join('; ')})`);
+  const second = posts[1];
+  assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
+  assert.equal(second.path, first.path, 'to the attempt\'s own store');
+  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.equal(second.body, first.body, 'the byte-identical body');
+  assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'] ?? null], [201, null], 'the key\'s first create, not a replay');
+  assert.equal(stored.length, 1, 'exactly ONE draft row');
+  assert.deepEqual(JSON.parse(second.replied.text), { draft: { id: stored[0].id, status: 'draft', currency: 'USD', lineCount: 1, subtotalCents: subtotalOf(lines) } });
+  assert.equal(second.replied.headers.location, `${draftsPath(main.id)}/${stored[0].id}`);
+  assert.deepEqual(stored[0].lines, linesFor(lines), 'its line as typed, in cents');
+  assert.deepEqual(minus(await draftCounts(tenant), dBefore), { D: 1, L: 1, A: 1, O: 1 }, 'one draft, its line, audit and event');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, 'one completion and one idempotency record: the check was the key\'s first create');
+  await waitDraftRows(page, [stored[0].id], 'the list shows it once');
+  await assertDraftsNowhere([page], [stored[0].id, first.headers['idempotency-key'], customer.id, first.body, ...lines.map((l) => l.description)]);
+  await assertNoLeak(page);
+}, 240_000);
