@@ -669,7 +669,7 @@ test('TSC-32. onSessionEnd: every logout and reset tells each listener synchrono
   assert.equal(net.sent.length, 5);
 });
 
-test('TSC-33. the header names every in-memory holder of the token: the drafts section as the fourth (commit 15110e4), and every module that listens to onSessionEnd', () => {
+test('TSC-33. the header names every in-memory holder of the token: the drafts section as the fourth (commit 15110e4), and every module that listens to onSessionEnd — since M7B-INVOICES-P1-R2 the directory too (DA-200)', () => {
   const read = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
   const header = read('./tenantSessionClient.ts').split('\nexport const TENANT_SESSION_PATHS')[0];
   assert.match(header, /The Invoices page's server drafts section \(ServerInvoiceDrafts\.tsx, M7B-INVOICES-P1\), fourth/);
@@ -686,10 +686,13 @@ test('TSC-33. the header names every in-memory holder of the token: the drafts s
   const listeners = walk(new URL('../', import.meta.url))
     .filter((path) => !path.endsWith('/tenantSessionClient.ts') && /\bonSessionEnd\(/.test(readFileSync(path, 'utf8')))
     .map((path) => path.slice(path.lastIndexOf('/') + 1));
-  assert.deepEqual(listeners.sort(), ['ServerCustomerPicker.tsx', 'ServerInvoiceDrafts.tsx']);
+  assert.deepEqual(listeners.sort(), ['ServerCustomerDirectory.tsx', 'ServerCustomerPicker.tsx', 'ServerInvoiceDrafts.tsx']);
   for (const file of listeners) assert.ok(header.includes(file), `${file} listens to onSessionEnd, so the header must name it`);
   assert.match(header, /`onSessionEnd` takes it\s+\/\/\s+from every user's attempt/);
   assert.match(header, /until the last draft field unmounts or `onSessionEnd` is heard/);
+  // DA-200's residual is gone from the header: the directory's create hold store hears the sign-out from its module's load.
+  assert.match(header, /Its create hold store hears `onSessionEnd` from its\s+\/\/\s+module's load/);
+  assert.doesNotMatch(header, /ServerCustomerDirectory\.tsx[^]*?It does not hear `onSessionEnd`/);
 });
 
 test('TSC-34. sessionEndsSoFar counts every logout and reset, and has moved before their listeners run: a confirmation that answered just before a sign-out began is told apart from one asked for after it', async () => {

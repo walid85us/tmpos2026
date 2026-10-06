@@ -49,7 +49,9 @@
 //     and nobody is signed in because of it. A save or a Check again whose session was confirmed just before a sign-out
 //     began sends nothing: each counts the session ends before it asks (`sessionEndsSoFar`) and compares after the
 //     answer; and the sign-out forgets the picker's pair, so a customer chosen before it matches no session any more.
-//     What is scrubbed here does not wait for the server: the logout itself is best effort (a failed one leaves that
+//     The new-draft dialog's hand-over (M7B-INVOICES-P1-R2, AC-07) asks its session check only while no sign-out has
+//     begun and the section's generation and token are still the ones it opened under, and uses the answer only if
+//     they still are: otherwise it sets no customer and makes no context. What is scrubbed here does not wait for the server: the logout itself is best effort (a failed one leaves that
 //     server session to its idle timeout). A created attempt is never read back under a later session: it says it was
 //     saved under an earlier connection. A refused one still shows its own text, until Dismiss or Stop tracking.
 //   - After CREATED, the draft is read back with a GET (never another POST), only under the hold's own session: "Saved"
@@ -489,7 +491,11 @@ interface ListState {
   readonly note: string;
 }
 interface ReopenState { readonly id: string; readonly storeId: string; readonly phase: Phase | 'not-found'; readonly text: string; readonly draft: DraftDetail | null }
-interface NewDraftState { readonly store: StoreEntry; readonly csrf: string; readonly handoff: { readonly id: string; readonly name: string } | null }
+/** `n`, `csrf` and `since`: the section's generation and `sessionEndsSoFar()` when the dialog opened (AC-07, the hand-over's checks). */
+interface NewDraftState {
+  readonly store: StoreEntry; readonly csrf: string; readonly n: number; readonly since: number;
+  readonly handoff: { readonly id: string; readonly name: string } | null;
+}
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
 /** One generation's customer names: what was read (null: not readable), what is asked or queued, how many reads are out. */
@@ -879,7 +885,7 @@ function DraftsSection({
     if (chosen === null || chosen.readOnly || !canCreate || csrf === null || live || reopenRef.current !== null) return;
     setNotice('');
     setPending(null);
-    setNewDraft({ store: chosen, csrf, handoff: with_ });
+    setNewDraft({ store: chosen, csrf, n: gen.current.n, since: sessionEndsSoFar(), handoff: with_ });
   }
 
   // A hand-over from the invoice form: open the section, and the dialog at once when a writable store is chosen.
@@ -1234,6 +1240,7 @@ function DraftsSection({
         <NewDraftDialog
           uid={uid}
           state={newDraft}
+          generation={gen}
           held={held}
           canViewCustomers={canViewCustomers}
           session={session}
@@ -1370,9 +1377,11 @@ function liveSubtotal(lines: readonly DraftLineFields[]): bigint | null {
 }
 
 function NewDraftDialog({
-  uid, state, held, canViewCustomers, session, customers, identity, now, expired, waiting, onSend, onCheck, onStop, onClose, onRefusalShown, returnFocus,
+  uid, state, generation, held, canViewCustomers, session, customers, identity, now, expired, waiting, onSend, onCheck, onStop, onClose, onRefusalShown, returnFocus,
 }: {
   readonly uid: string; readonly state: NewDraftState; readonly held: HeldDraft | undefined; readonly canViewCustomers: boolean;
+  /** The section's generation, read (never written) by the hand-over's checks. */
+  readonly generation: { readonly current: { readonly n: number; readonly csrf: string | null } };
   readonly session: TenantSessionClient; readonly customers: CustomersClient; readonly identity: Pick<ShopIdentity, 'idToken'>; readonly now?: () => number;
   readonly expired: boolean; readonly waiting: boolean;
   readonly onSend: (p: PreparedDraft) => Promise<SendOutcome>; readonly onCheck: () => void; readonly onStop: () => void; readonly onClose: () => void;
@@ -1397,13 +1406,19 @@ function NewDraftDialog({
   }, []);
 
   // A hand-over carries an id and a name only: this dialog confirms its own session, then mints its own reference.
+  // M7B-INVOICES-P1-R2 (AC-07): only while everything it opened under still stands — no sign-out since (`since`), and the
+  // section's generation and token unchanged (no new generation, no ended one). Checked before the session check is
+  // even asked (so nothing is asked, and nobody signed in, for a session that is over) and again before its answer is
+  // used: otherwise the answer changes nothing here, no customer, no context, no notice — the section says what happened.
   useEffect(() => {
     const given = state.handoff;
     if (given === null) return;
-    const since = sessionEndsSoFar();
+    const standing = (): boolean => alive.current && state.since === sessionEndsSoFar()
+      && generation.current.n === state.n && generation.current.csrf === state.csrf;
+    if (!standing()) return;
     void session.ensure(uid, () => identity.idToken(uid)).then((s) => {
-      if (!alive.current) return;
-      if (s.kind === 'ok' && s.csrf === state.csrf) setCustomer(serverCustomerReference(given, uid, sessionContextOf(uid, s.csrf, since)));
+      if (!standing()) return;
+      if (s.kind === 'ok' && s.csrf === state.csrf) setCustomer(serverCustomerReference(given, uid, sessionContextOf(uid, s.csrf, state.since)));
       else setStatus({ alert: true, text: NOT_SENT_TEXT.customer });
     });
     // Once per dialog: the hand-over is fixed for its life.

@@ -13,12 +13,13 @@
 //       - The customer directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5), second: in refs, to compare it with
 //         the next one; in its module-level hold store beside a held create and a create's recorded "saved" outcome, to
 //         re-send that create on the same session and to tell whether the outcome is this session's; and in its edit hold
-//         store beside a held edit and an edit's recorded outcome. It does not hear `onSessionEnd`: its edit hold store
-//         drops every other user's edit and outcome on a sign-out or another user (the page binds it to the sign-in state),
-//         but its create hold store keeps the token after a sign-out — on a held create until that user's directory page
-//         sees another token (the create is detached) or the create ends (confirmed, refused or removed), and on a "saved"
-//         outcome (a confirmation that came after the page had gone) until that user's page takes it — or until the page
-//         reloads (doc 08 DA-200).
+//         store beside a held edit and an edit's recorded outcome. Its create hold store hears `onSessionEnd` from its
+//         module's load, whether or not a directory page is mounted (M7B-INVOICES-P1-R2, doc 08 DA-200): every user's held
+//         create loses its token and its whole body, and every recorded outcome its token. A mounted directory page hears
+//         it too (its refs lose the token with its generation, and it drops that user's held edit). Its edit hold store
+//         does not: it drops every other user's edit and outcome on a sign-out or another user (the page binds it to the
+//         sign-in state); otherwise a held edit keeps its token until a mounted page of its user hears `onSessionEnd` or
+//         sees another token or an ended session (the edit is dropped), or the page reloads.
 //       - The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9), third: its open dialog in a ref, to
 //         compare it with the next one, until the dialog closes or hears `onSessionEnd`; and its `sessionContextOf` keeps
 //         the latest (UID, token) pair in module scope, to hand out one opaque context per session,
@@ -35,11 +36,13 @@
 //     starts that logout, without awaiting it, on every signed-out state and before another user's session is used; the
 //     logout itself is best effort (a failed one leaves the server session to its idle timeout). The module-scope holders
 //     listen from their module's load (and stop on a hot reload), whether or not their page is still mounted; a mounted
-//     view (the picker's dialog, the drafts section) listens while it is mounted. One that throws stops neither
-//     the logout nor the other listeners, and its error is rethrown unchanged in a queued microtask once they have all
-//     run (reported by the platform as an uncaught error, never thrown into the logout). An answer asked for before a
-//     sign-out began can still arrive after it: `sessionEndsSoFar` counts the ends, and a holder that read it before
-//     asking takes no token from such an answer.
+//     view (the directory page, the picker's dialog and each draft's server-customer field, the drafts section) listens
+//     while it is mounted. The broadcast carries nothing (no user, reason or tenant) and only a logout or a reset here
+//     publishes it: a remote expiry or revocation reaches a holder only when that holder asks (`ensure`). A listener
+//     that throws stops neither the logout nor the other listeners, and its error is rethrown unchanged in a queued
+//     microtask once they have all run (reported by the platform as an uncaught error, never thrown into the logout). An
+//     answer asked for before a sign-out began can still arrive after it: `sessionEndsSoFar` counts the ends, and a
+//     holder that read it before asking takes no token from such an answer.
 //   - A session is only ever reused for the user it belongs to. Every `ensure` first reads the session this browser
 //     already holds (M7A-CUSTOMERS-P5-R1, DA-143) and reuses it — with no login — only when the server's `subject` for it
 //     equals the digest of the UID asked for; the digest is recomputed here from that UID and never sent. No session, or

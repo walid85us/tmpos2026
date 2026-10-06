@@ -9,8 +9,8 @@ import type { ShipmentPrefill } from './ShippingCenter';
 import type { ReturnPrefill } from './ReturnsPortal';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, usableDraftCustomer, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
-import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField } from '../tenant/ServerCustomerPicker';
-import { ServerInvoiceDrafts } from '../tenant/ServerInvoiceDrafts';
+import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField, isLiveContext } from '../tenant/ServerCustomerPicker';
+import { NOT_SENT_TEXT, ServerInvoiceDrafts } from '../tenant/ServerInvoiceDrafts';
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
@@ -104,20 +104,40 @@ export default function Invoices() {
   /** The field's report for draft `mine`: a choice binds only while that draft is open and both permissions still hold. */
   const serverCustomerChange = (mine: number) => (next: ServerCustomerReference | null) => {
     if (liveDraft.current !== mine) return;
+    setHandoffRefused(false);
     if (next !== null && !(checkPermission('invoices', 'create') && canAccess('customers') && checkPermission('customers', 'view'))) return;
     setNewInv(prev => (next !== null ? { ...prev, customer: next } : prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
   };
   const closeCreate = () => {
     liveDraft.current += 1;
+    setHandoffRefused(false);
     setShowAddModal(false);
     setNewInv(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
   };
   // M7B-INVOICES-P1 — "Save as server draft": a draft that holds a server customer continues in the "Server drafts"
   // section's own dialog (ServerInvoiceDrafts.tsx). Only the customer's id and name are handed over — never this form's
   // lines, prices, notes or totals — and that dialog confirms its own session and makes its own reference before using
-  // them. This draft closes; nothing is added to this browser's invoices.
+  // them. This draft closes; nothing is added to this browser's invoices. A customer chosen under a session that is over
+  // (M7B-INVOICES-P1-R2, DA-202: its context is no longer live — a press before the field has heard so) is never handed
+  // on: it leaves the draft, and an alert (focused, as the button it replaces is gone) says to select it again.
   const [draftHandoff, setDraftHandoff] = useState<{ readonly id: string; readonly name: string } | null>(null);
+  const [handoffRefused, setHandoffRefused] = useState(false);
+  const refusedAlert = useRef<HTMLParagraphElement | null>(null);
+  const refusedFrom = useRef<Element | null>(null); // where focus was when "Save as server draft" was pressed
+  // The alert takes focus that fell to the page (the pressed button has gone) or still sits on that button — never focus
+  // the user has moved elsewhere since.
+  useEffect(() => {
+    if (!handoffRefused) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body || active === refusedFrom.current) refusedAlert.current?.focus();
+  }, [handoffRefused]);
   const saveAsServerDraft = (ref: ServerCustomerReference) => {
+    if (!isLiveContext(ref.context)) {
+      refusedFrom.current = document.activeElement;
+      setNewInv(prev => (prev.customer.source === 'server' ? { ...prev, customer: NO_CUSTOMER } : prev));
+      setHandoffRefused(true);
+      return;
+    }
     closeCreate();
     setDraftHandoff({ id: ref.id, name: ref.name });
   };
@@ -158,6 +178,7 @@ export default function Invoices() {
 
   const resetNewInv = () => {
     liveDraft.current += 1;
+    setHandoffRefused(false);
     setDraftId(liveDraft.current);
     setNewInv({
       customer: NO_CUSTOMER, dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
@@ -635,6 +656,9 @@ export default function Invoices() {
               {mode === 'create' && (
                 <div className="mt-3 space-y-2">
                   <ServerCustomerField key={`${uid}:${draftId}`} uid={uid} value={customer.source === 'server' ? customer : null} canView={canViewServerCustomers} onChange={serverCustomerChange(draftId)} />
+                  {handoffRefused && (
+                    <p ref={refusedAlert} tabIndex={-1} role="alert" data-testid="invoice-server-draft-refused" className="text-xs font-bold text-rose-800">{NOT_SENT_TEXT.customer}</p>
+                  )}
                   {customer.source === 'server' && (
                     <>
                       <p id="invoice-server-limit" role="status" data-testid="invoice-server-limit" className="text-xs font-bold text-amber-800">{SERVER_DRAFT_LIMIT_TEXT}</p>

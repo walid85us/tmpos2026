@@ -8,6 +8,9 @@
 // M7B-INVOICES-P1: the page's "Server drafts" section (ServerInvoiceDrafts.tsx) rides along with the REAL invoice drafts
 // client over the same fake (stores, a store's drafts, one create): a server customer is no longer a dead end — "Save as
 // server draft" hands its id and name (only) to that section — and a server draft never reaches the local invoices.
+// M7B-INVOICES-P1-R2 (DA-202): a sign-out with the picker closed clears the draft's server customer at once, a local one
+// untouched (INV-18); "Save as server draft" never hands on a customer whose session is over and says so (INV-19); a
+// later session's context drops a closed field's customer (INV-20); the alert never takes focus moved elsewhere (INV-21).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -109,11 +112,11 @@ const storeValue = {
 vi.mock('../context/StoreLocalState', () => ({ useStoreLocalState: () => storeValue, SEED_POS_OPERATORS: [] }));
 
 import Invoices from './Invoices';
-import { NOT_AVAILABLE_TEXT, PICK_ENDED_TEXT, SERVER_DRAFT_LIMIT_TEXT } from '../tenant/ServerCustomerPicker';
+import { NOT_AVAILABLE_TEXT, PICK_ENDED_TEXT, SERVER_DRAFT_LIMIT_TEXT, sessionContextOf } from '../tenant/ServerCustomerPicker';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from '../tenant/customersClient';
-import { createTenantSessionClient, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
+import { createTenantSessionClient, sessionEndsSoFar, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
 import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, type InvoiceDraftsClient } from '../tenant/invoiceDraftsClient';
-import { DRAFTS_TEXT } from '../tenant/ServerInvoiceDrafts';
+import { DRAFTS_TEXT, NOT_SENT_TEXT } from '../tenant/ServerInvoiceDrafts';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -621,5 +624,92 @@ describe('Invoices — a server customer in the create draft (M7A-CUSTOMERS-P9)'
     for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
     const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'Invoices.tsx'), 'utf8');
     expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\./);
+  });
+
+  it('INV-18. DA-202: a sign-out while the draft holds a server customer and the picker is CLOSED (no focus, no tab return) removes it at once with the notice — no limit text, no "Save as server draft", Generate blocked until a local customer — and sends nothing but the logout; a local customer chosen instead is untouched by the next sign-out', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    await click('invoice-create-open');
+    await addItem();
+    await chooseServer(ada.id);
+    expect(dialog()).toBeNull();
+    expect(screen.getByTestId('invoice-server-draft')).toBeInTheDocument();
+    const mark = server.sent.length;
+    await act(async () => { await (net.current.session as TenantSessionClient).logout(); });
+    expect(value()).toBeNull();
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(limit()).toBeNull();
+    expect(screen.queryByTestId('invoice-server-draft')).toBeNull();
+    expect(save()).toBeDisabled();
+    await settle();
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(screen.queryByTestId('drafts-handoff')).toBeNull();
+    pickLocal('c1');
+    expect(customerSelect().value).toBe('c1');
+    expect(save()).toBeEnabled();
+    await act(async () => { await (net.current.session as TenantSessionClient).logout(); });
+    expect(customerSelect().value).toBe('c1'); // a local customer is not the session's: it stays
+    expect(save()).toBeEnabled();
+    expect(writes(server)).toEqual([]);
+    expect(addInvoice).not.toHaveBeenCalled();
+  });
+
+  it('INV-19. DA-202: "Save as server draft" pressed after another session\'s context was handed out but before the field heard it: nothing is handed to the Server drafts section; the customer leaves the draft and a focused alert says to select it again', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    await click('invoice-create-open');
+    await chooseServer(ada.id);
+    // A later session's context is handed out, and the press lands before the field is told (one task, no microtask between).
+    act(() => {
+      sessionContextOf('uid-a', `${'x'.repeat(40)}999`, sessionEndsSoFar());
+      screen.getByTestId('invoice-server-draft').click();
+    });
+    await settle();
+    expect(screen.getByText('Create New Invoice')).toBeInTheDocument();
+    expect(screen.getByTestId('invoice-server-draft-refused')).toHaveTextContent(NOT_SENT_TEXT.customer);
+    expect(screen.getByTestId('invoice-server-draft-refused')).toHaveAttribute('role', 'alert');
+    expect(screen.getByTestId('invoice-server-draft-refused')).toHaveFocus();
+    expect(value()).toBeNull();
+    expect(limit()).toBeNull();
+    expect(screen.queryByTestId('drafts-handoff')).toBeNull();
+    expect(screen.queryByTestId('draft-new')).toBeNull();
+    await chooseServer(ada.id); // choosing again (a new session's context) clears the alert
+    expect(screen.queryByTestId('invoice-server-draft-refused')).toBeNull();
+    expect(writes(server)).toEqual([]);
+  });
+
+  it('INV-20. DA-202: another session\'s context handed out while the draft holds a server customer and the picker is CLOSED: the field drops it with the ended notice — the limit text and "Save as server draft" go — and nothing is written', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    await click('invoice-create-open');
+    await chooseServer(ada.id);
+    act(() => { sessionContextOf('uid-a', `${'x'.repeat(40)}998`, sessionEndsSoFar()); });
+    await settle();
+    expect(value()).toBeNull();
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(limit()).toBeNull();
+    expect(screen.queryByTestId('invoice-server-draft')).toBeNull();
+    expect(writes(server)).toEqual([]);
+  });
+
+  it('INV-21. DA-202: the refusal\'s alert never takes focus the user has moved elsewhere: a press refused, and focus moved to the local customer select before the page commits — focus stays there; the alert is still said', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    await click('invoice-create-open');
+    await chooseServer(ada.id);
+    act(() => {
+      sessionContextOf('uid-a', `${'x'.repeat(40)}997`, sessionEndsSoFar());
+      screen.getByTestId('invoice-server-draft').click();
+      customerSelect().focus();
+    });
+    await settle();
+    expect(screen.getByTestId('invoice-server-draft-refused')).toHaveTextContent(NOT_SENT_TEXT.customer);
+    expect(customerSelect()).toHaveFocus();
+    expect(screen.queryByTestId('drafts-handoff')).toBeNull();
+    expect(writes(server)).toEqual([]);
   });
 });

@@ -10,9 +10,14 @@
 // (SID-43..45), a list, name or reopen read out when it begins (SID-49), a Check again or a 403's fresh check whose
 // session answered just before it (SID-51, SID-52), a rate limit's wait (SID-53) — and where focus goes outside the
 // dialogs when a control it was on goes away or is disabled (SID-46..48: each named site, not every possible render),
-// and where it stays when the user left it on <body> (SID-50).
+// and where it stays when the user left it on <body> (SID-50). M7B-INVOICES-P1-R2 (AC-07): the new-draft dialog's
+// hand-over against a new generation adopted before its answer and a session end the section found before its answer
+// (SID-55, SID-56), plus a sign-out during its session check (SID-54, a regression guard: it passes on the entry commit
+// too), each with the dialog's own check held by a session wrapper aimed at the first check asked while that dialog is
+// up; and StrictMode's double setup (SID-57).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
+import { StrictMode, type ReactNode } from 'react';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +30,7 @@ import {
 import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, type StoreEntry } from './invoiceDraftsClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, type TenantSessionClient } from './tenantSessionClient';
-import { hasSessionPair, isContextOf, sessionContextOf } from './ServerCustomerPicker';
+import { ServerCustomerField, hasSessionPair, isContextOf, sessionContextOf } from './ServerCustomerPicker';
 import { parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -1831,5 +1836,150 @@ describe('Server drafts — a new draft (M7B-INVOICES-P1)', () => {
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)/);
     }
+  });
+
+  /**
+   * A session wrapper aimed at the new-draft dialog's hand-over check: the first `ensure` asked while that dialog is up.
+   * Its answer (the real one) is handed to `hook` before the dialog sees it; every other check passes through, and
+   * `onOther` sees each of their answers.
+   */
+  function aimedAtTheDialog(real: TenantSessionClient, hook: (s: Awaited<ReturnType<TenantSessionClient['ensure']>>) => Promise<void> | void, onOther: () => void = () => {}) {
+    // `answer`: the dialog's check as the dialog holds it — a `.then` added to it later runs after the dialog's own.
+    const aim = { armed: true, calls: 0, answer: null as ReturnType<TenantSessionClient['ensure']> | null };
+    const session: TenantSessionClient = {
+      ...real,
+      ensure: (...args) => {
+        const theDialogs = aim.armed && screen.queryByTestId('draft-new') !== null;
+        if (theDialogs) aim.armed = false;
+        else onOther();
+        aim.calls += 1;
+        const answer = (async () => {
+          const s = await real.ensure(...args);
+          if (theDialogs) await hook(s);
+          return s;
+        })();
+        if (theDialogs) aim.answer = answer;
+        return answer;
+      },
+    };
+    /** Resolves once the dialog's own continuation of its check has run (the explicit barrier the cases wait on). */
+    const dialogDone = (): Promise<void> => aim.answer!.then(() => undefined);
+    return { session, aim, dialogDone };
+  }
+  /** A hand-over of `customer`, then the store choice that opens the new-draft dialog (its check is asked at once). */
+  async function handOver(r: Rig, session: TenantSessionClient, customer: string, extra?: ReactNode) {
+    const view = render(<>{extra}<ServerInvoiceDrafts {...r.props({ session })} /></>);
+    view.rerender(<>{extra}<ServerInvoiceDrafts {...r.props({ session, handoff: { id: customer, name: 'Ada Customer' } })} /></>);
+    await storesReady();
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await waitFor(() => expect(screen.getByTestId('draft-new')).toBeInTheDocument());
+    return view;
+  }
+
+  it('SID-54. AC-07 regression guard (it passes on the entry commit too: the section\'s own sign-out listener closes the dialog first): a sign-out that begins while the hand-over\'s session check is out (its answer, the old token, arriving after): no customer, no context, no notice, no login, no POST — nothing but the logout; the hand-over is gone, and Reconnect is a first connection that opens nothing', async () => {
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const real = r.props().session!;
+    let mark = -1;
+    const { session, aim } = aimedAtTheDialog(real, () => { mark = server.sent.length; void real.logout(); });
+    await handOver(r, session, ada);
+    await waitFor(() => expect(aim.armed).toBe(false));
+    await waitFor(() => expect(screen.queryByTestId('draft-new')).toBeNull());
+    await settle();
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(hasSessionPair()).toBe(false);
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(screen.getByTestId('drafts-stores-state')).toHaveTextContent(DRAFTS_TEXT.ended);
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(server.posts()).toEqual([]);
+    expect(r.keys).toEqual([]);
+    server.expire(); // the fake's logout answer does not end the session on its own
+    await click('drafts-retry');
+    await storesReady();
+    await settle();
+    expect(screen.queryByTestId('drafts-handoff')).toBeNull();
+    expect(screen.queryByTestId('draft-new')).toBeNull();
+    expect(screen.queryByTestId('drafts-connection-changed')).toBeNull();
+    expect(server.posts()).toEqual([]);
+  });
+
+  it('SID-55. AC-07, the inverse order: the section adopts a new session (a new generation) before the hand-over\'s old answer arrives — that answer makes no customer and no context for the old token, even while another draft field keeps the module\'s pair alive, and nothing is sent', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const real = r.props().session!;
+    const gate = { release: null as (() => void) | null, others: -1 };
+    let released!: () => void;
+    const releasedThen = new Promise<void>((resolve) => { released = resolve; });
+    // The dialog's answer waits; once another tab has signed in, the section's 1st check (the focus check, answering the
+    // new token) passes, and its 2nd (the store read that `begin` starts for the new generation) releases that answer —
+    // by then the section has adopted the new token, and inside act nothing has been committed yet.
+    const { session, dialogDone } = aimedAtTheDialog(
+      real,
+      async () => { await new Promise<void>((resolve) => { gate.release = resolve; }); },
+      () => {
+        if (gate.others < 0) return;
+        gate.others += 1;
+        if (gate.others === 2 && gate.release !== null) { const go = gate.release; gate.release = null; go(); released(); }
+      },
+    );
+    const props = r.props();
+    const other = <ServerCustomerField uid="uid-a" value={null} canView onChange={() => {}} session={props.session} customers={props.customers} identity={props.identity} />;
+    await handOver(r, session, ada, other);
+    await waitFor(() => expect(gate.release).not.toBeNull());
+    expect(hasSessionPair()).toBe(false); // the dialog has made no context yet
+    server.otherTab('uid-a'); // another tab signs the same user in: a new session and token
+    gate.others = 0;
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await releasedThen; // the new generation's store read has started: the old answer is released
+      await dialogDone(); // and the dialog's continuation has run — still inside act, before any commit
+    });
+    expect(gate.release).toBeNull(); // released
+    await settle();
+    expect(screen.queryByTestId('draft-new')).toBeNull(); // the new generation closed it
+    expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument();
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(hasSessionPair()).toBe(false); // no (UID, token) pair was made for the old token
+    expect(server.posts()).toEqual([]);
+    expect(r.keys).toEqual([]);
+  });
+
+  it('SID-56. AC-07: the section finds the session ended (a focus check) while the hand-over\'s check is out; the dialog stays up, and the old answer arriving after it shows no customer and no notice, makes no context, and sends nothing — no login, no POST', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const real = r.props().session!;
+    const gate = { release: null as (() => void) | null };
+    const { session, dialogDone } = aimedAtTheDialog(real, async () => { await new Promise<void>((resolve) => { gate.release = resolve; }); });
+    await handOver(r, session, ada);
+    await waitFor(() => expect(gate.release).not.toBeNull());
+    server.expire();
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.getByTestId('draft-new')).toBeInTheDocument();
+    const mark = server.sent.length;
+    await act(async () => { gate.release!(); await dialogDone(); }); // the dialog's continuation has run, and React committed
+    expect(within(screen.getByTestId('draft-new')).queryByTestId('picker-value')).toBeNull();
+    expect(screen.queryByTestId('draft-new-status')).toBeNull();
+    expect(hasSessionPair()).toBe(false);
+    expect(server.sent.slice(mark)).toEqual([]);
+    expect(server.posts()).toEqual([]);
+    expect(r.keys).toEqual([]);
+  });
+
+  it('SID-57. under StrictMode (setup, cleanup, setup in development) a hand-over still binds its customer in the dialog and one Save sends one POST', async () => {
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const view = render(<StrictMode><ServerInvoiceDrafts {...r.props()} /></StrictMode>);
+    view.rerender(<StrictMode><ServerInvoiceDrafts {...r.props({ handoff: { id: ada, name: 'Ada Customer' } })} /></StrictMode>);
+    await storesReady();
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await waitFor(() => expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ada));
+    fireEvent.change(screen.getByTestId('draft-new-description'), { target: { value: 'Fan' } });
+    fireEvent.change(screen.getByTestId('draft-new-price'), { target: { value: '5' } });
+    await click('draft-new-save');
+    await waitFor(() => expect(screen.getByTestId('drafts-notice')).toHaveTextContent(DRAFTS_TEXT.saved));
+    expect(server.posts().map((p) => p.body)).toEqual([bodyOf(TENANT_A, ada, [['Fan', 1, 500]])]);
   });
 });

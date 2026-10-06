@@ -7,12 +7,14 @@
 // fields mounted at once (the invoice form's, closing, and the server draft dialog's) and a host's invalid mark (SCP-58);
 // closing round: a sign-out heard by the open dialog — a read out when it begins, a Select after it, a 403's one fresh
 // check that answered just before it, a rate limit's wait — and by a closed field's check that answered just before
-// it, with the module's (UID, token) pair looked at, never made (SCP-59..63).
+// it, with the module's (UID, token) pair looked at, never made (SCP-59..63). M7B-INVOICES-P1-R2 (DA-202): a CLOSED
+// field hears a sign-out itself, once, under StrictMode too and not after it unmounts, and a field that mounts holding a
+// reference of a session that is over drops it at once (SCP-64..67).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { useState } from 'react';
+import { StrictMode, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -23,7 +25,7 @@ vi.mock('../context/AccessContext', () => ({ useAccess: () => { throw new Error(
 
 import {
   NOT_AVAILABLE_TEXT, PICK_CHANGED_TEXT, PICK_DENIED_TEXT, PICK_ENDED_TEXT, PICKER_TEXT, ServerCustomerField, ServerCustomerPicker,
-  hasSessionPair, idEndingText, isContextOf, pickerWaitText, sessionContextOf,
+  hasSessionPair, idEndingText, isContextOf, isLiveContext, pickerWaitText, sessionContextOf,
 } from './ServerCustomerPicker';
 import {
   NO_CUSTOMER, localCustomerIdOf, localCustomerReference, serverCustomerReference, type ServerCustomerReference, type SessionContext,
@@ -194,6 +196,8 @@ function mountField(server: Server, options: { uid?: string | null; canView?: bo
 const realSetTimeout = globalThis.setTimeout; // the fake clock's tests still drain promises on a real macrotask
 const flush = () => act(async () => { await new Promise((r) => realSetTimeout(r, 0)); });
 const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
+/** The microtask on which the last field's unmount forgets the pair (M7B-INVOICES-P1-R2). */
+const microtask = () => act(async () => { await Promise.resolve(); });
 const state = () => screen.getByTestId('picker-state');
 const phase = (): string | null => state().getAttribute('data-phase');
 const ready = () => waitFor(() => expect(phase()).toBe('ready'));
@@ -1225,6 +1229,7 @@ describe('ServerCustomerPicker review fixes (M7A-CUSTOMERS-P9)', () => {
     const context = log[0].next!.context;
     expect(isContextOf(context, 'uid-a', csrf)).toBe(true);
     unmount();
+    await microtask(); // forgotten on a microtask once no field has mounted again (M7B-INVOICES-P1-R2)
     expect(hasSessionPair()).toBe(false);
     expect(sessionContextOf('uid-a', csrf, sessionEndsSoFar())).not.toBe(context);
   });
@@ -1637,7 +1642,8 @@ describe('ServerCustomerField in the server draft dialog (M7B-INVOICES-P1)', () 
     view.rerender(two(false)); // the closing field goes; the dialog's still holds Bob under that context
     expect(isContextOf(context, 'uid-a', csrf)).toBe(true);
     expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', bob.id);
-    view.unmount(); // the last field goes: the pair with it
+    view.unmount(); // the last field goes: the pair with it (on a microtask)
+    await microtask();
     expect(hasSessionPair()).toBe(false);
 
     const marked = render(<ServerCustomerField uid="uid-a" value={null} canView invalid errorId="host-error" onChange={() => {}} {...inject} />);
@@ -1761,5 +1767,235 @@ describe('A sign-out heard by the picker (M7B-INVOICES-P1 closing round)', () =>
     await click('picker-retry');
     await ready();
     expect(ids()).toEqual([ada.id]);
+  });
+});
+
+describe('A closed field hears a sign-out (M7B-INVOICES-P1-R2, DA-202)', () => {
+  /** The draft side as a host holds it: a value it was given (or null), what the field reports, and the field mounted or not. */
+  function Host({ initial, shown, inject, log, fieldKey = 'f1', install }: {
+    initial: ServerCustomerReference | null; shown: boolean; inject: Clients; log: Array<{ next: ServerCustomerReference | null; why: Why }>; fieldKey?: string;
+    install?: (set: (next: ServerCustomerReference | null) => void) => void; // hands the test the host's own setter
+  }) {
+    const [value, setValue] = useState<ServerCustomerReference | null>(initial);
+    install?.(setValue);
+    return (
+      <>
+        <output data-testid="host-value">{value === null ? '' : value.id}</output>
+        {shown && <ServerCustomerField key={fieldKey} uid="uid-a" value={value} canView onChange={(next, why) => { log.push({ next, why }); setValue(next); }} {...inject} />}
+      </>
+    );
+  }
+  /** A customer chosen in the dialog, the dialog closed: the field shows it, the draft holds it. */
+  async function chosen(server: Server) {
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const mounted = mountField(server);
+    await click('picker-open');
+    await ready();
+    await selectRow(ada.id);
+    expect(dialog()).toBeNull();
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ada.id);
+    return { ...mounted, ada };
+  }
+
+  it('SCP-64. a sign-out with the dialog CLOSED drops the chosen customer at once — no focus, no tab return — with the ended notice: the draft is told once (`ended`), no (UID, token) pair stays, nothing but the logout is sent, and the next session shows no customer until one is chosen again', async () => {
+    const server = fakeServer();
+    const { log, inject, ada } = await chosen(server);
+    const mark = server.sent.length;
+    await act(async () => { await inject.session.logout(); });
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(log.map((e) => [e.next?.id ?? null, e.why])).toEqual([[ada.id, 'selected'], [null, 'ended']]);
+    expect(hasSessionPair()).toBe(false);
+    await settle();
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    // A new session: the dialog reads again under a NEW context, and the draft is still empty until a new choice.
+    server.sessions.clear();
+    await click('picker-open');
+    await ready();
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(log).toHaveLength(2);
+    await selectRow(ada.id);
+    expect(log[2].why).toBe('selected');
+    expect(log[2].next!.context).not.toBe(log[0].next!.context);
+    expect(isLiveContext(log[2].next!.context)).toBe(true);
+    expect(isLiveContext(log[0].next!.context)).toBe(false);
+  });
+
+  it('SCP-65. the field\'s listener lives as long as the field: under StrictMode\'s setup, cleanup, setup one sign-out tells the draft exactly once; once the field has unmounted a sign-out tells it nothing', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const inject = clients(server);
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    const view = render(<StrictMode><Draft uid="uid-a" inject={inject} log={log} /></StrictMode>);
+    await click('picker-open');
+    await ready();
+    await selectRow(ada.id);
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ada.id);
+    await act(async () => { await inject.session.logout(); });
+    expect(log.map((e) => e.why)).toEqual(['selected', 'ended']);
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    view.unmount();
+    await act(async () => { await inject.session.logout(); });
+    expect(log.map((e) => e.why)).toEqual(['selected', 'ended']);
+  });
+
+  it('SCP-66. a field that MOUNTS holding a reference whose session is over drops it at once (ended, the host told, its copy cleared): ended by a sign-out, or replaced by another session\'s context; a live one is kept', async () => {
+    const server = fakeServer();
+    const inject = clients(server);
+    const entry = { id: uuid(0xc01), name: 'Ada' };
+    const T1 = `${'s'.repeat(40)}901`;
+    for (const how of ['live', 'signed-out', 'replaced'] as const) {
+      const ref = serverCustomerReference(entry, 'uid-a', sessionContextOf('uid-a', T1, sessionEndsSoFar()));
+      if (how === 'signed-out') await act(async () => { await inject.session.logout(); });
+      if (how === 'replaced') sessionContextOf('uid-a', `${'s'.repeat(40)}902`, sessionEndsSoFar()); // a later session's
+      const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+      render(<Host initial={ref} shown inject={inject} log={log} />);
+      if (how === 'live') {
+        expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', entry.id);
+        expect(screen.getByTestId('host-value')).toHaveTextContent(entry.id);
+        expect(log).toEqual([]);
+        expect(screen.queryByTestId('picker-notice')).toBeNull();
+      } else {
+        expect(screen.queryByTestId('picker-value')).toBeNull();
+        expect(screen.getByTestId('host-value').textContent).toBe('');
+        expect(log).toEqual([{ next: null, why: 'ended' }]);
+        expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+      }
+      cleanup();
+    }
+    expect(server.sent.filter((r) => r.url !== TENANT_SESSION_PATHS.logout && r.url !== TENANT_SESSION_PATHS.current)).toEqual([]);
+  });
+
+  it('SCP-67. a draft that keeps its customer while its field is unmounted (the last field gone, the pair with it) gets it back dropped, not shown, when the field mounts again', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const inject = clients(server);
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    const view = render(<Host initial={null} shown inject={inject} log={log} />);
+    await click('picker-open');
+    await ready();
+    await selectRow(ada.id);
+    expect(screen.getByTestId('host-value')).toHaveTextContent(ada.id);
+    view.rerender(<Host initial={null} shown={false} inject={inject} log={log} />); // the last field unmounts
+    await microtask(); // the pair goes with it, on a microtask
+    expect(hasSessionPair()).toBe(false);
+    expect(screen.getByTestId('host-value')).toHaveTextContent(ada.id); // the host still holds it
+    view.rerender(<Host initial={null} shown inject={inject} log={log} />);
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(screen.getByTestId('host-value').textContent).toBe('');
+    expect(log.map((e) => e.why)).toEqual(['selected', 'ended']);
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+  });
+
+  it('SCP-68. a field mounted under StrictMode (setup, cleanup, setup) whose host ALREADY holds a live server reference keeps it: no drop, no notice, nothing told, the context still live', async () => {
+    const server = fakeServer();
+    const inject = clients(server);
+    const ref = serverCustomerReference({ id: uuid(0xc11), name: 'Ada' }, 'uid-a', sessionContextOf('uid-a', `${'s'.repeat(40)}911`, sessionEndsSoFar()));
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    render(<StrictMode><Host initial={ref} shown inject={inject} log={log} /></StrictMode>);
+    await microtask();
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ref.id);
+    expect(screen.getByTestId('host-value')).toHaveTextContent(ref.id);
+    expect(screen.queryByTestId('picker-notice')).toBeNull();
+    expect(log).toEqual([]);
+    expect(isLiveContext(ref.context)).toBe(true);
+  });
+
+  it('SCP-69. the only field unmounting with nothing mounted again forgets the pair on the microtask after it: the reference it held is then live nowhere', async () => {
+    const server = fakeServer();
+    const inject = clients(server);
+    const ref = serverCustomerReference({ id: uuid(0xc12), name: 'Ada' }, 'uid-a', sessionContextOf('uid-a', `${'s'.repeat(40)}912`, sessionEndsSoFar()));
+    const view = render(<Host initial={ref} shown inject={inject} log={[]} />);
+    expect(isLiveContext(ref.context)).toBe(true);
+    view.unmount();
+    await microtask();
+    expect(hasSessionPair()).toBe(false);
+    expect(isLiveContext(ref.context)).toBe(false);
+  });
+
+  it('SCP-70. a host that switches its field\'s key (the old field unmounts, the new one mounts in one commit) keeps a live customer: the new field shows it and nothing is dropped', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const inject = clients(server);
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    const view = render(<Host initial={null} shown inject={inject} log={log} fieldKey="k1" />);
+    await click('picker-open');
+    await ready();
+    await selectRow(ada.id);
+    view.rerender(<Host initial={null} shown inject={inject} log={log} fieldKey="k2" />);
+    await microtask();
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ada.id);
+    expect(log.map((e) => e.why)).toEqual(['selected']);
+    expect(isLiveContext(log[0].next!.context)).toBe(true);
+    expect(screen.queryByTestId('picker-notice')).toBeNull();
+  });
+
+  it('SCP-71. another session\'s context handed out while a CLOSED field holds a customer: the field drops it (ended, the host told once) on the microtask after — no focus or tab-return check needed; and a customer SELECTED by a real (native, un-act-wrapped) click in the same task as a replacement its own Select makes is kept when that replacement is told', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    const inject = clients(server);
+    const T1 = `${'s'.repeat(40)}921`;
+    const T2 = `${'s'.repeat(40)}922`;
+    const old = serverCustomerReference({ id: uuid(0xc21), name: 'Old' }, 'uid-a', sessionContextOf('uid-a', T1, sessionEndsSoFar()));
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    render(<Host initial={old} shown inject={inject} log={log} />);
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', old.id);
+    act(() => { sessionContextOf('uid-a', T2, sessionEndsSoFar()); });
+    await microtask();
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(log).toEqual([{ next: null, why: 'ended' }]);
+    cleanup();
+
+    // The race: the dialog is open on the real session (its generation's token); the field holds a customer under ANOTHER
+    // pair that is the kept one (installed by the host). The dialog's Select then makes its own context — replacing that
+    // pair, whose replacement is told on a microtask — and hands the field the new customer in the same task. Measured
+    // (M7B-INVOICES-P1-R2 round 2): React commits a click's update before that microtask, so this case passes with or
+    // without the field's synchronous `held.current = ref` in onSelect — it pins the outcome, not that assignment.
+    const log2: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    let setHost!: (next: ServerCustomerReference | null) => void;
+    render(<Host initial={null} shown inject={inject} log={log2} install={(set) => { setHost = set; }} />);
+    await click('picker-open');
+    await ready();
+    const other = serverCustomerReference({ id: uuid(0xc23), name: 'Other' }, 'uid-a', sessionContextOf('uid-a', `${'s'.repeat(40)}923`, sessionEndsSoFar()));
+    await microtask();
+    act(() => { setHost(other); });
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', other.id);
+    expect(isLiveContext(other.context)).toBe(true);
+    const select = within(rows().find((r) => r.getAttribute('data-id') === ada.id)!).getByTestId('picker-select');
+    const actEnv = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    actEnv.IS_REACT_ACT_ENVIRONMENT = false; // a real click: React schedules and commits on its own
+    try {
+      select.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0)); // one real task: the microtasks and React's commit run
+    } finally {
+      actEnv.IS_REACT_ACT_ENVIRONMENT = true;
+    }
+    await microtask();
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', ada.id);
+    expect(log2.map((e) => e.why)).toEqual(['selected']);
+    expect(isLiveContext(log2[0].next!.context)).toBe(true);
+    expect(screen.queryByTestId('picker-notice')).toBeNull();
+  });
+
+  it('SCP-72. a context made in the same task as the last field\'s unmount (before that unmount\'s forget runs), for a field still to mount: the forget leaves it, and the field mounted with it after the microtask keeps a live customer — the one a send checks (isContextOf) still matches', async () => {
+    const server = fakeServer();
+    const inject = clients(server);
+    const T1 = `${'s'.repeat(40)}931`;
+    const T2 = `${'s'.repeat(40)}932`;
+    const old = serverCustomerReference({ id: uuid(0xc31), name: 'Old' }, 'uid-a', sessionContextOf('uid-a', T1, sessionEndsSoFar()));
+    const view = render(<Host initial={old} shown inject={inject} log={[]} />);
+    view.unmount(); // the last field: its forget is queued
+    const fresh = serverCustomerReference({ id: uuid(0xc32), name: 'Fresh' }, 'uid-a', sessionContextOf('uid-a', T2, sessionEndsSoFar()));
+    await microtask();
+    expect(hasSessionPair()).toBe(true);
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    render(<Host initial={fresh} shown inject={inject} log={log} />);
+    await microtask();
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', fresh.id);
+    expect(log).toEqual([]);
+    expect(isLiveContext(fresh.context)).toBe(true);
+    expect(isContextOf(fresh.context, 'uid-a', T2)).toBe(true);
+    expect(screen.queryByTestId('picker-notice')).toBeNull();
   });
 });

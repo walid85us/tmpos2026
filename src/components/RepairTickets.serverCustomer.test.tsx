@@ -105,7 +105,7 @@ const storeValue = {
 vi.mock('../context/StoreLocalState', () => ({ useStoreLocalState: () => storeValue, SEED_POS_OPERATORS: [] }));
 
 import RepairTickets, { SERVER_REPAIR_LIMIT_TEXT } from './RepairTickets';
-import { NOT_AVAILABLE_TEXT, idEndingText } from '../tenant/ServerCustomerPicker';
+import { NOT_AVAILABLE_TEXT, PICK_ENDED_TEXT, idEndingText } from '../tenant/ServerCustomerPicker';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from '../tenant/customersClient';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
@@ -652,5 +652,31 @@ describe('RepairTickets — a server customer in the new ticket draft (M7A-CUSTO
     for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
     const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'RepairTickets.tsx'), 'utf8');
     expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\./);
+  });
+
+  it('REP-19. DA-202: a sign-out while the new ticket holds a server customer and the picker is CLOSED (no focus, no tab return) removes it at once with the notice — no limit text — the device and issue stay, a local customer can be picked instead, and nothing but the logout is sent', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada Server']);
+    mount(server);
+    await click('repair-create-open');
+    fillDeviceAndIssue();
+    await chooseServer(ada.id);
+    expect(picker()).toBeNull();
+    expect(limit()).toBeInTheDocument();
+    const mark = server.sent.length;
+    await act(async () => { await (net.current.session as TenantSessionClient).logout(); });
+    expect(value()).toBeNull();
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(limit()).toBeNull();
+    expect(device().value).toBe('Synthetic Phone 1');
+    expect(issue().value).toBe('Cracked synthetic screen');
+    await settle();
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    await pickLocal('Local', 'Local Person');
+    expect(customerBox().value).toBe('Local Person');
+    await act(async () => { await (net.current.session as TenantSessionClient).logout(); });
+    expect(customerBox().value).toBe('Local Person'); // a local customer is not the session's: it stays
+    expect(writes(server)).toEqual([]);
+    expect(addRepairTicket).not.toHaveBeenCalled();
   });
 });

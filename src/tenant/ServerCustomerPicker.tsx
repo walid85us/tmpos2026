@@ -68,7 +68,8 @@ export const idEndingText = (id: string): string => `ID ending ${id.slice(-8)}`;
 const DEFAULT_WAIT_SECONDS = 60;
 
 // The latest (UID, token) pair and the one context handed out for it: the only place a token sits beside a context.
-// Forgotten when the LAST mounted draft field unmounts (ServerCustomerField). M7B-INVOICES-P1: two fields can be mounted
+// Forgotten when the LAST mounted draft field unmounts (ServerCustomerField; since M7B-INVOICES-P1-R2 on a microtask, and
+// only if no field has mounted again meanwhile). M7B-INVOICES-P1: two fields can be mounted
 // at once — the invoice form's, still closing, and the server draft dialog's it handed its customer to — and the closing
 // one must not orphan the context the other holds. Also forgotten at the start of every sign-out (the session client's
 // `onSessionEnd`, heard whether or not a field is still mounted), and never made again from a session confirmed before
@@ -78,6 +79,20 @@ let latest: { readonly uid: string; readonly csrf: string; readonly context: Ses
 let mountedFields = 0;
 const forgetOnEnd = onSessionEnd(() => { latest = null; });
 import.meta.hot?.dispose(forgetOnEnd); // a hot reload replaces this module: its listener goes with it
+// M7B-INVOICES-P1-R2 (DA-202): each mounted field hears a context being REPLACED by another session's (it registers while
+// mounted, so a hot reload's new module simply starts with the fields that mount under it).
+const replacedListeners = new Set<() => void>();
+// Moves on every field mount and every context made: a forget queued before either changes nothing.
+let contextGen = 0;
+/**
+ * The last field went: forget the pair — on a microtask, and only if no field has mounted and no context has been made
+ * since. A field that unmounts and mounts again in one commit (StrictMode's setup, cleanup, setup in development; a host's
+ * key switch) keeps it, and so does a context made meanwhile for a field still to mount.
+ */
+function forgetUnlessMounted(): void {
+  const at = contextGen;
+  queueMicrotask(() => { if (mountedFields === 0 && contextGen === at) latest = null; });
+}
 
 /**
  * The opaque context of the session whose token is `csrf`, for `uid`, confirmed by an answer asked for when
@@ -88,7 +103,14 @@ import.meta.hot?.dispose(forgetOnEnd); // a hot reload replaces this module: its
  */
 export function sessionContextOf(uid: string, csrf: string, since: number): SessionContext {
   if (since !== sessionEndsSoFar()) return Object.freeze({}) as SessionContext;
-  if (latest === null || latest.uid !== uid || latest.csrf !== csrf) latest = { uid, csrf, context: Object.freeze({}) as SessionContext };
+  if (latest === null || latest.uid !== uid || latest.csrf !== csrf) {
+    const replaced = latest !== null;
+    latest = { uid, csrf, context: Object.freeze({}) as SessionContext };
+    contextGen += 1;
+    // Every field holding the replaced context is told once the caller is done (never inside a render or a handler's
+    // own state change): its reference matches no session any more.
+    if (replaced) queueMicrotask(() => { for (const listener of [...replacedListeners]) listener(); });
+  }
   return latest.context;
 }
 
@@ -98,6 +120,13 @@ export const isContextOf = (context: SessionContext, uid: string, csrf: string):
 
 /** Whether a (UID, token) pair is kept at all — a read that changes nothing (what a sign-out must leave false). */
 export const hasSessionPair = (): boolean => latest !== null;
+
+/**
+ * Whether `context` is the one kept for the latest session (M7B-INVOICES-P1-R2, DA-202): false once a sign-out has
+ * begun, once the last draft field has unmounted, or once another session's context has been handed out — a reference
+ * chosen under it is then never shown, kept or handed on. A comparison: it creates and keeps nothing.
+ */
+export const isLiveContext = (context: SessionContext): boolean => latest !== null && latest.context === context;
 
 type Phase = 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
 interface ListState {
@@ -603,6 +632,12 @@ export interface ServerCustomerFieldProps extends Pick<ServerCustomerPickerProps
  * a return to the tab checks the session once, plain: it signs in only when no session is confirmed yet for this user
  * or the cookie names another identity's session (tenantSessionClient.ts) — after a confirmed session end it is
  * `ended`, and only the dialog's explicit Reconnect signs in. An undecided check keeps it.
+ * M7B-INVOICES-P1-R2 (DA-202): open dialog or not, the field hears a sign-out itself (`onSessionEnd`, while it is
+ * mounted) and drops the reference as `ended`, as it does when another session's context replaces the kept one (told
+ * on a microtask); and a field that MOUNTS holding a reference whose context is no longer live (`isLiveContext`) drops
+ * it at once — so the draft's host clears it (`onChange(null, 'ended')`, which leaves a
+ * local customer alone) and nothing revives it: a later session's contexts are other objects. A remote expiry or
+ * revocation is still learned only by a check that asks (focus, a tab return, the dialog, the host's own send).
  */
 export function ServerCustomerField({ uid, value, canView, onChange, invalid = false, errorId, ...inject }: ServerCustomerFieldProps) {
   const session = inject.session ?? tenantSession;
@@ -620,9 +655,24 @@ export function ServerCustomerField({ uid, value, canView, onChange, invalid = f
   const valueBlock = useRef<HTMLDivElement | null>(null); // the held customer's block (Change and Remove inside)
   useLayoutEffect(() => { held.current = shown; change.current = onChange; });
   // The module's (UID, token) pair goes with the last field: contexts stay stable while one is mounted, none outlives them.
+  // A field that mounts holding a reference of a session that is over drops it (and the host's copy with it) at once.
   useEffect(() => {
     mountedFields += 1;
-    return () => { mountedFields -= 1; if (mountedFields === 0) latest = null; };
+    contextGen += 1;
+    if (held.current !== null && !isLiveContext(held.current.context)) drop('ended');
+    return () => { mountedFields -= 1; if (mountedFields === 0) forgetUnlessMounted(); };
+    // Once per mount; `drop` reads only refs and the state setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // A sign-out, heard where it starts, whether or not the dialog is open, or another session's context handed out: the
+  // reference goes with the session it was chosen under.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => onSessionEnd(() => drop('ended')), []);
+  useEffect(() => {
+    const replaced = (): void => { if (held.current !== null && !isLiveContext(held.current.context)) drop('ended'); };
+    replacedListeners.add(replaced);
+    return () => { replacedListeners.delete(replaced); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /**
@@ -711,7 +761,7 @@ export function ServerCustomerField({ uid, value, canView, onChange, invalid = f
         <ServerCustomerPicker
           uid={uid}
           {...inject}
-          onSelect={(ref) => { close(); setNotice(null); change.current(ref, 'selected'); }}
+          onSelect={(ref) => { held.current = ref; close(); setNotice(null); change.current(ref, 'selected'); }}
           onCancel={close}
           onLost={drop}
           onContext={(context) => { if (held.current !== null && held.current.context !== context) drop('changed'); }}

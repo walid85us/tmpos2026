@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Navigate, RouterProvider, createMemoryRouter } from 'react-router-dom';
+import { StrictMode } from 'react';
 
 const access = vi.hoisted(() => {
   let value: { uid: string | null; canCreate: boolean; canEdit: boolean } = { uid: 'uid-a', canCreate: true, canEdit: false };
@@ -68,11 +69,11 @@ vi.mock('../context/AccessContext', async () => {
 import {
   CHECK_CUTOFF_MS, CONNECTION_CHANGED_TEXT, CustomerDirectoryPage, EMAIL_RULE_TEXT, EMPTY_TEXT, LAST_KNOWN_TEXT, NAME_RULE_TEXT,
   NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, SEARCH_RULE_TEXT, savedEarlierText, searchMatchingText, searchNoneText,
-  STOP_WARNING_TEXT, createHoldStore,
+  STOP_WARNING_TEXT, createHoldStore, ENDED_TEXT, bindHoldsToSessionEnd,
   unresolvedText, type HoldStore, createEditHoldStore, type EditHoldStore, type EditOutcome, EDIT_CONFLICT_TEXT, EDIT_DENIED_TEXT, EDIT_NO_CHANGES_TEXT,
   EDIT_REVIEWED_TEXT, EDIT_SAVED_TEXT, EDIT_SAVED_UNREFRESHED_TEXT, EDIT_UNKNOWN_TEXT, bindEditHoldsToAuth, editNamedText,
 } from './ServerCustomerDirectory';
-import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
+import { createTenantSessionClient, TENANT_SESSION_PATHS, type TenantSessionClient } from './tenantSessionClient';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
@@ -400,6 +401,8 @@ interface MountOptions {
   readonly holds?: HoldStore;
   readonly editHolds?: EditHoldStore;
   readonly wrapCustomers?: (client: CustomersClient) => CustomersClient;
+  readonly wrapSession?: (client: TenantSessionClient) => TenantSessionClient;
+  readonly strict?: boolean; // under <StrictMode>: in development every effect runs setup, cleanup, setup
   readonly defaultEditHolds?: boolean; // mount WITHOUT an injected edit hold store: the shop's own, bound to sign-in
   readonly defaultHolds?: boolean; // mount WITHOUT an injected hold store: the page's own module-level one
   readonly now?: () => number;
@@ -417,9 +420,10 @@ function mount(server: Server, options: MountOptions = {}) {
   };
   const holds = options.holds ?? createHoldStore();
   const editHolds = options.editHolds ?? createEditHoldStore();
+  const session = createTenantSessionClient({ fetch: server.fetch }); // its logout() is a sign-out: every onSessionEnd hears it
   const page = (
     <CustomerDirectoryPage
-      session={createTenantSessionClient({ fetch: server.fetch })}
+      session={(options.wrapSession ?? ((c: TenantSessionClient) => c))(session)}
       customers={(options.wrapCustomers ?? ((c: CustomersClient) => c))(createCustomersClient({ fetch: server.fetch }))}
       identity={{ idToken: async (uid) => tokens[uid] ?? null }}
       holds={options.defaultHolds === true ? undefined : holds}
@@ -434,9 +438,9 @@ function mount(server: Server, options: MountOptions = {}) {
     { path: '/customers', element: <p data-testid="local-customers">local customers</p> },
     { path: '/elsewhere', element: <p data-testid="elsewhere">elsewhere</p> },
   ], { initialEntries: [options.path ?? '/customers/directory'] });
-  const view = render(<RouterProvider router={router} />);
+  const view = render(options.strict === true ? <StrictMode><RouterProvider router={router} /></StrictMode> : <RouterProvider router={router} />);
   const go = (to: string) => act(async () => { await router.navigate(to); });
-  return { ...view, router, holds, editHolds, made, go };
+  return { ...view, router, holds, editHolds, made, go, session };
 }
 
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
@@ -1288,7 +1292,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(nameInput().value).toBe('Grace Hopper'); // R2: a confirmation clears the draft only when it still is the confirmed name
   });
 
-  it('SCD-25. a check that does not confirm stays unresolved with its reason — a 401, 403, 429, 503, 422 or another name never says "not saved"', async () => {
+  it('SCD-25. a check that does not confirm stays unresolved with its reason — a 401, 403, 429, 503, 422 or another name never says "not saved"; after the 401 the ended session has detached it (M7B-INVOICES-P1-R2), so only the others are checked again', async () => {
     const cases: Array<[PostPlan, RegExp]> = [
       [401, /Sign-in needed/],
       [403, /The server refused this check\./],
@@ -1313,14 +1317,23 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       await click('directory-check-again');
       await waitFor(() => expect(screen.getByTestId('directory-hold-reason')).toHaveTextContent(reason));
       expect(hold()).toHaveAttribute('data-state', 'unresolved');
-      expect(hold()).toHaveTextContent(unresolvedText('Ada Lovelace'));
+      // A 401 ends the session as the page knows it: the attempt is detached by that end and no longer named.
+      expect(hold()).toHaveTextContent(plan === 401 ? ENDED_TEXT.unresolved : unresolvedText('Ada Lovelace'));
       expect(page()).not.toMatch(/not saved/i);
       expect(page()).not.toMatch(/Saved on the server:/);
       expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), state: 'unresolved' }); // still held, whatever the answer
       if (plan === 401) {
         await waitFor(() => expect(phase()).toBe('signed-out')); // the list handling: nothing of the server's stays
         expect(names()).toEqual([]);
+        expect(hold()).toHaveAttribute('data-detached', 'true');
+        expect(view.holds.get('uid-a')).toMatchObject({ csrf: null, body: '', ended: true });
         await click('directory-retry');
+        await ready();
+        // Detached for good: no Check again, and nothing is sent again under any session.
+        expect(screen.queryByTestId('directory-check-again')).toBeNull();
+        expect(posts(server)).toHaveLength(2);
+        cleanup();
+        continue;
       } else if (plan === 403) {
         await waitFor(() => expect(lists(server).length).toBe(listsBefore + 1)); // view access re-proved at once
       } else if (plan === 429) {
@@ -1346,10 +1359,11 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await addCustomer('Ada Lovelace');
     await unresolved();
     server.moveGrant('tok-a', TENANT_B);
-    // The move ended the session: "Check again" finds it ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6).
+    // The move ended the session: "Check again" finds it ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6);
+    // that end detaches it at once (M7B-INVOICES-P1-R2, DA-200).
     await click('directory-check-again');
     await waitFor(() => expect(phase()).toBe('signed-out'));
-    expect(hold()).toHaveAttribute('data-detached', 'false');
+    expect(hold()).toHaveAttribute('data-detached', 'true');
     expect(logins(server)).toHaveLength(1);
     expect(posts(server)).toHaveLength(1);
     await click('directory-retry'); // Reconnect: the new session is the other store's
@@ -2727,7 +2741,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(logins(server)).toHaveLength(2);
   });
 
-  it('SCD-75. an uncertain create, then the session ends: "Check again" and "Stop tracking" send NO login and NO POST; Reconnect logs in once and detaches the attempt — never re-sent', async () => {
+  it('SCD-75. an uncertain create, then the session ends: "Check again" and "Stop tracking" send NO login and NO POST; the end that Check again finds detaches the attempt for good (M7B-INVOICES-P1-R2: its token and body go, its name is no longer shown); Reconnect logs in once — never re-sent', async () => {
     const server = fakeServer();
     server.seed(TENANT_A, ['Bea']);
     server.posts.push('lost-before');
@@ -2740,7 +2754,11 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await waitFor(() => expect(phase()).toBe('signed-out'));
     expect(state()).toHaveTextContent(ENDED);
     expect(hold()).toHaveAttribute('data-state', 'unresolved');
-    expect(hold()).toHaveAttribute('data-detached', 'false');
+    expect(hold()).toHaveAttribute('data-detached', 'true');
+    expect(hold()).toHaveTextContent(ENDED_TEXT.unresolved);
+    expect(hold()).not.toHaveTextContent('Ada Lovelace');
+    expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), csrf: null, body: '', ended: true, state: 'unresolved' });
+    expect(screen.queryByTestId('directory-check-again')).toBeNull();
     expect(screen.getByTestId('directory-hold-reason')).toHaveTextContent(`Not checked. ${ENDED}`);
     expect(names()).toEqual([]);
     expect(logins(server)).toHaveLength(1);
@@ -2748,7 +2766,7 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     await click('directory-retry'); // Reconnect
     await ready();
     expect(logins(server)).toHaveLength(2);
-    expect(hold()).toHaveAttribute('data-detached', 'true'); // the new connection is not the attempt's: detached for good
+    expect(hold()).toHaveAttribute('data-detached', 'true'); // still detached for good under the new connection
     expect(screen.queryByTestId('directory-check-again')).toBeNull();
     expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), csrf: null, state: 'unresolved' });
     expect(posts(server)).toHaveLength(1);
@@ -5460,5 +5478,358 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(names()).toEqual([]);
     expect(page()).not.toMatch(/Ada King|Ada Lovelace/);
     expect(logins(server)).toHaveLength(1);
+  });
+  // M7B-INVOICES-P1-R2 (DA-200) — a session end reaches the held create: the hold store's own contract, the shop's
+  // module-level store with no page mounted (and a logout that never reached the server), the mounted page and the late
+  // answers it then meets, answers asked for before a sign-out began, an old read after a new sign-in, the page
+  // listener's lifetime and where focus goes. A sign-out is the session client's logout(): every `onSessionEnd` hears it
+  // at its start. The access mock keeps the UID, as AccessContext.tsx keeps a page mounted on a direct switch until the
+  // next user's profile has loaded.
+  const signOut = async (view: ReturnType<typeof mount>) => { await act(async () => { await view.session.logout(); }); };
+
+  it('SCD-166. the hold store\'s contract: bound to onSessionEnd, a sign-out takes every user\'s token and whole body (a name-only one too) and every outcome\'s token, once; key, name, state and send time stay, so a late answer still settles by key; unbound, it hears nothing', async () => {
+    const holds = createHoldStore();
+    const T = 'c'.repeat(43);
+    holds.put('uid-a', { key: key(1), body: FULL_BODY, name: 'Ada Lovelace', csrf: T, sentAt: 7, state: 'sending' });
+    holds.put('uid-b', { key: key(2), body: '{"name":"Bea"}', name: 'Bea', csrf: T, sentAt: 8, state: 'unresolved' });
+    holds.put('uid-c', { key: key(3), body: '{"name":"Cy"}', name: 'Cy', csrf: T, sentAt: 9, state: 'sending' });
+    holds.finish('uid-c', key(3), { kind: 'saved', customer: { id: uuid(0xc1), name: 'Cy' }, csrf: T, plain: true });
+    holds.put('uid-d', { key: key(4), body: '{"name":"Dee"}', name: 'Dee', csrf: T, sentAt: 10, state: 'sending' });
+    holds.finish('uid-d', key(4), { kind: 'refused', name: 'Dee' });
+    const told = vi.fn();
+    holds.subscribe(told);
+    const client = createTenantSessionClient({ fetch: fakeServer().fetch });
+    const unbind = bindHoldsToSessionEnd(holds);
+    try {
+      await client.logout();
+      expect(told).toHaveBeenCalledTimes(1);
+      expect(holds.get('uid-a')).toEqual({ key: key(1), body: '', name: 'Ada Lovelace', csrf: null, sentAt: 7, state: 'sending', ended: true });
+      expect(holds.get('uid-b')).toEqual({ key: key(2), body: '', name: 'Bea', csrf: null, sentAt: 8, state: 'unresolved', ended: true });
+      await client.logout(); // nothing is left to take: nobody is told again
+      expect(told).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify([holds.get('uid-a'), holds.get('uid-b')])).not.toMatch(/c{43}|555|@/);
+      expect(holds.takeOutcome('uid-c')).toEqual({ kind: 'saved', customer: { id: uuid(0xc1), name: 'Cy' }, csrf: null, plain: true, ended: true });
+      expect(holds.takeOutcome('uid-d')).toEqual({ kind: 'refused', name: 'Dee', ended: true });
+      // The late answer still settles its attempt by key (a stale key settles nothing); no token or body comes back.
+      expect(holds.change('uid-b', key(9), { state: 'checking' })).toBe(false);
+      expect(holds.change('uid-b', key(2), { state: 'unresolved' })).toBe(true);
+      expect(holds.get('uid-b')).toMatchObject({ csrf: null, body: '', ended: true });
+      expect(holds.finish('uid-a', key(1), { kind: 'saved', customer: { id: uuid(0xc2), name: 'Ada Lovelace' }, csrf: null, plain: false, ended: true })).toBe(true);
+      expect(holds.get('uid-a')).toBeUndefined();
+    } finally {
+      unbind();
+    }
+    holds.put('uid-e', { key: key(5), body: '{"name":"Eve"}', name: 'Eve', csrf: T, sentAt: 11, state: 'unresolved' });
+    await client.logout();
+    expect(holds.get('uid-e')).toMatchObject({ csrf: T, body: '{"name":"Eve"}' }); // unbound: it heard nothing
+    expect(holds.get('uid-e')?.ended).toBeUndefined();
+  });
+
+  it('SCD-167. the shop\'s own hold store hears a sign-out with no directory page mounted: after a logout that never reached the server, the same user gets the SAME session back, yet the attempt left behind is detached for good — no Check again, no name or contact, nothing re-sent', async () => {
+    access.set({ uid: 'uid-default-ended' });
+    const server = fakeServer();
+    server.users['tok-d'] = { uid: 'uid-default-ended', tenant: TENANT_A, view: true, create: true, edit: true };
+    server.posts.push('lost-before');
+    const view = mount(server, { defaultHolds: true, tokens: { 'uid-default-ended': 'tok-d' }, keys: [key(1), key(2)] });
+    await ready();
+    fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+    await click('directory-add');
+    await unresolved();
+    expect(screen.getByTestId('directory-check-again')).toBeEnabled();
+    await view.go('/elsewhere'); // no directory page is mounted from here on
+    // A logout that never reaches the server (a best-effort logout can fail): the session it began with still stands.
+    const cookie = server.cookie!;
+    const kept = server.sessions.get(cookie)!;
+    await signOut(view);
+    server.sessions.set(cookie, kept);
+    server.cookie = cookie;
+    await view.go('/customers/directory');
+    await ready();
+    expect(logins(server)).toHaveLength(1); // the session (and its token) the attempt was sent under, found again
+    expect(hold()).toHaveAttribute('data-detached', 'true');
+    expect(hold()).toHaveTextContent(ENDED_TEXT.unresolved);
+    expect(page()).not.toMatch(/Ada Lovelace|555|@/);
+    expect(screen.queryByTestId('directory-check-again')).toBeNull();
+    await focusWindow();
+    await settle();
+    expect(posts(server)).toHaveLength(1);
+    await click('directory-stop-tracking'); // leave the module-level store clean for the other cases
+    expect(screen.queryByTestId('directory-hold')).toBeNull();
+    expect(posts(server)).toHaveLength(1);
+  });
+
+  it('SCD-168. a sign-out while the page is mounted and a create is out: the ended state at once — the form\'s name, phone and email and every notice go, the card names nothing, the store keeps no token or body; the late answer (201, refusal or undecided) settles by key only — no notice, no read, no login, no send; after Reconnect it is said without its name, and nothing reaches storage, a log or the address', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    for (const late of ['201', '403', '503'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Bea']);
+      if (late === '403') server.posts.push(403);
+      if (late === '503') server.posts.push('commit-then-503');
+      // An injected store that is NOT bound to onSessionEnd: what happens here is the mounted page's own doing.
+      const holds = createHoldStore();
+      {
+        const view = mount(server, { holds, keys: [key(1), key(2)] });
+        await ready();
+        server.hold.posts = 1;
+        fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+        await click('directory-add');
+        await waitFor(() => expect(server.held).toHaveLength(1));
+        await signOut(view);
+        expect(phase()).toBe('signed-out');
+        expect(state()).toHaveTextContent(ENDED);
+        expect([nameInput().value, phoneInput().value, emailInput().value]).toEqual(['', '', '']);
+        expect(createStatus().textContent).toBe('');
+        expect(hold()).toHaveAttribute('data-detached', 'true');
+        expect(hold()).toHaveTextContent(ENDED_TEXT.sending);
+        expect(page()).not.toMatch(/Ada Lovelace|555|@/);
+        expect(holds.get('uid-a')).toMatchObject({ key: key(1), csrf: null, body: '', ended: true, state: 'sending' });
+        const sent = server.sent.length;
+        await act(async () => { server.held[0].release(); });
+        await settle();
+        expect(server.sent).toHaveLength(sent); // no read-back, no login, no send
+        expect(phase()).toBe('signed-out');
+        expect(screen.queryByTestId('directory-saved')).toBeNull();
+        expect(screen.queryByTestId('directory-saved-earlier')).toBeNull();
+        expect(createStatus().textContent).toBe('');
+        expect(page()).not.toMatch(/Ada Lovelace|555|@/);
+        if (late === '503') expect(holds.get('uid-a')).toMatchObject({ key: key(1), csrf: null, body: '', ended: true, state: 'unresolved' });
+        else expect(holds.get('uid-a')).toBeUndefined(); // settled by key into a token-less outcome
+        // Reconnect: a new session, the page's first token. The news is said without a name; nothing is sent again, and the
+        // news reads nothing: the Reconnect's own page-one read is the only list read.
+        const listsBefore = lists(server).length;
+        await click('directory-retry');
+        await ready();
+        await settle();
+        expect(lists(server)).toHaveLength(listsBefore + 1);
+        if (late === '201') expect(screen.getByTestId('directory-saved-earlier')).toHaveTextContent(ENDED_TEXT.saved);
+        if (late === '403') expect(createStatus()).toHaveTextContent(ENDED_TEXT.refused);
+        if (late === '503') {
+          expect(hold()).toHaveTextContent(ENDED_TEXT.unresolved);
+          expect(screen.queryByTestId('directory-check-again')).toBeNull();
+        }
+        expect(screen.queryByTestId('directory-saved-link')).toBeNull();
+        expect(page()).not.toMatch(/"Ada Lovelace"|555|@/); // a row may list the customer the server stored; no notice names it
+        await settle();
+        expect(posts(server)).toHaveLength(1);
+        expect(view.router.state.location.search).toBe('');
+        expect(view.router.state.location.pathname).toBe('/customers/directory');
+        cleanup();
+      }
+    }
+    expect(setItem).not.toHaveBeenCalled();
+    for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('SCD-169. a session check that answered just before a sign-out began answers for nothing: Add sends no POST and takes no key, Check again re-sends nothing, Refresh reads nothing — only the logout goes out', async () => {
+    for (const step of ['add', 'check', 'refresh'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Bea']);
+      if (step === 'check') server.posts.push('lost-before');
+      let trip = false;
+      let mark = -1;
+      // The sign-out begins after the session check has answered, before the caller's continuation runs.
+      const wrapSession = (c: TenantSessionClient): TenantSessionClient => ({
+        ...c, ensure: async (...args) => { const s = await c.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void c.logout(); } return s; },
+      });
+      const view = mount(server, { keys: [key(1), key(2)], wrapSession });
+      await ready();
+      if (step === 'check') {
+        await addCustomer('Ada Lovelace');
+        await unresolved();
+      } else {
+        await typeName('Ada Lovelace');
+      }
+      trip = true;
+      await click(step === 'add' ? 'directory-add' : step === 'check' ? 'directory-check-again' : 'directory-refresh');
+      await settle();
+      expect(trip).toBe(false);
+      expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+      expect(posts(server)).toHaveLength(step === 'check' ? 1 : 0);
+      expect(view.made).toHaveLength(step === 'check' ? 1 : 0);
+      expect(phase()).toBe('signed-out');
+      cleanup();
+    }
+  });
+
+  it('SCD-170. a read asked for before a sign-out answers nothing after the next sign-in: the new session\'s rows stay, never the old answer', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Bea']);
+    const view = mount(server);
+    await ready();
+    server.hold.reads = 1;
+    await click('directory-refresh');
+    await waitFor(() => expect(server.held).toHaveLength(1)); // computed under the old session: Bea only
+    await signOut(view);
+    expect(phase()).toBe('signed-out');
+    server.seed(TENANT_A, ['Cy']);
+    await click('directory-retry'); // a new session, the page's first token
+    await waitFor(() => expect(names()).toEqual(['Bea', 'Cy']));
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    expect(names()).toEqual(['Bea', 'Cy']);
+    expect(phase()).toBe('ready');
+  });
+
+  it('SCD-171. the page\'s sign-out listener lives exactly as long as the page: under StrictMode\'s setup, cleanup, setup a sign-out is still heard; once the page has gone it is not (an unbound store keeps its attempt), while the store\'s own binding is the one that outlives it', async () => {
+    {
+      const server = fakeServer();
+      server.posts.push('lost-before');
+      const view = mount(server, { keys: [key(1)], strict: true });
+      await ready();
+      await addCustomer('Ada Lovelace');
+      await unresolved();
+      await signOut(view);
+      expect(phase()).toBe('signed-out');
+      expect(hold()).toHaveAttribute('data-detached', 'true');
+      expect(view.holds.get('uid-a')).toMatchObject({ csrf: null, body: '', ended: true });
+      cleanup();
+    }
+    {
+      const server = fakeServer();
+      server.posts.push('lost-before');
+      const view = mount(server, { keys: [key(1)] }); // its store is NOT bound to onSessionEnd: only the page could detach it
+      await ready();
+      await addCustomer('Ada Lovelace');
+      await unresolved();
+      const csrf = view.holds.get('uid-a')!.csrf;
+      expect(csrf).not.toBeNull();
+      await view.go('/elsewhere');
+      await signOut(view);
+      expect(view.holds.get('uid-a')).toMatchObject({ csrf, body: '{"name":"Ada Lovelace"}' });
+      expect(view.holds.get('uid-a')?.ended).toBeUndefined();
+    }
+  });
+
+  it('SCD-172. focus: a sign-out that takes away a focused Check again sends focus to the list heading, never <body>; focus the user left in the form stays there', async () => {
+    for (const where of ['check', 'name'] as const) {
+      const server = fakeServer();
+      server.posts.push('lost-before');
+      const view = mount(server, { keys: [key(1)] });
+      await ready();
+      await addCustomer('Ada Lovelace');
+      await unresolved();
+      const target = where === 'check' ? screen.getByTestId('directory-check-again') : nameInput();
+      act(() => target.focus());
+      expect(target).toHaveFocus();
+      await signOut(view);
+      await settle();
+      if (where === 'check') {
+        expect(screen.queryByTestId('directory-check-again')).toBeNull();
+        expect(screen.getByRole('heading', { name: 'Customers on the server' })).toHaveFocus();
+      } else {
+        expect(target).toHaveFocus();
+      }
+      cleanup();
+    }
+  });
+
+  it('SCD-173. the answer of an attempt a sign-out detached, arriving only after Reconnect (a new generation): bookkeeping only — ZERO requests of any kind follow it (no list or detail read, no session check, no send); a 201 is said without its name or link, a refusal (429 included) without its name and with no wait, an undecided answer (503) stays an unnamed detached card with no hold note', async () => {
+    for (const late of ['201', '403', '429', '503'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Bea']);
+      if (late === '403' || late === '429') server.posts.push(late === '403' ? 403 : 429);
+      if (late === '503') server.posts.push('commit-then-503');
+      server.retryAfter = '60';
+      const view = mount(server, { keys: [key(1), key(2)] });
+      await ready();
+      server.hold.posts = 1;
+      await addCustomer('Ada Lovelace');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await signOut(view);
+      await click('directory-retry'); // Reconnect: a new session, the page's first token
+      await ready();
+      expect(hold()).toHaveTextContent(ENDED_TEXT.sending);
+      await settle();
+      const mark = server.sent.length;
+      await act(async () => { server.held[0].release(); });
+      await settle();
+      expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([]); // nothing at all follows the old answer
+      if (late === '503') {
+        expect(hold()).toHaveTextContent(ENDED_TEXT.unresolved);
+        expect(hold()).toHaveAttribute('data-detached', 'true');
+        expect(screen.queryByTestId('directory-hold-reason')).toBeNull();
+        expect(screen.queryByTestId('directory-check-again')).toBeNull();
+      } else {
+        expect(screen.queryByTestId('directory-hold')).toBeNull();
+      }
+      if (late === '201') expect(screen.getByTestId('directory-saved-earlier')).toHaveTextContent(ENDED_TEXT.saved);
+      if (late === '403' || late === '429') expect(createStatus()).toHaveTextContent(ENDED_TEXT.refused);
+      expect(screen.queryByTestId('directory-saved-link')).toBeNull();
+      expect(page()).not.toMatch(/"Ada Lovelace"/);
+      if (late !== '503') expect(addButton()).toBeEnabled(); // no wait was started for the session shown now
+      expect(posts(server)).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it('SCD-174. Check again keeps only the key across its session check: the attempt as the store holds it AFTER the check decides — past the 23-hour window by then, nothing is sent; inside it, the same key and the same bytes, once', async () => {
+    for (const when of ['too-old', 'in-time'] as const) {
+      const server = fakeServer();
+      server.posts.push('lost-before');
+      let t = 1_000;
+      const view = mount(server, { keys: [key(1)], now: () => t });
+      await ready();
+      fill({ name: 'Ada Lovelace', phone: PHONE, email: EMAIL });
+      await click('directory-add');
+      await unresolved();
+      server.hold.checks = 1; // Check again's session check is held at the front
+      await click('directory-check-again');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      if (when === 'too-old') t += CHECK_CUTOFF_MS; // the window closes while the check is out
+      await act(async () => { server.held[0].release(); });
+      await settle();
+      if (when === 'too-old') {
+        expect(posts(server)).toHaveLength(1);
+        expect(view.holds.get('uid-a')).toMatchObject({ key: key(1), state: 'unresolved' });
+      } else {
+        expect(posts(server).map((r) => [r.headers.get('idempotency-key'), r.body])).toEqual([[key(1), FULL_BODY], [key(1), FULL_BODY]]);
+      }
+      cleanup();
+    }
+  });
+
+  it('SCD-175. focus the user moves elsewhere while a sign-out takes a focused Check again away stays where the user put it: the heading takes only focus that fell to the page', async () => {
+    const server = fakeServer();
+    server.posts.push('lost-before');
+    const view = mount(server, { keys: [key(1)] });
+    await ready();
+    await addCustomer('Ada Lovelace');
+    await unresolved();
+    act(() => screen.getByTestId('directory-check-again').focus());
+    // The sign-out and the user's move to the name field land before the page commits the ended state.
+    await act(async () => { void view.session.logout(); nameInput().focus(); });
+    await settle();
+    expect(screen.queryByTestId('directory-check-again')).toBeNull();
+    expect(nameInput()).toHaveFocus();
+  });
+
+  it('SCD-176. a result for an attempt a sign-out detached that settles after its page has gone, while the same user\'s NEXT page (a new session) is mounted: that page shows only the unnamed notice — zero requests follow it (no read, no session check, no send), the draft being typed is untouched', async () => {
+    for (const late of ['201', '403'] as const) {
+      const server = fakeServer();
+      server.seed(TENANT_A, ['Bea']);
+      if (late === '403') server.posts.push(403);
+      const view = mount(server, { keys: [key(1), key(2)] });
+      await ready();
+      server.hold.posts = 1;
+      await addCustomer('Ada Lovelace');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await signOut(view);
+      await view.go('/elsewhere'); // that page goes
+      await view.go('/customers/directory'); // the same user's next page: a new session, a new generation
+      await ready();
+      await typeName('Zed');
+      await settle();
+      const mark = server.sent.length;
+      await act(async () => { server.held[0].release(); }); // the old page's continuation settles it in the store
+      await settle();
+      expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([]);
+      if (late === '201') expect(screen.getByTestId('directory-saved-earlier')).toHaveTextContent(ENDED_TEXT.saved);
+      else expect(createStatus()).toHaveTextContent(ENDED_TEXT.refused);
+      expect(page()).not.toMatch(/"Ada Lovelace"/);
+      expect(nameInput().value).toBe('Zed');
+      expect(posts(server)).toHaveLength(1);
+      cleanup();
+    }
   });
 });

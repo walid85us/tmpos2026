@@ -45,6 +45,21 @@
 //     React view of an attempt is token-free (the token stays in refs and the store). The store survives in-app
 //     navigation, not a reload (persisting it would put a name, a key and a token in browser storage), though since
 //     M7A-CUSTOMERS-P5-R1 a reloaded page usually reuses the same session (DA-137).
+//   - A session END reaches the held create (M7B-INVOICES-P1-R2, DA-200). The hold store hears every sign-out from its
+//     module's load (the session client's `onSessionEnd`), mounted page or not: every user's attempt loses its token
+//     and its whole body (a name-only one too) and every recorded outcome its token — the in-memory holders are
+//     cleared; bytes already sent, or copies the JavaScript engine still keeps, are not. A mounted page hears it too:
+//     a new generation with no token, its reads stale, the form's name, phone and email, its notices and a wait gone,
+//     and the ended state shown. An ended session a read finds (clearBoth) detaches the user's attempt the same way.
+//     A detached-by-an-end attempt keeps its key, state, send time and name ONLY to settle a late answer by key and
+//     validate a 201: it is never sent again (there is no token), never named again (its card and its "saved" or
+//     "refused" news say "a customer sent before your server session ended"), and its late answer — while that end
+//     stands, mounted or not — settles in the store only: nothing is shown, read or sent, and no token or body comes
+//     back; the next generation's page (after Reconnect, or the next sign-in) shows it — that unnamed notice only: in no
+//     later session does its result read, wait or touch the draft or the hold note. Every session check, read and
+//     Add notes `sessionEndsSoFar` before asking and takes nothing from an answer asked for before a sign-out began;
+//     Check again keeps only the key across its session check and reads the token and bytes from the store after it.
+//     A remote expiry or revocation is learned only by a read or a check that asks (focus, a tab return, a click).
 //   - A read the server refuses (a 401 or a 403 on the list or on a detail, or a session check that finds the session
 //     ended or a sign-in the server no longer accepts) clears BOTH views: no rows, no cursor and no customer, whichever
 //     view was reading. No read starts during a rate limit's wait (the later deadline wins; a wait text states the wait
@@ -107,7 +122,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } fr
 import { onAuthStateChanged } from 'firebase/auth';
 import { Link, useParams } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
-import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
+import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import {
   CONTACT_INVALID, customers as customersClient, isCustomerId, normalizeCustomerEmail, normalizeCustomerName, normalizeCustomerPhone, normalizeCustomerSearch,
   customerEditBody, type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient, type UpdateResult,
@@ -125,6 +140,17 @@ export const NOT_FOUND_TEXT = 'No customer with this address is available in thi
 export const CONNECTION_CHANGED_TEXT = 'The store connection changed. Check the list, then add again.';
 export const LAST_KNOWN_TEXT = 'Last known list — could not refresh';
 export const savedEarlierText = (name: string): string => `"${name}" was saved on the server under the earlier connection.`;
+/**
+ * What is said of an attempt a session END detached (M7B-INVOICES-P1-R2, DA-200), on the signed-out page and on every
+ * page after it: never its name or a contact — the next session may be another tenant's, as the drafts section's
+ * "earlier" texts.
+ */
+export const ENDED_TEXT = Object.freeze({
+  sending: 'A customer sent before your server session ended is still waiting for the server\'s answer.',
+  unresolved: 'Not confirmed yet: a customer sent before your server session ended. The server may have saved it.',
+  saved: 'A customer sent before your server session ended was saved on the server.',
+  refused: 'A customer sent before your server session ended was not added: the server refused that request.',
+});
 export const STOP_WARNING_TEXT =
   'Stop tracking does not cancel the request, and adding the same name again can create a second customer.';
 export const NAME_RULE_TEXT = 'Enter a name of 1 to 200 characters, without control or text-direction characters.';
@@ -250,11 +276,16 @@ export interface HeldCreate {
   readonly body: string;
   /** The normalized name that was sent. */
   readonly name: string;
-  /** The session token it was sent with; null once detached (the page's connection changed since). */
+  /** The session token it was sent with; null once detached (the page's connection changed since, or the session ended). */
   readonly csrf: string | null;
   /** A monotonic reading taken when it was sent. */
   readonly sentAt: number;
   readonly state: 'sending' | 'unresolved' | 'checking';
+  /**
+   * Detached by a session END (M7B-INVOICES-P1-R2, DA-200: a sign-out, or an ended session a read found): its body is
+   * gone, and its name is kept only to validate a late 201 for its key — it is never shown again.
+   */
+  readonly ended?: true;
 }
 
 /** What a create that settled after its page had gone ended as; kept until a mounted page shows it. */
@@ -262,23 +293,27 @@ export type HoldOutcome =
   | {
     readonly kind: 'saved'; readonly customer: CustomerEntry; /** The token the attempt was sent with; null once detached. */ readonly csrf: string | null;
     /** Whether the body sent was name-only (no contact): only then can a later page's draft be matched against it. */ readonly plain: boolean;
+    /** Its attempt was detached by a session end, or a session ended since it settled: shown without its name. */ readonly ended?: true;
   }
-  | { readonly kind: 'refused'; readonly name: string };
+  | { readonly kind: 'refused'; readonly name: string; readonly ended?: true };
 
 /** What React sees of an attempt: everything but the session token, frozen and stable between store changes. */
 interface HeldView {
   readonly key: string;
+  /** '' once a session end detached it: React never sees that name. */
   readonly name: string;
   readonly state: HeldCreate['state'];
   readonly sentAt: number;
   readonly detached: boolean;
+  readonly ended: boolean;
 }
 const views = new WeakMap<HeldCreate, HeldView>();
 function viewOf(held: HeldCreate | undefined): HeldView | undefined {
   if (held === undefined) return undefined;
   let view = views.get(held);
   if (view === undefined) {
-    view = Object.freeze({ key: held.key, name: held.name, state: held.state, sentAt: held.sentAt, detached: held.csrf === null });
+    const ended = held.ended === true;
+    view = Object.freeze({ key: held.key, name: ended ? '' : held.name, state: held.state, sentAt: held.sentAt, detached: held.csrf === null, ended });
     views.set(held, view);
   }
   return view;
@@ -303,12 +338,18 @@ export interface HoldStore {
   put(uid: string, attempt: HeldCreate): boolean;
   /** Change the attempt under `key`; false when the store's attempt is another (a stale continuation is a no-op). */
   /** Detaching (`csrf: null`) also empties a body that carries a contact (see HeldCreate.body). */
-  change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body'>>): boolean;
+  change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body' | 'ended'>>): boolean;
   remove(uid: string, key: string): boolean;
   /** Remove the attempt under `key` and record its terminal `outcome` (one per user; a newer one replaces it). */
   finish(uid: string, key: string, outcome: HoldOutcome): boolean;
   /** The recorded outcome, forgotten as it is returned. */
   takeOutcome(uid: string): HoldOutcome | undefined;
+  /**
+   * A session end (M7B-INVOICES-P1-R2, DA-200), for every user: each held attempt loses its token and its whole body
+   * (a name-only one too) and is marked `ended`; each recorded outcome loses its token and is marked `ended`. Keys,
+   * states, send times and names stay, so a late answer still settles its attempt by key.
+   */
+  detachAll(): void;
   subscribe(listener: () => void): () => void;
 }
 
@@ -325,7 +366,7 @@ export function createHoldStore(): HoldStore {
       tell();
       return true;
     },
-    change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body'>>): boolean {
+    change(uid: string, key: string, next: Partial<Pick<HeldCreate, 'csrf' | 'state' | 'body' | 'ended'>>): boolean {
       const current = held.get(uid);
       if (current === undefined || current.key !== key) return false;
       const changed = { ...current, ...next };
@@ -351,6 +392,20 @@ export function createHoldStore(): HoldStore {
       outcomes.delete(uid);
       return outcome;
     },
+    detachAll(): void {
+      let changed = false;
+      for (const [uid, current] of held) {
+        if (current.ended === true) continue; // already token-less and body-less
+        held.set(uid, Object.freeze({ ...current, csrf: null, body: '', ended: true as const }));
+        changed = true;
+      }
+      for (const [uid, outcome] of outcomes) {
+        if (outcome.ended === true) continue;
+        outcomes.set(uid, Object.freeze(outcome.kind === 'saved' ? { ...outcome, csrf: null, ended: true as const } : { ...outcome, ended: true as const }));
+        changed = true;
+      }
+      if (changed) tell();
+    },
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -358,8 +413,18 @@ export function createHoldStore(): HoldStore {
   });
 }
 
-/** The shop's one hold store: it outlives the page across in-app navigation, and ends with the page load. */
+/** Tie a hold store to the session client's `onSessionEnd`: every sign-out detaches every attempt. Returns the unbinding. */
+export function bindHoldsToSessionEnd(store: HoldStore): () => void {
+  return onSessionEnd(() => store.detachAll());
+}
+
+/**
+ * The shop's one hold store: it outlives the page across in-app navigation, and ends with the page load. It hears every
+ * sign-out from the module's load, whether or not a directory page is mounted (a hot reload unbinds it with the module).
+ */
 const holdStore: HoldStore = createHoldStore();
+const unbindHolds = bindHoldsToSessionEnd(holdStore);
+import.meta.hot?.dispose(unbindHolds);
 
 /** An edit whose outcome is not known yet (M7A-CUSTOMERS-P7): exactly what "Check again" sends again, and where. */
 export interface HeldEdit {
@@ -594,7 +659,9 @@ function UserPage({
   const [draft, setDraft] = useState<Fields>(NO_FIELDS);
   const [errors, setErrors] = useState<Fields>(NO_FIELDS); // each field's rule text while it is refused here
   const [createStatus, setCreateStatus] = useState<{ readonly refusal: boolean; readonly text: string; readonly named?: true } | null>(null);
-  const [saved, setSaved] = useState<CustomerEntry | { readonly earlier: string } | null>(null);
+  // A confirmed create: this session's (named, with its link), or an earlier connection's (named, or `null` once a session
+  // end detached it: unnamed).
+  const [saved, setSaved] = useState<CustomerEntry | { readonly earlier: string | null } | null>(null);
   const [connectionChanged, setConnectionChanged] = useState(false);
   const [wait, setWait] = useState<number | null>(null); // the seconds a rate limit asked for, while that wait runs
   const [adding, setAdding] = useState(false);
@@ -644,6 +711,9 @@ function UserPage({
   // own end then changes nothing, and the new context's controls are free at once.
   const editEpoch = useRef(0);
   const endedSeen = useRef(0); // counts confirmed session ends (clearBoth): a refresh after a save learns of one from it
+  // Set by a session end (a sign-out heard here, or an ended session a read found) until the next generation's first
+  // token: meanwhile a create's late answer settles in the hold store only — nothing is shown, read or sent for it.
+  const signedOut = useRef(false);
   const cancelledForm = useRef<EditForm | null>(null); // the form an explicit Cancel closed (navigation is not a Cancel)
   const editStatusRef = useRef<EditNotice | null>(null); // the notice as last put (the state may be mid-announcement)
   const announceSeq = useRef(0);
@@ -658,13 +728,19 @@ function UserPage({
   const editForm = useRef<HTMLFormElement | null>(null);
   const editCard = useRef<HTMLDivElement | null>(null);
   const searchInput = useRef<HTMLInputElement | null>(null);
+  const checkButton = useRef<HTMLButtonElement | null>(null); // the held create's Check again
+  const titleFrom = useRef<Element | null>(null); // where focus was when the heading was chosen as its destination
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))(); // one fresh Idempotency-Key per new attempt
   /** The session for `who`: plain (never signs in after an end), `fresh` (the check after a 403) or `reconnect` (the user's click). */
   const connect = (who: string, mode?: 'fresh' | 'reconnect'): Promise<SessionResult> =>
     session.ensure(who, () => identity.idToken(who), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
+  /** Whether a create's news may be shown and acted on here: mounted, holding a token, and no session end since it. */
+  const live = (): boolean => alive.current && gen.current.csrf !== null && !signedOut.current;
   const putList = (next: ListState): void => { listRef.current = next; setList(next); };
+  /** Focus goes to the heading once the control it is on has gone — unless the user has put it elsewhere by then. */
+  const toTitle = (): void => { focusTarget.current = 'title'; titleFrom.current = document.activeElement; };
   const putDetail = (next: DetailState): void => { detailRef.current = next; setDetail(next); };
   const putEdit = (next: EditForm | null): void => { editRef.current = next; setEdit(next); };
   /** Close the edit form: its draft and field errors go with it. */
@@ -751,7 +827,12 @@ function UserPage({
    * starts a new generation (true): whatever the caller was about to do under the old one must not happen.
    */
   function adopt(who: string, csrf: string): boolean {
-    if (gen.current.csrf === csrf) return false;
+    const wasSignedOut = signedOut.current;
+    signedOut.current = false; // a session confirmed now: an end seen before it no longer stands
+    if (gen.current.csrf === csrf) {
+      if (wasSignedOut) consumeOutcome(); // news that settled meanwhile (the same session, found valid again)
+      return false;
+    }
     if (gen.current.csrf === null) {
       gen.current.csrf = csrf;
       detach(who, csrf);
@@ -788,13 +869,19 @@ function UserPage({
       else if (isCustomerId(id)) putDetail({ id, phase: failure.kind as 'denied' | 'signed-out', text: failure.text, customer: null });
     }
     // The profile is gone, and with it the edit form and its draft (focus that was in it goes to the heading).
-    if (editRef.current !== null && owningFocus()) focusTarget.current = 'title';
+    if (editRef.current !== null && owningFocus()) toTitle();
     closeEdit();
     // Signed out: no notice of a save or of a settled create stays either (they name a customer of a session that is
     // gone). The hold note and every other create status stay: Add, Check again and a refused send write theirs.
     if (ended) {
       setSaved(null);
       setCreateStatus((status) => (status?.named === true ? null : status));
+      // An unresolved create's token has ended too (DA-200): it is detached for good, its body goes and its name is no
+      // longer shown; a late answer for it settles in the store only until the next generation (`signedOut`).
+      signedOut.current = true;
+      if (checkButton.current !== null && checkButton.current === document.activeElement) toTitle(); // it goes
+      const heldCreate = uid === null ? undefined : holds.get(uid);
+      if (uid !== null && heldCreate !== undefined && heldCreate.ended !== true) holds.change(uid, heldCreate.key, { csrf: null, body: '', ended: true });
       // A held edit, in any state, can never be checked again (its token has ended): dropped, and said so. An answer still
       // out for it then finds nothing to settle.
       const heldEdit = uid === null ? undefined : editHolds.get(uid);
@@ -807,14 +894,28 @@ function UserPage({
   }
   const isRefusal = (failure: Failure): boolean => failure.kind === 'denied' || failure.kind === 'signed-out';
 
-  /** Show what a create that settled after its page had gone ended as — once this page holds a session token. */
+  /**
+   * Show what a create that settled after its page had gone ended as — once this page holds a session token, and not
+   * while a session end stands (`live`). One a session end touched is said without its name.
+   */
   function consumeOutcome(): void {
-    if (uid === null || !alive.current || gen.current.csrf === null) return;
+    if (uid === null || !live()) return;
     const outcome = holds.takeOutcome(uid);
     if (outcome === undefined) return;
+    if (outcome.ended === true) return endedNews(outcome.kind);
     if (outcome.kind === 'refused') return setCreateStatus({ refusal: true, text: `"${outcome.name}" was not added: the server refused that request.`, named: true });
     const sent = outcome.plain ? { name: outcome.customer.name, phone: null, email: null } : null;
     confirmed(outcome.customer, sent, outcome.csrf === gen.current.csrf, false); // the user may be typing: no focus move
+  }
+
+  /**
+   * What a page says of a result for an attempt a session END detached (DA-200): only the unnamed notice — no read, no
+   * wait, no draft or hold note touched, no focus moved. The session it was sent under is gone; nothing of its result
+   * applies to the one shown now.
+   */
+  function endedNews(kind: HoldOutcome['kind']): void {
+    if (kind === 'saved') return setSaved({ earlier: null });
+    setCreateStatus({ refusal: true, text: ENDED_TEXT.refused });
   }
 
   /**
@@ -844,9 +945,10 @@ function UserPage({
    * refused (signed out): a check that cannot decide never turns a refused read into last-known rows.
    */
   async function recheck(who: string): Promise<Failure | null> {
+    const since = sessionEndsSoFar();
     const s = await connect(who, 'fresh'); // a session read sent AFTER the 403, never one already in flight before it
     if (s.kind !== 'ok') return sessionFailure(s);
-    if (alive.current) adopt(who, s.csrf);
+    if (alive.current && since === sessionEndsSoFar()) adopt(who, s.csrf); // never a token from before a sign-out
     return null;
   }
 
@@ -874,11 +976,12 @@ function UserPage({
       return;
     }
     const mine = gen.current.n;
+    const since = sessionEndsSoFar(); // an answer asked for before a sign-out began is stale too, mounted or not
     const seq = ++listSeq.current;
     listCtl.current?.abort(); // a superseded read is cancelled
     const controller = new AbortController();
     listCtl.current = controller;
-    const stale = (): boolean => mine !== gen.current.n || seq !== listSeq.current;
+    const stale = (): boolean => mine !== gen.current.n || seq !== listSeq.current || since !== sessionEndsSoFar();
     setListBusy(true);
     if (mode === 'first') putList({ ...listRef.current, phase: 'loading', text: TEXT.loading, note });
     try {
@@ -955,11 +1058,12 @@ function UserPage({
   /** `reconnect` only from the detail's Reconnect button, as for the list. */
   async function loadDetail(id: string, reconnect = false): Promise<void> {
     const mine = gen.current.n;
+    const since = sessionEndsSoFar();
     const seq = ++detailSeq.current;
     detailCtl.current?.abort();
     const controller = new AbortController();
     detailCtl.current = controller;
-    const stale = (): boolean => mine !== gen.current.n || seq !== detailSeq.current || id !== routeRef.current;
+    const stale = (): boolean => mine !== gen.current.n || seq !== detailSeq.current || id !== routeRef.current || since !== sessionEndsSoFar();
     if (uid === null) return putDetail({ id, phase: 'signed-out', text: TEXT.noIdentity, customer: null });
     // One generic answer for a malformed, a missing and another store's id; a malformed one is never sent.
     if (!isCustomerId(id)) return putDetail({ id, phase: 'not-found', text: NOT_FOUND_TEXT, customer: null });
@@ -995,6 +1099,7 @@ function UserPage({
    */
   function begin(csrf: string | null, user: boolean): void {
     gen.current = { n: gen.current.n + 1, csrf };
+    signedOut.current = false;
     listCtl.current?.abort();
     detailCtl.current?.abort();
     setListBusy(false);
@@ -1037,8 +1142,10 @@ function UserPage({
       const heldEdit = editHolds.get(uid);
       if (heldEdit !== undefined && heldEdit.state !== 'unresolved') return;
       const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      const seen = endedSeen.current; // an end a read found meanwhile is not undone by this check's earlier answer
       void connect(uid).then((s) => {
-        if (mine !== gen.current.n) return;
+        if (mine !== gen.current.n || since !== sessionEndsSoFar() || seen !== endedSeen.current) return;
         if (s.kind === 'ok') adopt(uid, s.csrf);
         // Definitely gone; the rest teaches nothing. Always cleared (a route change moves a read counter without a read):
         // clearBoth spares only a view whose Reconnect is still out.
@@ -1049,7 +1156,27 @@ function UserPage({
     document.addEventListener('visibilitychange', reconnect);
     const unsubscribe = holds.subscribe(consumeOutcome); // an outcome that settles while this page is mounted
     const unsubscribeEdits = editHolds.subscribe(consumeEditOutcome); // the same for an edit an older page sent
+    // DA-200 (M7B-INVOICES-P1-R2): a sign-out, heard where it starts (the session client's `onSessionEnd`) while this page
+    // is mounted — on a direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has
+    // loaded. Everything in flight is stale from here (a new generation with no token; reads cancelled, a Reconnect's
+    // too); the create form's name, phone and email, its notices and a rate limit's wait go; and the page shows the
+    // ended session (clearBoth: no rows, no customer, no edit; the held create detached). The hold store has heard it
+    // already (its own module-level listener). Nothing is read, sent or signed in because of it: only Reconnect.
+    const unhear = onSessionEnd(() => {
+      if (uid === null) return;
+      gen.current = { n: gen.current.n + 1, csrf: null };
+      reconnecting.current = { list: 0, detail: 0 };
+      clearWait();
+      setDraft(NO_FIELDS);
+      setErrors(NO_FIELDS);
+      setHoldNote(null);
+      setSaved(null);
+      setCreateStatus(null);
+      setConnectionChanged(false);
+      clearBoth({ kind: 'signed-out', text: TEXT.sessionEnded });
+    });
     return () => {
+      unhear();
       unsubscribe();
       unsubscribeEdits();
       window.removeEventListener('focus', reconnect);
@@ -1104,7 +1231,11 @@ function UserPage({
       const element = target === 'name' ? editName.current : target === 'review' ? reviewButton.current
         : target === 'edit' ? editButton.current ?? editPolite.current : target === 'alert' ? editAlertRef.current
           : target === 'hold' ? editCard.current : target === 'title' ? detailTitle.current ?? listTitle.current : editPolite.current;
-      if (element !== null) {
+      // The heading only takes focus that fell to the page (the control it was on has gone) or still sits on that
+      // control (disabled): focus the user has moved elsewhere since stays there.
+      const active = document.activeElement;
+      if (target === 'title' && active !== null && active !== document.body && active !== titleFrom.current) focusTarget.current = null;
+      else if (element !== null) {
         focusTarget.current = null;
         element.focus();
       }
@@ -1122,25 +1253,41 @@ function UserPage({
 
   /**
    * One create answer, reconciled by KEY: a continuation whose key is no longer the store's is a no-op, and an answer
-   * that arrives after this page has gone updates the store only. `first` is the attempt's first send.
+   * that arrives after this page has gone — or while a session end stands (`live`: DA-200) — updates the store only: no
+   * notice, no read, no send, no token or body restored; the next generation's page shows it. `first` is the attempt's
+   * first send. An attempt a session END detached (`ended`) is bookkeeping only, whenever its answer comes: it settles
+   * by key, and a page that may show news shows nothing but its unnamed ENDED_TEXT notice — no read, no wait, no hold
+   * note, nothing of the session shown now (`endedNews`).
    */
   function settle(who: string, key: string, answer: CreateResult, first: boolean): void {
     const held = holds.get(who);
     if (held === undefined || held.key !== key) return;
+    const shown = live();
     // This page still holds the connection the attempt was sent under.
-    const here = alive.current && held.csrf !== null && held.csrf === gen.current.csrf;
-    if (answer.kind === 'created' && answer.customer.name === held.name) {
+    const here = shown && held.csrf !== null && held.csrf === gen.current.csrf;
+    const kind = answer.kind;
+    const created = kind === 'created' && answer.customer.name === held.name;
+    const conclusive = first && (kind === 'signed-out' || kind === 'denied' || kind === 'invalid' || kind === 'absent' || kind === 'key-reused' || kind === 'rate-limited');
+    if (held.ended === true) {
+      if (!created && !conclusive) return void holds.change(who, key, { state: 'unresolved' });
+      const outcome: HoldOutcome = created && answer.kind === 'created'
+        ? { kind: 'saved', customer: answer.customer, csrf: null, plain: false, ended: true }
+        : { kind: 'refused', name: held.name, ended: true };
+      if (!shown) return void holds.finish(who, key, outcome);
+      holds.remove(who, key);
+      return endedNews(outcome.kind);
+    }
+    if (created && answer.kind === 'created') {
       // CONFIRMED: a validated 201 naming the name that was sent
-      if (!alive.current) {
+      if (!shown) {
         return void holds.finish(who, key, { kind: 'saved', customer: answer.customer, csrf: held.csrf, plain: held.body === JSON.stringify({ name: held.name }) });
       }
       holds.remove(who, key);
       return confirmed(answer.customer, sentOf(held), here, true);
     }
-    const kind = answer.kind;
-    if (first && (kind === 'signed-out' || kind === 'denied' || kind === 'invalid' || kind === 'absent' || kind === 'key-reused' || kind === 'rate-limited')) {
+    if (conclusive) {
       // conclusive for this request: nothing was reserved or executed; the draft stays
-      if (!alive.current) return void holds.finish(who, key, { kind: 'refused', name: held.name });
+      if (!shown) return void holds.finish(who, key, { kind: 'refused', name: held.name });
       holds.remove(who, key);
       if (answer.kind === 'rate-limited') {
         const left = startWait(answer.retryAfterSeconds);
@@ -1151,7 +1298,7 @@ function UserPage({
     }
     // Undecided, or any answer to a check that is not the confirming 201: the key may have committed.
     holds.change(who, key, { state: 'unresolved' });
-    if (!alive.current) return;
+    if (!shown) return;
     setHoldNote({ key, text: reasonOf(answer, answer.kind === 'rate-limited' ? startWait(answer.retryAfterSeconds) : undefined) });
     if (!first) listAfter(kind, here);
   }
@@ -1171,6 +1318,7 @@ function UserPage({
       return;
     }
     const mine = gen.current.n;
+    const since = sessionEndsSoFar();
     addRef.current = true;
     setAdding(true);
     setErrors(NO_FIELDS);
@@ -1179,7 +1327,8 @@ function UserPage({
     setConnectionChanged(false);
     try {
       const s = await connect(uid);
-      if (!alive.current || mine !== gen.current.n) return; // the page or its connection was replaced: nothing is sent
+      // The page or its connection was replaced, or a sign-out began after this check asked: nothing is sent.
+      if (!alive.current || mine !== gen.current.n || since !== sessionEndsSoFar()) return;
       if (s.kind !== 'ok') {
         return setCreateStatus({ refusal: true, text: `Not sent. ${failList(sessionFailure(s)).text}` });
       }
@@ -1202,29 +1351,38 @@ function UserPage({
     const held = holds.get(uid);
     if (held === undefined || held.state !== 'unresolved' || held.csrf === null || waitRef.current) return;
     if (clock() - held.sentAt >= CHECK_CUTOFF_MS) return setTick((n) => n + 1); // too old: the card now says so
-    const { key, body, csrf } = held;
+    // Only the key is kept across the session check: the token and the bytes are read from the store again after it.
+    const { key } = held;
+    const since = sessionEndsSoFar();
     checkRef.current = true;
     holds.change(uid, key, { state: 'checking' });
     setHoldNote(null);
     try {
       const s = await connect(uid);
-      if (holds.get(uid)?.key !== key) return;
+      const now = holds.get(uid);
+      if (now === undefined || now.key !== key) return;
+      // A sign-out began after this check asked (its token and body are gone from the store): nothing is sent or taken.
+      if (since !== sessionEndsSoFar()) return void holds.change(uid, key, { state: 'unresolved' });
       if (s.kind !== 'ok') {
         holds.change(uid, key, { state: 'unresolved' });
         if (!alive.current) return;
         return setHoldNote({ key, text: `Not checked. ${failList(sessionFailure(s)).text}` });
       }
-      if (s.csrf !== csrf) {
+      // Detached or ended meanwhile (a read noticed another connection or an end while this one was confirming).
+      if (now.csrf === null || now.ended === true) return void holds.change(uid, key, { state: 'unresolved' });
+      if (s.csrf !== now.csrf) {
         // Another connection answers now: the attempt is detached for good and NOTHING is sent.
         holds.change(uid, key, { state: 'unresolved', csrf: null });
         if (alive.current) adopt(uid, s.csrf);
         return;
       }
       if (alive.current) adopt(uid, s.csrf); // a page that had no token yet takes this one: the attempt's own
-      // Detached meanwhile (a read noticed another connection while this one was confirming): nothing is sent.
-      if (holds.get(uid)?.csrf !== csrf) return void holds.change(uid, key, { state: 'unresolved' });
-      // The SAME key and the SAME body string, with the token it was first sent with.
-      settle(uid, key, await customers.create(body, key, csrf), false);
+      // The attempt as the store holds it NOW, still under the token the check confirmed and still inside the window;
+      // its bytes are copied straight into the one request: the SAME key, the SAME body, its own token.
+      const sending = holds.get(uid);
+      if (sending === undefined || sending.key !== key || sending.ended === true || sending.csrf !== s.csrf || sending.body === ''
+        || clock() - sending.sentAt >= CHECK_CUTOFF_MS) return void holds.change(uid, key, { state: 'unresolved' });
+      settle(uid, key, await customers.create(sending.body, key, sending.csrf), false);
     } finally {
       checkRef.current = false;
     }
@@ -1725,7 +1883,7 @@ function UserPage({
         </p>
       )}
       {saved !== null && 'earlier' in saved && (
-        <p data-testid="directory-saved-earlier" role="status" className="text-sm font-bold text-slate-700">{savedEarlierText(saved.earlier)}</p>
+        <p data-testid="directory-saved-earlier" role="status" className="text-sm font-bold text-slate-700">{saved.earlier === null ? ENDED_TEXT.saved : savedEarlierText(saved.earlier)}</p>
       )}
 
       {attempt !== undefined && (
@@ -1737,11 +1895,13 @@ function UserPage({
           data-detached={detached ? 'true' : 'false'}
           className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-2"
         >
-          {attempt.state === 'sending' && <p role="status" className="text-sm font-bold text-amber-900">Sending &quot;{attempt.name}&quot; to the server…</p>}
-          {attempt.state === 'checking' && <p role="status" className="text-sm font-bold text-amber-900">Checking &quot;{attempt.name}&quot; with the server…</p>}
+          {/* A session end detached it: nothing names it here (its view carries no name). */}
+          {attempt.state !== 'unresolved' && attempt.ended && <p role="status" className="text-sm font-bold text-amber-900">{ENDED_TEXT.sending}</p>}
+          {attempt.state === 'sending' && !attempt.ended && <p role="status" className="text-sm font-bold text-amber-900">Sending &quot;{attempt.name}&quot; to the server…</p>}
+          {attempt.state === 'checking' && !attempt.ended && <p role="status" className="text-sm font-bold text-amber-900">Checking &quot;{attempt.name}&quot; with the server…</p>}
           {attempt.state === 'unresolved' && (
             <>
-              <p role="status" className="text-sm font-bold text-amber-900">{unresolvedText(attempt.name)}</p>
+              <p role="status" className="text-sm font-bold text-amber-900">{attempt.ended ? ENDED_TEXT.unresolved : unresolvedText(attempt.name)}</p>
               {holdNote !== null && holdNote.key === attempt.key && (
                 <p data-testid="directory-hold-reason" role="status" className="text-xs font-bold text-amber-800">{holdNote.text}</p>
               )}
@@ -1752,7 +1912,7 @@ function UserPage({
                 </p>
               ) : (
                 <div className="flex flex-wrap items-center gap-3">
-                  <button type="button" data-testid="directory-check-again" disabled={waiting} aria-describedby="directory-check-hint" onClick={() => { void checkAgain(); }} className={button}>
+                  <button ref={checkButton} type="button" data-testid="directory-check-again" disabled={waiting} aria-describedby="directory-check-hint" onClick={() => { void checkAgain(); }} className={button}>
                     Check again
                   </button>
                   <span id="directory-check-hint" className={hintClass}>{waiting ? waitHint(wait) : ''}</span>

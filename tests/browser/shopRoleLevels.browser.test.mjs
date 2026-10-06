@@ -87,8 +87,9 @@
 //   SCB-05 a reply lost after the commit: the unresolved card, never "saved"; "Check again" re-sends the SAME key and the
 //          byte-identical body (though the field was edited since), answered 201 as a replay; ONE customer of that name.
 //   SCB-06 a first send that never reached the server, then the account's grant moves to tenant B: "Check again" finds
-//          the session ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6); the owner's Reconnect signs in (now
-//          B's) and the attempt is detached — no POST leaves under the new session, neither tenant holds the name.
+//          the session ended and sends nothing — no login, no POST (M7A-CUSTOMERS-P6) — and that end detaches the attempt
+//          at once (M7B-INVOICES-P1-R2, DA-200); the owner's Reconnect signs in (now B's) and the attempt stays detached —
+//          no POST leaves under the new session, neither tenant holds the name.
 //
 // M7A-CUSTOMERS-P5-R1 — the tenant session is REUSED across loads and the customer reads are BOUND to it (same harness).
 // One more substitution, stated: SCB-08 swaps the browser's tenant session cookie (CDP Storage.setCookies in the page's
@@ -112,10 +113,11 @@
 // M7A-CUSTOMERS-P6 — a session the page confirmed that the server then ends is NEVER re-established on its own (same
 // harness). The end is the one SRL-03 makes: the owner's tmpos_session.session rows (and their mint rows) deleted.
 //   SCB-09 SESSION END: an owner's page with rows and an unresolved create (its answer lost after the commit); the session
-//          is ended in the store. Refresh, a window focus, a tab return (visibilitychange), "Check again", a customer
-//          opened in the app and the way back send ZERO logins and no POST; the list and the detail show "Reconnect" and
-//          no customer. ONE Reconnect click sends exactly ONE login, the rows return and the attempt is detached (never
-//          re-sent: one POST in the whole case). Ended again, a valid session another TAB made is reused on focus with
+//          is ended in the store. Refresh, a window focus, a tab return (visibilitychange), a customer opened in the app
+//          and the way back send ZERO logins and no POST; the list and the detail show "Reconnect" and no customer; the
+//          end the Refresh found detached the attempt at once (M7B-INVOICES-P1-R2, DA-200: no Check again). ONE Reconnect
+//          click sends exactly ONE login, the rows return and the attempt stays detached (never re-sent: one POST in the
+//          whole case). Ended again, a valid session another TAB made is reused on focus with
 //          no login from the page. A reload while the cookie names an ended session is a fresh page: one login, the
 //          stated residual (the 401 does not say "expired", and the page stores nothing). Not run in this stage's
 //          sandbox (no browser gate here): written to SCB-05/07/08's helpers.
@@ -280,6 +282,34 @@
 //          request from this tab after the switch began but its one logout of A's session carries A's session CSRF token
 //          (answered 401 when the other tab's own switch has already ended that session, as it can). Once B's profile is
 //          released this tab shows B's Invoices page, and still nothing of A.
+// M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
+// guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
+// of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
+//   SSE-01 (DA-200, AC-01..04) THE CUSTOMER DIRECTORY'S CREATE HOLD: an owner adds a customer with a phone and an email;
+//          ONE POST commits and its answer is lost at the front (Check again offered). The owner signs out in this tab
+//          (the same document): once the logout has run, the page's JavaScript heap holds neither the session CSRF token
+//          nor the exact body sent (the phone and email strings are still reachable there through the detached inputs a
+//          CDP handle of this harness keeps, and React's value tracker on them — recorded with their retaining path, not
+//          asserted: no erasure of the contact is claimed). Signed in again (a new session), the attempt shows detached and unnamed, with no
+//          Check again, through a navigation away and back; Stop tracking forgets it. A second add (name only) has its
+//          201 parked at the front, the owner signs out, and the answer is released at /login: nothing is read or sent
+//          for it. Signed in again, the directory says a customer sent before the session ended was saved — no name, no
+//          link. Two POSTs in the whole case, two customers, each with its one audit and completion.
+//   SSE-02 (DA-202, AC-05/06) A CHOSEN SERVER CUSTOMER WITH THE PICKER CLOSED: A's invoice draft holds a server customer
+//          ("Save as server draft" offered), the picker closed; B signs in in a second tab (B's profile held, A's page
+//          mounted): the field drops the customer with the session-ended notice, and the limit text and "Save as server
+//          draft" go — observed while every session check of this tab (a focus or tab-return check included) is held
+//          before it leaves, so the drop is the sign-out's own. Once B's profile loads, the draft (now B's) holds no server
+//          customer, and opening B's picker binds nothing. Nothing is written.
+//   SSE-03 (AC-07) THE DRAFT HAND-OVER'S SESSION CHECK: A hands a server customer to the Server drafts section and chooses
+//          a store, which opens the New server draft dialog; its session check (GET /api/v1/session) is held at the front.
+//          B signs in in a second tab (B's profile held); the check's answer, released then, opens nothing: no dialog, no
+//          customer, no hand-over note, no draft POST and no login, and no request after the switch but A's logout carries
+//          A's session CSRF token. A REGRESSION GUARD, not evidence of the AC-07 fix: it passes on the entry commit too
+//          (recorded: the session client's epoch neutralizes an answer that arrives after the logout began, and the
+//          section's own sign-out listener closes the dialog). The fix's cases — an answer that had arrived just before
+//          the sign-out, a new or ended generation before the answer — are jsdom-only (ServerInvoiceDrafts.test.tsx
+//          SID-55, SID-56).
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -1356,6 +1386,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08',
+  'SSE-01', 'SSE-02', 'SSE-03',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -2458,7 +2489,7 @@ scenario('SCB-05', 'LOST REPLY AFTER THE COMMIT — the POST commits but its ans
   await assertNoLeak(page);
 });
 
-scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reached the server is held; the account\'s grant moves to tenant B: "Check again" notices the new connection, the attempt is detached, NO POST leaves under the new session, and neither tenant holds the name', async () => {
+scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reached the server is held; the account\'s grant moves to tenant B: "Check again" finds the session ended and the attempt is detached for good at once (M7B-INVOICES-P1-R2), NO POST leaves under the new session, and neither tenant holds the name', async () => {
   const a = await shop('c6a');
   const b = await newTenant('c6b');
   const inA = await seedCustomers(a.tenant, [`M7SCB c6 A only ${SUFFIX}`]);
@@ -2483,11 +2514,11 @@ scenario('SCB-06', 'HELD ATTEMPT, MOVED GRANT — a first send that never reache
   const moved = st.api.length;
   await page.click(by('directory-check-again')); // the page's next action: it must check the connection before anything is sent
   // M7A-CUSTOMERS-P6: the move ended the session this page confirmed — "Check again" finds it ended and sends nothing:
-  // no login and no POST; the card stays unresolved (no other connection exists yet) and the list offers Reconnect.
+  // no login and no POST; the list offers Reconnect. M7B-INVOICES-P1-R2 (DA-200): that end detaches the card at once.
   await waitList(page, 'signed-out');
   await quiet(page, moved);
   assert.deepEqual(st.api.slice(moved).filter((r) => isLogin(r) || isCreate(r)).map(apiLine), [], 'no login and no POST on "Check again"');
-  assert.equal(await page.evaluate(`${q('directory-hold')}.dataset.detached`), 'false', 'not detached before a new connection exists');
+  assert.equal(await page.evaluate(`${q('directory-hold')}.dataset.detached`), 'true', 'the ended session detached it at once: it can never be sent again');
   assert.equal(await textOf(page, 'directory-retry'), 'Reconnect');
   const reconnect = st.api.length;
   await page.click(by('directory-retry'));
@@ -2772,7 +2803,7 @@ async function endSessions(who) {
   await owner`delete from tmpos_session.session where auth_provider_uid = ${who.uid}`;
 }
 
-scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page confirmed is ended in the store: Refresh, a focus, a tab return, "Check again" and a customer opened in the app send ZERO logins and no POST, showing Reconnect and no customer; ONE Reconnect click sends exactly ONE login, the rows return and the unresolved create is detached, never re-sent; ended again, another tab\'s valid session is reused with no login; a reload with an ended cookie signs in once (the stated residual)', async () => {
+scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page confirmed is ended in the store: Refresh, a focus, a tab return and a customer opened in the app send ZERO logins and no POST, showing Reconnect and no customer, and the end detaches the unresolved create at once (M7B-INVOICES-P1-R2: no Check again); ONE Reconnect click sends exactly ONE login, the rows return and the create stays detached, never re-sent; ended again, another tab\'s valid session is reused with no login; a reload with an ended cookie signs in once (the stated residual)', async () => {
   const { tenant, boss } = await shop('c9');
   await seedCustomers(tenant, [`M7SCB c9 one ${SUFFIX}`, `M7SCB c9 two ${SUFFIX}`]);
   const name = `M7SCB c9 held ${SUFFIX}`;
@@ -2796,9 +2827,8 @@ scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page conf
   steps.refresh = { logins: pageLogins(ended).map(answered), state: await textOf(page, 'directory-state') };
   await page.evaluate(`dispatchEvent(new Event('focus'))`);
   await page.evaluate(`document.dispatchEvent(new Event('visibilitychange'))`);
-  await page.waitFor(() => offered(page, 'directory-check-again'), 15_000, 'Check again is offered');
-  await page.click(by('directory-check-again'));
-  await page.waitFor(async () => /Not checked/.test((await textOf(page, 'directory-hold-reason')) ?? ''), 15_000, 'the check found the session ended');
+  await page.waitFor(`${q('directory-hold')}?.dataset.detached === 'true'`, 15_000, 'the end detached the attempt (DA-200)');
+  steps.checkAgain = await has(page, 'directory-check-again');
   await go(page, `${DIRECTORY}/${expected[0].id}`);
   await waitData(page, 'directory-detail', 'phase', 'signed-out');
   steps.detail = { name: await has(page, 'directory-detail-name'), retry: await textOf(page, 'directory-detail-retry') };
@@ -2853,10 +2883,11 @@ scenario('SCB-09', 'SESSION END (M7A-CUSTOMERS-P6) — the session the page conf
   assert.deepEqual(steps.refresh.logins, [], 'Refresh after the end: no login');
   assert.match(steps.refresh.state ?? '', /session ended/i, 'the list says the session ended');
   assert.deepEqual([steps.detail.name, steps.detail.retry], [false, 'Reconnect'], 'the detail shows no customer, and Reconnect');
-  assert.deepEqual(steps.ended.logins, [], 'ZERO logins across Refresh, focus, tab return, Check again and the route changes');
+  assert.deepEqual(steps.ended.logins, [], 'ZERO logins across Refresh, focus, tab return and the route changes');
   assert.deepEqual(steps.ended.creates, [], 'no POST: the uncertain create is not re-sent');
   assert.deepEqual(steps.ended.customerReads, [], 'no customer read without a session');
-  assert.deepEqual([steps.ended.rows, steps.ended.retry, steps.ended.detached], [0, 'Reconnect', 'false'], 'no rows, Reconnect, the attempt still held');
+  assert.deepEqual([steps.ended.rows, steps.ended.retry, steps.ended.detached, steps.checkAgain], [0, 'Reconnect', 'true', false],
+    'no rows, Reconnect, the attempt still held but detached by the end, with no Check again');
   assert.deepEqual(steps.reconnect.logins, ['200'], 'ONE Reconnect click: exactly one login');
   assert.ok(steps.reconnect.rowsBack, 'the rows return');
   assert.equal(steps.reconnect.creates, 1, 'one POST in the whole case: the attempt is detached, never re-sent');
@@ -4739,6 +4770,11 @@ const answeredTokens = (records) => records.flatMap((r) => tokensOf({ headers: {
  * taking one, and a collection is asked for first), searched as text. What it sees is the renderer's JS heap only.
  */
 async function heldInHeap(page, values) {
+  const snapshot = await heapSnapshot(page);
+  return values.filter((v) => snapshot.includes(v));
+}
+/** A CDP heap snapshot of `page`'s renderer JS heap (a collection asked for first), as its JSON text. */
+async function heapSnapshot(page) {
   const chunks = [];
   const stop = page.on('HeapProfiler.addHeapSnapshotChunk', (e) => chunks.push(e.chunk));
   try {
@@ -4751,7 +4787,53 @@ async function heldInHeap(page, values) {
   }
   const snapshot = chunks.join('');
   assert.ok(snapshot.length > 100_000 && snapshot.includes('"strings"'), 'a heap snapshot was taken');
-  return values.filter((v) => snapshot.includes(v));
+  return snapshot;
+}
+/**
+ * The retaining path of the first heap string that contains `value` (M7B-INVOICES-P1-R2, SSE-01): from that string up
+ * through its retainers (weak edges skipped), breadth first, at most `depth` steps — each step "type name -edge->". A
+ * diagnostic for the evidence: it names what keeps the string, it decides nothing.
+ */
+function retainingPath(snapshotText, value, depth = 12) {
+  const { snapshot: { meta }, nodes, edges, strings } = JSON.parse(snapshotText);
+  const N = meta.node_fields.length;
+  const E = meta.edge_fields.length;
+  const [nType, nName, nEdges] = ['type', 'name', 'edge_count'].map((f) => meta.node_fields.indexOf(f));
+  const [eType, eName, eTo] = ['type', 'name_or_index', 'to_node'].map((f) => meta.edge_fields.indexOf(f));
+  const nodeTypes = meta.node_types[nType];
+  const edgeTypes = meta.edge_types[eType];
+  const count = nodes.length / N;
+  const target = [];
+  for (let n = 0; n < count; n += 1) if (/string/.test(nodeTypes[nodes[n * N + nType]]) && strings[nodes[n * N + nName]].includes(value)) target.push(n);
+  if (target.length === 0) return null;
+  const owner = new Map(target.map((n) => [n, null])); // node -> [retainer, edge label]
+  let frontier = new Set(target);
+  let root = null;
+  for (let d = 0; d < depth && frontier.size > 0 && root === null; d += 1) {
+    const next = new Set();
+    for (let from = 0, e = 0; from < count; from += 1) {
+      for (let k = 0; k < nodes[from * N + nEdges]; k += 1, e += E) {
+        const to = edges[e + eTo] / N;
+        if (!frontier.has(to) || owner.has(from)) continue;
+        const kind = edgeTypes[edges[e + eType]];
+        if (kind === 'weak') continue;
+        const name = kind === 'element' || kind === 'hidden' ? `[${edges[e + eName]}]` : strings[edges[e + eName]];
+        owner.set(from, [to, `${kind}:${String(name).slice(0, 40)}`]);
+        next.add(from);
+        if (nodeTypes[nodes[from * N + nType]] === 'synthetic') root = from;
+      }
+    }
+    frontier = next;
+  }
+  // Walk back from the deepest node reached (the root when one was), down to the string.
+  let at = root ?? [...frontier][0] ?? target[0];
+  const path = [];
+  while (at !== undefined && owner.has(at)) {
+    const step = owner.get(at);
+    path.push(`${nodeTypes[nodes[at * N + nType]]} ${String(strings[nodes[at * N + nName]]).slice(0, 60)}${step === null ? '' : ` -${step[1]}->`}`);
+    at = step === null ? undefined : step[0];
+  }
+  return path;
 }
 /** Whether any of `values` rides a request: its path, query, any header or its body. */
 const carries = (r, values) => {
@@ -5159,5 +5241,275 @@ scenario('SDB-08', 'AC-15 A READ OUT WHEN ANOTHER USER SIGNS IN (DA-198) — use
   const aLogouts = after.filter((r) => isLogout(r) && carries(r, aTokens));
   assert.equal(aLogouts.length, 1, `this tab sent one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
   assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
+  await assertNoLeak(page);
+}, 180_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P1-R2 — session-end cleanup (DA-200, DA-202, AC-07). The literals are the shop's own texts.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** ServerCustomerDirectory.tsx's ENDED_TEXT: what is said of an attempt a session end detached — never its name. */
+const SSE_ENDED = Object.freeze({
+  unresolved: 'Not confirmed yet: a customer sent before your server session ended. The server may have saved it.',
+  saved: 'A customer sent before your server session ended was saved on the server.',
+});
+/** ServerCustomerPicker.tsx's PICK_ENDED_TEXT. */
+const PICK_ENDED = 'Your server session ended, so the server customer was removed from this draft. Choose "Select a server customer", then Reconnect to select one again.';
+/** Hold the switch to `b` in `page`: `b` signs in in a second tab of this browser, and `b`'s profile read in this tab is held (SDB-08). */
+async function switchHeld(page, b, from) {
+  const profile = profileGate(page, b.uid);
+  const tab = await sameContextTab(page);
+  await signIn(tab, b);
+  const reached = await Promise.race([profile.reached.then(() => true), delay(30_000).then(() => false)]);
+  assert.ok(reached, `this tab reads ${b.label}'s profile: the switch has begun (the logout was started first)`);
+  await page.waitFor(() => sentBy(page, isLogout, from).length > 0, 15_000, 'the logout left this tab');
+  return profile;
+}
+
+scenario('SSE-01', 'DA-200 THE DIRECTORY\'S CREATE HOLD AT A SIGN-OUT — a create whose answer is lost holds its token and exact body until the owner signs out: then the page\'s heap holds neither; signed in again it is detached and unnamed, never re-sent through navigation; a second create whose 201 arrives after the sign-out starts no read or send, and is said later without its name; two POSTs, two customers, nothing else', async () => {
+  const { tenant, boss } = await shop('se1');
+  const first = { name: `M7SSE se1 Ada ${SUFFIX}`, phone: `+1 555 01${SUFFIX.slice(0, 2).replace(/\D/g, '7')}`, email: `se1.${SUFFIX}@example.test` };
+  const second = `M7SSE se1 Bea ${SUFFIX}`;
+  const before = await counts();
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDirectory(page);
+  await waitList(page);
+
+  // 1. ONE POST, committed; its answer lost at the front: the attempt is held, Check again offered.
+  await page.fill(by('directory-name'), first.name);
+  await page.fill(by('directory-phone'), first.phone);
+  await page.fill(by('directory-email'), first.email);
+  await page.waitFor(() => offered(page, 'directory-add'), 15_000, 'Add customer is enabled');
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('directory-add'));
+    await waitData(page, 'directory-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const [post] = sentBy(page, isCreate);
+  const heldBefore = { check: await offered(page, 'directory-check-again'), detached: await page.evaluate(`${q('directory-hold')}?.dataset.detached ?? null`) };
+  assert.deepEqual(heldBefore, { check: true, detached: 'false' }, 'the attempt is held, attached, with Check again');
+  assert.equal((await named(tenant, first.name)).length, 1, 'the lost answer\'s create committed');
+  const tokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  assert.ok(tokens.length > 0, 'the session CSRF token was seen');
+  assert.ok(post.body.includes(first.phone) && post.body.includes(first.email), 'the body sent carries the phone and the email');
+
+  // 2. Signed out in this tab (the same document): once the logout has run, the heap holds no token and no body.
+  await page.evaluate('window.__sdbSameDocument = true');
+  const out = await signOutHere(page);
+  await page.waitFor(() => st.api.slice(out).some((r) => isLogout(r) && r.handedBack === true), 20_000, 'the logout\'s answer was handed to the page');
+  await page.settle();
+  // What the heap is searched for: the token and the exact body (the hold store's; asserted absent) and the phone and email
+  // (recorded only). In the recorded runs both contact strings were reachable as "(Global handles) / DevTools console ->
+  // native <input id=directory-phone|email> -get value-> closure context": the detached inputs, kept alive by the CDP
+  // remote object this harness's own click resolved (cdp.mjs `find`), and React's input value tracker on them — render
+  // residue under the inspector, not an application holder; no erasure of the contact is claimed.
+  let inHeap = null;
+  let snapshot = '';
+  // Each snapshot asks for a collection first; the logout's own work may still be finishing in the first one.
+  for (let i = 0; i < 3 && (inHeap === null || inHeap.tokens + inHeap.body > 0); i++) {
+    snapshot = await heapSnapshot(page);
+    // The snapshot is JSON: a string holding quotes (the body) appears there escaped.
+    inHeap = {
+      tokens: tokens.filter((v) => snapshot.includes(v)).length, body: snapshot.includes(JSON.stringify(post.body).slice(1, -1)) ? 1 : 0,
+      phone: snapshot.includes(first.phone), email: snapshot.includes(first.email),
+    };
+  }
+  const retainers = { phone: inHeap.phone ? retainingPath(snapshot, first.phone) : null, email: inHeap.email ? retainingPath(snapshot, first.email) : null };
+  snapshot = '';
+
+  // 3. Signed in again (a new session): the attempt is detached and unnamed, and nothing re-sends it.
+  await signInHere(page, boss);
+  await openDirectory(page);
+  await waitList(page);
+  await page.waitFor(`${q('directory-hold')}?.dataset.detached === 'true'`, 15_000, 'the attempt, detached');
+  const back = { text: await page.evaluate(`${q('directory-hold')}?.textContent ?? ''`), check: await has(page, 'directory-check-again') };
+  await go(page, '/');
+  await page.settle();
+  await openDirectory(page);
+  await waitList(page);
+  const remounted = { detached: await page.evaluate(`${q('directory-hold')}?.dataset.detached ?? null`), check: await has(page, 'directory-check-again') };
+  await page.click(by('directory-stop-tracking'));
+  await page.waitFor(`!${q('directory-hold')}`, 15_000, 'stopped tracking');
+
+  // 4. A second create, its 201 parked at the front; the owner signs out; the answer is released at /login.
+  const parked = gate((r) => r.frameId === page.frameId && isCreate(r), 'response');
+  await addCustomer(page, second);
+  const late = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(late, 'the second POST reached the entry; its answer is parked');
+  const out2 = await signOutHere(page);
+  await page.waitFor(() => st.api.slice(out2).some((r) => isLogout(r) && r.handedBack === true), 20_000, 'the logout\'s answer was handed to the page');
+  await page.settle();
+  const releasedAt = st.api.length;
+  parked.release();
+  await page.waitFor(() => late.handedBack === true, 15_000, 'the parked 201 was handed back to the browser');
+  await page.settle(); // two frames: the answer's continuation has run and anything it rendered is committed
+  // The settle point: the next sign-in. Whatever the late answer made the page send was sent before it began.
+  const afterLate = st.api.slice(releasedAt).filter((r) => r.frameId === page.frameId).map(apiLine);
+  await signInHere(page, boss);
+  await openDirectory(page);
+  await waitList(page);
+  await page.waitFor(`!!${q('directory-saved-earlier')}`, 15_000, 'the earlier session\'s create, said');
+  const news = { text: await textOf(page, 'directory-saved-earlier'), link: await has(page, 'directory-saved-link'), hold: await has(page, 'directory-hold') };
+  // A later deterministic event — a Refresh whose page-one read is answered — before anything is counted.
+  const refreshAt = st.api.length;
+  await page.click(by('directory-refresh'));
+  await page.waitFor(() => sentBy(page, isList, refreshAt).some((r) => r.status !== null), 15_000, 'the Refresh read was answered');
+  await quiet(page, out);
+  const posts = sentBy(page, isCreate);
+  record('SSE-01', { heldBefore, inHeap, retainers, back, remounted, late: answered(late), afterLate, news, posts: posts.map(apiLine) });
+  assert.equal(await page.evaluate(SAME_DOCUMENT), true, 'the same document throughout: the module memory is the one the sign-outs left');
+  assert.deepEqual(inHeap, { tokens: 0, body: 0, phone: inHeap.phone, email: inHeap.email },
+    'once signed out, the page\'s JavaScript heap holds neither the session CSRF token nor the exact body sent (the hold store heard the sign-out)');
+  assert.ok(back.text.includes(SSE_ENDED.unresolved), `the card says what it is, unnamed: ${back.text}`);
+  assert.ok(!back.text.includes(first.name) && !back.text.includes(first.phone) && !back.text.includes(first.email), 'the card names no customer and no contact');
+  assert.equal(back.check, false, 'no Check again: it can never be sent');
+  assert.deepEqual(remounted, { detached: 'true', check: false }, 'a navigation away and back changes nothing');
+  assert.equal(late.status, 201, 'the parked answer was the entry\'s 201');
+  assert.deepEqual(afterLate, [], 'the late answer, at /login, made the page read or send nothing');
+  assert.deepEqual(news, { text: SSE_ENDED.saved, link: false, hold: false }, 'the late create is said without its name and without a link');
+  assert.deepEqual(posts.map((r) => r.status), [201, 201], 'two POSTs in the whole case: one per explicit Add (the first answer lost at the front)');
+  assert.equal(posts[0].lost, 'response');
+  assert.equal((await named(tenant, first.name)).length, 1, 'one customer for the first add');
+  assert.equal((await named(tenant, second)).length, 1, 'one customer for the second add');
+  await assertDelta(before, { C: 2, A: 2, E: 0, U: 0, K: 2, L: 2 }, 'two creates: two customers, two create audits, two completions, no other idempotency record');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SSE-02', 'DA-202 A CHOSEN SERVER CUSTOMER, PICKER CLOSED, AT A SIGN-OUT — B signs in in a second tab and B\'s profile is held, so A\'s invoice draft stays mounted: its server customer goes at once with the session-ended notice, with the limit text and "Save as server draft" — no focus or tab-return check; once B\'s profile loads the draft holds no server customer and opening B\'s picker binds nothing; nothing is written', async () => {
+  const { tenant, boss: a } = await shop('se2');
+  const b = await actor('se2-b', [grant(tenant, 'manager')], { role: 'manager' });
+  const [customer] = await seedCustomers(tenant, [`M7SSE se2 Robin ${SUFFIX}`]);
+  const before = await counts();
+  const page = await recordWrites(await openPage());
+  await signIn(page, a);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('invoice-create-open')}`, 30_000, 'the Invoices page offers Create Invoice');
+  await page.click(by('invoice-create-open'));
+  await page.waitFor(`!!${q('picker-open')}`, 15_000, 'the draft offers the server-customer picker');
+  await openPicker(page, 'picker-open');
+  await pickRow(page, customer.id);
+  const chosen = {
+    bound: await boundId(page), dialog: await has(page, 'picker-dialog'), limit: await has(page, 'invoice-server-limit'), handoff: await has(page, 'invoice-server-draft'),
+  };
+  assert.deepEqual(chosen, { bound: customer.id, dialog: false, limit: true, handoff: true }, 'the draft holds the server customer, the picker closed');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  const from = st.api.length;
+  // Every session check this tab asks from here is held before it leaves (the field's own focus or tab-return check
+  // included, which a new tab can trigger): what the field shows while they are held is the sign-out's own doing.
+  const checksHeld = [0, 1, 2].map(() => gate((r) => r.frameId === page.frameId && isSessionRead(r), 'request'));
+  const profile = await switchHeld(page, b, from);
+  await page.settle(); // two frames after the logout began
+  const whileMounted = {
+    form: await has(page, 'invoice-customer-select'), bound: await boundId(page), notice: await textOf(page, 'picker-notice'),
+    limit: await has(page, 'invoice-server-limit'), handoff: await has(page, 'invoice-server-draft'), drafts: await has(page, 'drafts-handoff'),
+  };
+  const checksSeen = sentBy(page, isSessionRead, from);
+  const heldChecks = checksSeen.map(apiLine);
+  record('SSE-02', { phase: 'A mounted, B\'s profile held', chosen, whileMounted, heldChecks, requests: sentBy(page, () => true, from).map(apiLine) });
+  // Every session check this tab asked up to the observation is still held, unanswered (none escaped the gates), so what
+  // the field shows is the sign-out listener's doing, not a check's answer.
+  assert.ok(checksSeen.length <= checksHeld.length, `more session checks than gates: ${heldChecks.join('; ')}`);
+  assert.ok(checksSeen.every((r) => r.status === null && r.handedBack !== true), `a session check was answered before the observation: ${heldChecks.join('; ')}`);
+  for (const c of checksHeld) c.release();
+  profile.release();
+  await page.waitFor(`!!${q('invoice-create-open')}`, 30_000, 'B\'s Invoices page in this tab');
+  await page.settle();
+  // B's own draft: open one (or the one still open) and its picker: page one under B's session, no customer bound.
+  if (!(await has(page, 'picker-field'))) {
+    await page.click(by('invoice-create-open'));
+    await page.waitFor(`!!${q('picker-field')}`, 15_000, 'B\'s draft offers the picker');
+  }
+  const bDraft = { bound: await boundId(page), limit: await has(page, 'invoice-server-limit') };
+  let bPicker = null;
+  if (await has(page, 'picker-open')) {
+    await page.click(by('picker-open'));
+    await page.waitFor(`!!${q('picker-state')} && ${q('picker-state')}.dataset.phase !== 'loading'`, 30_000, 'B\'s picker answered');
+    bPicker = await page.evaluate(`${q('picker-state')}?.dataset.phase ?? null`);
+    await page.click(by('picker-cancel'));
+    await page.waitFor(`!${q('picker-dialog')}`, 15_000, 'the picker closed');
+  }
+  const bAfterPicker = { bound: await boundId(page), limit: await has(page, 'invoice-server-limit') };
+  await quiet(page, from); // after B's picker read and its Cancel (the later deterministic event), every request answered
+  const after = sentBy(page, () => true, from);
+  record('SSE-02', { chosen, whileMounted, bDraft, bPicker, bAfterPicker, requests: after.map(apiLine) });
+  assert.deepEqual(whileMounted, { form: true, bound: null, notice: PICK_ENDED, limit: false, handoff: false, drafts: false },
+    'A\'s draft, still mounted: the server customer is gone with the notice, and nothing offers to carry it on');
+  assert.deepEqual(bDraft, { bound: null, limit: false }, 'the draft, now B\'s, holds no server customer');
+  assert.deepEqual(bAfterPicker, { bound: null, limit: false }, 'B\'s picker (whatever its own session state: it said "signed-out" in the recorded runs) restores nothing');
+  assert.deepEqual(after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine), [], 'no request after the switch but the logout carries A\'s session CSRF token');
+  assert.deepEqual(after.filter((r) => r.method !== 'GET' && !isLogout(r) && !isLogin(r)).map(apiLine), [], 'nothing but a logout and B\'s login is sent');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'nothing written');
+  await assertNoLeak(page);
+}, 180_000);
+
+scenario('SSE-03', 'AC-07 REGRESSION GUARD (it passes on the entry commit too: the client epoch layer) — THE DRAFT HAND-OVER\'S SESSION CHECK AT A SIGN-OUT — A hands a server customer to the Server drafts section and chooses a store; the New server draft dialog opens and its session check is held at the front; B signs in in a second tab (B\'s profile held, A\'s page mounted); the check\'s answer, released then, opens and fills nothing — no dialog, customer, hand-over, draft POST or login of A — and no request after the switch but A\'s logout carries A\'s token; nothing is written', async () => {
+  const { tenant, stores: [west], boss: a } = await draftShop('se3', ['west']);
+  const b = await actor('se3-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const [customer] = await seedCustomers(tenant, [`M7SSE se3 Sage ${SUFFIX}`]);
+  const dBefore = await draftCounts(tenant);
+  const before = await counts();
+  const page = await recordWrites(await openPage());
+  await signIn(page, a);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('invoice-create-open')}`, 30_000, 'the Invoices page offers Create Invoice');
+  await page.click(by('invoice-create-open'));
+  await page.waitFor(`!!${q('picker-open')}`, 15_000, 'the draft offers the server-customer picker');
+  await openPicker(page, 'picker-open');
+  await pickRow(page, customer.id);
+  await page.click(by('invoice-server-draft'));
+  await page.waitFor(`!!${q('drafts-handoff')}`, 30_000, 'the Server drafts section holds the hand-over');
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+
+  // 1. The store choice opens the dialog for the hand-over; every session check asked from here (the list read's and the
+  // dialog's, whether they share one request or not) is held at the front.
+  const checks = [0, 1, 2].map(() => gate((r) => r.frameId === page.frameId && isSessionRead(r), 'response'));
+  const pickAt = st.api.length;
+  await pickStore(page, west.id);
+  const held = await Promise.race([checks[0].reached, delay(30_000).then(() => null)]);
+  assert.ok(held, 'the session check reached the entry; its answer is parked');
+  await page.waitFor(`!!${q('draft-new')}`, 15_000, 'the New server draft dialog opened for the hand-over');
+  await page.settle(); // two frames after the dialog mounted: its effect has asked its check (its own request, or the shared one)
+  const heldChecks = sentBy(page, isSessionRead, pickAt);
+  assert.ok(heldChecks.length >= 1 && heldChecks.length <= checks.length && heldChecks.every((r) => r.handedBack !== true),
+    `every session check since the store choice is held at the front: ${heldChecks.map(apiLine).join('; ')}`);
+  // The dialog's own field (the Invoices form, still animating out, may show its old customer for a moment).
+  const dialogBound = () => page.evaluate(`document.querySelector('${by('draft-new')} ${by('picker-value')}')?.dataset.id ?? null`);
+  const opened = { bound: await dialogBound(), handoff: await has(page, 'drafts-handoff') };
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  assert.ok(aTokens.length > 0, 'A\'s session CSRF token was seen');
+
+  // 2. B signs in in a second tab: A's logout starts, B's profile is held, A's page stays mounted.
+  const from = st.api.length;
+  const profile = await switchHeld(page, b, from);
+  // 3. The checks' answers, released while A's page is mounted.
+  for (const c of checks) c.release();
+  await page.waitFor(() => heldChecks.every((r) => r.handedBack === true), 15_000, 'the parked answers were handed back to the browser');
+  await page.settle(); // two frames: the answers' continuations have run and anything they rendered is committed
+  const whileMounted = {
+    section: await has(page, 'drafts-section'), dialog: await has(page, 'draft-new'), bound: await boundId(page), handoff: await has(page, 'drafts-handoff'),
+    stores: await page.evaluate(`${q('drafts-stores-state')}?.dataset.phase ?? null`),
+  };
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from); // B's page loaded (the later deterministic event), every request answered
+  const after = sentBy(page, () => true, from);
+  const seen = {
+    whileMounted, dialogNow: await has(page, 'draft-new'), handoffNow: await has(page, 'drafts-handoff'),
+    aLogins: after.filter(acceptedLogin(a)).map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+  };
+  record('SSE-03', { opened, held: heldChecks.map(answered), ...seen, requests: after.map(apiLine) });
+  assert.deepEqual(opened, { bound: null, handoff: false }, 'while its check is held the dialog shows no customer yet');
+  assert.deepEqual(seen, {
+    whileMounted: { section: true, dialog: false, bound: null, handoff: false, stores: 'signed-out' },
+    dialogNow: false, handoffNow: false, aLogins: [], carriersOfA: [],
+  }, 'the released answer opened and filled nothing: the section had ended at the sign-out, and nothing of A followed');
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST in the whole case');
+  assert.deepEqual(await draftCounts(tenant), dBefore, 'no draft, line, audit or event');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no customer, completion or idempotency record');
   await assertNoLeak(page);
 }, 180_000);
