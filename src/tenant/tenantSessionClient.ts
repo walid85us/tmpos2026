@@ -18,7 +18,7 @@
 //         but its create hold store keeps the token after a sign-out — on a held create until that user's directory page
 //         sees another token (the create is detached) or the create ends (confirmed, refused or removed), and on a "saved"
 //         outcome (a confirmation that came after the page had gone) until that user's page takes it — or until the page
-//         reloads (doc 08 DA-198).
+//         reloads (doc 08 DA-200).
 //       - The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9), third: its open dialog in a ref, to
 //         compare it with the next one, until the dialog closes or hears `onSessionEnd`; and its `sessionContextOf` keeps
 //         the latest (UID, token) pair in module scope, to hand out one opaque context per session,
