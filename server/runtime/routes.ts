@@ -44,10 +44,12 @@
 // about an id's shape;
 // no literal route may sit anywhere below a template's prefix.
 // M7B-INVOICES-P1 — A SECOND CLOSED TEMPLATE SET, THE STORE TEMPLATES: exactly
-// GET /api/v1/stores/{storeId}/invoice-drafts, POST /api/v1/stores/{storeId}/invoice-drafts and
-// GET /api/v1/stores/{storeId}/invoice-drafts/{id}. {storeId} is a SELECTOR segment separate from the {id} target and matches
+// GET /api/v1/stores/{storeId}/invoice-drafts, POST /api/v1/stores/{storeId}/invoice-drafts,
+// GET /api/v1/stores/{storeId}/invoice-drafts/{id} and — M7B-INVOICES-P1-R2 — GET
+// /api/v1/stores/{storeId}/invoice-drafts/eligibility, whose literal last segment is matched before the {id} template's, so
+// it is never read as a draft id. {storeId} is a SELECTOR segment separate from the {id} target and matches
 // what {id} matches (one raw segment, 1-128 characters, no '/'); each must be a tenant-session route requiring a STORE-scope
-// permission, the POST alone an idempotency-required `command`, the two GETs taking none — and no other route may require a
+// permission, the POST alone an idempotency-required `command`, the three GETs taking none — and no other route may require a
 // store-scope permission at all, so no store is ever selected without a path naming it. The chain hands the store segment
 // to the authorizer as RouteView.storeTarget — the canonical lowercase uuid, or null for any other spelling, which then
 // selects no grant (a 403 like a missing or foreign store) — and nothing else ever reads it. A path outside that grammar is
@@ -413,10 +415,14 @@ const IDEMPOTENT_TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['PATCH /api/v1
 export const STORE_SEGMENT = '/{storeId}';
 /** The store templates' common prefix; the store directory (below) is exactly this literal path. */
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
-/** The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1): any other {storeId} template is refused. */
+/**
+ * The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1; the eligibility read since M7B-INVOICES-P1-R2): any
+ * other {storeId} template is refused.
+ */
 const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts/eligibility`,
 ]);
 /** The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create. */
 const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([`POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`]);
@@ -633,7 +639,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly three declared strings, so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly four declared strings, so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -699,7 +705,9 @@ const isIdSegment = (segment: string): boolean =>
  * literally spelling a template's path is such a segment ('{id}'), never the template itself. Failing all of those, a path
  * below /api/v1/stores/ matches a STORE template (M7B-INVOICES-P1) when the segment after that prefix is an id segment (the
  * store selector) and the rest is exactly the template's own rest — its literal segments, then, for the one ending in {id},
- * one more id segment. The store selector is never part of any other lookup.
+ * one more id segment. A rest that is exactly a store template's literal rest matches that template first, so
+ * /invoice-drafts/eligibility (M7B-INVOICES-P1-R2) is never the {id} template's. The store selector is never part of any
+ * other lookup.
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();

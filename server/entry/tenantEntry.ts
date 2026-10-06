@@ -55,7 +55,10 @@
 // authorization-free business route, bound to the session and its CSRF token; and the three STORE-scope invoice draft
 // routes (invoiceDrafts.ts, migration 028): POST /api/v1/stores/{storeId}/invoice-drafts, a draft saved at that store —
 // idempotent, committed through the tenant store with its audit record, its one outbox event and its completion — and
-// GET /api/v1/stores/{storeId}/invoice-drafts[/{id}], the store's drafts and one draft, read-only; each authorized only
+// GET /api/v1/stores/{storeId}/invoice-drafts[/{id}], the store's drafts and one draft, read-only; — M7B-INVOICES-P1-R2 — a
+// fourth, GET /api/v1/stores/{storeId}/invoice-drafts/eligibility, whether a save would be authorized at that store now,
+// decided under the save's own requirement and writing no business row (like every authorized read, a 200 refreshes the
+// session's lastSeenAt and each request spends the request limit); each authorized only
 // through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
@@ -109,6 +112,7 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 

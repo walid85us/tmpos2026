@@ -1317,6 +1317,8 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     // M7B-INVOICES-P1: the invoice drafts' two store-scope reads, session-bound under a resolved store scope.
     ['GET', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}', 'session', 'tenant', 'required', 'required', 'none'],
+    // M7B-INVOICES-P1-R2: the drafts' creation eligibility, a session-bound store-scope read appended after the detail.
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts/eligibility', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
@@ -1324,18 +1326,22 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['POST', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
   assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
-    'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}'],
+    'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
+    'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
     ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
-      'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
+      'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}', 'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility',
       'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts']);
   assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
-  assert.deepEqual([6, 7, 11].map((i) => ttx.routes[i].policy), [
+  assert.deepEqual([6, 7, 8, 12].map((i) => ttx.routes[i].policy), [
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
-  ], 'the draft routes require the STORE route permissions');
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
+  ], 'the draft routes require the STORE route permissions — the eligibility read exactly the save\'s');
+  assert.deepEqual([8, 12].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
+    ['GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts']);
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;

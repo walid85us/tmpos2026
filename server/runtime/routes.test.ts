@@ -589,6 +589,7 @@ const STORE_VIEW = { scope: 'store', permission: 'view_invoice_drafts' };
 const STORE_CREATE = { scope: 'store', permission: 'create_invoice_drafts' };
 const DRAFTS = '/api/v1/stores/{storeId}/invoice-drafts';
 const DRAFT = '/api/v1/stores/{storeId}/invoice-drafts/{id}';
+const ELIGIBILITY = '/api/v1/stores/{storeId}/invoice-drafts/eligibility';
 const storeRead = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   route({ path: DRAFTS, policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required', sessionBinding: 'required', ...over });
 const storeCreate = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -599,12 +600,13 @@ const directory = (over: Record<string, unknown> = {}): Record<string, unknown> 
   route({ path: '/api/v1/stores', policy: BARE_SESSION('tenant'), sessionBinding: 'required', ...over });
 const STORE = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 
-test('M7B: exactly the three store templates register — the two GETs without idempotency, the POST as an idempotency-required command, each a tenant-session store-scope route', () => {
-  const all = [storeRead(), storeRead({ path: DRAFT }), storeCreate()];
+test('M7B: exactly the four store templates register — the three GETs without idempotency, the POST as an idempotency-required command, each a tenant-session store-scope route', () => {
+  // M7B-INVOICES-P1-R2: the fourth, the drafts' creation eligibility, a GET under the save's own requirement.
+  const all = [storeRead(), storeRead({ path: DRAFT }), storeRead({ path: ELIGIBILITY, policy: SESSION('tenant', STORE_CREATE) }), storeCreate()];
   assert.equal(setupCode(all), undefined);
   assert.equal(setupCode([...all, directory(), list(), detail(), profile(), patch()]), undefined, 'beside the store directory and the customer templates');
   const table = defineRoutes(all);
-  assert.deepEqual(table.list().map((r) => `${r.method} ${r.path}`), [`GET ${DRAFTS}`, `GET ${DRAFT}`, `POST ${DRAFTS}`]);
+  assert.deepEqual(table.list().map((r) => `${r.method} ${r.path}`), [`GET ${DRAFTS}`, `GET ${DRAFT}`, `GET ${ELIGIBILITY}`, `POST ${DRAFTS}`]);
   assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts`)?.idempotency, 'required');
   const { command: _command, ...noCommand } = storeCreate();
   for (const [label, def] of [
@@ -612,6 +614,10 @@ test('M7B: exactly the three store templates register — the two GETs without i
     ['a bare store template', storeRead({ path: '/api/v1/stores/{storeId}' })],
     ['a store segment elsewhere', storeRead({ path: '/api/v1/customers/{storeId}/invoice-drafts' })],
     ['a deeper store template', storeRead({ path: `${DRAFT}/lines` })],
+    ['a deeper eligibility template', storeRead({ path: `${ELIGIBILITY}/x` })],
+    ['another literal word after the drafts', storeRead({ path: `${DRAFTS}/eligible` })],
+    ['the eligibility word as a POST', storeCreate({ path: ELIGIBILITY })],
+    ['the eligibility under a key', storeCreate({ method: 'GET', path: ELIGIBILITY, body: { kind: 'none' } })],
     ['two store segments', storeRead({ path: '/api/v1/stores/{storeId}/{storeId}' })],
     ['a PATCH on the draft template', storeCreate({ method: 'PATCH', path: DRAFT })],
     ['a PUT on the list template', storeCreate({ method: 'PUT' })],
@@ -643,7 +649,7 @@ test('M7B: exactly the three store templates register — the two GETs without i
   assert.equal(setupCode([storeCreate({ path: '/api/v1/probe' })]), 'route_idempotency_policy_invalid', 'a store command on a literal path');
 });
 
-test('M7B: a STORE-scope requirement registers on the three store templates and nowhere else — no store is ever selected without a path naming it', () => {
+test('M7B: a STORE-scope requirement registers on the four store templates and nowhere else — no store is ever selected without a path naming it', () => {
   const UNDECIDED = { scope: 'store', permission: 'view_shipping_costs' };
   for (const [label, def] of [
     ['a literal tenant-session read', route({ path: '/api/v1/probe', policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required' })],
@@ -674,14 +680,31 @@ test('M7B: a STORE-scope requirement registers on the three store templates and 
 });
 
 test('M7B: lookup — /api/v1/stores/ plus ONE store segment plus exactly the template rest reaches a store template; nothing else does', () => {
-  const table = defineRoutes([directory(), storeRead(), storeRead({ path: DRAFT }), storeCreate(), list(), detail()]);
+  const table = defineRoutes([directory(), storeRead(), storeRead({ path: DRAFT }), storeRead({ path: ELIGIBILITY, policy: SESSION('tenant', STORE_CREATE) }),
+    storeCreate(), list(), detail()]);
   const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
-  for (const segment of [STORE, STORE.toUpperCase(), '{storeId}', 'x', '..', '%2F', 'a'.repeat(128)]) {
+  for (const segment of [STORE, STORE.toUpperCase(), '{storeId}', 'x', '..', '%2F', 'a'.repeat(128), 'eligibility']) {
     assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts`), DRAFTS, segment);
     assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts`, 'POST'), DRAFTS, `POST ${segment}`);
     assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts/${ID}`), DRAFT, `${segment} + draft`);
+    assert.equal(hit(`/api/v1/stores/${segment}/invoice-drafts/eligibility`), ELIGIBILITY, `${segment} + eligibility`);
+  }
+  // M7B-INVOICES-P1-R2: the literal 'eligibility' is the eligibility template, never a draft id; every other non-uuid segment
+  // (a near spelling included) is still the draft template's, whose handler refuses it as a malformed id (the 400).
+  for (const segment of [STORE, STORE.toUpperCase(), '{storeId}', '{id}', 'x', '..', '%2F', 'a'.repeat(128), 'Eligibility', 'eligibility2', 'eligible',
+    'eligibility%2F', ' eligibility']) {
     assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}`), DRAFT, `draft ${segment}`);
   }
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/eligibility`)?.policy, SESSION('tenant', STORE_CREATE),
+    'the eligibility path resolves to the create requirement\'s route, not the view requirement\'s draft read');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/eligibility`, 'POST'), undefined, 'POST names no eligibility');
+  for (const miss of [`/api/v1/stores/${STORE}/invoice-drafts/eligibility/`, `/api/v1/stores/${STORE}/invoice-drafts/eligibility/x`,
+    `/api/v1/stores/${STORE}/eligibility`]) {
+    assert.equal(hit(miss), undefined, miss);
+  }
+  // Without the eligibility template (the table before -R2) the same path was the draft template's: the literal wins only
+  // because it is registered.
+  assert.equal(defineRoutes([storeRead({ path: DRAFT })]).lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/eligibility`)?.path, DRAFT);
   assert.equal(hit('/api/v1/stores'), '/api/v1/stores', 'the literal directory');
   assert.equal(hit(`/api/v1/customers/${ID}`), '/api/v1/customers/{id}', 'the customer template is unchanged');
   for (const miss of [

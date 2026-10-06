@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 17 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 18 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -224,6 +224,8 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 17 frozen tenant routes', ()
     // M7B-INVOICES-P1: the three store templates — a store's drafts, one draft, and the idempotent save.
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'none', idempotency: 'none' },
+    // M7B-INVOICES-P1-R2: the fourth store template — the save's creation eligibility, read-only.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/eligibility', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
   ]);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
@@ -631,17 +633,21 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
     }
     assert.equal((await send(port, 'GET', '/admin/v1/tenants', { host: TENANT_HOST })).status, 404, 'no administrative route on the tenant host');
-    // M7B-INVOICES-P1: the store directory and the three store templates reach the chain on the tenant host (no session: 401);
-    // a path outside the template grammar is no route.
+    // M7B-INVOICES-P1: the store directory and the store templates (the eligibility read since -R2) reach the chain on the
+    // tenant host (no session: 401); a path outside the template grammar is no route, and no POST names the eligibility.
     assert.equal((await send(port, 'GET', '/api/v1/stores', { host: TENANT_HOST })).status, 401);
-    for (const path of [`/api/v1/stores/${DETAIL_ID}/invoice-drafts`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}`]) {
+    for (const path of [`/api/v1/stores/${DETAIL_ID}/invoice-drafts`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}`,
+      `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility`]) {
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 401, path);
     }
-    for (const path of [`/api/v1/stores/${DETAIL_ID}`, `/api/v1/stores/${DETAIL_ID}/invoices`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/lines`]) {
+    for (const path of [`/api/v1/stores/${DETAIL_ID}`, `/api/v1/stores/${DETAIL_ID}/invoices`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/lines`,
+      `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility/`, `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility/x`]) {
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
     }
+    assert.equal((await send(port, 'POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility`, { host: TENANT_HOST })).status, 404, 'no POST names the eligibility');
     for (const host of [ADMIN_HOST, 'unknown.tmpos.test']) {
       assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host })).status, 404, `the draft list on ${host}`);
+      assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility`, { host })).status, 404, `the eligibility on ${host}`);
     }
     // The probes answer on any host.
     for (const host of [TENANT_HOST, ADMIN_HOST]) assert.equal((await send(port, 'GET', '/health', { host })).status, 200);

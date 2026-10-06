@@ -78,6 +78,10 @@
 // M7B-INVOICES-P1 UPDATE (invoice drafts). Migration 028 adds the store-owned invoice drafts and the entry serves their list,
 // read and save (tests/db/invoiceDraftRoutine.integration.test.mjs and invoiceDraftsHttp.integration.test.mjs prove them).
 // The chain is 001-028: M7TE-01 pins seventeen routes and M7TE-10 the 001-028 ledger (a fake next row is '029').
+//
+// M7B-INVOICES-P1-R2 UPDATE (draft creation eligibility). The entry also serves
+// GET /api/v1/stores/{storeId}/invoice-drafts/eligibility, a bodiless session read with no migration
+// (invoiceDraftsHttp.integration.test.mjs proves it over 028): M7TE-01 pins eighteen routes; the ledger is still 001-028.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -855,7 +859,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     // owner's role-level edit (M7A-CUSTOMERS-P3-R1) are its two body-bearing, idempotent routes; the edit's read-back
     // (M7A-CUSTOMERS-P3-R2) is a bodiless session read, and so is its Invoices sibling (M5-INVOICES-AUTH-P1), and so is the
     // store directory (M7B-INVOICES-P1); the invoice drafts' save is a third body-bearing, idempotent route, their list and
-    // read bodiless session reads (M7B-INVOICES-P1).
+    // read bodiless session reads (M7B-INVOICES-P1), and so is the save's creation eligibility (M7B-INVOICES-P1-R2).
     assert.deepEqual(canonical(ctx.result.routes), [
       'GET /api/v1/customers session none none',
       'GET /api/v1/customers/{id} session none none',
@@ -865,6 +869,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'GET /api/v1/session session none none',
       'GET /api/v1/stores session none none',
       'GET /api/v1/stores/{storeId}/invoice-drafts session none none',
+      'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility session none none',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id} session none none',
       'GET /health public none none',
       'GET /readiness public none none',

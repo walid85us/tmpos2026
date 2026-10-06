@@ -21,7 +21,7 @@
 // sockets. It does NOT prove that any SHIPPED tenant functionality exists: none does yet.
 //
 // M7B-INVOICES-P1 — THE STORE WITNESS IS THE REAL DRAFT LIST NOW. Store scope became real: a store-scope requirement
-// registers only on one of the three closed store templates, whose path names the store (routes.ts), and the tenant
+// registers only on one of the closed store templates (three; four since M7B-INVOICES-P1-R2), whose path names the store (routes.ts), and the tenant
 // authorizer denies a store requirement whose view names no store instead of picking the actor's one store grant
 // (tenantAuthorization.ts). So the literal-path store witness this harness once served is exactly what both now refuse:
 // STORE_WITNESS_ROUTE is kept, never served, so the suites can assert that registering it is refused (route_path_invalid).

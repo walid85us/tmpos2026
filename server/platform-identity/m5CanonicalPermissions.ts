@@ -209,8 +209,9 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
  * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View or Create,
  * shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain.
  *   * view_invoice_drafts   — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
- *   * create_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts: the Invoices domain at Create or above AND the
- *     Customers domain at View or above.
+ *   * create_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts and, since M7B-INVOICES-P1-R2, its read-only
+ *     creation eligibility GET /api/v1/stores/{storeId}/invoice-drafts/eligibility: the Invoices domain at Create or above
+ *     AND the Customers domain at View or above.
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],

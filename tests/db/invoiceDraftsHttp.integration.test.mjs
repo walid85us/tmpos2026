@@ -44,6 +44,27 @@
 //   IDH-14 (AC-01 AC-10) a read_only and an overdue account, tenant and store, on a session established after the change:
 //          discovery marks the store read-only, the list and the reopen answer the existing draft (200), the save is the
 //          authorizer's 403 before any key is acquired, writing nothing.
+//   IDH-15 (M7B-INVOICES-P1-R2: DA-201 AC-10 AC-11) GET .../invoice-drafts/eligibility over real 028 equals the save's own
+//          authorization, case by case: store_owner, manager and sales_staff at their defaults, technician at its default
+//          View, and owner-edited levels (Invoices lowered below Create, Customers lowered below View, technician raised to
+//          Create; the owner has no editable level): eligibility is the exact 200 { "eligibility": "allowed" } iff a real POST is
+//          201, and the 403 iff that POST is the authorizer's 403 writing no business row (no draft, line, audit, outbox,
+//          completion, lease or role-level row); an edit committed while the session lives moves both, both directions.
+//   IDH-16 (DA-201 AC-09 AC-10 AC-11) a technician grant at the store, standing in for an account whose browser-only
+//          custom role claims Invoices Full (the browser side is slice B2's, SDB-07): eligibility and the direct POST are
+//          both 403 writing no business row; another store of the tenant, another tenant's store, a missing store and
+//          non-canonical or braced segments are one 403 whose body differs only in requestId — the same as the
+//          technician's.
+//   IDH-17 (DA-201 AC-11) a read_only and an overdue account, tenant and store, on a session established after the change:
+//          the list still answers (200), eligibility is the 403 and so is the save; and a session established BEFORE a
+//          tenant is made read_only is ended on its next request (eligibility, list and save each the 401, no business row),
+//          while a session established afterwards lists (200) and is refused eligibility (403).
+//   IDH-18 (DA-201 AC-12) the chain around eligibility: 401 without a session, the session CSRF witness (missing or
+//          another session's token) the same 403, any query the 400, the administrative host and a POST the 404, no-store on
+//          every answer; the request limit's 300 eligibility answers from one client write no business row (drafts, lines,
+//          audit records, outbox events, completions, leases and role-level rows unchanged) and the 301st is its 429 with
+//          Retry-After. The limiter's window opens at the client's first request, so the 300 must land within 60 s: measured
+//          about 3.8 s locally (a margin of roughly 56 s; the assertion reports the elapsed time if a slow runner ever eats it).
 //   IDH-12 the chain's order and headers: 401, the CSRF witnesses, no-store; no log line carries a description, a customer,
 //          a draft, a session key or an Idempotency-Key (run last, over every case's log lines).
 //
@@ -73,6 +94,7 @@ import { createSupervisedPgClient } from '../../server/persistence/supervisedPgC
 import { rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
 import { startTenantEntry } from '../../server/entry/tenantEntry.ts';
 import { SESSION_CSRF_HEADER } from '../../server/runtime/sessions.ts';
+import { RATE_LIMITS } from '../../server/runtime/rateLimit.ts';
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from '../../server/runtime/requestSecurity.ts';
 import { sessionPaths } from '../../server/runtime/routes.ts';
 import { SECURITY_HEADERS, HSTS_HEADER } from '../../server/runtime/securityHeaders.ts';
@@ -482,6 +504,34 @@ async function counts(tenants, keys = []) {
 }
 const delta = (after, before) => Object.fromEntries(Object.keys(after).map((k) => [k, after[k] - before[k]]));
 const NOTHING = Object.freeze({ D: 0, L: 0, A: 0, O: 0, K: 0 });
+/**
+ * Everything a draft save, a refused one or an eligibility answer could write (M7B-INVOICES-P1-R2), read by the OWNER: the
+ * tenants' drafts and lines, EVERY audit record and outbox event, every sealed completion and every open lease, and the
+ * tenants' role-level rows (028's lock anchors included) as one text — the suite's cases run one at a time.
+ */
+async function footprint(tenants) {
+  const [r] = await owner`select
+    (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = any(${tenants}::uuid[]))::int as drafts,
+    (select count(*) from tmpos_invoice_draft.invoice_draft_line where tenant_id = any(${tenants}::uuid[]))::int as lines,
+    (select count(*) from public.audit_event)::int as audit,
+    (select count(*) from tmpos_internal.outbox_event)::int as outbox,
+    (select count(*) from tmpos_internal.idempotency_record where response is not null)::int as completions,
+    (select count(*) from tmpos_internal.idempotency_record where response is null)::int as leases,
+    (select coalesce(string_agg(l.tenant_id::text || ' ' || l.role_id || ' ' || l.domain || ' ' || coalesce(l.level, '-') || ' ' || l.updated_at::text, ','
+      order by l.tenant_id, l.role_id, l.domain), '') from tmpos_role.tenant_role_level l where l.tenant_id = any(${tenants}::uuid[])) as roles`;
+  return { ...r };
+}
+/** An eligibility answer as its verdict: the exact closed 200 is 'allowed', the chain's 403 'forbidden'; anything else fails. */
+function eligibilityOf(reply, label) {
+  assert.equal(reply.headers['cache-control'], 'no-store', `${label}: no-store`);
+  assertBaseline(reply, label);
+  if (reply.status === 200) {
+    assert.equal(reply.body, '{"eligibility":"allowed"}', `${label}: exactly the closed positive body`);
+    return 'allowed';
+  }
+  assertRefusal(reply, 403, 'forbidden', label);
+  return 'forbidden';
+}
 
 // ---------------------------------------------------------------------------
 // the entry harness
@@ -514,6 +564,8 @@ async function withEntry(fn) {
       { host: TENANT_HOST, ...(s === null ? {} : { cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf }), ...headers }, undefined, { localAddress: from }),
     list: (s, store, query = '') => ctx.read(s, `/api/v1/stores/${store}/invoice-drafts${query}`),
     get: (s, store, id) => ctx.read(s, `/api/v1/stores/${store}/invoice-drafts/${id}`),
+    /** GET the save's creation eligibility at `store` (M7B-INVOICES-P1-R2), with `query` appended verbatim. */
+    eligibility: (s, store, { query = '', headers = {} } = {}) => ctx.read(s, `/api/v1/stores/${store}/invoice-drafts/eligibility${query}`, headers),
     /** POST a draft at `store` presenting `s`, under a fresh Idempotency-Key unless one is given. */
     save: (s, store, body, { key = randomUUID(), headers = {} } = {}) => {
       SECRETS.add(key);
@@ -1286,6 +1338,207 @@ test('IDH-14 (AC-01 AC-10): a read_only and an overdue account, tenant and store
       });
     }
   }
+});
+
+test('IDH-15 (M7B-INVOICES-P1-R2: DA-201 AC-10 AC-11): eligibility over real 028 is allowed exactly when a real POST passes authorization — every built-in role at its default and under owner-edited levels; a denied POST is the 403 writing no business row', async () => {
+  const CASES = [
+    ['store_owner default', 'store_owner', [], true],
+    ['manager default', 'manager', [], true],
+    ['sales_staff default', 'sales_staff', [], true],
+    ['technician default (View)', 'technician', [], false],
+    ['technician raised to Invoices Create', 'technician', [['invoices', 'create']], true],
+    ['technician raised to Invoices Full, Customers lowered to None', 'technician', [['invoices', 'full'], ['customers', 'none']], false],
+    ['sales_staff lowered to Invoices View', 'sales_staff', [['invoices', 'view']], false],
+    ['manager lowered to Invoices View', 'manager', [['invoices', 'view']], false],
+    ['sales_staff with Customers lowered to None', 'sales_staff', [['customers', 'none']], false],
+    ['manager with Customers lowered to None', 'manager', [['customers', 'none']], false],
+    // (No store_owner edit: 020's tenant_role_level_role_chk admits no level row for the owner, whose authority is fixed.)
+  ];
+  const cases = [];
+  for (const [i, [label, role, edits, expected]] of CASES.entries()) {
+    const T = await newTenant(`idh15-${i}`);
+    const S = await newStore(T, `IDH15 ${i}`);
+    const C = await newCustomer(T, `idh15-${i}`);
+    const who = await actor(`idh15-${i}`, [storeGrant(T, S, role)]);
+    for (const [domain, level] of edits) await setLevel(T, role, domain, level);
+    cases.push({ label, T, S, C, who, expected });
+  }
+  await withEntry(async (ctx) => {
+    const table = [];
+    const sessions = [];
+    for (const { label, T, S, C, who, expected } of cases) {
+      const s = await signIn(ctx, who);
+      sessions.push(s);
+      const before = await footprint([T]);
+      const verdict = eligibilityOf(await ctx.eligibility(s, S), `${label}: eligibility`);
+      assert.deepEqual(await footprint([T]), before, `${label}: the eligibility answer wrote nothing`);
+      const key = randomUUID();
+      const saved = await ctx.save(s, S, bodyOf(T, C, [line(described(`idh15 ${label}`), 1, 7)]), { key });
+      if (saved.status === 201) {
+        createdOf(saved, S, { lineCount: 1, subtotalCents: 7 }, `${label}: the POST`);
+      } else {
+        assertRefusal(saved, 403, 'forbidden', `${label}: the POST`);
+        assert.deepEqual(await footprint([T]), before, `${label}: the refused POST wrote nothing — no draft, line, audit, outbox, completion, lease or role row`);
+        const [{ n }] = await owner`select count(*)::int as n from tmpos_internal.idempotency_record where scope = ${scopeOf(key, who.principal)}`;
+        assert.equal(n, 0, `${label}: refused before any key was acquired`);
+      }
+      assert.equal(verdict === 'allowed', saved.status === 201, `${label}: eligibility ${verdict} but the POST ${saved.status}`);
+      table.push([label, verdict, saved.status]);
+      assert.equal(verdict === 'allowed', expected, `${label}: expected ${expected ? 'allowed' : 'forbidden'}`);
+    }
+    assert.equal(table.length, CASES.length);
+    // The CURRENT server-saved level, read per request: an edit committed while the session lives moves eligibility and the
+    // POST together, both directions, on that same session (sales_staff at its default, case 2).
+    const { T, S, C } = cases[2];
+    const s = sessions[2];
+    await setLevel(T, 'sales_staff', 'invoices', 'view');
+    const before = await footprint([T]);
+    assert.equal(eligibilityOf(await ctx.eligibility(s, S), 'lowered mid-session'), 'forbidden');
+    assertRefusal(await ctx.save(s, S, bodyOf(T, C, [line(described('idh15 lowered'), 1, 1)])), 403, 'forbidden', 'lowered mid-session: the POST');
+    assert.deepEqual(await footprint([T]), before, 'lowered mid-session: nothing written');
+    await setLevel(T, 'sales_staff', 'invoices', 'create');
+    assert.equal(eligibilityOf(await ctx.eligibility(s, S), 'raised back mid-session'), 'allowed');
+    createdOf(await ctx.save(s, S, bodyOf(T, C, [line(described('idh15 raised'), 1, 1)])), S, { lineCount: 1, subtotalCents: 1 }, 'raised back mid-session: the POST');
+  });
+});
+
+test('IDH-16 (DA-201 AC-09 AC-10 AC-11): a technician grant at the store — standing in for an account whose browser-only role claims Invoices Full (browser side: slice B2) — is refused eligibility and the direct POST alike (403, no business row); a foreign, missing or non-canonical store is one 403 body, the technician\'s', async () => {
+  const T = await newTenant('idh16');
+  const T2 = await newTenant('idh16-other');
+  const S = await newStore(T, 'IDH16 one');
+  const S2 = await newStore(T, 'IDH16 two');
+  const S3 = await newStore(T2, 'IDH16 other');
+  const C = await newCustomer(T, 'idh16');
+  // Stands in for SDB-07's account, whose shop profile (Firestore users/{uid}.role) names a custom role with Invoices Full that
+  // exists only in the browser: the server holds only a technician grant (a custom role id cannot be a membership — IDH-04's
+  // CHECK). Nothing browser-side is set up here; that the hint never reaches a request is slice B2's to prove.
+  const tech = await actor('idh16-custom', [storeGrant(T, S, 'technician')]);
+  const who = await actor('idh16-manager', [storeGrant(T, S, 'manager')]);
+  await withEntry(async (ctx) => {
+    const st = await signIn(ctx, tech);
+    const sm = await signIn(ctx, who);
+    const before = await footprint([T, T2]);
+    const denied = await ctx.eligibility(st, S);
+    assert.equal(eligibilityOf(denied, 'the custom-role account: eligibility'), 'forbidden');
+    assert.equal((await ctx.list(st, S)).status, 200, 'it still lists (Invoices View)');
+    const key = randomUUID();
+    assertRefusal(await ctx.save(st, S, bodyOf(T, C, [line(described('idh16 custom'), 1, 1)]), { key }), 403, 'forbidden', 'the custom-role account: the direct POST');
+    assert.deepEqual(await footprint([T, T2]), before, 'nothing written by either');
+    const [{ n }] = await owner`select count(*)::int as n from tmpos_internal.idempotency_record where scope = ${scopeOf(key, tech.principal)}`;
+    assert.equal(n, 0, 'refused before any key');
+    assert.equal(eligibilityOf(await ctx.eligibility(sm, S), 'the manager at its own store'), 'allowed', 'control');
+    const replies = [['a denied role', denied]];
+    for (const [label, store] of [['the tenant\'s other store', S2], ['another tenant\'s store', S3], ['a missing store', randomUUID()],
+      ['an upper-case segment', S.toUpperCase()], ['a braced segment', `{${S}}`], ['a word', 'mine']]) {
+      const r = await ctx.eligibility(sm, store);
+      assert.equal(eligibilityOf(r, label), 'forbidden', label);
+      replies.push([label, r]);
+    }
+    const shapes = new Set(replies.map(([, r]) => { const { requestId: _id, ...rest } = JSON.parse(r.body); return `${r.status} ${r.body.length} ${JSON.stringify(rest)}`; }));
+    assert.equal(shapes.size, 1, `one status, one body length, one body but requestId: ${[...shapes].join(' | ')}`);
+    assert.deepEqual(await footprint([T, T2]), before, 'still nothing written');
+  });
+});
+
+test('IDH-17 (DA-201 AC-11): a read_only and an overdue account, tenant and store — on a session established after the change — still list (200) but are refused eligibility (403) and the save (403); a session established before a tenant turns read_only is ended (401)', async () => {
+  const cases = [];
+  for (const axis of ['account', 'tenant', 'store']) {
+    for (const status of ['read_only', 'overdue']) {
+      const T = await newTenant(`idh17-${axis}-${status}`);
+      const S = await newStore(T, `IDH17 ${axis} ${status}`);
+      const C = await newCustomer(T, `idh17-${axis}-${status}`);
+      const who = await actor(`idh17-${axis}-${status}`, [storeGrant(T, S, 'manager')]);
+      cases.push({ label: `${axis} ${status}`, axis, status, T, S, C, who });
+    }
+  }
+  const earlyT = await newTenant('idh17-early');
+  const earlyS = await newStore(earlyT, 'IDH17 early');
+  const early = { T: earlyT, S: earlyS, C: await newCustomer(earlyT, 'idh17-early'), who: await actor('idh17-early', [storeGrant(earlyT, earlyS, 'manager')]) };
+  await withEntry(async (ctx) => {
+    for (const { label, axis, status, T, S, C, who } of cases) {
+      assert.equal(eligibilityOf(await ctx.eligibility(await signIn(ctx, who), S), `${label}: while active`), 'allowed', `${label}: control`);
+      if (axis === 'account') await owner`update app_user set status = ${status} where internal_user_id = ${who.id}`;
+      else if (axis === 'tenant') await owner`update tenant set status = ${status} where tenant_id = ${T}`;
+      else await owner`update store set status = ${status} where store_id = ${S}`;
+      const s = await signIn(ctx, who);
+      pageOf(await ctx.list(s, S), `${label}: the list`);
+      const before = await footprint([T]);
+      assert.equal(eligibilityOf(await ctx.eligibility(s, S), `${label}: eligibility`), 'forbidden', label);
+      assertRefusal(await ctx.save(s, S, bodyOf(T, C, [line(described(`idh17 ${label}`), 1, 1)])), 403, 'forbidden', `${label}: the save`);
+      assert.deepEqual(await footprint([T]), before, `${label}: nothing written`);
+    }
+    // The session established FIRST, then the tenant made read_only: the boundary ends that session on its next request
+    // (the existing session-boundary rule, not this route's) — the list, eligibility and the save are each the 401, and no
+    // eligibility answer outlives the change; a session established afterwards lists (200) and is refused eligibility (403).
+    const { T, S, C, who } = early;
+    const s = await signIn(ctx, who);
+    assert.equal(eligibilityOf(await ctx.eligibility(s, S), 'established first: while active'), 'allowed');
+    await owner`update tenant set status = 'read_only' where tenant_id = ${T}`;
+    const before = await footprint([T]);
+    assertRefusal(await ctx.eligibility(s, S), 401, 'unauthenticated', 'established first: eligibility after read_only');
+    assertRefusal(await ctx.list(s, S), 401, 'unauthenticated', 'established first: the list after read_only');
+    assertRefusal(await ctx.save(s, S, bodyOf(T, C, [line(described('idh17 established first'), 1, 1)])), 401, 'unauthenticated', 'established first: the save');
+    assert.deepEqual(await footprint([T]), before, 'established first: no business row');
+    const fresh = await signIn(ctx, who); // a sign-in is audited: the snapshot is taken after it
+    const afterSignIn = await footprint([T]);
+    pageOf(await ctx.list(fresh, S), 'established after: the list');
+    assert.equal(eligibilityOf(await ctx.eligibility(fresh, S), 'established after: eligibility'), 'forbidden');
+    assert.deepEqual(await footprint([T]), afterSignIn, 'established after: no business row');
+  });
+});
+
+test('IDH-18 (DA-201 AC-12): around eligibility — 401, the session CSRF witness, a query, another host, a POST, no-store everywhere; 300 answers from one client write no business row and the 301st is the 429 with Retry-After', async () => {
+  const T = await newTenant('idh18');
+  const S = await newStore(T, 'IDH18 store');
+  const who = await actor('idh18', [storeGrant(T, S, 'sales_staff')]);
+  // The chain's refusals, from one entry (and its one client address).
+  await withEntry(async (ctx) => {
+    const s = await signIn(ctx, who);
+    const other = await signIn(ctx, who);
+    for (const [label, reply, status, error] of [
+      ['no session', await ctx.eligibility(null, S), 401, 'unauthenticated'],
+      ['no session CSRF token', await ctx.read(null, `/api/v1/stores/${S}/invoice-drafts/eligibility`, { cookie: s.cookie }), 403, 'forbidden'],
+      ['another session\'s token', await ctx.read(null, `/api/v1/stores/${S}/invoice-drafts/eligibility`, { cookie: s.cookie, [SESSION_CSRF_HEADER]: other.csrf }), 403, 'forbidden'],
+      ['a query', await ctx.eligibility(s, S, { query: '?x=1' }), 400, 'invalid_request'],
+      ['an empty query', await ctx.eligibility(s, S, { query: '?' }), 400, 'invalid_request'],
+      ['the administrative host', await ctx.eligibility(s, S, { headers: { host: ADMIN_HOST } }), 404, 'not_found'],
+      ['a trailing segment', await ctx.read(s, `/api/v1/stores/${S}/invoice-drafts/eligibility/x`), 404, 'not_found'],
+    ]) {
+      assertRefusal(reply, status, error, label);
+      assert.equal(reply.headers['cache-control'], 'no-store', `${label}: no-store`);
+    }
+    const post = await send(ctx.port, 'POST', `/api/v1/stores/${S}/invoice-drafts/eligibility`, {
+      host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf,
+    }, '');
+    assertRefusal(post, 404, 'not_found', 'a POST names no eligibility');
+    assert.equal(eligibilityOf(await ctx.eligibility(s, S), 'the session\'s own token'), 'allowed');
+    assert.equal(eligibilityOf(await ctx.eligibility(other, S), 'the second session, its own token'), 'allowed');
+  });
+  // A fresh entry, so its one client address has spent nothing: only eligibility reads go out from it.
+  await withEntry(async (ctx) => {
+    const s = await signIn(ctx, who);
+    const before = await footprint([T]);
+    const statuses = [];
+    let limited = null;
+    const started = Date.now();
+    const { limit, windowMs } = RATE_LIMITS.request;
+    for (let i = 0; i < limit + 10 && limited === null; i++) {
+      const r = await ctx.eligibility(s, S);
+      if (r.status === 200) statuses.push(eligibilityOf(r, `answer ${i + 1}`));
+      else limited = { at: i + 1, reply: r };
+    }
+    const elapsed = Date.now() - started;
+    // Timing-dependent by nature: the bucket opens at the first answer and must not close before the last (DA-60 class).
+    assert.ok(elapsed < windowMs, `the run fit one ${windowMs} ms window (${elapsed} ms)`);
+    assert.deepEqual([statuses.length, new Set(statuses).size], [limit, 1], `exactly the request limit's ${limit} answers, every one allowed`);
+    assert.ok(limited !== null, 'the limit was reached');
+    assert.equal(limited.at, limit + 1);
+    assertRefusal(limited.reply, 429, 'rate_limited', 'the 301st');
+    assert.match(limited.reply.headers['retry-after'] ?? '', /^[1-9][0-9]*$/, 'Retry-After in whole seconds');
+    assert.ok(Number(limited.reply.headers['retry-after']) <= windowMs / 1000, 'within the window');
+    assert.equal(limited.reply.headers['cache-control'], 'no-store');
+    assert.deepEqual(await footprint([T]), before, '300 eligibility answers and a 429: no draft, line, audit record, outbox event, completion, lease or role-level row');
+  });
 });
 
 test('IDH-12: the chain — 401 without a session, the session CSRF witness on GET, Origin and X-TMPOS-CSRF on POST, the tenant host only, no-store — and no log line carries a description, a customer, a draft, a session key or an Idempotency-Key', async () => {

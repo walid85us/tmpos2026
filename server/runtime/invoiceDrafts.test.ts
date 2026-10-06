@@ -20,8 +20,8 @@ import type { CommandTransactionPort, TransactionCommand } from './commandTransa
 import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyState, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
 import { createIdempotencyKeyring } from './idempotency.js';
 import {
-  INVOICE_DRAFTS_PATH, INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_EVENTS, INVOICE_DRAFT_PATH,
-  createInvoiceDraftDetailRoute, createInvoiceDraftListRoute, decodeInvoiceDraftCursor, encodeInvoiceDraftCursor, inInvoiceDraftOrder,
+  INVOICE_DRAFTS_PATH, INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_CREATE_REQUIREMENT, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_ELIGIBILITY_PATH, INVOICE_DRAFT_EVENTS,
+  INVOICE_DRAFT_PATH, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftListRoute, decodeInvoiceDraftCursor, encodeInvoiceDraftCursor, inInvoiceDraftOrder,
   invoiceDraftOf, invoiceDraftPageOf, isDraftCreatedAt, normalizeDraftDescription, parseInvoiceDraftListQuery, planInvoiceDraftCreate,
 } from './invoiceDrafts.js';
 import type { InvoiceDraftReadPort } from './invoiceDrafts.js';
@@ -304,6 +304,66 @@ test('AC-02: get handler — a query 400, a malformed id 400, missing and foreig
   assert.deepEqual([foreign.out.status, foreign.out.locals.refusal], [503, 'invoice_draft_answer_invalid'], 'a draft of another store is a fault, never an answer');
 });
 
+// --- 4b. the creation eligibility (M7B-INVOICES-P1-R2, DA-201): its declaration and its handler, called directly -----------
+
+test('DA-201 AC-11: the eligibility route is a session-bound STORE-scope GET under the save\'s own requirement object — no body, no key, no recent sign-in — and the runtime registers it', () => {
+  const r = createInvoiceDraftEligibilityRoute();
+  assert.equal(INVOICE_DRAFT_ELIGIBILITY_PATH, '/api/v1/stores/{storeId}/invoice-drafts/eligibility');
+  assert.deepEqual([r.method, r.path, r.idempotency, r.trustedContext, r.recentAuth, r.sessionBinding], ['GET', INVOICE_DRAFT_ELIGIBILITY_PATH, 'none', 'required', 'none', 'required']);
+  assert.deepEqual(r.body, { kind: 'none' });
+  assert.ok(r.policy.access === 'session' && INVOICE_DRAFT_CREATE_ROUTE.policy.access === 'session');
+  // ONE requirement, one evaluator: the very object the save declares, so the chain's authorizer decides both the same way.
+  assert.equal(r.policy.authorization, INVOICE_DRAFT_CREATE_REQUIREMENT, 'the create requirement object itself');
+  assert.equal(r.policy.authorization, INVOICE_DRAFT_CREATE_ROUTE.policy.authorization, 'the save\'s own requirement object');
+  assert.deepEqual(r.policy, { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } });
+  assert.ok(Object.isFrozen(r) && Object.isFrozen(r.policy) && Object.isFrozen(r.body) && Object.isFrozen(INVOICE_DRAFT_CREATE_REQUIREMENT));
+  const table = defineRoutes([createInvoiceDraftListRoute({ invoiceDrafts: { page: () => null, get: () => null } }),
+    createInvoiceDraftDetailRoute({ invoiceDrafts: { page: () => null, get: () => null } }), r, INVOICE_DRAFT_CREATE_ROUTE]);
+  assert.equal(table.lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/eligibility`)?.path, INVOICE_DRAFT_ELIGIBILITY_PATH, 'never the draft read');
+  assert.equal(table.lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/eligible`)?.path, INVOICE_DRAFT_PATH, 'any other segment is still a draft id');
+  assert.notEqual(createInvoiceDraftEligibilityRoute(), r, 'a fresh definition per build');
+});
+
+async function runEligibility(opts: { url?: string; path?: string; trusted?: TrustedScope | null; sessionKey?: string | null } = {}) {
+  const route = createInvoiceDraftEligibilityRoute();
+  const out: Captured = { status: null, body: undefined, locals: {} };
+  const res = { locals: out.locals, status(code: number) { out.status = code; return res; }, json(b: unknown) { out.body = b; return res; } };
+  const ctx = {
+    requestId: 'req-8', principal: null, session: null, authenticatedAt: null, body: undefined,
+    trusted: 'trusted' in opts ? opts.trusted : scopeAt(STORE), sessionKey: 'sessionKey' in opts ? opts.sessionKey : SESSION_KEY,
+  } as unknown as RouteContext;
+  const path = opts.path ?? `/api/v1/stores/${STORE}/invoice-drafts/eligibility`;
+  if (route.idempotency !== 'none') throw new Error('a read');
+  await route.handler({ url: opts.url ?? path, path } as unknown as Request, res as unknown as Response, ctx);
+  return out;
+}
+
+test('DA-201 AC-11 AC-12: eligibility handler — any query is the 400; a missing, tenant or other-store scope or no session key is the 403; otherwise exactly { eligibility: "allowed" }', async () => {
+  const at = `/api/v1/stores/${STORE}/invoice-drafts/eligibility`;
+  for (const url of [`${at}?`, `${at}?x=1`, `${at}?eligibility=allowed`, `${at}?storeId=${OTHER_STORE}`]) {
+    const r = await runEligibility({ url });
+    assert.deepEqual([r.status, r.body, r.locals.refusal], [400, { error: 'invalid_request', requestId: 'req-8' }, 'invoice_draft_eligibility_query_invalid'], url);
+  }
+  for (const [label, opts] of [
+    ['no trusted scope', { trusted: null }], ['a tenant scope', { trusted: scopeAt(STORE, { scope: 'tenant', store: null }) }],
+    ['a store scope without its tenant', { trusted: scopeAt(STORE, { tenant: null }) }],
+    ['the trusted store is not the path\'s', { trusted: scopeAt(OTHER_STORE) }], ['no session key', { sessionKey: null }],
+    ['a non-canonical path store', { path: `/api/v1/stores/${STORE.toUpperCase()}/invoice-drafts/eligibility` }],
+  ] as const) {
+    const r = await runEligibility(opts);
+    assert.deepEqual([r.status, r.body, r.locals.refusal], [403, { error: 'forbidden', requestId: 'req-8' }, 'authz_context_missing'], label);
+  }
+  // The handler is reached only once the chain granted create_invoice_drafts; it answers the closed positive body and nothing
+  // else — no role, level, grant, tenant, store, token or customer — whatever the trusted scope carries.
+  for (const trusted of [scopeAt(STORE), scopeAt(STORE, { roleId: 'store_owner' }), scopeAt(STORE, { roleId: 'manager', limitation: 'read_only' })]) {
+    const ok = await runEligibility({ trusted });
+    assert.deepEqual([ok.status, ok.body, ok.locals.refusal], [200, { eligibility: 'allowed' }, undefined]);
+    assert.deepEqual(Object.keys(ok.body as object), ['eligibility']);
+    const text = JSON.stringify(ok.body);
+    for (const secret of [TENANT, STORE, ACTOR, MEMBERSHIP, SESSION_KEY, 'sales_staff', 'store_owner']) assert.ok(!text.includes(secret), secret);
+  }
+});
+
 // --- 5. the save over the enforced chain ---------------------------------------------------------------------------------------
 
 interface Reply { status: number; headers: http.IncomingHttpHeaders; body: string }
@@ -329,16 +389,21 @@ function request(port: number, method: string, path: string, headers: Record<str
 interface Chain {
   commits: TransactionCommand[];
   views: unknown[];
+  /** The requirement the authorizer was handed, per call, beside `views`. */
+  requirements: unknown[];
   /** The memory idempotency records, by scope: what the chain reserved and with which fingerprint. */
   records: Map<string, { readonly fingerprint: string }>;
   /** Every line the runtime logged, parsed. */
   logs: Record<string, unknown>[];
   post: (store: string, payload: string, key: string) => Promise<Reply>;
+  /** A GET of the eligibility path (or `suffix` in its place) as the signed-in client sends it; `headers` override. */
+  eligibility: (store: string, opts?: { suffix?: string; headers?: Record<string, string | undefined> }) => Promise<Reply>;
   setScopeFor: (scopeFor: ((storeTarget: string | null) => TrustedScope | false) | null) => void;
 }
 async function withChain(fn: (h: Chain) => Promise<void>, outcomes: { missing: string; wrongTenant: string }): Promise<void> {
   const commits: TransactionCommand[] = [];
   const views: unknown[] = [];
+  const requirements: unknown[] = [];
   const logs: Record<string, unknown>[] = [];
   let scopeFor: ((storeTarget: string | null) => TrustedScope | false) | null = null;
   const state = createMemoryIdempotencyState();
@@ -364,6 +429,7 @@ async function withChain(fn: (h: Chain) => Promise<void>, outcomes: { missing: s
     admission: { admit: () => ({ admitted: true, securityVersion: 'v1', actor: ACTOR }) },
     authorizer: { authorize: (_principal: unknown, requirement: unknown, view: { storeTarget?: string | null }) => {
       views.push(view);
+      requirements.push(requirement);
       if (scopeFor !== null) {
         const scope = scopeFor(view.storeTarget ?? null);
         return scope === false ? false : { granted: true, context: scope };
@@ -376,7 +442,7 @@ async function withChain(fn: (h: Chain) => Promise<void>, outcomes: { missing: s
   readiness.setReady();
   const app = createApp({
     readiness, log: { log: (line: string) => { logs.push(JSON.parse(line) as Record<string, unknown>); } }, sessions: { tenant: boundary },
-    routes: [INVOICE_DRAFT_CREATE_ROUTE], events: INVOICE_DRAFT_EVENTS,
+    routes: [INVOICE_DRAFT_CREATE_ROUTE, createInvoiceDraftEligibilityRoute()], events: INVOICE_DRAFT_EVENTS,
     limits: testRequestLimits(), idempotency: { store: inner, keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
   });
   const server = createBoundedServer(app);
@@ -391,7 +457,13 @@ async function withChain(fn: (h: Chain) => Promise<void>, outcomes: { missing: s
     const id = pair.slice(pair.indexOf('=') + 1);
     const csrf = (JSON.parse(login.body) as { csrfToken: string }).csrfToken;
     views.length = 0;
-    await fn({ commits, views, records: state.records, logs, setScopeFor: (f) => { scopeFor = f; }, post: (store, payload, key) => request(p, 'POST', `/api/v1/stores/${store}/invoice-drafts`, {
+    requirements.length = 0;
+    const eligibility = (store: string, opts: { suffix?: string; headers?: Record<string, string | undefined> } = {}) => {
+      const headers: Record<string, string | undefined> = { cookie: `${SESSION_COOKIES.tenant}=${id}`, [SESSION_CSRF_HEADER]: csrf, ...opts.headers };
+      return request(p, 'GET', `/api/v1/stores/${store}/invoice-drafts${opts.suffix ?? '/eligibility'}`,
+        Object.fromEntries(Object.entries(headers).filter((e): e is [string, string] => e[1] !== undefined)));
+    };
+    await fn({ commits, views, requirements, records: state.records, logs, eligibility, setScopeFor: (f) => { scopeFor = f; }, post: (store, payload, key) => request(p, 'POST', `/api/v1/stores/${store}/invoice-drafts`, {
       origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, 'content-type': 'application/json',
       cookie: `${SESSION_COOKIES.tenant}=${id}`, [SESSION_CSRF_HEADER]: csrf, 'content-length': String(Buffer.byteLength(payload)), 'idempotency-key': key,
     }, payload) });
@@ -531,4 +603,66 @@ test('AC-09: a store command answering customer_not_found without the opted-in s
     'an update may not opt into the typed refusal');
   assert.throws(() => defineCommands([{ ...INVOICE_DRAFT_CREATE_CONTRACT, sealedRefusal: 'not_found' }], events), (e: unknown) => e instanceof EnforcementSetupError);
   assert.throws(() => defineCommands([{ ...INVOICE_DRAFT_CREATE_CONTRACT, contextScope: 'shop' }], events), (e: unknown) => e instanceof EnforcementSetupError);
+});
+
+test('DA-201 AC-10 AC-11 AC-12: eligibility over the chain — the save\'s requirement and the path\'s store reach the authorizer; 200 is the closed body; a denial, a foreign or non-canonical store and a session-CSRF mismatch are one 403; 401, 400; an authorizer outage 503; no-store; nothing reserved or committed', async () => {
+  await withChain(async (h) => {
+    const ok = await h.eligibility(STORE);
+    assert.deepEqual([ok.status, ok.body], [200, '{"eligibility":"allowed"}']);
+    assert.equal(ok.headers['cache-control'], 'no-store');
+    assert.deepEqual(h.requirements, [{ scope: 'store', permission: 'create_invoice_drafts' }], 'the save\'s requirement, never the view\'s');
+    assert.deepEqual(h.views, [{ method: 'GET', path: INVOICE_DRAFT_ELIGIBILITY_PATH, audience: 'tenant', storeTarget: STORE }]);
+    // The POST is decided under the very same requirement value.
+    const saved = await h.post(STORE, JSON.stringify(body()), randomUUID());
+    assert.equal(saved.status, 201, saved.body);
+    assert.deepEqual(h.requirements[1], h.requirements[0], 'one requirement for both');
+    const commits = h.commits.length;
+    const records = h.records.size;
+    // Denied by the authorizer: the chain's generic 403, the handler never reached.
+    h.setScopeFor(() => false);
+    const denied = await h.eligibility(STORE);
+    assert.equal(denied.status, 403, denied.body);
+    assert.deepEqual(Object.keys(JSON.parse(denied.body)), ['error', 'requestId']);
+    assert.equal(JSON.parse(denied.body).error, 'forbidden');
+    assert.equal(denied.headers['cache-control'], 'no-store');
+    // A foreign store selects no grant (here the authorizer answers for STORE only); a non-canonical segment is a null target.
+    h.setScopeFor((target) => (target === STORE ? scopeAt(STORE) : false));
+    const foreign = await h.eligibility(OTHER_STORE);
+    const upper = await h.eligibility(STORE.toUpperCase());
+    assert.equal((h.views.at(-1) as { storeTarget?: unknown }).storeTarget, null, 'the non-canonical segment selects nothing');
+    // A scope the authorizer resolved at another store than the path's: the handler's own 403.
+    h.setScopeFor(() => scopeAt(OTHER_STORE));
+    const mismatched = await h.eligibility(STORE);
+    h.setScopeFor(null);
+    // The presenting session's CSRF token is required on this GET: missing or another value is the same 403, before the authorizer.
+    const asked = h.views.length;
+    const noCsrf = await h.eligibility(STORE, { headers: { [SESSION_CSRF_HEADER]: undefined } });
+    const wrongCsrf = await h.eligibility(STORE, { headers: { [SESSION_CSRF_HEADER]: 'x'.repeat(43) } });
+    assert.equal(h.views.length, asked, 'a session-CSRF refusal never reaches the authorizer');
+    for (const [label, r] of [['foreign', foreign], ['non-canonical', upper], ['other-store scope', mismatched], ['no CSRF', noCsrf], ['wrong CSRF', wrongCsrf]] as const) {
+      assert.equal(r.status, 403, `${label}: ${r.body}`);
+      assert.deepEqual([Object.keys(JSON.parse(r.body)), JSON.parse(r.body).error], [['error', 'requestId'], 'forbidden'], label);
+    }
+    // Which 403 is which, in the log alone: the authorizer's denial, the handler's own re-check, the session-CSRF refusal.
+    const reasonOf = (r: Reply) => h.logs.find((l) => l.event === 'request' && l.requestId === r.headers['x-request-id'])?.reason;
+    assert.deepEqual([reasonOf(denied), reasonOf(mismatched)], ['authz_denied', 'authz_context_missing']);
+    assert.deepEqual([reasonOf(noCsrf), reasonOf(wrongCsrf)], ['csrf_session_missing', 'csrf_session_invalid'], 'the session-CSRF refusals, by name');
+    // No session: 401. A query: 400. A trailing segment: no route, 404 (a POST's 404: tenantEntry.test.ts M7TU and IDH-18).
+    const anon = await h.eligibility(STORE, { headers: { cookie: undefined, [SESSION_CSRF_HEADER]: undefined } });
+    assert.equal(anon.status, 401, anon.body);
+    const query = await h.eligibility(STORE, { suffix: '/eligibility?x=1' });
+    assert.deepEqual([query.status, JSON.parse(query.body).error], [400, 'invalid_request']);
+    assert.equal((await h.eligibility(STORE, { suffix: '/eligibility/x' })).status, 404);
+    // An authorizer that cannot answer (here its role-levels read throws) is the outage's 503 — never the handler's allowed body.
+    h.setScopeFor(() => { throw new Error('role levels read failed: db host 10.0.0.1'); });
+    const outage = await h.eligibility(STORE);
+    h.setScopeFor(null);
+    assert.deepEqual([outage.status, JSON.parse(outage.body).error, Object.keys(JSON.parse(outage.body))], [503, 'service_unavailable', ['error', 'requestId']]);
+    assert.notEqual(outage.body, ok.body);
+    assert.equal(reasonOf(outage), 'authz_unavailable', 'the authorizer\'s outage, decided before any handler');
+    assert.equal(outage.headers['cache-control'], 'no-store');
+    assert.ok(!outage.body.includes('10.0.0.1'));
+    // Nothing reserved, nothing committed, by any eligibility answer.
+    assert.deepEqual([h.commits.length, h.records.size], [commits, records], 'no idempotency record and no commit');
+  }, { missing: randomUUID(), wrongTenant: randomUUID() });
 });

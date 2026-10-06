@@ -1,11 +1,13 @@
 // Phase 4.0 M7b — store-owned invoice drafts: save one, list a store's, reopen one read-only (M7B-INVOICES-P1; G-IAM,
 // G-ISOLATION, G-PERSIST, G-IDEMPOT, G-AUDIT; docs/phase-4/10).
 //
-// THE THREE ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
+// THE FOUR ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
 // requiring a STORE-scope permission (m5CanonicalPermissions.ts STORE_ROUTE_PERMISSIONS):
-//   POST /api/v1/stores/{storeId}/invoice-drafts        create_invoice_drafts — save a draft (a command, under a key)
-//   GET  /api/v1/stores/{storeId}/invoice-drafts        view_invoice_drafts   — the store's drafts, newest first
-//   GET  /api/v1/stores/{storeId}/invoice-drafts/{id}   view_invoice_drafts   — one draft and its lines (read-only)
+//   POST /api/v1/stores/{storeId}/invoice-drafts              create_invoice_drafts — save a draft (a command, under a key)
+//   GET  /api/v1/stores/{storeId}/invoice-drafts              view_invoice_drafts   — the store's drafts, newest first
+//   GET  /api/v1/stores/{storeId}/invoice-drafts/{id}         view_invoice_drafts   — one draft and its lines (read-only)
+//   GET  /api/v1/stores/{storeId}/invoice-drafts/eligibility  create_invoice_drafts — whether a save would be authorized now
+//                                                                                    (M7B-INVOICES-P1-R2; see THE ELIGIBILITY)
 // The {storeId} segment is a REQUESTED TARGET: the chain hands it to the tenant authorizer, which selects the actor's OWN
 // active store-scope grant at exactly that store (no tenant-to-store inheritance; none, two roles at one store, a foreign
 // or missing store and a non-canonical segment are all the same 403), decides the permission on that grant's role and its
@@ -64,6 +66,23 @@
 // it reaches a response, and anything out of shape is a bounded 503. No read writes an audit record (the customer reads'
 // owner decision). Chain-wide headers mark every answer no-store.
 //
+// THE ELIGIBILITY (M7B-INVOICES-P1-R2, DA-201). A read-only answer to "may this session's actor save a draft at this store
+// now?", decided by the SAME requirement object the save declares (INVOICE_DRAFT_CREATE_REQUIREMENT), so the chain's one
+// tenant authorizer decides both with one evaluator: admission, the actor's own grant at exactly the path's store, that
+// grant's role on its tenant's current server-saved levels (Invoices Create or above AND Customers View or above), a
+// read-only or overdue account, tenant or store denied. It is a literal store template, so the segment 'eligibility' is never
+// read as a draft id. Session-bound (the presenting session's CSRF token in X-TMPOS-Session-CSRF), no body, no idempotency,
+// no recent sign-in, and no port: the handler refuses any query (400 invalid_request), states the trusted store scope at the
+// path's store again (else 403 authz_context_missing) and answers 200 with exactly { "eligibility": "allowed" } — no role,
+// level, grant, tenant, token or customer. Every refusal of the actor or the store is one 403 forbidden, the same body as
+// the handler's own re-check: a denied role, a foreign, unknown or non-canonical store and a session-CSRF mismatch are the
+// chain's (only the logged reason differs). 401 an invalid session, 429 the request limit (Retry-After),
+// 503 an outage, 404 another host or path. It writes no business row: no draft, line, audit record, outbox event, lease,
+// idempotency completion or role-level row; like every authorized read, a 200 refreshes the session's lastSeenAt, and each
+// request spends the request limit. It is a snapshot: the save decides again, under locks, when it commits (the transaction
+// revalidator and migration 028's routine), and an "allowed" answer covers none of the save's own checks — its request
+// security (Origin, Sec-Fetch-Site, X-TMPOS-CSRF), its body and customer, or its Idempotency-Key and lease.
+//
 // NOT HERE (deferred, owner decisions): editing, discarding or deleting a draft, issuing and numbering, tax, discounts,
 // shipping, payments, fractional quantities, catalog prices, legacy customer or invoice mapping, retention and privacy.
 //
@@ -79,9 +98,11 @@ import type { TrustedScope } from './principals.js';
 import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_DIRECTORY_PATH, STORE_SEGMENT, pathIdOf, storeTargetOf } from './routes.js';
 import type { AuthorizationRequirement, CommandContext, CommandPlan, RouteContext, RouteDefinition, RouteHandler } from './routes.js';
 
-/** The three templates (routes.ts STORE_TEMPLATED_ROUTES). */
+/** The four templates (routes.ts STORE_TEMPLATED_ROUTES). */
 export const INVOICE_DRAFTS_PATH = `${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`;
 export const INVOICE_DRAFT_PATH = `${INVOICE_DRAFTS_PATH}${PATH_ID_SEGMENT}`;
+/** The creation-eligibility template (M7B-INVOICES-P1-R2): a literal last segment, matched before INVOICE_DRAFT_PATH. */
+export const INVOICE_DRAFT_ELIGIBILITY_PATH = `${INVOICE_DRAFTS_PATH}/eligibility`;
 /** The store route permissions (m5CanonicalPermissions.ts): Invoices View; Invoices Create with Customers View. */
 export const INVOICE_DRAFT_VIEW_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'view_invoice_drafts' });
 export const INVOICE_DRAFT_CREATE_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'create_invoice_drafts' });
@@ -573,4 +594,30 @@ export function createInvoiceDraftDetailRoute(ports: InvoiceDraftPorts, options:
       },
     });
   });
+}
+
+/**
+ * Whether the session's actor may save a draft at the path's store now (M7B-INVOICES-P1-R2; see THE ELIGIBILITY). The chain
+ * decides it under INVOICE_DRAFT_CREATE_REQUIREMENT — the save's own requirement object — before this handler runs; the
+ * handler reads no port and writes no business row.
+ */
+export function createInvoiceDraftEligibilityRoute(): RouteDefinition {
+  const route: RouteDefinition = {
+    method: 'GET',
+    path: INVOICE_DRAFT_ELIGIBILITY_PATH,
+    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: INVOICE_DRAFT_CREATE_REQUIREMENT } as const),
+    body: Object.freeze({ kind: 'none' } as const),
+    idempotency: 'none',
+    trustedContext: 'required',
+    recentAuth: 'none',
+    // The client names the session it checked: an answer is bound to the presenting session's CSRF token (DA-138).
+    sessionBinding: 'required',
+    handler: (req, res, ctx) => {
+      // No query is part of this contract: any at all, an empty one included, is refused.
+      if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_eligibility_query_invalid');
+      if (readerOf(req, ctx) === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+      res.status(200).json({ eligibility: 'allowed' });
+    },
+  };
+  return Object.freeze(route);
 }

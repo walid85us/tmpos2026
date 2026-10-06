@@ -21,6 +21,7 @@ import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership, Tru
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
 import { TENANT_ROLE_IDS } from '../platform-identity/authorizationConstants.js';
+import { INVOICE_DRAFT_CREATE_REQUIREMENT, INVOICE_DRAFT_ELIGIBILITY_PATH, createInvoiceDraftEligibilityRoute } from '../runtime/invoiceDrafts.js';
 
 const ACTOR = '11111111-1111-4111-8111-111111111111';
 const TENANT = '22222222-2222-4222-8222-222222222222';
@@ -756,6 +757,55 @@ test('M7B-AZ-02 a read-only store, tenant or account reaches only a CLASSIFIED s
     ['a pending store', admitted([storeGrantOf('manager', { storeStatus: 'pending_activation' })])],
     ['a suspended tenant', admitted([storeGrantOf('manager', { tenantStatus: 'suspended' })])],
   ] as const) assert.equal(await decide(answer, VIEW_DRAFTS, STORE_ROUTE), false, label);
+});
+
+test('M7B-AZ-03 (M7B-INVOICES-P1-R2, DA-201) the eligibility view under the save\'s requirement decides exactly as the save: per role and owner edit, technician denied at its default level and a role outside the catalog always denied, a read-only or overdue scope denied although the route is a classified read', async () => {
+  const ELIGIBILITY: RouteView = Object.freeze({ method: 'GET', path: INVOICE_DRAFT_ELIGIBILITY_PATH, audience: 'tenant', storeTarget: STORE });
+  const reads = new Set([readKey('GET', '/api/v1/stores/{storeId}/invoice-drafts'), readKey('GET', INVOICE_DRAFT_ELIGIBILITY_PATH)]);
+  // The requirement each route itself declares: the eligibility route's, and the save's (CREATE_DRAFTS).
+  const declared = createInvoiceDraftEligibilityRoute().policy;
+  assert.ok(declared.access === 'session' && declared.authorization !== null);
+  const requirementOf = (route: RouteView): AuthorizationRequirement => (route === DRAFTS_POST ? CREATE_DRAFTS : declared.authorization as AuthorizationRequirement);
+  const decide = (answer: unknown, route: RouteView, levels: unknown = {}) => answered(createTenantRouteAuthorizer({
+    admission: stub(answer), levels: async () => levels, reads,
+  }).authorize(PRINCIPAL, requirementOf(route), route, live(), null));
+  assert.equal(declared.authorization, INVOICE_DRAFT_CREATE_REQUIREMENT, 'the route declares the save\'s requirement object');
+  const EDITS = [
+    {}, { invoices: 'none' }, { invoices: 'view' }, { invoices: 'create' }, { invoices: 'full' }, { customers: 'none' }, { customers: 'view' },
+    { invoices: 'create', customers: 'none' }, { invoices: 'full', customers: 'view' }, { invoices: 'Full' }, null,
+  ];
+  const table: Record<string, boolean[]> = {};
+  for (const roleId of [...TENANT_ROLE_IDS, 'custom_role_browser_only']) {
+    table[roleId] = [];
+    for (const levels of EDITS) {
+      const answer = admitted([storeGrantOf(roleId)]);
+      const eligible = grantedOf(await decide(answer, ELIGIBILITY, levels));
+      assert.equal(eligible, grantedOf(await decide(answer, DRAFTS_POST, levels)), `${roleId} ${JSON.stringify(levels)}: eligibility = the save's decision`);
+      table[roleId].push(eligible);
+    }
+  }
+  assert.deepEqual(table, {
+    store_owner: [true, true, true, true, true, true, true, true, true, false, false],
+    manager: [true, false, false, true, true, false, true, false, true, false, false],
+    technician: [false, false, false, true, true, false, false, false, true, false, false],
+    sales_staff: [true, false, false, true, true, false, true, false, true, false, false],
+    custom_role_browser_only: Array(EDITS.length).fill(false),
+  }, 'defaults: owner, manager and sales staff yes, technician no; an edit below Invoices Create or Customers View denies (never the owner); malformed edits and a role the catalog does not hold never');
+  for (const [label, answer] of [
+    ['a read-only store', admitted([storeGrantOf('manager', { storeStatus: 'read_only' })])],
+    ['an overdue store', admitted([storeGrantOf('manager', { storeStatus: 'overdue' })])],
+    ['a read-only tenant', admitted([storeGrantOf('manager', { tenantStatus: 'read_only' })])],
+    ['an overdue tenant', admitted([storeGrantOf('manager', { tenantStatus: 'overdue' })])],
+    ['a read-only account', admitted([storeGrantOf('manager')], 'read_only')],
+    ['a suspended store', admitted([storeGrantOf('manager', { storeStatus: 'suspended' })])],
+    ['a grant at another store', admitted([storeGrantOf('manager', { store: OTHER_TENANT })])],
+    ['a tenant grant only (no inheritance)', admitted([grant({ roleId: 'manager' })])],
+    ['two roles at the store', admitted([storeGrantOf('manager'), storeGrantOf('sales_staff', { membershipId: OTHER_TENANT })])],
+  ] as const) {
+    assert.equal(await decide(answer, ELIGIBILITY), false, `${label}: eligibility`);
+    assert.equal(await decide(answer, DRAFTS_POST), false, `${label}: the save`);
+  }
+  assert.equal(await decide(admitted([storeGrantOf('manager')]), { ...ELIGIBILITY, storeTarget: null }), false, 'a non-canonical store segment selects nothing');
 });
 
 /** The scope the authorizer hands a store create: the manager's one store grant at STORE. */
