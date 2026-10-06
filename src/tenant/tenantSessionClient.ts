@@ -7,19 +7,39 @@
 //     server verifies it and decides who this is. Nothing here knows or builds an issuer key, a proof or a database key.
 //   - The session CSRF token lives in this closure only (beside the UID it was issued for) — never in React state (one
 //     exception, below), storage, a URL, the DOM or a log — and is handed to the caller only to ride its next request (an
-//     unsafe one, or a session-bound read). The customer
-//     directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5) is its second in-memory holder: it keeps the token
-//     it was handed in refs, and beside an unresolved create in its in-memory hold store, only to compare it with the
-//     next one and to re-send that create on the same session — under the same rule (no state, storage, URL, DOM, log).
-//     The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9) is the third: its dialog keeps the token
-//     it was handed in a ref only to compare it with the next one, and its `sessionContextOf` keeps the latest (UID,
-//     token) pair in module scope only to hand out one opaque context per session — under the same rule. The Invoices
-//     page's server drafts section (ServerInvoiceDrafts.tsx, M7B-INVOICES-P1) is the fourth: it keeps the token in refs
-//     to compare it with the next one and send its reads, in an open new-draft dialog's state to send that dialog's save
-//     (the one React-state exception), and on each save attempt in its in-memory hold store, to re-send an unresolved one
-//     on the same session (Check again) and to read a created one back only under that session — until the attempt is
-//     detached, read back or removed or another user's section renders (a sign-out unmounts the page; a reload drops
-//     it). Otherwise the same rule: never storage, a URL, the DOM or a log.
+//     unsafe one, or a session-bound read). Three more in-memory holders keep what they were handed, under the same rule
+//     (never storage, a URL, the DOM or a log); their refs and dialog state go with their page, which a sign-out unmounts
+//     (the route guard, AccessGuard.tsx; a DEV-only session excepted), and a reload drops everything:
+//       - The customer directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5), second: in refs, to compare it with
+//         the next one; in its module-level hold store beside a held create and a create's recorded "saved" outcome, to
+//         re-send that create on the same session and to tell whether the outcome is this session's; and in its edit hold
+//         store beside a held edit and an edit's recorded outcome. It does not hear `onSessionEnd`: its edit hold store
+//         drops every other user's edit and outcome on a sign-out or another user (the page binds it to the sign-in state),
+//         but its create hold store keeps the token after a sign-out — on a held create until that user's directory page
+//         sees another token (the create is detached) or the create ends (confirmed, refused or removed), and on a "saved"
+//         outcome (a confirmation that came after the page had gone) until that user's page takes it — or until the page
+//         reloads (doc 08 DA-198).
+//       - The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9), third: its open dialog in a ref, to
+//         compare it with the next one, until the dialog closes or hears `onSessionEnd`; and its `sessionContextOf` keeps
+//         the latest (UID, token) pair in module scope, to hand out one opaque context per session,
+//         until the last draft field unmounts or `onSessionEnd` is heard — never again for a session confirmed before.
+//       - The Invoices page's server drafts section (ServerInvoiceDrafts.tsx, M7B-INVOICES-P1), fourth: in refs, to compare
+//         it with the next one and send its reads; in an open new-draft dialog's state, to send that dialog's save (the one
+//         React-state exception) — both until the section unmounts or, while it is mounted, hears `onSessionEnd` (which
+//         also closes that dialog); and on each save attempt in its module-level hold store, to re-send an unresolved one
+//         on the same session (Check again) and to read a created one back only under that session. `onSessionEnd` takes it
+//         from every user's attempt (an unconfirmed one loses its body too, and is never sent again); otherwise it stays
+//         until the attempt is detached, read back or removed, or the page reloads.
+//   - A sign-out is heard where it starts: `onSessionEnd` listeners run synchronously at the START of every `logout()`
+//     (and `reset()`), before anything is sent or awaited — so they run whatever the server answers. AccessContext.tsx
+//     starts that logout, without awaiting it, on every signed-out state and before another user's session is used; the
+//     logout itself is best effort (a failed one leaves the server session to its idle timeout). The module-scope holders
+//     listen from their module's load (and stop on a hot reload), whether or not their page is still mounted; a mounted
+//     view (the picker's dialog, the drafts section) listens while it is mounted. One that throws stops neither
+//     the logout nor the other listeners, and its error is rethrown unchanged in a queued microtask once they have all
+//     run (reported by the platform as an uncaught error, never thrown into the logout). An answer asked for before a
+//     sign-out began can still arrive after it: `sessionEndsSoFar` counts the ends, and a holder that read it before
+//     asking takes no token from such an answer.
 //   - A session is only ever reused for the user it belongs to. Every `ensure` first reads the session this browser
 //     already holds (M7A-CUSTOMERS-P5-R1, DA-143) and reuses it — with no login — only when the server's `subject` for it
 //     equals the digest of the UID asked for; the digest is recomputed here from that UID and never sent. No session, or
@@ -105,12 +125,16 @@ export interface TenantSessionClient {
    */
   reauthenticate(uid: string, freshToken: string): Promise<SessionResult>;
   /**
-   * End the tenant session this browser holds, best effort. Everything in flight before it is abandoned and the memo
+   * End the tenant session this browser holds, best effort. First, synchronously, every `onSessionEnd` listener is told.
+   * Everything in flight before it is abandoned and the memo
    * (with the confirmed-session marker) is cleared at once, whatever the server answers. With no session remembered it reads the current one first (none →
    * nothing is sent). Logouts run one after another, and every later `ensure` waits until they have finished.
    */
   logout(): Promise<void>;
-  /** Forget this page's session (and that one was ever confirmed) and abandon everything in flight (a user switch). Sends nothing. */
+  /**
+   * Forget this page's session (and that one was ever confirmed) and abandon everything in flight (a user switch). Sends
+   * nothing. First, synchronously, every `onSessionEnd` listener is told.
+   */
   reset(): void;
 }
 
@@ -154,6 +178,44 @@ function undecided(outcome: Outcome): SessionResult {
   if (statusOf(outcome) !== 429) return UNAVAILABLE;
   const seconds = outcome.kind === 'response' ? outcome.retryAfter : null;
   return Object.freeze(seconds === null ? { kind: 'rate-limited' } : { kind: 'rate-limited', retryAfterSeconds: seconds });
+}
+
+const sessionEndListeners = new Set<() => void>();
+let sessionEnds = 0;
+
+/**
+ * Hear every end of a session this module's clients hold (the shop makes one: `tenantSession`): `listener` runs
+ * synchronously at the start of each `logout()` and `reset()`, before anything is sent or awaited. For the in-memory token
+ * holders: the module-scope ones register once, a mounted view for its life. Returns the unsubscription.
+ */
+export function onSessionEnd(listener: () => void): () => void {
+  sessionEndListeners.add(listener);
+  return () => { sessionEndListeners.delete(listener); };
+}
+
+/**
+ * How many session ends (logouts and resets) this page has announced. Read BEFORE a session is asked for and compared
+ * when its answer is used: a different count means a sign-out began in between, so the token that answer carries is from
+ * before it and is taken nowhere (it can resolve after `logout()` has begun, when its promise settled just before).
+ */
+export const sessionEndsSoFar = (): number => sessionEnds;
+
+/**
+ * Tell every listener. One that throws stops neither the logout nor the listeners after it; its error is not swallowed:
+ * once every listener has run, each one caught is rethrown as it was, in a queued microtask of its own — an uncaught error
+ * the platform reports (the browser's console and `error` event), never thrown into this logout.
+ */
+function announceSessionEnd(): void {
+  sessionEnds += 1; // first: a listener, and every continuation after it, already reads the new count
+  const failures: unknown[] = [];
+  for (const listener of [...sessionEndListeners]) {
+    try {
+      listener();
+    } catch (error) {
+      failures.push(error); // a holder's own failure: the sign-out goes on, and the error is surfaced below
+    }
+  }
+  for (const error of failures) queueMicrotask(() => { throw error; });
 }
 
 export function createTenantSessionClient(
@@ -337,6 +399,7 @@ export function createTenantSessionClient(
   }
 
   function logout(): Promise<void> {
+    announceSessionEnd(); // first: the holders hear it before anything is sent or awaited
     supersede(); // its own epoch: whatever was in flight before this logout answers for nothing
     const remembered = memo?.csrf ?? null;
     memo = null;
@@ -368,6 +431,7 @@ export function createTenantSessionClient(
     reauthenticate,
     logout,
     reset(): void {
+      announceSessionEnd();
       supersede();
       memo = null;
       confirmedUid = null;
@@ -375,5 +439,8 @@ export function createTenantSessionClient(
   });
 }
 
-/** The shop's one tenant session client, shared by the role-levels panel, the customer directory and the sign-out hook in AccessContext. */
+/**
+ * The shop's one tenant session client, shared by the role-levels panels, the customer directory, the customer picker, the
+ * server drafts section and the sign-out hook in AccessContext.
+ */
 export const tenantSession: TenantSessionClient = createTenantSessionClient();

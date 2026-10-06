@@ -2,10 +2,15 @@
 // which user, and which answers it believes. M7A-CUSTOMERS-P5-R1: every ensure reads the session first and reuses one
 // the server names as that user's (`subject`), so a page load signs in only when there is no such session.
 // M7A-CUSTOMERS-P6: a session the client confirmed that then ends is `ended` — no login until a reconnect (TSC-25..31).
+// M7B-INVOICES-P1 (closing round): every logout and reset tells the `onSessionEnd` listeners first, before anything is
+// sent or awaited, and a listener that throws stops neither — its error is rethrown unchanged in a queued microtask once
+// every listener has run (TSC-32); the header's holder list names the drafts section and every module that listens (TSC-33);
+// `sessionEndsSoFar` counts the ends and has moved before any listener runs (TSC-34).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionSubjectOf } from './tenantSessionClient';
+import { readdirSync, readFileSync } from 'node:fs';
+import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, sessionSubjectOf } from './tenantSessionClient';
 import { sessionSubjectOf as serverSubjectOf } from '../../server/runtime/sessions';
 
 const CSRF = 'c'.repeat(43);
@@ -619,4 +624,91 @@ test('TSC-31. after an end, a fresh check for another user sends nothing and ans
   assert.deepEqual(await client.ensure('uid-a', idToken), { kind: 'ended' }); // the stale check cleared nothing
   assert.deepEqual(lines(net.sent.slice(3)), [READ, READ]);
   assert.equal(tokens, 1);
+});
+
+test('TSC-32. onSessionEnd: every logout and reset tells each listener synchronously, before anything is sent; a listener that throws stops neither the logout nor the others, and its error is rethrown as it was in a queued microtask once all have run; an unsubscribed one hears nothing', async () => {
+  const net = scripted([NONE(), active(), active(), new Response(null, { status: 204 }), NONE()]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  await client.ensure('uid-a', async () => TOKEN_A);
+  // queueMicrotask is captured only around each synchronous call that ends a session, and restored in `finally`: what a
+  // call queued is kept unrun here, so the rethrown error is caught by this case instead of failing the run as uncaught.
+  const queued: Array<() => void> = [];
+  const capturing = <T>(call: () => T): T => {
+    const real = globalThis.queueMicrotask;
+    Object.assign(globalThis, { queueMicrotask: (task: () => void) => { queued.push(task); } });
+    try { return call(); } finally { Object.assign(globalThis, { queueMicrotask: real }); }
+  };
+  const rethrown = (task: () => void): unknown => { try { task(); } catch (error) { return error; } return undefined; };
+  const failure = new Error('a holder failed');
+  const heard: string[] = [];
+  const offs = [
+    onSessionEnd(() => { heard.push(`first:${net.sent.length}`); }),
+    onSessionEnd(() => { throw failure; }),
+    onSessionEnd(() => { heard.push(`last:${net.sent.length}:${queued.length}`); }), // nothing is queued before the last ran
+  ];
+  try {
+    const logout = capturing(() => client.logout());
+    assert.deepEqual(heard, ['first:3', 'last:3:0']); // told before logout() returned, with nothing of it sent yet
+    assert.equal(queued.length, 1); // the failure, surfaced after every listener ran
+    assert.equal(rethrown(queued[0]), failure); // the ORIGINAL error object, nothing of ours around it
+    await logout;
+    assert.deepEqual(lines(net.sent.slice(3)), [`POST ${TENANT_SESSION_PATHS.logout}`]); // the logout still ran, with the kept token
+    assert.equal(net.sent[3].headers.get('x-tmpos-session-csrf'), CSRF);
+    capturing(() => client.reset());
+    assert.deepEqual(heard, ['first:3', 'last:3:0', 'first:4', 'last:4:1']); // a reset tells them too, and sends nothing
+    assert.equal(queued.length, 2);
+    assert.equal(rethrown(queued[1]), failure);
+    offs[0]();
+    await capturing(() => client.logout()); // nothing remembered: one read finds no session, so no logout is sent
+    assert.deepEqual(heard, ['first:3', 'last:3:0', 'first:4', 'last:4:1', 'last:4:2']);
+    assert.equal(queued.length, 3);
+    assert.equal(rethrown(queued[2]), failure);
+  } finally {
+    for (const off of offs) off();
+  }
+  assert.equal(net.sent.length, 5);
+});
+
+test('TSC-33. the header names every in-memory holder of the token: the drafts section as the fourth (commit 15110e4), and every module that listens to onSessionEnd', () => {
+  const read = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
+  const header = read('./tenantSessionClient.ts').split('\nexport const TENANT_SESSION_PATHS')[0];
+  assert.match(header, /The Invoices page's server drafts section \(ServerInvoiceDrafts\.tsx, M7B-INVOICES-P1\), fourth/);
+  assert.match(header, /in an open new-draft dialog's state, to send that dialog's save \(the one\s+\/\/\s+React-state exception\)/);
+  for (const file of ['ServerInvoiceDrafts.tsx', 'ServerCustomerPicker.tsx', 'ServerCustomerDirectory.tsx']) {
+    const listens = /\bonSessionEnd\(/.test(read(`./${file}`));
+    assert.ok(header.includes(file), `${file} is a token holder the header must name`);
+    // A listener is named as one, and a holder that does not listen says so (DA-198's residual stays visible here).
+    if (!listens) assert.match(header, new RegExp(`${file.replace('.', '\\.')}[^]*?It does not hear \`onSessionEnd\``));
+  }
+  // Every production module under src/ that calls onSessionEnd, found by walking the tree (not a fixed list), is named.
+  const walk = (dir: URL): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : /\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name) ? [new URL(e.name, dir).pathname] : []);
+  const listeners = walk(new URL('../', import.meta.url))
+    .filter((path) => !path.endsWith('/tenantSessionClient.ts') && /\bonSessionEnd\(/.test(readFileSync(path, 'utf8')))
+    .map((path) => path.slice(path.lastIndexOf('/') + 1));
+  assert.deepEqual(listeners.sort(), ['ServerCustomerPicker.tsx', 'ServerInvoiceDrafts.tsx']);
+  for (const file of listeners) assert.ok(header.includes(file), `${file} listens to onSessionEnd, so the header must name it`);
+  assert.match(header, /`onSessionEnd` takes it\s+\/\/\s+from every user's attempt/);
+  assert.match(header, /until the last draft field unmounts or `onSessionEnd` is heard/);
+});
+
+test('TSC-34. sessionEndsSoFar counts every logout and reset, and has moved before their listeners run: a confirmation that answered just before a sign-out began is told apart from one asked for after it', async () => {
+  const net = scripted([active(), new Response(null, { status: 204 })]);
+  const client = createTenantSessionClient({ fetch: net.fetch });
+  const before = sessionEndsSoFar();
+  assert.deepEqual(await client.ensure('uid-a', async () => TOKEN_A), { kind: 'ok', csrf: CSRF }); // answered, then...
+  const seen: number[] = [];
+  const off = onSessionEnd(() => { seen.push(sessionEndsSoFar()); });
+  try {
+    const out = client.logout(); // ...a sign-out began: whoever compares the count now sees it moved
+    assert.equal(sessionEndsSoFar(), before + 1);
+    assert.deepEqual(seen, [before + 1]); // already moved when the listeners ran
+    await out;
+    assert.equal(sessionEndsSoFar(), before + 1); // the logout's own answer counts nothing more
+    client.reset();
+    assert.deepEqual([sessionEndsSoFar(), seen], [before + 2, [before + 1, before + 2]]);
+  } finally {
+    off();
+  }
+  assert.deepEqual(lines(net.sent), [READ, `POST ${TENANT_SESSION_PATHS.logout}`]);
 });

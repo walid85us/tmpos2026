@@ -233,6 +233,53 @@
 //          "Check again" sends exactly one more POST with the SAME Idempotency-Key and byte-identical body, answered 201 as
 //          the key's FIRST create (no Idempotent-Replayed): exactly ONE draft row, with its line, audit, event and one
 //          completion; the list shows it once.
+// M7B-INVOICES-P1's closing round. A SIGN-OUT here is SRL-09's: the persisted Firebase sign-in cleared in the page, exactly
+// what a sign-out in another tab leaves behind (the shop has no sign-out control of its own); the tab's Firebase SDK
+// notices it, AccessContext starts the tenant logout (not awaited) and the route guard shows /login in the SAME document.
+// The next user signs in through that form, so the page's module memory (the draft hold store, the picker's pair) is the
+// one the previous user left: a marker set on `window` before the sign-out is asserted still there.
+//   SDB-05 (AC-15, DA-193, DA-198) USER SWITCH IN ONE TAB: user A (a store grant at store W) has W chosen, its rows listed,
+//          the read-only reopen dialog open and an unconfirmed save held (the POST committed, its answer lost at the front).
+//          A signs out; user B (another account of the tenant with its own store grant at W) signs in in the same tab.
+//          Nothing of A shows — no store choice, row, dialog or held attempt (no "Check again"), before or after B's own
+//          "Show server drafts", which lists B's stores with none chosen; no draft POST leaves the page during or after
+//          the switch (its only POSTs: A's logout and B's login); no request after the sign-out carries A's session CSRF
+//          token but the logout that ends A's session (A's cookie then reads 401), and once that logout has run A's token
+//          is held nowhere in the page's JavaScript heap (a CDP heap snapshot of the renderer, searched as text: the draft
+//          hold store, which kept it beside the held attempt, heard the sign-out — DA-198 in a real browser); B's own list
+//          of W works. B signs out
+//          and A signs in again in the same document: A's attempt is shown detached (no "Check again"), Stop tracking
+//          puts focus on the section heading, and still no draft POST: one in the whole case, the lost one.
+//   SDB-06 (DA-199) FOCUS IN REAL CHROMIUM, outside the dialogs: document.activeElement after each press is what the
+//          section promises — "Show server drafts" (its stores read lost at the front), the stores' "Try again", the
+//          list's "Try again" and the stores' "Reconnect" (after the session is ended in the store): the section heading;
+//          "Load more" with more pages left: Load more itself, kept focusable (aria-disabled, never disabled) while its
+//          read is parked, a press meanwhile sending nothing; "Load more" that brings the last page: the first row it
+//          appended (its Open); "Load more" whose read is lost: the heading.
+//   SDB-07 (AC-04) A BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER'S AUTHORITY. The shop cannot persist or assign a custom
+//          role: it only reads users/{uid} (firestore.rules lets the client write no users document), and a role made in
+//          its Roles tab lives only in that page's memory (AccessContext's tenantRolesState, through addTenantRole). So the
+//          owner makes the role in the Roles tab and gives it Invoices Full and Customers View in the local grid (no write
+//          request reaches the tenant server and nothing is written to Firestore), and the HARNESS seeds the second
+//          account's users/{uid}.role with that role's id (Employees.tsx's rule: the name lower-cased, whitespace to "_")
+//          to stand for a browser-only role; that account signs in in the SAME document after the owner's sign-out, so the
+//          page still holds the role. Its server grants are `technician` (tenant and store: Invoices View by default). The
+//          page's hint follows the seeded id into that in-memory role (Invoices Full), so the invoice form's "Create
+//          Invoice" and the section's "New server draft" ARE offered — `canCreate` is the local role's hint only, by the
+//          section's own rule (ServerInvoiceDrafts.tsx header) — and the case asserts that, as shown. The section lists the
+//          store's draft (View). The page's own save (its real Save, with its own session cookie, session CSRF token and
+//          request-intent header) is answered 403 `forbidden` and said "Not saved"; nothing is written: no draft, line,
+//          audit, outbox event, idempotency completion or lease, and no role-level row or version.
+//   SDB-08 (AC-15, DA-198) A READ OUT WHEN ANOTHER USER SIGNS IN: user A has W chosen, and W's list read has been
+//          answered by the entry with A's row but its answer is parked at the front. User B (another account of the tenant,
+//          a store grant at W) signs in in a second tab of the same browser — SRL-09's switch: this tab's Firebase SDK
+//          follows the shared sign-in, so AccessContext starts A's logout and then awaits B's users/{uid} profile, which
+//          the harness holds (the Listen channel's request naming that document), keeping A's page MOUNTED. A's answer is
+//          released then: the drafts section has already ended at the sign-out (its stores say the session ended), and
+//          the answer shows nothing — no row, draft or customer name — and starts nothing: no customer-name read, and no
+//          request from this tab after the switch began but its one logout of A's session carries A's session CSRF token
+//          (answered 401 when the other tab's own switch has already ended that session, as it can). Once B's profile is
+//          released this tab shows B's Invoices page, and still nothing of A.
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -951,6 +998,13 @@ async function route(ev) {
   if (u.protocol === 'https:' && u.host === FS_HOST) {
     if (ev.request.method === 'OPTIONS') return preflight(ev.request);
     st.firestore.push(`${ev.request.method} ${u.pathname}`);
+    const s = st;
+    for (const g of [...s.profileGates]) {
+      if (!g.match(ev, u)) continue;
+      s.profileGates.delete(g);
+      g.hit();
+      await g.released;
+    }
     return FIRESTORE_MODE === 'emulator' ? forwardFirestore(ev.request, u) : firestoreStub(ev.request, u);
   }
   st.blocked.push(`${ev.request.method} ${u.protocol}//${u.host}${u.pathname}`);
@@ -1022,6 +1076,23 @@ function gate(match, phase) {
   const reached = new Promise((r) => { hit = r; });
   const released = new Promise((r) => { release = r; });
   st.gates.add({ match, phase, hit, released: Promise.race([released, delay(60_000)]) }); // a bound, never a result
+  st.releases.push(release);
+  return { reached, release };
+}
+
+/**
+ * Hold `page`'s next Firestore read of users/{uid} — the Listen channel's forward POST whose form-encoded messages name
+ * that document (AccessContext's profile read after a sign-in: getDoc rides the WebChannel) — until release(); bounded,
+ * and released at scenario end. Keep a hold short: the SDK calls itself offline after 10 s without a healthy stream.
+ */
+function profileGate(page, uid) {
+  let hit;
+  let release;
+  const reached = new Promise((r) => { hit = r; });
+  const released = new Promise((r) => { release = r; });
+  const match = (ev, u) => ev.frameId === page.frameId && ev.request.method === 'POST' && u.pathname.endsWith('/Listen/channel')
+    && [...new URLSearchParams(postBody(ev.request)).values()].some((v) => v.includes(`/documents/users/${uid}"`));
+  st.profileGates.add({ match, hit, released: Promise.race([released, delay(30_000)]) }); // a bound, never a result
   st.releases.push(release);
   return { reached, release };
 }
@@ -1227,7 +1298,24 @@ async function createCustomRole(page, name) {
   await clickButton(page, 'Create Role', 'create-role-open');
   const input = 'input[placeholder="e.g. Senior Technician"]';
   await page.waitFor(`!!document.querySelector(${JSON.stringify(input)})`, 10_000, 'the Create Role form');
+  // The dialog animates in (Employees.tsx: its panel enters from opacity 0, scale 0.9 and 20 px down): a click aimed
+  // while it moves can miss the field, so the name never lands and the submit stays disabled (seen once in four SDB-07
+  // runs). Click only once that entry is OVER — every ancestor of the field has computed opacity 1 and no transform (none,
+  // or the identity matrix) — and check the name landed before looking for the submit.
+  const atRest = `(() => {
+    const field = document.querySelector(${JSON.stringify(input)});
+    if (field === null) return false;
+    for (let n = field.parentElement; n !== null; n = n.parentElement) {
+      const style = getComputedStyle(n);
+      if (style.opacity !== '1' || (style.transform !== 'none' && style.transform !== 'matrix(1, 0, 0, 1, 0, 0)')) return false;
+    }
+    return true;
+  })()`;
+  let polls = 0;
+  await page.waitFor(async () => { polls += 1; return (await page.evaluate(atRest)) === true; }, 10_000, 'the Create Role form at rest (its entry motion over)');
+  note('Create Role form polls until at rest', polls);
   await page.fill(input, name);
+  await page.waitFor(`document.querySelector(${JSON.stringify(input)})?.value === ${JSON.stringify(name)}`, 10_000, 'the role name typed');
   const submit = `[...document.querySelectorAll('button')].find((b) => !b.disabled && b.textContent.trim() === 'Create Role')`;
   await page.waitFor(`!!${submit}`, 10_000, 'the Create Role submit');
   await page.evaluate(`${submit}.setAttribute('data-p3r2', 'create-role-submit')`);
@@ -1267,7 +1355,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SRL-11', 'SRL-12', 'SRL-13', 'SRL-14', 'SRL-15', 'SRL-16',
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
-  'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04',
+  'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -1276,7 +1364,7 @@ function scenario(id, title, fn, timeout = 180_000) {
   if (registered.has(id)) repeated.push(id);
   registered.add(id);
   test(`${id}: ${title}`, { timeout }, async () => {
-    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
+    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), profileGates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
     const errorsBefore = browser.interceptErrors.length;
     let outcome = 'fail';
@@ -4566,3 +4654,510 @@ scenario('SDB-04', 'AC-14 LOST REQUEST — the first POST never reaches the entr
   await assertDraftsNowhere([page], [stored[0].id, first.headers['idempotency-key'], customer.id, first.body, ...lines.map((l) => l.description)]);
   await assertNoLeak(page);
 }, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P1 closing round — a user switch in one tab (SDB-05), focus outside the dialogs (SDB-06), a browser-only
+// custom role against the server's authority (SDB-07) and a read out when another user signs in (SDB-08)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** ServerInvoiceDrafts.tsx REFUSED_TEXT.denied: a save the server refused 403. */
+const DRAFT_DENIED = 'Not saved: this account may not save drafts at this store.';
+/** ServerInvoiceDrafts.tsx HOLD_TEXT.detached, its start. */
+const HOLD_DETACHED = 'This draft could not be confirmed: the store connection changed.';
+/** The section heading's DOM id: where a press that takes its own control away hands focus. */
+const HEADING = 'drafts-title';
+const SESSION_CSRF = SESSION_CSRF_HEADER.toLowerCase();
+/** Set on `window` before a sign-out; still true after the next sign-in only if the document was never reloaded. */
+const SAME_DOCUMENT = 'window.__sdbSameDocument === true';
+
+/**
+ * Sign out in this tab as SRL-09 does — the persisted Firebase sign-in cleared, what a sign-out in another tab leaves
+ * behind; the shop has no sign-out control of its own — and wait for the route guard's /login in the same document.
+ * Answers the API record count before the sign-out began.
+ */
+async function signOutHere(page) {
+  const from = st.api.length;
+  await page.evaluate(`new Promise((resolve, reject) => {
+    const open = indexedDB.open('firebaseLocalStorageDb');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction('firebaseLocalStorage', 'readwrite');
+      tx.objectStore('firebaseLocalStorage').clear();
+      tx.oncomplete = () => { db.close(); resolve(true); };
+      tx.onerror = () => reject(tx.error);
+    };
+  })`);
+  await page.waitFor(`location.pathname === '/login' && !!document.querySelector('input[type="email"]')`, 30_000, 'signed out: the route guard shows /login');
+  return from;
+}
+
+/** Sign in through the /login form the route guard shows: no navigation, so the document and its module memory stay. */
+async function signInHere(page, who) {
+  await page.waitFor(`location.pathname === '/login' && !!document.querySelector('input[type="email"]')`, 30_000, 'the sign-in form');
+  await page.fill('input[type="email"]', who.email);
+  await page.fill('input[type="password"]', who.password);
+  await page.click('button[type="submit"]');
+  await page.waitFor(`location.pathname === '/'`, 30_000, `${who.label} signed in and left /login`);
+}
+
+/**
+ * `n` one-line drafts put in a store by the database owner (no session, audit, event, completion or idempotency record),
+ * created one second apart: their ids in the list's order (newest first).
+ */
+async function seedDrafts(tenant, store, customerId, createdBy, n, label) {
+  const ids = Array.from({ length: n }, () => randomUUID());
+  await owner.begin(async (sql) => {
+    for (const [i, id] of ids.entries()) {
+      const cents = 100 + i;
+      await sql`insert into tmpos_invoice_draft.invoice_draft
+          (draft_id, tenant_id, store_id, customer_id, status, currency, version, line_count, subtotal_cents, created_at, created_by)
+        values (${id}, ${tenant}, ${store}, ${customerId}, 'draft', 'USD', 1, 1, ${cents}, pg_catalog.now() - ${i + 1}::int * interval '1 second', ${createdBy})`;
+      await sql`insert into tmpos_invoice_draft.invoice_draft_line
+          (draft_id, tenant_id, store_id, position, description, quantity, unit_price_cents, line_total_cents)
+        values (${id}, ${tenant}, ${store}, 1, ${`${label} ${i + 1} ${SUFFIX}`}, 1, ${cents}, ${cents})`;
+    }
+  });
+  return ids;
+}
+
+/** What has focus: its DOM id, else its test id, else its tag name ('BODY' when focus fell to the page). */
+const focusOf = (page) => page.evaluate(`(() => { const a = document.activeElement; return a === null ? null : a.id || a.dataset?.testid || a.tagName; })()`);
+/** The session CSRF tokens a record carried (its header) or was answered (a login's or a session read's csrfToken). */
+function tokensOf(r) {
+  const out = typeof r.headers[SESSION_CSRF] === 'string' ? [r.headers[SESSION_CSRF]] : [];
+  try {
+    const answered = JSON.parse(r.replied?.text ?? '').csrfToken;
+    if (typeof answered === 'string') out.push(answered);
+  } catch { /* not JSON */ }
+  return out;
+}
+/** The session CSRF tokens the entry answered to `records` (a login's or a session read's csrfToken). */
+const answeredTokens = (records) => records.flatMap((r) => tokensOf({ headers: {}, replied: r.replied }));
+/**
+ * Which of `values` the page's JavaScript heap still holds as a string: a CDP heap snapshot (V8 collects garbage before
+ * taking one, and a collection is asked for first), searched as text. What it sees is the renderer's JS heap only.
+ */
+async function heldInHeap(page, values) {
+  const chunks = [];
+  const stop = page.on('HeapProfiler.addHeapSnapshotChunk', (e) => chunks.push(e.chunk));
+  try {
+    await page.send('HeapProfiler.enable');
+    await page.send('HeapProfiler.collectGarbage');
+    await browser.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false }, page.sessionId, 60_000);
+  } finally {
+    stop();
+    await page.send('HeapProfiler.disable').catch(() => {});
+  }
+  const snapshot = chunks.join('');
+  assert.ok(snapshot.length > 100_000 && snapshot.includes('"strings"'), 'a heap snapshot was taken');
+  return values.filter((v) => snapshot.includes(v));
+}
+/** Whether any of `values` rides a request: its path, query, any header or its body. */
+const carries = (r, values) => {
+  const wire = `${r.path}${r.query}\n${JSON.stringify(r.headers)}\n${r.body}`;
+  return values.some((v) => wire.includes(v));
+};
+
+scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, with a store chosen, its row listed, the reopen dialog open and an unconfirmed save held, signs out and user B signs in in the same document: no A store choice, row, dialog or held attempt shows, no draft POST is sent during or after the switch, no request after the sign-out but A\'s logout carries A\'s session CSRF token, and B\'s own list works; A, back in the same document, finds the attempt detached (no Check again)', async () => {
+  const tenant = await newTenant('d5');
+  const westName = `M7SDB d5 west ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const [customer] = await seedCustomers(tenant, [`M7SDB d5 Quinn ${SUFFIX}`]);
+  // A and B: two accounts of one tenant, each with its tenant grant (the picker and the names) and a store grant at W.
+  const a = await actor('d5-a', [grant(tenant, 'store_owner'), storeGrant(tenant, west.id, 'store_owner')], { role: 'store_owner' });
+  const b = await actor('d5-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const seedLabel = 'M7SDB d5 seed';
+  const [dSeed] = await seedDrafts(tenant, west.id, customer.id, a.id, 1, seedLabel);
+  const page = await recordWrites(await openPage());
+  await signIn(page, a);
+
+  // 1. A: W chosen, its row listed, a save held unconfirmed (it committed; its answer lost at the front), the reopen open.
+  await openDrafts(page);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, [dSeed], 'A lists W', customer.name);
+  const heldLines = [typed(`West held by A ${SUFFIX}`, '2', '7.25', 725)];
+  await composeDraft(page, customer.id, heldLines);
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isDraftCreate(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-new-save'));
+    await waitData(page, 'drafts-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await page.click(by('draft-new-cancel'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-hold')}?.dataset.state === 'unresolved'`, 15_000, 'the attempt held in the section');
+  const view = await reopenDraft(page, dSeed, customer.name);
+  const [first] = sentBy(page, isDraftCreate);
+  const heldDraft = (await storedDrafts(tenant)).find((d) => d.lines[0]?.description === heldLines[0].description);
+  assert.ok(heldDraft, 'the lost create committed');
+  const beforeOut = {
+    chosen: await chosenStore(page), rows: (await draftRowsOf(page)).map((r) => r.id), view: await has(page, 'draft-view'),
+    hold: await holdState(page), check: await offered(page, 'drafts-check-again'),
+  };
+  const aLogin = st.api.filter(acceptedLogin(a)).at(-1);
+  assert.ok(aLogin, 'the page established A\'s tenant session');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  const dBefore = await draftCounts(tenant);
+  const before = await counts();
+  record('SDB-05', { phase: 'A before the sign-out', ...beforeOut, viewLines: view.lines.length, aTokens: aTokens.length, posts: sentBy(page, isDraftCreate).map(apiLine) });
+  assert.deepEqual(beforeOut, { chosen: west.id, rows: [dSeed], view: true, hold: 'unresolved', check: true },
+    'A: W chosen, its row listed, the reopen dialog open, the save held with Check again');
+  assert.deepEqual(view.lines, viewCells([typed(`${seedLabel} 1 ${SUFFIX}`, '1', '1', 100)]), 'the reopen shows the stored line');
+  assert.ok(aTokens.length > 0 && aTokens.every((t) => typeof t === 'string' && t.length >= 16), 'A\'s session CSRF token was seen');
+
+  // 2. A signs out in this tab; B signs in through the /login the route guard shows — the same document.
+  await page.evaluate('window.__sdbSameDocument = true');
+  const out = await signOutHere(page);
+  const atLogin = { view: await has(page, 'draft-view'), section: await has(page, 'drafts-section') };
+  await page.waitFor(async () => (await readWith(aLogin.cookie)).status === 401, 20_000, 'A\'s tenant session ended by the sign-out');
+  await page.waitFor(() => st.api.slice(out).some((r) => isLogout(r) && r.handedBack === true), 20_000, 'the logout\'s answer was handed to the page');
+  await page.settle();
+  // DA-198: once the logout has run, nothing in the page's JavaScript heap keeps A's token. A snapshot may still catch the logout's
+  // own work finishing (it sends the token), so up to three are taken, a second apart; a holder that keeps it never clears.
+  let aTokensInHeap = null;
+  for (let i = 0; i < 3 && aTokensInHeap !== 0; i++) {
+    if (i > 0) await delay(1_000);
+    aTokensInHeap = (await heldInHeap(page, aTokens)).length;
+  }
+  await signInHere(page, b);
+  const same = await page.evaluate(SAME_DOCUMENT);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'B\'s Invoices page');
+  await page.settle();
+  const shownOfA = async () => {
+    const html = await page.evaluate('document.documentElement.outerHTML');
+    return [dSeed, heldDraft.id, heldLines[0].description, `${seedLabel} 1 ${SUFFIX}`, customer.id].filter((v) => html.includes(v)).length;
+  };
+  const atSwitch = {
+    hold: await has(page, 'drafts-hold'), check: await has(page, 'drafts-check-again'), view: await has(page, 'draft-view'),
+    store: await has(page, 'drafts-store'), rows: await has(page, 'drafts-row'), notice: await has(page, 'drafts-notice'), shownOfA: await shownOfA(),
+  };
+  // B's own "Show server drafts": B's stores, none chosen; still nothing of A.
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  const afterShow = {
+    options: (await storeOptions(page)).map((o) => o.value), chosen: await chosenStore(page), rows: await has(page, 'drafts-row'),
+    hold: await has(page, 'drafts-hold'), view: await has(page, 'draft-view'), shownOfA: await shownOfA(),
+  };
+  // B's own list of W: the store's drafts (A's seeded one and the one A's lost reply committed), read under B's session.
+  const westIds = (await storedDrafts(tenant)).filter((d) => d.storeId === west.id).map((d) => d.id);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, westIds, 'B lists W', customer.name);
+  const bNew = await offered(page, 'drafts-new');
+  await quiet(page, out);
+  await delay(2_000); // whatever it would still send on its own, it has sent
+  const after = sentBy(page, () => true, out);
+  const bLogins = after.filter(acceptedLogin(b));
+  const evidenceOfSwitch = {
+    same, atLogin, aTokensInHeap, atSwitch, afterShow, bNew,
+    posts: after.filter((r) => r.method === 'POST').map((r) => `${r.path} ${answered(r)}`),
+    carriersOfA: after.filter((r) => carries(r, aTokens)).map(apiLine),
+    lists: sentBy(page, isDraftList(west.id), out).map((r) => `${carries(r, aTokens) ? 'A' : carries(r, answeredTokens(after)) ? 'B' : 'none'} ${answered(r)}`),
+  };
+  record('SDB-05', { phase: 'B after the switch', ...evidenceOfSwitch, requests: after.map(apiLine) });
+  assert.equal(same, true, 'the same document: nothing was reloaded, the module memory is the one A left');
+  assert.deepEqual(atLogin, { view: false, section: false }, 'signed out: the Invoices page and its dialog are gone');
+  assert.equal(aTokensInHeap, 0, 'once signed out, A\'s session CSRF token is held nowhere in the page\'s JavaScript heap (the draft hold store and the picker heard the sign-out)');
+  assert.deepEqual(atSwitch, { hold: false, check: false, view: false, store: false, rows: false, notice: false, shownOfA: 0 },
+    'B\'s Invoices page shows no store choice, row, dialog, held attempt or notice of A');
+  assert.deepEqual(afterShow, { options: ['', west.id], chosen: '', rows: false, hold: false, view: false, shownOfA: 0 },
+    'B\'s stores, none chosen; no row, held attempt or dialog of A');
+  assert.equal(bNew, true, 'B, a manager at W, is offered a draft of its own');
+  assert.deepEqual(sentBy(page, isDraftCreate, out), [], 'no draft POST during or after the switch');
+  assert.ok(evidenceOfSwitch.posts.length > 0 && evidenceOfSwitch.posts.every((p) => p.startsWith('/api/v1/session/logout ') || p.startsWith(`${LOGIN} `)),
+    `the switch's only POSTs: a logout and B's login (${evidenceOfSwitch.posts.join('; ')})`);
+  assert.equal(bLogins.length, 1, 'B signed in to the tenant server once');
+  const aLogouts = after.filter((r) => isLogout(r) && r.status === 204 && (r.headers.cookie ?? '').includes(aLogin.cookie));
+  assert.equal(aLogouts.length, 1, `one logout, carrying A's cookie, ended A's session: ${after.map(apiLine).join('; ')}`);
+  assert.ok(carries(aLogouts[0], aTokens), 'that logout names A\'s session by its CSRF token');
+  assert.deepEqual(after.filter((r) => r !== aLogouts[0] && carries(r, aTokens)).map(apiLine), [],
+    'no request after the sign-out but that logout carries A\'s session CSRF token');
+  assert.deepEqual(after.filter((r) => r !== aLogouts[0] && (r.headers.cookie ?? '').includes(aLogin.cookie)).map(apiLine), [], 'nor A\'s session cookie');
+  assert.deepEqual(evidenceOfSwitch.lists, ['B 200'], 'B\'s list of W: one read, under B\'s session');
+  assert.deepEqual(await draftCounts(tenant), dBefore, 'no draft, line, audit or event written by the switch');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no completion or idempotency record written by the switch');
+
+  // 3. B signs out; A signs in again in the same document: A's attempt is there, detached, and can never be sent.
+  const back = await signOutHere(page);
+  await signInHere(page, a);
+  const sameAgain = await page.evaluate(SAME_DOCUMENT);
+  await go(page, '/invoices');
+  await page.waitFor(`${q('drafts-hold')}?.dataset.state === 'detached'`, 30_000, 'A\'s attempt, shown detached');
+  const aBack = { hold: await holdState(page), check: await has(page, 'drafts-check-again'), text: await textOf(page, 'drafts-hold') };
+  await page.click(by('drafts-stop'));
+  await page.waitFor(`!${q('drafts-hold')}`, 15_000, 'stopped tracking');
+  await page.settle();
+  const stopFocus = await focusOf(page);
+  await quiet(page, back);
+  await delay(1_000); // whatever it would still send on its own, it has sent
+  record('SDB-05', { phase: 'A back', sameAgain, aBack, stopFocus, requests: sentBy(page, () => true, back).map(apiLine), posts: sentBy(page, isDraftCreate).map(apiLine) });
+  assert.equal(sameAgain, true, 'still the same document');
+  assert.equal(aBack.hold, 'detached', 'A\'s attempt is shown detached');
+  assert.equal(aBack.check, false, 'no Check again: it can never be sent');
+  assert.ok(aBack.text.startsWith(HOLD_DETACHED), `the card says so: ${aBack.text}`);
+  assert.equal(stopFocus, HEADING, 'Stop tracking hands focus to the section heading');
+  assert.deepEqual(sentBy(page, isDraftCreate).map((r) => `${r.status} ${r.lost ?? 'delivered'}`), ['201 response'], 'ONE draft POST in the whole case: the lost one');
+  assert.deepEqual((await storedDrafts(tenant)).map((d) => d.id).sort(), [dSeed, heldDraft.id].sort(), 'exactly the seeded draft and the one the lost reply committed');
+  await assertDraftsNowhere([page], [dSeed, heldDraft.id, first.headers['idempotency-key'], customer.id, first.body, heldLines[0].description]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-06', 'DA-199 FOCUS IN REAL CHROMIUM — outside the dialogs no press leaves focus on <body>: Show server drafts, the stores\' Try again, the list\'s Try again and the stores\' Reconnect put it on the section heading; Load more keeps it while more pages remain (aria-disabled during its parked read, a press then sending nothing), moves it to the first row the last page appended, and to the heading when its read is lost', async () => {
+  const { tenant, stores: [paged, short], boss } = await draftShop('d7', ['paged', 'short']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d7 Fern ${SUFFIX}`]);
+  const pagedIds = await seedDrafts(tenant, paged.id, customer.id, boss.id, 45, 'M7SDB d7 paged');
+  const shortIds = await seedDrafts(tenant, short.id, customer.id, boss.id, 25, 'M7SDB d7 short');
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the Server drafts section offers Show');
+  await page.settle();
+  const seen = {};
+
+  // 1. "Show server drafts", its stores read lost at the front: the heading. The stores' "Try again": the heading.
+  let lostStores = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isStoresRead(rec) && rec.frameId === page.frameId && lostStores++ === 0;
+    await page.click(by('drafts-show'));
+    await waitData(page, 'drafts-stores-state', 'phase', 'unavailable');
+  } finally {
+    st.lose = null;
+  }
+  await page.settle();
+  seen.show = await focusOf(page);
+  seen.storesRetryLabel = await textOf(page, 'drafts-retry');
+  await page.click(by('drafts-retry'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await page.settle();
+  seen.storesRetry = await focusOf(page);
+
+  // 2. The list's first read lost: the list's "Try again": the heading.
+  let lostList = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isDraftList(paged.id)(rec) && rec.frameId === page.frameId && lostList++ === 0;
+    await pickStore(page, paged.id);
+    await waitData(page, 'drafts-list-state', 'phase', 'unavailable');
+  } finally {
+    st.lose = null;
+  }
+  await page.click(by('drafts-list-retry'));
+  await waitDraftRows(page, pagedIds.slice(0, 20), 'page one of the paged store');
+  await page.settle();
+  seen.listRetry = await focusOf(page);
+
+  // 3. "Load more" with pages left, its answer parked: focus stays on it, aria-disabled (never disabled); a press then
+  //    sends nothing; the answer appends page two and Load more, still there, keeps focus.
+  const parked = gate((r) => r.frameId === page.frameId && isDraftList(paged.id)(r) && r.query.includes('cursor='), 'response');
+  const fromMore = st.api.length;
+  await page.click(by('drafts-load-more'));
+  const moreRead = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(moreRead, 'Load more\'s read reached the entry; its answer is parked');
+  await page.settle();
+  seen.duringRead = {
+    focus: await focusOf(page), ariaDisabled: await page.evaluate(`${q('drafts-load-more')}?.getAttribute('aria-disabled') ?? null`),
+    disabled: await page.evaluate(`${q('drafts-load-more')}?.disabled ?? null`),
+  };
+  await page.click(by('drafts-load-more')); // pressed again during the read
+  await page.settle();
+  seen.readsWhileParked = sentBy(page, isDraftList(paged.id), fromMore).length;
+  parked.release();
+  await waitDraftRows(page, pagedIds.slice(0, 40), 'page two appended');
+  await page.settle();
+  seen.morePages = { focus: await focusOf(page), loadMore: await has(page, 'drafts-load-more') };
+
+  // 4. "Load more" bringing the last page: Load more goes; focus on the first row it appended (its Open).
+  await page.click(by('drafts-load-more'));
+  await waitDraftRows(page, pagedIds, 'the last page appended');
+  await page.waitFor(`!${q('drafts-load-more')}`, 10_000, 'Load more gone after the last page');
+  await page.settle();
+  seen.lastPage = await focusOf(page);
+
+  // 5. The other store: "Load more" whose read is lost — Load more goes (the rows kept, last known): the heading.
+  await pickStore(page, short.id);
+  await waitDraftRows(page, shortIds.slice(0, 20), 'page one of the short store');
+  let lostMore = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isDraftList(short.id)(rec) && rec.query.includes('cursor=') && rec.frameId === page.frameId && lostMore++ === 0;
+    await page.click(by('drafts-load-more'));
+    await waitData(page, 'drafts-list-state', 'phase', 'unavailable');
+  } finally {
+    st.lose = null;
+  }
+  await page.settle();
+  seen.moreLost = { focus: await focusOf(page), loadMore: await has(page, 'drafts-load-more'), retry: await has(page, 'drafts-list-retry'), rows: (await draftRowsOf(page)).length };
+
+  // 6. The session ended in the store, found on a focus: "Reconnect" (one login): the heading.
+  await endSessions(boss);
+  await page.evaluate(`dispatchEvent(new Event('focus'))`);
+  await waitData(page, 'drafts-stores-state', 'phase', 'signed-out');
+  seen.reconnectLabel = await textOf(page, 'drafts-retry');
+  const fromReconnect = st.api.length;
+  await page.click(by('drafts-retry'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await page.settle();
+  seen.reconnect = await focusOf(page);
+  seen.reconnectLogins = sentBy(page, isLogin, fromReconnect).map(answered);
+  record('SDB-06', seen);
+
+  assert.equal(seen.show, HEADING, '"Show server drafts" (it goes): the heading');
+  assert.equal(seen.storesRetryLabel, 'Try again');
+  assert.equal(seen.storesRetry, HEADING, 'the stores\' "Try again" (it goes): the heading');
+  assert.equal(seen.listRetry, HEADING, 'the list\'s "Try again" (it goes): the heading');
+  assert.deepEqual(seen.duringRead, { focus: 'drafts-load-more', ariaDisabled: 'true', disabled: false }, 'during its read Load more keeps focus: aria-disabled, never disabled');
+  assert.equal(seen.readsWhileParked, 1, 'a press during the read sends nothing');
+  assert.deepEqual(seen.morePages, { focus: 'drafts-load-more', loadMore: true }, 'more pages left: focus stays on Load more');
+  assert.equal(seen.lastPage, `drafts-open-${pagedIds[40]}`, 'the last page: focus on the first row it appended');
+  assert.deepEqual(seen.moreLost, { focus: HEADING, loadMore: false, retry: true, rows: 20 }, 'a lost Load more read: the heading, the rows kept');
+  assert.equal(seen.reconnectLabel, 'Reconnect');
+  assert.equal(seen.reconnect, HEADING, '"Reconnect" (it goes): the heading');
+  assert.deepEqual(seen.reconnectLogins, ['200'], 'Reconnect: exactly one login');
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'nothing was saved');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-07', 'AC-04 BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER\'S AUTHORITY — the owner makes a custom role with Invoices Full in the shop\'s own Roles tab (page memory only); the harness seeds a technician-granted account\'s users/{uid}.role with its id, standing for a browser-only role the shop cannot persist; signed in in the same document, the page offers Create Invoice and New server draft on that local hint and lists the store\'s draft (View), and its own save is refused 403 forbidden and writes nothing', async () => {
+  const tenant = await newTenant('d7-custom');
+  const mainName = `M7SDB d7c main ${SUFFIX}`;
+  const main = { id: await newStore(tenant, mainName), name: mainName };
+  const [customer] = await seedCustomers(tenant, [`M7SDB d7c Robin ${SUFFIX}`]);
+  const boss = await actor('d7-custom-owner', [grant(tenant, 'store_owner'), storeGrant(tenant, main.id, 'store_owner')], { role: 'store_owner' });
+  const custom = `M7SDB Inv Full ${SUFFIX}`;
+  const customId = custom.toLowerCase().replace(/\s+/g, '_'); // Employees.tsx handleCreateRole's id for that name
+  // The shop can neither persist this role nor assign it (it only READS users/{uid}; firestore.rules allows the client no
+  // write there), so the harness seeds users/{uid}.role with the role's id, as it seeds every account's role, to stand
+  // for a browser-only role. How the page derives its hint for it: AccessContext reads users/{uid}.role at sign-in into
+  // session.role, so effectiveRole is that id (no POS operator role is set here); checkPermission (decideTenantPermission
+  // → tenantPermissionLevel, tenantAccessDecisions.ts) finds the role with that id in tenantRolesState — the in-memory list
+  // the owner's addTenantRole appended it to in THIS document — and reads its Invoices level, Full; so Invoices.tsx's
+  // canCreate is true and the section offers New. In a fresh document the id would match no role: level `none`, and
+  // canAccess refuses the page.
+  const tech = await actor('d7-custom-tech', [grant(tenant, 'technician'), storeGrant(tenant, main.id, 'technician')], { role: customId });
+  const [dSeed] = await seedDrafts(tenant, main.id, customer.id, boss.id, 1, 'M7SDB d7c seed');
+  const page = await recordWrites(await openPage());
+
+  // 1. The owner makes the custom role in the shop's Roles tab and gives it Invoices Full and Customers View in the grid.
+  await ownerPanel(boss, page);
+  const fsFrom = st.firestore.length;
+  const local = st.api.length;
+  await createCustomRole(page, custom);
+  await openPermissions(page);
+  await waitState(page, 'Ready');
+  const grid = { invoices: await setGridLevel(page, custom, 'Invoices', 'full'), customers: await setGridLevel(page, custom, 'Customers', 'view') };
+  await delay(1_000); // whatever the grid would send, it has sent
+  const sentByGrid = st.api.slice(local).filter((r) => r.method !== 'GET').map(apiLine);
+  const writesByGrid = st.firestore.slice(fsFrom).filter((f) => f.includes('/Write/'));
+
+  // 2. The owner signs out; the account whose seeded users/{uid}.role names that role signs in in the same document.
+  await page.evaluate('window.__sdbSameDocument = true');
+  const switched = await signOutHere(page);
+  await signInHere(page, tech);
+  const same = await page.evaluate(SAME_DOCUMENT);
+  await openDrafts(page);
+  const createInvoice = await page.evaluate(`[...document.querySelectorAll('button')].some((b) => !b.disabled && b.textContent.trim().endsWith('Create Invoice'))`);
+  const options = (await storeOptions(page)).map((o) => o.value);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [dSeed], 'the technician grant lists the store\'s draft (Invoices View)', customer.name);
+  const newOffered = await offered(page, 'drafts-new');
+  const techLogin = st.api.filter(acceptedLogin(tech)).at(-1);
+  assert.ok(techLogin, 'the page established the custom-role account\'s tenant session');
+
+  // 3. The page's own save: composed in New server draft and sent by its Save, with the page's own session headers.
+  const lines = [typed(`Custom role line ${SUFFIX}`, '1', '15', 1_500)];
+  await composeDraft(page, customer.id, lines);
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+  const roleBefore = await tenantState(tenant);
+  const from = st.api.length;
+  await page.click(by('draft-new-save'));
+  await page.waitFor(`${q('draft-new-status')}?.textContent.trim() === ${JSON.stringify(DRAFT_DENIED)}`, 30_000, 'the refusal, said in the dialog');
+  await quiet(page, from);
+  await delay(1_000); // whatever it would still send on its own, it has sent
+  const posts = sentBy(page, isDraftCreate, from);
+  const logins = sentBy(page, isLogin, from);
+  const dDelta = minus(await draftCounts(tenant), dBefore);
+  const roleAfter = await tenantState(tenant);
+  record('SDB-07', { same, grid, sentByGrid, writesByGrid, createInvoice, options, newOffered, posts: posts.map(apiLine), logins: logins.map(apiLine), ...dDelta, roleAfter });
+  assert.deepEqual(grid, { invoices: 'full', customers: 'view' }, 'the custom role\'s levels in the local grid');
+  assert.deepEqual(sentByGrid, [], 'the role and its levels are local: no write (non-GET) request reaches the tenant server');
+  assert.deepEqual(writesByGrid, [], 'nor written to Firestore');
+  assert.equal(same, true, 'the same document: the custom role made here is still this page\'s');
+  assert.equal(createInvoice, true, 'what the page shows: the local role decides Invoices Create, so the invoice form\'s Create Invoice is offered');
+  assert.deepEqual(options, ['', main.id], 'the server\'s stores for the technician grant');
+  assert.equal(newOffered, true, 'what the page shows: New server draft, offered on the local role\'s hint (ServerInvoiceDrafts.tsx: `canCreate` is a hint only)');
+  assert.deepEqual(posts.map(answered), ['403 forbidden'], `ONE POST, refused by the server: ${posts.map(apiLine).join('; ')}`);
+  const [post] = posts;
+  assert.equal(post.path, draftsPath(main.id), 'to the chosen store');
+  assert.equal(post.body, bodyFor(tenant, customer.id, lines), 'the page\'s own body');
+  assert.match(post.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.equal(post.headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the page\'s request-intent header');
+  assert.ok(answeredTokens(sentBy(page, (r) => r !== post, switched)).includes(post.headers[SESSION_CSRF]), 'with the session CSRF token the entry answered this account');
+  assert.ok((post.headers.cookie ?? '').includes(techLogin.cookie), 'and its own session cookie');
+  assert.deepEqual(logins, [], 'no login around the save');
+  assert.deepEqual(dDelta, { D: 0, L: 0, A: 0, O: 0 }, 'no draft, line, audit or outbox event');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'refused before anything is recorded: no idempotency completion or lease, no audit of any kind');
+  assert.deepEqual((await storedDrafts(tenant)).map((d) => d.id), [dSeed], 'the store holds only its seeded draft');
+  assert.deepEqual(roleAfter, roleBefore, 'no role-level row, version or edit audit changed');
+  assert.deepEqual(roleAfter.levels, {}, 'no role level is stored for the tenant: the custom role\'s Full reached no server');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-08', 'AC-15 A READ OUT WHEN ANOTHER USER SIGNS IN (DA-198) — user A has store W chosen and W\'s list answer parked at the front; B signs in in another tab of the same browser, so this tab switches A to B directly and keeps A\'s page mounted while B\'s profile loads (held); A\'s answer, released then, shows nothing and starts nothing: no customer-name read, and no request from this tab after the switch began but its logout of A\'s session carries A\'s session CSRF token', async () => {
+  const tenant = await newTenant('d8');
+  const westName = `M7SDB d8 west ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const [customer] = await seedCustomers(tenant, [`M7SDB d8 Rowan ${SUFFIX}`]);
+  const a = await actor('d8-a', [grant(tenant, 'store_owner'), storeGrant(tenant, west.id, 'store_owner')], { role: 'store_owner' });
+  const b = await actor('d8-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const [dSeed] = await seedDrafts(tenant, west.id, customer.id, a.id, 1, 'M7SDB d8 seed');
+  const page = await recordWrites(await openPage());
+  await signIn(page, a);
+  await openDrafts(page);
+  // 1. W's list read reaches the entry and is answered (A's row); the answer is parked at the front.
+  const parked = gate((r) => r.frameId === page.frameId && isDraftList(west.id)(r), 'response');
+  await pickStore(page, west.id);
+  const listRead = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(listRead, 'W\'s list read reached the entry; its answer is parked');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  assert.ok(aTokens.length > 0, 'A\'s session CSRF token was seen');
+  // 2. B signs in in a second tab of this browser (SRL-09's switch): this tab's Firebase SDK follows the shared sign-in,
+  // and AccessContext starts A's logout and then awaits B's users/{uid} profile — held here, so A's page stays mounted.
+  const from = st.api.length;
+  const profile = profileGate(page, b.uid);
+  const tab = await sameContextTab(page);
+  await signIn(tab, b);
+  const reached = await Promise.race([profile.reached.then(() => true), delay(30_000).then(() => false)]);
+  assert.ok(reached, 'this tab reads B\'s profile: the switch has begun (A\'s logout was started first)');
+  await page.waitFor(() => sentBy(page, isLogout, from).length > 0, 15_000, 'A\'s logout left this tab');
+  // 3. A's answer, released while A's page is still mounted (B's profile still held).
+  parked.release();
+  await page.waitFor(() => listRead.handedBack === true, 15_000, 'the parked answer was handed back to the browser');
+  await page.settle();
+  await delay(1_500); // whatever reaching the page would make it do, it has done
+  const whileMounted = {
+    section: await has(page, 'drafts-section'), stores: await page.evaluate(`${q('drafts-stores-state')}?.dataset.phase ?? null`),
+    rows: await has(page, 'drafts-row'),
+    shownOfA: await page.evaluate(`${JSON.stringify([dSeed, customer.name])}.filter((v) => document.documentElement.outerHTML.includes(v)).length`),
+  };
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from);
+  await delay(2_000); // whatever it would still send on its own, it has sent
+  const after = sentBy(page, () => true, from);
+  const seen = {
+    whileMounted,
+    nameReads: after.filter(isDetail).map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+    shownOfA: await page.evaluate(`${JSON.stringify([dSeed, customer.id, customer.name])}.filter((v) => document.documentElement.outerHTML.includes(v)).length`),
+  };
+  record('SDB-08', { parked: answered(listRead), ...seen, requests: after.map(apiLine) });
+  assert.equal(listRead.status, 200);
+  assert.ok(listRead.replied.text.includes(dSeed), 'the parked answer was a real one, naming A\'s draft');
+  assert.deepEqual(seen, { whileMounted: { section: true, stores: 'signed-out', rows: false, shownOfA: 0 }, nameReads: [], carriersOfA: [], shownOfA: 0 },
+    'released while A\'s section was still mounted (B\'s profile held), A\'s answer showed nothing and started nothing; the section had ended at the sign-out');
+  const aLogouts = after.filter((r) => isLogout(r) && carries(r, aTokens));
+  assert.equal(aLogouts.length, 1, `this tab sent one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
+  await assertNoLeak(page);
+}, 180_000);

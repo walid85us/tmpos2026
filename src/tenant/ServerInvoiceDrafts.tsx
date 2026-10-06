@@ -33,31 +33,53 @@
 //     hold's OWN store, only under the token it was sent with, only while max(monotonic, wall) elapsed is under 23 hours
 //     (the server keeps a key for 24). Nothing re-sends on a timer, a focus, a tab return, a refresh, a navigation, a
 //     read-back, a Reconnect or any session renewal. A 503 or no answer to a check stays unresolved.
-//   - Only a user change or a session-token change DETACHES a hold (its body is cleared; it can never be sent again, and
-//     the card says to check the store's drafts). Choosing another store never detaches or re-targets it; closing the
-//     dialog (Cancel, Escape) only hides it. A user change, once ServerInvoiceDrafts renders the new UID, also takes the
-//     token from another user's SETTLED attempt (created, refused). A sign-out unmounts the page (the route guard), so
-//     nothing is scrubbed then: the signed-out user's token (and an unconfirmed attempt's key and body) stays in this
-//     page's memory until another user's Invoices page renders, the attempt is detached, read back or removed, or the
-//     page reloads (the server logout is best effort: a failed one leaves that session to its idle timeout). A created
-//     attempt is never read back under a later session: it says it was saved under an earlier connection.
+//   - Only a user change, a session-token change or a sign-out DETACHES a hold (its token and body are cleared, its
+//     key stays only to name it; it can never be sent again, and once no request of it is out the card says to check
+//     the store's drafts). Choosing another store never detaches or re-targets it; closing the dialog (Cancel, Escape)
+//     only hides it. A user change, once ServerInvoiceDrafts renders the new UID, also takes the token from another
+//     user's SETTLED attempt (created, refused). A SIGN-OUT takes it from EVERY user's attempt, settled ones included,
+//     at once: the hold store listens to the session client's `onSessionEnd` (bindDraftHoldsToSessionEnd), which runs
+//     at the start of every logout — AccessContext.tsx starts one, without awaiting it, on every signed-out state and
+//     before another user's session is used — whether or not this page is still mounted. A MOUNTED section hears it
+//     too: the route guard unmounts the page only with the render after a sign-out (a DEV-only session excepted), and
+//     on a direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has loaded; so
+//     the section ends its generation at once — the token leaves its refs, its reads out are cancelled (a created
+//     draft's read-back is only ignored) and their late answers change nothing (no row, no name read), the reopen's
+//     read goes, a rate limit's wait ends, the new-draft dialog closes, and it says the session ended; nothing is read
+//     and nobody is signed in because of it. A save or a Check again whose session was confirmed just before a sign-out
+//     began sends nothing: each counts the session ends before it asks (`sessionEndsSoFar`) and compares after the
+//     answer; and the sign-out forgets the picker's pair, so a customer chosen before it matches no session any more.
+//     What is scrubbed here does not wait for the server: the logout itself is best effort (a failed one leaves that
+//     server session to its idle timeout). A created attempt is never read back under a later session: it says it was
+//     saved under an earlier connection. A refused one still shows its own text, until Dismiss or Stop tracking.
 //   - After CREATED, the draft is read back with a GET (never another POST), only under the hold's own session: "Saved"
 //     when it loads, "Saved, but it could not be loaded back" when it does not.
 //   - The session token sits only in refs, the hold store, an open new-draft dialog's state and the picker's
-//     `sessionContextOf` pair (tenantSessionClient.ts lists the holders): never browser storage, a URL, the DOM or a log.
-//     No key or body reaches any of those either, and draft content only the DOM (the dialogs show what is typed and
-//     read back), never storage, the page's URL or a log; ids leave the page only in API requests (paths, a draft id
-//     inside the list cursor, the customer id in the save's body).
+//     `sessionContextOf` pair (tenantSessionClient.ts lists the holders, and what a sign-out takes from each): never
+//     browser storage, a URL, the DOM or a log. No key or body reaches any of those either, and draft content only the
+//     DOM (the dialogs show what is typed and read back), never storage, the page's URL or a log; ids leave the page
+//     only in API requests (paths, a draft id inside the list cursor, the customer id in the save's body).
 //   - Dialogs (the reopen and the new draft) follow the picker's pattern: a portal, role=dialog and aria-modal, the page
 //     behind made inert, Escape closing only the top dialog, Tab wrapping inside it (buttons, inputs, selects, textareas),
 //     focus lost to a control the user's press removed or disabled taken back inside without scrolling (never from the
-//     picker over it; a line's Remove hands it to the neighbouring line itself), focus returned on close. Outside the
-//     dialogs, a press on the attempt's card hands focus to the section heading first. One of the two at a time: the new draft never opens beside the reopen dialog. z-[180]: above the invoice dialogs (z-50) and below the picker it opens (z-[190]) and the
-//     shop's z-[200] layers.
+//     picker over it; a line's Remove hands it to the neighbouring line itself), focus returned on close. One of the two
+//     at a time: the new draft never opens beside the reopen dialog. z-[180]: above the invoice dialogs (z-50) and below
+//     the picker it opens (z-[190]) and the shop's z-[200] layers.
+//   - Outside the dialogs focus never falls to <body> either (DA-199). The section tracks the control that last took
+//     focus in it (`trackFocus`); a render that removes or disables it while focus is still on it (or fell from it to
+//     <body>) hands focus to the section heading. So a press that takes its own control away — "Show server drafts", the
+//     stores' Try again or Reconnect, the list's Try again — lands on the heading, as does any other such render: a new
+//     generation, a session end, a rate limit's wait (New, Check again), a page one that drops rows, the local role hint
+//     (`canCreate`) taking New away. The attempt card's Check again, Stop tracking and Dismiss hand focus to the heading
+//     themselves, first. "Load more" is aria-disabled, never disabled, during its read, so it keeps focus while more
+//     pages remain; when its answer takes it away, focus goes to the first row that answer added (the last page), else to
+//     the heading (a failure, a reload from page one, a session end). Focus on another control or in a dialog is never
+//     taken, nor is focus the user left on <body> by a press elsewhere (a press outside the tracked control ends the
+//     tracking).
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
+import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { customers as customersClient, type CustomersClient } from './customersClient';
 import {
   invoiceDrafts as draftsClient, draftBody, formatCents, lineAmounts, MAX_CENTS, MAX_DRAFT_LINES,
@@ -65,7 +87,7 @@ import {
 } from './invoiceDraftsClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS, createdText } from './ServerCustomerDirectory';
-import { ServerCustomerField, idEndingText, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
+import { ServerCustomerField, idEndingText, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
 import { serverCustomerReference, type ServerCustomerReference } from './customerReference';
 
 const DEFAULT_WAIT_SECONDS = 60;
@@ -145,10 +167,12 @@ export const storeLabel = (store: Pick<StoreEntry, 'id' | 'name'>): string =>
 /** A customer whose name could not be read. */
 export const customerFallbackText = (id: string): string => `Customer, ${idEndingText(id)}`;
 export const lineCountText = (n: number): string => `${n} line${n === 1 ? '' : 's'}`;
+/** The DOM id of a listed draft's Open button. */
+const openIdOf = (id: string): string => `drafts-open-${id}`;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The hold store: at most one attempt per user, in memory only (never browser storage); it outlives the section across
-// in-app navigation, and ends with the page load.
+// in-app navigation, every sign-out detaches every attempt in it, and it ends with the page load.
 
 export interface HeldDraft {
   readonly key: string;
@@ -239,8 +263,20 @@ export function createDraftHoldStore(): DraftHoldStore {
   });
 }
 
-/** The shop's one draft hold store. */
+/**
+ * Tie a hold store to the sign-out: at the start of every logout (tenantSessionClient.ts `onSessionEnd`, heard whether or
+ * not a section is mounted) every user's attempt loses its session token, exactly as `detachOthers` detaches another
+ * user's — an unconfirmed one its body too, so it can never be sent again (its key stays only to name it). Returns the
+ * unbinding.
+ */
+export function bindDraftHoldsToSessionEnd(holds: DraftHoldStore): () => void {
+  return onSessionEnd(() => holds.detachOthers(null));
+}
+
+/** The shop's one draft hold store, scrubbed at every sign-out. */
 const draftHolds: DraftHoldStore = createDraftHoldStore();
+const unbindDraftHolds = bindDraftHoldsToSessionEnd(draftHolds);
+import.meta.hot?.dispose(unbindDraftHolds); // a hot reload replaces this module: its listener goes with its store
 
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
 
@@ -532,6 +568,13 @@ function DraftsSection({
   const readBack = useRef<string | null>(null); // the created key whose read-back is running
   const newButton = useRef<HTMLButtonElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
+  const loadMore = useRef<HTMLButtonElement | null>(null);
+  const section = useRef<HTMLElement | null>(null);
+  // The control in this section (outside the dialogs) that last took focus, and where focus goes if a later render removes
+  // or disables it while it still has focus (DA-199): the heading, unless a change named another place (Load more's first
+  // new row). Kept until that happens, another control in the section takes focus or a press lands outside it — not
+  // consumed by an unrelated commit.
+  const keepFocus = useRef<{ readonly from: Element; readonly to: () => HTMLElement | null } | null>(null);
   // The props as they are NOW, for continuations: a list, reopen or read-back answer that lands after a re-render reads
   // Customers View here, never from the render its read began in (resolveNames).
   const events = useRef({ onHandoffTaken, canViewCustomers });
@@ -542,6 +585,10 @@ function DraftsSection({
   const nextKey = (): string => (newKey ?? (() => crypto.randomUUID()))();
   const connect = (mode?: 'fresh' | 'reconnect'): Promise<SessionResult> =>
     session.ensure(uid, () => identity.idToken(uid), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
+  /** Track the section control that has focus now; `to` names where focus goes if a render takes it away (default: the heading). */
+  const trackFocus = (target: EventTarget | null, to: () => HTMLElement | null = () => heading.current): void => {
+    if (target instanceof Element && section.current?.contains(target) === true) keepFocus.current = { from: target, to };
+  };
   const putStores = (next: StoresState): void => { storesRef.current = next; setStoresState(next); };
   const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
   const putReopen = (next: ReopenState | null): void => { reopenRef.current = next; setReopenState(next); };
@@ -634,9 +681,10 @@ function DraftsSection({
 
   /** After a read refused 403: ONE fresh check tells "another session" (a new generation) from a refusal that stands. */
   async function recheck(): Promise<Failure | null> {
+    const since = sessionEndsSoFar();
     const s = await connect('fresh');
     if (s.kind !== 'ok') return sessionFailure(s);
-    if (alive.current) adopt(s.csrf);
+    if (alive.current && since === sessionEndsSoFar()) adopt(s.csrf); // never a token from before a sign-out
     return null;
   }
 
@@ -742,6 +790,9 @@ function DraftsSection({
         const was = listRef.current;
         const shown = new Set(mode === 'more' ? was.rows.map((row) => row.id) : []);
         const fresh = answer.drafts.filter((row) => !shown.has(row.id) && shown.add(row.id) !== undefined);
+        // The last page takes Load more away: focus still on it goes to the first row this page brought (else the heading).
+        const first = mode === 'more' && answer.nextCursor === null ? fresh[0] : undefined;
+        if (first !== undefined && document.activeElement === loadMore.current) trackFocus(loadMore.current, () => document.getElementById(openIdOf(first.id)));
         putList({ gen: mine, storeId: target, phase: 'ready', text: '', rows: mode === 'more' ? [...was.rows, ...fresh] : fresh, next: answer.nextCursor, note: mode === 'more' ? '' : was.note });
         return resolveNames(answer.drafts.map((row) => row.customerId), s.csrf);
       }
@@ -852,8 +903,11 @@ function DraftsSection({
     if (isLiveHold(holds.get(uid))) return { kind: 'not-sent', text: NOT_SENT_TEXT.pending };
     sendingRef.current = true;
     try {
+      const since = sessionEndsSoFar();
       const s = await connect();
       if (!alive.current) return { kind: 'blocked' };
+      // A sign-out began while the session was confirmed: that answer is from before it, so nothing is sent or taken.
+      if (since !== sessionEndsSoFar()) return { kind: 'not-sent', text: `Not sent. ${DRAFTS_TEXT.ended}` };
       if (s.kind !== 'ok') {
         const failure = sessionFailure(s);
         if (failure.kind === 'signed-out') failSession(failure);
@@ -863,7 +917,7 @@ function DraftsSection({
         adopt(s.csrf);
         return { kind: 'not-sent', text: NOT_SENT_TEXT.connection };
       }
-      if (sessionContextOf(uid, s.csrf) !== p.customer.context) return { kind: 'not-sent', text: NOT_SENT_TEXT.customer };
+      if (!isContextOf(p.customer.context, uid, s.csrf)) return { kind: 'not-sent', text: NOT_SENT_TEXT.customer };
       const key = nextKey();
       const attempt: HeldDraft = {
         key, body: p.body, storeId: p.store.id, tenantId: p.store.tenantId, customerId: p.customer.id, storeLabel: storeLabel(p.store),
@@ -889,8 +943,11 @@ function DraftsSection({
     checkingRef.current = true;
     holds.change(uid, key, { state: 'checking', note: '' });
     try {
+      const since = sessionEndsSoFar();
       const s = await connect();
       if (holds.get(uid)?.key !== key) return;
+      // A sign-out began while the session was confirmed: nothing is sent and no token is taken from that answer.
+      if (since !== sessionEndsSoFar()) return void holds.change(uid, key, { state: 'unresolved', note: `Not checked. ${DRAFTS_TEXT.ended}` });
       if (s.kind !== 'ok') {
         const failure = sessionFailure(s);
         holds.change(uid, key, { state: 'unresolved', note: `Not checked. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}` });
@@ -970,11 +1027,52 @@ function DraftsSection({
     alive.current = true;
     return () => { alive.current = false; };
   }, []);
+  /**
+   * After every commit, before paint (DA-199): once the tracked control is gone or disabled (a browser then moves focus
+   * to <body>) — by the press on it (Show server drafts, Try again, Reconnect), a read's answer, a new generation, a
+   * session end, a rate limit's wait, a page one that drops rows, or the role hint taking New away — focus still on it or
+   * on <body> goes to the place named for it. Focus on another control or in a dialog is never taken, nor is anything
+   * while a dialog holds the page inert (the dialog recovers its own focus), nor after a press elsewhere ended the
+   * tracking (below).
+   */
+  useLayoutEffect(() => {
+    const keep = keepFocus.current;
+    if (keep === null || (keep.from.isConnected && (keep.from as HTMLButtonElement).disabled !== true)) return;
+    keepFocus.current = null;
+    const at = document.activeElement;
+    if ((at === null || at === document.body || at === keep.from) && section.current?.closest('[inert]') === null) (keep.to() ?? heading.current)?.focus();
+  });
+  // A press anywhere but on the tracked control is the user moving on — a press on plain text leaves focus on <body> with
+  // no focus event — so the tracking ends there, and a later render that removes that control takes no focus from where
+  // the user left it. A press, not blur or focusout: a browser may fire those when the focused control is REMOVED, the
+  // very loss the recovery above is for. Captured, so it runs before the press moves any focus.
+  useEffect(() => {
+    const moved = (e: Event): void => {
+      const keep = keepFocus.current;
+      if (keep !== null && !(e.target instanceof Node && keep.from.contains(e.target))) keepFocus.current = null;
+    };
+    document.addEventListener('pointerdown', moved, true);
+    return () => document.removeEventListener('pointerdown', moved, true);
+  }, []);
   useEffect(() => {
     const check = (): void => checkSession();
     window.addEventListener('focus', check);
     document.addEventListener('visibilitychange', check);
+    // A sign-out, heard where it starts (the session client's `onSessionEnd`), while this section is mounted — on a
+    // direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has loaded. Everything
+    // in flight is stale from here: a new generation with no token (a created draft's read-back answer is then ignored),
+    // every read cancelled (the name queue with it), the reopen's read dropped and the new-draft dialog closed (its token
+    // goes with it), and a rate limit's wait ends with the session that was asked to wait (as `begin` drops another
+    // session's); the section says the session ended. Nothing is read and nobody is signed in because of it — only the
+    // user's Reconnect reads again.
+    const unhear = onSessionEnd(() => {
+      gen.current = { n: gen.current.n + 1, csrf: null };
+      clearWait();
+      setNewDraft(null);
+      failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    });
     return () => {
+      unhear();
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
       gen.current = { n: gen.current.n + 1, csrf: null };
@@ -995,10 +1093,11 @@ function DraftsSection({
   const newBlocked = live || waiting;
 
   return (
-    <section data-testid="drafts-section" aria-labelledby="drafts-title" className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm p-8 space-y-4">
+    <section ref={section} onFocus={(e) => trackFocus(e.target)} data-testid="drafts-section" aria-labelledby="drafts-title" className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm p-8 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          {/* A programmatic focus target (the card's presses, a dialog's return): it shows the ring to a keyboard user. */}
+          {/* A programmatic focus target (a press that takes its own control away, a dialog's return, a view change that
+              removes or disables the focused control): it shows the ring to a keyboard user. */}
           <h3 ref={heading} id="drafts-title" tabIndex={-1} className={`text-xl font-black text-primary tracking-tight ${focusRing}`}>Server drafts</h3>
           <p className="text-sm font-medium text-slate-600">{DRAFTS_TEXT.intro}</p>
         </div>
@@ -1096,6 +1195,7 @@ function DraftsSection({
                       </div>
                       <button
                         type="button"
+                        id={openIdOf(row.id)}
                         data-testid="drafts-open"
                         aria-label={`Open the draft created ${createdText(row.createdAt)}`}
                         aria-describedby={`drafts-row-${row.id}`}
@@ -1109,7 +1209,18 @@ function DraftsSection({
                 </ul>
               )}
               {list.phase === 'ready' && list.next !== null && (
-                <button type="button" data-testid="drafts-load-more" disabled={busy || waiting} onClick={() => { void readDrafts('more'); }} className={quiet}>Load more</button>
+                // aria-disabled, never disabled: a browser moves focus off a disabled control, and Load more keeps it
+                // through its own read (a press meanwhile does nothing).
+                <button
+                  ref={loadMore}
+                  type="button"
+                  data-testid="drafts-load-more"
+                  aria-disabled={busy || waiting}
+                  onClick={() => { if (!busyRef.current && !waitRef.current) void readDrafts('more'); }}
+                  className={`${quiet} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
+                >
+                  Load more
+                </button>
               )}
             </div>
           )}
@@ -1289,9 +1400,10 @@ function NewDraftDialog({
   useEffect(() => {
     const given = state.handoff;
     if (given === null) return;
+    const since = sessionEndsSoFar();
     void session.ensure(uid, () => identity.idToken(uid)).then((s) => {
       if (!alive.current) return;
-      if (s.kind === 'ok' && s.csrf === state.csrf) setCustomer(serverCustomerReference(given, uid, sessionContextOf(uid, s.csrf)));
+      if (s.kind === 'ok' && s.csrf === state.csrf) setCustomer(serverCustomerReference(given, uid, sessionContextOf(uid, s.csrf, since)));
       else setStatus({ alert: true, text: NOT_SENT_TEXT.customer });
     });
     // Once per dialog: the hand-over is fixed for its life.

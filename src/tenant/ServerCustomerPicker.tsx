@@ -21,13 +21,18 @@
 //     and the applied query — an ended session the search draft too — and says so to the draft (`onLost`), which drops a
 //     chosen customer: a reference never outlives the session it was chosen under. An outage, a malformed answer or a
 //     rate limit keeps the rows under the last-known label; a failure never says "no customers" or "no match".
-//   - The session token is held in a ref only to compare it with the next one, and `sessionContextOf` keeps the latest
-//     (UID, token) pair in module scope only to hand out one context per session — never React state, storage, a URL,
-//     the DOM or a log (tenantSessionClient.ts lists the holders).
+//   - A sign-out is heard where it starts (the session client's `onSessionEnd`, at the start of every logout), while
+//     the dialog is open: its generation ends there — the read out is cancelled and its answer is stale, the token and
+//     a rate limit's wait go, and the dialog shows the ended session as above (the draft is told). A token confirmed by
+//     an answer asked for before a sign-out began (`sessionEndsSoFar`) is taken nowhere and no context is made for it;
+//     nothing is read and nobody is signed in because of the sign-out (only Reconnect reads again).
+//   - The session token is held in a ref only to compare it with the next one (until the dialog closes or a sign-out
+//     begins), and `sessionContextOf` keeps the latest (UID, token) pair in module scope only to hand out one context per
+//     session — never React state, storage, a URL, the DOM or a log (tenantSessionClient.ts lists the holders).
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
+import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { customers as customersClient, normalizeCustomerSearch, type CustomerEntry, type CustomersClient } from './customersClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { EMPTY_TEXT, LAST_KNOWN_TEXT, SEARCH_RULE_TEXT, searchMatchingText, searchNoneText } from './ServerCustomerDirectory';
@@ -63,21 +68,36 @@ export const idEndingText = (id: string): string => `ID ending ${id.slice(-8)}`;
 const DEFAULT_WAIT_SECONDS = 60;
 
 // The latest (UID, token) pair and the one context handed out for it: the only place a token sits beside a context.
-// Forgotten when the LAST mounted draft field unmounts (ServerCustomerField), so a pair outlives no sign-out in module
-// scope. M7B-INVOICES-P1: two fields can be mounted at once — the invoice form's, still closing, and the server draft
-// dialog's it handed its customer to — and the closing one must not orphan the context the other holds.
+// Forgotten when the LAST mounted draft field unmounts (ServerCustomerField). M7B-INVOICES-P1: two fields can be mounted
+// at once — the invoice form's, still closing, and the server draft dialog's it handed its customer to — and the closing
+// one must not orphan the context the other holds. Also forgotten at the start of every sign-out (the session client's
+// `onSessionEnd`, heard whether or not a field is still mounted), and never made again from a session confirmed before
+// it: a context is MINTED only by `sessionContextOf` for a session confirmed since the last sign-out, and every
+// comparison (`isContextOf`) creates nothing. A context handed out before a sign-out matches no later session's.
 let latest: { readonly uid: string; readonly csrf: string; readonly context: SessionContext } | null = null;
 let mountedFields = 0;
+const forgetOnEnd = onSessionEnd(() => { latest = null; });
+import.meta.hot?.dispose(forgetOnEnd); // a hot reload replaces this module: its listener goes with it
 
 /**
- * The opaque context of the session whose token is `csrf`, for `uid`: the SAME frozen object as the last call for the
- * same pair, a new one otherwise. Only the latest pair is kept, so a context outlives its session only as an object
- * nothing will ever be handed again — a reference chosen under it compares unequal to every later session's.
+ * The opaque context of the session whose token is `csrf`, for `uid`, confirmed by an answer asked for when
+ * `sessionEndsSoFar()` was `since`: the SAME frozen object as the last call for the same pair, a new one otherwise. Only
+ * the latest pair is kept, so a context outlives its session only as an object nothing will ever be handed again — a
+ * reference chosen under it compares unequal to every later session's. A session confirmed before a sign-out that has
+ * begun since gets a new object that is kept nowhere: it matches nothing, and no token is kept for it.
  */
-export function sessionContextOf(uid: string, csrf: string): SessionContext {
+export function sessionContextOf(uid: string, csrf: string, since: number): SessionContext {
+  if (since !== sessionEndsSoFar()) return Object.freeze({}) as SessionContext;
   if (latest === null || latest.uid !== uid || latest.csrf !== csrf) latest = { uid, csrf, context: Object.freeze({}) as SessionContext };
   return latest.context;
 }
+
+/** Whether `context` is the one kept for `uid`'s session whose token is `csrf`. A comparison: it creates and keeps nothing. */
+export const isContextOf = (context: SessionContext, uid: string, csrf: string): boolean =>
+  latest !== null && latest.context === context && latest.uid === uid && latest.csrf === csrf;
+
+/** Whether a (UID, token) pair is kept at all — a read that changes nothing (what a sign-out must leave false). */
+export const hasSessionPair = (): boolean => latest !== null;
 
 type Phase = 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
 interface ListState {
@@ -151,7 +171,8 @@ function PickerDialog({
   const [refused, setRefused] = useState(false); // the draft last applied is one the server would refuse
   const [changed, setChanged] = useState(false);
 
-  const gen = useRef<{ n: number; csrf: string | null }>({ n: 0, csrf: null }); // the token never leaves refs
+  // The token never leaves refs; `since`: the session ends counted before the answer that confirmed it was asked for.
+  const gen = useRef<{ n: number; csrf: string | null; since: number }>({ n: 0, csrf: null, since: 0 });
   const alive = useRef(false);
   const listRef = useRef<ListState>(list);
   const seq = useRef(0); // the start order of reads
@@ -196,28 +217,32 @@ function PickerDialog({
   }
 
   /** A new generation: whatever this one read is gone, the draft is told, and page one is read under the new token. */
-  function begin(csrf: string): void {
-    gen.current = { n: gen.current.n + 1, csrf };
+  function begin(csrf: string, since: number): void {
+    gen.current = { n: gen.current.n + 1, csrf, since };
     ctl.current?.abort();
     clearWait(); // the wait was the other session's; this one's page one is read now (the directory's begin does the same)
     setDraft(''); // typed for the other connection (possibly another store)
     setRefused(false);
     setChanged(true);
     put(initial(gen.current.n));
-    events.current.onContext(sessionContextOf(uid, csrf));
+    events.current.onContext(sessionContextOf(uid, csrf, since));
     events.current.onLost('changed');
     void read('first');
   }
 
-  /** Take a confirmed token: the first fixes the generation, the same changes nothing, another starts a new one (true). */
-  function adopt(csrf: string): boolean {
+  /**
+   * Take a token confirmed by an answer asked for at `since` (sessionEndsSoFar): the first fixes the generation, the
+   * same changes nothing, another starts a new one (true). One from before a sign-out is taken nowhere (true: stop).
+   */
+  function adopt(csrf: string, since: number): boolean {
+    if (since !== sessionEndsSoFar()) return true;
     if (gen.current.csrf === csrf) return false;
     if (gen.current.csrf === null) {
-      gen.current.csrf = csrf;
-      events.current.onContext(sessionContextOf(uid, csrf));
+      gen.current = { n: gen.current.n, csrf, since };
+      events.current.onContext(sessionContextOf(uid, csrf, since));
       return false;
     }
-    begin(csrf);
+    begin(csrf, since);
     return true;
   }
 
@@ -232,7 +257,7 @@ function PickerDialog({
         setChanged(false);
         // Nothing is fixed after a confirmed end (`n` stays, so its late answers stay stale): the Reconnect's token is a
         // FIRST token (onContext only), not a "connection changed" generation after the user's own click.
-        gen.current = { n: gen.current.n, csrf: null };
+        gen.current = { ...gen.current, csrf: null };
       }
       events.current.onLost(failure.kind === 'signed-out' ? 'ended' : 'denied');
       return;
@@ -246,9 +271,10 @@ function PickerDialog({
    * a failed check is returned, and the same token leaves the refusal standing (null).
    */
   async function recheck(): Promise<Failure | null> {
+    const since = sessionEndsSoFar();
     const s = await connect('fresh');
     if (s.kind !== 'ok') return sessionFailure(s);
-    if (alive.current) adopt(s.csrf);
+    if (alive.current) adopt(s.csrf, since);
     return null;
   }
 
@@ -269,10 +295,11 @@ function PickerDialog({
     setBusy(true);
     if (mode === 'first') put({ ...listRef.current, phase: 'loading', text: PICKER_TEXT.loading, note });
     try {
+      const since = sessionEndsSoFar();
       const s = await connect(reconnect ? 'reconnect' : undefined);
       if (stale()) return;
       if (s.kind !== 'ok') return fail(sessionFailure(s));
-      if (adopt(s.csrf)) return; // a new generation has started its own read
+      if (adopt(s.csrf, since)) return; // a new generation has started its own read
       const answer = await customers.list(cursor, s.csrf, controller.signal, query);
       if (stale()) return;
       if (answer.kind === 'ok') {
@@ -318,11 +345,12 @@ function PickerDialog({
     if (listRef.current.phase === 'signed-out') return;
     const mine = gen.current.n;
     const n = seq.current;
+    const since = sessionEndsSoFar();
     setBusy(true);
     void connect().then((s) => {
       if (!alive.current || mine !== gen.current.n || n !== seq.current) return;
       setBusy(false);
-      if (s.kind === 'ok' ? adopt(s.csrf) : s.kind === 'ended' || s.kind === 'refused' || s.kind === 'no-identity') {
+      if (s.kind === 'ok' ? adopt(s.csrf, since) : s.kind === 'ended' || s.kind === 'refused' || s.kind === 'no-identity') {
         if (s.kind !== 'ok') fail(sessionFailure(s));
         checkLater.current = false; // the new generation's read, or the cleared dialog, answers for that later return
         return;
@@ -356,7 +384,7 @@ function PickerDialog({
     const shown = listRef.current;
     const csrf = gen.current.csrf;
     if (!alive.current || csrf === null || shown.gen !== gen.current.n || !shown.rows.includes(row)) return;
-    const ref = serverCustomerReference(row, uid, sessionContextOf(uid, csrf));
+    const ref = serverCustomerReference(row, uid, sessionContextOf(uid, csrf, gen.current.since));
     if (ref !== null) events.current.onSelect(ref);
   }
 
@@ -372,10 +400,24 @@ function PickerDialog({
     const check = (): void => checkSession();
     window.addEventListener('focus', check);
     document.addEventListener('visibilitychange', check);
+    // A sign-out, heard where it starts (the session client's `onSessionEnd`), while this dialog is open: the read or
+    // check out is stale from here and cancelled, the token goes, a rate limit's wait goes with the session that was
+    // asked to wait (as `begin` drops another session's), and the dialog shows the ended session (rows gone, the draft
+    // told) — so no answer that lands after the sign-out began shows a row or sends another read. Nothing is read and
+    // nobody is signed in because of it: only the user's Reconnect reads again, and it is offered at once.
+    const unhear = onSessionEnd(() => {
+      gen.current = { ...gen.current, n: gen.current.n + 1, csrf: null };
+      ctl.current?.abort();
+      checkLater.current = false;
+      clearWait();
+      setBusy(false); // the stale read's own exit no longer gives it back
+      fail({ kind: 'signed-out', text: PICKER_TEXT.ended });
+    });
     return () => {
+      unhear();
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
-      gen.current = { n: gen.current.n + 1, csrf: null };
+      gen.current = { ...gen.current, n: gen.current.n + 1, csrf: null };
       ctl.current?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
@@ -613,9 +655,11 @@ export function ServerCustomerField({ uid, value, canView, onChange, invalid = f
     let current = true; // off once this listener goes: a late answer then changes nothing
     const check = (): void => {
       if (document.visibilityState === 'hidden') return;
+      const since = sessionEndsSoFar();
       void session.ensure(uid, () => identity.idToken(uid)).then((s) => {
         if (!current || held.current !== shown) return;
-        if (s.kind === 'ok') { if (sessionContextOf(uid, s.csrf) !== shown.context) drop('changed'); }
+        if (since !== sessionEndsSoFar()) drop('ended'); // a sign-out began after this check asked: that session is over
+        else if (s.kind === 'ok') { if (!isContextOf(shown.context, uid, s.csrf)) drop('changed'); }
         else if (s.kind === 'ended' || s.kind === 'refused' || s.kind === 'no-identity') drop('ended'); // definitely gone
       });
     };

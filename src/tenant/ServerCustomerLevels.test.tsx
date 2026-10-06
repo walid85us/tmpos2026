@@ -4,7 +4,8 @@
 // and that no late or foreign answer replaces the current user's and tenant's state. M7A-CUSTOMERS-P4: the fake server
 // keeps a version per level and refuses a PUT whose asserted tenant or version no longer holds (409 write_conflict,
 // nothing written); the panel turns a stale draft into a conflict with Discard/Reapply, never carries a draft across a
-// store, and reports a save sent to a store it has left only as a notice about that previous store.
+// store, and reports a save sent to a store it has left only as a notice about that previous store. M7B-INVOICES-P1:
+// both domains' panels side by side, as the Employees screen shows them, each with its own copy (SCL-63).
 import { useLayoutEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
@@ -12,7 +13,7 @@ import userEvent from '@testing-library/user-event';
 
 vi.mock('../firebase', () => ({ auth: { currentUser: null } }));
 
-import ServerCustomerLevels, { DENIED_NOTE, PREVIOUS_STORE, REFRESH_FAILED_NOTE, STORE_CHANGED_NOTICE, type ShopIdentity } from './ServerCustomerLevels';
+import ServerCustomerLevels, { DENIED_NOTE, PREVIOUS_STORE, REFRESH_FAILED_NOTE, STORE_CHANGED_NOTICE, ServerInvoiceLevels, type ShopIdentity } from './ServerCustomerLevels';
 import { createTenantSessionClient, TENANT_SESSION_PATHS } from './tenantSessionClient';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 import { createRoleLevelsClient, ROLE_LEVELS_PATH, type RoleLevelsClient } from './roleLevelsClient';
@@ -1949,4 +1950,30 @@ describe('ServerCustomerLevels: no automatic PUT resend (M5-INVOICES-AUTH-P1-R1)
     expect(keysOf(ended)).toEqual([K1, K1]);
     expect(puts(ended)[1].body).toBe(puts(ended)[0].body);
   }, 30_000);
+});
+
+describe('ServerCustomerLevels: the two domains on one screen (M7B-INVOICES-P1)', () => {
+  it('SCL-63. the Invoices panel says the server decides the server drafts (save, list, open at a store) by its level and that other invoices stay in this browser; the Customers panel keeps its own copy; no id is shared', () => {
+    const sent: string[] = [];
+    const session = createTenantSessionClient({ fetch: async (input) => { sent.push(String(input)); return new Response(null, { status: 503 }); } });
+    const levels = createRoleLevelsClient({ fetch: async (input) => { sent.push(String(input)); return new Response(null, { status: 503 }); } });
+    const { identity } = identityFor({});
+    const { container } = render(
+      <>
+        <ServerCustomerLevels uid={null} session={session} levels={levels} identity={identity} />
+        <ServerInvoiceLevels uid={null} session={session} levels={levels} identity={identity} />
+      </>,
+    );
+    const invoices = screen.getByTestId('server-invoice-levels');
+    expect(invoices).toHaveTextContent('Saved on the store server: only the Invoices level of the built-in roles (store owner fixed).');
+    expect(invoices).toHaveTextContent('The server uses it to decide who may save, list and open server drafts at a store.');
+    expect(invoices).toHaveTextContent('Other invoices are still saved in this browser and are not checked by the server.');
+    expect(invoices.textContent).not.toMatch(/invoice actions are not enforced by the server/); // the M5-INVOICES-AUTH-P1 copy, untrue since server drafts
+    const customers = screen.getByTestId('server-customer-levels');
+    expect(customers).toHaveTextContent('Stored on the store server and enforced on every customer view and create request. Covers the Customers module of the built-in roles only.');
+    expect(customers.textContent).not.toMatch(/server drafts/);
+    const ids = [...container.querySelectorAll('[id]')].map((node) => node.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(sent).toEqual([]); // nobody signed in: nothing is read
+  });
 });

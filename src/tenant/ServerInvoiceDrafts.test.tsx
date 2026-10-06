@@ -5,6 +5,12 @@
 // and its per-request scripts (no sleeps; the one rate-limit wait that is timed, SID-36's, runs on a fake clock); clocks
 // and keys are injected. Every assertion about a request is made on what
 // the fake recorded — the wire — and every assertion about an attempt on the hold store the section was given.
+// Closing round (DA-198, DA-199): a sign-out heard through the session client's `onSessionEnd` — the hold store bound
+// to it, the shop's own store in the page, a save whose session answered just before it, the picker's pair
+// (SID-43..45), a list, name or reopen read out when it begins (SID-49), a Check again or a 403's fresh check whose
+// session answered just before it (SID-51, SID-52), a rate limit's wait (SID-53) — and where focus goes outside the
+// dialogs when a control it was on goes away or is disabled (SID-46..48: each named site, not every possible render),
+// and where it stays when the user left it on <body> (SID-50).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -13,12 +19,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
-  DRAFTS_TEXT, DRAFT_RULE_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts, createDraftHoldStore, customerFallbackText, storeLabel,
-  type DraftHoldStore, type ServerInvoiceDraftsProps,
+  DRAFTS_TEXT, DRAFT_RULE_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts, bindDraftHoldsToSessionEnd, createDraftHoldStore,
+  customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
 import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, type StoreEntry } from './invoiceDraftsClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
-import { TENANT_SESSION_PATHS, createTenantSessionClient } from './tenantSessionClient';
+import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, type TenantSessionClient } from './tenantSessionClient';
+import { hasSessionPair, isContextOf, sessionContextOf } from './ServerCustomerPicker';
 import { parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -323,6 +330,19 @@ async function heldInSection(server: Server, customer: string) {
 const HOUR = 60 * 60_000;
 const bodyOf = (tenant: string, customerId: string, lines: Array<[string, number, number]>) =>
   JSON.stringify({ expectedTenant: tenant, customerId, currency: 'USD', lines: lines.map(([description, quantity, unitPriceCents]) => ({ description, quantity, unitPriceCents })) });
+/**
+ * Focus on <body> after any DOM change from here (a removed or disabled control's), until `stop`. Its callbacks run once
+ * React's commit (layout effects included) is over: a recovery made before paint is what it sees, as a user would.
+ */
+const watchBody = () => {
+  const fell: string[] = [];
+  const observer = new MutationObserver(() => { if (document.activeElement === null || document.activeElement === document.body) fell.push('body'); });
+  observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  return { fell, stop: () => observer.disconnect() };
+};
+/** A refusal in the server's envelope, for a held read's late answer. */
+const refusal = (status: number, error: string): Response =>
+  new Response(JSON.stringify({ error, requestId: 'req-synthetic' }), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
 /** A programmatic focus target shows the file's focus-visible ring, never `focus:outline-none` (jsdom has no styles: the classes are what can be checked). */
 const ringed = (node: HTMLElement): void => {
   expect(node).toHaveClass('focus-visible:outline-2', 'focus-visible:outline-offset-2', 'focus-visible:outline-sky-700');
@@ -1436,6 +1456,362 @@ describe('Server drafts — a new draft (M7B-INVOICES-P1)', () => {
     expect(screen.queryByTestId('drafts-check-wait')).toBeNull();
     vi.useRealTimers();
     expect(server.posts()).toHaveLength(1); // nothing sent by the wait or its end
+  });
+
+  it('SID-43. a sign-out (the session client\'s logout) scrubs at its very start, before it sends or awaits anything: every user\'s attempt loses its token — an unresolved one its body too — and the picker\'s pair is forgotten; a listener that throws stops none of it (its error is rethrown as it was, in a queued microtask)', async () => {
+    const server = fakeServer();
+    const holds = createDraftHoldStore();
+    const failure = new Error('another holder failed');
+    const offs = [onSessionEnd(() => { throw failure; }), bindDraftHoldsToSessionEnd(holds)];
+    const session = createTenantSessionClient({ fetch: server.fetch });
+    try {
+      const token = 's'.repeat(43);
+      const customerId = uuid(0xc01);
+      const attempt = (key: string, state: HeldDraft['state'], extra: Partial<HeldDraft> = {}): HeldDraft => ({
+        key, body: state === 'unresolved' ? bodyOf(TENANT_A, customerId, [['Fan', 1, 999]]) : '', storeId: STORE_1, tenantId: TENANT_A, customerId,
+        storeLabel: 'Main Street', lineCount: 1, subtotalCents: 999, csrf: token, sentAt: 1, sentWall: 1, state, note: '', draftId: null, refusal: null, ...extra,
+      });
+      holds.put('uid-a', attempt('key-a', 'unresolved'));
+      holds.put('uid-b', attempt('key-b', 'created', { draftId: uuid(0xd01) }));
+      holds.put('uid-c', attempt('key-c', 'refused', { refusal: 'denied' }));
+      const context = sessionContextOf('uid-a', token, sessionEndsSoFar());
+      let sentWhenHeard = -1;
+      offs.push(onSessionEnd(() => { sentWhenHeard = server.sent.length; }));
+      // queueMicrotask is captured around the synchronous logout() call only, and restored in `finally`, so the failing
+      // listener's rethrown error is caught here instead of failing the run as an uncaught error.
+      const queued: Array<() => void> = [];
+      const realQueue = globalThis.queueMicrotask;
+      Object.assign(globalThis, { queueMicrotask: (task: () => void) => { queued.push(task); } });
+      let out: Promise<void>;
+      try { out = session.logout(); } finally { Object.assign(globalThis, { queueMicrotask: realQueue }); }
+      expect(queued).toHaveLength(1);
+      let rethrown: unknown;
+      try { queued[0](); } catch (error) { rethrown = error; }
+      expect(rethrown).toBe(failure); // the listener's own error object, surfaced; logout and the other listeners still ran
+      // All of it is done by the time logout() returns, with nothing of the logout sent yet.
+      expect(sentWhenHeard).toBe(0);
+      expect(holds.get('uid-a')).toEqual(expect.objectContaining({ key: 'key-a', state: 'unresolved', csrf: null, body: '' }));
+      expect(holds.get('uid-b')).toEqual(expect.objectContaining({ key: 'key-b', state: 'created', csrf: null, draftId: uuid(0xd01) }));
+      expect(holds.get('uid-c')).toEqual(expect.objectContaining({ key: 'key-c', state: 'refused', csrf: null, refusal: 'denied' }));
+      expect([hasSessionPair(), isContextOf(context, 'uid-a', token)]).toEqual([false, false]); // forgotten, and looked at without making it again
+      await out;
+      expect(server.sent.map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // no session here: nothing to end
+    } finally {
+      for (const off of offs) off();
+      session.reset(); // leaves no pair behind for the next case
+    }
+  });
+
+  it('SID-44. in the page, with the shop\'s own hold store: a sign-out while an unconfirmed save is held detaches it at once — the card says so, Check again is gone, and nothing is ever sent again (not on a focus either); Stop tracking clears it', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const props = r.props({ holds: undefined }); // the module's store, as the shop runs it
+    render(<ServerInvoiceDrafts {...props} />);
+    await showAndChoose(STORE_1);
+    await heldInSection(server, ada);
+    expect(hold()).toHaveAttribute('data-state', 'unresolved');
+    expect(r.holds.get('uid-a')).toBeUndefined(); // held in the shop's store, not the rig's
+    await act(async () => { await props.session!.logout(); });
+    expect(hold()).toHaveAttribute('data-state', 'detached');
+    expect(hold()).toHaveTextContent(HOLD_TEXT.detached);
+    expect(screen.queryByTestId('drafts-check-again')).toBeNull();
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(server.posts()).toHaveLength(1);
+    await click('drafts-stop');
+    expect(hold()).toBeNull();
+  });
+
+  it('SID-45. a save whose session answered just before a sign-out began is not sent: the sign-out closes the dialog and ends the section\'s generation, and the save takes nothing from that earlier answer — no key, no POST, nothing held, the picker\'s pair not made again (looked at without making it), nothing but the logout sent; a later Reconnect is a first connection, not a "changed" one', async () => {
+    const { server, ada } = seeded();
+    const r = rig(server);
+    const real = r.props().session!;
+    let trip = false;
+    let mark = -1;
+    // The sign-out begins after the session confirmation has answered, before the save's continuation runs.
+    const session: TenantSessionClient = { ...real, ensure: async (...args) => { const s = await real.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void real.logout(); } return s; } };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await showAndChoose(STORE_1);
+    await fillDraft(ada, [['Fan', '1', '9.99']]);
+    expect(hasSessionPair()).toBe(true); // the picker made the customer's context
+    trip = true;
+    await click('draft-new-save');
+    await waitFor(() => expect(screen.queryByTestId('draft-new')).toBeNull());
+    await settle();
+    expect(trip).toBe(false);
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(screen.getByTestId('drafts-stores-state')).toHaveTextContent(DRAFTS_TEXT.ended);
+    expect(server.posts()).toEqual([]);
+    expect(r.keys).toEqual([]);
+    expect(r.holds.get('uid-a')).toBeUndefined();
+    expect(hasSessionPair()).toBe(false);
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    // The ended token was taken back nowhere: Reconnect's token (a new session: the server ended A's, which this fake's
+    // logout answer does not do on its own) is the section's first, so nothing says the connection "changed".
+    server.expire();
+    await click('drafts-retry');
+    await storesReady();
+    expect(screen.queryByTestId('drafts-connection-changed')).toBeNull();
+    expect(storeSelect().value).toBe('');
+  });
+
+  it('SID-46. outside the dialogs, a press that takes its own control away hands focus to the section heading — Show server drafts, the stores\' Try again and Reconnect, the list\'s Try again — and so does a session end that takes the store choice it was on; never <body>', async () => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5));
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    const heading = screen.getByRole('heading', { name: 'Server drafts' });
+    act(() => { screen.getByTestId('drafts-show').focus(); });
+    const watch = watchBody();
+    try {
+      server.hold.stores = 1;
+      await user().click(screen.getByTestId('drafts-show'));
+      expect(screen.queryByTestId('drafts-show')).toBeNull();
+      expect(document.activeElement).toBe(heading);
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['stores']));
+      await act(async () => { server.held.shift()!.release(refusal(503, 'service_unavailable')); });
+      await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'unavailable'));
+      await user().click(screen.getByTestId('drafts-retry')); // Try again: it goes as the stores read starts
+      expect(document.activeElement).toBe(heading);
+      await storesReady();
+      server.expire();
+      act(() => { storeSelect().focus(); });
+      fireEvent.change(storeSelect(), { target: { value: STORE_1 } }); // its list read finds the session ended
+      await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+      expect(screen.queryByTestId('drafts-store')).toBeNull();
+      expect(document.activeElement).toBe(heading);
+      await waitFor(() => expect(screen.getByTestId('drafts-retry')).toBeEnabled());
+      await user().click(screen.getByTestId('drafts-retry')); // Reconnect
+      expect(document.activeElement).toBe(heading);
+      await storesReady();
+      server.listStatus.push(500);
+      fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+      await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'unavailable'));
+      await user().click(screen.getByTestId('drafts-list-retry'));
+      expect(document.activeElement).toBe(heading);
+      await listReady();
+      expect(rows()).toHaveLength(1);
+      expect(watch.fell).toEqual([]);
+    } finally {
+      watch.stop();
+    }
+    expect(server.posts()).toEqual([]);
+  });
+
+  it('SID-47. "Load more" keeps focus through its read (aria-disabled, never disabled; a press meanwhile reads nothing) and while more pages remain; the last page hands focus to the first row it added, and a failed continuation to the heading', async () => {
+    const { server, ada } = seeded();
+    for (let i = 0; i < 45; i++) server.seedDraft(STORE_1, ada, at(100 + i));
+    for (let i = 0; i < 25; i++) server.seedDraft(STORE_2, ada, at(300 + i));
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    const heading = screen.getByRole('heading', { name: 'Server drafts' });
+    const more = () => screen.getByTestId('drafts-load-more');
+    const reads = (store: string) => server.sent.filter((r) => r.method === 'GET' && r.url.startsWith(draftsPathOf(store))).length;
+    act(() => { more().focus(); });
+    const watch = watchBody();
+    try {
+      server.hold.list = 1;
+      await user().click(more());
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['list']));
+      expect(more()).toHaveAttribute('aria-disabled', 'true');
+      expect(more()).toBeEnabled();
+      expect(document.activeElement).toBe(more());
+      await user().click(more()); // during its read: nothing
+      expect(reads(STORE_1)).toBe(2);
+      await act(async () => { server.held.shift()!.release(); });
+      await waitFor(() => expect(rows()).toHaveLength(40));
+      expect(more()).toHaveAttribute('aria-disabled', 'false');
+      expect(document.activeElement).toBe(more()); // more pages remain: it stays, and keeps focus
+      await user().click(more());
+      await waitFor(() => expect(rows()).toHaveLength(45));
+      expect(screen.queryByTestId('drafts-load-more')).toBeNull();
+      expect(document.activeElement).toBe(within(rows()[40]).getByTestId('drafts-open')); // the first row the last page added
+      expect(reads(STORE_1)).toBe(3);
+      fireEvent.change(storeSelect(), { target: { value: STORE_2 } }); // the focused Open goes with its store's rows
+      await waitFor(() => expect(rows()).toHaveLength(20));
+      expect(document.activeElement).toBe(heading);
+      server.listStatus.push(503);
+      await user().click(more());
+      await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'unavailable'));
+      expect(screen.queryByTestId('drafts-load-more')).toBeNull();
+      expect(document.activeElement).toBe(heading);
+      expect(watch.fell).toEqual([]);
+    } finally {
+      watch.stop();
+    }
+  });
+
+  it('SID-48. a render that takes away or disables the focused control hands focus to the heading — a new generation (another tab\'s session, detaching a held save in the same moment) under a focused Open, the role hint taking New away, a rate limit\'s wait disabling a focused New; focus on the store choice is kept while its rows change', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5));
+    const other = server.seedDraft(STORE_2, ada, at(6));
+    const r = rig(server);
+    const view = render(<ServerInvoiceDrafts {...r.props()} />);
+    await showAndChoose(STORE_1);
+    const heading = screen.getByRole('heading', { name: 'Server drafts' });
+    act(() => { storeSelect().focus(); });
+    const watch = watchBody();
+    try {
+      fireEvent.change(storeSelect(), { target: { value: STORE_2 } }); // its rows are replaced: the choice keeps focus
+      await waitFor(() => expect(rows().map((row) => row.getAttribute('data-id'))).toEqual([other.id]));
+      expect(document.activeElement).toBe(storeSelect());
+      expect(watch.fell).toEqual([]);
+      await heldInSection(server, ada); // an unconfirmed save, held: the next generation detaches it
+      await settle();
+      watch.fell.length = 0; // the dialog's own close and focus return (SID-29) are not this case's
+      act(() => { within(rows()[0]).getByTestId('drafts-open').focus(); });
+      server.otherTab('uid-a');
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+      expect(hold()).toHaveAttribute('data-state', 'detached');
+      expect(rows()).toEqual([]);
+      expect(document.activeElement).toBe(heading);
+      fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+      await listReady();
+      act(() => { screen.getByTestId('drafts-new').focus(); });
+      view.rerender(<ServerInvoiceDrafts {...r.props({ canCreate: false })} />);
+      expect(screen.queryByTestId('drafts-new')).toBeNull();
+      expect(document.activeElement).toBe(heading);
+      view.rerender(<ServerInvoiceDrafts {...r.props()} />);
+      act(() => { screen.getByTestId('drafts-new').focus(); });
+      server.retryAfter = '5';
+      server.listStatus.push(429);
+      fireEvent.change(storeSelect(), { target: { value: STORE_2 } });
+      await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited'));
+      expect(screen.getByTestId('drafts-new')).toBeDisabled();
+      expect(document.activeElement).toBe(heading);
+      expect(watch.fell).toEqual([]);
+    } finally {
+      watch.stop();
+    }
+    expect(server.posts()).toHaveLength(1); // the held save's one POST: nothing re-sent
+  });
+
+  it.each(['list', 'names', 'reopen'] as const)('SID-49. a sign-out while a %s read is out ends the section at once: the late answer, released after it, shows nothing and starts nothing — no row, name or draft, no further read (the queued name read included), nothing sent but the logout; the section says the session ended and signs nobody in', async (kind) => {
+    const { server } = seeded();
+    server.seedCustomer(TENANT_A, 'Cy Customer');
+    server.seedCustomer(TENANT_A, 'Di Customer');
+    const people = [...server.customers.entries()].map(([id, c]) => ({ id, name: c.name }));
+    people.forEach((c, i) => server.seedDraft(STORE_1, c.id, at(10 + i))); // four customers: three name reads out, one queued
+    const r = rig(server);
+    const props = r.props();
+    render(<ServerInvoiceDrafts {...props} />);
+    await click('drafts-show');
+    await storesReady();
+    if (kind === 'list') server.hold.list = 1;
+    if (kind === 'names') server.hold.names = 3;
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    if (kind === 'reopen') {
+      await listReady();
+      await waitFor(() => expect(screen.getAllByTestId('drafts-row-customer').map((n) => n.textContent).sort()).toEqual(people.map((c) => c.name).sort()));
+      server.hold.get = 1;
+      await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    }
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual({ list: ['list'], names: ['names', 'names', 'names'], reopen: ['get'] }[kind]));
+    const mark = server.sent.length;
+    await act(async () => { void props.session!.logout(); });
+    for (const late of server.held.splice(0)) await act(async () => { late.release(); });
+    await settle();
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(rows()).toEqual([]);
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(screen.getByTestId('drafts-stores-state')).toHaveTextContent(DRAFTS_TEXT.ended);
+    for (const c of people) expect(document.body).not.toHaveTextContent(c.name);
+    if (kind === 'reopen') {
+      expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'signed-out');
+      expect(screen.queryAllByTestId('draft-view-line')).toEqual([]);
+    }
+    expect(screen.getByTestId('drafts-retry')).toBeEnabled(); // Reconnect: the user's own press, nothing reads on its own
+    expect(server.posts()).toEqual([]);
+  });
+
+  it('SID-50. focus the user left on <body> with a press on plain text stays theirs: a later render that takes away the control they left (the role hint removing New) moves no focus; the tracking resumes at the next focus in the section', async () => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5));
+    const r = rig(server);
+    const view = render(<ServerInvoiceDrafts {...r.props()} />);
+    await showAndChoose(STORE_1);
+    const heading = screen.getByRole('heading', { name: 'Server drafts' });
+    act(() => { screen.getByTestId('drafts-new').focus(); });
+    await user().click(screen.getByText(DRAFTS_TEXT.intro)); // no control there: focus goes to <body>, with no focus event
+    expect(document.activeElement).toBe(document.body);
+    view.rerender(<ServerInvoiceDrafts {...r.props({ canCreate: false })} />);
+    expect(screen.queryByTestId('drafts-new')).toBeNull();
+    expect(document.activeElement).toBe(document.body); // left where the user put it, not pulled to the heading
+    view.rerender(<ServerInvoiceDrafts {...r.props()} />);
+    act(() => { screen.getByTestId('drafts-new').focus(); });
+    view.rerender(<ServerInvoiceDrafts {...r.props({ canCreate: false })} />);
+    expect(document.activeElement).toBe(heading); // focused again, then taken away: the recovery stands
+    expect(server.posts()).toEqual([]);
+  });
+
+  it('SID-51. a Check again whose session answered just before a sign-out began sends nothing — even from a hold store the sign-out does not scrub, which keeps the token and body: no POST and nothing but the logout sent; the attempt stays unresolved and says why', async () => {
+    const { server, ada } = seeded();
+    const r = rig(server); // its hold store is NOT bound to the sign-out: only the check's own comparison stands in the way
+    const real = r.props().session!;
+    let trip = false;
+    let mark = -1;
+    const session: TenantSessionClient = { ...real, ensure: async (...args) => { const s = await real.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void real.logout(); } return s; } };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await showAndChoose(STORE_1);
+    await heldInSection(server, ada);
+    expect(server.posts()).toHaveLength(1);
+    trip = true;
+    await click('drafts-check-again');
+    await waitFor(() => expect(r.holds.get('uid-a')).toEqual(expect.objectContaining({ state: 'unresolved', note: `Not checked. ${DRAFTS_TEXT.ended}` })));
+    await settle();
+    expect(trip).toBe(false);
+    expect(r.holds.get('uid-a')?.csrf).not.toBeNull(); // still held by this unbound store: the comparison alone kept it from leaving
+    expect(server.posts()).toHaveLength(1); // the lost first send only
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+  });
+
+  it('SID-52. a list read refused 403 whose one fresh check answered just before a sign-out began takes nothing from that answer: the section stays ended, and the user\'s Reconnect is a FIRST connection — no "connection changed"', async () => {
+    const { server } = seeded();
+    const r = rig(server);
+    const real = r.props().session!;
+    let trip = true;
+    const session: TenantSessionClient = {
+      ...real,
+      ensure: async (uid, idToken, options) => { const s = await real.ensure(uid, idToken, options); if (trip && options?.fresh === true) { trip = false; void real.logout(); } return s; },
+    };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await click('drafts-show');
+    await storesReady();
+    server.listStatus.push(403);
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await waitFor(() => expect(trip).toBe(false));
+    await settle();
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    server.expire(); // the server ended that session (this fake's logout answer does not): Reconnect gets a new token
+    await click('drafts-retry'); // Reconnect
+    await storesReady();
+    expect(screen.queryByTestId('drafts-connection-changed')).toBeNull();
+    expect(server.posts()).toEqual([]);
+  });
+
+  it('SID-53. a sign-out during a rate limit\'s wait ends that wait with the session that was asked to wait: after Reconnect a store is read at once and New is not held back by it', async () => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5));
+    const r = rig(server);
+    const props = r.props();
+    render(<ServerInvoiceDrafts {...props} />);
+    await showAndChoose(STORE_1);
+    server.retryAfter = '60';
+    server.listStatus.push(429);
+    fireEvent.change(storeSelect(), { target: { value: STORE_2 } });
+    await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited'));
+    expect(screen.getByTestId('drafts-new')).toBeDisabled(); // the 60-second wait
+    await act(async () => { void props.session!.logout(); });
+    server.expire(); // the server ended that session (this fake's logout answer does not): Reconnect signs in again
+    await click('drafts-retry'); // Reconnect
+    await storesReady();
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady();
+    expect(rows()).toHaveLength(1);
+    expect(screen.getByTestId('drafts-new')).toBeEnabled();
+    expect(server.posts()).toEqual([]);
   });
 
   it('SID-27. nothing reaches browser storage or a log, and the sources reach neither', async () => {

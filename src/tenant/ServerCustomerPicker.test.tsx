@@ -3,7 +3,11 @@
 // only), copied from ServerCustomerDirectory.test.tsx's: a distinct CSRF token per session, a read refused 403 unless it
 // carries its session's own token, sessions bound to tenants, and the list read with the server's own query parser,
 // cursor codec and page order. Ordering is controlled with the fake's hold/release (no sleeps). Every assertion about a
-// request is made on what the fake recorded — the wire — never on what the picker believes it sent.
+// request is made on what the fake recorded — the wire — never on what the picker believes it sent. M7B-INVOICES-P1: two
+// fields mounted at once (the invoice form's, closing, and the server draft dialog's) and a host's invalid mark (SCP-58);
+// closing round: a sign-out heard by the open dialog — a read out when it begins, a Select after it, a 403's one fresh
+// check that answered just before it, a rate limit's wait — and by a closed field's check that answered just before
+// it, with the module's (UID, token) pair looked at, never made (SCP-59..63).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -19,13 +23,13 @@ vi.mock('../context/AccessContext', () => ({ useAccess: () => { throw new Error(
 
 import {
   NOT_AVAILABLE_TEXT, PICK_CHANGED_TEXT, PICK_DENIED_TEXT, PICK_ENDED_TEXT, PICKER_TEXT, ServerCustomerField, ServerCustomerPicker,
-  idEndingText, pickerWaitText, sessionContextOf,
+  hasSessionPair, idEndingText, isContextOf, pickerWaitText, sessionContextOf,
 } from './ServerCustomerPicker';
 import {
   NO_CUSTOMER, localCustomerIdOf, localCustomerReference, serverCustomerReference, type ServerCustomerReference, type SessionContext,
 } from './customerReference';
 import { EMPTY_TEXT, LAST_KNOWN_TEXT, SEARCH_RULE_TEXT, searchMatchingText, searchNoneText } from './ServerCustomerDirectory';
-import { createTenantSessionClient, TENANT_SESSION_PATHS, type EnsureOptions } from './tenantSessionClient';
+import { createTenantSessionClient, sessionEndsSoFar, TENANT_SESSION_PATHS, type EnsureOptions, type TenantSessionClient } from './tenantSessionClient';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from './customersClient';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
@@ -249,7 +253,7 @@ describe('customerReference (M7A-CUSTOMERS-P9)', () => {
     expect(Object.isFrozen(local)).toBe(true);
     expect(localCustomerIdOf(local)).toBe('c1');
     expect(localCustomerIdOf(NO_CUSTOMER)).toBe('');
-    const context = sessionContextOf('uid-a', 'x'.repeat(43));
+    const context = sessionContextOf('uid-a', 'x'.repeat(43), sessionEndsSoFar());
     const entry = { id: uuid(0xa01), name: 'Ada Lovelace', phone: '555-0100', email: 'ada@example.test' } as CustomerEntry;
     const ref = serverCustomerReference(entry, 'uid-a', context);
     expect(ref).toEqual({ source: 'server', id: entry.id, name: 'Ada Lovelace', uid: 'uid-a', context });
@@ -263,17 +267,33 @@ describe('customerReference (M7A-CUSTOMERS-P9)', () => {
     expect(serverCustomerReference({ id: entry.id, name: 7 as unknown as string }, 'uid-a', context)).toBeNull();
   });
 
-  it('SCP-02. sessionContextOf: the same frozen opaque object for the same (UID, token) as the last call, a new one otherwise; only the latest pair is kept', () => {
+  it('SCP-02. sessionContextOf: the same frozen opaque object for the same (UID, token) as the last call, a new one otherwise; only the latest pair is kept; a comparison (isContextOf) creates nothing; after a sign-out a session confirmed before it gets an object kept nowhere', () => {
     const [tokA, tokB] = ['a'.repeat(43), 'b'.repeat(43)];
-    const first = sessionContextOf('uid-a', tokA);
-    expect(sessionContextOf('uid-a', tokA)).toBe(first);
+    const now = sessionEndsSoFar;
+    const first = sessionContextOf('uid-a', tokA, now());
+    expect(sessionContextOf('uid-a', tokA, now())).toBe(first);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Reflect.ownKeys(first)).toEqual([]); // no token, nothing inside
     expect(JSON.stringify(first)).toBe('{}');
-    const other = sessionContextOf('uid-a', tokB);
+    expect(isContextOf(first, 'uid-a', tokA)).toBe(true);
+    expect([isContextOf(first, 'uid-a', tokB), isContextOf(first, 'uid-b', tokA)]).toEqual([false, false]);
+    expect(isContextOf(first, 'uid-a', tokA)).toBe(true); // those comparisons replaced nothing
+    const other = sessionContextOf('uid-a', tokB, now());
     expect(other).not.toBe(first);
-    expect(sessionContextOf('uid-a', tokA)).not.toBe(first); // the earlier pair was not kept
-    expect(sessionContextOf('uid-b', tokA)).not.toBe(sessionContextOf('uid-a', tokA)); // another user is another context
+    expect(sessionContextOf('uid-a', tokA, now())).not.toBe(first); // the earlier pair was not kept
+    expect(sessionContextOf('uid-b', tokA, now())).not.toBe(sessionContextOf('uid-a', tokA, now())); // another user is another context
+    // A sign-out (here a reset: it tells the same listeners, and sends nothing) forgets the pair; a token confirmed by an
+    // answer asked for before it mints a context kept nowhere — a new one on every call, matching nothing, no pair kept.
+    const before = now();
+    const kept = sessionContextOf('uid-a', tokA, before);
+    createTenantSessionClient({ fetch: async () => { throw new Error('nothing is sent'); } }).reset();
+    expect(hasSessionPair()).toBe(false);
+    const late = sessionContextOf('uid-a', tokA, before);
+    expect(late).not.toBe(kept);
+    expect(sessionContextOf('uid-a', tokA, before)).not.toBe(late);
+    expect(Object.isFrozen(late)).toBe(true);
+    expect([hasSessionPair(), isContextOf(late, 'uid-a', tokA), isContextOf(kept, 'uid-a', tokA)]).toEqual([false, false, false]);
+    expect(isContextOf(sessionContextOf('uid-a', tokA, now()), 'uid-a', tokA)).toBe(true); // confirmed since: kept again
   });
 });
 
@@ -1203,9 +1223,10 @@ describe('ServerCustomerPicker review fixes (M7A-CUSTOMERS-P9)', () => {
     await selectRow(bob.id);
     const csrf = lists(server).at(-1)!.headers.get('x-tmpos-session-csrf')!;
     const context = log[0].next!.context;
-    expect(sessionContextOf('uid-a', csrf)).toBe(context);
+    expect(isContextOf(context, 'uid-a', csrf)).toBe(true);
     unmount();
-    expect(sessionContextOf('uid-a', csrf)).not.toBe(context);
+    expect(hasSessionPair()).toBe(false);
+    expect(sessionContextOf('uid-a', csrf, sessionEndsSoFar())).not.toBe(context);
   });
 
   it('SCP-46. focus stays in the dialog when the focused control goes away: Load more on the last page, and Try again after it succeeds', async () => {
@@ -1591,5 +1612,154 @@ describe('ServerCustomerPicker refusals and keyboard (M7A-CUSTOMERS-P10)', () =>
     await waitFor(() => expect(active()).toBe(screen.getByTestId(after)));
     await settle();
     expect(active()).toBe(screen.getByTestId(after));
+  });
+});
+
+describe('ServerCustomerField in the server draft dialog (M7B-INVOICES-P1)', () => {
+  it('SCP-58. two fields mounted at once share one context per session: the one that goes first leaves the pair to the other, the last one forgets it; a host\'s `invalid` marks "Select a server customer" and points it at the host\'s error (off by default)', async () => {
+    const server = fakeServer();
+    const [bob] = server.seed(TENANT_A, ['Bob']);
+    const inject = clients(server);
+    const log: Array<{ next: ServerCustomerReference | null; why: Why }> = [];
+    const two = (both: boolean) => (
+      <>
+        {both && <Draft key="closing" uid="uid-a" inject={inject} log={[]} />}
+        <Draft key="dialog" uid="uid-a" inject={inject} log={log} />
+      </>
+    );
+    const view = render(two(true));
+    await userEvent.setup().click(screen.getAllByTestId('picker-open')[1]);
+    await ready();
+    await selectRow(bob.id);
+    const csrf = lists(server).at(-1)!.headers.get('x-tmpos-session-csrf')!;
+    const context = log[0].next!.context;
+    expect(isContextOf(context, 'uid-a', csrf)).toBe(true);
+    view.rerender(two(false)); // the closing field goes; the dialog's still holds Bob under that context
+    expect(isContextOf(context, 'uid-a', csrf)).toBe(true);
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', bob.id);
+    view.unmount(); // the last field goes: the pair with it
+    expect(hasSessionPair()).toBe(false);
+
+    const marked = render(<ServerCustomerField uid="uid-a" value={null} canView invalid errorId="host-error" onChange={() => {}} {...inject} />);
+    expect(screen.getByTestId('picker-open')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByTestId('picker-open')).toHaveAttribute('aria-describedby', 'host-error');
+    marked.unmount();
+    render(<ServerCustomerField uid="uid-a" value={null} canView errorId="host-error" onChange={() => {}} {...inject} />);
+    expect(screen.getByTestId('picker-open')).not.toHaveAttribute('aria-invalid');
+    expect(screen.getByTestId('picker-open')).not.toHaveAttribute('aria-describedby');
+    expect(writes(server)).toEqual([]);
+  });
+});
+
+describe('A sign-out heard by the picker (M7B-INVOICES-P1 closing round)', () => {
+  /** The real clients, and a draft-side record of what the dialog says. */
+  function openDialog(server: Server) {
+    const inject = clients(server);
+    const calls = { select: [] as ServerCustomerReference[], lost: [] as string[] };
+    render(<ServerCustomerPicker uid="uid-a" onSelect={(ref) => { calls.select.push(ref); }} onCancel={() => {}} onLost={(why) => { calls.lost.push(why); }} onContext={() => {}} {...inject} />);
+    return { inject, calls };
+  }
+
+  it('SCP-59. a sign-out while the dialog\'s list read is out ends the dialog at once — the ended state, the draft told — and the read\'s late answer, released after it, shows no row and sends nothing: no login, no read again, nothing but the logout', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada', 'Bea']);
+    server.hold.reads = 1;
+    const { inject, calls } = openDialog(server);
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(hasSessionPair()).toBe(true); // the first token fixed the generation and made its context
+    const mark = server.sent.length;
+    await act(async () => { void inject.session.logout(); });
+    expect(phase()).toBe('signed-out');
+    expect(state()).toHaveTextContent(PICKER_TEXT.ended);
+    expect(calls.lost).toEqual(['ended']);
+    expect(hasSessionPair()).toBe(false);
+    await act(async () => { server.held.shift()!.release(); });
+    await settle();
+    expect(rows()).toEqual([]);
+    expect(phase()).toBe('signed-out');
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(screen.getByTestId('picker-retry')).toBeEnabled(); // Reconnect: the user's own press (its busy state given back)
+    expect(calls.select).toEqual([]);
+  });
+
+  it('SCP-60. Select after a sign-out makes no reference: the rows the dialog read go with the session the moment it ends, so no Select is left; the draft holds no customer, no (UID, token) pair is kept, and nothing but the logout is sent', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Bob']);
+    const { log, inject } = mountField(server);
+    await click('picker-open');
+    await ready();
+    expect(screen.getAllByTestId('picker-select')).toHaveLength(1);
+    const mark = server.sent.length;
+    await act(async () => { void inject.session.logout(); });
+    expect(screen.queryAllByTestId('picker-select')).toEqual([]);
+    expect(phase()).toBe('signed-out');
+    expect(log).toEqual([]); // nothing was chosen before, and nothing could be after
+    expect(screen.queryByTestId('picker-value')).toBeNull();
+    expect(hasSessionPair()).toBe(false);
+    await settle();
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+  });
+
+  it('SCP-61. a closed-dialog check whose session answered just before a sign-out began drops the customer as ENDED and makes no (UID, token) pair again: the comparison creates nothing, and the ended token is kept nowhere', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const server = fakeServer();
+    const [bob] = server.seed(TENANT_A, ['Bob']);
+    const real = clients(server);
+    let trip = false;
+    // The sign-out begins after the check's session confirmation has answered, before the check's continuation runs.
+    const session: TenantSessionClient = { ...real.session, ensure: async (...args) => { const s = await real.session.ensure(...args); if (trip) { trip = false; void real.session.logout(); } return s; } };
+    const { log } = mountField(server, { inject: { ...real, session } });
+    await click('picker-open');
+    await ready();
+    await selectRow(bob.id);
+    expect(log.map((e) => e.why)).toEqual(['selected']);
+    trip = true;
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(trip).toBe(false);
+    expect(log.map((e) => [e.next, e.why])).toEqual([[log[0].next, 'selected'], [null, 'ended']]);
+    expect(screen.getByTestId('picker-notice')).toHaveTextContent(PICK_ENDED_TEXT);
+    expect(hasSessionPair()).toBe(false);
+  });
+
+  it('SCP-62. a 403\'s one fresh check whose session answered just before a sign-out began takes nothing from that answer: the dialog stays ended, and the user\'s Reconnect is a FIRST token — no "connection changed", nothing dropped as changed', async () => {
+    const server = fakeServer();
+    server.seed(TENANT_A, ['Ada']);
+    server.reads.push(403); // the first list read is refused: one fresh check follows
+    const real = clients(server);
+    let trip = true;
+    const session: TenantSessionClient = {
+      ...real.session,
+      ensure: async (uid, idToken, options) => { const s = await real.session.ensure(uid, idToken, options); if (trip && options?.fresh === true) { trip = false; void real.session.logout(); } return s; },
+    };
+    const calls = { lost: [] as string[] };
+    render(<ServerCustomerPicker uid="uid-a" onSelect={() => {}} onCancel={() => {}} onLost={(why) => { calls.lost.push(why); }} onContext={() => {}} {...real} session={session} />);
+    await waitFor(() => expect(trip).toBe(false));
+    await settle();
+    expect(phase()).toBe('signed-out');
+    expect(calls.lost).toEqual(['ended']);
+    server.sessions.clear(); // the server ended that session (this fake has no logout route): Reconnect gets a new token
+    await click('picker-retry'); // Reconnect
+    await ready();
+    expect(screen.queryByTestId('picker-connection-changed')).toBeNull();
+    expect(calls.lost).toEqual(['ended']);
+  });
+
+  it('SCP-63. a sign-out during a rate limit\'s wait ends that wait with the session that was asked to wait: Reconnect is offered at once, and reads', async () => {
+    const server = fakeServer();
+    const [ada] = server.seed(TENANT_A, ['Ada']);
+    server.retryAfter = '60';
+    server.reads.push(429);
+    const { inject } = openDialog(server);
+    await waitFor(() => expect(phase()).toBe('rate-limited'));
+    expect(screen.getByTestId('picker-retry')).toBeDisabled(); // the 60-second wait
+    await act(async () => { void inject.session.logout(); });
+    expect(phase()).toBe('signed-out');
+    expect(screen.getByTestId('picker-retry')).toHaveTextContent('Reconnect');
+    expect(screen.getByTestId('picker-retry')).toBeEnabled(); // at once: the ended session's wait went with it
+    server.sessions.clear(); // the server ended that session (this fake has no logout route): Reconnect signs in again
+    await click('picker-retry');
+    await ready();
+    expect(ids()).toEqual([ada.id]);
   });
 });

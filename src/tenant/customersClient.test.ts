@@ -4,15 +4,17 @@
 // email rules too (server/runtime/customerDirectory.ts), with the profile read's exact shape; since M7A-CUSTOMERS-P7 the
 // profile's version from its ETag and the edit (PATCH): its bytes, its headers and the one outcome of every answer; since
 // M7A-CUSTOMERS-P8 the list's search (`q`): its spelling on the wire, its own cursor grammar, and the search rule swept
-// against the server's own query parser. Special characters are built from code points, so this source stays ASCII.
+// against the server's own query parser. M7B-INVOICES-P1: the name rule as a plain-text rule with a limit
+// (`normalizePlainText`, which an invoice draft line's description uses at 256), swept against the server's own at both
+// limits (CDC-23). Special characters are built from code points, so this source stays ASCII.
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CONTACT_INVALID, CUSTOMERS_PATH, createCustomersClient, customerEditBody, isCustomerId, normalizeCustomerEmail, normalizeCustomerName,
-  normalizeCustomerPhone, normalizeCustomerSearch, retryAfterSeconds, versionOfEtag,
+  normalizeCustomerPhone, normalizeCustomerSearch, normalizePlainText, retryAfterSeconds, versionOfEtag,
 } from './customersClient';
-import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
+import { normalizeCustomerName as serverNormalizeCustomerName, normalizePlainText as serverNormalizePlainText } from '../../server/runtime/customerCreate';
 import {
   CONTACT_REFUSED, CUSTOMER_DIRECTORY_PATH, decodeCustomerCursor, encodeCustomerCursor, isCustomerCreatedAt,
   encodeCustomerSearchCursor, normalizeCustomerEmail as serverNormalizeCustomerEmail, normalizeCustomerPhone as serverNormalizeCustomerPhone,
@@ -837,4 +839,29 @@ test('CDC-22. the search rule accepts, refuses and normalizes exactly as the ser
   for (const other of [null, undefined, 7, {}, ['Ada']]) assert.equal(normalizeCustomerSearch(other), null);
   assert.equal(server('q=+Ada+'), 'Ada'); // the server's form decoding: '+' is a space
   assert.equal(server('q='), '');
+});
+
+test('CDC-23. normalizePlainText (commit 15110e4): the name rule at a given limit, equal to the server\'s at 256 (a draft line\'s description) and at 200, where normalizeCustomerName is exactly it', () => {
+  const astral = cp(0x1f600);
+  const corpus: unknown[] = [
+    '', ' ', 'A', '  Fan  belt  ', `\tFan\n`, cp(0x2800), cp(0x200b), `Fan${cp(0x202e)}`, `Fan${cp(0x7)}`, `Fan${unit(0xd800)}`, `${unit(0xdfff)}Fan`,
+    null, undefined, 7, {}, ['Fan'],
+  ];
+  for (const n of [199, 200, 201, 255, 256, 257]) corpus.push('x'.repeat(n), astral.repeat(n), ` ${'x'.repeat(n)} `, `${'x'.repeat(n - 1)}${astral}`);
+  let accepted = 0;
+  for (const raw of corpus) {
+    for (const max of [200, 256]) {
+      const theirs = serverNormalizePlainText(raw, max);
+      assert.equal(normalizePlainText(raw, max), theirs, `the plain-text rules disagree at ${max} on ${typeof raw === 'string' ? `${[...raw].length} scalars` : String(raw)}`);
+      if (theirs !== null) accepted += 1;
+    }
+    assert.equal(normalizeCustomerName(raw), normalizePlainText(raw, 200));
+  }
+  assert.ok(accepted > 20, `the sweep must accept as well as refuse (accepted ${accepted})`);
+  // Anchors: the limit is the caller's — 256 astral scalars are a description, not a name; 257 are neither.
+  assert.equal(normalizePlainText(astral.repeat(256), 256), astral.repeat(256));
+  assert.equal(normalizePlainText(astral.repeat(256), 200), null);
+  assert.equal(normalizePlainText(astral.repeat(257), 256), null);
+  assert.equal(normalizePlainText('  Fan  belt  ', 256), 'Fan  belt');
+  assert.equal(normalizePlainText(`Fan${cp(0x202e)}`, 256), null); // a bidi control, at any limit
 });
