@@ -96,7 +96,16 @@
 //     click, only under that token and inside the create's 23-hour window; past it the body is emptied and only
 //     "Discard" is left. A matching profile is never taken as proof. A held edit, in any state, is dropped (never
 //     re-sent) as soon as another token is seen — a tenant switch, a Reconnect — or the session ends, and the page says
-//     the change could not be confirmed; a user change or a sign-out drops the previous user's held edit too.
+//     the change could not be confirmed, unnamed. A sign-out (M7B-INVOICES-P2) reaches the edit hold store from its
+//     module's load, mounted page or not, and also stands for a user change (AccessContext.tsx logs the previous user
+//     out first): every user's held edit and recorded outcome is DROPPED — target, body, expected version, name, key
+//     and token — and only a mark that this user lost one is kept, for that same unnamed notice on the page that heard
+//     the sign-out or on the user's next generation. A late answer for a dropped edit then finds nothing to settle: it
+//     shows, reads, sends and records nothing (an unknown outcome stays unknown). Save and Check again note
+//     `sessionEndsSoFar` before their session check and send nothing after a sign-out began; Check again keeps only the
+//     key across it and reads the target, the token and the bytes from the store after it. A mounted page also drops
+//     the form, its draft and the profile an explicit Cancel closed. Bytes already sent, closures of requests still
+//     out, and copies the JavaScript engine still keeps are not erased.
 //   - A tenant switch (a new generation), a user change, a route change and a refusal clear the form, its draft and the
 //     edit's notices; an answer that arrives for a dropped attempt changes nothing. A 403 on the edit closes the form.
 //     Cancel sends nothing, also while Save is still checking the session. "Review latest" keeps only the fields the
@@ -119,7 +128,6 @@
 //     page's state: never in the address, history, browser storage or a log.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
 import { Link, useParams } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
@@ -128,7 +136,6 @@ import {
   customerEditBody, type CreateResult, type CustomerEntry, type CustomerProfile, type CustomersClient, type UpdateResult,
 } from './customersClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
-import { auth } from '../firebase';
 
 export const DIRECTORY_PATH = '/customers/directory';
 /** No "Check again" from here on: a conservative client cutoff under the server's 24-hour key retention. */
@@ -424,7 +431,6 @@ export function bindHoldsToSessionEnd(store: HoldStore): () => void {
  */
 const holdStore: HoldStore = createHoldStore();
 const unbindHolds = bindHoldsToSessionEnd(holdStore);
-import.meta.hot?.dispose(unbindHolds);
 
 /** An edit whose outcome is not known yet (M7A-CUSTOMERS-P7): exactly what "Check again" sends again, and where. */
 export interface HeldEdit {
@@ -457,20 +463,33 @@ export interface EditHoldStore {
   announce(uid: string, key: string, outcome: EditOutcome): boolean;
   /** The recorded outcome, forgotten as it is returned. */
   takeOutcome(uid: string): EditOutcome | undefined;
-  /** Drop every other user's held edit and outcome (a user change or a sign-out): nothing is kept for anyone else. */
+  /**
+   * Drop every other user's held edit and outcome (a user change): nothing of theirs is kept but the ended mark below,
+   * which names nothing and is taken only by a page of its own user.
+   */
   keepOnly(uid: string | null): void;
+  /**
+   * A session end (M7B-INVOICES-P2), for every user: every held edit and every recorded outcome is DROPPED — key,
+   * target, body, expected version, name and token alike (a held edit is never sent under another token, and an outcome
+   * is shown only under its own) — and each user who lost one is marked, with nothing else, for one unnamed notice.
+   */
+  endAll(): void;
+  /** Whether a session end dropped one of this user's edits or outcomes; the mark is forgotten as it is returned. */
+  takeEnded(uid: string): boolean;
   subscribe(listener: () => void): () => void;
 }
 
 /**
  * An edit that settled after its page had gone: no body, no contact. `csrf` is the token it was sent under: a page shows
  * it only under that same token (the same session, so the same tenant), as a create's outcome; otherwise it is dropped.
+ * A sign-out drops it whoever it belongs to (`endAll`): a session found again after a logout never shows it.
  */
 export interface EditOutcome { readonly kind: EditOutcomeKind; readonly customerId: string; readonly name: string; readonly csrf: string }
 
 export function createEditHoldStore(): EditHoldStore {
   const held = new Map<string, HeldEdit>();
   const outcomes = new Map<string, EditOutcome>();
+  const ended = new Set<string>(); // the users a session end took an edit or an outcome from: nothing else
   const listeners = new Set<() => void>();
   const tell = (): void => { for (const listener of [...listeners]) listener(); };
   return Object.freeze({
@@ -518,6 +537,16 @@ export function createEditHoldStore(): EditHoldStore {
       for (const who of others) held.delete(who);
       if (others.length > 0) tell();
     },
+    endAll(): void {
+      if (held.size === 0 && outcomes.size === 0) return;
+      for (const who of [...held.keys(), ...outcomes.keys()]) ended.add(who);
+      held.clear();
+      outcomes.clear();
+      tell();
+    },
+    takeEnded(uid: string): boolean {
+      return ended.delete(uid);
+    },
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -525,23 +554,21 @@ export function createEditHoldStore(): EditHoldStore {
   });
 }
 
-/** The shop's one edit hold store, like `holdStore`. */
-const editHoldStore: EditHoldStore = createEditHoldStore();
+/** Tie an edit hold store to the session client's `onSessionEnd`: every sign-out drops every edit. Returns the unbinding. */
+export function bindEditHoldsToSessionEnd(store: EditHoldStore): () => void {
+  return onSessionEnd(() => store.endAll());
+}
 
 /**
- * Tie a store to the signed-in user: on a sign-out or another user, every other user's held edit and outcome is dropped
- * — whether or not a directory page is mounted. The same user keeps them (in-app navigation). Returns the unbinding.
+ * The shop's one edit hold store, like `holdStore`: it hears every sign-out from the module's load, mounted page or not.
+ * That is also what a user change does to it: AccessContext.tsx logs the previous user's session out before another
+ * user's is used, so it follows no sign-in state of its own (a page that mounts for a user still drops every other
+ * user's edit: `keepOnly`).
  */
-export function bindEditHoldsToAuth(store: EditHoldStore, watch: (listener: (uid: string | null) => void) => () => void): () => void {
-  return watch((uid) => store.keepOnly(uid));
-}
-let editHoldStoreBound = false;
-/** The shop's store follows the app's own sign-in state (the provider the access context listens to). */
-function bindShopEditHolds(): void {
-  if (editHoldStoreBound) return;
-  editHoldStoreBound = true;
-  bindEditHoldsToAuth(editHoldStore, (listener) => onAuthStateChanged(auth, (user) => listener(user?.uid ?? null)));
-}
+const editHoldStore: EditHoldStore = createEditHoldStore();
+const unbindEditHolds = bindEditHoldsToSessionEnd(editHoldStore);
+// One dispose per module (a later call replaces an earlier one): a hot reload unbinds both stores with the module.
+import.meta.hot?.dispose(() => { unbindHolds(); unbindEditHolds(); });
 
 /** What React sees of a held edit: no token, no body. */
 interface HeldEditView { readonly key: string; readonly name: string; readonly state: HeldEdit['state']; readonly sentAt: number }
@@ -809,13 +836,13 @@ function UserPage({
     if (held !== undefined && held.csrf !== null && held.csrf !== csrf) holds.change(who, held.key, { csrf: null });
     // A held edit is never sent under another token: it is dropped, with its bytes, and the page says so.
     const heldEdit = editHolds.get(who);
-    if (heldEdit !== undefined && heldEdit.csrf !== csrf) dropHeldEdit(who, heldEdit.key, 'connectionHeld');
+    if (heldEdit !== undefined && heldEdit.csrf !== csrf) dropHeldEdit(who, heldEdit.key);
   };
   /** Drop a held edit that can never be checked again, and say (a page-level notice, unnamed) that its outcome is not known. */
-  function dropHeldEdit(who: string, key: string, event: 'connectionHeld' | 'endedHeld'): void {
+  function dropHeldEdit(who: string, key: string): void {
     if (!editHolds.remove(who, key)) return;
     setEditNote(null);
-    putEditStatus({ alert: true, text: EDIT_TEXT[event] });
+    putEditStatus({ alert: true, text: EDIT_TEXT.connectionHeld });
   }
   /** A confirmed save's later news: its own text on that customer's page, by name anywhere else. */
   function savedNews(event: keyof typeof editEventText, held: Pick<HeldEdit, 'customerId' | 'name'>): void {
@@ -838,12 +865,22 @@ function UserPage({
       detach(who, csrf);
       consumeOutcome();
       consumeEditOutcome();
+      endedEditNews(who);
       return false;
     }
     begin(csrf, false);
     consumeOutcome();
     consumeEditOutcome();
+    endedEditNews(who);
     return true;
+  }
+
+  /**
+   * A sign-out dropped one of this user's edits while no page of theirs heard it (M7B-INVOICES-P2): the first token of
+   * a later generation says so, unnamed — no read, no send, no focus moved. Nothing else of that edit was kept.
+   */
+  function endedEditNews(who: string): void {
+    if (editHolds.takeEnded(who)) putEditStatus({ alert: true, text: EDIT_TEXT.endedHeld });
   }
 
   /** A refusal or an ended session shows nothing of the server's on either view: no rows, no cursor, no customer. */
@@ -883,13 +920,20 @@ function UserPage({
       const heldCreate = uid === null ? undefined : holds.get(uid);
       if (uid !== null && heldCreate !== undefined && heldCreate.ended !== true) holds.change(uid, heldCreate.key, { csrf: null, body: '', ended: true });
       // A held edit, in any state, can never be checked again (its token has ended): dropped, and said so. An answer still
-      // out for it then finds nothing to settle.
+      // out for it then finds nothing to settle. An outcome an older page recorded for this user goes too (it is shown
+      // only under its own token, which has ended). On a sign-out the shop's store has dropped both already (its own
+      // listener runs first) and marked this user: the same unnamed notice is said for that mark, and a later end does
+      // not take it away. The profile an explicit Cancel closed goes too.
+      cancelledForm.current = null;
       const heldEdit = uid === null ? undefined : editHolds.get(uid);
+      const outcome = uid === null ? undefined : editHolds.takeOutcome(uid);
+      const dropped = uid !== null && editHolds.takeEnded(uid);
       endedSeen.current += 1;
       freeEdit();
       setEditNote(null);
-      putEditStatus(null);
-      if (uid !== null && heldEdit !== undefined) dropHeldEdit(uid, heldEdit.key, 'endedHeld');
+      if (editStatusRef.current?.text !== EDIT_TEXT.endedHeld) putEditStatus(null);
+      if (uid !== null && heldEdit !== undefined) editHolds.remove(uid, heldEdit.key);
+      if (heldEdit !== undefined || outcome !== undefined || dropped) putEditStatus({ alert: true, text: EDIT_TEXT.endedHeld });
     }
   }
   const isRefusal = (failure: Failure): boolean => failure.kind === 'denied' || failure.kind === 'signed-out';
@@ -1128,8 +1172,7 @@ function UserPage({
   }, [uid]);
 
   useEffect(() => {
-    if (editHolds === editHoldStore) bindShopEditHolds();
-    editHolds.keepOnly(uid); // a user change or a sign-out: the previous user's held edit goes
+    editHolds.keepOnly(uid); // a user change or a sign-out: the previous user's held edit and outcome go
     begin(null, true);
     // A changed session is noticed without a click: reads only, one at a time, and never while a create is out. Its
     // check is plain: it signs in only when no session is confirmed yet for this user or the cookie names another
@@ -1160,8 +1203,9 @@ function UserPage({
     // is mounted — on a direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has
     // loaded. Everything in flight is stale from here (a new generation with no token; reads cancelled, a Reconnect's
     // too); the create form's name, phone and email, its notices and a rate limit's wait go; and the page shows the
-    // ended session (clearBoth: no rows, no customer, no edit; the held create detached). The hold store has heard it
-    // already (its own module-level listener). Nothing is read, sent or signed in because of it: only Reconnect.
+    // ended session (clearBoth: no rows, no customer, no edit form, draft or cancelled profile; the held create detached,
+    // the held edit dropped, unnamed). The shop's hold stores have heard it already (their own module-level listeners).
+    // Nothing is read, sent or signed in because of it: only Reconnect.
     const unhear = onSessionEnd(() => {
       if (uid === null) return;
       gen.current = { n: gen.current.n + 1, csrf: null };
@@ -1473,14 +1517,15 @@ function UserPage({
     if (built.kind === 'unchanged') return putEditStatus({ alert: false, text: EDIT_NO_CHANGES_TEXT });
     const mine = gen.current.n;
     const epoch = editEpoch.current;
+    const since = sessionEndsSoFar();
     const done = busyEdit();
     putEditStatus(null);
     try {
       // Plain: it signs in only when no session is confirmed yet for this user or the cookie names another identity's
       // session; after a confirmed session end it is `ended`, and only the explicit Reconnect signs in.
       const s = await connect(uid);
-      // The page, its connection or its session was replaced: nothing is sent.
-      if (!alive.current || mine !== gen.current.n || epoch !== editEpoch.current) return;
+      // The page, its connection or its session was replaced, or a sign-out began after this check asked: nothing is sent.
+      if (!alive.current || mine !== gen.current.n || epoch !== editEpoch.current || since !== sessionEndsSoFar()) return;
       const open = editRef.current === form; // false: cancelled (or reopened) meanwhile — nothing is sent either way
       if (s.kind !== 'ok') {
         const failure = withWait(sessionFailure(s));
@@ -1695,22 +1740,37 @@ function UserPage({
   }
 
   /** "Check again": the SAME bytes, the SAME key, the SAME customer, under the token it was first sent with. */
+  /**
+   * Check again's synchronous start: the held edit as the store holds it now, validated and marked `checking`. Only its
+   * key is returned, so nothing of the attempt — target, token, bytes — is bound across the session check.
+   */
+  function startCheckEdit(who: string): string | null {
+    const held = editHolds.get(who);
+    if (held === undefined || held.state !== 'unresolved' || held.body === '' || waitRef.current) return null;
+    if (clock() - held.sentAt >= CHECK_CUTOFF_MS) { setTick((n) => n + 1); return null; } // too old: the card now says so
+    if (owningFocus()) focusTarget.current = 'hold'; // the button goes while it checks: the card keeps focus
+    editHolds.change(who, held.key, { state: 'checking' });
+    setEditNote(null);
+    putEditStatus({ alert: false, text: EDIT_TEXT.checking, customerId: held.customerId, named: `Checking your changes to "${held.name}" with the server…` });
+    return held.key;
+  }
+
   async function checkEdit(): Promise<void> {
     if (uid === null || editBusy.current) return;
-    const held = editHolds.get(uid);
-    if (held === undefined || held.state !== 'unresolved' || held.body === '' || waitRef.current) return;
-    if (clock() - held.sentAt >= CHECK_CUTOFF_MS) return setTick((n) => n + 1); // too old: the card now says so
-    const { key, body, csrf, customerId, sentAt } = held;
+    // Only the key is kept across the session check: the target, the token and the bytes are read from the store after it.
+    const key = startCheckEdit(uid);
+    if (key === null) return;
+    const since = sessionEndsSoFar();
     const done = busyEdit();
-    if (owningFocus()) focusTarget.current = 'hold'; // the button goes while it checks: the card keeps focus
-    editHolds.change(uid, key, { state: 'checking' });
-    setEditNote(null);
-    putEditStatus({ alert: false, text: EDIT_TEXT.checking, customerId, named: `Checking your changes to "${held.name}" with the server…` });
     try {
       // Plain, as a Save's: it signs in only when no session is confirmed yet for this user or the cookie names another
       // identity's session; after a confirmed session end only the explicit Reconnect signs in.
       const s = await connect(uid);
-      if (editHolds.get(uid)?.key !== key) return;
+      const now = editHolds.get(uid);
+      if (now === undefined || now.key !== key) return;
+      // A sign-out began after this check asked: nothing is sent or taken (the shop's store has dropped the edit by then).
+      if (since !== sessionEndsSoFar()) return;
+      const { csrf, customerId, sentAt } = now;
       if (s.kind !== 'ok') {
         editHolds.change(uid, key, { state: 'unresolved' });
         if (!alive.current) return; // the page is gone: no wait is started for it
@@ -1725,21 +1785,24 @@ function UserPage({
         else {
           // The page went first: the outcome is recorded under the token the edit was sent with. Under the token rule it
           // is shown only by a page that holds that token again; a page on the new token drops it with no text.
-          const now = editHolds.get(uid);
-          if (now?.key === key) editHolds.finish(uid, key, { kind: 'unconfirmed', customerId, name: now.name, csrf });
+          editHolds.finish(uid, key, { kind: 'unconfirmed', customerId, name: now.name, csrf });
           return;
         }
-        dropHeldEdit(uid, key, 'connectionHeld');
+        dropHeldEdit(uid, key);
         return;
       }
       if (alive.current) adopt(uid, s.csrf);
-      if (editHolds.get(uid)?.key !== key) return; // dropped meanwhile
+      // The edit as the store holds it NOW, still under the token the check confirmed; its bytes go straight into the one
+      // request: the SAME key, the SAME body, the SAME customer, its own token.
+      const sending = editHolds.get(uid);
+      if (sending === undefined || sending.key !== key || sending.csrf !== s.csrf) return; // dropped meanwhile
       if (clock() - sentAt >= CHECK_CUTOFF_MS) { // the window closed during the session step: nothing is sent
         editHolds.change(uid, key, { state: 'unresolved', body: '' });
         if (alive.current) holdNoteOf(key, EDIT_TEXT.tooOld);
         return;
       }
-      settleEdit(uid, key, await sendEdit(customerId, body, key, csrf), false);
+      if (sending.body === '') return;
+      settleEdit(uid, key, await sendEdit(sending.customerId, sending.body, key, sending.csrf), false);
     } finally {
       const now = editHolds.get(uid);
       if (now?.key === key && now.state === 'checking') editHolds.change(uid, key, { state: 'unresolved' }); // never stuck

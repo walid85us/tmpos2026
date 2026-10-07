@@ -17,9 +17,9 @@
 //         module's load, whether or not a directory page is mounted (M7B-INVOICES-P1-R2, doc 08 DA-200): every user's held
 //         create loses its token and its whole body, and every recorded outcome its token. A mounted directory page hears
 //         it too (its refs lose the token with its generation, and it drops that user's held edit). Its edit hold store
-//         does not: it drops every other user's edit and outcome on a sign-out or another user (the page binds it to the
-//         sign-in state); otherwise a held edit keeps its token until a mounted page of its user hears `onSessionEnd` or
-//         sees another token or an ended session (the edit is dropped), or the page reloads.
+//         hears it the same way, from its module's load (M7B-INVOICES-P2): every user's held edit and recorded edit
+//         outcome is dropped whole — target, body, expected version, name, key and token — and only a mark that the user
+//         lost one is kept, for one unnamed notice.
 //       - The server-customer picker (ServerCustomerPicker.tsx, M7A-CUSTOMERS-P9), third: its open dialog in a ref, to
 //         compare it with the next one, until the dialog closes or hears `onSessionEnd`; and its `sessionContextOf` keeps
 //         the latest (UID, token) pair in module scope, to hand out one opaque context per session,

@@ -331,6 +331,19 @@
 //          section's own sign-out listener closes the dialog). The fix's cases — an answer that had arrived just before
 //          the sign-out, a new or ended generation before the answer — are jsdom-only (ServerInvoiceDrafts.test.tsx
 //          SID-55, SID-56).
+// M7B-INVOICES-P2 — THE CUSTOMER DIRECTORY'S EDIT HOLD AT A SIGN-OUT (AC-01/AC-02).
+//   SSE-04 (AC-01/02) THE EDIT HOLD AND THE OPEN EDIT FORM: an owner edits a customer's name and phone; ONE PATCH commits
+//          and its answer is lost at the front (Check again offered). The owner signs out in this tab (the same document):
+//          once the logout has run, the page's heap holds neither the session CSRF token nor the exact PATCH body (the
+//          same search just before the sign-out finds both: a positive control; the new name and phone are recorded with
+//          their retaining path, not asserted). Signed in again (a new session) nothing of the edit is held, offered or
+//          said, through a navigation away and back and a Refresh. The edit form is opened again and a phone typed; at the
+//          next sign-out nothing is sent and the heap holds no token of either session (the typed phone recorded with its
+//          retaining path, not asserted). A REGRESSION GUARD, not evidence of the fix: it passes on the entry commit too (a
+//          real sign-out reaches the mounted page, whose listener drops its user's held edit, and the entry's edit store
+//          also followed the Firebase sign-in). The fix's cases — a sign-out heard with no page mounted, a logout that never reached the
+//          server so the same session is found again, a late answer or a Check again around the sign-out — are
+//          jsdom-only (ServerCustomerDirectory.test.tsx SCD-177..186).
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -1407,7 +1420,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
-  'SSE-01', 'SSE-02', 'SSE-03',
+  'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -5746,3 +5759,112 @@ scenario('SSE-03', 'AC-07 REGRESSION GUARD (it passes on the entry commit too: t
   await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no customer, completion or idempotency record');
   await assertNoLeak(page);
 }, 180_000);
+
+scenario('SSE-04', 'M7B-INVOICES-P2 REGRESSION GUARD (it passes on the entry commit too: a real sign-out also reaches the page while it is mounted, and on the entry commit the edit store also followed the Firebase sign-in) — THE DIRECTORY\'S EDIT HOLD AND OPEN EDIT FORM AT A SIGN-OUT — an edit whose PATCH answer is lost holds its token and exact body until the owner signs out: then the page\'s heap holds neither; signed in again nothing of it is held, offered or re-sent through navigation and a Refresh; an edit form with a typed phone open at the next sign-out sends nothing and leaves no session token of either session in the heap; one create, one edit, nothing else', async () => {
+  const { tenant, boss } = await shop('se4');
+  const name = `M7SSE se4 Ada ${SUFFIX}`;
+  const renamed = `M7SSE se4 King ${SUFFIX}`;
+  const digits = SUFFIX.replace(/\D/g, '7').slice(0, 2);
+  const phone = `+1 555 02${digits}`;
+  const newPhone = `+1 555 03${digits}`;
+  const typedPhone = `+1 555 04${digits}`;
+  const email = `se4.${SUFFIX}@example.test`;
+  const before = await counts();
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDirectory(page);
+  await waitList(page);
+  await page.fill(by('directory-phone'), phone);
+  await page.fill(by('directory-email'), email);
+  await addCustomer(page, name);
+  await page.waitFor(`!!${q('directory-saved-link')}`, 30_000, 'the saved notice');
+  const [{ id }] = await named(tenant, name);
+  await page.click(by('directory-saved-link'));
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  /**
+   * After a sign-out: how many of `tokens` and whether `body` the page's heap still holds (asserted), and whether it
+   * holds each contact string (recorded with its retaining path only: SSE-01's render residue, no erasure claimed).
+   */
+  const searchHeap = async (tokens, body, contacts, tries = 3) => {
+    let found = null;
+    let snapshot = '';
+    // Each snapshot asks for a collection first; the logout's own work may still be finishing in the first one.
+    for (let i = 0; i < tries && (found === null || found.tokens + found.body > 0); i++) {
+      snapshot = await heapSnapshot(page);
+      found = { tokens: tokens.filter((v) => snapshot.includes(v)).length, body: snapshot.includes(JSON.stringify(body).slice(1, -1)) ? 1 : 0 };
+    }
+    const retainers = Object.fromEntries(contacts.map((c) => [c, snapshot.includes(c) ? retainingPath(snapshot, c) : null]));
+    return { found, retainers };
+  };
+  const signedOut = async () => {
+    const out = await signOutHere(page);
+    await page.waitFor(() => st.api.slice(out).some((r) => isLogout(r) && r.handedBack === true), 20_000, 'the logout\'s answer was handed to the page');
+    await page.settle();
+    return out;
+  };
+
+  // 1. ONE PATCH, committed; its answer lost at the front: the edit is held, Check again offered.
+  await openEditForm(page);
+  await retype(page, 'directory-edit-name', renamed);
+  await retype(page, 'directory-edit-phone', newPhone);
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isEdit(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('directory-edit-save'));
+    await waitData(page, 'directory-edit-hold', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const [patch] = sentBy(page, isEdit);
+  const heldBefore = { check: await offered(page, 'directory-edit-check'), lost: patch.lost ?? null };
+  assert.deepEqual(heldBefore, { check: true, lost: 'response' }, 'the edit is held with Check again: its answer was lost at the front');
+  assert.ok(patch.body.includes(newPhone) && patch.body.includes(renamed), 'the body sent carries the new name and phone');
+  const firstTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  assert.ok(firstTokens.length > 0, 'the session CSRF token was seen');
+  // The control: the same search BEFORE the sign-out finds the held edit's token and exact body in the heap, so their
+  // absence after it is the sign-out's doing, not a search that cannot see them.
+  const control = (await searchHeap(firstTokens, patch.body, [], 1)).found;
+  assert.ok(control.tokens > 0 && control.body === 1, `before the sign-out the heap holds the token and the body: ${JSON.stringify(control)}`);
+
+  // 2. Signed out in this tab (the same document): once the logout has run, the heap holds no token and no body.
+  await page.evaluate('window.__sdbSameDocument = true');
+  const out = await signedOut();
+  const held = await searchHeap(firstTokens, patch.body, [renamed, newPhone]);
+
+  // 3. Signed in again (a new session): nothing of the edit is held or offered, through navigation and a Refresh.
+  await signInHere(page, boss);
+  await openDirectory(page, `${DIRECTORY}/${id}`);
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  const shownAgain = async () => ({ hold: await has(page, 'directory-edit-hold'), check: await has(page, 'directory-edit-check'), edit: await offered(page, 'directory-edit') });
+  const back = { ...(await shownAgain()), alert: await textOf(page, 'directory-edit-alert') };
+  await go(page, '/');
+  await page.settle();
+  await openDirectory(page);
+  await waitList(page);
+  const refreshAt = st.api.length;
+  await page.click(by('directory-refresh'));
+  await page.waitFor(() => sentBy(page, isList, refreshAt).some((r) => r.status !== null), 15_000, 'the Refresh read was answered');
+  await openDirectory(page, `${DIRECTORY}/${id}`);
+  await waitData(page, 'directory-detail', 'phase', 'ready');
+  const remounted = await shownAgain();
+
+  // 4. The edit form open, a phone typed, at the next sign-out: nothing is sent, and the heap keeps no token or body.
+  await openEditForm(page);
+  await retype(page, 'directory-edit-phone', typedPhone);
+  const allTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  await signedOut();
+  const form = await searchHeap(allTokens, patch.body, [typedPhone]);
+  await quiet(page, out);
+  const edits = sentBy(page, isEdit);
+  record('SSE-04', { heldBefore, control, held, back, remounted, form, edits: edits.map(apiLine) });
+  assert.equal(await page.evaluate(SAME_DOCUMENT), true, 'the same document throughout: the module memory is the one the sign-outs left');
+  assert.deepEqual(held.found, { tokens: 0, body: 0 }, 'once signed out with an edit held, the page\'s heap holds neither the session CSRF token nor the exact PATCH body');
+  assert.deepEqual(back, { hold: false, check: false, edit: true, alert: '' }, 'signed in again: no held edit, no Check again, Edit offered, nothing said of it');
+  assert.deepEqual(remounted, { hold: false, check: false, edit: true }, 'a navigation away and back and a Refresh change nothing');
+  assert.deepEqual(form.found, { tokens: 0, body: 0 }, 'once signed out with the edit form open, the heap holds no session CSRF token of either session (and still no PATCH body)');
+  assert.deepEqual(edits.map((r) => r.status), [200], 'one PATCH in the whole case: its answer lost at the front, never re-sent, and nothing sent from the form open at the second sign-out');
+  const [stored] = await named(tenant, renamed);
+  assert.equal(stored?.id, id, 'the lost answer\'s edit committed');
+  await assertDelta(before, { C: 1, A: 1, E: 0, U: 1, K: 2, L: 2 }, 'one create and one edit: one customer, one create and one update audit, two completions');
+  await assertNoLeak(page);
+}, 240_000);

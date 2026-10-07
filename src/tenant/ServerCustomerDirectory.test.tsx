@@ -34,23 +34,6 @@ const access = vi.hoisted(() => {
   };
 });
 vi.mock('../firebase', () => ({ auth: { currentUser: null } }));
-// The app's sign-in source, as the shop's own edit hold store listens to it: a switchable stand-in (SCD-139).
-const firebaseAuth = vi.hoisted(() => {
-  const listeners = new Set<(user: { uid: string } | null) => void>();
-  return {
-    subscriptions: 0,
-    listeners,
-    emit(uid: string | null) { for (const l of [...listeners]) l(uid === null ? null : { uid }); },
-  };
-});
-vi.mock('firebase/auth', async (original) => ({
-  ...(await original<typeof import('firebase/auth')>()),
-  onAuthStateChanged: (_auth: unknown, listener: (user: { uid: string } | null) => void) => {
-    firebaseAuth.subscriptions += 1;
-    firebaseAuth.listeners.add(listener);
-    return () => { firebaseAuth.listeners.delete(listener); };
-  },
-}));
 // The routed page reads the signed-in user and the local create and edit hints from the access context: a switchable stand-in.
 vi.mock('../context/AccessContext', async () => {
   const { useSyncExternalStore } = await import('react');
@@ -71,9 +54,9 @@ import {
   NOT_FOUND_TEXT, NOT_PROVIDED_TEXT, NOT_RECORDED_TEXT, PHONE_RULE_TEXT, SEARCH_RULE_TEXT, savedEarlierText, searchMatchingText, searchNoneText,
   STOP_WARNING_TEXT, createHoldStore, ENDED_TEXT, bindHoldsToSessionEnd,
   unresolvedText, type HoldStore, createEditHoldStore, type EditHoldStore, type EditOutcome, EDIT_CONFLICT_TEXT, EDIT_DENIED_TEXT, EDIT_NO_CHANGES_TEXT,
-  EDIT_REVIEWED_TEXT, EDIT_SAVED_TEXT, EDIT_SAVED_UNREFRESHED_TEXT, EDIT_UNKNOWN_TEXT, bindEditHoldsToAuth, editNamedText,
+  EDIT_REVIEWED_TEXT, EDIT_SAVED_TEXT, EDIT_SAVED_UNREFRESHED_TEXT, EDIT_UNKNOWN_TEXT, bindEditHoldsToSessionEnd, editNamedText,
 } from './ServerCustomerDirectory';
-import { createTenantSessionClient, TENANT_SESSION_PATHS, type TenantSessionClient } from './tenantSessionClient';
+import { createTenantSessionClient, onSessionEnd, TENANT_SESSION_PATHS, type TenantSessionClient } from './tenantSessionClient';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomersClient } from './customersClient';
 import { normalizeCustomerName as serverNormalizeCustomerName } from '../../server/runtime/customerCreate';
 import {
@@ -403,7 +386,7 @@ interface MountOptions {
   readonly wrapCustomers?: (client: CustomersClient) => CustomersClient;
   readonly wrapSession?: (client: TenantSessionClient) => TenantSessionClient;
   readonly strict?: boolean; // under <StrictMode>: in development every effect runs setup, cleanup, setup
-  readonly defaultEditHolds?: boolean; // mount WITHOUT an injected edit hold store: the shop's own, bound to sign-in
+  readonly defaultEditHolds?: boolean; // mount WITHOUT an injected edit hold store: the shop's own, bound to onSessionEnd
   readonly defaultHolds?: boolean; // mount WITHOUT an injected hold store: the page's own module-level one
   readonly now?: () => number;
   readonly tokens?: Record<string, string>;
@@ -4131,31 +4114,34 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(patches(server)).toHaveLength(1);
   });
 
-  it('SCD-114. a sign-out or a user change drops the held edit even while the directory is not mounted; the same user keeps it across navigation', async () => {
-    for (const next of [null, 'uid-b'] as const) {
-      const listeners = new Set<(uid: string | null) => void>();
+  it('SCD-114. a sign-out drops the held edit (its bytes and token) even while the directory is not mounted; the same user keeps it across navigation; a page that mounts for another user drops every other user\'s edit', async () => {
+    for (const next of ['sign-out', 'uid-b'] as const) {
       const store = createEditHoldStore();
-      const unbind = bindEditHoldsToAuth(store, (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
-      const emit = (uid: string | null) => act(() => { for (const l of [...listeners]) l(uid); });
-      const server = fakeServer();
-      server.patches.push('rollback-503');
-      const { view } = await editable(server, { keys: [key(1)], editHolds: store });
-      await openForm();
-      fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
-      await click('directory-edit-save');
-      await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
-      await view.go('/elsewhere'); // the guard's redirect: the directory unmounts
-      emit('uid-a'); // the same user: kept for the next visit
-      expect(store.get('uid-a')).toBeDefined();
-      emit(next);
-      expect(store.get('uid-a')).toBeUndefined();
-      expect(JSON.stringify(store.get('uid-a') ?? null)).not.toMatch(/555|King/);
-      await view.go('/customers/directory');
-      await ready();
-      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
-      expect(patches(server)).toHaveLength(1);
-      unbind();
-      expect(listeners.size).toBe(0);
+      const unbind = bindEditHoldsToSessionEnd(store);
+      try {
+        const server = fakeServer();
+        server.patches.push('rollback-503');
+        const { view } = await editable(server, { keys: [key(1)], editHolds: store });
+        await openForm();
+        fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+        await click('directory-edit-save');
+        await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+        await view.go('/elsewhere'); // the guard's redirect: the directory unmounts
+        await view.go('/customers/directory'); // the same user: kept for the next visit
+        await ready();
+        expect(screen.getByTestId('directory-edit-hold')).toBeInTheDocument();
+        await view.go('/elsewhere');
+        if (next === 'sign-out') await act(async () => { await view.session.logout(); });
+        else act(() => access.set({ uid: 'uid-b' }));
+        await view.go('/customers/directory');
+        await ready();
+        expect(store.get('uid-a')).toBeUndefined();
+        expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+        expect(page()).not.toMatch(/Ada King|555 0199/);
+        expect(patches(server)).toHaveLength(1);
+      } finally {
+        unbind();
+      }
       cleanup();
       vi.restoreAllMocks();
       access.set({ uid: 'uid-a', canEdit: false });
@@ -4712,32 +4698,27 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
     expect(document.getElementById('directory-edit-hold-text')).toHaveTextContent(EDIT_UNKNOWN_TEXT);
   });
 
-  it('SCD-139. the shop\'s own edit hold store follows the app\'s sign-in: bound once, kept for the same user, dropped on a sign-out or another user while no page is mounted', async () => {
-    for (const next of [null, 'uid-b'] as const) {
-      const server = fakeServer();
-      server.patches.push('rollback-503');
-      const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: true });
-      await openForm();
-      fillEdit({ name: 'Ada King' });
-      await click('directory-edit-save');
-      await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
-      expect(firebaseAuth.subscriptions).toBe(1); // bound once for the whole app, however many pages mount
-      await view.go('/elsewhere');
-      act(() => firebaseAuth.emit('uid-a')); // the same user: kept
-      await view.go('/customers/directory');
-      await ready();
-      expect(screen.getByTestId('directory-edit-hold')).toBeInTheDocument();
-      await view.go('/elsewhere');
-      act(() => firebaseAuth.emit(next));
-      await view.go('/customers/directory');
-      await ready();
-      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
-      expect(page()).not.toMatch(/Ada King/);
-      cleanup();
-      vi.restoreAllMocks();
-      access.set({ uid: 'uid-a', canEdit: false });
-    }
-    expect(firebaseAuth.subscriptions).toBe(1);
+  it('SCD-139. REGRESSION GUARD (it passes on the entry source too, there through the Firebase sign-in binding and a new session\'s token) — the shop\'s own edit hold store keeps the same user\'s held edit across navigation, and drops it on a sign-out heard while no page is mounted', async () => {
+    access.set({ uid: 'uid-default-edit' });
+    const server = fakeServer();
+    server.users['tok-e'] = { uid: 'uid-default-edit', tenant: TENANT_A, view: true, create: true, edit: true };
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: true, tokens: { 'uid-default-edit': 'tok-e' } });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+    await view.go('/elsewhere');
+    await view.go('/customers/directory');
+    await ready();
+    expect(screen.getByTestId('directory-edit-hold')).toBeInTheDocument();
+    await view.go('/elsewhere');
+    await act(async () => { await view.session.logout(); });
+    await view.go('/customers/directory');
+    await ready();
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(page()).not.toMatch(/Ada King/);
+    expect(patches(server)).toHaveLength(1);
   });
 
   // Review fixes, round 4 (M7A-CUSTOMERS-P7).
@@ -5832,4 +5813,414 @@ describe('ServerCustomerDirectory (M7A-CUSTOMERS-P5)', () => {
       cleanup();
     }
   });
+
+  // M7B-INVOICES-P2 — a session end reaches the held EDIT as it reaches the held create (DA-200's remaining residual):
+  // the edit hold store's own contract, the shop's module-level store with no page mounted (and a logout that never
+  // reached the server, so the SAME session is found again), the mounted page (whose listener runs after the store's),
+  // the late answers it then meets, a Check again whose session check settles on either side of a sign-out, and an
+  // outcome recorded under the session that ended. Each case that uses the shop's own store has its own UID: that store
+  // is shared by every case in this file.
+  const ENDED_HELD_TEXT = "Your server session ended before a change could be confirmed. After you reconnect, check the customer's details.";
+  /** A user of tenant A whose page uses the shop's own edit hold store (bound to onSessionEnd), and that user's login token. */
+  const shopUser = (server: Server, uid: string): Record<string, string> => {
+    server.users[`tok-${uid}`] = { uid, tenant: TENANT_A, view: true, create: true, edit: true };
+    access.set({ uid });
+    return { [uid]: `tok-${uid}` };
+  };
+  /** Count each time the edit alert region's text BECOMES `text` (an announcement); `stop()` disconnects and answers it. */
+  const countAlerts = (text: string) => {
+    const node = editAlert();
+    let last = node.textContent;
+    let count = 0;
+    const observer = new MutationObserver(() => {
+      const now = node.textContent;
+      if (now !== last && now === text) count += 1;
+      last = now;
+    });
+    observer.observe(node, { childList: true, characterData: true, subtree: true });
+    return { stop: (): number => { observer.disconnect(); return count; } };
+  };
+  const heldEditState = () => waitFor(() => expect(screen.getByTestId('directory-edit-hold')).toHaveAttribute('data-state', 'unresolved'));
+  /** A logout that never reaches the server: the session it began with still stands, so the next check finds it again. */
+  const signOutUnsent = async (server: Server, view: ReturnType<typeof mount>) => {
+    const cookie = server.cookie!;
+    const kept = server.sessions.get(cookie)!;
+    await signOut(view);
+    server.sessions.set(cookie, kept);
+    server.cookie = cookie;
+  };
+
+  it('SCD-177. the edit hold store\'s contract: bound to onSessionEnd, a sign-out DROPS every user\'s held edit and every recorded outcome (key, target, body, version, name and token), once, keeping only a per-user mark that is taken once; a listener heard after it finds the store already cleared; a late answer then settles nothing by key; a page for one user leaves the other users\' marks to them; unbound, it hears nothing', async () => {
+    const store = createEditHoldStore();
+    const T = 'c'.repeat(43);
+    const edit = (n: number, name: string, state: 'sending' | 'unresolved') => ({
+      key: key(n), customerId: uuid(0xe0 + n), body: editBody(3, { name, phone: PHONE }), expectedVersion: 3, name, csrf: T, sentAt: n, state,
+    });
+    store.put('uid-a', edit(1, 'Ada King', 'sending'));
+    store.put('uid-b', edit(2, 'Bea Queen', 'unresolved'));
+    store.put('uid-c', edit(3, 'Cy Duke', 'sending'));
+    store.finish('uid-c', key(3), { kind: 'saved', customerId: uuid(0xe3), name: 'Cy Duke', csrf: T });
+    const told = vi.fn();
+    store.subscribe(told);
+    const client = createTenantSessionClient({ fetch: fakeServer().fetch });
+    const unbind = bindEditHoldsToSessionEnd(store);
+    // Registered after the store's binding, as a mounted page's listener is: it runs second (insertion order).
+    const seen: unknown[] = [];
+    const unhear = onSessionEnd(() => { seen.push(store.get('uid-a'), store.get('uid-b')); });
+    try {
+      await client.logout();
+      expect(seen).toEqual([undefined, undefined]); // already dropped when the later listener ran
+      expect(told).toHaveBeenCalledTimes(1);
+      for (const uid of ['uid-a', 'uid-b', 'uid-c']) expect(store.get(uid)).toBeUndefined();
+      expect(store.takeOutcome('uid-c')).toBeUndefined();
+      // A late answer finds nothing to settle: every by-key step is refused, and nothing is recorded.
+      expect(store.change('uid-a', key(1), { state: 'unresolved' })).toBe(false);
+      expect(store.finish('uid-a', key(1), { kind: 'saved', customerId: uuid(0xe1), name: 'Ada King', csrf: T })).toBe(false);
+      expect(store.announce('uid-b', key(2), { kind: 'undecided', customerId: uuid(0xe2), name: 'Bea Queen', csrf: T })).toBe(false);
+      expect(store.remove('uid-b', key(2))).toBe(false);
+      expect([store.takeOutcome('uid-a'), store.takeOutcome('uid-b')]).toEqual([undefined, undefined]);
+      await client.logout(); // nothing is left to drop: nobody is told again
+      expect(told).toHaveBeenCalledTimes(1);
+      expect(store.takeEnded('uid-a')).toBe(true);
+      expect(store.takeEnded('uid-a')).toBe(false); // taken once
+      store.keepOnly('uid-b'); // a page that mounts for uid-b: uid-c's mark stays for uid-c's own next page
+      expect(store.takeEnded('uid-b')).toBe(true);
+      expect(store.takeEnded('uid-c')).toBe(true);
+      expect(store.takeEnded('uid-d')).toBe(false); // nothing was held for uid-d
+    } finally {
+      unhear();
+      unbind();
+    }
+    store.put('uid-e', edit(5, 'Eve', 'unresolved'));
+    await client.logout();
+    expect(store.get('uid-e')).toEqual(edit(5, 'Eve', 'unresolved')); // unbound: it heard nothing
+    expect(store.takeEnded('uid-e')).toBe(false);
+  });
+
+  it('SCD-178. the shop\'s own edit hold store hears a sign-out with no directory page mounted: after a logout that never reached the server the same user gets the SAME session back, yet the held edit (with contacts) is gone — no card, no Check again, no name or contact, one unnamed notice; focus and Refresh send no PATCH and sign nothing in', async () => {
+    const server = fakeServer();
+    const tokens = shopUser(server, 'uid-default-edit-away');
+    server.patches.push('rollback-503');
+    const { view, ada } = await editable(server, { keys: [key(1), key(2)], defaultEditHolds: true, tokens });
+    await openForm();
+    fillEdit({ name: 'Ada King', phone: '+1 555 0199', email: 'king@example.test' });
+    await click('directory-edit-save');
+    await heldEditState();
+    expect(screen.getByTestId('directory-edit-check')).toBeEnabled();
+    await view.go('/elsewhere'); // no directory page is mounted from here on
+    await signOutUnsent(server, view);
+    await view.go('/customers/directory');
+    await ready();
+    expect(logins(server)).toHaveLength(1); // the session (and its token) the edit was sent under, found again
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(screen.queryByTestId('directory-edit-check')).toBeNull();
+    await waitFor(() => expect(editAlert().textContent).toBe(ENDED_HELD_TEXT));
+    expect(page()).not.toMatch(/Ada King|555 0199|king@/);
+    await focusWindow();
+    await settle();
+    await click('directory-refresh');
+    await ready();
+    await settle();
+    await openDetail(view, ada.id);
+    expect(screen.getByTestId('directory-edit')).toBeInTheDocument(); // nothing is held: Edit is offered again
+    expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+    expect(patches(server)).toHaveLength(1);
+    expect(logins(server)).toHaveLength(1);
+  });
+
+  it('SCD-179. REGRESSION GUARD (it passes on the entry source too: the mounted page dropped its user\'s held edit) — a sign-out while the page is mounted clears the edit at once: an open form with typed contacts goes with its draft and the profile (no notice: nothing was held); a held edit goes from the card, the form and the store, and the page says it once, unnamed (one announcement, counted), that the change could not be confirmed — also when the shop\'s own store has dropped it first; nothing is read, sent or signed in until the Reconnect click, no PATCH follows it, and a form opened then starts from the profile, never the typed values', async () => {
+    for (const variant of ['form', 'held-shop', 'held-injected'] as const) {
+      const server = fakeServer();
+      const tokens = variant === 'held-shop' ? shopUser(server, 'uid-default-edit-mounted') : undefined;
+      server.patches.push('rollback-503');
+      const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: variant === 'held-shop', tokens });
+      const uid = access.get().uid!;
+      await openForm();
+      fillEdit({ name: 'Ada King', phone: '+1 555 0199', email: 'king@example.test' });
+      if (variant !== 'form') {
+        await click('directory-edit-save');
+        await heldEditState();
+      }
+      const mark = server.sent.length;
+      const alerts = countAlerts(ENDED_HELD_TEXT);
+      await signOut(view);
+      expect(detailPhase()).toBe('signed-out');
+      expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(page()).not.toMatch(/Ada King|555 0199|king@|555 0100|ada@example/); // typed and profile contacts alike
+      expect(editStatus().textContent).toBe(variant === 'form' ? '' : ENDED_HELD_TEXT);
+      if (variant === 'held-injected') expect(view.editHolds.get(uid)).toBeUndefined();
+      await settle();
+      expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+      await click('directory-detail-retry'); // Reconnect: the one control that signs in
+      await waitFor(() => expect(detailPhase()).toBe('ready'));
+      await settle();
+      expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+      expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+      expect(editStatus().textContent).toBe(variant === 'form' ? '' : ENDED_HELD_TEXT); // never named
+      expect(alerts.stop()).toBe(variant === 'form' ? 0 : 1); // announced once: not again at the Reconnect
+      await openForm(); // the typed draft went with the ended form: the form starts from the profile read now
+      expect([editInput('name').value, editInput('phone').value, editInput('email').value]).toEqual(['Ada Lovelace', PHONE, EMAIL]);
+      expect(patches(server)).toHaveLength(variant === 'form' ? 0 : 1);
+      cleanup();
+      vi.restoreAllMocks();
+      access.set({ uid: 'uid-a', canEdit: false });
+    }
+  });
+
+  it('SCD-180. REGRESSION GUARD (it passes on the entry source too: the mounted page dropped the attempt, so its answer is key-guarded) — the late answer of an edit a sign-out dropped while its PATCH was out (a 200 that committed, a 409 conflict, a 503 after commit, no answer) revives nothing: no "Saved", conflict or refusal — unknown stays unknown, only the unnamed notice — no form, card, token or body, no read-back, send or sign-in; after Reconnect nothing of it is said or sent', async () => {
+    for (const late of ['200', '409', '503', 'network'] as const) {
+      for (const store of ['shop', 'injected'] as const) {
+        const server = fakeServer();
+        const tokens = store === 'shop' ? shopUser(server, `uid-default-edit-late-${late}`) : undefined;
+        if (late === '503') server.patches.push('commit-then-503');
+        const delivered: string[] = []; // what the customers client made of the late answer: proof it reached the page
+        const wrapCustomers = (c: CustomersClient): CustomersClient => ({
+          ...c,
+          update: async (...args) => {
+            try {
+              const r = await c.update(...args);
+              delivered.push(r.kind === 'unknown' ? `unknown:${r.responded}` : r.kind);
+              return r;
+            } catch (error) {
+              delivered.push('threw');
+              throw error;
+            }
+          },
+        });
+        const { view, ada } = await editable(server, { keys: [key(1)], defaultEditHolds: store === 'shop', tokens, wrapCustomers });
+        const uid = access.get().uid!;
+        await openForm();
+        fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+        if (late === '409') server.editElsewhere(ada.id, 'Ada Byron');
+        server.hold.patches = 1;
+        await click('directory-edit-save');
+        await waitFor(() => expect(server.held).toHaveLength(1));
+        await signOut(view);
+        expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+        const mark = server.sent.length;
+        await act(async () => { server.held[0].release(late === 'network' ? 'drop' : undefined); });
+        await settle();
+        const label = `late ${late}, ${store} store`;
+        // Delivered first: the held answer drained and reached the page as the client reads it (a 200 that committed).
+        expect(delivered, label).toEqual([{ 200: 'saved', 409: 'conflict', 503: 'unknown:true', network: 'unknown:false' }[late]]);
+        if (late === '200') expect(server.rows[TENANT_A].find((r) => r.id === ada.id)!.name, label).toBe('Ada King');
+        expect(server.sent.slice(mark), label).toEqual([]); // no read-back, no session check, no send
+        expect(editStatus().textContent, label).toBe(ENDED_HELD_TEXT);
+        expect(screen.queryByTestId('directory-edit-name')).toBeNull();
+        expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+        expect(page()).not.toMatch(/Ada King|555 0199/);
+        if (store === 'injected') expect([view.editHolds.get(uid), view.editHolds.takeOutcome(uid)]).toEqual([undefined, undefined]);
+        await click('directory-detail-retry');
+        await waitFor(() => expect(detailPhase()).toBe('ready'));
+        await settle();
+        expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+        expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+        expect(patches(server)).toHaveLength(1);
+        cleanup();
+        vi.restoreAllMocks();
+        access.set({ uid: 'uid-a', canEdit: false });
+      }
+    }
+  });
+
+  // SCD-181: one case per variant, so each is judged on its own (also on the entry source).
+  for (const where of ['mounted', 'gone'] as const) {
+    for (const store of ['shop', 'unbound'] as const) {
+      for (const order of ['before', 'after'] as const) {
+        it(`SCD-181 (${where}, ${store} store, answered ${order} the sign-out). ${where === 'gone' && order === 'before' ? '' : 'REGRESSION GUARD (it passes on the entry source too) — '}a Check again whose session check answers just before a sign-out begins, or just after, sends nothing — on its page or after that page has gone, with the shop's store or with a store that hears no sign-out: only the logout goes out, and the shop's store keeps nothing of the edit to check later`, async () => {
+          const server = fakeServer();
+          const tokens = store === 'shop' ? shopUser(server, `uid-default-edit-check-${where}-${order}`) : undefined;
+          server.patches.push('rollback-503');
+          let trip = false;
+          let mark = -1;
+          // `before`: the sign-out begins after the session check has answered, before Check again's continuation runs.
+          const wrapSession = (c: TenantSessionClient): TenantSessionClient => ({
+            ...c, ensure: async (...args) => { const s = await c.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void c.logout(); } return s; },
+          });
+          const { view } = await editable(server, { keys: [key(1), key(2)], defaultEditHolds: store === 'shop', tokens, wrapSession });
+          await openForm();
+          fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+          await click('directory-edit-save');
+          await heldEditState();
+          server.hold.checks = 1; // Check again's session check is held at the front
+          await click('directory-edit-check');
+          await waitFor(() => expect(server.held).toHaveLength(1));
+          if (where === 'gone') await view.go('/elsewhere');
+          if (order === 'before') {
+            trip = true;
+            await act(async () => { server.held[0].release(); });
+          } else {
+            mark = server.sent.length;
+            await signOut(view);
+            await act(async () => { server.held[0].release(); });
+          }
+          await settle();
+          if (order === 'before') expect(trip).toBe(false); // the sign-out did begin between the answer and its use
+          expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+          expect(patches(server)).toHaveLength(1);
+          if (store === 'shop') {
+            if (where === 'gone') await view.go('/customers/directory');
+            await settle();
+            expect(screen.queryByTestId('directory-edit-hold')).toBeNull();
+            expect(screen.queryByTestId('directory-edit-check')).toBeNull();
+            expect(patches(server)).toHaveLength(1);
+          }
+        });
+      }
+    }
+  }
+
+  // SCD-182: one case per variant.
+  for (const when of ['settled-before', 'settled-after'] as const) {
+    it(`SCD-182 (${when}). an edit outcome recorded under a session that a sign-out then ended is dropped with it: when a logout that never reached the server leaves that SAME session to be found again, the customer's page says only the unnamed notice — no "Saved", no name, no list or profile read-back; an answer that settles after the sign-out records nothing at all`, async () => {
+      const server = fakeServer();
+      const tokens = shopUser(server, `uid-default-edit-reused-${when}`);
+      const { view, ada } = await editable(server, { keys: [key(1)], defaultEditHolds: true, tokens });
+      await openForm();
+      fillEdit({ name: 'Ada King' });
+      server.hold.patches = 1;
+      await click('directory-edit-save');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      await view.go('/elsewhere'); // the page that sent it goes: its answer settles in the store only
+      if (when === 'settled-before') {
+        await act(async () => { server.held[0].release(); });
+        await settle();
+      }
+      await signOutUnsent(server, view);
+      if (when === 'settled-after') {
+        await act(async () => { server.held[0].release(); });
+        await settle();
+      }
+      const [listsBefore, detailsBefore] = [lists(server).length, details(server).length];
+      await view.go(`/customers/directory/${ada.id}`);
+      await waitFor(() => expect(detailPhase()).toBe('ready'));
+      await settle();
+      expect(logins(server)).toHaveLength(1); // the same session, found again
+      expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+      expect(lists(server)).toHaveLength(listsBefore + 1); // the page's own first reads, nothing more
+      expect(details(server)).toHaveLength(detailsBefore + 1);
+      expect(screen.getByTestId('directory-edit')).toBeInTheDocument();
+      expect(patches(server)).toHaveLength(1);
+    });
+  }
+
+  it('SCD-183. the unnamed notice of an edit a sign-out dropped stays through a later ended answer: a Reconnect whose session step finds no sign-in (the identity gone, as after a real sign-out) keeps it, and reads, sends and signs in nothing', async () => {
+    const server = fakeServer();
+    const tokens: Record<string, string> = { 'uid-a': 'tok-a' };
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)], tokens });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await heldEditState();
+    delete tokens['uid-a'];
+    await signOut(view);
+    expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+    const mark = server.sent.length;
+    await click('directory-detail-retry');
+    await waitFor(() => expect(screen.getByTestId('directory-detail')).toHaveTextContent('Sign in with your store account'));
+    await settle();
+    expect(detailPhase()).toBe('signed-out');
+    expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+    expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // the check only: no login
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  it('SCD-184. an ended session a read finds also drops an edit outcome an older page recorded under it: the page says only the unnamed notice; after Reconnect (a new session) nothing of it is named, read back or sent', async () => {
+    const server = fakeServer();
+    const store = createEditHoldStore();
+    const { view } = await editable(server, { keys: [key(1)], editHolds: store });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    server.hold.patches = 1;
+    await click('directory-edit-save');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await view.go('/elsewhere'); // the page that sent it goes: its answer is recorded for the next page of this user
+    await act(async () => { server.held[0].release(); });
+    await settle();
+    server.sessions.clear(); // the session ends on the server: the next page's first check finds it ended
+    await view.go('/customers/directory');
+    await waitFor(() => expect(phase()).toBe('signed-out'));
+    await settle();
+    expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+    expect(store.takeOutcome('uid-a')).toBeUndefined();
+    const listsBefore = lists(server).length;
+    await click('directory-retry'); // Reconnect
+    await ready();
+    await settle();
+    expect(lists(server)).toHaveLength(listsBefore + 1); // the Reconnect's own read only
+    expect(editStatus().textContent).toBe(ENDED_HELD_TEXT);
+    expect(patches(server)).toHaveLength(1);
+  });
+  it('SCD-185. an ended mark is its own user\'s: A\'s held edit dropped by a sign-out while no page is mounted, then B\'s page (another user) mounts and says nothing of it, then A\'s next page says the unnamed notice — once: the page after that says nothing', async () => {
+    const server = fakeServer();
+    const [a, b] = ['uid-default-edit-aba-a', 'uid-default-edit-aba-b'];
+    server.users[`tok-${b}`] = { uid: b, tenant: TENANT_B, view: true, create: true, edit: true };
+    const tokens = { ...shopUser(server, a), [b]: `tok-${b}` };
+    server.patches.push('rollback-503');
+    const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: true, tokens });
+    await openForm();
+    fillEdit({ name: 'Ada King' });
+    await click('directory-edit-save');
+    await heldEditState();
+    await view.go('/elsewhere');
+    await signOut(view);
+    act(() => access.set({ uid: b })); // another user signs in: their page drops every other user's edit (keepOnly)
+    await view.go('/customers/directory');
+    await ready();
+    await settle();
+    expect(editStatus().textContent).toBe('');
+    await view.go('/elsewhere');
+    act(() => access.set({ uid: a }));
+    await view.go('/customers/directory');
+    await ready();
+    await waitFor(() => expect(editAlert().textContent).toBe(ENDED_HELD_TEXT));
+    await view.go('/elsewhere');
+    await view.go('/customers/directory');
+    await ready();
+    await settle();
+    expect(editStatus().textContent).toBe(''); // the mark was taken by the page that said it
+    expect(patches(server)).toHaveLength(1);
+  });
+
+  // SCD-186: Save's analogue of SCD-181, one case per variant.
+  for (const store of ['shop', 'injected'] as const) {
+    for (const order of ['before', 'after'] as const) {
+      it(`SCD-186 (${store} store, answered ${order} the sign-out). REGRESSION GUARD (it passes on the entry source too: the page's generation and the session client's epoch already stop it) — a Save whose session check answers just before a sign-out begins, or just after, sends nothing: no PATCH and no key, no read-back, no replacement login — only the logout goes out`, async () => {
+        const server = fakeServer();
+        const tokens = store === 'shop' ? shopUser(server, `uid-default-edit-save-${order}`) : undefined;
+        let trip = false;
+        let mark = -1;
+        const wrapSession = (c: TenantSessionClient): TenantSessionClient => ({
+          ...c, ensure: async (...args) => { const s = await c.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void c.logout(); } return s; },
+        });
+        const { view } = await editable(server, { keys: [key(1)], defaultEditHolds: store === 'shop', tokens, wrapSession });
+        const uid = access.get().uid!;
+        await openForm();
+        fillEdit({ name: 'Ada King', phone: '+1 555 0199' });
+        const loginsBefore = logins(server).length;
+        server.hold.checks = 1; // Save's session check is held at the front
+        await click('directory-edit-save');
+        await waitFor(() => expect(server.held).toHaveLength(1));
+        if (order === 'before') {
+          trip = true;
+          await act(async () => { server.held[0].release(); });
+        } else {
+          mark = server.sent.length;
+          await signOut(view);
+          await act(async () => { server.held[0].release(); });
+        }
+        await settle();
+        if (order === 'before') expect(trip).toBe(false); // the sign-out did begin between the answer and its use
+        expect(server.sent.slice(mark).map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+        expect(patches(server)).toHaveLength(0);
+        expect(view.made).toHaveLength(0); // no key was taken
+        expect(logins(server)).toHaveLength(loginsBefore);
+        expect(detailPhase()).toBe('signed-out');
+        expect(page()).not.toMatch(/Ada King|555 0199/);
+        if (store === 'injected') expect(view.editHolds.get(uid)).toBeUndefined();
+      });
+    }
+  }
 });
