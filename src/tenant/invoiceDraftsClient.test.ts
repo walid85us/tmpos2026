@@ -3,13 +3,14 @@
 // checks before a create: exact dollar-to-cent parsing (BigInt, no float anywhere), whole quantities, the 2^53-1 bound on
 // every line and on the subtotal, the description rule (the customer name rule at 256) and the body's 64 KiB in exact UTF-8
 // bytes. Every accepted answer is one server/runtime/invoiceDrafts.ts and storeDirectory.ts would serve, and nothing they
-// would refuse to serve is accepted. Ids are built at run time (secret scanning), special characters from code points, so
+// would refuse to serve is accepted. M7B-INVOICES-P1-R2: the eligibility read (IDC-17, IDC-18) — `allowed` only for the
+// exact closed body, each refusal only in its envelope, everything else `unavailable`. Ids are built at run time (secret scanning), special characters from code points, so
 // the test data stays ASCII.
 import { Buffer } from 'node:buffer';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, STORES_PATH, createInvoiceDraftsClient, draftBody, draftPathOf, draftsPathOf, formatCents,
+  DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, STORES_PATH, createInvoiceDraftsClient, draftBody, draftPathOf, draftsPathOf, eligibilityPathOf, formatCents,
   isDraftBodyTooLarge, isDraftCreatedAt, normalizeDraftDescription, parsePriceCents, parseQuantity,
 } from './invoiceDraftsClient';
 import { normalizeCustomerName } from './customersClient';
@@ -450,4 +451,68 @@ test('IDC-16. a read refusal decides only in the server\'s exact { error, reques
   assert.deepEqual(await scripted(refused(400, 'invalid_request')).client.listDrafts(STORE, CURSOR, CSRF), { kind: 'bad-cursor' });
   assert.deepEqual(await scripted(refused(404, 'not_found')).client.getDraft(STORE, DRAFT, CSRF), { kind: 'not-found' });
   assert.deepEqual(await scripted(refused(429, 'rate_limited')).client.getDraft(STORE, DRAFT, CSRF), { kind: 'rate-limited', retryAfterSeconds: 60 });
+});
+
+test('IDC-17. eligibility: a GET of the store\'s eligibility path with the session token only; allowed ONLY for a 200 whose body is exactly { eligibility: "allowed" }; any other 200 is unavailable', async () => {
+  const { calls, client } = scripted(json(200, { eligibility: 'allowed' }));
+  assert.deepEqual(await client.eligibility(STORE, CSRF), { kind: 'allowed' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, eligibilityPathOf(STORE));
+  assert.equal(calls[0].url, `${STORES_PATH}/${STORE}/invoice-drafts/eligibility`); // no query: the server refuses one (400)
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.credentials, 'include');
+  assert.equal(calls[0].init.mode, 'same-origin');
+  assert.equal(calls[0].init.cache, 'no-store');
+  assert.equal(calls[0].init.redirect, 'error');
+  const h = headersOf(calls[0]);
+  assert.equal(h.get('x-tmpos-session-csrf'), CSRF);
+  assert.equal(h.get('idempotency-key'), null);
+  assert.equal(h.get('x-tmpos-csrf'), null);
+  const malformed: unknown[] = [
+    { eligibility: 'allowed', role: 'owner' }, { eligibility: 'allowed', more: false }, {}, { eligibility: 'denied' }, { eligibility: 'Allowed' },
+    { eligibility: true }, { eligibility: null }, { allowed: true }, { eligibility: ['allowed'] }, ['allowed'], 'allowed', null, 1,
+    { eligibility: { allowed: true } },
+  ];
+  for (const body of malformed) assert.deepEqual(await scripted(json(200, body)).client.eligibility(STORE, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
+  // The right words in no JSON answer, or past the body bound: unavailable.
+  assert.deepEqual(await scripted(new Response('{"eligibility":"allowed"}', { status: 200, headers: { 'content-type': 'text/plain' } })).client.eligibility(STORE, CSRF), { kind: 'unavailable' });
+  assert.deepEqual(await scripted(new Response('{"eligibility":"allowed"', { status: 200, headers: { 'content-type': 'application/json' } })).client.eligibility(STORE, CSRF), { kind: 'unavailable' });
+  assert.deepEqual(await scripted(new Response(`{"eligibility":"allowed"${' '.repeat(262_144)}}`, { status: 200, headers: { 'content-type': 'application/json' } })).client.eligibility(STORE, CSRF), { kind: 'unavailable' });
+  // Another 2xx is no answer this route gives.
+  for (const status of [201, 204]) {
+    const res = status === 204 ? new Response(null, { status }) : json(status, { eligibility: 'allowed' });
+    assert.deepEqual(await scripted(res).client.eligibility(STORE, CSRF), { kind: 'unavailable' }, String(status));
+  }
+});
+
+test('IDC-18. eligibility refusals: 401 signed-out, 403 denied, 429 rate-limited with its Retry-After (60 without one) — each only in the server\'s exact envelope; a 5xx, 400, 404, an off-shape refusal, no answer, a timeout or an abort is unavailable; a store id outside its grammar sends nothing', async () => {
+  assert.deepEqual(await scripted(refused(401, 'unauthenticated')).client.eligibility(STORE, CSRF), { kind: 'signed-out' });
+  assert.deepEqual(await scripted(refused(403, 'forbidden')).client.eligibility(STORE, CSRF), { kind: 'denied' });
+  assert.deepEqual(await scripted(refused(429, 'rate_limited', { 'retry-after': '9' })).client.eligibility(STORE, CSRF), { kind: 'rate-limited', retryAfterSeconds: 9 });
+  assert.deepEqual(await scripted(refused(429, 'rate_limited')).client.eligibility(STORE, CSRF), { kind: 'rate-limited', retryAfterSeconds: 60 });
+  const html = (status: number): Response => new Response('<html>no</html>', { status, headers: { 'content-type': 'text/html' } });
+  const other: Response[] = [
+    refused(500, 'internal_error'), refused(503, 'service_unavailable'), refused(400, 'invalid_request'), refused(404, 'not_found'),
+    html(401), html(403), html(429), json(403, { error: 'forbidden' }), json(401, { error: 'unauthenticated' }), json(429, { error: 'rate_limited' }),
+    refused(403, 'authz_context_missing'), refused(401, 'forbidden'), json(403, { error: 'forbidden', requestId: 'r', extra: 1 }), json(200, { error: 'forbidden', requestId: 'r' }),
+  ];
+  for (const res of other) assert.deepEqual(await scripted(res).client.eligibility(STORE, CSRF), { kind: 'unavailable' }, `${res.status} ${res.headers.get('content-type')}`);
+  assert.deepEqual(await scripted(new Error('offline')).client.eligibility(STORE, CSRF), { kind: 'unavailable' });
+  // A timeout: the client's own deadline aborts the request.
+  const hang = (async (_input: RequestInfo | URL, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+    init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  })) as typeof globalThis.fetch;
+  assert.deepEqual(await createInvoiceDraftsClient({ fetch: hang, timeoutMs: 5 }).eligibility(STORE, CSRF), { kind: 'unavailable' });
+  // The caller's abort: unavailable, and an already-aborted signal sends nothing.
+  const caller = new AbortController();
+  const pending = createInvoiceDraftsClient({ fetch: hang }).eligibility(STORE, CSRF, caller.signal);
+  caller.abort();
+  assert.deepEqual(await pending, { kind: 'unavailable' });
+  const { calls, client } = scripted();
+  assert.deepEqual(await client.eligibility(STORE, CSRF, caller.signal), { kind: 'unavailable' });
+  for (const store of ['', 'store-1', STORE.toUpperCase(), `${STORE}/x`, '../stores', `${STORE}?x=1`]) {
+    assert.deepEqual(await client.eligibility(store, CSRF), { kind: 'denied' }, store);
+  }
+  assert.deepEqual(calls, []);
 });

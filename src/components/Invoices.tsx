@@ -832,7 +832,7 @@ export default function Invoices() {
       </div>
 
       {/* M7B-INVOICES-P1 — store-owned drafts saved on the server: their own section, never in the list or counters above. */}
-      <ServerInvoiceDrafts uid={uid} canCreate={canCreate} canViewCustomers={canViewServerCustomers} handoff={draftHandoff} onHandoffTaken={() => setDraftHandoff(null)} />
+      <ServerInvoiceDrafts uid={uid} canViewCustomers={canViewServerCustomers} handoff={draftHandoff} onHandoffTaken={() => setDraftHandoff(null)} />
 
       <AnimatePresence>
         {detailInvoice && !showPaymentModal && !showEditModal && !showEmailModal && !showSmsModal && !showOnlinePayModal && !showPrintModal && (

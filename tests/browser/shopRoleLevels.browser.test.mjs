@@ -267,11 +267,15 @@
 //          to stand for a browser-only role; that account signs in in the SAME document after the owner's sign-out, so the
 //          page still holds the role. Its server grants are `technician` (tenant and store: Invoices View by default). The
 //          page's hint follows the seeded id into that in-memory role (Invoices Full), so the invoice form's "Create
-//          Invoice" and the section's "New server draft" ARE offered — `canCreate` is the local role's hint only, by the
-//          section's own rule (ServerInvoiceDrafts.tsx header) — and the case asserts that, as shown. The section lists the
-//          store's draft (View). The page's own save (its real Save, with its own session cookie, session CSRF token and
-//          request-intent header) is answered 403 `forbidden` and said "Not saved"; nothing is written: no draft, line,
-//          audit, outbox event, idempotency completion or lease, and no role-level row or version.
+//          Invoice" IS offered (the local invoices are the browser's own). M7B-INVOICES-P1-R2 (DA-201, AC-09) inverts the
+//          section's half: "New server draft" is the server's decision now, and its eligibility read is answered 403
+//          `forbidden` (after the one fresh session check: the same token), so New is NOT offered and the section says the
+//          account may not save drafts there; the store's draft still lists (View). The direct save stays refused on its
+//          own (AC-10): the POST a Save would send — the page's own session cookie, its session CSRF token, the
+//          request-intent header, a v4 key and the exact body — sent by the harness from inside the page (fetch in its
+//          document, same-origin, credentials included: no stand-in route, no test-only permission, the real store) is
+//          answered 403 `forbidden`; nothing is written: no draft, line, audit, outbox event, idempotency completion or
+//          lease, and no role-level row or version, and the eligibility reads wrote nothing either.
 //   SDB-08 (AC-15, DA-198) A READ OUT WHEN ANOTHER USER SIGNS IN: user A has W chosen, and W's list read has been
 //          answered by the entry with A's row but its answer is parked at the front. User B (another account of the tenant,
 //          a store grant at W) signs in in a second tab of the same browser — SRL-09's switch: this tab's Firebase SDK
@@ -282,6 +286,22 @@
 //          request from this tab after the switch began but its one logout of A's session carries A's session CSRF token
 //          (answered 401 when the other tab's own switch has already ended that session, as it can). Once B's profile is
 //          released this tab shows B's Invoices page, and still nothing of A.
+// M7B-INVOICES-P1-R2 — SERVER ELIGIBILITY (DA-201, journey D): "New server draft" follows GET
+// /api/v1/stores/{storeId}/invoice-drafts/eligibility, answered by the real entry over 028.
+//   SDB-09 (AC-08, AC-11, AC-13) A manager with store grants at W and E: W's eligibility answer (200, exactly
+//          {"eligibility":"allowed"}, carrying the session CSRF token, no query) is parked at the front — no New, the
+//          section says it is checking — and released: New. A stale allowance cannot cross a store switch: E's check is
+//          parked before it reaches the entry, then W's next allowance is parked, then E is chosen again (its check parked
+//          too); W's allowance released while E is chosen offers nothing (the page aborted that read on the switch, so
+//          this shows that nothing of W's scope shows, not the section's staleness checks — the jsdom SID-63..65 pin
+//          those); E's own released check then offers New. The owner lowers the manager's Invoices level to View outside
+//          the browser (the shop's PUT): the next check (choosing W) is 403 forbidden and New goes, said as an alert, and
+//          the same at E; raised back to Create, the next check offers New again. Nothing the checks do writes: no
+//          draft, line, audit, outbox event, completion, lease, idempotency record or role-level row; no draft POST.
+//   SDB-10 (AC-13) A STALE ALLOWANCE ACROSS A SESSION/USER SWITCH: user A has W chosen and W's eligibility allowance
+//          parked at the front; B signs in in a second tab (SDB-08's window: B's profile held, A's page mounted). Released
+//          then, the allowance offers nothing — the section had ended at the sign-out (its stores say so) — and starts
+//          nothing; no request after the switch but A's logout carries A's token; B's page then shows no New of A's.
 // M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
 // guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
 // of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
@@ -302,7 +322,8 @@
 //          before it leaves, so the drop is the sign-out's own. Once B's profile loads, the draft (now B's) holds no server
 //          customer, and opening B's picker binds nothing. Nothing is written.
 //   SSE-03 (AC-07) THE DRAFT HAND-OVER'S SESSION CHECK: A hands a server customer to the Server drafts section and chooses
-//          a store, which opens the New server draft dialog; its session check (GET /api/v1/session) is held at the front.
+//          a store; the server's eligibility answer (parked, then released: M7B-INVOICES-P1-R2) opens the New server draft
+//          dialog; its session check (GET /api/v1/session) is held at the front.
 //          B signs in in a second tab (B's profile held); the check's answer, released then, opens nothing: no dialog, no
 //          customer, no hand-over note, no draft POST and no login, and no request after the switch but A's logout carries
 //          A's session CSRF token. A REGRESSION GUARD, not evidence of the AC-07 fix: it passes on the entry commit too
@@ -1385,7 +1406,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SRL-11', 'SRL-12', 'SRL-13', 'SRL-14', 'SRL-15', 'SRL-16',
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
-  'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08',
+  'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
   'SSE-01', 'SSE-02', 'SSE-03',
 ]);
 const registered = new Set();
@@ -4000,6 +4021,8 @@ const isStoresRead = (r) => r.method === 'GET' && r.path === STORES;
 const isDraftsRoute = (r) => r.path.startsWith(`${STORES}/`);
 const isDraftCreate = (r) => r.method === 'POST' && /^\/api\/v1\/stores\/[^/]+\/invoice-drafts$/.test(r.path);
 const isDraftList = (store) => (r) => r.method === 'GET' && r.path === draftsPath(store);
+/** The eligibility read of `store` (M7B-INVOICES-P1-R2: GET /api/v1/stores/{storeId}/invoice-drafts/eligibility). */
+const isEligibility = (store) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/eligibility`;
 const isDraftGet = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}`;
 const minus = (a, b) => Object.fromEntries(Object.keys(a).map((k) => [k, a[k] - b[k]]));
 
@@ -4125,6 +4148,7 @@ async function typeLineField(page, i, field, text) {
 }
 /** "New server draft" for the chosen store: a server customer picked by its database id in the picker, then `lines` typed. */
 async function composeDraft(page, customerId, lines) {
+  await page.waitFor(() => offered(page, 'drafts-new'), 30_000, 'New server draft is offered (the server allowed it: M7B-INVOICES-P1-R2)');
   await page.click(by('drafts-new'));
   await page.waitFor(`!!${q('draft-new')}`, 15_000, 'the New server draft dialog');
   await openPicker(page, 'picker-open');
@@ -4691,6 +4715,8 @@ scenario('SDB-04', 'AC-14 LOST REQUEST — the first POST never reaches the entr
 // custom role against the server's authority (SDB-07) and a read out when another user signs in (SDB-08)
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** ServerInvoiceDrafts.tsx ELIGIBILITY_TEXT.denied: the server's eligibility refused (M7B-INVOICES-P1-R2). */
+const ELIG_DENIED = 'This account may not save drafts at this store.';
 /** ServerInvoiceDrafts.tsx REFUSED_TEXT.denied: a save the server refused 403. */
 const DRAFT_DENIED = 'Not saved: this account may not save drafts at this store.';
 /** ServerInvoiceDrafts.tsx HOLD_TEXT.detached, its start. */
@@ -4927,7 +4953,7 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
   const westIds = (await storedDrafts(tenant)).filter((d) => d.storeId === west.id).map((d) => d.id);
   await pickStore(page, west.id);
   await waitDraftRows(page, westIds, 'B lists W', customer.name);
-  const bNew = await offered(page, 'drafts-new');
+  const bNew = await page.waitFor(() => offered(page, 'drafts-new'), 30_000, 'B is offered New once the server allows it').then(() => true, () => false);
   await quiet(page, out);
   await delay(2_000); // whatever it would still send on its own, it has sent
   const after = sentBy(page, () => true, out);
@@ -5099,7 +5125,7 @@ scenario('SDB-06', 'DA-199 FOCUS IN REAL CHROMIUM — outside the dialogs no pre
   await assertNoLeak(page);
 }, 240_000);
 
-scenario('SDB-07', 'AC-04 BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER\'S AUTHORITY — the owner makes a custom role with Invoices Full in the shop\'s own Roles tab (page memory only); the harness seeds a technician-granted account\'s users/{uid}.role with its id, standing for a browser-only role the shop cannot persist; signed in in the same document, the page offers Create Invoice and New server draft on that local hint and lists the store\'s draft (View), and its own save is refused 403 forbidden and writes nothing', async () => {
+scenario('SDB-07', 'AC-04 BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER\'S AUTHORITY — the owner makes a custom role with Invoices Full in the shop\'s own Roles tab (page memory only); the harness seeds a technician-granted account\'s users/{uid}.role with its id, standing for a browser-only role the shop cannot persist; signed in in the same document, the page offers Create Invoice on that local hint and lists the store\'s draft (View), but the server\'s eligibility is 403 and New server draft is NOT offered (M7B-INVOICES-P1-R2, AC-09); the save, sent directly from the page with its own session, is refused 403 forbidden and writes nothing (AC-10)', async () => {
   const tenant = await newTenant('d7-custom');
   const mainName = `M7SDB d7c main ${SUFFIX}`;
   const main = { id: await newStore(tenant, mainName), name: mainName };
@@ -5113,8 +5139,9 @@ scenario('SDB-07', 'AC-04 BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER\'S AUTHORI
   // session.role, so effectiveRole is that id (no POS operator role is set here); checkPermission (decideTenantPermission
   // → tenantPermissionLevel, tenantAccessDecisions.ts) finds the role with that id in tenantRolesState — the in-memory list
   // the owner's addTenantRole appended it to in THIS document — and reads its Invoices level, Full; so Invoices.tsx's
-  // canCreate is true and the section offers New. In a fresh document the id would match no role: level `none`, and
-  // canAccess refuses the page.
+  // local Create Invoice is offered. The Server drafts section takes no local hint since M7B-INVOICES-P1-R2: its New
+  // follows the server's eligibility only. In a fresh document the id would match no role: level `none`, and canAccess
+  // refuses the page.
   const tech = await actor('d7-custom-tech', [grant(tenant, 'technician'), storeGrant(tenant, main.id, 'technician')], { role: customId });
   const [dSeed] = await seedDrafts(tenant, main.id, customer.id, boss.id, 1, 'M7SDB d7c seed');
   const page = await recordWrites(await openPage());
@@ -5141,47 +5168,65 @@ scenario('SDB-07', 'AC-04 BROWSER-ONLY CUSTOM ROLE AGAINST THE SERVER\'S AUTHORI
   const options = (await storeOptions(page)).map((o) => o.value);
   await pickStore(page, main.id);
   await waitDraftRows(page, [dSeed], 'the technician grant lists the store\'s draft (Invoices View)', customer.name);
+  // The server decides New (M7B-INVOICES-P1-R2): its eligibility answer for this store and session, never the local hint.
+  await page.waitFor(`${q('drafts-elig')}?.dataset.phase === 'denied'`, 30_000, 'the server\'s eligibility answer: denied');
+  await quiet(page, switched);
   const newOffered = await offered(page, 'drafts-new');
+  // The refusal is an alert of its own; the section's eligibility status region keeps its role and goes quiet.
+  const eligText = await textOf(page, 'drafts-elig-alert');
+  const eligRole = await page.evaluate(`${q('drafts-elig-alert')}?.getAttribute('role') ?? null`);
+  const eligReads = sentBy(page, isEligibility(main.id), switched);
   const techLogin = st.api.filter(acceptedLogin(tech)).at(-1);
   assert.ok(techLogin, 'the page established the custom-role account\'s tenant session');
 
-  // 3. The page's own save: composed in New server draft and sent by its Save, with the page's own session headers.
+  // 3. The direct save, refused on its own: the POST a Save sends, sent from inside the page's document with its own
+  // session (the cookie by credentials, the session CSRF token the entry answered this account), as Save would send it.
   const lines = [typed(`Custom role line ${SUFFIX}`, '1', '15', 1_500)];
-  await composeDraft(page, customer.id, lines);
+  const token = answeredTokens(sentBy(page, () => true, switched)).at(-1);
+  assert.ok(typeof token === 'string', 'the session CSRF token the entry answered this account');
+  const key = randomUUID();
   const before = await counts();
   const dBefore = await draftCounts(tenant);
   const roleBefore = await tenantState(tenant);
   const from = st.api.length;
-  await page.click(by('draft-new-save'));
-  await page.waitFor(`${q('draft-new-status')}?.textContent.trim() === ${JSON.stringify(DRAFT_DENIED)}`, 30_000, 'the refusal, said in the dialog');
+  const direct = await page.evaluate(`fetch(${JSON.stringify(draftsPath(main.id))}, {
+    method: 'POST', credentials: 'include', mode: 'same-origin', cache: 'no-store', redirect: 'error',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ${JSON.stringify(CSRF_HEADER)}: ${JSON.stringify(CSRF_HEADER_VALUE)},
+      ${JSON.stringify(SESSION_CSRF_HEADER)}: ${JSON.stringify(token)}, 'Idempotency-Key': ${JSON.stringify(key)} },
+    body: ${JSON.stringify(bodyFor(tenant, customer.id, lines))},
+  }).then((r) => r.status)`);
   await quiet(page, from);
   await delay(1_000); // whatever it would still send on its own, it has sent
   const posts = sentBy(page, isDraftCreate, from);
   const logins = sentBy(page, isLogin, from);
   const dDelta = minus(await draftCounts(tenant), dBefore);
   const roleAfter = await tenantState(tenant);
-  record('SDB-07', { same, grid, sentByGrid, writesByGrid, createInvoice, options, newOffered, posts: posts.map(apiLine), logins: logins.map(apiLine), ...dDelta, roleAfter });
+  record('SDB-07', { same, grid, sentByGrid, writesByGrid, createInvoice, options, newOffered, eligText, eligReads: eligReads.map(apiLine), direct, posts: posts.map(apiLine), logins: logins.map(apiLine), ...dDelta, roleAfter });
   assert.deepEqual(grid, { invoices: 'full', customers: 'view' }, 'the custom role\'s levels in the local grid');
   assert.deepEqual(sentByGrid, [], 'the role and its levels are local: no write (non-GET) request reaches the tenant server');
   assert.deepEqual(writesByGrid, [], 'nor written to Firestore');
   assert.equal(same, true, 'the same document: the custom role made here is still this page\'s');
-  assert.equal(createInvoice, true, 'what the page shows: the local role decides Invoices Create, so the invoice form\'s Create Invoice is offered');
+  assert.equal(createInvoice, true, 'what the page shows: the local role decides the browser\'s own invoices, so the invoice form\'s Create Invoice is offered');
   assert.deepEqual(options, ['', main.id], 'the server\'s stores for the technician grant');
-  assert.equal(newOffered, true, 'what the page shows: New server draft, offered on the local role\'s hint (ServerInvoiceDrafts.tsx: `canCreate` is a hint only)');
+  assert.deepEqual(eligReads.map(answered), ['403 forbidden'], `the server's eligibility for this store and session: ${eligReads.map(apiLine).join('; ')}`);
+  assert.equal(newOffered, false, 'New server draft is NOT offered: the server denied it, whatever the local role\'s Invoices Full says (AC-09)');
+  assert.deepEqual([eligText, eligRole], [ELIG_DENIED, 'alert'], 'the section says the account may not save drafts at this store');
+  assert.equal(direct, 403, 'the direct POST is refused');
   assert.deepEqual(posts.map(answered), ['403 forbidden'], `ONE POST, refused by the server: ${posts.map(apiLine).join('; ')}`);
   const [post] = posts;
-  assert.equal(post.path, draftsPath(main.id), 'to the chosen store');
-  assert.equal(post.body, bodyFor(tenant, customer.id, lines), 'the page\'s own body');
+  assert.equal(post.path, draftsPath(main.id), 'to the real store');
+  assert.equal(post.body, bodyFor(tenant, customer.id, lines), 'the exact body a Save sends');
   assert.match(post.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
-  assert.equal(post.headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the page\'s request-intent header');
-  assert.ok(answeredTokens(sentBy(page, (r) => r !== post, switched)).includes(post.headers[SESSION_CSRF]), 'with the session CSRF token the entry answered this account');
-  assert.ok((post.headers.cookie ?? '').includes(techLogin.cookie), 'and its own session cookie');
+  assert.equal(post.headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the request-intent header');
+  assert.equal(post.headers[SESSION_CSRF], token, 'with the session CSRF token the entry answered this account');
+  assert.ok((post.headers.cookie ?? '').includes(techLogin.cookie), 'and the page\'s own session cookie');
   assert.deepEqual(logins, [], 'no login around the save');
   assert.deepEqual(dDelta, { D: 0, L: 0, A: 0, O: 0 }, 'no draft, line, audit or outbox event');
   await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'refused before anything is recorded: no idempotency completion or lease, no audit of any kind');
   assert.deepEqual((await storedDrafts(tenant)).map((d) => d.id), [dSeed], 'the store holds only its seeded draft');
   assert.deepEqual(roleAfter, roleBefore, 'no role-level row, version or edit audit changed');
   assert.deepEqual(roleAfter.levels, {}, 'no role level is stored for the tenant: the custom role\'s Full reached no server');
+  assert.deepEqual(sentBy(page, isDraftCreate).length, 1, 'the page sent no POST of its own: the one is the harness\'s');
   await assertNoLeak(page);
 }, 240_000);
 
@@ -5240,6 +5285,189 @@ scenario('SDB-08', 'AC-15 A READ OUT WHEN ANOTHER USER SIGNS IN (DA-198) — use
     'released while A\'s section was still mounted (B\'s profile held), A\'s answer showed nothing and started nothing; the section had ended at the sign-out');
   const aLogouts = after.filter((r) => isLogout(r) && carries(r, aTokens));
   assert.equal(aLogouts.length, 1, `this tab sent one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
+  await assertNoLeak(page);
+}, 180_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P1-R2 — server eligibility (DA-201, journey D): SDB-09 and SDB-10
+// ---------------------------------------------------------------------------------------------------------------------
+
+const eligPhaseOf = (page) => page.evaluate(`${q('drafts-elig')}?.dataset.phase ?? null`);
+/**
+ * The browser-side end of `page`'s requests (CDP Network domain, enabled on this page only): each request's id by path in
+ * send order, and how its load ended — finished (the page received the answer) or failed (canceled: the page aborted it,
+ * so no answer can reach it). Call before the requests it must see.
+ */
+async function watchNetwork(page) {
+  const sent = [];
+  const ends = new Map();
+  const waiters = new Map();
+  const end = (id, how) => { ends.set(id, how); waiters.get(id)?.(how); };
+  page.on('Network.requestWillBeSent', (e) => { try { sent.push({ id: e.requestId, path: new URL(e.request.url).pathname }); } catch { /* not a URL */ } });
+  page.on('Network.loadingFinished', (e) => end(e.requestId, 'finished'));
+  page.on('Network.loadingFailed', (e) => end(e.requestId, e.canceled === true ? 'canceled' : `failed ${e.errorText}`));
+  await page.send('Network.enable');
+  page.net = {
+    /** How many requests to `path` the browser has sent so far: taken just before a request is parked. */
+    mark: (path) => sent.filter((r) => r.path === path).length,
+    /**
+     * How the browser ended THE request to `path` sent after `mark` (exactly one: the parked one), null if it has not
+     * within `timeout`.
+     */
+    endOfParked(path, mark, timeout = 15_000) {
+      const after = sent.filter((r) => r.path === path).slice(mark);
+      assert.equal(after.length, 1, `exactly one request to ${path} since the park began: ${after.length}`);
+      const [parked] = after;
+      if (ends.has(parked.id)) return Promise.resolve(ends.get(parked.id));
+      return Promise.race([new Promise((ok) => waiters.set(parked.id, ok)), delay(timeout).then(() => null)]);
+    },
+  };
+  return page;
+}
+/** One role's Invoices level set outside the browser the way the shop's owner sets it: read the tenant, then PUT asserting `expectedVersion`. */
+async function setInvoicesLevel(session, roleId, level, expectedVersion) {
+  const read = await call('GET', ROLE_LEVELS, { session });
+  assert.equal(read.status, 200, read.text);
+  const { tenant } = JSON.parse(read.text);
+  const res = await call('PUT', ROLE_LEVELS, { session, body: { roleId, domain: 'invoices', level, reason: REASON, expectedTenant: tenant, expectedVersion }, key: randomUUID() });
+  assert.equal(res.status, 200, `the owner's Invoices level for ${roleId}: ${res.text}`);
+}
+/** Park `page`'s next eligibility read of `store` at `phase`; answers the parked record (null after 30 s). */
+async function parkEligibility(page, store, phase, choose = true) {
+  const g = gate((r) => r.frameId === page.frameId && isEligibility(store)(r), phase);
+  if (choose) await pickStore(page, store);
+  const rec = await Promise.race([g.reached, delay(30_000).then(() => null)]);
+  assert.ok(rec, `the eligibility read of the store reached the front (${phase})`);
+  return { rec, release: g.release };
+}
+
+scenario('SDB-09', 'DA-201 SERVER ELIGIBILITY (AC-08, AC-11, AC-13) — a manager gets New only once the server\'s eligibility for the chosen store answers allowed (parked: checking, no New); W\'s allowance released after a switch to E offers nothing at E; the owner lowering the manager\'s Invoices level makes the next check 403 and New goes, raising it back brings New again; the checks write nothing and nothing is posted', async () => {
+  const tenant = await newTenant('d9');
+  const westName = `M7SDB d9 west ${SUFFIX}`;
+  const eastName = `M7SDB d9 east ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const east = { id: await newStore(tenant, eastName), name: eastName };
+  const boss = await actor('d9-owner', [grant(tenant, 'store_owner')], { role: 'store_owner' });
+  const mgr = await actor('d9-mgr', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager'), storeGrant(tenant, east.id, 'manager')], { role: 'manager' });
+  const page = await watchNetwork(await recordWrites(await openPage()));
+  await signIn(page, mgr);
+  await openDrafts(page);
+  const dBefore = await draftCounts(tenant);
+  const before = await counts();
+  const start = st.api.length;
+
+  // 1. W: the allowance parked at the front — checking, no New — then released: New.
+  const first = await parkEligibility(page, west.id, 'response');
+  await page.waitFor(async () => (await eligPhaseOf(page)) === 'checking', 15_000, 'the section says it is checking');
+  const whileParked = { newShown: await has(page, 'drafts-new'), text: await textOf(page, 'drafts-elig'), role: await page.evaluate(`${q('drafts-elig')}?.getAttribute('role') ?? null`) };
+  first.release();
+  await page.waitFor(() => offered(page, 'drafts-new'), 30_000, 'New once the server allowed it');
+  const firstRead = first.rec;
+
+  // 2. A stale allowance cannot cross a store switch: E's check parked before the entry, W's next allowance parked at the
+  // front, E chosen again (parked before the entry); W's allowance released while E is chosen.
+  const e1 = await parkEligibility(page, east.id, 'request');
+  const w2Mark = page.net.mark(`${draftsPath(west.id)}/eligibility`);
+  const w2 = await parkEligibility(page, west.id, 'response');
+  const e2 = await parkEligibility(page, east.id, 'request');
+  w2.release();
+  await page.waitFor(() => w2.rec.handedBack === true, 15_000, 'W\'s allowance was handed back to the browser');
+  // The browser's own end of that very request: finished (the page received the answer) or canceled (the page aborted
+  // it on the switch, so no answer can reach it); then two frames, so whatever it made the page do has run.
+  const w2End = await page.net.endOfParked(`${draftsPath(west.id)}/eligibility`, w2Mark);
+  assert.ok(w2End !== null, 'the browser ended W\'s parked request');
+  await page.settle();
+  const atEast = { chosen: await chosenStore(page), newShown: await has(page, 'drafts-new'), phase: await eligPhaseOf(page) };
+  e1.release();
+  e2.release();
+  await page.waitFor(() => offered(page, 'drafts-new'), 30_000, 'E\'s own allowance: New');
+
+  // 3. The owner lowers the manager's Invoices level to View: the next check (W chosen) is 403, and New goes.
+  const ownerSession = await directLogin(boss);
+  await setInvoicesLevel(ownerSession, 'manager', 'view', 0);
+  const lowered = await tenantState(tenant);
+  const writesFrom = await counts();
+  const dFrom = await draftCounts(tenant);
+  const lowerAt = st.api.length;
+  await pickStore(page, west.id);
+  await page.waitFor(async () => (await eligPhaseOf(page)) === 'denied', 30_000, 'W: the server denies it now');
+  const deniedWest = { newShown: await has(page, 'drafts-new'), text: await textOf(page, 'drafts-elig-alert'), role: await page.evaluate(`${q('drafts-elig-alert')}?.getAttribute('role') ?? null`) };
+  await pickStore(page, east.id);
+  await page.waitFor(async () => (await eligPhaseOf(page)) === 'denied', 30_000, 'E: denied too');
+  const deniedEast = { newShown: await has(page, 'drafts-new') };
+  await quiet(page, lowerAt);
+  const deniedReads = sentBy(page, (r) => isEligibility(west.id)(r) || isEligibility(east.id)(r), lowerAt);
+  const deniedWrites = { ...minus(await draftCounts(tenant), dFrom), roleChanged: JSON.stringify(await tenantState(tenant)) !== JSON.stringify(lowered) };
+  await assertDelta(writesFrom, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'the denied checks recorded nothing: no completion, lease, idempotency record or audit');
+
+  // 4. Raised back to Create: the next check (W chosen) offers New again.
+  await setInvoicesLevel(ownerSession, 'manager', 'create', 1);
+  await pickStore(page, west.id);
+  await page.waitFor(() => offered(page, 'drafts-new'), 30_000, 'W: allowed again');
+  await quiet(page, start);
+  const reads = sentBy(page, (r) => isEligibility(west.id)(r) || isEligibility(east.id)(r), start);
+  record('SDB-09', {
+    whileParked, firstRead: answered(firstRead), firstBody: firstRead.replied.text, atEast, w2: { handedBack: w2.rec.handedBack === true, status: answered(w2.rec), browserEnd: w2End },
+    deniedWest, deniedEast, deniedReads: deniedReads.map(apiLine), deniedWrites, reads: reads.map(apiLine),
+  });
+  assert.deepEqual(whileParked, { newShown: false, text: 'Checking with the server whether drafts can be saved at this store…', role: 'status' }, 'nothing until the server answers');
+  assert.equal(firstRead.status, 200);
+  assert.equal(firstRead.replied.text, '{"eligibility":"allowed"}', 'the closed allowance, nothing else');
+  assert.equal(firstRead.query, '', 'no query');
+  assert.ok(answeredTokens(sentBy(page, () => true, 0)).includes(firstRead.headers[SESSION_CSRF]), 'under the session CSRF token the entry answered this page');
+  assert.deepEqual(atEast, { chosen: east.id, newShown: false, phase: 'checking' }, 'W\'s allowance, released while E is chosen, offered nothing at E');
+  assert.equal(w2.rec.status, 200, 'what was released was a real allowance');
+  assert.deepEqual(deniedWest, { newShown: false, text: ELIG_DENIED, role: 'alert' }, 'the lowered level: W\'s next check takes New away');
+  assert.deepEqual(deniedEast, { newShown: false }, 'and E\'s');
+  assert.ok(deniedReads.length >= 2 && deniedReads.every((r) => r.status === 403 && r.error === 'forbidden'), `each check after the edit is 403 forbidden: ${deniedReads.map(apiLine).join('; ')}`);
+  assert.deepEqual(deniedWrites, { D: 0, L: 0, A: 0, O: 0, roleChanged: false }, 'the denied checks wrote no draft, line, audit, event or role-level row');
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST in the whole case');
+  assert.deepEqual(minus(await draftCounts(tenant), dBefore), { D: 0, L: 0, A: 0, O: 0 }, 'no draft, line, audit or event in the whole case');
+  await assertDelta(before, { C: 0, K: 2, L: 2 }, 'the whole case: no customer; its only completions and idempotency records are the owner\'s two level edits');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-10', 'DA-201 A STALE ALLOWANCE ACROSS A SESSION/USER SWITCH (AC-13) — A has W chosen and W\'s eligibility allowance parked at the front; B signs in in another tab (B\'s profile held, A\'s page mounted); the allowance released then offers nothing and starts nothing, and only A\'s logout carries A\'s token after the switch', async () => {
+  const tenant = await newTenant('d10');
+  const westName = `M7SDB d10 west ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const a = await actor('d10-a', [grant(tenant, 'store_owner'), storeGrant(tenant, west.id, 'store_owner')], { role: 'store_owner' });
+  const b = await actor('d10-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const page = await watchNetwork(await recordWrites(await openPage()));
+  await signIn(page, a);
+  await openDrafts(page);
+  const parkMark = page.net.mark(`${draftsPath(west.id)}/eligibility`);
+  const parked = await parkEligibility(page, west.id, 'response');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  assert.ok(aTokens.length > 0, 'A\'s session CSRF token was seen');
+  const from = st.api.length;
+  const profile = await switchHeld(page, b, from);
+  parked.release();
+  await page.waitFor(() => parked.rec.handedBack === true, 15_000, 'the parked allowance was handed back to the browser');
+  // The browser's own end of that very request (finished: received; canceled: aborted by the sign-out), then two frames.
+  const parkedEnd = await page.net.endOfParked(`${draftsPath(west.id)}/eligibility`, parkMark);
+  assert.ok(parkedEnd !== null, 'the browser ended the parked request');
+  await page.settle();
+  const whileMounted = {
+    section: await has(page, 'drafts-section'), stores: await page.evaluate(`${q('drafts-stores-state')}?.dataset.phase ?? null`),
+    newShown: await has(page, 'drafts-new'), dialog: await has(page, 'draft-new'),
+  };
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from);
+  const after = sentBy(page, () => true, from);
+  const seen = {
+    whileMounted, newNow: await has(page, 'drafts-new'),
+    eligAfter: after.filter((r) => isEligibility(west.id)(r)).map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+  };
+  record('SDB-10', { parked: answered(parked.rec), browserEnd: parkedEnd, ...seen, requests: after.map(apiLine) });
+  assert.equal(parked.rec.status, 200, 'the parked answer was a real allowance');
+  assert.deepEqual(seen, {
+    whileMounted: { section: true, stores: 'signed-out', newShown: false, dialog: false }, newNow: false, eligAfter: [], carriersOfA: [],
+  }, 'released while A\'s section was mounted, A\'s allowance offered nothing and started nothing');
+  assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
   assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
   await assertNoLeak(page);
 }, 180_000);
@@ -5464,18 +5692,23 @@ scenario('SSE-03', 'AC-07 REGRESSION GUARD (it passes on the entry commit too: t
   await page.waitFor(`!!${q('drafts-handoff')}`, 30_000, 'the Server drafts section holds the hand-over');
   await waitData(page, 'drafts-stores-state', 'phase', 'ready');
 
-  // 1. The store choice opens the dialog for the hand-over; every session check asked from here (the list read's and the
-  // dialog's, whether they share one request or not) is held at the front.
+  // 1. The store choice asks the server's eligibility (M7B-INVOICES-P1-R2): its allowance, parked at the front, opens the
+  // dialog for the hand-over once released; every session check asked from then on (the dialog's) is held at the front.
+  const allowance = gate((r) => r.frameId === page.frameId && isEligibility(west.id)(r), 'response');
+  await pickStore(page, west.id);
+  const allowed = await Promise.race([allowance.reached, delay(30_000).then(() => null)]);
+  assert.ok(allowed, 'the eligibility read reached the entry; its answer is parked');
+  assert.equal(await has(page, 'draft-new'), false, 'no dialog before the server\'s answer');
   const checks = [0, 1, 2].map(() => gate((r) => r.frameId === page.frameId && isSessionRead(r), 'response'));
   const pickAt = st.api.length;
-  await pickStore(page, west.id);
+  allowance.release();
   const held = await Promise.race([checks[0].reached, delay(30_000).then(() => null)]);
   assert.ok(held, 'the session check reached the entry; its answer is parked');
   await page.waitFor(`!!${q('draft-new')}`, 15_000, 'the New server draft dialog opened for the hand-over');
   await page.settle(); // two frames after the dialog mounted: its effect has asked its check (its own request, or the shared one)
   const heldChecks = sentBy(page, isSessionRead, pickAt);
   assert.ok(heldChecks.length >= 1 && heldChecks.length <= checks.length && heldChecks.every((r) => r.handedBack !== true),
-    `every session check since the store choice is held at the front: ${heldChecks.map(apiLine).join('; ')}`);
+    `every session check since the allowance was released is held at the front: ${heldChecks.map(apiLine).join('; ')}`);
   // The dialog's own field (the Invoices form, still animating out, may show its old customer for a moment).
   const dialogBound = () => page.evaluate(`document.querySelector('${by('draft-new')} ${by('picker-value')}')?.dataset.id ?? null`);
   const opened = { bound: await dialogBound(), handoff: await has(page, 'drafts-handoff') };

@@ -8,6 +8,8 @@
 // M7B-INVOICES-P1: the page's "Server drafts" section (ServerInvoiceDrafts.tsx) rides along with the REAL invoice drafts
 // client over the same fake (stores, a store's drafts, one create): a server customer is no longer a dead end — "Save as
 // server draft" hands its id and name (only) to that section — and a server draft never reaches the local invoices.
+// M7B-INVOICES-P1-R2 (DA-201): the section's dialog opens for a hand-over only once the server allows a draft at the
+// chosen store (its eligibility read, which this fake allows at its one store); the page passes no local role hint.
 // M7B-INVOICES-P1-R2 (DA-202): a sign-out with the picker closed clears the draft's server customer at once, a local one
 // untouched (INV-18); "Save as server draft" never hands on a customer whose session is over and says so (INV-19); a
 // later session's context drops a closed field's customer (INV-20); the alert never takes focus moved elsewhere (INV-21).
@@ -115,7 +117,7 @@ import Invoices from './Invoices';
 import { NOT_AVAILABLE_TEXT, PICK_ENDED_TEXT, SERVER_DRAFT_LIMIT_TEXT, sessionContextOf } from '../tenant/ServerCustomerPicker';
 import { CUSTOMERS_PATH, createCustomersClient, type CustomerEntry } from '../tenant/customersClient';
 import { createTenantSessionClient, sessionEndsSoFar, TENANT_SESSION_PATHS } from '../tenant/tenantSessionClient';
-import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, type InvoiceDraftsClient } from '../tenant/invoiceDraftsClient';
+import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, eligibilityPathOf, type InvoiceDraftsClient } from '../tenant/invoiceDraftsClient';
 import { DRAFTS_TEXT, NOT_SENT_TEXT } from '../tenant/ServerInvoiceDrafts';
 import { encodeCustomerCursor, encodeCustomerSearchCursor, parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
@@ -210,6 +212,8 @@ function fakeServer() {
         if (session === undefined) return refuse(401);
         return reply(200, { stores: session.user.uid === 'uid-a' ? [{ id: STORE, tenantId: TENANT_A, name: 'Main Street', readOnly: false }] : [] });
       }
+      // M7B-INVOICES-P1-R2: the server allows this user a draft at its one store (the save's own requirement decides it).
+      if (session !== undefined && method === 'GET' && url === eligibilityPathOf(STORE)) return reply(200, { eligibility: 'allowed' });
       if (session !== undefined && url.startsWith(draftsPathOf(STORE))) {
         const subtotal = (d: (typeof drafts)[number]) => d.body.lines.reduce((sum, l) => sum + l.quantity * l.unitPriceCents, 0);
         if (method === 'POST') {

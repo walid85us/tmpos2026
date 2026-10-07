@@ -4,8 +4,27 @@
 //
 //   - Separate from this browser's invoices: a server draft never enters the local invoice list, its counters or any
 //     browser storage, and nothing here offers what a draft is not (no number, no amount owed, no status but "Draft").
-//   - The server decides everything. `canCreate` (Invoices Create) and `canViewCustomers` (the customers feature and
-//     Customers View) are the local role state's hints only; the server's 403 is the answer that counts.
+//   - The server decides everything. `canViewCustomers` (the customers feature and Customers View) is the local role
+//     state's hint only; the server's 403 is the answer that counts.
+//   - "New server draft" is offered ONLY on the server's own positive answer (M7B-INVOICES-P1-R2, DA-201): GET
+//     /api/v1/stores/{storeId}/invoice-drafts/eligibility, decided by the save's own requirement. No local role state
+//     (Invoices Create or Full), role name or earlier answer stands in for it. One eligibility state is kept, bound to
+//     the user, the generation (its counter and token), the chosen store and the request that asked: New (and a
+//     hand-over's dialog opening on its own) needs `allowed` under exactly the ones there now, so a store change, a new
+//     generation or a sign-out takes the offer away at once, and an answer for an older request, store, generation or
+//     user, or one arriving after a sign-out began, changes nothing. It is a read, asked only when a writable store is
+//     chosen under a confirmed token and by the user's own Try again — never on a timer, a focus or a tab return; a
+//     new generation clears the choice, so its own check comes with the next choice; a read-only store asks nothing.
+//     Its answers: checking; allowed; denied (a 403 after the reads' one fresh check found the same token — another
+//     token starts a new generation instead); unavailable (an outage, a malformed answer, a timeout: Try again, and
+//     never said as a refusal); rate-limited (the section's wait, holding New and Try again back until it has passed,
+//     then Try again); a 401 ends the session as any read's does. A save or a Check again the server refuses 403 takes
+//     New away at its store under that session (nothing is asked again on its own; the attempt keeps the state its own
+//     rule gives it), and a save's or a Check again's 429 starts the same wait (only while the session that sent it is
+//     still the section's), during which a hand-over's dialog does
+//     not open on its own (it opens once the wait has passed). A refusal is announced as an alert of its own; the wait
+//     is said once (by the list's note when it names the same wait). The answer is a snapshot: the save still decides on its own when it commits, and an edit made elsewhere is learned only by
+//     the next check or the save's refusal.
 //   - The store is ALWAYS an explicit choice from the server's own list: nothing is preselected (not even a single store),
 //     and this browser's store labels are never mapped to it. A read-only store lists and opens drafts but offers no new
 //     one. Reads are opened by "Show server drafts": nothing is read and no session is made before that.
@@ -71,9 +90,10 @@
 //     focus in it (`trackFocus`); a render that removes or disables it while focus is still on it (or fell from it to
 //     <body>) hands focus to the section heading. So a press that takes its own control away — "Show server drafts", the
 //     stores' Try again or Reconnect, the list's Try again — lands on the heading, as does any other such render: a new
-//     generation, a session end, a rate limit's wait (New, Check again), a page one that drops rows, the local role hint
-//     (`canCreate`) taking New away. The attempt card's Check again, Stop tracking and Dismiss hand focus to the heading
-//     themselves, first. "Load more" is aria-disabled, never disabled, during its read, so it keeps focus while more
+//     generation, a session end, a rate limit's wait (New, Check again), a page one that drops rows, the eligibility's
+//     Try again (its own press), a store change taking New away while the new store is asked. A save's refusal takes New
+//     away behind its dialog, whose close then returns focus to the heading. The attempt card's Check again, Stop
+//     tracking and Dismiss hand focus to the heading themselves, first. "Load more" is aria-disabled, never disabled, during its read, so it keeps focus while more
 //     pages remain; when its answer takes it away, focus goes to the first row that answer added (the last page), else to
 //     the heading (a failure, a reload from page one, a session end). Focus on another control or in a dialog is never
 //     taken, nor is focus the user left on <body> by a press elsewhere (a press outside the tracked control ends the
@@ -121,6 +141,16 @@ export const DRAFTS_TEXT = Object.freeze({
   handoff: (name: string) => `Choose a store, then "New server draft", to save a server draft for "${name}".`,
 });
 
+/** What the section says about New server draft at a writable store until the server allows it (M7B-INVOICES-P1-R2). */
+export const ELIGIBILITY_TEXT = Object.freeze({
+  checking: 'Checking with the server whether drafts can be saved at this store…',
+  denied: 'This account may not save drafts at this store.',
+  // Not an answer about the user's access: the question could not be asked.
+  unavailable: 'The server could not be asked right now whether drafts can be saved at this store. Try again.',
+  /** Why New server draft or this Try again is disabled during a rate limit's wait (screen readers). */
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
 export const DRAFT_RULE_TEXT = Object.freeze({
   customer: 'Select a customer saved on the server.',
   description: 'Enter a description of 1 to 256 characters, without control or text-direction characters.',
@@ -161,6 +191,8 @@ export const HOLD_TEXT = Object.freeze({
   saveBlocked: 'An earlier draft is not confirmed yet: check it again or stop tracking it before saving another.',
   /** Why Check again is disabled during a rate limit's wait (no count: nothing re-renders as the wait runs down). */
   waiting: 'Too many requests: Check again comes back once the wait has passed.',
+  /** Why Save draft is disabled during a rate limit's wait (M7B-INVOICES-P1-R2: a save's 429 starts one too). */
+  saveWaiting: 'Too many requests: Save draft comes back once the wait has passed.',
 });
 
 /** A store as the user chooses it: its name, or the end of its id; never a browser store label. */
@@ -449,8 +481,6 @@ function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, 
 export interface ServerInvoiceDraftsProps {
   /** The signed-in shop user's UID, or null: nothing is shown without one. */
   readonly uid: string | null;
-  /** The local role state's hint that this user may create invoices (Invoices Create). The server decides. */
-  readonly canCreate: boolean;
   /** The local role state's hint that this user may view server customers (the customers feature and Customers View). */
   readonly canViewCustomers: boolean;
   /** A server customer the invoice form handed over (its id and name only), or null. */
@@ -489,6 +519,8 @@ interface ListState {
   readonly rows: readonly DraftSummary[]; // in arrival order (the server's newest-first order); never re-sorted
   readonly next: string | null;
   readonly note: string;
+  /** The wait a rate-limited note says (`waitSeq`), 0 for none: a wait is said once only when two notes name the same one. */
+  readonly waitId: number;
 }
 interface ReopenState { readonly id: string; readonly storeId: string; readonly phase: Phase | 'not-found'; readonly text: string; readonly draft: DraftDetail | null }
 /** `n`, `csrf` and `since`: the section's generation and `sessionEndsSoFar()` when the dialog opened (AC-07, the hand-over's checks). */
@@ -496,6 +528,12 @@ interface NewDraftState {
   readonly store: StoreEntry; readonly csrf: string; readonly n: number; readonly since: number;
   readonly handoff: { readonly id: string; readonly name: string } | null;
 }
+/**
+ * The server's answer about New server draft (M7B-INVOICES-P1-R2), with everything it was asked under: the user, the
+ * generation's counter and token, the store and the request (`seq`). It counts only while all of them are the ones now.
+ */
+type EligPhase = 'checking' | 'allowed' | 'denied' | 'unavailable' | 'rate-limited' | 'ended';
+interface EligState { readonly uid: string; readonly n: number; readonly csrf: string | null; readonly storeId: string; readonly seq: number; readonly phase: EligPhase; readonly text: string; readonly waitId: number }
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
 /** One generation's customer names: what was read (null: not readable), what is asked or queued, how many reads are out. */
@@ -504,7 +542,7 @@ const newBook = (gen: number): NameBook => ({ gen, map: new Map(), pending: new 
 
 const STORES_IDLE: StoresState = Object.freeze({ phase: 'idle', text: '', stores: [] });
 const listOf = (gen: number, storeId: string, phase: Phase = 'idle', text = ''): ListState =>
-  Object.freeze({ gen, storeId, phase, text, rows: [], next: null, note: '' });
+  Object.freeze({ gen, storeId, phase, text, rows: [], next: null, note: '', waitId: 0 });
 const UNAVAILABLE: Failure = Object.freeze({ kind: 'unavailable', text: DRAFTS_TEXT.unavailable });
 
 function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
@@ -534,7 +572,7 @@ interface PreparedDraft {
 type SendOutcome = { readonly kind: 'sent'; readonly key: string; readonly created: boolean } | { readonly kind: 'not-sent'; readonly text: string } | { readonly kind: 'blocked' };
 
 function DraftsSection({
-  uid, canCreate, canViewCustomers, handoff, onHandoffTaken,
+  uid, canViewCustomers, handoff, onHandoffTaken,
   session = tenantSession, drafts = draftsClient, customers = customersClient, identity = firebaseShopIdentity,
   holds = draftHolds, now, wallNow, newKey,
 }: ServerInvoiceDraftsProps & { readonly uid: string; readonly holds: DraftHoldStore }) {
@@ -549,6 +587,7 @@ function DraftsSection({
   const [changed, setChanged] = useState(false);
   const [busy, setBusyState] = useState(false);
   const [wait, setWait] = useState<number | null>(null);
+  const [elig, setEligState] = useState<EligState>(() => ({ uid, n: 0, csrf: null, storeId: '', seq: 0, phase: 'ended', text: '', waitId: 0 }));
   const [, setNamesTick] = useState(0);
   const [, setTick] = useState(0);
   const held = useSyncExternalStore(holds.subscribe, () => holds.get(uid));
@@ -559,14 +598,16 @@ function DraftsSection({
   const storeRef = useRef('');
   const listRef = useRef<ListState>(list);
   const reopenRef = useRef<ReopenState | null>(null);
-  const seq = useRef({ stores: 0, list: 0, reopen: 0 });
-  const ctl = useRef<{ stores: AbortController | null; list: AbortController | null; reopen: AbortController | null; names: AbortController | null }>(
-    { stores: null, list: null, reopen: null, names: null },
+  const eligRef = useRef<EligState>(elig);
+  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0 });
+  const ctl = useRef<{ stores: AbortController | null; list: AbortController | null; reopen: AbortController | null; names: AbortController | null; elig: AbortController | null }>(
+    { stores: null, list: null, reopen: null, names: null, elig: null },
   );
   const names = useRef<NameBook>(newBook(0));
   const waitRef = useRef(false);
   const waitUntil = useRef(0);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const waitSeq = useRef(0); // which wait is running: one more each time a wait (re)starts with a later end
   const busyRef = useRef(false);
   const busyBy = useRef(0); // the read that set `busy` last: only its own exit clears it (or abortReads)
   const sendingRef = useRef(false); // a Save draft is out: a second press sends nothing
@@ -598,6 +639,12 @@ function DraftsSection({
   const putStores = (next: StoresState): void => { storesRef.current = next; setStoresState(next); };
   const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
   const putReopen = (next: ReopenState | null): void => { reopenRef.current = next; setReopenState(next); };
+  const putElig = (next: EligState): void => { eligRef.current = next; setEligState(next); };
+  /** The eligibility answer counts: asked under this user, this generation and token, the store chosen now and the latest request. */
+  const current = (e: EligState): boolean =>
+    e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && e.storeId === storeRef.current && e.seq === seq.current.elig;
+  /** New server draft may be offered now: the server's `allowed`, for exactly the context there is now. */
+  const allowedNow = (): boolean => eligRef.current.phase === 'allowed' && current(eligRef.current);
   const setBusy = (next: boolean): void => { busyRef.current = next; setBusyState(next); };
   /**
    * `busy` for one read (stores or list): it takes it on start and gives it back on EVERY exit — an answer, a refusal, a
@@ -607,6 +654,7 @@ function DraftsSection({
    */
   const takeBusy = (): number => { setBusy(true); return ++busyBy.current; };
   const giveBusy = (token: number): void => { if (alive.current && busyBy.current === token) setBusy(false); };
+  const waitLeft = (): number => Math.max(1, Math.ceil((waitUntil.current - clock()) / 1000));
   const expired = (h: HeldDraft): boolean => Math.max(clock() - h.sentAt, wall() - h.sentWall) >= CHECK_CUTOFF_MS;
 
   function clearWait(): void {
@@ -621,6 +669,7 @@ function DraftsSection({
     if (waitRef.current && until <= waitUntil.current) return Math.max(1, Math.ceil((waitUntil.current - clock()) / 1000));
     if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     waitUntil.current = until;
+    waitSeq.current += 1;
     waitRef.current = true;
     setWait(seconds);
     waitTimer.current = setTimeout(() => { waitTimer.current = null; waitRef.current = false; setWait(null); }, seconds * 1000);
@@ -629,8 +678,8 @@ function DraftsSection({
 
   /** Cancel every read in flight; their answers are stale from here, and nothing is busy any more. */
   function abortReads(): void {
-    for (const kind of ['stores', 'list', 'reopen', 'names'] as const) ctl.current[kind]?.abort();
-    seq.current = { stores: seq.current.stores + 1, list: seq.current.list + 1, reopen: seq.current.reopen + 1 };
+    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig'] as const) ctl.current[kind]?.abort();
+    seq.current = { stores: seq.current.stores + 1, list: seq.current.list + 1, reopen: seq.current.reopen + 1, elig: seq.current.elig + 1 };
     busyBy.current += 1;
     setBusy(false);
   }
@@ -683,6 +732,7 @@ function DraftsSection({
     if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null });
     // Nothing is fixed after a confirmed end: the Reconnect's token is a FIRST token, not a "connection changed".
     if (failure.kind === 'signed-out') gen.current = { n: gen.current.n, csrf: null };
+    putElig({ uid, n: gen.current.n, csrf: gen.current.csrf, storeId: '', seq: seq.current.elig, phase: 'ended', text: '', waitId: 0 }); // the stores' note says it
   }
 
   /** After a read refused 403: ONE fresh check tells "another session" (a new generation) from a refusal that stands. */
@@ -787,7 +837,8 @@ function DraftsSection({
       if (s.kind !== 'ok') {
         const failure = sessionFailure(s);
         if (failure.kind === 'signed-out') return failSession(failure);
-        return putList({ ...listRef.current, phase: failure.kind, text: failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text, note: '' });
+        const said = failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text;
+        return putList({ ...listRef.current, phase: failure.kind, text: said, note: '', waitId: waitSeq.current });
       }
       if (adopt(s.csrf)) return;
       const answer = await drafts.listDrafts(target, cursor, s.csrf, controller.signal);
@@ -799,7 +850,7 @@ function DraftsSection({
         // The last page takes Load more away: focus still on it goes to the first row this page brought (else the heading).
         const first = mode === 'more' && answer.nextCursor === null ? fresh[0] : undefined;
         if (first !== undefined && document.activeElement === loadMore.current) trackFocus(loadMore.current, () => document.getElementById(openIdOf(first.id)));
-        putList({ gen: mine, storeId: target, phase: 'ready', text: '', rows: mode === 'more' ? [...was.rows, ...fresh] : fresh, next: answer.nextCursor, note: mode === 'more' ? '' : was.note });
+        putList({ gen: mine, storeId: target, phase: 'ready', text: '', rows: mode === 'more' ? [...was.rows, ...fresh] : fresh, next: answer.nextCursor, note: mode === 'more' ? '' : was.note, waitId: 0 });
         return resolveNames(answer.drafts.map((row) => row.customerId), s.csrf);
       }
       // A continuation that no longer names a draft of this store: ONE reload from page one (which has no cursor).
@@ -813,7 +864,7 @@ function DraftsSection({
       const failure = readFailure(answer, DRAFTS_TEXT.listDenied);
       const text = failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text;
       // A refusal shows nothing; an outage or a rate limit keeps the rows as last known.
-      putList(failure.kind === 'denied' ? { ...listOf(mine, target), phase: 'denied', text } : { ...listRef.current, phase: failure.kind, text, note: '' });
+      putList(failure.kind === 'denied' ? { ...listOf(mine, target), phase: 'denied', text } : { ...listRef.current, phase: failure.kind, text, note: '', waitId: waitSeq.current });
     } finally {
       giveBusy(token);
     }
@@ -847,6 +898,79 @@ function DraftsSection({
     putReopen({ id, storeId: target, phase: failure.kind, text: 'seconds' in failure && failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text, draft: null });
   }
 
+  /**
+   * Ask the server whether New server draft may be offered at the chosen store (M7B-INVOICES-P1-R2, DA-201): a read, never
+   * a mutation, and only for a writable store under a confirmed token. Its answer applies only under the user,
+   * generation, token, store and request that asked, and only while no sign-out has begun since; anything else changes
+   * nothing. A 403 gets the reads' ONE fresh check: another token starts a new generation (the store is chosen again,
+   * and asks again), the same token is a refusal that stands. During a rate limit's wait nothing is asked.
+   */
+  async function readEligibility(): Promise<void> {
+    ctl.current.elig?.abort();
+    const n = ++seq.current.elig;
+    const target = storeRef.current;
+    const store = storesRef.current.stores.find((entry) => entry.id === target);
+    const csrf = gen.current.csrf;
+    if (store === undefined || store.readOnly || csrf === null) return; // a read-only store keeps its own text and asks nothing
+    const key = { uid, n: gen.current.n, csrf, storeId: target, seq: n };
+    // `waitId`: the wait running once `text` is made (a rate limit's text starts or names it first).
+    const put = (phase: EligPhase, text = ''): void => putElig({ ...key, phase, text, waitId: waitSeq.current });
+    const waitText = (seconds: number): string => pickerWaitText(startWait(seconds));
+    if (waitRef.current) return put('rate-limited', pickerWaitText(waitLeft()));
+    const controller = new AbortController();
+    ctl.current.elig = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || key.n !== gen.current.n || csrf !== gen.current.csrf || n !== seq.current.elig
+      || target !== storeRef.current || since !== sessionEndsSoFar();
+    put('checking', ELIGIBILITY_TEXT.checking);
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      return failure.seconds !== undefined ? put('rate-limited', waitText(failure.seconds)) : put('unavailable', ELIGIBILITY_TEXT.unavailable);
+    }
+    if (adopt(s.csrf)) return; // a new generation: its stores are read again, and the next choice asks again
+    const answer = await drafts.eligibility(target, s.csrf, controller.signal);
+    if (stale()) return;
+    if (answer.kind === 'allowed') return put('allowed');
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'rate-limited') return put('rate-limited', waitText(answer.retryAfterSeconds));
+    if (answer.kind === 'denied') {
+      const again = await recheck();
+      if (stale()) return; // another token (a new generation), a sign-out, or anything newer
+      if (again === null) return put('denied', ELIGIBILITY_TEXT.denied);
+      if (again.kind === 'signed-out') return failSession(again);
+      if (again.seconds !== undefined) return put('rate-limited', waitText(again.seconds));
+    }
+    put('unavailable', ELIGIBILITY_TEXT.unavailable);
+  }
+
+  /**
+   * The server refused a save 403 (M7B-INVOICES-P1-R2): New goes at that store for the eligibility asked under the same
+   * generation and token — by the store the attempt was for, not the one chosen now — and nothing is asked again on its
+   * own. A later answer of a check still out for it is dropped.
+   */
+  function refuseElig(storeId: string, csrf: string): void {
+    const e = eligRef.current;
+    if (e.uid !== uid || e.storeId !== storeId || e.csrf !== csrf || e.n !== gen.current.n || csrf !== gen.current.csrf) return;
+    ctl.current.elig?.abort();
+    putElig({ ...e, seq: ++seq.current.elig, phase: 'denied', text: ELIGIBILITY_TEXT.denied });
+  }
+
+  /**
+   * What a create answer means for the section beyond its attempt — a save's and a Check again's alike: a 403 takes New
+   * away at the attempt's store under its token (refuseElig), a 429 starts the section's wait. The attempt itself is
+   * settled by `settleDraft` alone, and nothing is asked again because of it. A wait ends with the session that was
+   * asked to wait, so a 429 starts one only while the request's token is still the generation's and no sign-out has
+   * begun since `since` (taken before the request was sent): a late answer for an earlier session holds nothing back.
+   */
+  function afterCreate(answer: CreateDraftResult, storeId: string, csrf: string, since: number): void {
+    if (!alive.current) return;
+    if (answer.kind === 'denied') refuseElig(storeId, csrf);
+    if (answer.kind === 'rate-limited' && csrf === gen.current.csrf && since === sessionEndsSoFar()) startWait(answer.retryAfterSeconds);
+  }
+
   /** "Show server drafts": the first read of this section (nothing is read before it). */
   function show(): void {
     if (open) return;
@@ -862,14 +986,13 @@ function DraftsSection({
     setStoreIdState(id);
     setNotice('');
     putList(listOf(gen.current.n, id));
+    // The previous store's eligibility goes with it (a check still out for it is dropped); a writable store asks its own.
+    void readEligibility();
     if (id === '') return;
     setChanged(false); // "The store connection changed … Choose a store." is answered by the choice
     // During a rate limit's wait nothing is read (readDrafts refuses): never a blank list — the wait is said, with Try
     // again (enabled once the wait has passed), as after any other rate-limited read.
-    if (waitRef.current) {
-      const seconds = Math.max(1, Math.ceil((waitUntil.current - clock()) / 1000));
-      return putList({ ...listOf(gen.current.n, id), phase: 'rate-limited', text: pickerWaitText(seconds) });
-    }
+    if (waitRef.current) return putList({ ...listOf(gen.current.n, id), phase: 'rate-limited', text: pickerWaitText(waitLeft()), waitId: waitSeq.current });
     void readDrafts('first');
   }
 
@@ -882,13 +1005,14 @@ function DraftsSection({
     // inert page keeps New from a press, but a hand-over can try here on its own (the effect below, when an attempt
     // settles meanwhile); it then stays pending, said by the hand-over note, until New or the effect's next try finds no
     // dialog up.
-    if (chosen === null || chosen.readOnly || !canCreate || csrf === null || live || reopenRef.current !== null) return;
+    if (chosen === null || chosen.readOnly || !allowedNow() || csrf === null || live || waitRef.current || reopenRef.current !== null) return;
     setNotice('');
     setPending(null);
     setNewDraft({ store: chosen, csrf, n: gen.current.n, since: sessionEndsSoFar(), handoff: with_ });
   }
 
-  // A hand-over from the invoice form: open the section, and the dialog at once when a writable store is chosen.
+  // A hand-over from the invoice form: open the section, and the dialog at once when a store is chosen that the server
+  // allows a draft at (its eligibility, never a local hint).
   useEffect(() => {
     if (handoff === null) return;
     events.current.onHandoffTaken();
@@ -896,8 +1020,9 @@ function DraftsSection({
     if (!open) show();
   }, [handoff]);
   useEffect(() => {
-    if (pending !== null && newDraft === null && chosen !== null && !chosen.readOnly && canCreate && !live && gen.current.csrf !== null) openNewDraft(pending);
-  }, [pending, chosen, newDraft, canCreate, live]);
+    // Not during a rate limit's wait: the dialog opens once it has passed (`wait` back to null), the allowance still current.
+    if (pending !== null && newDraft === null && chosen !== null && !chosen.readOnly && allowedNow() && !live && wait === null && gen.current.csrf !== null) openNewDraft(pending);
+  }, [pending, chosen, newDraft, elig, live, wait]);
 
   /**
    * One explicit Save draft: at most one POST, and none while another is out or the user's earlier attempt is still
@@ -934,6 +1059,9 @@ function DraftsSection({
       // Settled by key in the store, whether or not this section or its dialog is still there.
       const answer = await drafts.createDraft(p.store.id, p.body, key, s.csrf);
       settleDraft(holds, uid, key, answer, true);
+      // The server's refusal stands for the offer too (New goes at that store, nothing is asked again on its own); its
+      // rate limit holds New, the reads and Save back for its Retry-After.
+      afterCreate(answer, p.store.id, s.csrf, since);
       return { kind: 'sent', key, created: answer.kind === 'created' };
     } finally {
       sendingRef.current = false;
@@ -979,7 +1107,9 @@ function DraftsSection({
         if (alive.current) setTick((t) => t + 1); // after the session's await: never a state update once unmounted
         return;
       }
-      settleDraft(holds, uid, key, await drafts.createDraft(target, body, key, csrf), false);
+      const answer = await drafts.createDraft(target, body, key, csrf);
+      settleDraft(holds, uid, key, answer, false);
+      afterCreate(answer, target, csrf, since); // the same refusal and rate limit as a save's: the attempt keeps the check rule's state
     } finally {
       checkingRef.current = false;
     }
@@ -1082,7 +1212,7 @@ function DraftsSection({
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
       gen.current = { n: gen.current.n + 1, csrf: null };
-      for (const kind of ['stores', 'list', 'reopen', 'names'] as const) ctl.current[kind]?.abort();
+      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig'] as const) ctl.current[kind]?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
     // A section serves one UID (see ServerInvoiceDrafts); the clients are fixed for its life.
@@ -1097,6 +1227,11 @@ function DraftsSection({
   // New, and a New disabled for that read would send the focus to the heading instead (SID-13). Opening the dialog during
   // a read is harmless: Save confirms the session itself and sends nothing under another token.
   const newBlocked = live || waiting;
+  const eligNow = current(elig) ? elig : null;
+  // A rate limit's wait is said once: by the list's note when it names the SAME wait, else by the eligibility's.
+  const sameWait = eligNow?.phase === 'rate-limited' && list.phase === 'rate-limited' && list.waitId === eligNow.waitId;
+  const eligText = eligNow === null || eligNow.phase === 'denied' || sameWait ? '' : eligNow.text;
+  const describedBy = (...ids: Array<string | false>): string | undefined => (ids.filter(Boolean).join(' ') || undefined);
 
   return (
     <section ref={section} onFocus={(e) => trackFocus(e.target)} data-testid="drafts-section" aria-labelledby="drafts-title" className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm p-8 space-y-4">
@@ -1162,20 +1297,37 @@ function DraftsSection({
             <div className="space-y-3">
               {chosen.readOnly ? (
                 <p data-testid="drafts-read-only" role="status" className="text-sm font-bold text-amber-800">{DRAFTS_TEXT.readOnly}</p>
-              ) : canCreate && (
+              ) : (
                 <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    ref={newButton}
-                    type="button"
-                    data-testid="drafts-new"
-                    disabled={newBlocked}
-                    aria-describedby={live ? 'drafts-new-hint' : undefined}
-                    onClick={() => openNewDraft(pending)}
-                    className={button}
-                  >
-                    New server draft
-                  </button>
-                  {live && <span id="drafts-new-hint" className={hintClass}>{NOT_SENT_TEXT.pending}</span>}
+                  {eligNow?.phase === 'allowed' && (
+                    <>
+                      <button
+                        ref={newButton}
+                        type="button"
+                        data-testid="drafts-new"
+                        disabled={newBlocked}
+                        aria-describedby={describedBy(live && 'drafts-new-hint', waiting && 'drafts-wait-hint')}
+                        onClick={() => openNewDraft(pending)}
+                        className={button}
+                      >
+                        New server draft
+                      </button>
+                      {live && <span id="drafts-new-hint" className={hintClass}>{NOT_SENT_TEXT.pending}</span>}
+                    </>
+                  )}
+                  {/* The server's answer about New, said where New would be, in one live region that keeps its role (empty once
+                      allowed); a refusal is an alert of its own, mounted only while it stands, so it is announced as one. */}
+                  <p data-testid="drafts-elig" data-phase={eligNow?.phase ?? 'none'} role="status" className="text-sm font-bold text-slate-600">{eligText}</p>
+                  {eligNow?.phase === 'denied' && <p data-testid="drafts-elig-alert" role="alert" className="text-sm font-bold text-rose-800">{eligNow.text}</p>}
+                  {(eligNow?.phase === 'unavailable' || eligNow?.phase === 'rate-limited') && (
+                    <button
+                      type="button" data-testid="drafts-elig-retry" disabled={waiting} aria-describedby={describedBy(waiting && 'drafts-wait-hint')}
+                      onClick={() => { void readEligibility(); }} className={button}
+                    >
+                      Try again
+                    </button>
+                  )}
+                  {waiting && <span id="drafts-wait-hint" className="sr-only">{ELIGIBILITY_TEXT.waiting}</span>}
                 </div>
               )}
               <p data-testid="drafts-list-state" data-phase={list.phase} role={list.phase === 'denied' ? 'alert' : 'status'} className="text-sm font-bold text-slate-600 min-h-[1rem]">
@@ -1466,7 +1618,7 @@ function NewDraftDialog({
   }
 
   async function save(): Promise<void> {
-    if (saving || isLiveHold(held)) return;
+    if (saving || isLiveHold(held) || waiting) return;
     const built = draftBody(state.store.tenantId, customer?.id ?? state.store.tenantId, lines);
     const lineErrors = new Map(lines.map((line, index) => [line.key, built.kind === 'invalid' ? built.lines[index] : { description: false, quantity: false, unitPrice: false, total: false }]));
     const next: FormErrors = { customer: customer === null, lines: lineErrors, subtotal: built.kind === 'invalid' && built.subtotal, tooLarge: built.kind === 'invalid' && built.tooLarge };
@@ -1495,8 +1647,9 @@ function NewDraftDialog({
   const subtotal = liveSubtotal(lines);
   // The user's one live attempt (this dialog's, as only a dialog with none can send): its card, with Check again, is here.
   const liveHold = isLiveHold(held) ? held : undefined;
-  const blocked = saving || liveHold !== undefined;
+  const blocked = saving || liveHold !== undefined || waiting;
   const heldBack = liveHold !== undefined && !saving; // disabled by an earlier attempt, not by this press: said to Save
+  const waitBack = waiting && !saving && !heldBack; // disabled by a rate limit's wait (a save's 429 starts one)
   const describe = (id: string, bad: boolean): string | undefined => (bad ? id : undefined);
 
   return (
@@ -1597,7 +1750,14 @@ function NewDraftDialog({
 
         <div className="flex justify-end gap-3">
           {heldBack && <span id="draft-new-save-hint" className="sr-only">{HOLD_TEXT.saveBlocked}</span>}
-          <button type="button" data-testid="draft-new-save" disabled={blocked} aria-describedby={heldBack ? 'draft-new-save-hint' : undefined} onClick={() => { void save(); }} className={button}>Save draft</button>
+          {waitBack && <span id="draft-new-save-wait" className="sr-only">{HOLD_TEXT.saveWaiting}</span>}
+          <button
+            type="button" data-testid="draft-new-save" disabled={blocked}
+            aria-describedby={heldBack ? 'draft-new-save-hint' : waitBack ? 'draft-new-save-wait' : undefined}
+            onClick={() => { void save(); }} className={button}
+          >
+            Save draft
+          </button>
         </div>
       </div>
     </DialogFrame>

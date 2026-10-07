@@ -1,8 +1,10 @@
 // M7B-INVOICES-P1 — the shop's client for the store-owned invoice draft routes (design D3/D4, R1, R10):
 // GET /api/v1/stores (the stores the signed-in user holds exactly one usable store grant at: `{ id, tenantId, name,
 // readOnly }`, at most 200, no cursor), GET /api/v1/stores/{storeId}/invoice-drafts?limit=&cursor= (one keyset page of
-// draft summaries, newest first), GET /api/v1/stores/{storeId}/invoice-drafts/{id} (one draft with its ordered lines) and
-// POST /api/v1/stores/{storeId}/invoice-drafts (the idempotent create of one USD draft for one server customer).
+// draft summaries, newest first), GET /api/v1/stores/{storeId}/invoice-drafts/{id} (one draft with its ordered lines),
+// GET /api/v1/stores/{storeId}/invoice-drafts/eligibility (M7B-INVOICES-P1-R2: whether this session may save a draft at
+// that store now, decided by the save's own requirement) and POST /api/v1/stores/{storeId}/invoice-drafts (the idempotent
+// create of one USD draft for one server customer).
 //
 //   - The server is the authority for everything: which stores this user may act at, who may list, reopen or save, which
 //     tenant a store belongs to, what a valid draft is and what was stored. A store id in a path is a REQUESTED target
@@ -15,6 +17,10 @@
 //     refusal is one too: a 401, 403, 429, a cursor's 400 or a 404 counts only as the server's exact `{ error, requestId }`
 //     with its status's one word (unauthenticated, forbidden, rate_limited, invalid_request, not_found); the same status
 //     in any other body is `unavailable`, so a proxy's page never signs the shop out or clears what it shows.
+//   - Eligibility is `allowed` on a 200 whose body is EXACTLY `{ "eligibility": "allowed" }` ONLY (another key, a missing
+//     one or another value is `unavailable`); its refusals are the reads' (401 signed-out, 403 denied, 429 rate-limited,
+//     each only in the server's own envelope), and everything else — another status, no answer, a timeout — is
+//     `unavailable`, which says nothing about permission. It is a snapshot: the save decides again when it commits.
 //   - A create is `created` on a validated 201 ONLY: the exact body, a canonical id, a `Location` that is exactly this
 //     draft's path at the store asked for, and a line count and subtotal equal to the ones the body SENT (read back from
 //     the caller's own string). Refusals are told apart by their status AND `error` word: 422 customer_not_found (the
@@ -53,6 +59,8 @@ export const STORES_PATH = '/api/v1/stores';
 export const draftsPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/invoice-drafts`;
 /** One draft of one store: what a 201's `Location` must be exactly. */
 export const draftPathOf = (storeId: string, draftId: string): string => `${draftsPathOf(storeId)}/${draftId}`;
+/** Whether a draft may be saved at one store now (M7B-INVOICES-P1-R2): only ever built from a canonical store id. */
+export const eligibilityPathOf = (storeId: string): string => `${draftsPathOf(storeId)}/eligibility`;
 
 export const DRAFT_PAGE_LIMIT = 20; // the page size the shop asks for (the server's default; its maximum is 50)
 export const MAX_DRAFT_LINES = 50;
@@ -143,6 +151,11 @@ export type DraftPageResult =
 export type DraftResult =
   | { readonly kind: 'ok'; readonly draft: DraftDetail }
   | { readonly kind: 'not-found' | 'signed-out' | 'denied' | 'unavailable' }
+  | RateLimited;
+
+/** `allowed` only for the exact positive answer; never a hint for any other store or session. */
+export type EligibilityResult =
+  | { readonly kind: 'allowed' | 'signed-out' | 'denied' | 'unavailable' }
   | RateLimited;
 
 export type CreateDraftResult =
@@ -426,6 +439,8 @@ export interface InvoiceDraftsClient {
   listDrafts(storeId: string, cursor: string | null, csrf: string, signal?: AbortSignal): Promise<DraftPageResult>;
   /** One draft of `storeId` by id; a malformed id is `not-found` and nothing is sent. Never rejects. */
   getDraft(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<DraftResult>;
+  /** Whether this session may save a draft at `storeId` now; a malformed store id is `denied` and nothing is sent. Never rejects. */
+  eligibility(storeId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
   /** One create attempt at `storeId`: `body` exactly as given, under `idempotencyKey`; a body the server would refuse is `invalid` and nothing is sent. Never rejects. */
   createDraft(storeId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateDraftResult>;
 }
@@ -532,6 +547,17 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     return refusal(answer) ?? Object.freeze({ kind: 'unavailable' });
   }
 
+  async function eligibility(storeId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId)) return Object.freeze({ kind: 'denied' }); // the server's answer to a store it cannot name
+    const answer = await read(eligibilityPathOf(storeId), csrf, signal);
+    if (answer === null) return Object.freeze({ kind: 'unavailable' });
+    if (answer.status === 200) {
+      const allowed = isPlain(answer.body) && hasKeys(answer.body, ['eligibility']) && answer.body.eligibility === 'allowed';
+      return Object.freeze({ kind: allowed ? 'allowed' : 'unavailable' });
+    }
+    return refusal(answer) ?? Object.freeze({ kind: 'unavailable' });
+  }
+
   async function createDraft(storeId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateDraftResult> {
     const sent = sentOf(body);
     if (!isCustomerId(storeId) || sent === null) return Object.freeze({ kind: 'invalid' }); // nothing is sent
@@ -576,7 +602,7 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     return Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ listStores, listDrafts, getDraft, createDraft });
+  return Object.freeze({ listStores, listDrafts, getDraft, eligibility, createDraft });
 }
 
 /** The shop's one invoice drafts client. */
