@@ -218,9 +218,17 @@ export interface CommandContext {
    * same id is bound into the idempotency fingerprint. Absent on every literal route. Still untrusted as a target: the
    * planner validates it and the store's mutator decides whether it names anything. For the store template's command
    * (M7B-INVOICES-P1: POST /api/v1/stores/{storeId}/invoice-drafts) it is the store the path selects — the one the
-   * authorizer selected the actor's grant at — so one key and body at two stores never replay each other's answer.
+   * authorizer selected the actor's grant at — so one key and body at two stores never replay each other's answer. For a
+   * store template's command that also carries {id} (M7B-INVOICES-P2: PATCH /api/v1/stores/{storeId}/invoice-drafts/{id})
+   * it is that {id} — the draft — and the store is `storeId` below.
    */
   readonly targetId?: string;
+  /**
+   * Set by the runtime ONLY for a store template's command that carries {id} (M7B-INVOICES-P2): the canonical lowercase uuid
+   * of the path's store segment, which the runtime has already proven is the trusted scope's store. It is not a second
+   * fingerprint target: the trusted store is bound into the fingerprint already. Absent on every other route.
+   */
+  readonly storeId?: string;
 }
 
 type PlanRecord = Readonly<Record<string, string | number | boolean>>;
@@ -416,16 +424,20 @@ export const STORE_SEGMENT = '/{storeId}';
 /** The store templates' common prefix; the store directory (below) is exactly this literal path. */
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
 /**
- * The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1; the eligibility read since M7B-INVOICES-P1-R2): any
- * other {storeId} template is refused.
+ * The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1; the eligibility read since M7B-INVOICES-P1-R2; the edit
+ * and its eligibility read since M7B-INVOICES-P2): any other {storeId} template is refused.
  */
 const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts/eligibility`,
+  `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/edit-eligibility`,
 ]);
-/** The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create. */
-const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([`POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`]);
+/** The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create and the draft edit. */
+const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
+]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
   ...[...TEMPLATED_ROUTES].map((key) => key.slice(key.indexOf(' ') + 1, key.indexOf(PATH_ID_SEGMENT))), STORE_DIRECTORY_PATH,
@@ -532,9 +544,9 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
  * the authorizer's trusted tenant and actor into the operation's fingerprint, so one tenant's recorded
  * response never replays in another's context, and the tenant store re-proves both inside the committing
  * transaction while holding the presenting session — which a Bearer-authenticated tenant route does not
- * have, and a `perform` never reaches. A store-scoped route may require one only as the one store command decided
- * (M7B-INVOICES-P1): a tenant-session `command` on the closed store POST template, whose fingerprint binds the trusted
- * tenant, store and actor the same way; every other store-scoped route may not.
+ * have, and a `perform` never reaches. A store-scoped route may require one only as a store command decided
+ * (M7B-INVOICES-P1, M7B-INVOICES-P2): a tenant-session `command` on the closed store POST or PATCH template, whose
+ * fingerprint binds the trusted tenant, store and actor the same way; every other store-scoped route may not.
  */
 function parseIdempotency(raw: unknown, method: string, path: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
   if (raw === undefined || raw === null) throw new EnforcementSetupError('route_idempotency_policy_missing');
@@ -639,7 +651,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly four declared strings, so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly six declared strings, so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -707,7 +719,9 @@ const isIdSegment = (segment: string): boolean =>
  * store selector) and the rest is exactly the template's own rest — its literal segments, then, for the one ending in {id},
  * one more id segment. A rest that is exactly a store template's literal rest matches that template first, so
  * /invoice-drafts/eligibility (M7B-INVOICES-P1-R2) is never the {id} template's. The store selector is never part of any
- * other lookup.
+ * other lookup. M7B-INVOICES-P2: failing those, the store template with {id} before one literal last segment matches when
+ * the segment before the last is an id segment and the rest is exactly that template's (only the edit eligibility's is
+ * declared, so a PATCH or any other suffix there matches nothing).
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
@@ -724,7 +738,10 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
   }
   const list = Object.freeze(ordered);
   const storePrefix = `${STORE_DIRECTORY_PATH}/`;
-  /** A store template for `path`: its store segment replaced by {storeId}, then its last segment by {id} if that is what matches. */
+  /**
+   * A store template for `path`: its store segment replaced by {storeId}, then its last segment by {id} if that is what
+   * matches, then (M7B-INVOICES-P2) the segment before its last by {id}.
+   */
   const storeLookup = (method: string, path: string): RouteDefinition | undefined => {
     if (storeTemplates.size === 0 || !path.startsWith(storePrefix)) return undefined;
     const end = path.indexOf('/', storePrefix.length);
@@ -733,8 +750,13 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
     const literal = storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest}`);
     if (literal !== undefined) return literal;
     const last = rest.lastIndexOf('/');
-    return last > 0 && isIdSegment(rest.slice(last + 1))
+    if (last <= 0) return undefined;
+    const final = isIdSegment(rest.slice(last + 1))
       ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, last)}${PATH_ID_SEGMENT}`) : undefined;
+    if (final !== undefined) return final;
+    const before = rest.lastIndexOf('/', last - 1);
+    return before > 0 && isIdSegment(rest.slice(before + 1, last))
+      ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, before)}${PATH_ID_SEGMENT}${rest.slice(last)}`) : undefined;
   };
   return Object.freeze({
     lookup: (method: string, path: string) => {

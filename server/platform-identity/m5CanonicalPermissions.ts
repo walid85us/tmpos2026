@@ -89,6 +89,12 @@
 // Neither is a tenant key: canonicalPermission('tenant', k) does not find them, so a tenant route naming one names nothing,
 // and the tenant route permissions stay undecidable at store scope. No key, default or ordering of the catalog changes, no
 // sub-permission (reopen_invoice included) is reused, and no money approval is implied by any level.
+//
+// M7B-INVOICES-P2 UPDATE — ONE MORE STORE ROUTE PERMISSION. edit_invoice_drafts, the Invoices domain at Edit or above, with
+// NO corequisite (the owner fixed Invoices >= Edit; a Customers threshold would be a new product policy and would refuse a
+// line-only edit that keeps the current customer). So the store thresholds admit View, Create and Edit. Decided exactly
+// like the other two: the same materializer, ordering, owner-edited levels and read_only rule (read_only caps at View, so
+// it never reaches Edit); no key, default or ordering of the catalog changes.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -206,12 +212,15 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
  * The STORE route permissions (M7B-INVOICES-P1): decided at STORE scope only, for a store-scope grant at exactly the
  * requested store (tenantAuthorization.ts). Each names one tenant DOMAIN and the level the store grant's role must hold on
  * it — its tenant's owner-edited level, the catalog default otherwise — and, where a draft also names a customer, a
- * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View or Create,
- * shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain.
+ * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View, Create or
+ * Edit, shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain.
  *   * view_invoice_drafts   — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
  *   * create_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts and, since M7B-INVOICES-P1-R2, its read-only
  *     creation eligibility GET /api/v1/stores/{storeId}/invoice-drafts/eligibility: the Invoices domain at Create or above
  *     AND the Customers domain at View or above.
+ *   * edit_invoice_drafts   — PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and its read-only edit eligibility
+ *     GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility (M7B-INVOICES-P2): the Invoices domain at Edit or
+ *     above, and nothing else.
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
@@ -219,13 +228,14 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
     key: 'create_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'create' as const,
     corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
   })],
+  ['edit_invoice_drafts', Object.freeze({ key: 'edit_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'edit' as const })],
 ]));
 
-const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create']);
+const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
 for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
   if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
   if (entry.sensitive || entry.threshold === null || !STORE_ROUTE_THRESHOLDS.has(entry.threshold)) {
-    throw new Error('store route permission is not a non-sensitive View or Create threshold');
+    throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold');
   }
   const corequisite = entry.corequisite;
   if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {

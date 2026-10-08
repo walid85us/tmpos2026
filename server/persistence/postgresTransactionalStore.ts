@@ -59,6 +59,9 @@
 // whose command carries the sealed 422 for 'customer_not_found' (commandTransaction.ts `sealedRefusal`) records it as the
 // completion when its mutator answers that word having written nothing, as the sealed 409s are; and a store create's
 // 'precondition_failed' is rolled back exactly as a tenant one's. The administrative store admits platform contexts alone.
+// M7B-INVOICES-P2: an invoice draft UPDATE (the edit) is audited with its draft as subject_invoice_draft_id too, and its
+// 'precondition_failed' (an expected tenant that is not the store's) is rolled back like the create's — admitted for that
+// one update kind alone.
 //
 // Outcomes. Every precondition is a routine's answer, so no error is ever read as a business answer: no SQLSTATE and no
 // constraint maps to 'conflict', and a reused event ID is a fault. A refusal is rolled back and answered only once the
@@ -254,8 +257,17 @@ export const COMMAND_AUDIT_EVALUATED_BY = 'm6_postgres_command_transaction@v1';
 const TENANT_AGGREGATE = 'tenant';
 /** The aggregate type whose UPDATE commands name their target as the audit record's subject customer (migration 024). */
 const CUSTOMER_AGGREGATE = 'customer';
-/** The aggregate type whose CREATE commands name the new draft as the audit record's subject (migration 028). */
+/**
+ * The aggregate type whose commands name their draft as the audit record's subject: the CREATE the draft it made (migration
+ * 028) and, since M7B-INVOICES-P2, the UPDATE the draft it edited (migration 029).
+ */
 const INVOICE_DRAFT_AGGREGATE = 'invoice_draft';
+/**
+ * The one UPDATE kind whose mutator may answer 'precondition_failed' (M7B-INVOICES-P2: the draft edit's expected tenant is
+ * not the store's), rolled back exactly as a create's; any other update answering it is the fault (commit, step 2a'). A
+ * literal: the store imports no route module; its test pins it equal to app.ts's and the edit contract's kind.
+ */
+export const PRECONDITION_UPDATE_KIND = 'store.invoice_draft.update';
 /** The context scopes each root's store admits (M7B-INVOICES-P1): a mutator's declared scope must be one of its root's. */
 const ADMITTED_SCOPES: Readonly<Record<'platform' | 'tenant', readonly CommandContextScope[]>> = Object.freeze({
   platform: Object.freeze(['platform'] as const), tenant: Object.freeze(['tenant', 'store'] as const),
@@ -605,8 +617,10 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       // checked above, which its mutator locks in the session's tenant. A customer create names none (DA-111 unchanged).
       subjectCustomerId: mutator.aggregateType === CUSTOMER_AGGREGATE && mutator.mode === 'update' ? aggregateId : null,
       // M7B-INVOICES-P1 (migration 028): an invoice draft CREATE names the draft it made — the runtime's new aggregate id
-      // checked above, which its mutator inserted in the context's tenant and store.
-      subjectInvoiceDraftId: mutator.aggregateType === INVOICE_DRAFT_AGGREGATE && mutator.mode === 'create' ? aggregateId : null,
+      // checked above, which its mutator inserted in the context's tenant and store. M7B-INVOICES-P2 (migration 029): an
+      // invoice draft UPDATE names the draft it edited the same way — the aggregate id checked above, which its mutator locks
+      // in the context's tenant and store. No other aggregate names a draft.
+      subjectInvoiceDraftId: mutator.aggregateType === INVOICE_DRAFT_AGGREGATE && (mutator.mode === 'create' || mutator.mode === 'update') ? aggregateId : null,
     };
     // The mutator is handed this copy — the values checked above, frozen — never the caller's live object.
     const checked: TransactionMutation = Object.freeze({
@@ -679,9 +693,12 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   //     state it finds then. A retry asserting another tenant or version is another body, so another fingerprint: 422 under
   //     this key. Admitted only from a create in a tenant store with its revalidated context — the one shape the role-level
   //     edit has — and anything else answering it is the fault below. M7B-INVOICES-P1: or a create in a STORE context (the
-  //     invoice draft's expectedTenant is not the store's tenant), rolled back exactly the same way.
-  if (applied === 'precondition_failed' && c.mutator.mode === 'create' && c.context !== null
-    && (c.context.scope === 'tenant' || c.context.scope === 'store')) {
+  //     invoice draft's expectedTenant is not the store's tenant), rolled back exactly the same way. M7B-INVOICES-P2: or the
+  //     one update kind that asserts a tenant (the draft edit, PRECONDITION_UPDATE_KIND) in its STORE context — no other
+  //     update, so every other update answering it is still the fault.
+  if (applied === 'precondition_failed' && c.context !== null
+    && ((c.mutator.mode === 'create' && (c.context.scope === 'tenant' || c.context.scope === 'store'))
+      || (c.mutator.mode === 'update' && c.mutator.kind === PRECONDITION_UPDATE_KIND && c.context.scope === 'store'))) {
     return refuse(PRECONDITION_FAILED);
   }
   // 2a''. A create's typed sealed refusal (M7B-INVOICES-P1): the invoice draft's customer is missing from the context's

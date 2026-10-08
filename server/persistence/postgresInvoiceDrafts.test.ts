@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import {
-  INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_READ_BOUNDS, createPostgresInvoiceDrafts, invoiceDraftAnswerOf, invoiceDraftPageAnswerOf,
+  INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_READ_BOUNDS, INVOICE_DRAFT_UPDATE_MUTATOR, createPostgresInvoiceDrafts, invoiceDraftAnswerOf, invoiceDraftPageAnswerOf,
   probeInvoiceDrafts,
 } from './postgresInvoiceDrafts.js';
 import type { MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
@@ -89,6 +89,73 @@ test('AC-02 AC-05: the routine\'s one row decides the answer — applied only fo
   }
 });
 
+// --- the edit's mutator (M7B-INVOICES-P2) ---------------------------------------------------------------------------------
+
+const MAX = Number.MAX_SAFE_INTEGER;
+const updateMutation = (expectedVersion: unknown = 4, over: Record<string, unknown> = {}): TransactionMutation => Object.freeze({
+  kind: 'store.invoice_draft.update', aggregateType: 'invoice_draft', aggregateId: DRAFT, expectedVersion: expectedVersion as number,
+  changes: Object.freeze({ storeId: STORE, expectedTenant: TENANT, customerId: CUSTOMER, subtotalCents: 100, lines: LINES, ...over }),
+});
+const updateRow = (outcome: string, version: string | null, over: Record<string, unknown> = {}) => (outcome === 'applied' || outcome === 'unchanged'
+  ? { o_outcome: outcome, o_tenant_id: TENANT, o_store_id: STORE, o_actor_id: ACTOR, o_membership_id: MEMBERSHIP, o_version: version, ...over }
+  : { o_outcome: outcome, o_tenant_id: null, o_store_id: null, o_actor_id: null, o_membership_id: null, o_version: version, ...over });
+
+test('M7B-INVOICES-P2 AC-05: the edit\'s mutator is the store-scope update; ONE fixed call binding the key, the REVALIDATED store, the draft, the precondition, the expected version as bigint text, the customer, the lines as one jsonb text and the subtotal', async () => {
+  assert.deepEqual([INVOICE_DRAFT_UPDATE_MUTATOR.kind, INVOICE_DRAFT_UPDATE_MUTATOR.mode, INVOICE_DRAFT_UPDATE_MUTATOR.aggregateType, INVOICE_DRAFT_UPDATE_MUTATOR.contextScope],
+    ['store.invoice_draft.update', 'update', 'invoice_draft', 'store']);
+  assert.ok(Object.isFrozen(INVOICE_DRAFT_UPDATE_MUTATOR), 'frozen');
+  const r = recorder([updateRow('applied', '5')]);
+  assert.equal(await INVOICE_DRAFT_UPDATE_MUTATOR.apply(r.sql, updateMutation(), authority()), 'applied');
+  assert.equal(r.texts.length, 1);
+  assert.match(r.texts[0], /^select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version\s+from tmpos_invoice_draft\.m7b_invoice_draft_update\(\?::text, \?::uuid, \?::uuid,\s+\?::uuid, \?::bigint, \?::uuid, \?::text::jsonb, \?::bigint\)$/);
+  assert.deepEqual(r.values[0], [SESSION_KEY, STORE, DRAFT, TENANT, '4', CUSTOMER,
+    '[{"description":"Glass","quantity":2,"unitPriceCents":50},{"description":"Labour","quantity":1,"unitPriceCents":0}]', '100']);
+  // The largest expected version binds exactly, as text: 2^53 - 2, never through a float.
+  const top = recorder([updateRow('applied', String(MAX))]);
+  assert.equal(await INVOICE_DRAFT_UPDATE_MUTATOR.apply(top.sql, updateMutation(MAX - 1), authority()), 'applied');
+  assert.equal(top.values[0][4], String(MAX - 1));
+});
+
+test('M7B-INVOICES-P2 AC-05 AC-06 AC-07 AC-10: the edit routine\'s one row decides — applied at expected + 1 and unchanged at expected only for exactly the revalidated identities; every refusal names nothing; tenant_mismatch the precondition; anything else a mismatch', async () => {
+  const cases: Array<[string, unknown[], string]> = [
+    ['applied', [updateRow('applied', '5')], 'applied'], ['unchanged', [updateRow('unchanged', '4')], 'unchanged'],
+    ['applied at the expected version', [updateRow('applied', '4')], 'mismatch'], ['applied two ahead', [updateRow('applied', '6')], 'mismatch'],
+    ['applied with a numeric version', [updateRow('applied', 5 as never)], 'mismatch'], ['applied without a version', [updateRow('applied', null)], 'mismatch'],
+    ['unchanged one ahead', [updateRow('unchanged', '5')], 'mismatch'], ['unchanged without a version', [updateRow('unchanged', null)], 'mismatch'],
+    ['applied for another tenant', [updateRow('applied', '5', { o_tenant_id: randomUUID() })], 'mismatch'],
+    ['applied at another store', [updateRow('applied', '5', { o_store_id: OTHER })], 'mismatch'],
+    ['applied by another actor', [updateRow('applied', '5', { o_actor_id: randomUUID() })], 'mismatch'],
+    ['applied under another grant', [updateRow('applied', '5', { o_membership_id: randomUUID() })], 'mismatch'],
+    ['unchanged for another tenant', [updateRow('unchanged', '4', { o_tenant_id: randomUUID() })], 'mismatch'],
+    ['unchanged naming no one', [updateRow('unchanged', '4', { o_tenant_id: null, o_store_id: null, o_actor_id: null, o_membership_id: null })], 'mismatch'],
+    ['conflict', [updateRow('conflict', null)], 'conflict'], ['invalid_state', [updateRow('invalid_state', null)], 'invalid_state'],
+    ['not_found', [updateRow('not_found', null)], 'not_found'], ['refused', [updateRow('refused', null)], 'refused'],
+    ['tenant_mismatch', [updateRow('tenant_mismatch', null)], 'precondition_failed'],
+    ['a conflict naming a version', [updateRow('conflict', '4')], 'mismatch'], ['a conflict naming a tenant', [updateRow('conflict', null, { o_tenant_id: TENANT })], 'mismatch'],
+    ['a not_found naming a store', [updateRow('not_found', null, { o_store_id: STORE })], 'mismatch'],
+    ['a refusal naming an actor', [updateRow('refused', null, { o_actor_id: ACTOR })], 'mismatch'],
+    ['a tenant_mismatch naming a grant', [updateRow('tenant_mismatch', null, { o_membership_id: MEMBERSHIP })], 'mismatch'],
+    ['the create\'s word', [updateRow('customer_not_found', null)], 'mismatch'], ['an unknown word', [updateRow('denied', null)], 'mismatch'],
+    ['no row', [], 'mismatch'], ['two rows', [updateRow('applied', '5'), updateRow('applied', '5')], 'mismatch'],
+    ['an extra column', [{ ...updateRow('applied', '5'), o_extra: 1 }], 'mismatch'], ['the create\'s columns', [row('applied')], 'mismatch'],
+  ];
+  for (const [label, rows, expected] of cases) assert.equal(await INVOICE_DRAFT_UPDATE_MUTATOR.apply(recorder(rows).sql, updateMutation(), authority()), expected, label);
+  // Never a call without the revalidated STORE context and its key, for a path store that is not the trusted one, or for a
+  // version outside 1..2^53 - 2.
+  for (const [label, m, a] of [
+    ['no authority', updateMutation(), undefined], ['a tenant context', updateMutation(), authority({ scope: 'tenant', store: null })],
+    ['no key', updateMutation(), authority({}, null)], ['the path store is not the trusted store', updateMutation(4, { storeId: OTHER }), authority()],
+    ['a non-uuid customer', updateMutation(4, { customerId: 'x' }), authority()], ['a non-uuid tenant', updateMutation(4, { expectedTenant: 'x' }), authority()],
+    ['no lines', updateMutation(4, { lines: [] }), authority()], ['a string subtotal', updateMutation(4, { subtotalCents: '100' }), authority()],
+    ['version 0', updateMutation(0), authority()], ['version 2^53 - 1', updateMutation(MAX), authority()], ['version null', updateMutation(null), authority()],
+    ['version 1.5', updateMutation(1.5), authority()], ['version as text', updateMutation('4'), authority()],
+  ] as const) {
+    const r = recorder([updateRow('applied', '5')]);
+    assert.equal(await INVOICE_DRAFT_UPDATE_MUTATOR.apply(r.sql, m, a), 'unavailable', label);
+    assert.equal(r.texts.length, 0, `${label}: no statement`);
+  }
+});
+
 // --- the reads -----------------------------------------------------------------------------------------------------------
 
 interface Fake extends SupervisedPgClient { readonly statements: string[]; readonly values: unknown[][]; readonly bounds: unknown[] }
@@ -164,12 +231,20 @@ test('AC-02 AC-06: the get is ONE fixed call; its rows become the draft with exa
     ],
   } });
   for (const word of ['not_found', 'denied']) assert.deepEqual(invoiceDraftAnswerOf([{ o_outcome: word, ...GET_NULLS }], SCOPE, DRAFT), { outcome: word });
+  // M7B-INVOICES-P2: an edited draft's version is any safe integer from 1, read exactly from its bigint text.
+  for (const version of ['2', '17', '9007199254740991']) {
+    const edited = invoiceDraftAnswerOf([getRow(1, { o_version: version }), getRow(2, { o_version: version })], SCOPE, DRAFT) as { draft: { version: unknown } };
+    assert.equal(edited.draft.version, Number(version), version);
+  }
   const cases: Array<[string, unknown]> = [
     ['another store', [getRow(1, { o_store_id: OTHER }), getRow(2, { o_store_id: OTHER })]], ['another draft', [getRow(1, { o_draft_id: D(1) }), getRow(2, { o_draft_id: D(1) })]],
     ['a header that differs between rows', [getRow(1), getRow(2, { o_customer_id: randomUUID() })]], ['a missing line', [getRow(1)]],
     ['positions out of order', [getRow(2), getRow(1)]], ['a wrong line total', [getRow(1, { o_line_total_cents: '1' }), getRow(2)]],
     ['a subtotal not the sum', [getRow(1, { o_subtotal_cents: '1' }), getRow(2, { o_subtotal_cents: '1' })]],
-    ['version 2', [getRow(1, { o_version: '2' }), getRow(2, { o_version: '2' })]], ['a control in a description', [getRow(1, { o_description: 'a\u0007' }), getRow(2)]],
+    ['version 0', [getRow(1, { o_version: '0' }), getRow(2, { o_version: '0' })]], ['version 2^53', [getRow(1, { o_version: '9007199254740992' }), getRow(2, { o_version: '9007199254740992' })]],
+    ['version as a number', [getRow(1, { o_version: 2 }), getRow(2, { o_version: 2 })]], ['version 01', [getRow(1, { o_version: '01' }), getRow(2, { o_version: '01' })]],
+    ['a version that differs between rows', [getRow(1, { o_version: '2' }), getRow(2, { o_version: '3' })]],
+    ['a control in a description', [getRow(1, { o_description: 'a\u0007' }), getRow(2)]],
     ['no row', []], ['invalid', [{ o_outcome: 'invalid', ...GET_NULLS }]], ['a refusal naming the draft', [{ o_outcome: 'not_found', ...GET_NULLS, o_draft_id: DRAFT }]],
   ];
   for (const [label, rows] of cases) assert.throws(() => invoiceDraftAnswerOf(rows, SCOPE, DRAFT), /invoice draft answer invalid/, label);

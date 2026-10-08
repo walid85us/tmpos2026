@@ -319,19 +319,31 @@ const PINNED = {
   // application database. D4 now names the contiguous chain through 028; the exact-[005] gate is unchanged and still refuses.
   '028_m7b_invoice_drafts.up.sql': 'fa8f86eb0ccdf8b96d59b8664c76af2f72bd42dea1f3d393adc3a18f52f1afd0',
   '028_m7b_invoice_drafts.down.sql': '423173cf210ad11183a18c16414e12c643c32eaab49073e512c2092d6f218147',
+  // Phase 4.0 M7B-INVOICES-P2 — editing a saved store invoice draft. In 028's schema: invoice_draft_version_chk widened
+  // under its own name to 1..9007199254740991; one ENABLE ALWAYS BEFORE UPDATE row trigger (trg_invoice_draft_immutable,
+  // SECURITY INVOKER, granted to nobody) keeping a draft's id, tenant, store, creation time and creator fixed and its version
+  // moving by at most one; one VOLATILE SECURITY DEFINER routine, m7b_invoice_draft_update (exactly one store grant at the
+  // store, Invoices Edit, the expected tenant, the header FOR UPDATE, status, version, the customer FOR KEY SHARE, the no-op,
+  // then on the change path alone the Invoices role row FOR SHARE and the lines replaced and verified); three comments
+  // reworded. tmpos_app gains EXECUTE on the routine and nothing else (001-028 byte for byte). Its rollback refuses while
+  // any draft's version is above 1; retained edit audit and outbox rows do not block it. Proved against disposable
+  // PostgreSQL only; applied to no managed, persistent or application database. D4 now names the contiguous chain through
+  // 029; the exact-[005] gate is unchanged and still refuses.
+  '029_m7b_invoice_draft_edit.up.sql': '34a4073fb494fe2ac8d81e2ca8b706b56ece70ea29073f88f1787f194ce780b2',
+  '029_m7b_invoice_draft_edit.down.sql': '12bd3b092cde24b17cc7cc7ec8b81f5adc4b4bc95c92d0e75d9a94ef4d8b731a',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the fifty-six expected files', () => {
+test('the migrations directory holds exactly the fifty-eight expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

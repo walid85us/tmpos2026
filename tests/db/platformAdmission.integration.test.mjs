@@ -274,13 +274,13 @@ async function rolledBack(fn) {
 // migration 013 as applied
 // ---------------------------------------------------------------------------
 
-test('M5P-01: 001-028 apply clean; tmpos_admission is three definer routines and one RLS table, and the triggers are exactly the four 013 declares and the three 015 declares', async () => {
+test('M5P-01: 001-029 apply clean; tmpos_admission is three definer routines and one RLS table, and the triggers are exactly the four 013 declares and the three 015 declares', async () => {
   // The LEDGER, not this run's report: on the shared CI service an earlier suite has already applied the chain, so this
   // run applies nothing and its report lists no version.
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029'].map((v) => [v, false]));
 
   const routines = await owner`select p.proname::text as name, p.prosecdef, p.provolatile::text as volatility, p.proconfig,
       p.prorettype::regtype::text as returns, p.proowner = n.nspowner as schema_owner

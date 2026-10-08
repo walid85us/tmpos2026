@@ -413,6 +413,20 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftsHttp.integration.test.mjs
+      # M7B-INVOICES-P2 — migration 029's draft edit as the runtime login (the postcondition and its refusals, the exact
+      # grantees, the immutability trigger, the edit's applied / unchanged / conflict / not_found / refused answers and that the
+      # sealed and rolled-back ones write nothing, every SQL bound, the get's one snapshot against a VOLATILE control, ordering
+      # against a second editor, an owner's narrowing, a suspended grant and a read-only store by lock waits, the down refused
+      # while a draft's version is above 1 and otherwise rolled back and restored, the upgrade over 028 drafts). It runs AFTER
+      # every step that rolls 028 back (each of those now rolls 029 back first, through its committed down, and re-applies it):
+      # its own rollback takes 029 back to 028 only after removing its drafts, and it ends with 029 applied, the ledger
+      # 001-029 and no draft, line, Invoices lock anchor or audit subject of its own; no later step rolls back below 029.
+      # Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Invoice draft edit routine against disposable PostgreSQL (M7B-INVOICES-P2)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftEditRoutine.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real
@@ -437,6 +451,19 @@ jobs:
           export CHROMIUM_PATH="$(command -v google-chrome)"
           npx --no-install firebase emulators:exec --only firestore --project demo-tmpos-shop \
             'node_modules/.bin/tsx --test tests/browser/shopRoleLevels.browser.test.mjs'
+      # M7B-INVOICES-P2 — editing a saved draft end to end over real loopback HTTP on two tenant entries (authority and the
+      # edit eligibility, the sealed no-op and 409s, two instances ordered by lock waits, a read during a held edit, the
+      # non-enumerating 404, injected faults, key reuse, both lost-COMMIT branches, revocations ordered against the commit, the
+      # 64 KiB bound), against the SAME disposable service. Its edits leave drafts above version 1 and draft audit subjects,
+      # which 029's and 028's downs refuse, so it runs AFTER every step that rolls either back (it sits after all of them), and
+      # before it ends it removes every draft, line, Invoices lock anchor and draft event of its own and clears their audit
+      # subjects, then checks none is left. Synthetic data and keys made at run time only. Same binding, no new service, no
+      # secret, no permission change.
+      - name: Invoice draft edits over HTTP against the tenant entry and disposable PostgreSQL (M7B-INVOICES-P2)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftEditHttp.integration.test.mjs
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

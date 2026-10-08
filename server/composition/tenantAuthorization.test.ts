@@ -21,7 +21,10 @@ import type { TenantAdmissionPort, TenantAdmissionResult, TrustedMembership, Tru
 import type { AuthorizationRequirement, VerifiedPrincipal } from '../runtime/routes.js';
 import type { RouteView } from '../runtime/access.js';
 import { TENANT_ROLE_IDS } from '../platform-identity/authorizationConstants.js';
-import { INVOICE_DRAFT_CREATE_REQUIREMENT, INVOICE_DRAFT_ELIGIBILITY_PATH, createInvoiceDraftEligibilityRoute } from '../runtime/invoiceDrafts.js';
+import {
+  INVOICE_DRAFT_CREATE_REQUIREMENT, INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH, INVOICE_DRAFT_EDIT_REQUIREMENT, INVOICE_DRAFT_ELIGIBILITY_PATH, INVOICE_DRAFT_PATH,
+  INVOICE_DRAFT_UPDATE_ROUTE, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftEligibilityRoute,
+} from '../runtime/invoiceDrafts.js';
 
 const ACTOR = '11111111-1111-4111-8111-111111111111';
 const TENANT = '22222222-2222-4222-8222-222222222222';
@@ -189,7 +192,7 @@ test('the selector is the actor\'s own grants: exactly one at the route\'s scope
   // M7B-INVOICES-P1: a store requirement on a view naming no store (a literal path) selects NOTHING — not even the actor's
   // one store grant — whatever the key: the undecidable catalogued one and both decided store route permissions.
   const single = admitted([grant({ scopeType: 'store', store: STORE, storeStatus: 'active' })]);
-  for (const permission of [CANONICAL, 'view_invoice_drafts', 'create_invoice_drafts']) {
+  for (const permission of [CANONICAL, 'view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
     assert.equal(await authorize(stub(single), { scope: 'store', permission }, undefined, ROUTE), false, `one store grant on a literal path: ${permission}`);
   }
   // The same one store grant AT the store a store template names, under an active tenant, selects, so the rules above are not vacuous.
@@ -725,7 +728,7 @@ test('M7B-AZ-01 view_invoice_drafts and create_invoice_drafts are decided on the
   assert.equal((await decide('manager', VIEW_DRAFTS, { invoices: 'none' })).granted, false, 'view: a manager narrowed to Invoices None');
   assert.equal((await decide('technician', VIEW_DRAFTS, { customers: 'none' })).granted, true, 'view needs no Customers level');
   // The keys name nothing at tenant scope, and the tenant keys nothing at store scope.
-  for (const permission of ['view_invoice_drafts', 'create_invoice_drafts']) {
+  for (const permission of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
     assert.equal(grantedOf(await withLevels(stub(admitted([grant()])), {}).decide({ scope: 'tenant', permission })), false, `${permission} at tenant scope`);
   }
   // (A catalogued but undecidable sub-permission such as reopen_invoice is still judged on membership and lifecycle alone, as
@@ -808,6 +811,106 @@ test('M7B-AZ-03 (M7B-INVOICES-P1-R2, DA-201) the eligibility view under the save
   assert.equal(await decide(admitted([storeGrantOf('manager')]), { ...ELIGIBILITY, storeTarget: null }), false, 'a non-canonical store segment selects nothing');
 });
 
+// --- M7B-INVOICES-P2: the edit permission, its eligibility, and its revalidation --------------------------------------------
+
+const DRAFT_PATCH: RouteView = Object.freeze({ method: 'PATCH', path: INVOICE_DRAFT_PATH, audience: 'tenant', storeTarget: STORE });
+const EDIT_ELIGIBILITY: RouteView = Object.freeze({ method: 'GET', path: INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH, audience: 'tenant', storeTarget: STORE });
+/** The owner-edited Invoices levels a decision table walks, with a Customers level that must never matter. */
+const LEVEL_EDITS: readonly unknown[] = [
+  {}, { invoices: 'none' }, { invoices: 'view' }, { invoices: 'create' }, { invoices: 'edit' }, { invoices: 'manage' }, { invoices: 'approve' },
+  { invoices: 'full' }, { customers: 'none' }, { invoices: 'edit', customers: 'none' }, { invoices: 'create', customers: 'full' }, { invoices: 'Edit' }, null,
+];
+
+test('M7B-AZ-04 (M7B-INVOICES-P2, D1) edit_invoice_drafts is Invoices at Edit or above on the STORE grant\'s role at its tenant\'s levels — Customers never matters, Create is not Edit, the owner is never narrowed', async () => {
+  // The requirement objects are distinct: the edit's is its own, never the create's or the view's.
+  assert.deepEqual(INVOICE_DRAFT_EDIT_REQUIREMENT, { scope: 'store', permission: 'edit_invoice_drafts' });
+  assert.notEqual(INVOICE_DRAFT_EDIT_REQUIREMENT, INVOICE_DRAFT_CREATE_REQUIREMENT);
+  assert.ok(Object.isFrozen(INVOICE_DRAFT_EDIT_REQUIREMENT), 'frozen');
+  const reads = new Set([readKey('GET', INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH), readKey('GET', INVOICE_DRAFT_ELIGIBILITY_PATH)]);
+  const decide = (answer: unknown, requirement: AuthorizationRequirement, route: RouteView, levels: unknown = {}) => answered(createTenantRouteAuthorizer({
+    admission: stub(answer), levels: async () => levels, reads,
+  }).authorize(PRINCIPAL, requirement, route, live(), null));
+  const ELIGIBILITY_VIEW: RouteView = Object.freeze({ method: 'GET', path: INVOICE_DRAFT_ELIGIBILITY_PATH, audience: 'tenant', storeTarget: STORE });
+  const table: Record<string, boolean[]> = {};
+  for (const roleId of [...TENANT_ROLE_IDS, 'custom_role_browser_only', 'cashier']) {
+    table[roleId] = [];
+    for (const levels of LEVEL_EDITS) {
+      const answer = admitted([storeGrantOf(roleId)]);
+      const edit = grantedOf(await decide(answer, INVOICE_DRAFT_EDIT_REQUIREMENT, DRAFT_PATCH, levels));
+      table[roleId].push(edit);
+      // Create eligibility never stands in for Edit: sales staff at its default is granted the create and refused the edit.
+      if (roleId === 'sales_staff' && JSON.stringify(levels) === '{}') {
+        assert.deepEqual([grantedOf(await decide(answer, INVOICE_DRAFT_CREATE_REQUIREMENT, ELIGIBILITY_VIEW, levels)), edit], [true, false], 'sales staff: Create yes, Edit no');
+      }
+    }
+  }
+  assert.deepEqual(table, {
+    //            {}     none   view   create edit   manage approve full   cust:none edit+cust:none create+cust:full Edit(bad) null
+    store_owner: [true, true, true, true, true, true, true, true, true, true, true, false, false],
+    manager: [true, false, false, false, true, true, true, true, true, true, false, false, false],
+    technician: [false, false, false, false, true, true, true, true, false, true, false, false, false],
+    sales_staff: [false, false, false, false, true, true, true, true, false, true, false, false, false],
+    custom_role_browser_only: Array(LEVEL_EDITS.length).fill(false),
+    cashier: Array(LEVEL_EDITS.length).fill(false),
+  }, 'defaults: owner and manager yes, technician (View) and sales staff (Create) no; Invoices Edit or above grants whatever Customers is; malformed edits and roles outside the catalog never');
+  // Every write-refusing status, and every selection failure, denies the edit — the read-only and overdue ones although the
+  // eligibility route is a classified read.
+  for (const [label, answer] of [
+    ['a read-only store', admitted([storeGrantOf('manager', { storeStatus: 'read_only' })])],
+    ['an overdue store', admitted([storeGrantOf('manager', { storeStatus: 'overdue' })])],
+    ['a read-only tenant', admitted([storeGrantOf('manager', { tenantStatus: 'read_only' })])],
+    ['an overdue tenant', admitted([storeGrantOf('manager', { tenantStatus: 'overdue' })])],
+    ['a read-only account', admitted([storeGrantOf('manager')], 'read_only')],
+    ['a suspended store', admitted([storeGrantOf('manager', { storeStatus: 'suspended' })])],
+    ['a pending store', admitted([storeGrantOf('manager', { storeStatus: 'pending_activation' })])],
+    ['a suspended tenant', admitted([storeGrantOf('manager', { tenantStatus: 'suspended' })])],
+    ['a grant at another store', admitted([storeGrantOf('manager', { store: OTHER_TENANT })])],
+    ['a tenant grant only (no inheritance)', admitted([grant({ roleId: 'manager' })])],
+    ['a tenant owner grant only (no inheritance)', admitted([grant({ roleId: 'store_owner' })])],
+    ['two roles at the store', admitted([storeGrantOf('manager'), storeGrantOf('sales_staff', { membershipId: OTHER_TENANT })])],
+  ] as const) {
+    for (const route of [DRAFT_PATCH, EDIT_ELIGIBILITY]) assert.equal(await decide(answer, INVOICE_DRAFT_EDIT_REQUIREMENT, route), false, `${label}: ${route.method}`);
+  }
+  // Controls: the same manager grant at an active store is granted, so the denials above are the statuses'.
+  assert.equal(grantedOf(await decide(admitted([storeGrantOf('manager')]), INVOICE_DRAFT_EDIT_REQUIREMENT, DRAFT_PATCH)), true);
+  assert.equal(await decide(admitted([storeGrantOf('manager')]), INVOICE_DRAFT_EDIT_REQUIREMENT, { ...DRAFT_PATCH, storeTarget: null }), false, 'a non-canonical store segment selects nothing');
+  // The key names nothing at tenant scope.
+  assert.equal(grantedOf(await withLevels(stub(admitted([grant({ roleId: 'store_owner' })])), {}).decide({ scope: 'tenant', permission: 'edit_invoice_drafts' })), false);
+});
+
+test('M7B-AZ-05 (M7B-INVOICES-P2, D2) the edit eligibility declares the PATCH\'s own requirement object and decides exactly as the PATCH, cell by cell; the creation eligibility still decides as the save', async () => {
+  const declared = createInvoiceDraftEditEligibilityRoute().policy;
+  const patched = INVOICE_DRAFT_UPDATE_ROUTE.policy;
+  assert.ok(declared.access === 'session' && patched.access === 'session', 'both are session routes');
+  assert.equal(declared.authorization, INVOICE_DRAFT_EDIT_REQUIREMENT, 'the edit eligibility declares the edit requirement object itself');
+  assert.equal(patched.authorization, INVOICE_DRAFT_EDIT_REQUIREMENT, 'the PATCH declares the same object');
+  const create = createInvoiceDraftEligibilityRoute().policy;
+  assert.ok(create.access === 'session' && create.authorization === INVOICE_DRAFT_CREATE_REQUIREMENT, 'the creation eligibility is unchanged');
+  const reads = new Set([readKey('GET', INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH)]);
+  const decide = (answer: unknown, route: RouteView, levels: unknown) => answered(createTenantRouteAuthorizer({
+    admission: stub(answer), levels: async () => levels, reads,
+  }).authorize(PRINCIPAL, (route === DRAFT_PATCH ? patched.authorization : declared.authorization) as AuthorizationRequirement, route, live(), null));
+  let granted = 0;
+  for (const roleId of [...TENANT_ROLE_IDS, 'custom_role_browser_only']) {
+    for (const levels of LEVEL_EDITS) {
+      for (const answer of [admitted([storeGrantOf(roleId)]), admitted([storeGrantOf(roleId, { storeStatus: 'read_only' })])]) {
+        const eligible = grantedOf(await decide(answer, EDIT_ELIGIBILITY, levels));
+        assert.equal(eligible, grantedOf(await decide(answer, DRAFT_PATCH, levels)), `${roleId} ${JSON.stringify(levels)}: eligibility = the edit's decision`);
+        if (eligible) granted += 1;
+      }
+    }
+  }
+  // Not vacuous: the cells AZ-04's table grants at an active store — 11 for the owner, 7 for the manager, 5 each for the
+  // technician and sales staff — are granted on BOTH sides, and none at a read_only store.
+  assert.equal(granted, 28, 'the granted cells, both sides');
+  assert.equal(grantedOf(await decide(admitted([storeGrantOf('manager')]), EDIT_ELIGIBILITY, {})), true, 'a manager at its default: the eligibility');
+  assert.equal(grantedOf(await decide(admitted([storeGrantOf('manager')]), DRAFT_PATCH, {})), true, 'and the PATCH');
+  assert.equal(grantedOf(await decide(admitted([storeGrantOf('sales_staff')]), DRAFT_PATCH, { invoices: 'edit' })), true, 'sales staff raised to Edit');
+  // The answer is a store selection and a level, never a draft: the view carries no draft id at all.
+  assert.deepEqual(Object.keys(EDIT_ELIGIBILITY).sort(), ['audience', 'method', 'path', 'storeTarget']);
+  assert.equal(INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH, '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility');
+});
+
 /** The scope the authorizer hands a store create: the manager's one store grant at STORE. */
 const STORE_SCOPE: TrustedScope = Object.freeze({ ...SCOPE, scope: 'store', store: STORE });
 const storeRead = (over: Partial<TrustedMembership> = {}) => admitted([storeGrantOf('manager', over)]);
@@ -822,6 +925,27 @@ test('M7B-RV-01 the revalidator accepts a store scope for a store route permissi
   // A grant at a second store does not disturb the selection at this one.
   const elsewhere = grant({ membershipId: '66666666-6666-4666-8666-666666666666', scopeType: 'store', store: '77777777-7777-4777-8777-777777777777', storeStatus: 'active' });
   assert.equal(await revalidator({ read: admitted([storeGrantOf('manager'), elsewhere]) }).revalidate('tx', STORE_SCOPE, 'create_invoice_drafts', null, KEY), true);
+});
+
+test('M7B-RV-03 (M7B-INVOICES-P2) the revalidator decides edit_invoice_drafts again on the role\'s CURRENT level: Edit or above holds, Create or below, a narrowed manager, a technician or sales staff at its default, a read-only scope are false', async () => {
+  assert.equal(await revalidator({ read: storeRead() }).revalidate('tx', STORE_SCOPE, 'edit_invoice_drafts', null, KEY), true, 'a manager at its default (Full)');
+  for (const level of ['edit', 'manage', 'approve', 'full']) {
+    assert.equal(await revalidator({ read: storeRead(), levels: { invoices: level, customers: 'none' } }).revalidate('tx', STORE_SCOPE, 'edit_invoice_drafts', null, KEY), true, level);
+  }
+  const cases: Array<[string, Parameters<typeof revalidator>[0], TrustedScope, string[]]> = [
+    ['a manager narrowed to Invoices Create', { read: storeRead(), levels: { invoices: 'create' } }, STORE_SCOPE, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a manager narrowed to Invoices View', { read: storeRead(), levels: { invoices: 'view' } }, STORE_SCOPE, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a technician at its default (View)', { read: admitted([storeGrantOf('technician')]) }, { ...STORE_SCOPE, roleId: 'technician' }, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['sales staff at its default (Create)', { read: admitted([storeGrantOf('sales_staff')]) }, { ...STORE_SCOPE, roleId: 'sales_staff' }, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a read-only store scope', {}, { ...STORE_SCOPE, limitation: 'read_only' }, []],
+    ['a store turned read-only', { read: storeRead({ storeStatus: 'read_only' }) }, STORE_SCOPE, ['peek', 'hold', 'session', 'read']],
+    ['the grant revoked (only a tenant grant now)', { read: admitted([grant({ roleId: 'manager' })]) }, STORE_SCOPE, ['peek', 'hold', 'session', 'read']],
+  ];
+  for (const [label, over, scope, expected] of cases) {
+    const { revalidate, steps } = revalidator(over);
+    assert.equal(await revalidate('tx', scope, 'edit_invoice_drafts', null, KEY), false, label);
+    assert.deepEqual(steps.map(([step]) => step), expected, `${label}: steps`);
+  }
 });
 
 test('M7B-RV-02 every lost store authority is false — a key the store scope does not decide is refused before ANY read', async () => {

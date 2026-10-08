@@ -2,9 +2,10 @@
 // phone and email in the tenant a session is admitted to (M7A-CUSTOMERS-P7; G-IAM, G-PERSIST, G-IDEMPOT, G-AUDIT).
 //
 // PATCH /api/v1/customers/{id} — a session route of the TENANT boundary, beside the detail GET on the same template
-// (customerDirectory.ts). It is one of the route table's two templated commands, the one on the customer template (routes.ts
-// IDEMPOTENT_TEMPLATED_ROUTES; the other, since M7B-INVOICES-P1, is the draft save, POST
-// /api/v1/stores/{storeId}/invoice-drafts, in IDEMPOTENT_STORE_TEMPLATED_ROUTES): the runtime judges the path id only after
+// (customerDirectory.ts). It is one of the route table's templated commands, the one on the customer template (routes.ts
+// IDEMPOTENT_TEMPLATED_ROUTES; the others are the draft save, POST /api/v1/stores/{storeId}/invoice-drafts, since
+// M7B-INVOICES-P1, and the draft edit, PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, since M7B-INVOICES-P2, in
+// IDEMPOTENT_STORE_TEMPLATED_ROUTES): the runtime judges the path id only after
 // the chain has authenticated and authorized the request, binds the canonical id into the idempotency fingerprint (so one
 // key sent to two customers is the 422 changed-request refusal, never a replay of one customer's response for the other)
 // and hands it to the planner as ctx.targetId (app.ts). The path names the customer; it is never authority, and neither is

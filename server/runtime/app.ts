@@ -66,7 +66,13 @@
 //                /api/v1/stores/{storeId}/invoice-drafts) the target is the store its path selects —
 //                the very store the authorizer selected the actor's grant at: a trusted scope at
 //                any other store, or none, -> 403 (authz_context_missing), so the fingerprint, the
-//                planner and the mutator's revalidated store are always one store;
+//                planner and the mutator's revalidated store are always one store. For a store
+//                template's command that also carries {id} (M7B-INVOICES-P2: PATCH
+//                /api/v1/stores/{storeId}/invoice-drafts/{id}) the same store check runs first, then
+//                the {id} segment — the draft — is the target, judged like the customer edit's (400
+//                unless a canonical lowercase uuid); the path's store reaches the planner as ctx.storeId
+//                and stays bound through the trusted scope (the fingerprint's store slot), never as a
+//                second target;
 //             7. body: only now is a declared JSON body read, capped on the bytes
 //                actually streamed (readBoundedBody), and parsed as strict UTF-8
 //                JSON -> 413 / 400 (trailer fields -> 400);
@@ -504,6 +510,14 @@ const PROBE_REUSE_MS = 1_000;
 
 const NO_BYTES = Buffer.alloc(0);
 
+/**
+ * The one UPDATE contract whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by its kind
+ * (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT). Every other update's
+ * is the 503. The tenant store admits the answer from the same kind alone (postgresTransactionalStore.ts). A literal, as
+ * app.ts imports no route module; postgresTransactionalStore.test.ts fails if it, the store's or the contract's kind drift.
+ */
+export const PRECONDITION_UPDATE_KIND = 'store.invoice_draft.update';
+
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
 function forwardedForOf(req: Request): string | string[] | undefined {
   const lines: string[] = [];
@@ -796,8 +810,9 @@ export function createApp(deps: AppDeps): Express {
     try {
       // Map lookups: nothing is read or parsed. A template (routes.ts) matches its prefix, one raw id segment and its own
       // literal suffix, if it has one; the route's view and log class carry the template's path, never the segment. Only
-      // the two templated commands (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7, whose target is its id; and
-      // POST /api/v1/stores/{storeId}/invoice-drafts, M7B-INVOICES-P1, whose target is its store) carry their validated
+      // the three templated commands (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7, whose target is its id;
+      // POST /api/v1/stores/{storeId}/invoice-drafts, M7B-INVOICES-P1, whose target is its store; and
+      // PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, M7B-INVOICES-P2, whose target is its id) carry their validated
       // segment further: into the idempotency fingerprint's target slot and the planner's ctx.targetId (below), never a log.
       const route = table.lookup(req.method, req.path);
       // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
@@ -925,22 +940,34 @@ export function createApp(deps: AppDeps): Express {
         && (authenticatedAt === null || now() - authenticatedAt > RECENT_AUTH_MAX_AGE_MS)) {
         return refuse(req, res, 403, 'step_up_required', 'recent_auth_required');
       }
-      // The target of a templated command (routes.ts admits exactly two: PATCH /api/v1/customers/{id}, whose target is its id,
-      // and, since M7B-INVOICES-P1, POST /api/v1/stores/{storeId}/invoice-drafts, whose target is its store), judged only now —
+      // The target of a templated command (routes.ts admitted exactly two before M7B-INVOICES-P2: PATCH /api/v1/customers/{id},
+      // whose target is its id, and POST /api/v1/stores/{storeId}/invoice-drafts, whose target is its store), judged only now —
       // after authentication, authorization and the trusted context, so an unauthenticated caller learns nothing about an
       // id's shape — and before the body is read or a key acquired, so a malformed id reserves nothing. null on every
-      // literal route. The store template's one command (M7B-INVOICES-P1) targets the store its path selects: the store
+      // literal route. The store template's save (M7B-INVOICES-P1) targets the store its path selects: the store
       // segment the authorizer narrowed the actor's grants with (a non-canonical one selected none, so it never gets here),
       // bound into the fingerprint so one key and body at two stores never replay each other's answer, and handed to the
       // planner (its Location and its change set). It must BE the trusted scope's store — the one the authorizer selected
       // the grant at and the store revalidates and the mutator binds — so a scope at any other store (or none) is refused
       // here, before the body is read or a key acquired, rather than letting the target and the authority diverge.
+      // M7B-INVOICES-P2: a store template's command that also carries {id} (PATCH /api/v1/stores/{storeId}/invoice-drafts/{id})
+      // targets that {id} — the draft — judged the same way as the customer edit's, after the same store check; the store
+      // stays bound through the trusted scope (the fingerprint's store slot) and reaches the planner as ctx.storeId. A route
+      // without {id} (the save) still targets its store, so the save's fingerprints are unchanged.
       let targetId: string | null = null;
+      let storeId: string | null = null;
       if ('command' in route && route.path.includes(STORE_SEGMENT)) {
-        targetId = storeTargetOf(req.path);
-        if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
-        if (context === null || context.scope !== 'store' || context.store !== targetId) {
+        const store = storeTargetOf(req.path);
+        if (store === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
+        if (context === null || context.scope !== 'store' || context.store !== store) {
           return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
+        }
+        if (route.path.includes(PATH_ID_SEGMENT)) {
+          targetId = pathIdOf(req.path);
+          if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
+          storeId = store;
+        } else {
+          targetId = store;
         }
       } else if ('command' in route && route.path.includes(PATH_ID_SEGMENT)) {
         targetId = pathIdOf(req.path);
@@ -998,7 +1025,7 @@ export function createApp(deps: AppDeps): Express {
           try {
             plan = route.command.plan(Object.freeze(targetId === null
               ? { audience, body: parsed, newAggregateId }
-              : { audience, body: parsed, newAggregateId, targetId }));
+              : storeId === null ? { audience, body: parsed, newAggregateId, targetId } : { audience, body: parsed, newAggregateId, targetId, storeId }));
           } catch {
             return refuse(req, res, 500, 'internal_error', 'command_plan_failed'); // nothing committed; the lease waits out its time
           }
@@ -1036,8 +1063,12 @@ export function createApp(deps: AppDeps): Express {
           if (refused === 'transaction_conflict') return sendRecorded(res, prepared.rejected.conflict, false, refused);
           // A precondition the request asserted no longer holds (M7A-CUSTOMERS-P4; DA-125): the store rolled everything back and
           // recorded nothing — no completion, unlike the sealed conflict above — so this 409 is the runtime's own, UNSEALED,
-          // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback.
-          if (refused === 'transaction_precondition_failed' && contract.mode === 'create') return refuse(req, res, 409, 'write_conflict', refused);
+          // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback. Admitted from a
+          // create, and (M7B-INVOICES-P2) from the one update contract that asserts a tenant — the draft edit, by its kind —
+          // and from no other update: there it committed nothing and is the 503 below.
+          if (refused === 'transaction_precondition_failed' && (contract.mode === 'create' || contract.kind === PRECONDITION_UPDATE_KIND)) {
+            return refuse(req, res, 409, 'write_conflict', refused);
+          }
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
           // The aggregate exists at the expected version, but the change its contract asks for is not one
           // its current state allows — a lifecycle transition from the wrong state, or to the state it is

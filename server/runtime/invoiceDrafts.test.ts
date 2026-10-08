@@ -72,8 +72,10 @@ test('AC-06 AC-09: the contract registers against its one event — store scope,
   assert.deepEqual(contract.changes.lines, { type: 'rows', maxRows: 50, fields: {
     description: { type: 'string', maxLength: 512 }, quantity: { type: 'integer', min: 1, max: MAX }, unitPriceCents: { type: 'integer', min: 0, max: MAX },
   } });
+  // M7B-INVOICES-P2: the registry also carries the edit's invoice_draft.updated — the same identifiers and count.
   assert.deepEqual(INVOICE_DRAFT_EVENTS.map((e) => [e.type, e.version, e.aggregateType, Object.keys(e.payload)]),
-    [['invoice_draft.created', 1, 'invoice_draft', ['storeId', 'customerId', 'lineCount']]], 'identifiers and a count only');
+    [['invoice_draft.created', 1, 'invoice_draft', ['storeId', 'customerId', 'lineCount']], ['invoice_draft.updated', 1, 'invoice_draft', ['storeId', 'customerId', 'lineCount']]],
+    'identifiers and a count only');
   // An event registry never admits a rows field: the payload of a draft event cannot carry a line.
   assert.throws(() => defineOutboxEvents([{ ...INVOICE_DRAFT_EVENTS[0], payload: { ...INVOICE_DRAFT_EVENTS[0].payload, lines: INVOICE_DRAFT_CREATE_CONTRACT.changes.lines } }]),
     (e: unknown) => e instanceof EnforcementSetupError && e.code === 'outbox_registry_invalid');
@@ -222,10 +224,15 @@ test('AC-12: a page is only an exactly shaped, newest-first, bounded list; a dra
   const lines = [{ position: 1, description: 'Glass', quantity: 2, unitPriceCents: 50, lineTotalCents: 100 }, { position: 2, description: 'Labour', quantity: 1, unitPriceCents: 0, lineTotalCents: 0 }];
   const draft = { id, storeId: STORE, customerId: CUSTOMER, status: 'draft', currency: 'USD', version: 1, createdAt: AT, subtotalCents: 100, lines };
   assert.deepEqual(invoiceDraftOf({ outcome: 'draft', draft }, id, STORE), draft);
+  // M7B-INVOICES-P2: an edit steps the version, so any safe integer from 1 is a version; nothing else is.
+  for (const version of [2, 3, MAX - 1, MAX]) assert.deepEqual(invoiceDraftOf({ outcome: 'draft', draft: { ...draft, version } }, id, STORE), { ...draft, version });
   for (const word of ['denied', 'not_found'] as const) assert.equal(invoiceDraftOf({ outcome: word }, id, STORE), word);
   for (const [label, raw] of [
     ['another id', { outcome: 'draft', draft: { ...draft, id: randomUUID() } }], ['another store', { outcome: 'draft', draft: { ...draft, storeId: OTHER_STORE } }],
-    ['version 2', { outcome: 'draft', draft: { ...draft, version: 2 } }], ['a wrong subtotal', { outcome: 'draft', draft: { ...draft, subtotalCents: 101 } }],
+    ['version 0', { outcome: 'draft', draft: { ...draft, version: 0 } }], ['version -1', { outcome: 'draft', draft: { ...draft, version: -1 } }],
+    ['version 2^53', { outcome: 'draft', draft: { ...draft, version: MAX + 1 } }], ['version 1.5', { outcome: 'draft', draft: { ...draft, version: 1.5 } }],
+    ['version as text', { outcome: 'draft', draft: { ...draft, version: '2' } }], ['version -0', { outcome: 'draft', draft: { ...draft, version: -0 } }],
+    ['a wrong subtotal', { outcome: 'draft', draft: { ...draft, subtotalCents: 101 } }],
     ['a wrong total', { outcome: 'draft', draft: { ...draft, lines: [{ ...lines[0], lineTotalCents: 99 }, lines[1]] } }],
     ['positions out of order', { outcome: 'draft', draft: { ...draft, lines: [lines[1], lines[0]] } }], ['no lines', { outcome: 'draft', draft: { ...draft, lines: [] } }],
     ['a description with a control', { outcome: 'draft', draft: { ...draft, lines: [{ ...lines[0], description: 'a\u0007' }, lines[1]] } }],

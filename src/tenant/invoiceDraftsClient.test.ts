@@ -183,9 +183,13 @@ test('IDC-04. a store id or a cursor outside its grammar is never put into a req
   assert.deepEqual(calls, []);
 });
 
-test('IDC-05. a draft: exactly its fields for the store and id asked, lines 1..n in order, every total its own BigInt product, the subtotal their sum', async () => {
+test('IDC-05. a draft: exactly its fields for the store and id asked, lines 1..n in order, every total its own BigInt product, the subtotal their sum; its version any safe integer of 1 or more (M7B-INVOICES-P2: an edit steps it)', async () => {
   const ok = await scripted(json(200, detailBody())).client.getDraft(STORE, DRAFT, CSRF);
   assert.equal(ok.kind, 'ok');
+  for (const version of [2, 3, MAX]) {
+    const edited = await scripted(json(200, detailBody({ version }))).client.getDraft(STORE, DRAFT, CSRF);
+    assert.equal(edited.kind === 'ok' && edited.draft.version, version, String(version));
+  }
   assert.deepEqual(ok.kind === 'ok' && ok.draft.lines.map((l) => l.lineTotalCents), [2000, 550]);
   // The largest exact amounts: one line of 2^53-1 cents.
   const big = await scripted(json(200, detailBody({ subtotalCents: MAX }, [{ position: 1, description: 'x', quantity: 1, unitPriceCents: MAX, lineTotalCents: MAX }]))).client.getDraft(STORE, DRAFT, CSRF);
@@ -199,7 +203,7 @@ test('IDC-05. a draft: exactly its fields for the store and id asked, lines 1..n
     detailBody({ subtotalCents: 2550 }, line({ quantity: 0, lineTotalCents: 0 })), detailBody({ subtotalCents: 2550 }, line({ note: 'x' })),
     detailBody({ subtotalCents: 0 }, [{ position: 1, description: 'x', quantity: 3, unitPriceCents: MAX, lineTotalCents: MAX }]),
     { draft: detailBody().draft, more: 1 },
-    detailBody({ version: 2 }), detailBody({ version: '1' }), // the server serves version 1 only (a draft is never edited)
+    detailBody({ version: '2' }), detailBody({ version: 1.5 }), detailBody({ version: -1 }), detailBody({ version: null }), detailBody({ version: MAX + 1 }),
   ];
   for (const body of bad) assert.deepEqual(await scripted(json(200, body)).client.getDraft(STORE, DRAFT, CSRF), { kind: 'unavailable' }, JSON.stringify(body).slice(0, 160));
   const zero = detailBody({ subtotalCents: 0 }, [{ position: 1, description: 'x', quantity: 1, unitPriceCents: 0, lineTotalCents: 0 }]);

@@ -612,11 +612,21 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // property above is untouched.
     'tests/db/invoiceDraftRoutine.integration.test.mjs',
     'tests/db/invoiceDraftsHttp.integration.test.mjs',
+    // M7B-INVOICES-P2: the draft edit proof needs 001-029 applied (and 029 rolled back through its down file, refused while a
+    // draft's version is above 1, and re-applied; the 028 database upgraded to 029) before it can say anything about migration
+    // 029's routine, trigger or privilege containment; it applies them through the SAME trusted executor, validating its target
+    // with the same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property
+    // above is untouched.
+    'tests/db/invoiceDraftEditRoutine.integration.test.mjs',
     // M7A-CUSTOMERS-P3-R2: the shop's real-browser gate stands up the tenant entry over a disposable PostgreSQL and needs
     // 001-020 applied first; it applies them through the SAME trusted executor (and validates its target with the same
     // assertDisposableTestDsn), never a second apply path. A test suite that runs the database lane, like the tests/db/
     // entries above; the decisive containment property asserted above is untouched.
     'tests/browser/shopRoleLevels.browser.test.mjs',
+    // M7B-INVOICES-P2: the draft edit's HTTP proof stands up the tenant entry over every migration in the directory (029
+    // included) and applies them through the SAME trusted executor before any request, validating its target with the same
+    // assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
+    'tests/db/invoiceDraftEditHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

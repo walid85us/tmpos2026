@@ -1,13 +1,17 @@
 // Phase 4.0 M7b — store-owned invoice drafts: save one, list a store's, reopen one read-only (M7B-INVOICES-P1; G-IAM,
-// G-ISOLATION, G-PERSIST, G-IDEMPOT, G-AUDIT; docs/phase-4/10).
+// G-ISOLATION, G-PERSIST, G-IDEMPOT, G-AUDIT; docs/phase-4/10), and edit a saved one (M7B-INVOICES-P2; see THE EDIT).
 //
-// THE FOUR ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
+// THE SIX ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
 // requiring a STORE-scope permission (m5CanonicalPermissions.ts STORE_ROUTE_PERMISSIONS):
-//   POST /api/v1/stores/{storeId}/invoice-drafts              create_invoice_drafts — save a draft (a command, under a key)
-//   GET  /api/v1/stores/{storeId}/invoice-drafts              view_invoice_drafts   — the store's drafts, newest first
-//   GET  /api/v1/stores/{storeId}/invoice-drafts/{id}         view_invoice_drafts   — one draft and its lines (read-only)
-//   GET  /api/v1/stores/{storeId}/invoice-drafts/eligibility  create_invoice_drafts — whether a save would be authorized now
-//                                                                                    (M7B-INVOICES-P1-R2; see THE ELIGIBILITY)
+//   POST  /api/v1/stores/{storeId}/invoice-drafts              create_invoice_drafts — save a draft (a command, under a key)
+//   GET   /api/v1/stores/{storeId}/invoice-drafts              view_invoice_drafts   — the store's drafts, newest first
+//   GET   /api/v1/stores/{storeId}/invoice-drafts/{id}         view_invoice_drafts   — one draft and its lines (read-only)
+//   GET   /api/v1/stores/{storeId}/invoice-drafts/eligibility  create_invoice_drafts — whether a save would be authorized now
+//                                                                                     (M7B-INVOICES-P1-R2; see THE ELIGIBILITY)
+//   PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}         edit_invoice_drafts   — replace a draft's customer and lines
+//                                                                                     (M7B-INVOICES-P2; a command, under a key)
+//   GET   /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility
+//                                                              edit_invoice_drafts   — whether an edit would be authorized now
 // The {storeId} segment is a REQUESTED TARGET: the chain hands it to the tenant authorizer, which selects the actor's OWN
 // active store-scope grant at exactly that store (no tenant-to-store inheritance; none, two roles at one store, a foreign
 // or missing store and a non-canonical segment are all the same 403), decides the permission on that grant's role and its
@@ -83,8 +87,40 @@
 // revalidator and migration 028's routine), and an "allowed" answer covers none of the save's own checks — its request
 // security (Origin, Sec-Fetch-Site, X-TMPOS-CSRF), its body and customer, or its Idempotency-Key and lease.
 //
-// NOT HERE (deferred, owner decisions): editing, discarding or deleting a draft, issuing and numbering, tax, discounts,
-// shipping, payments, fractional quantities, catalog prices, legacy customer or invoice mapping, retention and privacy.
+// THE EDIT (M7B-INVOICES-P2). PATCH replaces the editable part of one saved draft: its customer and its COMPLETE ordered
+// lines. Authority: edit_invoice_drafts — Invoices at Edit or above on the store grant's role, and nothing else (no
+// Customers level; read-only never). Request { expectedTenant, expectedVersion, customerId, lines }, no other key at either
+// level (a currency, a total, an id, a status or a creation time is the 400): expectedTenant is the save's precondition
+// (another tenant is the same unsealed 409 write_conflict, rolled back); expectedVersion is the version the detail read
+// reported, a safe integer from 1 to 2^53 - 2; customerId and the lines follow the save's contract exactly — the same
+// helper validates both (draftLinesOf) and the server computes the subtotal. The path's draft id must match the outbox's
+// aggregate-id shape (outbox.ts UUID_RE: a versioned, RFC-variant uuid) or the request is the 400: a stored id outside that
+// shape is readable but not editable (a recorded residual — every id this runtime mints is a v4). The body is bounded at
+// 64 KiB like the save's. app.ts binds the path's DRAFT id as the fingerprint's target and the trusted tenant, store and
+// actor beside it, so one key at two drafts is the 422 and never a replay. In ONE transaction: the lease fence; the
+// store-scope revalidation (Invoices Edit decided again); the mutator's one call into migration 029's routine, which
+// decides authority again, then locks the draft header in the trusted tenant and store and judges its state and its version
+// BEFORE the contents, then the replacement customer, then whether anything changes (and, only for a change, its role's
+// Invoices level again under a lock). A real change replaces the lines, sets the customer and
+// subtotal and steps the version by exactly one, with one audit record (action store.invoice_draft.update, the draft as
+// its subject) and one outbox event invoice_draft.updated v1 { storeId, customerId, lineCount } (its envelope's aggregate
+// version is the new version), and the sealed 200 { "draftId", "version": expectedVersion + 1, "changed": true }. The same
+// customer and the same ordered lines (equal totals alone are not equal; reordering is a change) at the current version
+// write nothing but the sealed 200 { "draftId", "version": expectedVersion, "changed": false } — no version step, no audit
+// record, no event. Another version — a stale no-op included — is the sealed 409 { "error": "write_conflict" }; a draft
+// whose state admits no edit is the sealed 409 { "error": "invalid_state" } (unreachable while migration 028 pins the status
+// to draft); a missing draft, another store's or tenant's, and a missing or another tenant's customer are ONE unsealed 404
+// not_found, rolled back. Each sealed answer is the key's completion: a retry under the key replays it, even after a later
+// edit moved the version. A lost COMMIT answer is the bounded 503, as for the save.
+//
+// THE EDIT ELIGIBILITY (M7B-INVOICES-P2). The edit's counterpart of THE ELIGIBILITY above, decided by the edit's own
+// requirement object (INVOICE_DRAFT_EDIT_REQUIREMENT) with exactly its conventions; the handler also refuses a draft id
+// segment that is not a canonical lowercase uuid (the 400 the reopen route answers), after the chain's refusals and the
+// scope check. It reads no draft, so its answer is the same for every well-formed id: it never tells whether a draft exists.
+// The creation eligibility is unchanged and proves Create only; neither answer authorizes the other's route.
+//
+// NOT HERE (deferred, owner decisions): discarding or deleting a draft, issuing and numbering, tax, discounts, shipping,
+// payments, fractional quantities, catalog prices, legacy customer or invoice mapping, retention and privacy.
 //
 // PURE AND PORTABLE: part of the emitted tenant runtime artifact, importing only the runtime. The planner holds no
 // infrastructure, reads nothing but its context and writes nothing; the reads' port is handed in by the composition root.
@@ -93,19 +129,30 @@ import type { Response } from 'express';
 import type { CommandContract } from './commandTransaction.js';
 import { normalizePlainText } from './customerCreate.js';
 import { PORT_DEADLINE_MS, outage, withDeadline } from './deadline.js';
+import { UUID_RE as AGGREGATE_ID_RE } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import type { TrustedScope } from './principals.js';
-import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_DIRECTORY_PATH, STORE_SEGMENT, pathIdOf, storeTargetOf } from './routes.js';
+import {
+  COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_DIRECTORY_PATH, STORE_SEGMENT, pathIdBeforeSuffixOf, pathIdOf, storeTargetOf,
+} from './routes.js';
 import type { AuthorizationRequirement, CommandContext, CommandPlan, RouteContext, RouteDefinition, RouteHandler } from './routes.js';
 
-/** The four templates (routes.ts STORE_TEMPLATED_ROUTES). */
+/** The templates (routes.ts STORE_TEMPLATED_ROUTES). */
 export const INVOICE_DRAFTS_PATH = `${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`;
 export const INVOICE_DRAFT_PATH = `${INVOICE_DRAFTS_PATH}${PATH_ID_SEGMENT}`;
 /** The creation-eligibility template (M7B-INVOICES-P1-R2): a literal last segment, matched before INVOICE_DRAFT_PATH. */
 export const INVOICE_DRAFT_ELIGIBILITY_PATH = `${INVOICE_DRAFTS_PATH}/eligibility`;
-/** The store route permissions (m5CanonicalPermissions.ts): Invoices View; Invoices Create with Customers View. */
+/** The edit-eligibility template's last segment, after the draft id (M7B-INVOICES-P2). */
+const EDIT_ELIGIBILITY_SUFFIX = '/edit-eligibility';
+/** The edit-eligibility template (M7B-INVOICES-P2): the draft's {id}, then one literal segment. */
+export const INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH = `${INVOICE_DRAFT_PATH}${EDIT_ELIGIBILITY_SUFFIX}`;
+/**
+ * The store route permissions (m5CanonicalPermissions.ts): Invoices View; Invoices Create with Customers View; Invoices Edit
+ * (M7B-INVOICES-P2: the edit and its eligibility share this one object).
+ */
 export const INVOICE_DRAFT_VIEW_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'view_invoice_drafts' });
 export const INVOICE_DRAFT_CREATE_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'create_invoice_drafts' });
+export const INVOICE_DRAFT_EDIT_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'edit_invoice_drafts' });
 
 /** Lines per draft, and a line description's length in Unicode scalar values (migration 028's CHECKs). */
 export const INVOICE_DRAFT_MAX_LINES = 50;
@@ -140,36 +187,58 @@ export const INVOICE_DRAFT_CREATED_EVENT: EventContract = Object.freeze({
     storeId: ID_FIELD, customerId: ID_FIELD, lineCount: Object.freeze({ type: 'integer', min: 1, max: INVOICE_DRAFT_MAX_LINES } as const),
   }),
 });
-/** The registry the tenant entry composes (its one event contract; tenantEntry.ts). */
-export const INVOICE_DRAFT_EVENTS: readonly EventContract[] = Object.freeze([INVOICE_DRAFT_CREATED_EVENT]);
+/** The one event an edit that changed something enqueues (M7B-INVOICES-P2): the same identifiers and count, after the edit. */
+export const INVOICE_DRAFT_UPDATED_EVENT: EventContract = Object.freeze({
+  type: 'invoice_draft.updated',
+  version: 1,
+  aggregateType: 'invoice_draft',
+  payload: INVOICE_DRAFT_CREATED_EVENT.payload,
+});
+/** The registry the tenant entry composes (its two event contracts; tenantEntry.ts). */
+export const INVOICE_DRAFT_EVENTS: readonly EventContract[] = Object.freeze([INVOICE_DRAFT_CREATED_EVENT, INVOICE_DRAFT_UPDATED_EVENT]);
 
 /**
- * The change set: the store the path selected, the expected tenant, the customer, the subtotal and the lines as ONE rows
- * field (outbox.ts). A description is bounded at 512 UTF-16 units here — 256 scalars at two units each — and at 256 scalars
- * by the planner.
+ * The change set of the save and of the edit: the store the path selected, the expected tenant, the customer, the subtotal and
+ * the lines as ONE rows field (outbox.ts). A description is bounded at 512 UTF-16 units here — 256 scalars at two units each
+ * — and at 256 scalars by the planner.
  */
+const DRAFT_CHANGES = Object.freeze({
+  storeId: ID_FIELD,
+  expectedTenant: ID_FIELD,
+  customerId: ID_FIELD,
+  subtotalCents: AMOUNT_FIELD,
+  lines: Object.freeze({
+    type: 'rows',
+    maxRows: INVOICE_DRAFT_MAX_LINES,
+    fields: Object.freeze({
+      description: Object.freeze({ type: 'string', maxLength: INVOICE_DRAFT_DESCRIPTION_MAX_CHARACTERS * 2 } as const),
+      quantity: Object.freeze({ type: 'integer', min: 1, max: INVOICE_DRAFT_MAX_AMOUNT } as const),
+      unitPriceCents: AMOUNT_FIELD,
+    }),
+  } as const),
+});
+
 export const INVOICE_DRAFT_CREATE_CONTRACT: CommandContract = Object.freeze({
   kind: 'store.invoice_draft.create',
   mode: 'create',
   aggregateType: 'invoice_draft',
-  changes: Object.freeze({
-    storeId: ID_FIELD,
-    expectedTenant: ID_FIELD,
-    customerId: ID_FIELD,
-    subtotalCents: AMOUNT_FIELD,
-    lines: Object.freeze({
-      type: 'rows',
-      maxRows: INVOICE_DRAFT_MAX_LINES,
-      fields: Object.freeze({
-        description: Object.freeze({ type: 'string', maxLength: INVOICE_DRAFT_DESCRIPTION_MAX_CHARACTERS * 2 } as const),
-        quantity: Object.freeze({ type: 'integer', min: 1, max: INVOICE_DRAFT_MAX_AMOUNT } as const),
-        unitPriceCents: AMOUNT_FIELD,
-      }),
-    } as const),
-  }),
+  changes: DRAFT_CHANGES,
   events: Object.freeze([Object.freeze({ type: INVOICE_DRAFT_CREATED_EVENT.type, version: INVOICE_DRAFT_CREATED_EVENT.version })]),
   contextScope: 'store',
   sealedRefusal: 'customer_not_found',
+});
+
+/**
+ * The edit (M7B-INVOICES-P2): an update of the same aggregate with the save's change set, and its one event. No typed sealed
+ * refusal: a missing or foreign customer is the update's unsealed 404, the same as a missing draft.
+ */
+export const INVOICE_DRAFT_UPDATE_CONTRACT: CommandContract = Object.freeze({
+  kind: 'store.invoice_draft.update',
+  mode: 'update',
+  aggregateType: 'invoice_draft',
+  changes: DRAFT_CHANGES,
+  events: Object.freeze([Object.freeze({ type: INVOICE_DRAFT_UPDATED_EVENT.type, version: INVOICE_DRAFT_UPDATED_EVENT.version })]),
+  contextScope: 'store',
 });
 
 /** A line description as it is stored, or null: the customer name's pipeline at 256 scalars. */
@@ -190,6 +259,36 @@ const hasKeys = (v: Record<string, unknown>, keys: readonly string[]): boolean =
 /** A safe integer at or above `min`, never -0. */
 const isWhole = (v: unknown, min: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= min && !Object.is(v, -0);
 
+/** A draft's lines as the save and the edit accept them, and their server-computed subtotal. */
+export interface DraftLines {
+  readonly rows: readonly { readonly description: string; readonly quantity: number; readonly unitPriceCents: number }[];
+  readonly subtotalCents: number;
+}
+
+/**
+ * The lines of a save or an edit body, validated and normalized, with their subtotal — or null for anything the line contract
+ * refuses: 1-50 objects of exactly { description, quantity, unitPriceCents }, each description normalized, each quantity a
+ * safe integer >= 1 and price a safe integer >= 0 (never -0), every line total and their sum at most 2^53 - 1 in BigInt.
+ */
+export function draftLinesOf(lines: unknown): DraftLines | null {
+  if (!Array.isArray(lines) || lines.length < 1 || lines.length > INVOICE_DRAFT_MAX_LINES) return null;
+  const rows: { description: string; quantity: number; unitPriceCents: number }[] = [];
+  let sum = 0n;
+  // inv: rows holds each line below i, validated, and sum their totals, each and the sum at most 2^53 - 1; term: i rises to lines.length.
+  for (let i = 0; i < lines.length; i++) {
+    const line: unknown = lines[i];
+    if (!isObject(line) || !hasKeys(line, LINE_KEYS)) return null;
+    const description = normalizeDraftDescription(line.description);
+    const { quantity, unitPriceCents } = line;
+    if (description === null || !isWhole(quantity, 1) || !isWhole(unitPriceCents, 0)) return null;
+    const total = BigInt(quantity) * BigInt(unitPriceCents);
+    sum += total;
+    if (total > MAX || sum > MAX) return null;
+    rows.push({ description, quantity, unitPriceCents });
+  }
+  return { rows, subtotalCents: Number(sum) }; // exact: at most 2^53 - 1
+}
+
 /** The save's plan from its context alone, or COMMAND_REQUEST_INVALID: the runtime's new id, the values, one event. */
 export function planInvoiceDraftCreate(ctx: CommandContext): CommandPlan | typeof COMMAND_REQUEST_INVALID {
   // The store the path selected (app.ts): the target the authorizer chose the grant at; the mutator requires it to be the
@@ -200,22 +299,9 @@ export function planInvoiceDraftCreate(ctx: CommandContext): CommandPlan | typeo
   if (!isObject(body) || !hasKeys(body, BODY_KEYS)) return COMMAND_REQUEST_INVALID;
   const { expectedTenant, customerId, currency, lines } = body;
   if (!isUuid(expectedTenant) || !isUuid(customerId) || currency !== INVOICE_DRAFT_CURRENCY) return COMMAND_REQUEST_INVALID;
-  if (!Array.isArray(lines) || lines.length < 1 || lines.length > INVOICE_DRAFT_MAX_LINES) return COMMAND_REQUEST_INVALID;
-  const rows: { description: string; quantity: number; unitPriceCents: number }[] = [];
-  let sum = 0n;
-  // inv: rows holds each line below i, validated, and sum their totals, each and the sum at most 2^53 - 1; term: i rises to lines.length.
-  for (let i = 0; i < lines.length; i++) {
-    const line: unknown = lines[i];
-    if (!isObject(line) || !hasKeys(line, LINE_KEYS)) return COMMAND_REQUEST_INVALID;
-    const description = normalizeDraftDescription(line.description);
-    const { quantity, unitPriceCents } = line;
-    if (description === null || !isWhole(quantity, 1) || !isWhole(unitPriceCents, 0)) return COMMAND_REQUEST_INVALID;
-    const total = BigInt(quantity) * BigInt(unitPriceCents);
-    sum += total;
-    if (total > MAX || sum > MAX) return COMMAND_REQUEST_INVALID;
-    rows.push({ description, quantity, unitPriceCents });
-  }
-  const subtotalCents = Number(sum); // exact: at most 2^53 - 1
+  const valid = draftLinesOf(lines);
+  if (valid === null) return COMMAND_REQUEST_INVALID;
+  const { rows, subtotalCents } = valid;
   const id = ctx.newAggregateId;
   return {
     aggregateId: id,
@@ -246,6 +332,53 @@ const CREATE_ROUTE: RouteDefinition = {
 
 /** The save route, as the tenant inventory registers it (server/composition/tenantTransactions.ts). */
 export const INVOICE_DRAFT_CREATE_ROUTE: RouteDefinition = Object.freeze(CREATE_ROUTE);
+
+const UPDATE_BODY_KEYS: readonly string[] = ['customerId', 'expectedTenant', 'expectedVersion', 'lines'];
+
+/**
+ * The edit's plan from its context alone, or COMMAND_REQUEST_INVALID (M7B-INVOICES-P2; see THE EDIT): the path's draft and
+ * store, the values, one event, and both 200s — built from the plan alone, so each is deterministic and sealed.
+ */
+export function planInvoiceDraftUpdate(ctx: CommandContext): CommandPlan | typeof COMMAND_REQUEST_INVALID {
+  // The path's draft id (app.ts: canonical lowercase), in the outbox's aggregate-id shape, so a bad id is this 400 and never
+  // the 500 an unpreparable plan would be; and the path's store, which app.ts proved is the trusted scope's.
+  const id = ctx.targetId;
+  const storeId = ctx.storeId;
+  if (typeof id !== 'string' || !AGGREGATE_ID_RE.test(id) || !isUuid(storeId)) return COMMAND_REQUEST_INVALID;
+  const body: unknown = ctx.body;
+  if (!isObject(body) || !hasKeys(body, UPDATE_BODY_KEYS)) return COMMAND_REQUEST_INVALID;
+  const { expectedTenant, expectedVersion, customerId, lines } = body;
+  if (!isUuid(expectedTenant) || !isUuid(customerId)) return COMMAND_REQUEST_INVALID;
+  // 1..2^53 - 2, so expectedVersion + 1 is still exact and within the column's bound: a version is never wrapped or reset.
+  if (!isWhole(expectedVersion, 1) || expectedVersion > Number.MAX_SAFE_INTEGER - 1) return COMMAND_REQUEST_INVALID;
+  const valid = draftLinesOf(lines);
+  if (valid === null) return COMMAND_REQUEST_INVALID;
+  const { rows, subtotalCents } = valid;
+  return {
+    aggregateId: id,
+    expectedVersion,
+    changes: { storeId, expectedTenant, customerId, subtotalCents, lines: rows },
+    events: [{ type: INVOICE_DRAFT_UPDATED_EVENT.type, payload: { storeId, customerId, lineCount: rows.length } }],
+    response: { status: 200, body: { draftId: id, version: expectedVersion + 1, changed: true } },
+    unchanged: { status: 200, body: { draftId: id, version: expectedVersion, changed: false } },
+  };
+}
+
+// Frozen throughout, as the save's.
+const UPDATE_ROUTE: RouteDefinition = {
+  method: 'PATCH',
+  path: INVOICE_DRAFT_PATH,
+  policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: INVOICE_DRAFT_EDIT_REQUIREMENT } as const),
+  body: Object.freeze({ kind: 'json', maxBytes: INVOICE_DRAFT_MAX_BODY_BYTES, required: true } as const),
+  idempotency: 'required',
+  // As the save: a resolved actor and store grant, no fresh authentication; the store binds the presenting session.
+  trustedContext: 'required',
+  recentAuth: 'none',
+  command: Object.freeze({ contract: INVOICE_DRAFT_UPDATE_CONTRACT, plan: planInvoiceDraftUpdate }),
+};
+
+/** The edit route, as the tenant inventory registers it (server/composition/tenantTransactions.ts). */
+export const INVOICE_DRAFT_UPDATE_ROUTE: RouteDefinition = Object.freeze(UPDATE_ROUTE);
 
 // ---------------------------------------------------------------------------
 // The reads: the cursor, the query, the answers' validation and the two routes
@@ -449,8 +582,9 @@ const LINE_OUT_KEYS: readonly string[] = ['position', 'description', 'quantity',
 
 /**
  * The port's answer as a validated draft, 'not_found' or 'denied' — or null for anything out of shape: the draft asked for,
- * at the trusted store; status draft, USD, version 1; 1-50 lines at positions 1..n in order, each total exactly quantity x
- * unit price and the subtotal exactly their sum (BigInt), every amount within 2^53 - 1. Never throws.
+ * at the trusted store; status draft, USD, a version that is a safe integer >= 1 (M7B-INVOICES-P2: an edit steps it);
+ * 1-50 lines at positions 1..n in order, each total exactly quantity x unit price and the subtotal exactly their sum
+ * (BigInt), every amount within 2^53 - 1. Never throws.
  */
 export function invoiceDraftOf(raw: unknown, draftId: string, storeId: string): InvoiceDraft | 'not_found' | 'denied' | null {
   try {
@@ -462,7 +596,7 @@ export function invoiceDraftOf(raw: unknown, draftId: string, storeId: string): 
     if (!isPlain(draft) || !hasExactly(draft, DRAFT_KEYS)) return null;
     const { id, storeId: store, customerId, status, currency, version, createdAt, subtotalCents, lines } = draft;
     if (id !== draftId || !isUuid(id) || store !== storeId || !isUuid(store) || !isUuid(customerId)) return null;
-    if (status !== INVOICE_DRAFT_STATUS || currency !== INVOICE_DRAFT_CURRENCY || version !== 1 || !isDraftCreatedAt(createdAt)) return null;
+    if (status !== INVOICE_DRAFT_STATUS || currency !== INVOICE_DRAFT_CURRENCY || !isWhole(version, 1) || !isDraftCreatedAt(createdAt)) return null;
     if (!isAmount(subtotalCents, 0) || !Array.isArray(lines)) return null;
     const count = lines.length;
     if (count < 1 || count > INVOICE_DRAFT_MAX_LINES) return null;
@@ -616,6 +750,34 @@ export function createInvoiceDraftEligibilityRoute(): RouteDefinition {
       // No query is part of this contract: any at all, an empty one included, is refused.
       if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_eligibility_query_invalid');
       if (readerOf(req, ctx) === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+      res.status(200).json({ eligibility: 'allowed' });
+    },
+  };
+  return Object.freeze(route);
+}
+
+/**
+ * Whether the session's actor may edit a draft at the path's store now (M7B-INVOICES-P2; see THE EDIT ELIGIBILITY). The
+ * chain decides it under INVOICE_DRAFT_EDIT_REQUIREMENT — the edit's own requirement object — before this handler runs; the
+ * handler reads no port and writes no business row, and checks the id segment's shape only, never whether a draft exists.
+ */
+export function createInvoiceDraftEditEligibilityRoute(): RouteDefinition {
+  const route: RouteDefinition = {
+    method: 'GET',
+    path: INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH,
+    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: INVOICE_DRAFT_EDIT_REQUIREMENT } as const),
+    body: Object.freeze({ kind: 'none' } as const),
+    idempotency: 'none',
+    trustedContext: 'required',
+    recentAuth: 'none',
+    sessionBinding: 'required',
+    handler: (req, res, ctx) => {
+      // The reopen route's order: the query, the scope, then the id segment (one canonical lowercase uuid).
+      if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_edit_eligibility_query_invalid');
+      if (readerOf(req, ctx) === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+      if (pathIdBeforeSuffixOf(typeof req.path === 'string' ? req.path : '', EDIT_ELIGIBILITY_SUFFIX) === null) {
+        return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_id_invalid');
+      }
       res.status(200).json({ eligibility: 'allowed' });
     },
   };

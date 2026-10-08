@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 18 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 20 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -227,7 +227,11 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 18 frozen tenant routes', ()
     // M7B-INVOICES-P1-R2: the fourth store template — the save's creation eligibility, read-only.
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/eligibility', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
+    // M7B-INVOICES-P2: the edit's eligibility, read-only, and the idempotent draft edit.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'json', idempotency: 'required' },
   ]);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 20);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });

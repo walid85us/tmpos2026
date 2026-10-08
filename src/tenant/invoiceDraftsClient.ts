@@ -41,7 +41,7 @@
 //     exists too. These rules restate the server's (server/runtime/invoiceDrafts.ts); the server still decides.
 //   - The parsers accept exactly what that route module serves and nothing it would refuse to serve: a store name null or
 //     1-256 well-formed scalars, the stores in its order (name in code point order — UTF-8 byte order — unnamed last, then
-//     id), version 1, no -0 anywhere, and a cursor in its one canonical spelling — the unpadded base64url of the tag byte
+//     id), a version that is a safe integer of 1 or more, no -0 anywhere, and a cursor in its one canonical spelling — the unpadded base64url of the tag byte
 //     0x01 and a 16-byte draft id (23 characters: 'A', then 'Q'..'f' for the tag's low bits, and a last character whose
 //     two unused bits are zero). Any other cursor is refused by the server with its 400.
 //   - A store id, a draft id or a cursor that is not in its grammar is never put into a request path.
@@ -367,7 +367,8 @@ function detailOf(body: unknown, storeId: string, draftId: string): DraftDetail 
   if (!isPlain(value) || !hasKeys(value, ['id', 'storeId', 'customerId', 'status', 'currency', 'version', 'createdAt', 'subtotalCents', 'lines'])) return null;
   const { id, customerId, status, currency, version, createdAt, subtotalCents, lines } = value;
   if (id !== draftId || value.storeId !== storeId || !isCustomerId(customerId) || status !== 'draft' || currency !== 'USD') return null;
-  if (version !== 1 || !isDraftCreatedAt(createdAt) || !isCents(subtotalCents)) return null; // a draft is never edited: version 1
+  // M7B-INVOICES-P2: 1 when saved, one more for each edit that changed it (migration 029: at most 2^53-1).
+  if (!isCount(version, 1, Number.MAX_SAFE_INTEGER) || !isDraftCreatedAt(createdAt) || !isCents(subtotalCents)) return null;
   if (!Array.isArray(lines) || lines.length < 1 || lines.length > MAX_DRAFT_LINES) return null;
   const out: DraftLine[] = [];
   let sum = 0n;

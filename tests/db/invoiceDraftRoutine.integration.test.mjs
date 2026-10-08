@@ -3,7 +3,7 @@
 // exercised as the runtime's own non-owner login, every call bound exactly as the production adapter binds it.
 //
 // WHAT IS PROVEN (each test's title carries the stage brief's acceptance criteria it evidences).
-//   IDR-01 (AC-16) 001-028 applied clean by the trusted executor, every ledger checksum the pinned one; 028's postcondition
+//   IDR-01 (AC-16) 001-029 applied clean by the trusted executor, every ledger checksum the pinned one; 028's postcondition
 //          re-proven over the applied state and refusing every widening it names; a second apply refused.
 //   IDR-02 (AC-16) the inventory, the foreign keys and the ACL: two RLS tables with no policy and no runtime privilege by any
 //          path (the login's direct read and write are 42501), composite NO ACTION foreign keys to store, customer and
@@ -40,7 +40,7 @@
 //   IDR-11 (AC-16) the rollback and the upgrade: 028's down refused while not applied, while a draft or a line exists and
 //          while an audit record names a draft; 027's down refused while 028 is applied; with nothing retained, 028 rolled
 //          back through the executor's own path — 027's exact store, customer and audit inventory restored, the Invoices
-//          lock anchors only 028's create made removed and every versioned or levelled row kept, the 001-028 runtime then
+//          lock anchors only 028's create made removed and every versioned or levelled row kept, the 001-029 runtime then
 //          refused by the startup preflight — and the 027 database, holding customers and role configuration, upgraded to
 //          028 by the trusted executor with every row unchanged.
 //   IDR-12 (AC-16 R7) the lock order, live for BOTH files: each is run while another transaction holds its tables one at a
@@ -57,9 +57,9 @@
 //
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic and
-// randomly suffixed; every id and key is made at run time. It rolls 028 back (and restores it: IDR-11 and IDR-12), so on a
-// shared service it runs after every step that applies 028 and before the HTTP suite. It leaves 028 applied, the ledger
-// 001-028, the issuer key row and limiter fingerprint it found, and NO draft, line, audit subject, Invoices lock anchor,
+// randomly suffixed; every id and key is made at run time. It rolls 028 back, with 029 above it (and restores both: IDR-11 and IDR-12),
+// so on a shared service it runs after every step that applies 028 and before the HTTP suite. It leaves 028 and 029 applied, the
+// ledger 001-029, the issuer key row and limiter fingerprint it found, and NO draft, line, audit subject, Invoices lock anchor,
 // session, mint-ledger row or login of its own; its synthetically named identities, tenants, stores, memberships and
 // customers stay, as every suite's do (no customer it made is referenced by a draft once it ends).
 import test from 'node:test';
@@ -81,6 +81,12 @@ const MIG_DIR = new URL(`../../${MIG_REL}/`, import.meta.url).pathname.replace(/
 const UP_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.up.sql`, 'utf8');
 const DOWN_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.down.sql`, 'utf8');
 const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
+/**
+ * M7B-INVOICES-P2: 029 (the draft edit) adds a routine, a trigger and its function to 028's schema and widens 028's version
+ * CHECK, which 028's exact postcondition does not know; 028's own surface is therefore judged with 029's committed down run
+ * first, in the same rolled-back transaction (no draft here is ever edited), and 028's rollback now follows 029's.
+ */
+const DOWN_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_028 = UP_028.slice(UP_028.lastIndexOf('do $$'));
 const CREATE = 'tmpos_invoice_draft.m7b_invoice_draft_create(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
@@ -186,9 +192,9 @@ test.after(async () => {
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
     await step(cleanDrafts);
-    // A failed IDR-11 may have left 028 rolled back: the executor applies it again.
+    // A failed IDR-11 may have left 028 (and 029 above it) rolled back: the executor applies them again.
     await step(async () => {
-      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '028') as applied`)[0].applied) {
+      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '029') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -232,7 +238,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-028), a real non-owner runtime login, the issuer key installed by the owner
+// setup: every migration in the directory (001-029), a real non-owner runtime login, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -367,13 +373,16 @@ const LINES = [line('Screen replacement', 1, 12_999), line('Labour  (1 hr)', 2, 
 // IDR-01..02: the migration, the inventory and the ACL
 // ===========================================================================
 
-test('IDR-01 (AC-16): 001-028 applied clean, every checksum the pinned one; 028\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('IDR-01 (AC-16): 001-029 applied clean, every checksum the pinned one; 028\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 28 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 29 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'every ledger checksum is the pinned one');
   assert.equal(ledger[27].checksum, createHash('sha256').update(UP_028).digest('hex'), '028\'s checksum is its up bytes');
-  assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_028).simple())).code, undefined, 'the applied state satisfies the postcondition');
+  assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(POSTCONDITION_028).simple(); })).code, undefined,
+    'the applied state satisfies the postcondition (029 rolled back above it)');
+  const on029 = await rolledBack((tx) => tx.unsafe(POSTCONDITION_028).simple());
+  assert.equal(on029.code, '55000', `029 applied: 028's exact inventory sees 029's routines and trigger (${JSON.stringify(on029)})`);
   for (const [label, widen] of [
     ['EXECUTE to PUBLIC', `grant execute on function ${CREATE} to public`],
     ['EXECUTE to the audit writer', `grant execute on function ${PAGE} to tmpos_audit_writer`],
@@ -392,7 +401,7 @@ test('IDR-01 (AC-16): 001-028 applied clean, every checksum the pinned one; 028\
     ['a relaxed CHECK', 'alter table tmpos_invoice_draft.invoice_draft drop constraint invoice_draft_currency_chk'],
     ['the audit column granted', 'grant select (subject_invoice_draft_id) on public.audit_event to tmpos_app'],
   ]) {
-    const out = await rolledBack(async (tx) => { await tx.unsafe(widen); await tx.unsafe(POSTCONDITION_028).simple(); });
+    const out = await rolledBack(async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(widen); await tx.unsafe(POSTCONDITION_028).simple(); });
     assert.equal(out.code, '55000', `${label}: refused (${JSON.stringify(out)})`);
     assert.match(out.message, /migration 028 refused/, label);
   }
@@ -402,8 +411,10 @@ test('IDR-01 (AC-16): 001-028 applied clean, every checksum the pinned one; 028\
 });
 
 test('IDR-02 (AC-16): two RLS tables with no policy and no runtime privilege by any path; composite NO ACTION foreign keys through the new UNIQUEs; three pinned definers the login alone may execute', async () => {
+  // 028's three (029's edit routine and trigger function in the same schema are proven by invoiceDraftEditRoutine IDE-02).
   const fns = (await owner`select p.proname::text as name, p.prosecdef, p.provolatile::text as volatility, p.proconfig, p.proacl::text as acl
-    from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_invoice_draft'::regnamespace order by 1`).map((r) => ({ ...r }));
+    from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_invoice_draft'::regnamespace
+      and p.proname in ('m7b_invoice_draft_create', 'm7b_invoice_draft_get', 'm7b_invoice_draft_page') order by 1`).map((r) => ({ ...r }));
   assert.deepEqual(fns.map((f) => [f.name, f.prosecdef, f.volatility, f.proconfig]), [
     ['m7b_invoice_draft_create', true, 'v', ['search_path=pg_catalog, pg_temp', 'row_security=off']],
     ['m7b_invoice_draft_get', true, 's', ['search_path=pg_catalog, pg_temp', 'row_security=off']],
@@ -946,16 +957,16 @@ test('IDR-11 (AC-16): 028\'s down refuses while a draft, a line or a draft-namin
   });
   assert.equal(subject.code, '55000', JSON.stringify(subject));
   assert.match(subject.message, /an audit record names an invoice draft/);
-  const twice = await rolledBack(async (tx) => { await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_028).simple(); });
+  const twice = await rolledBack(async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_028).simple(); });
   assert.equal(twice.code, '55000');
   assert.match(twice.message, /migration 028 is not applied/);
   // The executor's own path: 028's down and its ledger row.
   const withAll = await surfaceOf027();
-  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-028 runtime is accepted');
+  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-029 runtime is accepted');
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '027');
   let restored = false;
   try {
-    assert.deepEqual(undone, ['028'], 'only 028 sits above 027');
+    assert.deepEqual(undone, ['029', '028'], 'only 028 (and 029 above it, M7B-INVOICES-P2) sits above 027');
     const at027 = await surfaceOf027();
     assert.ok(!at027.store.constraints.some((c) => c.name === 'store_tenant_store_key'), 'the store UNIQUE gone');
     assert.ok(!at027.customer.constraints.some((c) => c.name === 'customer_tenant_customer_key'), 'the customer UNIQUE gone');
@@ -977,7 +988,7 @@ test('IDR-11 (AC-16): 028\'s down refuses while a draft, a line or a draft-namin
     assert.deepEqual((await owner`select role_id, domain, level from tmpos_role.tenant_role_level where tenant_id = ${anchors} order by 1, 2`).map((r) => ({ ...r })),
       [{ role_id: 'manager', domain: 'customers', level: null }], 'the Invoices lock anchor removed; a Customers anchor (020\'s kind) kept');
     assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing'], migrationLedger: ['migration_missing'] },
-      'the 001-028 runtime refuses the 027 database: its grants and its ledger');
+      'the 001-029 runtime refuses the 027 database: its grants and its ledger');
     // THE UPGRADE: a 027 database holding customers and role configuration, upgraded by the trusted executor.
     await setLevel(anchors, 'sales_staff', 'customers', 'view');
     const customer = await newCustomer(anchors, 'upgrade');
@@ -985,16 +996,17 @@ test('IDR-11 (AC-16): 028\'s down refuses while a draft, a line or a draft-namin
       where tenant_id = any(${TENANTS}::uuid[]) order by 1`).map((r) => ({ ...r }));
     const levelsBefore = (await owner`select tenant_id, role_id, domain, level, updated_at::text as u from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[]) order by 1, 2, 3`).map((r) => ({ ...r }));
     const upgrade = await trustedApply();
-    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['028']], JSON.stringify(upgrade).slice(0, 300));
+    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['028', '029']], JSON.stringify(upgrade).slice(0, 300));
     restored = true;
     assert.deepEqual((await owner`select customer_id, tenant_id, name, row_version::text as v, created_at::text as c from tmpos_customer.customer
       where tenant_id = any(${TENANTS}::uuid[]) order by 1`).map((r) => ({ ...r })), rowsBefore, 'every customer row unchanged');
     assert.deepEqual((await owner`select tenant_id, role_id, domain, level, updated_at::text as u from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[]) order by 1, 2, 3`).map((r) => ({ ...r })),
       levelsBefore, 'every role level unchanged');
     const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-    assert.deepEqual(ledger.map((r) => [r.version, r.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-028 again');
+    assert.deepEqual(ledger.map((r) => [r.version, r.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-029 again');
     assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
-    assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_028).simple())).code, undefined, 'the upgraded state satisfies the postcondition');
+    assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(POSTCONDITION_028).simple(); })).code, undefined,
+      'the upgraded state satisfies the postcondition (029 rolled back above it)');
     // The upgraded database saves at once, over the customer that existed before it.
     const S = await newStore(anchors, `Upgrade ${SUFFIX}`);
     const who = await actor('upgrade', [storeGrant(anchors, S, 'sales_staff')]);
@@ -1105,7 +1117,7 @@ test('IDR-12 (AC-16 R7): 028\'s down and up each take their ACCESS EXCLUSIVE loc
   await cleanDrafts();
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '027');
   try {
-    assert.deepEqual(undone, ['028'], 'only 028 sits above 027');
+    assert.deepEqual(undone, ['029', '028'], 'only 028 (and 029 above it) sits above 027');
     assert.ok((await owner`select pg_catalog.to_regnamespace('tmpos_invoice_draft') is null as absent`)[0].absent, 'a database without 028');
     await lockedLive('the down without 028', DOWN_028, WRITERS_ORDER.slice(0, 4),
       (o, kept) => /^refused 55000: migration 028 rollback refused: migration 028 is not applied \(/.test(o) && Array.isArray(kept) && kept.length === 0);
@@ -1114,7 +1126,7 @@ test('IDR-12 (AC-16 R7): 028\'s down and up each take their ACCESS EXCLUSIVE loc
   }
   const [after] = await owner`select pg_catalog.to_regnamespace('tmpos_invoice_draft') is not null as present,
     (select checksum from public.schema_migrations where version = '028') as checksum`;
-  assert.deepEqual({ ...after }, { present: true, checksum: REQUIRED_MIGRATIONS.at(-1).checksum }, '028 applied again, its ledger row restored');
+  assert.deepEqual({ ...after }, { present: true, checksum: REQUIRED_MIGRATIONS.find((m) => m.version === '028').checksum }, '028 applied again, its ledger row restored');
 
   // STATIC, for both files: the lock block is the first statement after the transaction settings — no block, read or check
   // before it — and holds nothing but its locks, in the creators' order, and the handler that turns a missing table or

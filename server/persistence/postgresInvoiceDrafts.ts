@@ -1,6 +1,6 @@
-// Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator and the two reads' production
-// adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's session-bound routines
-// (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
+// Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator, the edit's mutator (M7B-INVOICES-P2)
+// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's or 029's
+// session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
 //
 // THE MUTATOR (INVOICE_DRAFT_CREATE_MUTATOR, context scope 'store'). The one business mutation the tenant store commits for
 // POST /api/v1/stores/{storeId}/invoice-drafts, handed to the store in trusted source by the tenant transaction root alone.
@@ -25,12 +25,26 @@
 // the generic 503 (DA-70). A raise (a reused id, a value a CHECK refuses, a malformed argument, an isolation other than READ
 // COMMITTED) is not caught: the kernel rolls back, a 503, and a retry re-plans. No row, value or driver message is logged.
 //
+// THE EDIT'S MUTATOR (INVOICE_DRAFT_UPDATE_MUTATOR, M7B-INVOICES-P2, context scope 'store'). For PATCH
+// /api/v1/stores/{storeId}/invoice-drafts/{id}, at the same point of the same order, one statement —
+// tmpos_invoice_draft.m7b_invoice_draft_update (migration 029) — bound exactly like the save's: the session key, the
+// REVALIDATED trusted store as p_store_id (the change set's storeId must equal it), the draft (the command's aggregate id),
+// the expected tenant and version, the customer, the lines as one jsonb text and the planner's subtotal. Its answers, one row:
+// 'applied' naming exactly this transaction's tenant, store, actor and grant at expectedVersion + 1; 'unchanged' naming
+// them at expectedVersion (nothing written: the store seals the 200 changed:false); every refusal with every other column
+// null — 'conflict' (another version: the sealed 409), 'invalid_state' (the sealed 409), 'not_found' (a missing or foreign
+// draft or customer: rolled back, the 404), 'tenant_mismatch' as 'precondition_failed' (rolled back, the unsealed 409),
+// 'refused' (rolled back, the 503). Anything else — another identity, version, outcome or row count, an identity on a
+// refusal — is 'mismatch' (rolled back, the 503). A raise is not caught, as for the save. The version is bigint text,
+// compared as text, never through a float.
+//
 // THE READS (createPostgresInvoiceDrafts). page and get each run ONE statement on the kernel's client, in one short
 // transaction: the routine is handed the session key and the TRUSTED scope's tenant and store as its expected ones (never
 // anything the request carried beyond a validated anchor id, draft id and page size). Every row is untrusted: a refusal must
 // be the routine's only row with every other column null; every other row must name exactly the trusted tenant and store —
-// any mismatch is a fault — and carry well-formed values (canonical ids, status 'draft', 'USD', version 1, a microsecond UTC
-// creation time, bigint amounts as exact decimal text within 2^53 - 1, ordered rows). Anything else — more rows than asked,
+// any mismatch is a fault — and carry well-formed values (canonical ids, status 'draft', 'USD', a version that is a safe
+// integer >= 1 (M7B-INVOICES-P2: an edit steps it), a microsecond UTC creation time, bigint amounts as exact decimal text
+// within 2^53 - 1, ordered rows). Anything else — more rows than asked,
 // an 'invalid' answer (every argument was checked first, so it is a fault), an abort, a timeout, a lost connection, a driver
 // error — is a THROW, an outage the route answers as a bounded 503, never a refusal. The route validates the answer again.
 //
@@ -44,7 +58,7 @@ import type { TrustedScope } from '../runtime/principals.js';
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
 import {
   INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_CURRENCY, INVOICE_DRAFT_MAX_LIMIT, INVOICE_DRAFT_MAX_LINES, INVOICE_DRAFT_STATUS,
-  inInvoiceDraftOrder, isDraftCreatedAt, normalizeDraftDescription,
+  INVOICE_DRAFT_UPDATE_CONTRACT, inInvoiceDraftOrder, isDraftCreatedAt, normalizeDraftDescription,
 } from '../runtime/invoiceDrafts.js';
 import type { InvoiceDraftListQuery, InvoiceDraftReadPort } from '../runtime/invoiceDrafts.js';
 import type { AggregateMutator, MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
@@ -109,6 +123,47 @@ export const INVOICE_DRAFT_CREATE_MUTATOR: AggregateMutator = Object.freeze({
   aggregateType: INVOICE_DRAFT_CREATE_CONTRACT.aggregateType,
   contextScope: 'store',
   apply: applyInvoiceDraftCreate,
+});
+
+const UPDATE_COLUMNS: readonly string[] = [...CREATE_COLUMNS, 'o_version'];
+/** The routine's refusals, each with every other column null; 'tenant_mismatch' is the store's 'precondition_failed'. */
+const UPDATE_REFUSALS: ReadonlySet<string> = new Set(['conflict', 'invalid_state', 'not_found', 'refused']);
+
+async function applyInvoiceDraftUpdate(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<string> {
+  const context = authority?.context ?? null;
+  const sessionKey = authority?.sessionKey ?? null;
+  const { aggregateId, expectedVersion, changes } = mutation;
+  const { storeId, expectedTenant, customerId, subtotalCents, lines } = changes;
+  // As the save: the revalidated STORE context and its key, and the path's store equal to the revalidated one.
+  if (context === null || context.scope !== 'store' || context.tenant === null || context.store === null || typeof sessionKey !== 'string') return 'unavailable';
+  if (storeId !== context.store || !isUuid(expectedTenant) || !isUuid(customerId) || typeof subtotalCents !== 'number') return 'unavailable';
+  // The planner's bound, restated: 1..2^53-2, so expected + 1 is still exact and within the column's CHECK.
+  if (typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1
+    || expectedVersion > Number.MAX_SAFE_INTEGER - 1) return 'unavailable';
+  const text = linesText(lines);
+  if (text === null) return 'unavailable';
+  const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version
+    from tmpos_invoice_draft.m7b_invoice_draft_update(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid,
+      ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint, ${customerId}::uuid, ${text}::text::jsonb, ${String(subtotalCents)}::bigint)`;
+  if (rows.length !== 1 || !hasColumns(rows[0], UPDATE_COLUMNS)) return 'mismatch';
+  const { o_outcome: outcome, o_tenant_id: tenant, o_store_id: store, o_actor_id: actor, o_membership_id: membership, o_version: version } = rows[0];
+  const identified = tenant === context.tenant && store === context.store && actor === context.actor && membership === context.membershipId;
+  // bigint arrives as its decimal text: compared exactly, never through a float.
+  if (outcome === 'applied') return identified && version === String(expectedVersion + 1) ? 'applied' : 'mismatch';
+  if (outcome === 'unchanged') return identified && version === String(expectedVersion) ? 'unchanged' : 'mismatch';
+  // A refusal names nothing: every other column null.
+  if (tenant !== null || store !== null || actor !== null || membership !== null || version !== null) return 'mismatch';
+  if (outcome === 'tenant_mismatch') return 'precondition_failed';
+  return typeof outcome === 'string' && UPDATE_REFUSALS.has(outcome) ? outcome : 'mismatch';
+}
+
+/** The mutator the tenant inventory registers for the draft edit (M7B-INVOICES-P2; server/composition/tenantTransactions.ts). */
+export const INVOICE_DRAFT_UPDATE_MUTATOR: AggregateMutator = Object.freeze({
+  kind: INVOICE_DRAFT_UPDATE_CONTRACT.kind,
+  mode: 'update',
+  aggregateType: INVOICE_DRAFT_UPDATE_CONTRACT.aggregateType,
+  contextScope: 'store',
+  apply: applyInvoiceDraftUpdate,
 });
 
 // ---------------------------------------------------------------------------
@@ -206,7 +261,7 @@ export function invoiceDraftAnswerOf(rows: unknown, scope: TrustedScope, draftId
   if (!all.every((row) => header.every((c) => row[c] === first[c]))) throw fault();
   const { o_customer_id: customerId, o_status: status, o_currency: currency, o_created_at: createdAt } = first;
   if (!isUuid(customerId) || status !== INVOICE_DRAFT_STATUS || currency !== INVOICE_DRAFT_CURRENCY || !isDraftCreatedAt(createdAt)) throw fault();
-  if (amountOf(first.o_version, 1) !== 1) throw fault();
+  const version = amountOf(first.o_version, 1);
   const lineCount = countOf(first.o_line_count);
   const subtotalCents = amountOf(first.o_subtotal_cents, 0);
   if (all.length !== lineCount) throw fault();
@@ -225,7 +280,7 @@ export function invoiceDraftAnswerOf(rows: unknown, scope: TrustedScope, draftId
   return Object.freeze({
     outcome: 'draft',
     draft: Object.freeze({
-      id: draftId, storeId: scope.store, customerId, status, currency, version: 1, createdAt, subtotalCents, lines: Object.freeze(lines),
+      id: draftId, storeId: scope.store, customerId, status, currency, version, createdAt, subtotalCents, lines: Object.freeze(lines),
     }),
   });
 }

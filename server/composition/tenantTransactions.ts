@@ -88,6 +88,12 @@
 // lease, idempotency completion or role-level row): the chain's authorizer decides it before the handler answers. Like every
 // authorized read, a 200 refreshes the session's lastSeenAt, and each request spends the request limit.
 //
+// M7B-INVOICES-P2 UPDATE (draft edit). The edit, PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, over its store-scope
+// mutator (migration 029's routine), in `writes`; its edit eligibility, GET …/invoice-drafts/{id}/edit-eligibility, a
+// portless store-scope read under the edit's own requirement, in `reads` (a read-only actor reaches it and is denied Edit,
+// the same 403). Neither adds a readiness probe; the edit's event contract (invoice_draft.updated) is the entry's to compose
+// (tenantEntry.ts), like the save's.
+//
 // Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, probeCustomerSearch, probeStoreDirectory, then probeInvoiceDrafts), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
@@ -102,7 +108,7 @@ import {
 } from '../persistence/postgresRoleLevels.js';
 import type { StoredRoleLevel } from '../persistence/postgresRoleLevels.js';
 import { createPostgresStoreDirectory, probeStoreDirectory } from '../persistence/postgresStoreDirectory.js';
-import { INVOICE_DRAFT_CREATE_MUTATOR, createPostgresInvoiceDrafts, probeInvoiceDrafts } from '../persistence/postgresInvoiceDrafts.js';
+import { INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR, createPostgresInvoiceDrafts, probeInvoiceDrafts } from '../persistence/postgresInvoiceDrafts.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
 import { TENANT_OWNER_ROLE_ID, materializeTenantPermissions } from '../platform-identity/permissionCatalog.js';
@@ -115,7 +121,10 @@ import type { InvoiceRoleLevelDirectoryPorts, RoleLevelDirectoryPort, RoleLevelD
 import { ROLE_LEVEL_UPDATE_ROUTE } from '../runtime/roleLevelUpdate.js';
 import { createStoreDirectoryRoute } from '../runtime/storeDirectory.js';
 import type { StoreDirectoryPorts } from '../runtime/storeDirectory.js';
-import { INVOICE_DRAFT_CREATE_ROUTE, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftListRoute } from '../runtime/invoiceDrafts.js';
+import {
+  INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE, createInvoiceDraftDetailRoute, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftEligibilityRoute,
+  createInvoiceDraftListRoute,
+} from '../runtime/invoiceDrafts.js';
 import type { InvoiceDraftPorts } from '../runtime/invoiceDrafts.js';
 import type { RouteDefinition } from '../runtime/routes.js';
 import { TransactionCompositionError, composeReadTransactions, uncataloguedRoutePermissions } from './transactionKernel.js';
@@ -173,11 +182,12 @@ const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal)
 // (M7A-CUSTOMERS-P6), the customer edit over its mutator (M7A-CUSTOMERS-P7), the Invoices role levels' read-back
 // (M5-INVOICES-AUTH-P1), the store directory over its session-bound read, the invoice drafts' two store-scope reads and
 // their save over its store-scope mutator (M7B-INVOICES-P1), and the drafts' creation eligibility, a portless store-scope
-// read under the save's own requirement (M7B-INVOICES-P1-R2). Every read is in `reads`, so a read-only actor reaches the
-// eligibility route too — and the evaluator denies it create, the same 403.
+// read under the save's own requirement (M7B-INVOICES-P1-R2), and the drafts' edit over its store-scope mutator and its edit
+// eligibility, a portless store-scope read under the edit's own requirement (M7B-INVOICES-P2). Every read is in `reads`, so
+// a read-only actor reaches both eligibility routes too — and the evaluator denies it create and edit, the same 403.
 export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({
-  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute]),
-  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR]) }),
+  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftEditEligibilityRoute]),
+  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR]) }),
   ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }), invoiceDrafts: createPostgresInvoiceDrafts({ client }) }),
   inert: INERT,
   probe: probeTenantReads,

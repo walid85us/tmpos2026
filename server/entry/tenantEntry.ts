@@ -14,13 +14,14 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–028, clean, checksums pinned (each of 020-028 moves with its build);
+//    5. the migration ledger — exactly 001–029, clean, checksums pinned (each of 020-029 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
 //       edits), the request limits, the durable ports, the tenant store's idempotency and command ports, the ONE event
-//       contract this entry composes (M7B-INVOICES-P1: invoice_draft.created v1, the draft save's — invoiceDrafts.ts
-//       INVOICE_DRAFT_EVENTS, and nothing else) and the route table, validated by the runtime itself; the served inventory
+//       contracts this entry composes (M7B-INVOICES-P1: invoice_draft.created v1, the draft save's; M7B-INVOICES-P2:
+//       invoice_draft.updated v1, the draft edit's — invoiceDrafts.ts INVOICE_DRAFT_EVENTS, and nothing else) and the route
+//       table, validated by the runtime itself; the served inventory
 //       must equal TENANT_SHIPPING_ROUTES exactly;
 //    8. the issuer key — the database must hold this process's key: its fingerprint alone is sent, and only `match` passes.
 //       Before the limiter's step, so a wrong key refuses before 014's fingerprint is registered;
@@ -58,7 +59,11 @@
 // GET /api/v1/stores/{storeId}/invoice-drafts[/{id}], the store's drafts and one draft, read-only; — M7B-INVOICES-P1-R2 — a
 // fourth, GET /api/v1/stores/{storeId}/invoice-drafts/eligibility, whether a save would be authorized at that store now,
 // decided under the save's own requirement and writing no business row (like every authorized read, a 200 refreshes the
-// session's lastSeenAt and each request spends the request limit); each authorized only
+// session's lastSeenAt and each request spends the request limit); — M7B-INVOICES-P2 — PATCH
+// /api/v1/stores/{storeId}/invoice-drafts/{id}, a versioned edit of that draft's customer and lines (idempotent, committed
+// through the tenant store with its audit record, its one outbox event and its completion; the draft id is the fingerprint's
+// target), and GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility, whether an edit would be authorized at that
+// store now, decided under the edit's own requirement and writing no business row; each authorized only
 // through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
@@ -114,6 +119,8 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -279,7 +286,8 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
         routes: tx.routes,
         idempotency: tx.idempotency,
         transactions: tx.transactions,
-        // The one event contract the tenant runtime composes (M7B-INVOICES-P1): the draft save's invoice_draft.created.
+        // The event contracts the tenant runtime composes: the draft save's invoice_draft.created (M7B-INVOICES-P1) and the
+        // draft edit's invoice_draft.updated (M7B-INVOICES-P2).
         events: INVOICE_DRAFT_EVENTS,
         limits: sessions.limits,
         sessions: sessions.sessions,

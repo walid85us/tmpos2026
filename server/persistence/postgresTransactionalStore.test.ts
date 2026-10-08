@@ -9,12 +9,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createPostgresTransactionalStore } from './postgresTransactionalStore.js';
+import { PRECONDITION_UPDATE_KIND, createPostgresTransactionalStore } from './postgresTransactionalStore.js';
 import type { AggregateMutator, PgStatement } from './postgresTransactionalStore.js';
 import { createSupervisedPgClient } from './supervisedPgClient.js';
 import type { DriverPool, SupervisedPgClient } from './supervisedPgClient.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import type { TransactionCommand } from '../runtime/commandTransaction.js';
+import { PRECONDITION_UPDATE_KIND as APP_PRECONDITION_UPDATE_KIND } from '../runtime/app.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
 import { TEST_IDEMPOTENCY_KEY } from '../runtime/idempotencyStore.testkit.js';
@@ -22,7 +23,9 @@ import { defineOutboxEvents } from '../runtime/outbox.js';
 import { TEST_CREATE, TEST_EVENTS } from '../runtime/transactionalOutbox.testkit.js';
 import { TENANT_DISPLAY_NAME_CONTRACT, TENANT_DISPLAY_NAME_EVENTS, planTenantDisplayName } from '../runtime/tenantDisplayName.js';
 import { CUSTOMER_UPDATE_CONTRACT, planCustomerUpdate } from '../runtime/customerUpdate.js';
-import { INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_EVENTS, planInvoiceDraftCreate } from '../runtime/invoiceDrafts.js';
+import {
+  INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_EVENTS, INVOICE_DRAFT_UPDATE_CONTRACT, planInvoiceDraftCreate, planInvoiceDraftUpdate,
+} from '../runtime/invoiceDrafts.js';
 
 const UNAVAILABLE = { outcome: 'unavailable' };
 const LEASE_LOST = { outcome: 'lease_lost' };
@@ -878,4 +881,114 @@ test('M7B-INVOICES-P1 AC-05: customer_not_found COMMITS exactly the sealed 422 a
   const refused = scripted(c.lease);
   assert.deepEqual(await tenantStore(refused, [draftMutator('refused')]).transactions.commit(c, live()), UNAVAILABLE);
   assert.deepEqual(refused.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-P2 — the draft edit: its audit subject, its precondition and its update outcomes
+// ---------------------------------------------------------------------------
+
+const EDITED = '66666666-6666-4666-8666-666666666666';
+const EDIT_CUSTOMER = '99999999-9999-4999-8999-999999999999';
+/** The draft edit's mutator kind answering `answer`, declaring store scope. */
+const editMutator = (answer: string, kind = INVOICE_DRAFT_UPDATE_CONTRACT.kind): AggregateMutator =>
+  Object.freeze({ kind, mode: 'update', aggregateType: 'invoice_draft', contextScope: 'store', apply: async () => answer });
+/** A draft edit exactly as the runtime prepares one under `context`: the real contract, planner and sealing, at version 4. */
+function editing(context: TrustedScope = STORE_CONTEXT, contract = INVOICE_DRAFT_UPDATE_CONTRACT): TransactionCommand {
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', audience: 'tenant', tenant: TENANT, store: STORE_ID, actor: TRUSTED.actor,
+    body: Buffer.from('{}'), target: EDITED,
+  });
+  const plan = planInvoiceDraftUpdate({ audience: 'tenant', newAggregateId: randomUUID(), targetId: EDITED, storeId: STORE_ID, body: {
+    expectedTenant: TENANT, expectedVersion: 4, customerId: EDIT_CUSTOMER,
+    lines: [{ description: 'Glass', quantity: 2, unitPriceCents: 50 }, { description: 'Labour', quantity: 1, unitPriceCents: 0 }],
+  } });
+  const prepared = prepareCommand(contract, draftEvents, plan, {
+    scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'store', permission: 'edit_invoice_drafts' }),
+    context, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null, 'the edit is in contract');
+  return prepared.command;
+}
+
+test('M7B-INVOICES-P2 AC-05 (D5, D6): an applied draft edit is audited at store scope with the EDITED draft as subject_invoice_draft_id, then its one invoice_draft.updated event at the new version, then its completion', async () => {
+  const c = editing();
+  assert.ok(c.unchanged !== null && c.rejected.invalidState !== null && c.rejected.customerNotFound === null, 'an update: unchanged and invalid_state sealed, no 422');
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [editMutator('applied')]).transactions.commit(c, live()), COMMITTED);
+  const at = (name: string): number => client.texts.findIndex((t) => t.includes(name));
+  assert.ok(at('m6_command_fence') < at('insert into public.audit_event') && at('insert into public.audit_event') < at('m6_command_enqueue')
+    && at('m6_command_enqueue') < at('m6_idempotency_complete'), 'fence, audit, event, completion');
+  const audit = at('insert into public.audit_event');
+  assert.ok(client.texts[audit].includes('subject_invoice_draft_id'), 'the statement names the draft subject column');
+  assert.ok(!client.texts[audit].includes('subject_customer_id') && !client.texts[audit].includes('subject_tenant_id'), 'exactly one subject');
+  const bound = client.values[audit];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11], bound[bound.length - 1]],
+    [STORE_CONTEXT.actor, 'store', TENANT, STORE_ID, 'store.invoice_draft.update', 'edit_invoice_drafts', EDITED],
+    'the actor, the store scope with its tenant and store, the edit kind, the edit permission and the edited draft');
+  assert.deepEqual(bound[bound.length - 2], { json: {} }, 'metadata {}: no description, amount or customer');
+  const enqueue = client.values[at('m6_command_enqueue')];
+  assert.deepEqual([enqueue[3], enqueue[4], enqueue[5], enqueue[6], enqueue[7]], ['invoice_draft.updated', 1, 'invoice_draft', EDITED, '5'],
+    'the edit\'s event, its aggregate the draft, its aggregate version expected + 1');
+  assert.deepEqual(enqueue.slice(8, 11), [null, null, null], 'the event names no tenant, store or actor');
+  assert.deepEqual(enqueue[12], { json: { storeId: STORE_ID, customerId: EDIT_CUSTOMER, lineCount: 2 } });
+  assert.deepEqual(client.values[at('m6_idempotency_complete')], [c.scope, c.lease, c.response]);
+  assert.equal(client.texts.filter((t) => t.includes('m6_command_enqueue')).length, 1);
+});
+
+test('M7B-INVOICES-P2 AC-06 AC-07 AC-10: a draft edit\'s unchanged, conflict and invalid_state COMMIT only their sealed completion; not_found and refused roll everything back', async () => {
+  const c = editing();
+  for (const [answer, outcome, sealed] of [
+    ['unchanged', { outcome: 'unchanged' }, c.unchanged], ['conflict', { outcome: 'conflict' }, c.rejected.conflict],
+    ['invalid_state', { outcome: 'invalid_state' }, c.rejected.invalidState],
+  ] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [editMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    assert.deepEqual(client.values[client.texts.findIndex((t) => t.includes('m6_idempotency_complete'))], [c.scope, c.lease, sealed], `${answer}: its own sealed completion`);
+    for (const absent of ['insert into public.audit_event', 'm6_command_enqueue']) assert.ok(!client.texts.some((t) => t.includes(absent)), `${answer}: no ${absent}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit'], answer);
+  }
+  for (const [answer, outcome] of [['not_found', { outcome: 'not_found' }], ['refused', UNAVAILABLE], ['mismatch', UNAVAILABLE], ['customer_not_found', UNAVAILABLE]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [editMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event', 'm6_command_enqueue']) {
+      assert.ok(!client.texts.some((t) => t.includes(recorded)), `${answer}: no ${recorded}`);
+    }
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], answer);
+  }
+});
+
+test('M7B-INVOICES-P2 (design §2): precondition_failed is admitted from the draft edit\'s kind alone — rolled back with NO completion — and from any other update kind is still the fault', async () => {
+  const c = editing();
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [editMutator('precondition_failed')]).transactions.commit(c, live()), { outcome: 'precondition_failed' });
+  for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event', 'm6_command_enqueue']) {
+    assert.ok(!client.texts.some((t) => t.includes(recorded)), `no ${recorded}: nothing is recorded, the key is not terminal`);
+  }
+  assert.ok(client.texts.some((t) => t.includes('m6_command_fence')), 'decided under the fence');
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+  // Another store-scope update kind of the same aggregate answering it is the fault: keyed on the kind, never on the mode.
+  const otherKind = 'store.invoice_draft.reprice';
+  const other = editing(STORE_CONTEXT, Object.freeze({ ...INVOICE_DRAFT_UPDATE_CONTRACT, kind: otherKind }));
+  const fault = scripted(other.lease);
+  assert.deepEqual(await tenantStore(fault, [editMutator('precondition_failed', otherKind)]).transactions.commit(other, live()), UNAVAILABLE);
+  assert.deepEqual(fault.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+  // The customer edit (a tenant-scope update) answering it is still the fault.
+  const target = '77777777-7777-4777-8777-777777777777';
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'PATCH', path: '/api/v1/customers/{id}', audience: 'tenant', tenant: TENANT, store: null, actor: TENANT_CONTEXT.actor, body: Buffer.from('{}'), target,
+  });
+  const customer = prepareCommand(CUSTOMER_UPDATE_CONTRACT, defineOutboxEvents([]),
+    planCustomerUpdate({ audience: 'tenant', body: { expectedVersion: 4, name: 'Ada' }, newAggregateId: randomUUID(), targetId: target }), {
+      scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'tenant', permission: 'edit_customers' }),
+      context: TENANT_CONTEXT, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+    });
+  assert.ok(customer !== null, 'the customer edit is in contract');
+  const updater: AggregateMutator = Object.freeze({ kind: CUSTOMER_UPDATE_CONTRACT.kind, mode: 'update', aggregateType: 'customer', contextScope: 'tenant', apply: async () => 'precondition_failed' });
+  assert.deepEqual(await tenantStore(scripted(customer.command.lease), [updater]).transactions.commit(customer.command, live()), UNAVAILABLE);
+});
+
+test('M7B-INVOICES-P2 (design §2): the update kind the store admits precondition_failed from, app.ts\'s 409 mapping\'s kind and the draft edit contract\'s kind are one string — a drift in any of the three fails here', () => {
+  assert.equal(PRECONDITION_UPDATE_KIND, INVOICE_DRAFT_UPDATE_CONTRACT.kind, 'the store\'s');
+  assert.equal(APP_PRECONDITION_UPDATE_KIND, INVOICE_DRAFT_UPDATE_CONTRACT.kind, 'app.ts\'s');
+  assert.equal(INVOICE_DRAFT_UPDATE_CONTRACT.kind, 'store.invoice_draft.update', 'the edit contract\'s, as the audit action id migration 029 documents');
 });
