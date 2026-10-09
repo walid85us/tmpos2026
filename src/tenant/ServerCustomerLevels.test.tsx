@@ -1966,7 +1966,7 @@ describe('ServerCustomerLevels: the two domains on one screen (M7B-INVOICES-P1)'
     );
     const invoices = screen.getByTestId('server-invoice-levels');
     expect(invoices).toHaveTextContent('Saved on the store server: only the Invoices level of the built-in roles (store owner fixed).');
-    expect(invoices).toHaveTextContent('The server uses it to decide who may save, list and open server drafts at a store.');
+    expect(invoices).toHaveTextContent('The server uses it to decide who may save, list, open and edit server drafts at a store.');
     expect(invoices).toHaveTextContent('Other invoices are still saved in this browser and are not checked by the server.');
     expect(invoices.textContent).not.toMatch(/invoice actions are not enforced by the server/); // the M5-INVOICES-AUTH-P1 copy, untrue since server drafts
     const customers = screen.getByTestId('server-customer-levels');

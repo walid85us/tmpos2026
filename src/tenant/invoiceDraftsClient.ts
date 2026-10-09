@@ -4,7 +4,9 @@
 // draft summaries, newest first), GET /api/v1/stores/{storeId}/invoice-drafts/{id} (one draft with its ordered lines),
 // GET /api/v1/stores/{storeId}/invoice-drafts/eligibility (M7B-INVOICES-P1-R2: whether this session may save a draft at
 // that store now, decided by the save's own requirement) and POST /api/v1/stores/{storeId}/invoice-drafts (the idempotent
-// create of one USD draft for one server customer).
+// create of one USD draft for one server customer). M7B-INVOICES-P2: GET …/invoice-drafts/{id}/edit-eligibility (whether
+// this session may edit drafts at that store now, decided by the edit's own requirement; it reads no draft) and PATCH
+// …/invoice-drafts/{id} (the idempotent edit: the draft's customer and its complete ordered lines, at the version read).
 //
 //   - The server is the authority for everything: which stores this user may act at, who may list, reopen or save, which
 //     tenant a store belongs to, what a valid draft is and what was stored. A store id in a path is a REQUESTED target
@@ -31,9 +33,16 @@
 //     other 409/422/404, a refusal in any other body, a 201 this client cannot name, or no answer at all is `unknown` — the
 //     outcome is undecided (a 503 may follow a COMMIT whose answer was lost), and only the same key and the same bytes can
 //     ask again.
-//   - The body of a create is the caller's exact string (built once by `draftBody`): the server fingerprints the raw
-//     bytes, so this module never re-serializes it — and never sends one the server's planner would refuse (`invalid`,
-//     nothing sent).
+//   - An edit is `saved` on a 200 ONLY whose body is exactly `{ draftId, version, changed }` for the draft asked, with the
+//     version its own arithmetic gives from the expectedVersion the body SENT: one more when changed, the same when not.
+//     A sealed 409 write_conflict is `conflict` (the draft is not at that version: a stale no-op too) and a sealed 409
+//     invalid_state `not-editable`; the chain's 409 write_conflict is `tenant-changed` (the store is not in the tenant the
+//     body expected), its 404 not_found `not-found` (one answer for a missing or foreign draft and a missing or foreign
+//     customer), its 422 idempotency_key_reused `key-reused` and its 409 request_in_progress `in-progress`; the other
+//     refusals are the create's. Everything else — a 5xx, any other 2xx, another body, no answer — is `unknown`.
+//   - The body of a create or an edit is the caller's exact string (built once by `draftBody` or `draftEditBody`, which
+//     share one line check): the server fingerprints the raw bytes, so this module never re-serializes it — and never
+//     sends one the server's planner would refuse (`invalid`, nothing sent).
 //   - Money is USD as integer cents. A price is typed in dollars and parsed EXACTLY (`^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$`,
 //     BigInt), never through a float; every unit price, line total and the subtotal must stay at or below 2^53-1 cents,
 //     checked before any key exists. A description follows the customer name rule (customersClient.ts) with a 256 limit.
@@ -46,7 +55,8 @@
 //     two unused bits are zero). Any other cursor is refused by the server with its 400.
 //   - A store id, a draft id or a cursor that is not in its grammar is never put into a request path.
 //   - Every request carries the session CSRF token the caller was just handed, in a header (the server answers a read
-//     only under the session that token belongs to); a create also carries the intent header and the Idempotency-Key.
+//     only under the session that token belongs to); a create or an edit also carries the intent header and the
+//     Idempotency-Key.
 //     Nothing is put into a URL but the ids and the opaque cursor.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials. No
 //     method ever rejects.
@@ -61,6 +71,10 @@ export const draftsPathOf = (storeId: string): string => `${STORES_PATH}/${store
 export const draftPathOf = (storeId: string, draftId: string): string => `${draftsPathOf(storeId)}/${draftId}`;
 /** Whether a draft may be saved at one store now (M7B-INVOICES-P1-R2): only ever built from a canonical store id. */
 export const eligibilityPathOf = (storeId: string): string => `${draftsPathOf(storeId)}/eligibility`;
+/** Whether this session may edit drafts at one store now (M7B-INVOICES-P2): only ever built from canonical ids. */
+export const editEligibilityPathOf = (storeId: string, draftId: string): string => `${draftPathOf(storeId, draftId)}/edit-eligibility`;
+/** The largest version an edit may name (invoiceDrafts.ts: 2^53 - 2, so the version after it is still exact). */
+export const MAX_EXPECTED_VERSION = Number.MAX_SAFE_INTEGER - 1;
 
 export const DRAFT_PAGE_LIMIT = 20; // the page size the shop asks for (the server's default; its maximum is 50)
 export const MAX_DRAFT_LINES = 50;
@@ -164,7 +178,16 @@ export type CreateDraftResult =
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
 
-// ---- the shop's own checks before a create (the server restates and decides) ----
+/** An edit the server confirmed (M7B-INVOICES-P2): the draft's version after it, and whether it changed anything. */
+export interface UpdatedDraft { readonly draftId: string; readonly version: number; readonly changed: boolean }
+
+export type UpdateDraftResult =
+  | { readonly kind: 'saved'; readonly result: UpdatedDraft; readonly replayed: boolean }
+  | { readonly kind: 'conflict' | 'not-editable' | 'tenant-changed' | 'not-found' | 'key-reused' | 'in-progress' | 'denied' | 'signed-out' | 'invalid' }
+  | RateLimited
+  | { readonly kind: 'unknown'; readonly responded: boolean };
+
+// ---- the shop's own checks before a create or an edit (the server restates and decides) ----
 
 /** A description as the server would store it — trimmed, 1-256 scalars, the customer name rule — or null. */
 export const normalizeDraftDescription = (raw: unknown): string | null => normalizePlainText(raw, DRAFT_DESCRIPTION_MAX_CHARACTERS);
@@ -195,6 +218,12 @@ export function formatCents(cents: number | bigint): string {
   return `${negative ? '-' : ''}$${whole}.${(abs % 100n).toString().padStart(2, '0')}`;
 }
 
+/** Non-negative integer cents as the dollar text a price field holds (`1234.50`): what parsePriceCents reads back exactly. */
+export function priceText(cents: number | bigint): string {
+  const value = BigInt(cents);
+  return `${value / 100n}.${(value % 100n).toString().padStart(2, '0')}`;
+}
+
 /** One line as the dialog's fields hold it. */
 export interface DraftLineFields { readonly description: string; readonly quantity: string; readonly unitPrice: string }
 /** What is wrong with one line (each false when that field is fine); `total` — its quantity × price exceeds 2^53-1 cents. */
@@ -223,9 +252,24 @@ export function lineAmounts(line: DraftLineFields): { readonly quantity: bigint 
  * is ever minted for a body the server would refuse for size.
  */
 export function draftBody(expectedTenant: string, customerId: string, lines: readonly DraftLineFields[]): DraftBody {
+  return bodyOf(lines, isCustomerId(expectedTenant) && isCustomerId(customerId), (built) => ({ expectedTenant, customerId, currency: 'USD', lines: built }));
+}
+
+/**
+ * The PATCH body of one edit (M7B-INVOICES-P2), built ONCE by the same line check as the create's: keys expectedTenant,
+ * expectedVersion (the version the detail read reported, 1..2^53-2), customerId, lines (complete, in the order given) —
+ * no currency, which an edit never changes.
+ */
+export function draftEditBody(expectedTenant: string, expectedVersion: number, customerId: string, lines: readonly DraftLineFields[]): DraftBody {
+  const valid = isCustomerId(expectedTenant) && isCustomerId(customerId) && isCount(expectedVersion, 1, MAX_EXPECTED_VERSION);
+  return bodyOf(lines, valid, (built) => ({ expectedTenant, expectedVersion, customerId, lines: built }));
+}
+
+/** The one line check both bodies share; `shape` places the built lines in the body's own keys, in their fixed order. */
+function bodyOf(lines: readonly DraftLineFields[], valid: boolean, shape: (built: ReadonlyArray<{ description: string; quantity: number; unitPriceCents: number }>) => object): DraftBody {
   const count = lines.length < 1 || lines.length > MAX_DRAFT_LINES;
   let sum = 0n;
-  let bad = count || !isCustomerId(expectedTenant) || !isCustomerId(customerId);
+  let bad = count || !valid;
   const errors: DraftLineErrors[] = [];
   const built: Array<{ description: string; quantity: number; unitPriceCents: number }> = [];
   for (const line of lines) {
@@ -240,7 +284,7 @@ export function draftBody(expectedTenant: string, customerId: string, lines: rea
   const subtotal = !bad && sum > MAX_CENTS;
   const invalid = (tooLarge: boolean): DraftBody => Object.freeze({ kind: 'invalid', lines: Object.freeze(errors), subtotal, count, tooLarge });
   if (bad || subtotal) return invalid(false);
-  const body = JSON.stringify({ expectedTenant, customerId, currency: 'USD', lines: built });
+  const body = JSON.stringify(shape(built));
   if (isDraftBodyTooLarge(body)) return invalid(true);
   return Object.freeze({ kind: 'ok', body, lineCount: built.length, subtotalCents: Number(sum) });
 }
@@ -392,21 +436,27 @@ function createdOf(body: unknown): CreatedDraft | null {
   return Object.freeze({ id, status, currency, lineCount, subtotalCents });
 }
 
+/** The keys of a create body and of an edit body (M7B-INVOICES-P2): exactly these, no other. */
+const CREATE_KEYS: readonly string[] = ['expectedTenant', 'customerId', 'currency', 'lines'];
+const EDIT_KEYS: readonly string[] = ['expectedTenant', 'expectedVersion', 'customerId', 'lines'];
+
 /**
- * What a create body SENT: its line count and its subtotal (BigInt), read from the caller's own string; null when it is
- * not a body the server's planner (invoiceDrafts.ts planInvoiceDraftCreate) would take — unreadable, over 64 KiB, not
- * exactly the four keys, a non-canonical id, not USD, not 1-50 lines of exactly description, quantity and unitPriceCents,
- * a description the rule refuses, a quantity or price that is not a safe whole number in range (-0 included), a line
- * total or the sum over 2^53-1 cents — so nothing is sent and no key is spent on a sure 400. A string holding a lone
- * surrogate is refused too, although fetch would send it as U+FFFD: those bytes would not be the string held for a retry.
+ * What a create or an edit body SENT: its line count, its subtotal (BigInt) and an edit's expectedVersion (0 for a
+ * create), read from the caller's own string; null when it is not a body the server's planner (invoiceDrafts.ts) would
+ * take — unreadable, over 64 KiB, not exactly `keys`, a non-canonical id, a create not in USD, an edit's version outside
+ * 1..2^53-2, not 1-50 lines of exactly description, quantity and unitPriceCents, a description the rule refuses, a
+ * quantity or price that is not a safe whole number in range (-0 included), a line total or the sum over 2^53-1 cents —
+ * so nothing is sent and no key is spent on a sure 400. A string holding a lone surrogate is refused too, although fetch
+ * would send it as U+FFFD: those bytes would not be the string held for a retry.
  */
-function sentOf(body: string): { readonly lineCount: number; readonly subtotalCents: bigint } | null {
+function sentOf(body: string, keys: readonly string[]): { readonly lineCount: number; readonly subtotalCents: bigint; readonly expectedVersion: number } | null {
   try {
     if (isDraftBodyTooLarge(body)) return null;
     const parsed: unknown = JSON.parse(body);
-    if (!isPlain(parsed) || !hasKeys(parsed, ['expectedTenant', 'customerId', 'currency', 'lines'])) return null;
-    const { expectedTenant, customerId, currency, lines } = parsed;
-    if (!isCustomerId(expectedTenant) || !isCustomerId(customerId) || currency !== 'USD') return null;
+    if (!isPlain(parsed) || !hasKeys(parsed, keys)) return null;
+    const { expectedTenant, customerId, currency, expectedVersion = 0, lines } = parsed;
+    if (!isCustomerId(expectedTenant) || !isCustomerId(customerId)) return null;
+    if (keys === CREATE_KEYS ? currency !== 'USD' : !isCount(expectedVersion, 1, MAX_EXPECTED_VERSION)) return null;
     if (!Array.isArray(lines) || lines.length < 1 || lines.length > MAX_DRAFT_LINES) return null;
     let sum = 0n;
     for (const line of lines as unknown[]) {
@@ -416,10 +466,18 @@ function sentOf(body: string): { readonly lineCount: number; readonly subtotalCe
       sum += total;
       if (total > MAX_CENTS || sum > MAX_CENTS) return null;
     }
-    return { lineCount: lines.length, subtotalCents: sum };
+    return { lineCount: lines.length, subtotalCents: sum, expectedVersion: expectedVersion as number };
   } catch {
     return null;
   }
+}
+
+/** `{ draftId, version, changed }` exactly, for the draft asked; otherwise null. */
+function updatedOf(body: unknown, draftId: string): UpdatedDraft | null {
+  if (!isPlain(body) || !hasKeys(body, ['draftId', 'version', 'changed'])) return null;
+  const { version, changed } = body;
+  if (body.draftId !== draftId || !isCount(version, 1, Number.MAX_SAFE_INTEGER) || typeof changed !== 'boolean') return null;
+  return Object.freeze({ draftId, version, changed });
 }
 
 /**
@@ -444,6 +502,10 @@ export interface InvoiceDraftsClient {
   eligibility(storeId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
   /** One create attempt at `storeId`: `body` exactly as given, under `idempotencyKey`; a body the server would refuse is `invalid` and nothing is sent. Never rejects. */
   createDraft(storeId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateDraftResult>;
+  /** Whether this session may edit drafts at `storeId` now (the draft id names the route only); a malformed id is `denied` and nothing is sent. Never rejects. */
+  editEligibility(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
+  /** One edit attempt of `draftId` at `storeId`: `body` exactly as given, under `idempotencyKey`; a body or id the server would refuse is `invalid` and nothing is sent. Never rejects. */
+  updateDraft(storeId: string, draftId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<UpdateDraftResult>;
 }
 
 interface Answer {
@@ -550,7 +612,17 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
 
   async function eligibility(storeId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
     if (!isCustomerId(storeId)) return Object.freeze({ kind: 'denied' }); // the server's answer to a store it cannot name
-    const answer = await read(eligibilityPathOf(storeId), csrf, signal);
+    return eligibilityAt(eligibilityPathOf(storeId), csrf, signal);
+  }
+
+  async function editEligibility(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId) || !isCustomerId(draftId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
+    return eligibilityAt(editEligibilityPathOf(storeId, draftId), csrf, signal);
+  }
+
+  /** Both eligibility reads: `allowed` only for the exact closed body; the reads' refusals; anything else `unavailable`. */
+  async function eligibilityAt(path: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    const answer = await read(path, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
     if (answer.status === 200) {
       const allowed = isPlain(answer.body) && hasKeys(answer.body, ['eligibility']) && answer.body.eligibility === 'allowed';
@@ -559,22 +631,44 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     return refusal(answer) ?? Object.freeze({ kind: 'unavailable' });
   }
 
-  async function createDraft(storeId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateDraftResult> {
-    const sent = sentOf(body);
-    if (!isCustomerId(storeId) || sent === null) return Object.freeze({ kind: 'invalid' }); // nothing is sent
-    const answer = await exchange(draftsPathOf(storeId), {
-      method: 'POST',
+  /** One mutation: the caller's exact body with the intent, session and key headers; null when no answer arrived. */
+  const mutate = (method: 'POST' | 'PATCH', path: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
+    exchange(path, {
+      method,
       headers: {
         Accept: 'application/json', 'Content-Type': 'application/json',
         [INTENT_HEADER]: '1', [SESSION_CSRF_HEADER]: csrf, 'Idempotency-Key': idempotencyKey,
       },
       body, // the caller's exact string: a retry under the same key must send the same bytes
     }, signal);
+  /** A mutation refusal's word in one shape: `sealed` (the key's recorded completion) or the chain's own. */
+  const shapes = (answer: Answer) => {
+    const refused = refusalOf(answer.body);
+    return {
+      sealed: (word: string): boolean => refused?.error === word && refused.sealed,
+      chain: (word: string): boolean => refused?.error === word && !refused.sealed,
+    };
+  };
+  /** The refusals a create and an edit share, each only in the chain's body with its one word; null for any other. */
+  function chainRefusal(answer: Answer): { readonly kind: 'signed-out' | 'denied' | 'invalid' } | RateLimited | null {
+    const { status } = answer;
+    const { chain } = shapes(answer);
+    if (status === 401 && chain('unauthenticated')) return Object.freeze({ kind: 'signed-out' });
+    if (status === 403 && chain('forbidden')) return Object.freeze({ kind: 'denied' });
+    if ((status === 400 && chain('invalid_request')) || (status === 413 && chain('content_too_large'))
+      || (status === 415 && chain('unsupported_media_type'))) return Object.freeze({ kind: 'invalid' });
+    if (status === 429 && chain('rate_limited')) return limited(answer);
+    return null;
+  }
+
+  async function createDraft(storeId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<CreateDraftResult> {
+    const sent = sentOf(body, CREATE_KEYS);
+    if (!isCustomerId(storeId) || sent === null) return Object.freeze({ kind: 'invalid' }); // nothing is sent
+    const answer = await mutate('POST', draftsPathOf(storeId), body, idempotencyKey, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
     const { status } = answer;
     const refused = refusalOf(answer.body);
-    const sealed = (word: string): boolean => refused?.error === word && refused.sealed;
-    const chain = (word: string): boolean => refused?.error === word && !refused.sealed;
+    const { sealed, chain } = shapes(answer);
     if (status === 201) {
       const draft = createdOf(answer.body);
       const replay = answer.header('idempotent-replayed'); // app.ts sendRecorded: absent, or exactly "true" on a replay
@@ -593,17 +687,38 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });
     if (status === 409 && refused?.error === 'write_conflict') return Object.freeze({ kind: 'conflict' });
     if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
-    if (status === 401 && chain('unauthenticated')) return Object.freeze({ kind: 'signed-out' });
-    if (status === 403 && chain('forbidden')) return Object.freeze({ kind: 'denied' });
-    if ((status === 400 && chain('invalid_request')) || (status === 413 && chain('content_too_large'))
-      || (status === 415 && chain('unsupported_media_type'))) return Object.freeze({ kind: 'invalid' });
-    if (status === 429 && chain('rate_limited')) return limited(answer);
-    // Any other 409 or 422, a refusal in a body the server never answers it with, a 404, a 5xx, a 200 or any other 2xx:
-    // the outcome is undecided.
-    return Object.freeze({ kind: 'unknown', responded: true });
+    // Then the chain's shared refusals. Any other 409 or 422, a refusal in a body the server never answers it with, a
+    // 404, a 5xx, a 200 or any other 2xx: the outcome is undecided.
+    return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ listStores, listDrafts, getDraft, eligibility, createDraft });
+  async function updateDraft(storeId: string, draftId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<UpdateDraftResult> {
+    const sent = sentOf(body, EDIT_KEYS);
+    if (!isCustomerId(storeId) || !isCustomerId(draftId) || sent === null) return Object.freeze({ kind: 'invalid' }); // nothing is sent
+    const answer = await mutate('PATCH', draftPathOf(storeId, draftId), body, idempotencyKey, csrf, signal);
+    if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
+    const { status } = answer;
+    const { sealed, chain } = shapes(answer);
+    if (status === 200) {
+      const result = updatedOf(answer.body, draftId);
+      const replay = answer.header('idempotent-replayed'); // app.ts sendRecorded: absent, or exactly "true" on a replay
+      if (result !== null && (replay === null || replay === 'true') && result.version === sent.expectedVersion + (result.changed ? 1 : 0)) {
+        return Object.freeze({ kind: 'saved', result, replayed: replay === 'true' });
+      }
+      return Object.freeze({ kind: 'unknown', responded: true }); // a 200 this client cannot name: only the key can say
+    }
+    // The sealed answers are the key's recorded completion; the chain's 409 write_conflict (another tenant than
+    // expectedTenant) and its 404 not_found were rolled back and recorded nothing.
+    if (status === 409 && sealed('write_conflict')) return Object.freeze({ kind: 'conflict' });
+    if (status === 409 && sealed('invalid_state')) return Object.freeze({ kind: 'not-editable' });
+    if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-changed' });
+    if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
+    if (status === 404 && chain('not_found')) return Object.freeze({ kind: 'not-found' });
+    if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });
+    return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
+  }
+
+  return Object.freeze({ listStores, listDrafts, getDraft, eligibility, createDraft, editEligibility, updateDraft });
 }
 
 /** The shop's one invoice drafts client. */

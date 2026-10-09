@@ -27,13 +27,13 @@ import { StrictMode, type ReactNode } from 'react';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
-  DRAFTS_TEXT, DRAFT_RULE_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts, bindDraftHoldsToSessionEnd, createDraftHoldStore,
-  customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type ServerInvoiceDraftsProps,
+  DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
+  bindDraftHoldsToSessionEnd, createDraftHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
-import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, eligibilityPathOf, type StoreEntry } from './invoiceDraftsClient';
+import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, editEligibilityPathOf, eligibilityPathOf, type StoreEntry } from './invoiceDraftsClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, type TenantSessionClient } from './tenantSessionClient';
 import { ServerCustomerField, hasSessionPair, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
@@ -63,9 +63,11 @@ interface Sent { readonly method: string; readonly url: string; readonly headers
 /** `role`: the role the server holds for the user — the fake's `allow` table decides a draft save and its eligibility by it. */
 interface User { uid: string; tenant: string; view: boolean; role: string }
 interface Line { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number }
-interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[] }
-type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig';
+interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[]; version: number }
+type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig' | 'update' | 'editElig';
 type CreateScript = 'lose' | 'lose-before' | 503 | 429 | 'hold' | 'key-reused';
+/** M7B-INVOICES-P2: what the next PATCHes do — lose the answer after deciding (committed), lose the request, or answer this status (in the chain's envelope) instead. */
+type UpdateScript = 'lose' | 'lose-before' | number;
 
 /** One fake tenant server. `cookie` is the session the browser presents. */
 function fakeServer() {
@@ -85,7 +87,7 @@ function fakeServer() {
     reply(status, { error, requestId: 'req-synthetic' }, status === 429 && server.retryAfter !== null ? { 'retry-after': server.retryAfter } : {});
   const order = (x: Draft, y: Draft): number => (x.createdAt === y.createdAt ? (x.id < y.id ? 1 : -1) : x.createdAt < y.createdAt ? 1 : -1);
   const summaryOf = (d: Draft) => ({ id: d.id, customerId: d.customerId, status: 'draft', currency: 'USD', lineCount: d.lines.length, subtotalCents: d.subtotalCents, createdAt: d.createdAt });
-  const detailOf = (d: Draft) => ({ draft: { id: d.id, storeId: d.storeId, customerId: d.customerId, status: 'draft', currency: 'USD', version: 1, createdAt: d.createdAt, subtotalCents: d.subtotalCents, lines: d.lines } });
+  const detailOf = (d: Draft) => ({ draft: { id: d.id, storeId: d.storeId, customerId: d.customerId, status: 'draft', currency: 'USD', version: d.version, createdAt: d.createdAt, subtotalCents: d.subtotalCents, lines: d.lines } });
 
   const server = {
     sent: [] as Sent[],
@@ -101,13 +103,19 @@ function fakeServer() {
     retryAfter: null as string | null, // the Retry-After a 429 carries
     // M7B-INVOICES-P1-R2: the server's per-role decision of a draft save — the same table answers its eligibility read
     // (one requirement for both, as invoiceDrafts.ts). A role absent here, like a role only the browser knows, is denied.
-    allow: { owner: true, manager: true, technician: false } as Record<string, boolean>,
+    allow: { owner: true, manager: true, technician: false, sales: true } as Record<string, boolean>,
     eligStatus: [] as Array<number | Response>, // what the next eligibility GETs answer instead (a status, or a whole answer), in order
+    // M7B-INVOICES-P2: the server's per-role decision of a draft edit (Invoices Edit) — the same table answers its edit
+    // eligibility. `sales` saves drafts (Invoices Create) but may not edit them.
+    editAllow: { owner: true, manager: true } as Record<string, boolean>,
+    editEligStatus: [] as Array<number | Response>, // what the next edit-eligibility GETs answer instead, in order
+    updates: [] as UpdateScript[], // what the next PATCHes do (then normally)
+    currentStatus: [] as number[], // what the next session reads (GET /api/v1/session) answer instead (503, 429…), in order
     nameStatus: new Map<string, number>(), // a customer read answered with this status
     nameInFlight: 0,
     nameMaxInFlight: 0,
     second: 100,
-    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0 } as Record<Kind, number>,
+    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0, update: 0, editElig: 0 } as Record<Kind, number>,
     held: [] as Array<{ kind: Kind; url: string; release: (late?: Response) => void }>,
     seedCustomer(tenant: string, name: string): string {
       const id = uuid(0xc00 + server.customers.size + 1);
@@ -116,9 +124,26 @@ function fakeServer() {
     },
     seedDraft(storeId: string, customerId: string, createdAt: string, cents = 1250, lines = 1): Draft {
       const each = Array.from({ length: lines }, (_, i) => ({ position: i + 1, description: `Item ${i + 1}`, quantity: 1, unitPriceCents: cents, lineTotalCents: cents }));
-      const draft: Draft = { id: uuid(++draftCount), storeId, customerId, createdAt, subtotalCents: cents * lines, lines: each };
+      const draft: Draft = { id: uuid(++draftCount), storeId, customerId, createdAt, subtotalCents: cents * lines, lines: each, version: 1 };
       server.drafts.push(draft);
       return draft;
+    },
+    /** An edit committed on the server (by this browser's PATCH, or by another session): the next version. */
+    editDraft(draft: Draft, customerId: string, lines: Array<Omit<Line, 'position' | 'lineTotalCents'>>): void {
+      draft.customerId = customerId;
+      draft.lines = lines.map((l, i) => ({ position: i + 1, description: l.description, quantity: l.quantity, unitPriceCents: l.unitPriceCents, lineTotalCents: l.quantity * l.unitPriceCents }));
+      draft.subtotalCents = draft.lines.reduce((sum, l) => sum + l.lineTotalCents, 0);
+      draft.version += 1;
+    },
+    /** The PATCHes sent (M7B-INVOICES-P2). */
+    patches(): Sent[] { return server.sent.filter((r) => r.method === 'PATCH'); },
+    /** The edit-eligibility reads sent. */
+    editEligReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/edit-eligibility')); },
+    /** The draft GETs (reopen, read-back, a conflict's read) of `id`. */
+    detailReads(storeId: string, id: string): Sent[] { return server.sent.filter((r) => r.method === 'GET' && r.url === draftPathOf(storeId, id)); },
+    mayEdit(user: User, storeId: string): boolean {
+      const grant = server.stores[user.uid]?.find((s) => s.id === storeId);
+      return grant !== undefined && !grant.readOnly && server.editAllow[user.role] === true;
     },
     expire(): void { sessions.clear(); },
     /** Another tab signs `uid` in: a new session (and token) replaces the cookie this browser presents. */
@@ -161,6 +186,8 @@ function fakeServer() {
       }
       const session = server.cookie === null ? undefined : sessions.get(server.cookie);
       if (url === TENANT_SESSION_PATHS.current && method === 'GET') { // every `ensure` reads it first (tenantSessionClient.ts)
+        const scripted = server.currentStatus.shift(); // M7B-INVOICES-P2: a session read that answers this status instead
+        if (scripted !== undefined) return refuse(scripted);
         return server.maybeHold('current', url, () => (session === undefined ? refuse(401) : reply(200, activeBody(session.user.uid, session.csrf))));
       }
       const gate = (): Response | null => {
@@ -205,6 +232,15 @@ function fakeServer() {
           return server.mayCreate(session!.user, eligibility[1]) ? reply(200, { eligibility: 'allowed' }) : refuse(403, 'forbidden');
         })();
         return server.maybeHold('elig', url, decided);
+      }
+      const editEligibility = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts\/([0-9a-f-]{36})\/edit-eligibility$/.exec(url); // reads no draft
+      if (method === 'GET' && editEligibility !== null) {
+        const decided = gate() ?? (() => {
+          const scripted = server.editEligStatus.shift();
+          if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+          return server.mayEdit(session!.user, editEligibility[1]) ? reply(200, { eligibility: 'allowed' }) : refuse(403, 'forbidden');
+        })();
+        return server.maybeHold('editElig', url, decided);
       }
       const storePath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts(?:\/([0-9a-f-]{36}))?$/.exec(path);
       if (storePath !== null) {
@@ -264,7 +300,7 @@ function fakeServer() {
               return reply(422, { error: 'customer_not_found' });
             }
             const lines = parsed.lines.map((l, i) => ({ position: i + 1, description: l.description, quantity: l.quantity, unitPriceCents: l.unitPriceCents, lineTotalCents: l.quantity * l.unitPriceCents }));
-            const draft: Draft = { id: uuid(++draftCount), storeId, customerId: parsed.customerId, createdAt: at(server.second++, 123456), subtotalCents: lines.reduce((s, l) => s + l.lineTotalCents, 0), lines };
+            const draft: Draft = { id: uuid(++draftCount), storeId, customerId: parsed.customerId, createdAt: at(server.second++, 123456), subtotalCents: lines.reduce((s, l) => s + l.lineTotalCents, 0), lines, version: 1 };
             server.drafts.push(draft);
             const response = { status: 201, body: { draft: { id: draft.id, status: 'draft', currency: 'USD', lineCount: lines.length, subtotalCents: draft.subtotalCents } }, location: draftPathOf(storeId, draft.id) };
             server.keys.set(key, { fingerprint, response });
@@ -274,6 +310,37 @@ function fakeServer() {
           if (script === 'lose') throw new TypeError('network'); // committed, but the answer is lost
           if (script === 'hold') { server.hold.create += 1; }
           return server.maybeHold('create', url, decided);
+        }
+        // M7B-INVOICES-P2: the edit, keyed like the server's (the store, the DRAFT and the exact bytes): a sealed 200 or 409
+        // replays under its key; the tenant precondition and a missing draft or customer are unsealed (nothing recorded).
+        if (method === 'PATCH' && draftId !== undefined) {
+          const script = server.updates.shift();
+          if (script === 'lose-before') throw new TypeError('network');
+          if (typeof script === 'number') return refuse(script);
+          const decide = (): Response => {
+            if (refused !== null) return refused;
+            if (headers.get('x-tmpos-csrf') !== '1') return refuse(403, 'forbidden');
+            if (grant === undefined || !server.mayEdit(session!.user, storeId)) return refuse(403, 'forbidden');
+            const key = headers.get('idempotency-key') ?? '';
+            const fingerprint = `${storeId}\n${draftId}\n${body}`;
+            const known = server.keys.get(key);
+            if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+            if (known !== undefined) return reply(known.response.status, known.response.body, { 'idempotent-replayed': 'true' });
+            const parsed = JSON.parse(body ?? '{}') as { expectedTenant: string; expectedVersion: number; customerId: string; lines: Array<{ description: string; quantity: number; unitPriceCents: number }> };
+            if (parsed.expectedTenant !== grant.tenantId) return refuse(409, 'write_conflict'); // unsealed
+            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId);
+            const c = server.customers.get(parsed.customerId);
+            if (draft === undefined || c === undefined || c.tenant !== grant.tenantId) return refuse(404, 'not_found'); // one answer for both
+            const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, response: { status, body: sealed } }); return reply(status, sealed); };
+            if (draft.version !== parsed.expectedVersion) return seal(409, { error: 'write_conflict' }); // a stale no-op too
+            const lines = parsed.lines.map((l, i) => ({ position: i + 1, description: l.description, quantity: l.quantity, unitPriceCents: l.unitPriceCents, lineTotalCents: l.quantity * l.unitPriceCents }));
+            const same = draft.customerId === parsed.customerId && JSON.stringify(draft.lines) === JSON.stringify(lines);
+            if (!same) server.editDraft(draft, parsed.customerId, parsed.lines);
+            return seal(200, { draftId, version: draft.version, changed: !same });
+          };
+          const decided = decide();
+          if (script === 'lose') throw new TypeError('network'); // committed, but the answer is lost
+          return server.maybeHold('update', url, decided);
         }
       }
       return refuse(404, 'not_found');
@@ -552,7 +619,9 @@ describe('Server drafts — store choice, list and reopen (M7B-INVOICES-P1)', ()
     await waitFor(() => expect(within(view).getByTestId('draft-view-customer')).toHaveTextContent('Ada Customer'));
     expect(within(view).getByTestId('draft-view-store')).toHaveTextContent('Main Street');
     expect(within(view).queryAllByRole('textbox')).toEqual([]);
-    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
+    // M7B-INVOICES-P2: the view stays read-only; editing is the separate editor behind Edit, offered on the server's answer.
+    await waitFor(() => expect(within(view).getByTestId('draft-view-edit-state')).toHaveAttribute('data-phase', 'allowed'));
+    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft']);
     expect(view.textContent).not.toMatch(/amount due|balance|invoice number|issued|payment|tax|discount/i);
     expect(server.sent.filter((s) => s.url === draftPathOf(STORE_1, draft.id))).toHaveLength(1);
     await user().keyboard('{Escape}');
@@ -1276,8 +1345,9 @@ describe('Server drafts — a new draft (M7B-INVOICES-P1)', () => {
     // The size error, the third such target, cannot be reached from the form (a valid draft's body stays near 55 KB, under
     // the 64 KiB bound: invoiceDraftsClient.ts DRAFT_BODY_MAX_BYTES), so its ring is checked in the source (as SID-27 reads it).
     const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'ServerInvoiceDrafts.tsx'), 'utf8');
-    expect(source).toMatch(/data-testid="draft-new-size-error"[^\n]*className=\{`[^`\n]*\$\{focusRing\}`\}/);
-    expect(source).not.toMatch(/data-testid="draft-new-size-error"[^\n]*focus:outline-none/);
+    // M7B-INVOICES-P2: the lines, the subtotal and both its errors are LinesEditor's, shared with the editor (`prefix`).
+    expect(source).toMatch(/data-testid=\{`\$\{prefix\}-size-error`\}[^\n]*className=\{`[^`\n]*\$\{focusRing\}`\}/);
+    expect(source).not.toMatch(/-size-error`\}[^\n]*focus:outline-none/);
     fireEvent.change(screen.getAllByTestId('draft-new-price')[0], { target: { value: '1' } });
     server.creates.push('lose-before');
     await click('draft-new-save');
@@ -2614,5 +2684,1093 @@ describe('Server drafts — the server decides New (M7B-INVOICES-P1-R2, DA-201)'
     await showAndChoose(STORE_2);
     expect(server.eligReads(STORE_2)).toHaveLength(1);
     expect(screen.getByTestId('drafts-new')).toBeEnabled();
+  });
+});
+
+// M7B-INVOICES-P2 — the editor of a saved server draft (AC-16, AC-17 in jsdom). The fake server answers the edit eligibility
+// from its per-role `editAllow` table and the PATCH like the server: fingerprinted over the store, the DRAFT and the exact
+// bytes; a version other than the draft's is the sealed 409 write_conflict (a stale no-op too); the same customer and lines
+// are the sealed 200 changed:false; a missing draft or customer is the chain's 404 (one answer); every sealed answer replays
+// under its key. Cases labelled "jsdom-only callback ordering" release a held answer after the change they race; they show
+// what the section does with a late answer, not what a browser schedules.
+describe('Server drafts — editing a saved draft (M7B-INVOICES-P2)', () => {
+  const release = async (server: Server, i = 0, late?: Response) => { const [held] = server.held.splice(i, 1); await act(async () => { held.release(late); }); };
+  const editPhase = () => screen.queryByTestId('draft-view-edit-state')?.getAttribute('data-phase') ?? 'none';
+  const fields = (name: 'description' | 'quantity' | 'price') => screen.getAllByTestId(`draft-edit-${name}`) as HTMLInputElement[];
+  const working = () => fields('description').map((d, i) => [d.value, fields('quantity')[i].value, fields('price')[i].value]);
+  const editBody = (tenant: string, version: number, customerId: string, lines: Array<[string, number, number]>) =>
+    JSON.stringify({ expectedTenant: tenant, expectedVersion: version, customerId, lines: lines.map(([description, quantity, unitPriceCents]) => ({ description, quantity, unitPriceCents })) });
+  const savedNote = () => screen.queryByTestId('draft-view-saved');
+  /** Open the listed draft at `index`, wait for its read and for the server's answer about Edit (and, with `named`, the customer's name). */
+  async function openDraft(index = 0, named = true) {
+    await user().click(within(rows()[index]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toBeInTheDocument());
+    await waitFor(() => expect(editPhase()).not.toBe('checking'));
+    if (named) await waitFor(() => expect(screen.getByTestId('draft-view-customer')).not.toHaveTextContent('ID ending'));
+  }
+  async function openEditor(index = 0, named = true) {
+    await openDraft(index, named);
+    await click('draft-view-edit');
+    await waitFor(() => expect(screen.getByTestId('draft-edit')).toBeInTheDocument());
+  }
+  /** A draft of uid-a's at Main Street: Item 1 and Item 2, one each at $2.50, for Ada; version 1. */
+  async function ready(over: Partial<ServerInvoiceDraftsProps> = {}) {
+    const { server, ada, bea } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    const r = rig(server);
+    const props = r.props(over);
+    const view = render(<ServerInvoiceDrafts {...props} />);
+    await showAndChoose(STORE_1);
+    return { server, ada, bea, draft, r, props, view };
+  }
+  async function pickCustomer(id: string) {
+    await click('picker-change');
+    await waitFor(() => expect(screen.getByTestId('picker-state')).toHaveAttribute('data-phase', 'ready'));
+    const row = screen.getAllByTestId('picker-row').find((x) => x.getAttribute('data-id') === id)!;
+    await user().click(within(row).getByTestId('picker-select'));
+    await waitFor(() => expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', id));
+  }
+
+  it('SID-77. AC-16: Edit is offered ONLY on the server\'s own answer for exactly this draft, store and session — nothing (said as checking) until it answers; one edit-eligibility GET per open, carrying that session\'s token and nothing else; none at a read-only store; no PATCH', async () => {
+    const { server, draft } = await ready();
+    const ro = server.seedDraft(STORE_RO, draft.customerId, at(6));
+    server.hold.editElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('1'));
+    expect(editPhase()).toBe('checking');
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent(EDIT_ELIGIBILITY_TEXT.checking);
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    const asked = server.editEligReads();
+    expect(asked.map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${editEligibilityPathOf(STORE_1, draft.id)}`]);
+    expect(asked[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect([asked[0].headers.get('x-tmpos-csrf'), asked[0].headers.get('idempotency-key'), asked[0].body]).toEqual([null, null, undefined]);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled());
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent('');
+    await click('draft-view-close');
+    await openDraft();
+    expect(server.editEligReads()).toHaveLength(2); // each open asks again: never a last answer
+    await click('draft-view-close');
+    fireEvent.change(storeSelect(), { target: { value: STORE_RO } });
+    await listReady();
+    await openDraft(0);
+    expect(screen.getByTestId('draft-view-version')).toHaveTextContent('1');
+    expect(screen.queryByTestId('draft-view-edit-state')).toBeNull(); // a read-only store: nothing asked, nothing offered
+    expect(server.editEligReads().filter((x) => x.url.includes(ro.id))).toEqual([]);
+    expect(server.patches()).toEqual([]);
+  });
+
+  it('SID-78. AC-16: a role the server refuses (Invoices Create: it may save drafts, not edit them) gets no Edit — the 403 gets ONE fresh session check and stands; an outage is "unavailable" with a Try again (one GET per press) that offers Edit on the server\'s allowance; a 429 waits; nothing is ever sent as a PATCH', async () => {
+    const { server } = await ready();
+    server.users['tok-a'].role = 'sales';
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } }); // asked again under the Create-only role
+    await listReady();
+    await eligSettled();
+    expect(eligPhase()).toBe('allowed'); // the creation eligibility allows this role at this store
+    expect(server.eligReads(STORE_1).at(-1)!.headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    const before = server.sent.length;
+    await openDraft();
+    expect(editPhase()).toBe('denied');
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent(EDIT_ELIGIBILITY_TEXT.denied);
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(screen.queryByTestId('draft-view-edit-retry')).toBeNull();
+    const after = server.sent.slice(before).map((x) => x.url);
+    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(3); // the reopen's, the eligibility's and its ONE fresh check
+    expect(after.filter((u) => u.endsWith('/edit-eligibility'))).toHaveLength(1);
+    await click('draft-view-close');
+    server.users['tok-a'].role = 'owner';
+    server.editEligStatus.push(503);
+    await openDraft();
+    expect(editPhase()).toBe('unavailable');
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent(EDIT_ELIGIBILITY_TEXT.unavailable);
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    const asked = server.editEligReads().length;
+    await click('draft-view-edit-retry');
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled());
+    expect(server.editEligReads()).toHaveLength(asked + 1);
+    await click('draft-view-close');
+    server.retryAfter = '30';
+    server.editEligStatus.push(429);
+    await openDraft();
+    expect(editPhase()).toBe('rate-limited');
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent(pickerWaitText(30));
+    expect(screen.getByTestId('draft-view-edit-retry')).toBeDisabled();
+    await click('draft-view-close');
+    expect(server.patches()).toEqual([]);
+  });
+
+  it('SID-79. AC-17 (jsdom-only callback ordering): an edit-eligibility answer counts only for the draft, store and session that asked — released after the dialog moved to another draft, after a sign-out, or after a new generation, it offers nothing', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, props, draft } = await ready();
+    const other = server.seedDraft(STORE_1, draft.customerId, at(9), 100, 1);
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady();
+    expect(rows().map((x) => x.getAttribute('data-id'))).toEqual([other.id, draft.id]);
+    server.hold.editElig = 2;
+    await user().click(within(rows()[1]).getByTestId('drafts-open')); // `draft`: its answer held
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    await click('draft-view-close');
+    await user().click(within(rows()[0]).getByTestId('drafts-open')); // `other`: its answer held too
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig', 'editElig']));
+    await release(server, 0); // the first draft's allowance arrives while the dialog shows the second
+    await settle();
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(editPhase()).toBe('checking');
+    await release(server, 0, refusal(503, 'service_unavailable'));
+    await waitFor(() => expect(editPhase()).toBe('unavailable'));
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    await click('draft-view-close');
+    // A sign-out while the answer is out: the allowance, released after it began, offers nothing.
+    server.hold.editElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    await act(async () => { void props.session!.logout(); });
+    await release(server);
+    await settle();
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'signed-out');
+    await click('draft-view-close');
+    server.expire();
+    await click('drafts-retry'); // Reconnect
+    await showAndChoose(STORE_1);
+    // A new generation (another tab's session, noticed on focus) while the answer is out: the dialog goes with it.
+    server.hold.editElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    server.otherTab('uid-a');
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    await release(server);
+    await settle();
+    expect(screen.queryByTestId('draft-view')).toBeNull();
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(server.patches()).toEqual([]);
+  });
+
+  it('SID-80. AC-16: the editor is seeded from the detail just read (customer, ordered lines, version); lines are edited, added, removed and moved (focus stays with the moved line); ONE Save is ONE PATCH of the exact bytes under one key — duplicate presses send nothing, nothing says "Saved" before the 200 — then ONE read-back shows the new version and the list is read again', async () => {
+    const { server, bea, draft, r } = await ready();
+    await openEditor();
+    const dialog = screen.getByTestId('draft-edit');
+    expect(dialog).toHaveAttribute('role', 'dialog');
+    expect(screen.getByTestId('draft-edit-version')).toHaveTextContent('1');
+    expect(screen.getByTestId('picker-value-name')).toHaveTextContent('Ada Customer');
+    expect(working()).toEqual([['Item 1', '1', '2.50'], ['Item 2', '1', '2.50']]);
+    expect(document.activeElement).toBe(fields('description')[0]);
+    expect(screen.queryByTestId('draft-view')).toBeNull(); // one dialog at a time: the editor replaced the view
+    fireEvent.change(fields('description')[0], { target: { value: 'Screen repair' } });
+    fireEvent.change(fields('quantity')[0], { target: { value: '2' } });
+    fireEvent.change(fields('price')[0], { target: { value: '20' } });
+    await click('draft-edit-add-line');
+    fireEvent.change(fields('description')[2], { target: { value: 'Cable' } });
+    fireEvent.change(fields('quantity')[2], { target: { value: '3' } });
+    fireEvent.change(fields('price')[2], { target: { value: '0.75' } });
+    await user().click(screen.getByRole('button', { name: 'Remove line 2' }));
+    expect(working()).toEqual([['Screen repair', '2', '20'], ['Cable', '3', '0.75']]);
+    await user().click(screen.getByRole('button', { name: 'Move line 2 up' }));
+    expect(working()).toEqual([['Cable', '3', '0.75'], ['Screen repair', '2', '20']]);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move line 1 down' })); // the moved line's control: its Move up is now disabled
+    expect(screen.getByRole('button', { name: 'Move line 1 up' })).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-moved')).toHaveTextContent('Line 2 moved to line 1.');
+    expect(screen.getByLabelText('Line 2 quantity')).toBe(fields('quantity')[1]); // every field names its line
+    expect(screen.getByLabelText('Line 2 unit price ($)')).toBe(fields('price')[1]);
+    await pickCustomer(bea);
+    expect(screen.getByTestId('draft-edit-subtotal-amount')).toHaveTextContent('$42.25');
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'sending');
+    // The working copy is locked while its request is out: the screen keeps what was sent; closing now only stops tracking.
+    for (const control of [fields('description')[0], fields('price')[1], screen.getByTestId('draft-edit-add-line'), screen.getByTestId('picker-change'), screen.getByRole('button', { name: 'Move line 1 down' })]) {
+      expect(control).toBeDisabled();
+    }
+    expect(screen.getByTestId('draft-edit-cancel-hint')).toHaveTextContent(EDIT_TEXT.closeWarning);
+    fireEvent.click(screen.getByTestId('draft-edit-save'));
+    await settle();
+    expect(document.body).not.toHaveTextContent(/Saved on the server/);
+    const patches = server.patches();
+    expect(patches).toHaveLength(1);
+    expect(patches[0].url).toBe(draftPathOf(STORE_1, draft.id));
+    expect(patches[0].body).toBe(editBody(TENANT_A, 1, bea, [['Cable', 3, 75], ['Screen repair', 2, 2000]]));
+    expect(patches[0].headers.get('idempotency-key')).toBe(r.keys[0]);
+    expect(patches[0].headers.get('x-tmpos-csrf')).toBe('1');
+    expect(patches[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect(r.keys).toHaveLength(1);
+    const mark = server.sent.length;
+    await release(server);
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(2)));
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('2'));
+    expect(screen.getAllByTestId('draft-view-line').map((x) => x.textContent)).toEqual(['1Cable3$0.75$2.25', '2Screen repair2$20.00$40.00']);
+    await waitFor(() => expect(screen.getByTestId('draft-view-customer')).toHaveTextContent('Bea Customer'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled()); // asked again for the new view
+    expect(server.detailReads(STORE_1, draft.id).filter((x) => server.sent.indexOf(x) >= mark)).toHaveLength(1); // ONE read-back
+    await waitFor(() => expect(within(rows()[0]).getByTestId('drafts-row-subtotal')).toHaveTextContent('$42.25'));
+    expect(server.patches()).toHaveLength(1);
+    expect([draft.version, draft.customerId, draft.subtotalCents]).toEqual([2, bea, 4225]);
+  });
+
+  it('SID-81. AC-16: a Save that changes nothing is the server\'s changed:false — "No changes were needed", the version unchanged, and the one read-back', async () => {
+    const { server, draft } = await ready();
+    await openEditor();
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.unchanged(1)));
+    expect(savedNote()).not.toHaveTextContent(/Saved on the server/);
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('1'));
+    expect(server.patches().map((x) => x.body)).toEqual([editBody(TENANT_A, 1, draft.customerId, [['Item 1', 1, 250], ['Item 2', 1, 250]])]);
+    expect(draft.version).toBe(1);
+  });
+
+  it('SID-82. AC-16: a confirmed save whose read-back fails stays confirmed and says the current draft could not be read — nothing is sent again, and nothing reads on its own', async () => {
+    const { server, draft } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[1], { target: { value: 'Fan' } });
+    server.detailStatus.push(503); // the next draft read: the read-back
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(`${EDIT_TEXT.saved(2)} ${EDIT_TEXT.unread}`));
+    expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'unavailable');
+    const sent = server.sent.length;
+    await settle();
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(server.sent.slice(sent).filter((x) => x.method !== 'GET' || x.url !== TENANT_SESSION_PATHS.current)).toEqual([]);
+    expect(server.patches()).toHaveLength(1);
+    expect(draft.version).toBe(2);
+  });
+
+  it('SID-83. AC-17: a PATCH whose answer is lost after the server committed is UNRESOLVED — nothing is sent on a focus, a tab return or a reload of the section; only Check again re-sends, the SAME key and the SAME bytes to the same draft; its replayed answer confirms that attempt, and the read-back says honestly that the draft has changed again since', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada, draft, r, props, view } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Screen repair' } });
+    server.updates.push('lose');
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveTextContent(EDIT_TEXT.unresolved);
+    expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent('No answer from the server.');
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-save')).toHaveAccessibleDescription(EDIT_TEXT.saveHeld);
+    expect(draft.version).toBe(2); // committed on the server
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    expect(server.patches()).toHaveLength(1);
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // another session edits it again: version 3
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(`${EDIT_TEXT.saved(2)} ${EDIT_TEXT.later(3)}`));
+    const [first, again] = server.patches();
+    expect([again.url, again.body, again.headers.get('idempotency-key')]).toEqual([first.url, first.body, first.headers.get('idempotency-key')]);
+    expect(again.headers.get('x-tmpos-session-csrf')).toBe(first.headers.get('x-tmpos-session-csrf')); // the attempt's own session token
+    expect(r.keys).toHaveLength(1);
+    expect(screen.getByTestId('draft-view-version')).toHaveTextContent('3');
+    // A reload of the section (unmount, mount) while another attempt is unresolved restores nothing and sends nothing.
+    await click('draft-view-close');
+    await openEditor();
+    server.updates.push('lose');
+    fireEvent.change(fields('description')[0], { target: { value: 'Other' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    view.unmount();
+    render(<ServerInvoiceDrafts {...props} />);
+    await settle();
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(server.patches()).toHaveLength(3);
+  });
+
+  it('SID-84. AC-17: a 503, a lost request and a Check again\'s 429 leave the attempt unresolved under the same key — the 429 holds Check again and Save back for its Retry-After (said why), sending nothing on its own; each Check again is ONE PATCH of the same bytes; past the 23-hour cutoff (the larger of monotonic and wall-clock elapsed) nothing is sent and the card says to look again', async () => {
+    const { server, draft, r } = await ready();
+    await openEditor();
+    fireEvent.change(fields('quantity')[0], { target: { value: '4' } });
+    server.updates.push(503, 'lose-before', 429);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent('The server answered, but not with a result.'));
+    expect(draft.version).toBe(1);
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent('No answer from the server.'));
+    fakeClock();
+    server.retryAfter = '3';
+    fireEvent.click(screen.getByTestId('draft-edit-check-again'));
+    await until(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent('Too many requests. Wait 3 seconds.'));
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved');
+    expect(screen.getByTestId('draft-edit-check-again')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-check-again')).toHaveAccessibleDescription(HOLD_TEXT.waiting);
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    const sent = server.sent.length;
+    await advance(3_000);
+    await settle();
+    expect(screen.getByTestId('draft-edit-check-again')).toBeEnabled();
+    expect(server.sent).toHaveLength(sent);
+    vi.useRealTimers();
+    expect(server.patches()).toHaveLength(3);
+    expect(new Set(server.patches().map((x) => `${x.headers.get('idempotency-key')} ${x.headers.get('x-tmpos-session-csrf')} ${x.body}`)).size).toBe(1); // same key, token and bytes
+    r.clock.wall += 23 * HOUR; // the wall clock alone passes the cutoff
+    await click('draft-edit-check-again');
+    await settle();
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveTextContent(EDIT_TEXT.tooOld);
+    expect(screen.queryByTestId('draft-edit-check-again')).toBeNull();
+    expect(server.patches()).toHaveLength(3);
+    expect(r.keys).toHaveLength(1);
+    expect(draft.version).toBe(1);
+    // The monotonic arm alone: another attempt (the editor closed and opened again, the wall clock as it is now), then
+    // ONLY the monotonic clock passes 23 hours.
+    await click('draft-edit-cancel');
+    await openEditor();
+    fireEvent.change(fields('quantity')[0], { target: { value: '5' } });
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    expect(screen.getByTestId('draft-edit-check-again')).toBeEnabled();
+    r.clock.mono += 23 * HOUR;
+    await click('draft-edit-check-again');
+    await settle();
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveTextContent(EDIT_TEXT.tooOld);
+    expect(server.patches()).toHaveLength(4);
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-85. AC-16: a conflict (another session saved first) is never overwritten: the sealed 409 keeps the working copy, reads the server\'s draft afresh ONCE and shows both as text; Save waits for a decision; Reapply sends the same working copy under a NEW key at the version that read found', async () => {
+    const { server, ada, draft, r } = await ready();
+    await openEditor();
+    server.editDraft(draft, ada, [{ description: 'Their line', quantity: 2, unitPriceCents: 500 }]); // version 2, elsewhere
+    fireEvent.change(fields('description')[0], { target: { value: 'My line' } });
+    const mark = server.sent.length;
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'ready'));
+    expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.conflict);
+    expect(screen.getByTestId('draft-edit-status')).toHaveAttribute('role', 'alert');
+    expect(server.detailReads(STORE_1, draft.id).filter((x) => server.sent.indexOf(x) >= mark)).toHaveLength(1);
+    const theirs = screen.getByTestId('draft-edit-server');
+    expect(theirs).toHaveTextContent('On the server now (version 2)');
+    expect(theirs).toHaveTextContent('Customer: Ada Customer');
+    expect(theirs).toHaveTextContent('1. Their line — 2 × $5.00 = $10.00');
+    expect(theirs).toHaveTextContent('Draft subtotal $10.00');
+    const mine = screen.getByTestId('draft-edit-mine');
+    expect(mine).toHaveTextContent('1. My line — 1 × $2.50 = $2.50');
+    expect(mine).toHaveTextContent('2. Item 2 — 1 × $2.50 = $2.50');
+    expect(working()).toEqual([['My line', '1', '2.50'], ['Item 2', '1', '2.50']]); // kept
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-save')).toHaveAccessibleDescription(EDIT_TEXT.saveConflict);
+    await settle();
+    expect(server.patches()).toHaveLength(1); // nothing on its own
+    expect(draft.lines.map((l) => l.description)).toEqual(['Their line']);
+    await click('draft-edit-reapply');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(3)));
+    const [first, reapplied] = server.patches();
+    expect(reapplied.headers.get('idempotency-key')).not.toBe(first.headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+    expect(reapplied.body).toBe(editBody(TENANT_A, 2, ada, [['My line', 1, 250], ['Item 2', 1, 250]]));
+    expect(first.body).toBe(editBody(TENANT_A, 1, ada, [['My line', 1, 250], ['Item 2', 1, 250]]));
+    expect(draft.lines.map((l) => l.description)).toEqual(['My line', 'Item 2']);
+  });
+
+  it('SID-86. AC-16: "Discard my changes" is local only — no request; the editor then holds the server\'s current draft (its version, customer and lines) and a Save of it is the server\'s "no changes" at that version', async () => {
+    const { server, bea, draft } = await ready();
+    await openEditor();
+    server.editDraft(draft, bea, [{ description: 'Their line', quantity: 1, unitPriceCents: 100 }]);
+    fireEvent.change(fields('description')[0], { target: { value: 'My line' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'ready'));
+    const sent = server.sent.length;
+    await click('draft-edit-discard');
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(screen.queryByTestId('draft-edit-conflict')).toBeNull();
+    expect(working()).toEqual([['Their line', '1', '1.00']]);
+    expect(screen.getByTestId('draft-edit-version')).toHaveTextContent('2');
+    expect(screen.getByTestId('picker-value')).toHaveAttribute('data-id', bea);
+    expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.discarded(2));
+    expect(screen.getByTestId('draft-edit-status')).toHaveAttribute('role', 'status');
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.unchanged(2)));
+    expect(server.patches().at(-1)!.body).toBe(editBody(TENANT_A, 2, bea, [['Their line', 1, 100]]));
+    expect(draft.version).toBe(2);
+  });
+
+  it('SID-87. AC-16: a draft gone from the server and a customer gone from the server get the SAME answer — "this draft, or its customer, is no longer available" — with the working copy kept and no conflict review', async () => {
+    const { server, bea, draft } = await ready();
+    await openEditor();
+    await pickCustomer(bea);
+    server.customers.delete(bea);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.gone));
+    const forCustomer = screen.getByTestId('draft-edit-status').textContent;
+    expect(screen.queryByTestId('draft-edit-conflict')).toBeNull();
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    expect(working()).toEqual([['Item 1', '1', '2.50'], ['Item 2', '1', '2.50']]);
+    await click('draft-edit-cancel');
+    await openEditor();
+    server.drafts.splice(server.drafts.indexOf(draft), 1);
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.gone));
+    expect(screen.getByTestId('draft-edit-status').textContent).toBe(forCustomer);
+    expect(server.patches()).toHaveLength(2);
+  });
+
+  it('SID-88. AC-17: a PATCH refused 403 gets ONE fresh session check, then says the account may not edit (nothing re-sent); a 429 holds Save back for its Retry-After (said why) and sends nothing on its own; a 401 ends the session — the editor and its working copy go, and only Reconnect signs in', async () => {
+    const { server } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Secret line' } });
+    server.editAllow.owner = false; // the owner lowered the level meanwhile
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_REFUSED_TEXT.denied));
+    const patch = server.sent.indexOf(server.patches()[0]);
+    expect(server.sent.slice(patch + 1).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    server.editAllow.owner = true;
+    fakeClock();
+    server.retryAfter = '3';
+    server.updates.push(429);
+    fireEvent.click(screen.getByTestId('draft-edit-save'));
+    await until(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_REFUSED_TEXT['rate-limited']));
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-save')).toHaveAccessibleDescription(EDIT_TEXT.saveWaiting);
+    const sent = server.sent.length;
+    await advance(3_000);
+    await settle();
+    expect(screen.getByTestId('draft-edit-save')).toBeEnabled();
+    expect(server.sent).toHaveLength(sent);
+    vi.useRealTimers();
+    server.updates.push(401);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.queryByTestId('draft-edit')).toBeNull());
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(document.body).not.toHaveTextContent('Secret line');
+    expect(screen.getByTestId('drafts-retry')).toHaveTextContent('Reconnect');
+    expect(server.patches()).toHaveLength(3);
+  });
+
+  it.each(['the sign-out first, then the PATCH\'s answer', 'the PATCH\'s answer first, then the sign-out during its read-back'] as const)('SID-89. AC-17 (jsdom-only callback ordering): a sign-out while an edit is out — %s: the editor, its working copy and customer go at once; the late answer (the server DID commit) shows nothing — no "Saved", no draft, no read-back after the sign-out; only Reconnect reads again, and nothing of the old editor comes back', async (order) => {
+    const { server, props, bea, draft } = await ready();
+    await openEditor();
+    await pickCustomer(bea);
+    fireEvent.change(fields('description')[0], { target: { value: 'Secret line' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    if (order === 'the PATCH\'s answer first, then the sign-out during its read-back') {
+      server.hold.get = 1;
+      await release(server);
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['get']));
+      expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(2));
+    }
+    const mark = server.sent.length;
+    let during: HTMLElement | null | undefined;
+    // Sampled inside the sign-out call itself, before anything else runs: the editor is already gone (committed by its
+    // own listener, not on a later render).
+    await act(async () => { void props.session!.logout(); during = screen.queryByTestId('draft-edit'); });
+    expect(during).toBeNull();
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(document.body).not.toHaveTextContent('Secret line');
+    expect(document.body).not.toHaveTextContent('Bea Customer');
+    await release(server);
+    await settle();
+    expect(draft.version).toBe(2); // the server committed it under the old attempt
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(savedNote()).toBeNull();
+    expect(screen.queryAllByTestId('draft-view-line')).toEqual([]);
+    expect(document.body).not.toHaveTextContent('Secret line');
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    if (screen.queryByTestId('draft-view') !== null) await click('draft-view-close');
+    server.expire();
+    await click('drafts-retry'); // Reconnect
+    await showAndChoose(STORE_1);
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(screen.queryByTestId('draft-view')).toBeNull();
+    expect(server.patches()).toHaveLength(1);
+  });
+
+  it('SID-90. AC-17 (jsdom-only callback ordering): a Save whose session check answered just before a sign-out began sends nothing — no key, no PATCH; the editor is gone', async () => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    const r = rig(server);
+    const real = r.props().session!;
+    let trip = false;
+    let mark = -1;
+    const session: TenantSessionClient = { ...real, ensure: async (...args) => { const s = await real.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void real.logout(); } return s; } };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await showAndChoose(STORE_1);
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    trip = true;
+    await click('draft-edit-save');
+    await waitFor(() => expect(trip).toBe(false));
+    await settle();
+    expect(server.patches()).toEqual([]);
+    expect(r.keys).toEqual([]);
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+  });
+
+  it('SID-91. AC-17 (jsdom-only callback ordering): another user, or another session of the same user, never receives an old editor\'s result — a PATCH answered after a user switch or after a new generation (another tab\'s session, noticed on focus) shows nothing and reads nothing', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r, view, draft } = await ready();
+    server.stores['uid-b'] = [store(STORE_2, 'B Store', false, TENANT_B)];
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Secret line' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    view.rerender(<ServerInvoiceDrafts {...r.props({ uid: 'uid-b' })} />);
+    const out = server.sent.length;
+    await release(server);
+    await settle();
+    expect(server.sent.slice(out)).toEqual([]);
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(screen.queryByTestId('draft-view')).toBeNull();
+    expect(document.body).not.toHaveTextContent('Secret line');
+    expect(draft.version).toBe(2);
+    view.rerender(<ServerInvoiceDrafts {...r.props()} />);
+    await showAndChoose(STORE_1);
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Other line' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    server.otherTab('uid-a');
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    const later = server.sent.length;
+    await release(server);
+    await settle();
+    expect(server.sent.slice(later)).toEqual([]);
+    expect(savedNote()).toBeNull();
+    expect(screen.queryByTestId('draft-view')).toBeNull();
+    expect(document.body).not.toHaveTextContent('Other line');
+  });
+
+  it('SID-92. AC-16: dialog focus — Edit puts focus on the first line; Remove and the moves keep it with the lines; a Save disabled by its own press keeps focus inside (not <body>); Cancel and Escape drop the local changes only (nothing sent, the server\'s draft unchanged) and return focus to the draft\'s Open', async () => {
+    const { server, draft } = await ready();
+    await openEditor();
+    expect(document.activeElement).toBe(fields('description')[0]);
+    fireEvent.change(fields('description')[0], { target: { value: 'Local only' } });
+    const sent = server.sent.length;
+    await click('draft-edit-cancel');
+    await settle();
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(document.activeElement).toBe(within(rows()[0]).getByTestId('drafts-open'));
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(draft.lines[0].description).toBe('Item 1');
+    await openEditor();
+    expect(working()[0]).toEqual(['Item 1', '1', '2.50']); // the local change went with the editor
+    await click('draft-edit-add-line');
+    fireEvent.change(fields('description')[2], { target: { value: 'Cable' } });
+    fireEvent.change(fields('price')[2], { target: { value: '1' } });
+    await user().click(screen.getByRole('button', { name: 'Remove line 2' }));
+    expect(working().map((line) => line[0])).toEqual(['Item 1', 'Cable']);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove line 2' })); // the next line's, now line 2
+    await user().click(screen.getByRole('button', { name: 'Move line 2 up' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move line 1 down' }));
+    await user().click(screen.getByRole('button', { name: 'Move line 1 down' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move line 2 up' }));
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    await settle();
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByTestId('draft-edit').contains(document.activeElement)).toBe(true);
+    await release(server);
+    await waitFor(() => expect(savedNote()).toBeInTheDocument());
+    await settle();
+    expect(screen.getByTestId('draft-view').contains(document.activeElement)).toBe(true); // the view that replaced it holds focus
+    await click('draft-view-close');
+    await settle();
+    await openEditor();
+    await user().keyboard('{Escape}');
+    await settle();
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(document.activeElement).toBe(within(rows()[0]).getByTestId('drafts-open'));
+    expect(server.patches()).toHaveLength(1);
+  });
+
+  it('SID-93. AC-16: Invoices Edit without the local Customers View hint still edits the lines, keeping the draft\'s own customer — shown by its ID ending, sent as it is; no customer is read', async () => {
+    const { server, ada, draft } = await ready({ canViewCustomers: false });
+    await openEditor(0, false);
+    expect(screen.getByTestId('picker-unavailable')).toBeInTheDocument();
+    expect(screen.getByTestId('draft-edit-customer-kept')).toHaveTextContent(EDIT_TEXT.kept(customerFallbackText(ada)));
+    fireEvent.change(fields('price')[1], { target: { value: '3' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(2)));
+    expect(server.patches()[0].body).toBe(editBody(TENANT_A, 1, ada, [['Item 1', 1, 250], ['Item 2', 1, 300]]));
+    expect(server.sent.filter((x) => x.url.startsWith(CUSTOMERS_PATH))).toEqual([]);
+    expect(draft.customerId).toBe(ada);
+  });
+
+  it('SID-94. AC-17 (jsdom-only callback ordering): an editor closed while its PATCH is out holds nothing back — the next editor\'s Save sends at once under its own key; the closed one\'s late answer changes nothing (no "Saved" for it, no read-back)', async () => {
+    const { server, draft, r } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'First editor' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    expect(screen.getByTestId('draft-edit-cancel-hint')).toHaveTextContent(EDIT_TEXT.closeWarning);
+    await click('draft-edit-cancel'); // stops tracking it: the server decided it already (version 2)
+    await openEditor();
+    expect(screen.getByTestId('draft-edit-version')).toHaveTextContent('2');
+    fireEvent.change(fields('description')[0], { target: { value: 'Second editor' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(3)));
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled()); // its read-back and the next Edit answer done
+    await listReady(); // and the list read again after the change
+    await settle();
+    const patches = server.patches();
+    expect(patches).toHaveLength(2);
+    expect(patches[1].headers.get('idempotency-key')).not.toBe(patches[0].headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+    const sent = server.sent.length;
+    await release(server); // the first editor's 200 (version 2), late
+    await settle();
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(3));
+    expect(screen.getByTestId('draft-view-version')).toHaveTextContent('3');
+    expect(draft.lines[0].description).toBe('Second editor');
+  });
+
+  it('SID-95. AC-16: a conflict\'s fresh read refused 403 gets the reads\' ONE fresh session check, then says so with a Try again (nothing re-sent); Try again reads the draft again and the review proceeds', async () => {
+    const { server, ada, draft } = await ready();
+    await openEditor();
+    server.editDraft(draft, ada, [{ description: 'Their line', quantity: 1, unitPriceCents: 100 }]);
+    fireEvent.change(fields('description')[0], { target: { value: 'My line' } });
+    server.detailStatus.push(403);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'failed'));
+    expect(screen.getByTestId('draft-edit-conflict-state')).toHaveTextContent(DRAFTS_TEXT.draftDenied);
+    const read = server.detailReads(STORE_1, draft.id).at(-1)!;
+    expect(server.sent.slice(server.sent.indexOf(read) + 1).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(screen.queryByTestId('draft-edit-reapply')).toBeNull();
+    await click('draft-edit-read-again');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'ready'));
+    expect(screen.getByTestId('draft-edit-server')).toHaveTextContent('Their line');
+    expect(server.patches()).toHaveLength(1);
+  });
+  it('SID-96. AC-17: a PATCH refused 403 is a refusal of access ONLY when its one fresh session check confirms the same session — a check that cannot answer says so (never "may not edit"), and a check refused 429 starts the wait (Save held back, said why); a Check again\'s 403 leaves the attempt unresolved with that check\'s own note', async () => {
+    const { server } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    // A first send refused 403 whose fresh check cannot answer (503): refused, but no word about access.
+    server.editAllow.owner = false;
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    server.currentStatus.push(503); // the fresh check after the 403
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.refusedUnchecked));
+    expect(screen.getByTestId('draft-edit-status')).not.toHaveTextContent(EDIT_REFUSED_TEXT.denied);
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull(); // the chain refused it before anything ran
+    // A Check again's 403: unresolved — the same session confirmed ("The server refused this check."), then a check that cannot answer.
+    server.editAllow.owner = true;
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.editAllow.owner = false;
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent('The server refused this check.'));
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved');
+    server.hold.update = 1;
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    server.currentStatus.push(503);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent(EDIT_TEXT.checkUnchecked));
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved');
+    expect(screen.getByTestId('draft-edit-check-again')).toBeEnabled();
+    // A first send refused 403 whose fresh check is rate-limited: the wait starts, Save is held back through it.
+    await click('draft-edit-cancel');
+    server.editAllow.owner = true;
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed again' } });
+    server.editAllow.owner = false;
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    server.retryAfter = '30';
+    server.currentStatus.push(429);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_REFUSED_TEXT['rate-limited']));
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-save')).toHaveAccessibleDescription(EDIT_TEXT.saveWaiting);
+    expect(server.patches()).toHaveLength(5);
+  });
+
+  it('SID-97. AC-16: a read refused 403 gets the reads\' one fresh session check — a save\'s read-back keeps its confirmed result and says denied only for the same session; the view-only reopen and the conflict\'s read, whose check cannot answer, say "unavailable", never a refusal', async () => {
+    const { server, ada, draft } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Read back refused' } });
+    server.detailStatus.push(403); // the read-back
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'denied'));
+    expect(savedNote()).toHaveTextContent(`${EDIT_TEXT.saved(2)} ${EDIT_TEXT.unread}`); // the confirmed save stands
+    const readBack = server.detailReads(STORE_1, draft.id).at(-1)!;
+    expect(server.sent.slice(server.sent.indexOf(readBack) + 1).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(server.patches()).toHaveLength(1);
+    await click('draft-view-close');
+    // The view-only reopen shares that read: its 403 whose check cannot answer is unavailable now (was: denied at once).
+    server.hold.get = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['get']));
+    server.detailStatus.push(403);
+    server.currentStatus.push(503);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'unavailable'));
+    expect(screen.getByTestId('draft-view-state')).toHaveTextContent(DRAFTS_TEXT.unavailable);
+    await click('draft-view-close');
+    // The conflict's read refused 403, its check unable to answer: unavailable, with Try again.
+    await openEditor();
+    server.editDraft(draft, ada, [{ description: 'Their line', quantity: 1, unitPriceCents: 100 }]);
+    fireEvent.change(fields('description')[0], { target: { value: 'My line' } });
+    server.hold.get = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['get']));
+    server.detailStatus.push(403);
+    server.currentStatus.push(503);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'failed'));
+    expect(screen.getByTestId('draft-edit-conflict-state')).toHaveTextContent(DRAFTS_TEXT.unavailable);
+    expect(screen.getByTestId('draft-edit-read-again')).toBeEnabled();
+  });
+
+  it('SID-98. AC-17 (jsdom-only callback ordering): a rate limit\'s wait that begins while Save\'s session check is out sends nothing — no key, no PATCH — and says so', async () => {
+    const { server, r } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    // A list read behind the dialog (the store chosen again; jsdom does not enforce inert), its answer held.
+    server.hold.list = 1;
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['list']));
+    server.hold.current = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['list', 'current']));
+    await release(server, 0, refusal(429, 'rate_limited')); // the list's 429 starts the wait while Save's session check is out
+    await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited'));
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(/^Not sent\. Too many requests\./));
+    expect(server.patches()).toEqual([]);
+    expect(r.keys).toEqual([]);
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+  });
+
+  it('SID-99. AC-17 (jsdom-only callback ordering): a rate limit\'s wait that begins while Check again\'s session check is out sends nothing — the attempt stays unresolved with the wait said', async () => {
+    const { server, r } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.hold.list = 1;
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['list']));
+    server.hold.current = 1;
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['list', 'current']));
+    await release(server, 0, refusal(429, 'rate_limited'));
+    await waitFor(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited'));
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt-note')).toHaveTextContent(/^Not checked\. Too many requests\./));
+    expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved');
+    expect(screen.getByTestId('draft-edit-check-again')).toBeDisabled();
+    expect(server.patches()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-100. AC-16: a draft at the largest version the server records (2^53-1) cannot be saved again — Save is disabled and says why (visible and as its description); nothing is sent', async () => {
+    const { server, draft } = await ready();
+    draft.version = Number.MAX_SAFE_INTEGER;
+    await openEditor();
+    expect(screen.getByTestId('draft-edit-version')).toHaveTextContent(String(Number.MAX_SAFE_INTEGER));
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    expect(screen.getByTestId('draft-edit-save')).toBeDisabled();
+    expect(screen.getByTestId('draft-edit-save')).toHaveAccessibleDescription(EDIT_TEXT.saveLast);
+    expect(screen.getByTestId('draft-edit-save-last')).toHaveTextContent(EDIT_TEXT.saveLast);
+    fireEvent.click(screen.getByTestId('draft-edit-save'));
+    await settle();
+    expect(server.patches()).toEqual([]);
+  });
+
+  it('SID-101. AC-17: Check again uses the attempt\'s OWN session token — a store change keeps its own store, draft and token; after a token rotation (another tab\'s session, found by the check itself) or a session renewal (the session ended, then Reconnect) it sends nothing and the editor is gone', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, draft } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Store change' } });
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    fireEvent.change(storeSelect(), { target: { value: STORE_2 } }); // behind the dialog (jsdom does not enforce inert)
+    await listReady();
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(2)));
+    const [first, again] = server.patches();
+    expect([again.url, again.headers.get('idempotency-key'), again.headers.get('x-tmpos-session-csrf'), again.body])
+      .toEqual([draftPathOf(STORE_1, draft.id), first.headers.get('idempotency-key'), first.headers.get('x-tmpos-session-csrf'), first.body]);
+    await click('draft-view-close');
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady();
+    // A token rotation: another tab's session is what Check again's own session check finds.
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Rotation' } });
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.otherTab('uid-a');
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(server.patches()).toHaveLength(3);
+    // A session renewal: the session is over when Check again asks, and the user's Reconnect makes a new one.
+    await showAndChoose(STORE_1);
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Renewal' } });
+    server.updates.push(503);
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.expire();
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    await click('drafts-retry'); // Reconnect: a new session
+    await showAndChoose(STORE_1);
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(screen.queryByTestId('draft-edit')).toBeNull();
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    expect(server.patches()).toHaveLength(4); // the three first sends and the one Check again before the store change's answer
+  });
+
+  it('SID-102. AC-16: while a save is out, Tab and Shift+Tab stay inside the editor — the locked working copy (a disabled fieldset) holds no stop, so the wrap lands on an enabled control', async () => {
+    const { server } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Changed' } });
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    await settle();
+    const dialog = screen.getByTestId('draft-edit');
+    const cancel = screen.getByTestId('draft-edit-cancel');
+    const enabled = [...dialog.querySelectorAll<HTMLElement>('button, input, select, textarea')].filter((el) => !el.matches(':disabled'));
+    expect(enabled).toEqual([cancel]); // Save, the fields, Add line, the moves and Change are all off
+    act(() => { cancel.focus(); });
+    const tab = createEvent.keyDown(cancel, { key: 'Tab' });
+    fireEvent(cancel, tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+    const back = createEvent.keyDown(cancel, { key: 'Tab', shiftKey: true });
+    fireEvent(cancel, back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+    await release(server);
+    await waitFor(() => expect(savedNote()).toBeInTheDocument());
+  });
+
+  it('SID-103. AC-16: adding the 50th line (which disables Add line under the press) puts focus on that new line\'s description, never back on line 1', async () => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5), 100, 49);
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await openEditor();
+    expect(fields('description')).toHaveLength(49);
+    const add = screen.getByTestId('draft-edit-add-line');
+    await user().click(add);
+    expect(fields('description')).toHaveLength(50);
+    expect(add).toBeDisabled();
+    expect(document.activeElement).toBe(fields('description')[49]);
+    expect(document.activeElement).toHaveAccessibleName('Line 50 description');
+  });
+
+  it('SID-104. AC-16: during a rate limit\'s wait the conflict\'s Try again and Reapply are disabled and say why; they come back once it has passed', async () => {
+    const { server, ada, draft } = await ready();
+    await openEditor();
+    server.editDraft(draft, ada, [{ description: 'Their line', quantity: 1, unitPriceCents: 100 }]);
+    fireEvent.change(fields('description')[0], { target: { value: 'My line' } });
+    server.detailStatus.push(503); // the conflict's read fails: Try again
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'failed'));
+    fakeClock();
+    server.retryAfter = '5';
+    server.listStatus.push(429);
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } }); // a list read behind the dialog starts the wait
+    await until(() => expect(screen.getByTestId('draft-edit-read-again')).toBeDisabled());
+    expect(screen.getByTestId('draft-edit-read-again')).toHaveAccessibleDescription(EDIT_TEXT.readWaiting);
+    await advance(5_000);
+    await settle();
+    expect(screen.getByTestId('draft-edit-read-again')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('draft-edit-read-again'));
+    await until(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'ready'));
+    server.listStatus.push(429);
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await until(() => expect(screen.getByTestId('draft-edit-reapply')).toBeDisabled());
+    expect(screen.getByTestId('draft-edit-reapply')).toHaveAccessibleDescription(EDIT_TEXT.reapplyWaiting);
+    await advance(5_000);
+    await settle();
+    expect(screen.getByTestId('draft-edit-reapply')).toBeEnabled();
+    expect(server.patches()).toHaveLength(1);
+  });
+
+  it('SID-105. AC-17: a Check again answered by the sealed 409 write_conflict goes to the conflict review (working copy kept, the server\'s draft read); one answered 404 gives the one "no longer available" text and ends the attempt', async () => {
+    const { server, ada, draft } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Mine' } });
+    server.updates.push('lose-before'); // never reached the server
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.editDraft(draft, ada, [{ description: 'Theirs', quantity: 1, unitPriceCents: 100 }]); // version 2, elsewhere
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-conflict')).toHaveAttribute('data-phase', 'ready'));
+    expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.conflict);
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    expect(working()[0][0]).toBe('Mine');
+    expect(screen.getByTestId('draft-edit-server')).toHaveTextContent('Theirs');
+    const [first, check] = server.patches();
+    expect(check.headers.get('idempotency-key')).toBe(first.headers.get('idempotency-key'));
+    await click('draft-edit-discard');
+    fireEvent.change(fields('description')[0], { target: { value: 'Again' } });
+    server.updates.push('lose-before');
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    server.drafts.splice(server.drafts.indexOf(draft), 1);
+    await click('draft-edit-check-again');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_TEXT.gone));
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    expect(server.patches()).toHaveLength(4);
+  });
+
+  it('SID-106. AC-17: closing the editor while its attempt is unresolved says first that it only stops tracking (the server may have saved it) and sends nothing; opened again, the editor holds the server\'s draft and a fresh attempt that never presents itself as recovery', async () => {
+    const { server, r } = await ready();
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Lost answer' } });
+    server.updates.push('lose'); // committed, its answer lost
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-attempt')).toHaveAttribute('data-state', 'unresolved'));
+    expect(screen.getByTestId('draft-edit-cancel-hint')).toHaveTextContent(EDIT_TEXT.closeWarning);
+    expect(screen.getByTestId('draft-edit-cancel')).toHaveAccessibleDescription(EDIT_TEXT.closeWarning);
+    const sent = server.sent.length;
+    await click('draft-edit-cancel');
+    await settle();
+    expect(server.sent.slice(sent)).toEqual([]);
+    await openEditor();
+    expect(screen.getByTestId('draft-edit-version')).toHaveTextContent('2'); // the lost edit committed
+    expect(working()[0][0]).toBe('Lost answer');
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    expect(screen.queryByTestId('draft-edit-check-again')).toBeNull();
+    expect(document.body).not.toHaveTextContent(/Not confirmed yet/);
+    expect(screen.getByTestId('draft-edit-cancel-hint')).toHaveTextContent(EDIT_TEXT.cancelHint);
+    fireEvent.change(fields('description')[0], { target: { value: 'Fresh' } });
+    await click('draft-edit-save');
+    await waitFor(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(3)));
+    const [lost, fresh] = server.patches();
+    expect(fresh.headers.get('idempotency-key')).not.toBe(lost.headers.get('idempotency-key'));
+    expect(JSON.parse(fresh.body!).expectedVersion).toBe(2);
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-107. AC-17: an edit eligibility answered 401 ends the session as any read\'s does — the stores say so, the view holds no draft and offers no Edit, and only Reconnect signs in', async () => {
+    const { server } = await ready();
+    server.editEligStatus.push(401);
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.getByTestId('drafts-stores-state')).toHaveTextContent(DRAFTS_TEXT.ended);
+    expect(screen.getByTestId('draft-view-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(screen.queryAllByTestId('draft-view-line')).toEqual([]);
+    expect(screen.getByTestId('drafts-retry')).toHaveTextContent('Reconnect');
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(1); // only the first sign-in
+  });
+
+  /** Save refused 403 (Invoices Edit withdrawn), its one fresh session check held, then the editor closed by Cancel. */
+  async function refusedThenClosed(server: Server, rotate = false) {
+    await openEditor();
+    fireEvent.change(fields('description')[0], { target: { value: 'Closed while checked' } });
+    server.editAllow.owner = false;
+    server.hold.update = 1;
+    await click('draft-edit-save');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['update']));
+    if (rotate) server.otherTab('uid-a'); // the fresh check will find another tab's session (a new token)
+    server.hold.current = 1;
+    await release(server); // the PATCH's 403: its fresh check goes out and waits here
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    await click('draft-edit-cancel');
+    await waitFor(() => expect(screen.queryByTestId('draft-edit')).toBeNull());
+    server.editAllow.owner = true;
+  }
+
+  it('SID-108. AC-17 (jsdom-only callback ordering): a PATCH 403\'s fresh session check answered 401 after the editor closed still ends the session — the stores say so, only Reconnect signs in, and nothing more is sent', async () => {
+    const { server } = await ready();
+    await refusedThenClosed(server);
+    const sent = server.sent.length;
+    await release(server, 0, refusal(401, 'unauthenticated'));
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.getByTestId('drafts-stores-state')).toHaveTextContent(DRAFTS_TEXT.ended);
+    expect(screen.getByTestId('drafts-retry')).toHaveTextContent('Reconnect');
+    expect(rows()).toEqual([]);
+    await settle();
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(server.patches()).toHaveLength(1);
+  });
+
+  it('SID-109. AC-17 (jsdom-only callback ordering): a PATCH 403\'s fresh session check answered 429 after the editor closed still starts the wait — reopened, the draft offers no Edit and says why (no edit eligibility asked, no PATCH) until Retry-After has passed; then Edit and Save work', async () => {
+    const { server } = await ready();
+    await refusedThenClosed(server);
+    fakeClock();
+    await release(server, 0, new Response(JSON.stringify({ error: 'rate_limited', requestId: 'req-synthetic' }), {
+      status: 429, headers: { 'content-type': 'application/json; charset=utf-8', 'retry-after': '30' },
+    }));
+    await settle();
+    fireEvent.click(within(rows()[0]).getByTestId('drafts-open'));
+    await until(() => expect(editPhase()).toBe('rate-limited'));
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveTextContent(/^Too many requests\./);
+    expect(screen.queryByTestId('draft-view-edit')).toBeNull();
+    expect(server.editEligReads()).toHaveLength(1); // the first open's: none asked during the wait
+    fireEvent.click(screen.getByTestId('draft-view-close'));
+    await advance(30_000);
+    await settle();
+    fireEvent.click(within(rows()[0]).getByTestId('drafts-open'));
+    await until(() => expect(editPhase()).toBe('allowed'));
+    fireEvent.click(screen.getByTestId('draft-view-edit'));
+    await until(() => expect(screen.getByTestId('draft-edit-save')).toBeEnabled());
+    fireEvent.change(fields('description')[0], { target: { value: 'After the wait' } });
+    fireEvent.click(screen.getByTestId('draft-edit-save'));
+    await until(() => expect(savedNote()).toHaveTextContent(EDIT_TEXT.saved(2)));
+    expect(server.patches()).toHaveLength(2); // the refused one and this one
+  });
+
+  it('SID-110. AC-17 (jsdom-only callback ordering, regression guard): a PATCH 403\'s fresh session check that finds ANOTHER token after the editor closed is a new generation as before — no session end, no wait; the stores are read again under the new token', async () => {
+    const { server } = await ready();
+    await refusedThenClosed(server, true);
+    const [refused] = server.patches();
+    const sent = server.sent.length;
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    await storesReady();
+    const reread = server.sent.slice(sent).filter((x) => x.method === 'GET' && x.url === STORES_PATH);
+    expect(reread).toHaveLength(1);
+    expect(reread[0].headers.get('x-tmpos-session-csrf')).not.toBe(refused.headers.get('x-tmpos-session-csrf'));
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady(); // no wait holds the list back
+    await eligSettled();
+    expect(eligPhase()).toBe('allowed');
+    expect(screen.queryByTestId('drafts-retry')).toBeNull();
+    expect(server.patches()).toHaveLength(1);
+  });
+
+  it('SID-111. AC-16: two moves in a row that say the same words still change the live region, so the second is announced too', async () => {
+    await ready();
+    await openEditor();
+    await click('draft-edit-add-line');
+    fireEvent.change(fields('description')[2], { target: { value: 'Item 3' } });
+    const said = () => screen.getByTestId('draft-edit-moved').textContent ?? '';
+    await user().click(screen.getByRole('button', { name: 'Move line 3 up' }));
+    const first = said();
+    expect(first).toBe('Line 3 moved to line 2.');
+    expect(working().map(([d]) => d)).toEqual(['Item 1', 'Item 3', 'Item 2']);
+    await user().click(screen.getByRole('button', { name: 'Move line 3 up' })); // now Item 2, from line 3 to line 2
+    const second = said();
+    expect(working().map(([d]) => d)).toEqual(['Item 1', 'Item 2', 'Item 3']);
+    expect(second).not.toBe(first);
+    expect(second.replace(/\u00a0/g, ' ').trim()).toBe(first); // the same words
+    await user().click(screen.getByRole('button', { name: 'Move line 3 up' }));
+    expect(said()).not.toBe(second);
+    expect(said().trim()).toBe(first);
   });
 });

@@ -31,7 +31,7 @@
 //   - A GENERATION is one store connection as this section knows it: a counter and the session's CSRF token, in a ref,
 //     exactly as the customer picker's. `connect()` (the session client's `ensure`) runs before every list or draft read:
 //     plain, `fresh` only for the one check after a 403, `reconnect` only from the Reconnect button. A different token
-//     starts a new generation: reads in flight are cancelled, the stores, the choice, the drafts, the names and both
+//     starts a new generation: reads in flight are cancelled, the stores, the choice, the drafts, the names and the
 //     dialogs go, and the stores are read again. A read answer applies only under the generation, store and request that
 //     started it, while the section is mounted; anything else changes nothing.
 //   - Customer names come from the EXISTING customer detail read (GET /api/v1/customers/{id}, the Customers-authorized
@@ -64,10 +64,11 @@
 //     on a direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has loaded; so
 //     the section ends its generation at once — the token leaves its refs, its reads out are cancelled (a created
 //     draft's read-back is only ignored) and their late answers change nothing (no row, no name read), the reopen's
-//     read goes, a rate limit's wait ends, the new-draft dialog closes, and it says the session ended; nothing is read
-//     and nobody is signed in because of it. A save or a Check again whose session was confirmed just before a sign-out
-//     began sends nothing: each counts the session ends before it asks (`sessionEndsSoFar`) and compares after the
-//     answer; and the sign-out forgets the picker's pair, so a customer chosen before it matches no session any more.
+//     read goes, a rate limit's wait ends, the new-draft dialog and the editor close, and it says the session ended;
+//     nothing is read and nobody is signed in because of it. A save or a Check again whose session was confirmed just
+//     before a sign-out began sends nothing: each counts the session ends before it asks (`sessionEndsSoFar`) and
+//     compares after the answer; and the sign-out forgets the picker's pair, so a customer chosen before it matches no
+//     session any more.
 //     The new-draft dialog's hand-over (M7B-INVOICES-P1-R2, AC-07) asks its session check only while no sign-out has
 //     begun and the section's generation and token are still the ones it opened under, and uses the answer only if
 //     they still are: otherwise it sets no customer and makes no context. What is scrubbed here does not wait for the server: the logout itself is best effort (a failed one leaves that
@@ -75,17 +76,51 @@
 //     saved under an earlier connection. A refused one still shows its own text, until Dismiss or Stop tracking.
 //   - After CREATED, the draft is read back with a GET (never another POST), only under the hold's own session: "Saved"
 //     when it loads, "Saved, but it could not be loaded back" when it does not.
+//   - EDITING A SAVED DRAFT (M7B-INVOICES-P2). The reopen dialog offers Edit ONLY on the server's own positive answer (GET
+//     …/{id}/edit-eligibility, decided by the edit's requirement), kept exactly as New's eligibility is: bound to the
+//     user, the generation's counter and token, the reopen dialog's store and draft and the request that asked; asked
+//     once the draft's own read answered at a writable store (and by its Try again), never on a timer or a focus; no local
+//     role state stands in for it. Edit replaces the reopen dialog with the editor, seeded from the detail just read: its
+//     version (what a save expects), its customer (a server reference made for the session the eligibility confirmed, in
+//     the closed server-customer field; without the local Customers View hint the draft's own customer is kept as it is)
+//     and its lines in order — each editable, removable and movable up or down. Cancel (or Escape) of an unsent editor
+//     only drops these local changes: nothing is sent, and the draft on the server stays as it is. From Save's press until
+//     its attempt is settled the working copy is locked (what the screen shows is what was sent), and closing then only
+//     stops tracking the request — which the editor says.
+//   - Save sends ONE PATCH per press, never while the editor's attempt is out or unresolved, during a rate limit's wait or
+//     in a conflict: the attempt — its key, its exact body, its store, draft and expected version, its generation — is
+//     frozen in the editor's state before it leaves. "Saved" (or, when the server changed nothing, "No changes were
+//     needed") is said only after the server's 200, in the reopen dialog, which reads the draft back ONCE: a read-back
+//     that fails keeps the confirmed result and says the current draft could not be read (nothing is sent again), and a
+//     read-back at a later version says the draft has changed again since (a replayed answer confirms its own attempt
+//     only). A conflict (the sealed 409 write_conflict) keeps the working copy, reads the server's current draft afresh and
+//     shows both as text; "Reapply my changes" sends the working copy under a NEW key at the version that read found, and
+//     "Discard my changes" replaces the working copy with the server's draft (local only) — neither ever happens on its
+//     own. A 404 says the draft or its customer is no longer available (one text). An answer that decides nothing (a 5xx,
+//     no answer, one this client cannot name) leaves the attempt UNRESOLVED: only "Check again" re-sends — the SAME key
+//     and bytes to the attempt's own store and draft, under the generation it was sent in, within the 23-hour cutoff —
+//     and nothing does on a focus, a tab return, a reload, a session renewal or a navigation. A 403 gets the reads' one
+//     fresh check (another token is a new generation), a 401 ends the session, a 429 starts the section's wait.
+//   - The editor belongs to the generation it opened in: a new generation, a session end the section learns (failSession)
+//     and a sign-out (the section's `onSessionEnd` listener) close it synchronously — the closing render is committed
+//     there and then (flushSync), so the working copy and the customer chosen, which live in the dialog's own state, go
+//     with the held key and body and any read of it still out; a user change unmounts the section. An
+//     answer arriving after that — the PATCH may still commit on the server under its old attempt — finds no attempt under
+//     its key and changes nothing: no "Saved", no read-back, no name. The token is never in the editor's state: it is the
+//     generation's (a ref), as for the reads.
 //   - The session token sits only in refs, the hold store, an open new-draft dialog's state and the picker's
 //     `sessionContextOf` pair (tenantSessionClient.ts lists the holders, and what a sign-out takes from each): never
 //     browser storage, a URL, the DOM or a log. No key or body reaches any of those either, and draft content only the
 //     DOM (the dialogs show what is typed and read back), never storage, the page's URL or a log; ids leave the page
 //     only in API requests (paths, a draft id inside the list cursor, the customer id in the save's body).
-//   - Dialogs (the reopen and the new draft) follow the picker's pattern: a portal, role=dialog and aria-modal, the page
-//     behind made inert, Escape closing only the top dialog, Tab wrapping inside it (buttons, inputs, selects, textareas),
-//     focus lost to a control the user's press removed or disabled taken back inside without scrolling (never from the
-//     picker over it; a line's Remove hands it to the neighbouring line itself), focus returned on close. One of the two
-//     at a time: the new draft never opens beside the reopen dialog. z-[180]: above the invoice dialogs (z-50) and below
-//     the picker it opens (z-[190]) and the shop's z-[200] layers.
+//   - Dialogs (the reopen, the new draft and the editor) follow the picker's pattern: a portal, role=dialog and
+//     aria-modal, the page behind made inert, Escape closing only the top dialog, Tab wrapping inside it (buttons, inputs,
+//     selects, textareas), focus lost to a control the user's press removed or disabled taken back inside without
+//     scrolling (never from the picker over it; a line's Remove and Move up/down keep it with the lines themselves), focus
+//     returned on close. One of them at a time: the new draft never opens beside the reopen dialog or the editor, and the editor and the reopen dialog
+//     replace each other (Edit, a confirmed save) — a closing dialog then leaves focus to the one that opened (its return
+//     target is inert behind it). z-[180]: above the invoice dialogs (z-50) and below the picker it opens (z-[190]) and
+//     the shop's z-[200] layers.
 //   - Outside the dialogs focus never falls to <body> either (DA-199). The section tracks the control that last took
 //     focus in it (`trackFocus`); a render that removes or disables it while focus is still on it (or fell from it to
 //     <body>) hands focus to the section heading. So a press that takes its own control away — "Show server drafts", the
@@ -99,13 +134,17 @@
 //     taken, nor is focus the user left on <body> by a press elsewhere (a press outside the tracked control ends the
 //     tracking).
 
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
-import { createPortal } from 'react-dom';
+import {
+  useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore,
+  type Dispatch, type KeyboardEvent, type MutableRefObject, type ReactNode, type RefObject, type SetStateAction,
+} from 'react';
+import { createPortal, flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { customers as customersClient, type CustomersClient } from './customersClient';
 import {
-  invoiceDrafts as draftsClient, draftBody, formatCents, lineAmounts, MAX_CENTS, MAX_DRAFT_LINES,
-  type CreateDraftResult, type DraftDetail, type DraftLineFields, type DraftSummary, type InvoiceDraftsClient, type StoreEntry,
+  invoiceDrafts as draftsClient, draftBody, draftEditBody, formatCents, lineAmounts, MAX_CENTS, MAX_DRAFT_LINES, MAX_EXPECTED_VERSION, priceText,
+  type CreateDraftResult, type DraftBody, type DraftDetail, type DraftLineFields, type DraftSummary, type InvoiceDraftsClient, type StoreEntry,
+  type UpdateDraftResult, type UpdatedDraft,
 } from './invoiceDraftsClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS, createdText } from './ServerCustomerDirectory';
@@ -194,6 +233,58 @@ export const HOLD_TEXT = Object.freeze({
   /** Why Save draft is disabled during a rate limit's wait (M7B-INVOICES-P1-R2: a save's 429 starts one too). */
   saveWaiting: 'Too many requests: Save draft comes back once the wait has passed.',
 });
+
+/** What the reopen dialog says about Edit until the server allows it (M7B-INVOICES-P2). */
+export const EDIT_ELIGIBILITY_TEXT = Object.freeze({
+  checking: 'Checking with the server whether this draft can be edited…',
+  denied: 'This account may not edit drafts at this store.',
+  // Not an answer about the user's access: the question could not be asked.
+  unavailable: 'The server could not be asked right now whether this draft can be edited. Try again.',
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+/** The editor's texts (M7B-INVOICES-P2). Never "saved" before the server's 200. */
+export const EDIT_TEXT = Object.freeze({
+  cancelHint: 'Cancel closes the editor and drops your changes here; the draft on the server stays as it is.',
+  kept: (name: string) => `Customer: ${name} (kept as it is)`,
+  saving: 'Saving your changes on the server…',
+  checking: 'Checking your changes with the server…',
+  unresolved: 'Not confirmed yet: the server may have saved your changes. "Check again" sends the same request; it never applies them twice.',
+  tooOld: 'Not checked: it was sent too long ago. Close the editor and open the draft again to see what the server has.',
+  closeWarning: 'Closing the editor stops tracking this save; the server may have saved it anyway.',
+  saveHeld: 'Your last save is not confirmed yet: check it again first.',
+  saveWaiting: 'Too many requests: Save comes back once the wait has passed.',
+  saveConflict: 'Reapply your changes or discard them first.',
+  /** A draft at the largest version the server records (2^53-1): no save can name it (expectedVersion ≤ 2^53-2). */
+  saveLast: 'This draft has reached the last version the server can record, so it cannot be saved again.',
+  reapplyWaiting: 'Too many requests: Reapply comes back once the wait has passed.',
+  readWaiting: 'Too many requests: Try again comes back once the wait has passed.',
+  conflict: 'Not saved: this draft was changed on the server after you opened it. Compare the two below, then reapply your changes to the current draft or discard them.',
+  reviewLoading: 'Loading the current draft from the server…',
+  gone: 'Not saved: this draft, or its customer, is no longer available.',
+  /** A 403 whose one fresh session check could not answer: refused, but not said as a lack of access. */
+  refusedUnchecked: 'Not saved: the server refused this save, and your session could not be checked right now. Save again in a moment.',
+  checkUnchecked: 'The server refused this check, and your session could not be checked right now.',
+  discarded: (version: number) => `Your changes were discarded. This is the draft as the server has it now (version ${version}).`,
+  saved: (version: number) => `Saved on the server: this draft is now version ${version}.`,
+  unchanged: (version: number) => `No changes were needed: the server already had this draft exactly like this (version ${version}).`,
+  later: (version: number) => `It has been changed on the server again since: this is version ${version}.`,
+  unread: 'Your save is confirmed, but the current draft could not be read.',
+});
+
+type EditRefusal = 'not-editable' | 'tenant-changed' | 'not-found' | 'key-reused' | 'denied' | 'invalid' | 'rate-limited';
+/** What an edit attempt's decisive refusal says: this request did not go through. */
+export const EDIT_REFUSED_TEXT: Readonly<Record<EditRefusal, string>> = Object.freeze({
+  'not-editable': 'Not saved: this draft can no longer be edited.',
+  'tenant-changed': REFUSED_TEXT.conflict,
+  'not-found': EDIT_TEXT.gone,
+  'key-reused': REFUSED_TEXT['key-reused'],
+  denied: 'Not saved: this account may not edit drafts at this store.',
+  invalid: REFUSED_TEXT.invalid,
+  'rate-limited': 'Not saved: too many requests. Wait a moment, then save again.',
+});
+/** The answers that decide a Check again (the key was looked at): its 200, a sealed 409, or a refusal that recorded nothing because nothing ran. */
+const CHECK_DECIDES: ReadonlySet<UpdateDraftResult['kind']> = new Set(['saved', 'conflict', 'not-editable', 'tenant-changed', 'not-found', 'key-reused']);
 
 /** A store as the user chooses it: its name, or the end of its id; never a browser store label. */
 export const storeLabel = (store: Pick<StoreEntry, 'id' | 'name'>): string =>
@@ -314,8 +405,8 @@ import.meta.hot?.dispose(unbindDraftHolds); // a hot reload replaces this module
 
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
 
-/** Why an answer left the attempt unresolved. Never "not saved": only a decisive answer for the same key says that. */
-function reasonOf(answer: CreateDraftResult): string {
+/** Why an answer left the attempt (a create's or an edit's) unresolved. Never "not saved": only a decisive answer for the same key says that. */
+function reasonOf(answer: CreateDraftResult | UpdateDraftResult): string {
   switch (answer.kind) {
     case 'in-progress': return 'The server is still working on it. Check again in a moment.';
     case 'signed-out': return 'Sign-in needed: your server session ended. Reconnect, then check again.';
@@ -352,7 +443,7 @@ export function settleDraft(holds: DraftHoldStore, uid: string, key: string, ans
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The dialog frame shared by the reopen and the new draft dialogs.
+// The dialog frame shared by the reopen, the new draft and the editor dialogs.
 
 const focusRing = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700';
 const button = `px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
@@ -396,8 +487,10 @@ function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, 
       // After the commit that removed the dialog (and its inert marks): what had focus before, unless it is gone or
       // disabled meanwhile (New server draft while an attempt is unconfirmed), else `returnFocus`.
       setTimeout(() => {
+        // Never into an inert page: when another dialog has opened in this one's place (Edit, a confirmed save), focus
+        // is that dialog's.
         const usable = (node: HTMLElement | null | undefined): node is HTMLElement =>
-          node != null && node.isConnected && node !== document.body && !(node as HTMLButtonElement).disabled;
+          node != null && node.isConnected && node !== document.body && !(node as HTMLButtonElement).disabled && node.closest('[inert]') === null;
         const target = usable(before) ? before : returnFocus?.current;
         if (usable(target)) target.focus();
       }, 0);
@@ -421,7 +514,9 @@ function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, 
     const own = dialog.current;
     if (own === null || overlay.current === null || overlay.current.hasAttribute('inert')) return;
     const at = document.activeElement;
-    const disabled = (node: Element | null): boolean => (node as HTMLButtonElement | null)?.disabled === true;
+    // :disabled, not the property: a control inside a disabled fieldset (the editor's working copy while a save is out)
+    // cannot hold focus either.
+    const disabled = (node: Element | null): boolean => node?.matches(':disabled') === true;
     const lost = at === null || at === document.body || (own.contains(at) && disabled(at));
     if (!lost) return;
     const first = initialFocus?.current;
@@ -441,7 +536,8 @@ function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, 
       return;
     }
     if (e.key !== 'Tab') return;
-    const stops = [...dialog.current.querySelectorAll<HTMLElement>(STOPS)];
+    // :disabled too: a control inside a disabled fieldset (the editor's locked working copy) is no stop.
+    const stops = [...dialog.current.querySelectorAll<HTMLElement>(STOPS)].filter((stop) => !stop.matches(':disabled'));
     if (stops.length === 0) { e.preventDefault(); return; }
     const first = stops[0];
     const last = stops[stops.length - 1];
@@ -522,18 +618,46 @@ interface ListState {
   /** The wait a rate-limited note says (`waitSeq`), 0 for none: a wait is said once only when two notes name the same one. */
   readonly waitId: number;
 }
-interface ReopenState { readonly id: string; readonly storeId: string; readonly phase: Phase | 'not-found'; readonly text: string; readonly draft: DraftDetail | null }
+/** `saved`: the edit the server confirmed just before this read (M7B-INVOICES-P2), said above what the read-back shows. */
+interface ReopenState {
+  readonly id: string; readonly storeId: string; readonly phase: Phase | 'not-found'; readonly text: string; readonly draft: DraftDetail | null;
+  readonly saved: UpdatedDraft | null;
+}
 /** `n`, `csrf` and `since`: the section's generation and `sessionEndsSoFar()` when the dialog opened (AC-07, the hand-over's checks). */
 interface NewDraftState {
   readonly store: StoreEntry; readonly csrf: string; readonly n: number; readonly since: number;
   readonly handoff: { readonly id: string; readonly name: string } | null;
 }
 /**
- * The server's answer about New server draft (M7B-INVOICES-P1-R2), with everything it was asked under: the user, the
- * generation's counter and token, the store and the request (`seq`). It counts only while all of them are the ones now.
+ * The server's answer about New server draft (M7B-INVOICES-P1-R2) — or, with a `draftId`, about Edit in the reopen dialog
+ * (M7B-INVOICES-P2) — with everything it was asked under: the user, the generation's counter and token, the store (and
+ * draft), the request (`seq`) and `sessionEndsSoFar()` before its session check (`since`). It counts only while all of
+ * them are the ones now.
  */
 type EligPhase = 'checking' | 'allowed' | 'denied' | 'unavailable' | 'rate-limited' | 'ended';
-interface EligState { readonly uid: string; readonly n: number; readonly csrf: string | null; readonly storeId: string; readonly seq: number; readonly phase: EligPhase; readonly text: string; readonly waitId: number }
+interface EligState {
+  readonly uid: string; readonly n: number; readonly csrf: string | null; readonly storeId: string; readonly draftId: string; readonly seq: number;
+  readonly since: number; readonly phase: EligPhase; readonly text: string; readonly waitId: number;
+}
+/** One edit attempt (M7B-INVOICES-P2), frozen before it leaves: the exact body ('' once it may never be sent again), its target, and the generation (`n`) whose token it went with. */
+interface EditAttempt {
+  readonly key: string; readonly body: string; readonly storeId: string; readonly draftId: string; readonly expectedVersion: number; readonly n: number;
+  readonly sentAt: number; readonly sentWall: number;
+  readonly state: 'sending' | 'unresolved' | 'checking';
+  /** Why the last answer left it unresolved ('' for none). */
+  readonly note: string;
+}
+/**
+ * The open editor (M7B-INVOICES-P2): which open it is (`id`), the store and the generation it opened in (`since`: the
+ * eligibility's), the server draft its working copy edits (`base`: its version is what a save expects), the customer it
+ * was seeded with, its attempt, what it says, and a conflict's fresh read of the server's draft.
+ */
+interface EditorState {
+  readonly id: number; readonly store: StoreEntry; readonly n: number; readonly since: number;
+  readonly base: DraftDetail; readonly customer: ServerCustomerReference | null; readonly attempt: EditAttempt | null;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+  readonly conflict: { readonly phase: 'loading' | 'ready' | 'failed'; readonly text: string; readonly current: DraftDetail | null } | null;
+}
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
 /** One generation's customer names: what was read (null: not readable), what is asked or queued, how many reads are out. */
@@ -568,6 +692,8 @@ interface PreparedDraft {
   readonly lineCount: number;
   readonly subtotalCents: number;
 }
+/** An edit as the editor sends it: the body built once, the version it expects, its customer; `base` for a Reapply (the draft the conflict's read found). */
+interface PreparedEdit { readonly body: string; readonly expectedVersion: number; readonly customer: ServerCustomerReference; readonly base?: DraftDetail }
 /** `created`: the attempt's answer was a validated 201 (it may already have been read back and left the store). */
 type SendOutcome = { readonly kind: 'sent'; readonly key: string; readonly created: boolean } | { readonly kind: 'not-sent'; readonly text: string } | { readonly kind: 'blocked' };
 
@@ -587,7 +713,9 @@ function DraftsSection({
   const [changed, setChanged] = useState(false);
   const [busy, setBusyState] = useState(false);
   const [wait, setWait] = useState<number | null>(null);
-  const [elig, setEligState] = useState<EligState>(() => ({ uid, n: 0, csrf: null, storeId: '', seq: 0, phase: 'ended', text: '', waitId: 0 }));
+  const [elig, setEligState] = useState<EligState>(() => ({ uid, n: 0, csrf: null, storeId: '', draftId: '', seq: 0, since: 0, phase: 'ended', text: '', waitId: 0 }));
+  const [editElig, setEditEligState] = useState<EligState>(elig);
+  const [editor, setEditorState] = useState<EditorState | null>(null);
   const [, setNamesTick] = useState(0);
   const [, setTick] = useState(0);
   const held = useSyncExternalStore(holds.subscribe, () => holds.get(uid));
@@ -599,9 +727,12 @@ function DraftsSection({
   const listRef = useRef<ListState>(list);
   const reopenRef = useRef<ReopenState | null>(null);
   const eligRef = useRef<EligState>(elig);
-  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0 });
-  const ctl = useRef<{ stores: AbortController | null; list: AbortController | null; reopen: AbortController | null; names: AbortController | null; elig: AbortController | null }>(
-    { stores: null, list: null, reopen: null, names: null, elig: null },
+  const editEligRef = useRef<EligState>(editElig);
+  const editorRef = useRef<EditorState | null>(null);
+  const editorSeq = useRef(0); // which editor open is the latest: a continuation applies only to its own
+  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0, editElig: 0, review: 0 });
+  const ctl = useRef<Record<'stores' | 'list' | 'reopen' | 'names' | 'elig' | 'editElig' | 'review', AbortController | null>>(
+    { stores: null, list: null, reopen: null, names: null, elig: null, editElig: null, review: null },
   );
   const names = useRef<NameBook>(newBook(0));
   const waitRef = useRef(false);
@@ -612,6 +743,12 @@ function DraftsSection({
   const busyBy = useRef(0); // the read that set `busy` last: only its own exit clears it (or abortReads)
   const sendingRef = useRef(false); // a Save draft is out: a second press sends nothing
   const checkingRef = useRef(false); // a Check again is out
+  // The editor (its `id`) whose Save or Reapply is out, from its session check on, and whose Check again is out (0: none):
+  // owned by that editor, so a closed one's late operation never holds back the next editor.
+  const editBusy = useRef({ sending: 0, checking: 0 });
+  // The session token the editor's attempt was sent with (by its key): in a ref only, as every token here; Check again
+  // sends with it and with nothing else, and it goes with the attempt and with the editor.
+  const editToken = useRef<{ readonly key: string; readonly csrf: string } | null>(null);
   const readBack = useRef<string | null>(null); // the created key whose read-back is running
   const newButton = useRef<HTMLButtonElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
@@ -640,9 +777,34 @@ function DraftsSection({
   const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
   const putReopen = (next: ReopenState | null): void => { reopenRef.current = next; setReopenState(next); };
   const putElig = (next: EligState): void => { eligRef.current = next; setEligState(next); };
-  /** The eligibility answer counts: asked under this user, this generation and token, the store chosen now and the latest request. */
-  const current = (e: EligState): boolean =>
-    e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && e.storeId === storeRef.current && e.seq === seq.current.elig;
+  const putEditElig = (next: EligState): void => { editEligRef.current = next; setEditEligState(next); };
+  const putEditor = (next: EditorState | null): void => {
+    editorRef.current = next;
+    // The attempt's own token goes with its attempt (closed, settled or replaced): never sent for another.
+    if (next?.attempt?.key !== editToken.current?.key) editToken.current = null;
+    setEditorState(next);
+  };
+  /** Change the open editor (callers check first that it is still the one they act for). */
+  const patchEditor = (next: Partial<EditorState>): void => { if (editorRef.current !== null) putEditor({ ...editorRef.current, ...next }); };
+  /**
+   * Close the editor AT ONCE for a session that is over or changed (M7B-INVOICES-P2): its working copy and customer live
+   * in the dialog's own state, so the render that unmounts it is committed here, synchronously (flushSync) — never left
+   * for a later render. Called only outside React's render and commit (the sign-out broadcast, a read's continuation).
+   */
+  const dropEditor = (): void => {
+    editToken.current = null;
+    if (editorRef.current === null) return;
+    editorRef.current = null;
+    flushSync(() => setEditorState(null));
+  };
+  /**
+   * The eligibility answer counts: asked under this user, this generation and token and the latest request — for New, at
+   * the store chosen now; for Edit (`edit`), at the reopen dialog's store and draft now.
+   */
+  const current = (e: EligState, edit = false): boolean =>
+    e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && (edit
+      ? e.draftId !== '' && e.storeId === reopenRef.current?.storeId && e.draftId === reopenRef.current.id && e.seq === seq.current.editElig
+      : e.draftId === '' && e.storeId === storeRef.current && e.seq === seq.current.elig);
   /** New server draft may be offered now: the server's `allowed`, for exactly the context there is now. */
   const allowedNow = (): boolean => eligRef.current.phase === 'allowed' && current(eligRef.current);
   const setBusy = (next: boolean): void => { busyRef.current = next; setBusyState(next); };
@@ -655,7 +817,7 @@ function DraftsSection({
   const takeBusy = (): number => { setBusy(true); return ++busyBy.current; };
   const giveBusy = (token: number): void => { if (alive.current && busyBy.current === token) setBusy(false); };
   const waitLeft = (): number => Math.max(1, Math.ceil((waitUntil.current - clock()) / 1000));
-  const expired = (h: HeldDraft): boolean => Math.max(clock() - h.sentAt, wall() - h.sentWall) >= CHECK_CUTOFF_MS;
+  const expired = (h: { readonly sentAt: number; readonly sentWall: number }): boolean => Math.max(clock() - h.sentAt, wall() - h.sentWall) >= CHECK_CUTOFF_MS;
 
   function clearWait(): void {
     if (waitTimer.current !== null) clearTimeout(waitTimer.current);
@@ -678,8 +840,9 @@ function DraftsSection({
 
   /** Cancel every read in flight; their answers are stale from here, and nothing is busy any more. */
   function abortReads(): void {
-    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig'] as const) ctl.current[kind]?.abort();
-    seq.current = { stores: seq.current.stores + 1, list: seq.current.list + 1, reopen: seq.current.reopen + 1, elig: seq.current.elig + 1 };
+    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'review'] as const) ctl.current[kind]?.abort();
+    const s = seq.current;
+    seq.current = { stores: s.stores + 1, list: s.list + 1, reopen: s.reopen + 1, elig: s.elig + 1, editElig: s.editElig + 1, review: s.review + 1 };
     busyBy.current += 1;
     setBusy(false);
   }
@@ -701,6 +864,7 @@ function DraftsSection({
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
     putReopen(null);
+    dropEditor(); // the editor's working copy and attempt are the previous session's
     setNewDraft(null);
     setPending(null); // a hand-over is the previous session's: never carried into this one
     setChanged(true);
@@ -729,10 +893,35 @@ function DraftsSection({
     storeRef.current = '';
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
-    if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null });
+    if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null, saved: null });
+    // M7B-INVOICES-P2: unlike the reopen dialog, the editor closes — its working copy, customer and attempt go at once.
+    dropEditor();
     // Nothing is fixed after a confirmed end: the Reconnect's token is a FIRST token, not a "connection changed".
     if (failure.kind === 'signed-out') gen.current = { n: gen.current.n, csrf: null };
-    putElig({ uid, n: gen.current.n, csrf: gen.current.csrf, storeId: '', seq: seq.current.elig, phase: 'ended', text: '', waitId: 0 }); // the stores' note says it
+    putElig({ uid, n: gen.current.n, csrf: gen.current.csrf, storeId: '', draftId: '', seq: seq.current.elig, since: 0, phase: 'ended', text: '', waitId: 0 }); // the stores' note says it
+  }
+
+  /**
+   * A 403's verdict after the reads' ONE fresh check (recheck), shared by the eligibility reads, the reopen read (and so a
+   * save's read-back), the editor's conflict read and its PATCH answers (M7B-INVOICES-P2): 'denied' ONLY when the check
+   * confirmed the same session; null when `stale()` says the caller's context is gone meanwhile (another token started a
+   * new generation, a sign-out began, the dialog closed) or the check found the session over (failSession is done here);
+   * otherwise the check's own failure — a 429 starts the section's wait (its text says so), anything else is
+   * unavailable, never a refusal. A check that stayed in the SAME session (alive, the same generation, no session end
+   * since it was asked) still acts on its 401 (failSession) and its 429 (the wait) when only the caller's dialog closed.
+   */
+  async function denialOf(stale: () => boolean): Promise<'denied' | Failure | null> {
+    const n = gen.current.n;
+    const since = sessionEndsSoFar();
+    const again = await recheck();
+    const same = alive.current && n === gen.current.n && since === sessionEndsSoFar(); // recheck's new token is a new generation
+    if (same && again?.kind === 'signed-out') { failSession(again); return null; }
+    const waited = same && again?.seconds !== undefined ? startWait(again.seconds) : null;
+    if (stale()) return null;
+    if (again === null) return 'denied';
+    if (again.kind === 'signed-out') { failSession(again); return null; }
+    if (again.seconds !== undefined) return { kind: 'rate-limited', text: pickerWaitText(waited ?? startWait(again.seconds)), seconds: again.seconds };
+    return UNAVAILABLE;
   }
 
   /** After a read refused 403: ONE fresh check tells "another session" (a new generation) from a refusal that stands. */
@@ -870,32 +1059,47 @@ function DraftsSection({
     }
   }
 
-  /** Open one draft read-only: a fresh read of its own (never a list row), for the store it was listed at. */
-  async function readReopen(id: string, target: string): Promise<void> {
+  /**
+   * Open one draft read-only: a fresh read of its own (never a list row), for the store it was listed at. `saved`: the
+   * edit the server just confirmed (M7B-INVOICES-P2) — this is then its ONE read-back. Once it loads, the server is asked
+   * whether Edit may be offered (a writable store only).
+   */
+  async function readReopen(id: string, target: string, saved: UpdatedDraft | null = null): Promise<void> {
     const mine = gen.current.n;
     const n = ++seq.current.reopen;
     ctl.current.reopen?.abort();
     const controller = new AbortController();
     ctl.current.reopen = controller;
-    const stale = (): boolean => !alive.current || mine !== gen.current.n || n !== seq.current.reopen || reopenRef.current?.id !== id;
-    putReopen({ id, storeId: target, phase: 'loading', text: DRAFTS_TEXT.draftLoading, draft: null });
+    // M7B-INVOICES-P2: and no sign-out since it asked (as every new read here), now that it also reads a save back.
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || mine !== gen.current.n || n !== seq.current.reopen || reopenRef.current?.id !== id || since !== sessionEndsSoFar();
+    const put = (phase: ReopenState['phase'], text: string, draft: DraftDetail | null = null): void => putReopen({ id, storeId: target, phase, text, draft, saved });
+    put('loading', DRAFTS_TEXT.draftLoading);
     const s = await connect();
     if (stale()) return;
     if (s.kind !== 'ok') {
       const failure = sessionFailure(s);
       if (failure.kind === 'signed-out') return failSession(failure);
-      return putReopen({ id, storeId: target, phase: failure.kind, text: failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text, draft: null });
+      return put(failure.kind, failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text);
     }
     if (adopt(s.csrf)) return;
     const answer = await drafts.getDraft(target, id, s.csrf, controller.signal);
     if (stale()) return;
     if (answer.kind === 'ok') {
-      putReopen({ id, storeId: target, phase: 'ready', text: '', draft: answer.draft });
+      put('ready', '', answer.draft);
+      void readEligibility(id);
+      // An edit that changed the draft changed its row (line count, subtotal): page one is read again, as after a create.
+      if (saved?.changed === true && storeRef.current === target) void readDrafts('first');
       return resolveNames([answer.draft.customerId], s.csrf);
     }
     if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'denied') { // M7B-INVOICES-P2: the reads' one fresh check first (a save's `saved` note stays)
+      const verdict = await denialOf(stale);
+      if (verdict === null) return;
+      return verdict === 'denied' ? put('denied', DRAFTS_TEXT.draftDenied) : put(verdict.kind, verdict.text);
+    }
     const failure = answer.kind === 'not-found' ? { kind: 'not-found' as const, text: DRAFTS_TEXT.draftNotFound } : readFailure(answer, DRAFTS_TEXT.draftDenied);
-    putReopen({ id, storeId: target, phase: failure.kind, text: 'seconds' in failure && failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text, draft: null });
+    put(failure.kind, 'seconds' in failure && failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text);
   }
 
   /**
@@ -904,46 +1108,52 @@ function DraftsSection({
    * generation, token, store and request that asked, and only while no sign-out has begun since; anything else changes
    * nothing. A 403 gets the reads' ONE fresh check: another token starts a new generation (the store is chosen again,
    * and asks again), the same token is a refusal that stands. During a rate limit's wait nothing is asked.
+   * M7B-INVOICES-P2: with a `draftId`, the same read for Edit in the reopen dialog (GET …/{id}/edit-eligibility, the
+   * edit's own requirement) — its own state, request counter and controller, asked at the reopen dialog's store for its
+   * draft, and stale once that dialog shows another draft or none.
    */
-  async function readEligibility(): Promise<void> {
-    ctl.current.elig?.abort();
-    const n = ++seq.current.elig;
-    const target = storeRef.current;
+  async function readEligibility(draftId = ''): Promise<void> {
+    const edit = draftId !== '';
+    const slot = edit ? 'editElig' : 'elig';
+    ctl.current[slot]?.abort();
+    const n = ++seq.current[slot];
+    const target = edit ? reopenRef.current?.storeId ?? '' : storeRef.current;
     const store = storesRef.current.stores.find((entry) => entry.id === target);
     const csrf = gen.current.csrf;
     if (store === undefined || store.readOnly || csrf === null) return; // a read-only store keeps its own text and asks nothing
-    const key = { uid, n: gen.current.n, csrf, storeId: target, seq: n };
+    const since = sessionEndsSoFar();
+    const key = { uid, n: gen.current.n, csrf, storeId: target, draftId, seq: n, since };
+    const texts = edit ? EDIT_ELIGIBILITY_TEXT : ELIGIBILITY_TEXT;
     // `waitId`: the wait running once `text` is made (a rate limit's text starts or names it first).
-    const put = (phase: EligPhase, text = ''): void => putElig({ ...key, phase, text, waitId: waitSeq.current });
+    const put = (phase: EligPhase, text = ''): void => (edit ? putEditElig : putElig)({ ...key, phase, text, waitId: waitSeq.current });
     const waitText = (seconds: number): string => pickerWaitText(startWait(seconds));
     if (waitRef.current) return put('rate-limited', pickerWaitText(waitLeft()));
     const controller = new AbortController();
-    ctl.current.elig = controller;
-    const since = sessionEndsSoFar();
-    const stale = (): boolean => !alive.current || key.n !== gen.current.n || csrf !== gen.current.csrf || n !== seq.current.elig
-      || target !== storeRef.current || since !== sessionEndsSoFar();
-    put('checking', ELIGIBILITY_TEXT.checking);
+    ctl.current[slot] = controller;
+    const here = (): boolean => (edit ? reopenRef.current?.id === draftId && reopenRef.current.storeId === target : target === storeRef.current);
+    const stale = (): boolean => !alive.current || key.n !== gen.current.n || csrf !== gen.current.csrf || n !== seq.current[slot]
+      || !here() || since !== sessionEndsSoFar();
+    put('checking', texts.checking);
     const s = await connect();
     if (stale()) return;
     if (s.kind !== 'ok') {
       const failure = sessionFailure(s);
       if (failure.kind === 'signed-out') return failSession(failure);
-      return failure.seconds !== undefined ? put('rate-limited', waitText(failure.seconds)) : put('unavailable', ELIGIBILITY_TEXT.unavailable);
+      return failure.seconds !== undefined ? put('rate-limited', waitText(failure.seconds)) : put('unavailable', texts.unavailable);
     }
     if (adopt(s.csrf)) return; // a new generation: its stores are read again, and the next choice asks again
-    const answer = await drafts.eligibility(target, s.csrf, controller.signal);
+    const answer = await (edit ? drafts.editEligibility(target, draftId, s.csrf, controller.signal) : drafts.eligibility(target, s.csrf, controller.signal));
     if (stale()) return;
     if (answer.kind === 'allowed') return put('allowed');
     if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
     if (answer.kind === 'rate-limited') return put('rate-limited', waitText(answer.retryAfterSeconds));
     if (answer.kind === 'denied') {
-      const again = await recheck();
-      if (stale()) return; // another token (a new generation), a sign-out, or anything newer
-      if (again === null) return put('denied', ELIGIBILITY_TEXT.denied);
-      if (again.kind === 'signed-out') return failSession(again);
-      if (again.seconds !== undefined) return put('rate-limited', waitText(again.seconds));
+      const verdict = await denialOf(stale); // null: another token (a new generation), a sign-out, anything newer, an end
+      if (verdict === null) return;
+      if (verdict === 'denied') return put('denied', texts.denied);
+      if (verdict.kind === 'rate-limited') return put('rate-limited', verdict.text);
     }
-    put('unavailable', ELIGIBILITY_TEXT.unavailable);
+    put('unavailable', texts.unavailable);
   }
 
   /**
@@ -1001,11 +1211,11 @@ function DraftsSection({
 
   function openNewDraft(with_: { readonly id: string; readonly name: string } | null): void {
     const csrf = gen.current.csrf;
-    // One dialog at a time: never beside the reopen dialog (up from the Open press on, its read still out or not). Its
-    // inert page keeps New from a press, but a hand-over can try here on its own (the effect below, when an attempt
-    // settles meanwhile); it then stays pending, said by the hand-over note, until New or the effect's next try finds no
-    // dialog up.
-    if (chosen === null || chosen.readOnly || !allowedNow() || csrf === null || live || waitRef.current || reopenRef.current !== null) return;
+    // One dialog at a time: never beside the reopen dialog (up from the Open press on, its read still out or not) or the
+    // editor. Their inert page keeps New from a press, but a hand-over can try here on its own (the effect below, when an
+    // attempt settles meanwhile); it then stays pending, said by the hand-over note, until New or the effect's next try
+    // finds no dialog up.
+    if (chosen === null || chosen.readOnly || !allowedNow() || csrf === null || live || waitRef.current || reopenRef.current !== null || editorRef.current !== null) return;
     setNotice('');
     setPending(null);
     setNewDraft({ store: chosen, csrf, n: gen.current.n, since: sessionEndsSoFar(), handoff: with_ });
@@ -1121,6 +1331,205 @@ function DraftsSection({
     holds.remove(uid, h.key);
   }
 
+  // ---- the editor (M7B-INVOICES-P2) ----
+
+  /**
+   * Edit, from the reopen dialog: only on the server's `allowed` for exactly that dialog's store and draft under this
+   * generation (checked again at the press). The editor replaces the dialog, seeded from the detail it shows; its
+   * customer is a server reference made for the session the eligibility confirmed (`since`: none if a sign-out began).
+   */
+  function openEditor(): void {
+    const r = reopenRef.current;
+    const e = editEligRef.current;
+    const csrf = gen.current.csrf;
+    if (r === null || r.draft === null || csrf === null || e.phase !== 'allowed' || !current(e, true) || editorRef.current !== null) return;
+    const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
+    if (store === undefined || store.readOnly) return;
+    const draft = r.draft;
+    const customer = serverCustomerReference({ id: draft.customerId, name: customerText(draft.customerId) }, uid, sessionContextOf(uid, csrf, e.since));
+    putReopen(null);
+    putEditor({ id: ++editorSeq.current, store, n: gen.current.n, since: e.since, base: draft, customer, attempt: null, status: null, conflict: null });
+  }
+
+  /**
+   * One explicit Save (or Reapply): at most one PATCH, and none while the editor's attempt is out or unresolved, during
+   * a rate limit's wait, or — for a Save — in a conflict (Reapply sends at the version the conflict's read found). The
+   * session is checked first: another token starts a new generation (which closes the editor) and a customer chosen
+   * under another session sends nothing. The attempt is frozen in the editor BEFORE the request leaves.
+   */
+  async function sendEdit(p: PreparedEdit): Promise<void> {
+    const ed = editorRef.current;
+    if (ed === null || editBusy.current.sending === ed.id || ed.attempt !== null || waitRef.current) return;
+    if (p.base === undefined ? ed.conflict !== null : ed.conflict?.current !== p.base) return;
+    const standing = (): boolean => alive.current && editorRef.current?.id === ed.id;
+    const say = (text: string): void => { if (standing()) patchEditor({ status: { alert: true, text } }); };
+    editBusy.current.sending = ed.id;
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (!standing()) return;
+      if (since !== sessionEndsSoFar()) return say(`Not sent. ${DRAFTS_TEXT.ended}`);
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return say(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== ed.n) return; // another session: its new generation closed the editor
+      // A rate limit's wait that began while the session was checked: nothing leaves and no key is taken.
+      if (waitRef.current) return say(`Not sent. ${pickerWaitText(waitLeft())}`);
+      if (!isContextOf(p.customer.context, uid, s.csrf)) return say(NOT_SENT_TEXT.customer);
+      const key = nextKey();
+      const attempt: EditAttempt = {
+        key, body: p.body, storeId: ed.store.id, draftId: ed.base.id, expectedVersion: p.expectedVersion, n: ed.n,
+        sentAt: clock(), sentWall: wall(), state: 'sending', note: '',
+      };
+      editToken.current = { key, csrf: s.csrf };
+      patchEditor(p.base === undefined ? { attempt, status: null } : { attempt, status: null, base: p.base, conflict: null });
+      const answer = await drafts.updateDraft(attempt.storeId, attempt.draftId, p.body, key, s.csrf);
+      await settleEdit(key, answer, true, since, s.csrf);
+    } finally {
+      if (editBusy.current.sending === ed.id) editBusy.current.sending = 0;
+    }
+  }
+
+  /**
+   * One edit answer, applied BY KEY to the open editor's attempt: nothing when the editor closed or another opened (a new
+   * generation, a session end, a sign-out, Cancel) or the section unmounted — the PATCH may still have committed under
+   * its old attempt, and nothing here says so or restores anything. `first`: every answer of a first send but unknown and
+   * in-progress decides it; a Check again re-sends a key that may already have committed, so only CHECK_DECIDES do. A
+   * 429 starts the section's wait only while the session that sent it is still the section's (as afterCreate).
+   */
+  async function settleEdit(key: string, answer: UpdateDraftResult, first: boolean, since: number, csrf: string): Promise<void> {
+    const mine = (): EditAttempt | null => {
+      const a = alive.current ? editorRef.current?.attempt ?? null : null;
+      return a !== null && a.key === key ? a : null;
+    };
+    const a = mine();
+    if (a === null) return;
+    if (answer.kind === 'rate-limited' && csrf === gen.current.csrf && since === sessionEndsSoFar()) startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'saved') {
+      putEditor(null);
+      return void readReopen(a.draftId, a.storeId, answer.result); // the ONE read-back, in the reopen dialog (a read: no lock held)
+    }
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'denied') {
+      // The one fresh check: denied only for the same session; another token closed the editor (null), and a check that
+      // could not answer says so. A first send's 403 is decisive either way (the chain refused it before anything ran);
+      // a Check again's leaves the attempt unresolved.
+      const verdict = await denialOf(() => mine() === null);
+      const now = verdict === null ? null : mine();
+      if (verdict === null || now === null) return;
+      if (verdict === 'denied') {
+        if (first) return patchEditor({ attempt: null, status: { alert: true, text: EDIT_REFUSED_TEXT.denied } });
+        return patchEditor({ attempt: { ...now, state: 'unresolved', note: reasonOf(answer) } });
+      }
+      const waits = verdict.kind === 'rate-limited'; // its wait has begun: Save and Check again are held back through it
+      if (first) return patchEditor({ attempt: null, status: { alert: true, text: waits ? EDIT_REFUSED_TEXT['rate-limited'] : EDIT_TEXT.refusedUnchecked } });
+      return patchEditor({ attempt: { ...now, state: 'unresolved', note: waits ? verdict.text : EDIT_TEXT.checkUnchecked } });
+    }
+    if (answer.kind === 'conflict') {
+      patchEditor({ attempt: null, status: { alert: true, text: EDIT_TEXT.conflict } });
+      return readConflict();
+    }
+    const decisive = first ? answer.kind !== 'unknown' && answer.kind !== 'in-progress' : CHECK_DECIDES.has(answer.kind);
+    if (decisive) return patchEditor({ attempt: null, status: { alert: true, text: EDIT_REFUSED_TEXT[answer.kind as EditRefusal] } });
+    patchEditor({ attempt: { ...(mine() ?? a), state: 'unresolved', note: reasonOf(answer) } });
+  }
+
+  /**
+   * "Check again": the SAME key and the SAME bytes to the attempt's OWN store and draft, under the attempt's OWN session
+   * token (editToken) — only while the session check answers that very token and the generation it was sent in is still
+   * the section's (another token starts a new one, which closes the editor: nothing is sent), outside a rate limit's
+   * wait, and within the cutoff, judged again right before the PATCH. Never on its own.
+   */
+  async function checkEdit(): Promise<void> {
+    const id = editorRef.current?.id ?? 0;
+    const a = editorRef.current?.attempt ?? null;
+    if (a === null || a.state !== 'unresolved' || a.body === '' || editBusy.current.checking === id || waitRef.current) return;
+    const mine = (): EditAttempt | null => {
+      const now = alive.current ? editorRef.current?.attempt ?? null : null;
+      return now !== null && now.key === a.key ? now : null;
+    };
+    const mark = (next: Partial<EditAttempt>): void => { const now = mine(); if (now !== null) patchEditor({ attempt: { ...now, ...next } }); };
+    if (expired(a)) return mark({ body: '' }); // too old: the card now says so
+    editBusy.current.checking = id;
+    mark({ state: 'checking', note: '' });
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (mine() === null) return;
+      if (since !== sessionEndsSoFar()) return mark({ state: 'unresolved', note: `Not checked. ${DRAFTS_TEXT.ended}` });
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return mark({ state: 'unresolved', note: `Not checked. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}` });
+      }
+      if (adopt(s.csrf) || gen.current.n !== a.n) return; // another session: NOTHING is sent, and its generation closed the editor
+      if (waitRef.current) return mark({ state: 'unresolved', note: `Not checked. ${pickerWaitText(waitLeft())}` });
+      const latest = mine();
+      const token = editToken.current;
+      if (latest === null || latest.body !== a.body || token === null || token.key !== a.key || token.csrf !== s.csrf) return mark({ state: 'unresolved' });
+      if (expired(latest)) return mark({ state: 'unresolved', body: '' });
+      const answer = await drafts.updateDraft(a.storeId, a.draftId, a.body, a.key, token.csrf);
+      await settleEdit(a.key, answer, false, since, token.csrf);
+    } finally {
+      if (editBusy.current.checking === id) editBusy.current.checking = 0;
+    }
+  }
+
+  /** After a conflict: ONE fresh, authorized read of the draft for the comparison (and its Try again) — never a PATCH. */
+  async function readConflict(): Promise<void> {
+    const ed = editorRef.current;
+    if (ed === null) return;
+    ctl.current.review?.abort();
+    const n = ++seq.current.review;
+    const controller = new AbortController();
+    ctl.current.review = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || editorRef.current?.id !== ed.id || n !== seq.current.review || since !== sessionEndsSoFar();
+    const put = (phase: 'loading' | 'ready' | 'failed', text: string, found: DraftDetail | null = null): void => patchEditor({ conflict: { phase, text, current: found } });
+    if (waitRef.current) return put('failed', pickerWaitText(waitLeft()));
+    put('loading', EDIT_TEXT.reviewLoading);
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      return put('failed', failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text);
+    }
+    if (adopt(s.csrf)) return;
+    const answer = await drafts.getDraft(ed.store.id, ed.base.id, s.csrf, controller.signal);
+    if (stale()) return;
+    if (answer.kind === 'ok') {
+      put('ready', '', answer.draft);
+      return resolveNames([answer.draft.customerId], s.csrf);
+    }
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'not-found') return put('failed', DRAFTS_TEXT.draftNotFound);
+    if (answer.kind === 'denied') { // the reads' ONE fresh check: another token is a new generation (which closes the editor)
+      const verdict = await denialOf(stale);
+      if (verdict === null) return;
+      return put('failed', verdict === 'denied' ? DRAFTS_TEXT.draftDenied : verdict.text);
+    }
+    const failure = readFailure(answer, DRAFTS_TEXT.draftDenied);
+    put('failed', failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text);
+  }
+
+  /**
+   * "Discard my changes" after a conflict: local only — the editor now edits the server's draft the conflict's read found
+   * (its customer as a reference for the editor's session), and nothing is sent. Returns that customer for the working
+   * copy, or undefined when there is nothing to discard to.
+   */
+  function discardEdit(): ServerCustomerReference | null | undefined {
+    const ed = editorRef.current;
+    const found = ed?.conflict?.current ?? null;
+    const csrf = gen.current.csrf;
+    if (ed === null || found === null || ed.attempt !== null || csrf === null || gen.current.n !== ed.n) return undefined;
+    const customer = serverCustomerReference({ id: found.customerId, name: customerText(found.customerId) }, uid, sessionContextOf(uid, csrf, ed.since));
+    putEditor({ ...ed, base: found, customer, conflict: null, status: { alert: false, text: EDIT_TEXT.discarded(found.version) } });
+    return customer;
+  }
+
   // A created attempt is read back ONCE (a GET, never a second POST), under the session it was sent with.
   useEffect(() => {
     if (held === undefined || held.state !== 'created' || held.draftId === null || readBack.current === held.key) return;
@@ -1197,9 +1606,10 @@ function DraftsSection({
     // A sign-out, heard where it starts (the session client's `onSessionEnd`), while this section is mounted — on a
     // direct switch to another user AccessContext.tsx keeps it mounted until that user's profile has loaded. Everything
     // in flight is stale from here: a new generation with no token (a created draft's read-back answer is then ignored),
-    // every read cancelled (the name queue with it), the reopen's read dropped and the new-draft dialog closed (its token
-    // goes with it), and a rate limit's wait ends with the session that was asked to wait (as `begin` drops another
-    // session's); the section says the session ended. Nothing is read and nobody is signed in because of it — only the
+    // every read cancelled (the name queue with it), the reopen's read dropped, the new-draft dialog closed (its token
+    // goes with it) and the editor closed (its working copy, customer and attempt go with it: failSession), and a rate
+    // limit's wait ends with the session that was asked to wait (as `begin` drops another session's); the section says
+    // the session ended. Nothing is read and nobody is signed in because of it — only the
     // user's Reconnect reads again.
     const unhear = onSessionEnd(() => {
       gen.current = { n: gen.current.n + 1, csrf: null };
@@ -1212,7 +1622,7 @@ function DraftsSection({
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
       gen.current = { n: gen.current.n + 1, csrf: null };
-      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig'] as const) ctl.current[kind]?.abort();
+      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'review'] as const) ctl.current[kind]?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
     // A section serves one UID (see ServerInvoiceDrafts); the clients are fixed for its life.
@@ -1228,10 +1638,13 @@ function DraftsSection({
   // a read is harmless: Save confirms the session itself and sends nothing under another token.
   const newBlocked = live || waiting;
   const eligNow = current(elig) ? elig : null;
+  const editEligNow = current(editElig, true) ? editElig : null;
   // A rate limit's wait is said once: by the list's note when it names the SAME wait, else by the eligibility's.
   const sameWait = eligNow?.phase === 'rate-limited' && list.phase === 'rate-limited' && list.waitId === eligNow.waitId;
   const eligText = eligNow === null || eligNow.phase === 'denied' || sameWait ? '' : eligNow.text;
   const describedBy = (...ids: Array<string | false>): string | undefined => (ids.filter(Boolean).join(' ') || undefined);
+  /** Where focus goes when the editor closes: the draft's Open button in the list, when it is still there, else the heading. */
+  const rowOrHeading = (id: string): RefObject<HTMLElement | null> => ({ get current() { return document.getElementById(openIdOf(id)) ?? heading.current; } });
 
   return (
     <section ref={section} onFocus={(e) => trackFocus(e.target)} data-testid="drafts-section" aria-labelledby="drafts-title" className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm p-8 space-y-4">
@@ -1386,7 +1799,30 @@ function DraftsSection({
       )}
 
       {reopen !== null && (
-        <ReopenDialog state={reopen} customerText={customerText} store={stores.stores.find((s) => s.id === reopen.storeId) ?? null} onClose={() => putReopen(null)} returnFocus={heading} />
+        <ReopenDialog
+          state={reopen} customerText={customerText} store={stores.stores.find((s) => s.id === reopen.storeId) ?? null} onClose={() => putReopen(null)} returnFocus={heading}
+          edit={editEligNow} waiting={waiting} onEdit={openEditor} onEditAgain={() => { void readEligibility(reopen.id); }}
+        />
+      )}
+      {editor !== null && (
+        <EditDraftDialog
+          uid={uid}
+          state={editor}
+          canViewCustomers={canViewCustomers}
+          customerText={customerText}
+          session={session}
+          customers={customers}
+          identity={identity}
+          now={now}
+          expired={editor.attempt !== null && expired(editor.attempt)}
+          waiting={waiting}
+          onSend={sendEdit}
+          onCheck={() => { void checkEdit(); }}
+          onDiscard={discardEdit}
+          onReadAgain={() => { void readConflict(); }}
+          onClose={() => putEditor(null)}
+          returnFocus={rowOrHeading(editor.base.id)}
+        />
       )}
       {newDraft !== null && (
         <NewDraftDialog
@@ -1453,9 +1889,20 @@ function HoldCard({ held, expired, onCheck, onStop, waiting }: { readonly held: 
   );
 }
 
-function ReopenDialog({ state, customerText, store, onClose, returnFocus }: {
+/** What the reopen dialog says about an edit the server just confirmed, beside what its one read-back found. */
+function savedText(saved: UpdatedDraft, state: ReopenState): string {
+  const said = saved.changed ? EDIT_TEXT.saved(saved.version) : EDIT_TEXT.unchanged(saved.version);
+  if (state.phase === 'loading') return said;
+  if (state.draft === null) return `${said} ${EDIT_TEXT.unread}`;
+  // A replayed answer confirms its own attempt only: the draft may have been edited again since.
+  return state.draft.version > saved.version ? `${said} ${EDIT_TEXT.later(state.draft.version)}` : said;
+}
+
+function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, waiting, onEdit, onEditAgain }: {
   readonly state: ReopenState; readonly customerText: (id: string) => string; readonly store: StoreEntry | null;
   readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
+  /** The server's answer about Edit for this draft now (M7B-INVOICES-P2), or null (none asked: a read-only store, or not current). */
+  readonly edit: EligState | null; readonly waiting: boolean; readonly onEdit: () => void; readonly onEditAgain: () => void;
 }) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const draft = state.draft;
@@ -1465,6 +1912,7 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus }: {
         <h2 id="draft-view-title" className="text-xl font-black text-primary tracking-tight">Server draft</h2>
         <button ref={closeButton} type="button" data-testid="draft-view-close" onClick={onClose} className={quiet}>Close</button>
       </div>
+      {state.saved !== null && <p data-testid="draft-view-saved" role="status" className="text-sm font-bold text-emerald-800">{savedText(state.saved, state)}</p>}
       {state.phase !== 'ready' && (
         <p data-testid="draft-view-state" data-phase={state.phase} role={state.phase === 'loading' ? 'status' : 'alert'} className="text-sm font-bold text-slate-600">{state.text}</p>
       )}
@@ -1475,6 +1923,7 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus }: {
             <dt className={labelClass}>Store</dt><dd data-testid="draft-view-store" className="font-bold text-slate-700 break-words">{store !== null ? storeLabel(store) : `Store, ${idEndingText(draft.storeId)}`}</dd>
             <dt className={labelClass}>Created</dt><dd data-testid="draft-view-created" className="font-bold text-slate-700">{createdText(draft.createdAt)}</dd>
             <dt className={labelClass}>Status</dt><dd data-testid="draft-view-status" className="font-bold text-slate-700">Draft · USD</dd>
+            <dt className={labelClass}>Version</dt><dd data-testid="draft-view-version" className="font-bold text-slate-700">{draft.version}</dd>
           </dl>
           <table data-testid="draft-view-lines" className="w-full text-left text-sm border-collapse">
             <caption className="sr-only">Draft lines</caption>
@@ -1500,6 +1949,22 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus }: {
             </tbody>
           </table>
           <p data-testid="draft-view-subtotal" className="text-right text-base font-black text-primary">Draft subtotal {formatCents(draft.subtotalCents)}</p>
+          {/* Edit only on the server's answer; its other answers are said in one live region kept while it is asked. */}
+          {edit !== null && (
+            <div className="flex flex-wrap items-center gap-3">
+              {edit.phase === 'allowed' && <button type="button" data-testid="draft-view-edit" onClick={onEdit} className={button}>Edit draft</button>}
+              <p data-testid="draft-view-edit-state" data-phase={edit.phase} role="status" className="text-sm font-bold text-slate-600">{edit.phase === 'allowed' ? '' : edit.text}</p>
+              {(edit.phase === 'unavailable' || edit.phase === 'rate-limited') && (
+                <button
+                  type="button" data-testid="draft-view-edit-retry" disabled={waiting} aria-describedby={waiting ? 'draft-view-edit-wait' : undefined}
+                  onClick={onEditAgain} className={quiet}
+                >
+                  Try again
+                </button>
+              )}
+              {waiting && <span id="draft-view-edit-wait" className="sr-only">{EDIT_ELIGIBILITY_TEXT.waiting}</span>}
+            </div>
+          )}
         </div>
       )}
     </DialogFrame>
@@ -1509,13 +1974,32 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus }: {
 interface LineDraft extends DraftLineFields { readonly key: number }
 interface FormErrors {
   readonly customer: boolean;
-  /** By line key (not position), so removing a line never moves another line's error onto it. */
+  /** By line key (not position), so removing or moving a line never moves another line's error onto it. */
   readonly lines: ReadonlyMap<number, { readonly description: boolean; readonly quantity: boolean; readonly unitPrice: boolean; readonly total: boolean }>;
   readonly subtotal: boolean;
   /** The body would be over the server's 64 KiB bound (its 413): refused here, before a key exists. */
   readonly tooLarge: boolean;
 }
 const NO_ERRORS: FormErrors = Object.freeze({ customer: false, lines: new Map(), subtotal: false, tooLarge: false });
+const NO_LINE_ERRORS = Object.freeze({ description: false, quantity: false, unitPrice: false, total: false });
+
+/** What a built body says is wrong, by line key (`customer`: none is chosen). */
+function formErrorsOf(lines: readonly LineDraft[], built: DraftBody, customer: boolean): FormErrors {
+  return {
+    customer,
+    lines: new Map(lines.map((line, index) => [line.key, built.kind === 'invalid' ? built.lines[index] : NO_LINE_ERRORS])),
+    subtotal: built.kind === 'invalid' && built.subtotal,
+    tooLarge: built.kind === 'invalid' && built.tooLarge,
+  };
+}
+
+/** Focus the first invalid field, in reading order: the customer, then each line's description, quantity, price. */
+function focusFirstInvalid(root: HTMLElement | null, next: FormErrors, subtotalError: HTMLElement | null, sizeError: HTMLElement | null): void {
+  if (root === null) return;
+  const target = next.customer ? root.querySelector<HTMLElement>('[data-testid="picker-open"], [data-testid="picker-change"]')
+    : root.querySelector<HTMLElement>('[aria-invalid="true"]') ?? (next.subtotal ? subtotalError : next.tooLarge ? sizeError : null);
+  target?.focus();
+}
 
 /** The live Draft subtotal of the lines as typed: exact cents, or null while a line is incomplete or too large. */
 function liveSubtotal(lines: readonly DraftLineFields[]): bigint | null {
@@ -1526,6 +2010,163 @@ function liveSubtotal(lines: readonly DraftLineFields[]): bigint | null {
     sum += total;
   }
   return sum <= MAX_CENTS ? sum : null;
+}
+
+/** A saved draft's lines as the editor's fields hold them (M7B-INVOICES-P2), in order, each price as the dollar text it reads back. */
+const linesOf = (draft: DraftDetail): readonly LineDraft[] =>
+  draft.lines.map((line, index) => ({ key: index + 1, description: line.description, quantity: String(line.quantity), unitPrice: priceText(line.unitPriceCents) }));
+
+/**
+ * The lines of a draft being written — the new draft's and the editor's (M7B-INVOICES-P2) — with the live subtotal and
+ * the form's subtotal and size errors. Each line's description, quantity and unit price; Remove (disabled at one line);
+ * Add line (up to 50); and with `reorder` Move up and Move down. A line's Remove had focus and goes with it, so focus
+ * is handed BEFORE the line goes to the neighbour where the user is — the next line's Remove, else the previous one's —
+ * or, when one line is left (its Remove then disabled), to that line's description; never DialogFrame's fallback to line
+ * 1, a jump up a long form. A move keeps focus on the moved line's own button (its other one where that one is now
+ * disabled, at the first or last place) and says where the line went.
+ */
+function LinesEditor({ prefix, lines, setLines, errors, reorder = false, firstField, subtotalError, sizeError }: {
+  /** The testids' prefix: 'draft-new' (the new draft) or 'draft-edit' (the editor). */
+  readonly prefix: 'draft-new' | 'draft-edit';
+  readonly lines: readonly LineDraft[]; readonly setLines: Dispatch<SetStateAction<readonly LineDraft[]>>; readonly errors: FormErrors;
+  readonly reorder?: boolean;
+  readonly firstField: MutableRefObject<HTMLElement | null>;
+  readonly subtotalError: RefObject<HTMLParagraphElement | null>; readonly sizeError: RefObject<HTMLParagraphElement | null>;
+}) {
+  const lineKey = useRef(0); // the last key handed out: never one a line holds or held (errors are kept by key)
+  const focusAfter = useRef<string | null>(null); // the control a move (or the 50th line's Add) hands focus to, after its render
+  const [moved, setMoved] = useState('');
+  useLayoutEffect(() => {
+    const id = focusAfter.current;
+    focusAfter.current = null;
+    if (id !== null) document.getElementById(id)?.focus();
+  });
+
+  const setLine = (key: number, field: keyof DraftLineFields, value: string): void =>
+    setLines((prev) => prev.map((line) => (line.key === key ? { ...line, [field]: value } : line)));
+  const addLine = (): void => {
+    if (lines.length >= MAX_DRAFT_LINES) return;
+    lineKey.current = Math.max(lineKey.current, ...lines.map((line) => line.key)) + 1;
+    const key = lineKey.current;
+    // The 50th line disables Add line under the press: focus goes to that new line, never back to line 1.
+    if (lines.length + 1 >= MAX_DRAFT_LINES) focusAfter.current = `draft-line-${key}-description`;
+    setLines((prev) => [...prev, { key, description: '', quantity: '1', unitPrice: '' }]);
+  };
+  const removeLine = (key: number): void => {
+    const at = lines.findIndex((line) => line.key === key);
+    if (lines.length <= 1 || at < 0) return;
+    const near = lines[at + 1] ?? lines[at - 1];
+    document.getElementById(`draft-line-${near.key}-${lines.length > 2 ? 'remove' : 'description'}`)?.focus();
+    setLines((prev) => prev.filter((line) => line.key !== key));
+  };
+  const moveLine = (key: number, by: -1 | 1): void => {
+    const at = lines.findIndex((line) => line.key === key);
+    const to = at + by;
+    if (at < 0 || to < 0 || to >= lines.length) return;
+    const next = [...lines];
+    [next[at], next[to]] = [next[to], next[at]];
+    const way = by < 0 ? (to > 0 ? 'up' : 'down') : (to < lines.length - 1 ? 'down' : 'up');
+    focusAfter.current = `draft-line-${key}-${way}`;
+    const text = `Line ${at + 1} moved to line ${to + 1}.`;
+    setMoved((prev) => (prev === text ? `${text}\u00a0` : text)); // a repeat still changes the live region, so it is said again
+    setLines(next);
+  };
+
+  const subtotal = liveSubtotal(lines);
+  const describe = (id: string, bad: boolean): string | undefined => (bad ? id : undefined);
+  return (
+    <>
+      <fieldset className="space-y-3">
+        <legend className={labelClass}>Lines ({lines.length} of {MAX_DRAFT_LINES})</legend>
+        {lines.map((line, index) => {
+          const e = errors.lines.get(line.key) ?? NO_LINE_ERRORS;
+          const n = index + 1;
+          const base = `draft-line-${line.key}`;
+          return (
+            <div key={line.key} data-testid={`${prefix}-line`} className="grid grid-cols-12 gap-2 items-start p-3 rounded-2xl border border-slate-100">
+              <div className="col-span-12 sm:col-span-6 space-y-1">
+                <label htmlFor={`${base}-description`} className={labelClass}>Line {n} description</label>
+                <input
+                  ref={index === 0 ? (node) => { firstField.current = node; } : undefined}
+                  id={`${base}-description`}
+                  data-testid={`${prefix}-description`}
+                  type="text"
+                  autoComplete="off"
+                  value={line.description}
+                  aria-invalid={e.description}
+                  aria-describedby={describe(`${base}-description-error`, e.description)}
+                  onChange={(ev) => setLine(line.key, 'description', ev.target.value)}
+                  className={inputClass}
+                />
+                {e.description && <p id={`${base}-description-error`} role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.description}</p>}
+              </div>
+              <div className="col-span-4 sm:col-span-2 space-y-1">
+                <label htmlFor={`${base}-quantity`} className={labelClass}>Line {n} quantity</label>
+                <input
+                  id={`${base}-quantity`}
+                  data-testid={`${prefix}-quantity`}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={line.quantity}
+                  aria-invalid={e.quantity}
+                  aria-describedby={describe(`${base}-quantity-error`, e.quantity)}
+                  onChange={(ev) => setLine(line.key, 'quantity', ev.target.value)}
+                  className={inputClass}
+                />
+                {e.quantity && <p id={`${base}-quantity-error`} role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.quantity}</p>}
+              </div>
+              <div className="col-span-5 sm:col-span-3 space-y-1">
+                <label htmlFor={`${base}-price`} className={labelClass}>Line {n} unit price ($)</label>
+                <input
+                  id={`${base}-price`}
+                  data-testid={`${prefix}-price`}
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  value={line.unitPrice}
+                  aria-invalid={e.unitPrice || e.total}
+                  aria-describedby={describe(`${base}-price-error`, e.unitPrice || e.total)}
+                  onChange={(ev) => setLine(line.key, 'unitPrice', ev.target.value)}
+                  className={inputClass}
+                />
+                {(e.unitPrice || e.total) && <p id={`${base}-price-error`} role="alert" className="text-xs font-bold text-rose-700">{e.unitPrice ? DRAFT_RULE_TEXT.unitPrice : DRAFT_RULE_TEXT.total}</p>}
+              </div>
+              <div className={reorder ? 'col-span-12 flex flex-wrap gap-2' : 'col-span-3 sm:col-span-1 pt-5'}>
+                {reorder && (
+                  <>
+                    <button
+                      type="button" id={`${base}-up`} data-testid={`${prefix}-up`} aria-label={`Move line ${n} up`} disabled={index === 0}
+                      onClick={() => moveLine(line.key, -1)} className={quiet}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button" id={`${base}-down`} data-testid={`${prefix}-down`} aria-label={`Move line ${n} down`} disabled={index === lines.length - 1}
+                      onClick={() => moveLine(line.key, 1)} className={quiet}
+                    >
+                      ↓
+                    </button>
+                  </>
+                )}
+                <button type="button" id={`${base}-remove`} data-testid={`${prefix}-remove-line`} aria-label={`Remove line ${n}`} disabled={lines.length <= 1} onClick={() => removeLine(line.key)} className={quiet}>×</button>
+              </div>
+            </div>
+          );
+        })}
+        <button type="button" data-testid={`${prefix}-add-line`} disabled={lines.length >= MAX_DRAFT_LINES} onClick={addLine} className={quiet}>Add line</button>
+        {reorder && <p data-testid={`${prefix}-moved`} role="status" className="sr-only">{moved}</p>}
+      </fieldset>
+
+      {/* Only the amount is live (atomic): a change reads the new amount, never the label again. */}
+      <p data-testid={`${prefix}-subtotal`} className="text-right text-base font-black text-primary">
+        Draft subtotal <span data-testid={`${prefix}-subtotal-amount`} aria-live="polite" aria-atomic="true">{subtotal === null ? '—' : formatCents(subtotal)}</span>
+      </p>
+      {/* Focused by focusFirstInvalid when they are the only errors: the ring shows a keyboard user where focus landed. */}
+      {errors.subtotal && <p ref={subtotalError} tabIndex={-1} data-testid={`${prefix}-subtotal-error`} role="alert" className={`text-xs font-bold text-rose-700 text-right ${focusRing}`}>{DRAFT_RULE_TEXT.subtotal}</p>}
+      {errors.tooLarge && <p ref={sizeError} tabIndex={-1} data-testid={`${prefix}-size-error`} role="alert" className={`text-xs font-bold text-rose-700 text-right ${focusRing}`}>{DRAFT_RULE_TEXT.tooLarge}</p>}
+    </>
+  );
 }
 
 function NewDraftDialog({
@@ -1545,7 +2186,6 @@ function NewDraftDialog({
   const [status, setStatus] = useState<{ readonly alert: boolean; readonly text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [mine, setMine] = useState<string | null>(null); // the key of the attempt this dialog sent
-  const lineKey = useRef(1);
   const alive = useRef(false);
   const dialogRoot = useRef<HTMLDivElement | null>(null);
   const firstField = useRef<HTMLElement | null>(null);
@@ -1588,46 +2228,16 @@ function NewDraftDialog({
     }
   }, [held, mine]);
 
-  const setLine = (key: number, field: keyof DraftLineFields, value: string): void =>
-    setLines((prev) => prev.map((line) => (line.key === key ? { ...line, [field]: value } : line)));
-  const addLine = (): void => {
-    if (lines.length >= MAX_DRAFT_LINES) return;
-    lineKey.current += 1;
-    setLines((prev) => [...prev, { key: lineKey.current, description: '', quantity: '1', unitPrice: '' }]);
-  };
-  /**
-   * Remove one line. Its Remove had focus and goes with it, so focus is handed BEFORE the line goes to the neighbour where
-   * the user is — the next line's Remove, else the previous one's — or, when one line is left (its Remove then disabled),
-   * to that line's description; never DialogFrame's fallback to line 1, a jump up a long form.
-   */
-  const removeLine = (key: number): void => {
-    const at = lines.findIndex((line) => line.key === key);
-    if (lines.length <= 1 || at < 0) return;
-    const near = lines[at + 1] ?? lines[at - 1];
-    document.getElementById(`draft-line-${near.key}-${lines.length > 2 ? 'remove' : 'description'}`)?.focus();
-    setLines((prev) => prev.filter((line) => line.key !== key));
-  };
-
-  /** Focus the first invalid field, in reading order: the customer, then each line's description, quantity, price. */
-  function focusFirst(next: FormErrors): void {
-    const root = dialogRoot.current;
-    if (root === null) return;
-    const target = next.customer ? root.querySelector<HTMLElement>('[data-testid="picker-open"], [data-testid="picker-change"]')
-      : root.querySelector<HTMLElement>('[aria-invalid="true"]') ?? (next.subtotal ? subtotalError.current : next.tooLarge ? sizeError.current : null);
-    target?.focus();
-  }
-
   async function save(): Promise<void> {
     if (saving || isLiveHold(held) || waiting) return;
     const built = draftBody(state.store.tenantId, customer?.id ?? state.store.tenantId, lines);
-    const lineErrors = new Map(lines.map((line, index) => [line.key, built.kind === 'invalid' ? built.lines[index] : { description: false, quantity: false, unitPrice: false, total: false }]));
-    const next: FormErrors = { customer: customer === null, lines: lineErrors, subtotal: built.kind === 'invalid' && built.subtotal, tooLarge: built.kind === 'invalid' && built.tooLarge };
+    const next = formErrorsOf(lines, built, customer === null);
     setErrors(next);
     // Refused here: no key and no request.
     if (customer === null || built.kind === 'invalid') {
       setStatus(null);
       // After the render that marks the fields.
-      return void setTimeout(() => focusFirst(next), 0);
+      return void setTimeout(() => focusFirstInvalid(dialogRoot.current, next, subtotalError.current, sizeError.current), 0);
     }
     setSaving(true);
     setStatus(null);
@@ -1644,13 +2254,11 @@ function NewDraftDialog({
     }
   }
 
-  const subtotal = liveSubtotal(lines);
   // The user's one live attempt (this dialog's, as only a dialog with none can send): its card, with Check again, is here.
   const liveHold = isLiveHold(held) ? held : undefined;
   const blocked = saving || liveHold !== undefined || waiting;
   const heldBack = liveHold !== undefined && !saving; // disabled by an earlier attempt, not by this press: said to Save
   const waitBack = waiting && !saving && !heldBack; // disabled by a rate limit's wait (a save's 429 starts one)
-  const describe = (id: string, bad: boolean): string | undefined => (bad ? id : undefined);
 
   return (
     <DialogFrame labelledBy="draft-new-title" testId="draft-new" busy={saving} onClose={onClose} returnFocus={returnFocus} initialFocus={firstField}>
@@ -1672,78 +2280,7 @@ function NewDraftDialog({
           {errors.customer && <p id="draft-new-customer-error" data-testid="draft-new-customer-error" role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.customer}</p>}
         </fieldset>
 
-        <fieldset className="space-y-3">
-          <legend className={labelClass}>Lines ({lines.length} of {MAX_DRAFT_LINES})</legend>
-          {lines.map((line, index) => {
-            const e = errors.lines.get(line.key) ?? { description: false, quantity: false, unitPrice: false, total: false };
-            const n = index + 1;
-            const base = `draft-line-${line.key}`;
-            return (
-              <div key={line.key} data-testid="draft-new-line" className="grid grid-cols-12 gap-2 items-start p-3 rounded-2xl border border-slate-100">
-                <div className="col-span-12 sm:col-span-6 space-y-1">
-                  <label htmlFor={`${base}-description`} className={labelClass}>Line {n} description</label>
-                  <input
-                    ref={index === 0 ? (node) => { firstField.current = node; } : undefined}
-                    id={`${base}-description`}
-                    data-testid="draft-new-description"
-                    type="text"
-                    autoComplete="off"
-                    value={line.description}
-                    aria-invalid={e.description}
-                    aria-describedby={describe(`${base}-description-error`, e.description)}
-                    onChange={(ev) => setLine(line.key, 'description', ev.target.value)}
-                    className={inputClass}
-                  />
-                  {e.description && <p id={`${base}-description-error`} role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.description}</p>}
-                </div>
-                <div className="col-span-4 sm:col-span-2 space-y-1">
-                  <label htmlFor={`${base}-quantity`} className={labelClass}>Quantity</label>
-                  <input
-                    id={`${base}-quantity`}
-                    data-testid="draft-new-quantity"
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={line.quantity}
-                    aria-invalid={e.quantity}
-                    aria-describedby={describe(`${base}-quantity-error`, e.quantity)}
-                    onChange={(ev) => setLine(line.key, 'quantity', ev.target.value)}
-                    className={inputClass}
-                  />
-                  {e.quantity && <p id={`${base}-quantity-error`} role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.quantity}</p>}
-                </div>
-                <div className="col-span-5 sm:col-span-3 space-y-1">
-                  <label htmlFor={`${base}-price`} className={labelClass}>Unit price ($)</label>
-                  <input
-                    id={`${base}-price`}
-                    data-testid="draft-new-price"
-                    type="text"
-                    inputMode="decimal"
-                    autoComplete="off"
-                    value={line.unitPrice}
-                    aria-invalid={e.unitPrice || e.total}
-                    aria-describedby={describe(`${base}-price-error`, e.unitPrice || e.total)}
-                    onChange={(ev) => setLine(line.key, 'unitPrice', ev.target.value)}
-                    className={inputClass}
-                  />
-                  {(e.unitPrice || e.total) && <p id={`${base}-price-error`} role="alert" className="text-xs font-bold text-rose-700">{e.unitPrice ? DRAFT_RULE_TEXT.unitPrice : DRAFT_RULE_TEXT.total}</p>}
-                </div>
-                <div className="col-span-3 sm:col-span-1 pt-5">
-                  <button type="button" id={`${base}-remove`} data-testid="draft-new-remove-line" aria-label={`Remove line ${n}`} disabled={lines.length <= 1} onClick={() => removeLine(line.key)} className={quiet}>×</button>
-                </div>
-              </div>
-            );
-          })}
-          <button type="button" data-testid="draft-new-add-line" disabled={lines.length >= MAX_DRAFT_LINES} onClick={addLine} className={quiet}>Add line</button>
-        </fieldset>
-
-        {/* Only the amount is live (atomic): a change reads the new amount, never the label again. */}
-        <p data-testid="draft-new-subtotal" className="text-right text-base font-black text-primary">
-          Draft subtotal <span data-testid="draft-new-subtotal-amount" aria-live="polite" aria-atomic="true">{subtotal === null ? '—' : formatCents(subtotal)}</span>
-        </p>
-        {/* Focused by focusFirst when they are the only errors: the ring shows a keyboard user where focus landed. */}
-        {errors.subtotal && <p ref={subtotalError} tabIndex={-1} data-testid="draft-new-subtotal-error" role="alert" className={`text-xs font-bold text-rose-700 text-right ${focusRing}`}>{DRAFT_RULE_TEXT.subtotal}</p>}
-        {errors.tooLarge && <p ref={sizeError} tabIndex={-1} data-testid="draft-new-size-error" role="alert" className={`text-xs font-bold text-rose-700 text-right ${focusRing}`}>{DRAFT_RULE_TEXT.tooLarge}</p>}
+        <LinesEditor prefix="draft-new" lines={lines} setLines={setLines} errors={errors} firstField={firstField} subtotalError={subtotalError} sizeError={sizeError} />
 
         {liveHold !== undefined && <HoldCard held={liveHold} expired={expired} onCheck={onCheck} onStop={onStop} waiting={waiting} />}
         {status !== null && <p data-testid="draft-new-status" role={status.alert ? 'alert' : 'status'} className="text-sm font-bold text-rose-800">{status.text}</p>}
@@ -1758,6 +2295,215 @@ function NewDraftDialog({
           >
             Save draft
           </button>
+        </div>
+      </div>
+    </DialogFrame>
+  );
+}
+
+/** One line of a draft as text, for the conflict's comparison: never colour alone. */
+const lineSummary = (n: number, description: string, quantity: string, price: string, total: string): string =>
+  `${n}. ${description === '' ? '(no description)' : description} — ${quantity} × ${price} = ${total}`;
+
+/** One side of the conflict's comparison: its customer, its lines in order and its subtotal, as text. */
+function DraftSide({ testId, title, customer, lines, subtotal }: {
+  readonly testId: string; readonly title: string; readonly customer: string; readonly lines: readonly string[]; readonly subtotal: string;
+}) {
+  return (
+    <div data-testid={testId} className="space-y-1 p-3 rounded-2xl border border-slate-200 bg-white">
+      <h4 className={labelClass}>{title}</h4>
+      <p className="text-sm font-bold text-primary break-words">Customer: {customer}</p>
+      <ol className="text-sm text-slate-800 space-y-0.5 break-words">{lines.map((line, index) => <li key={index}>{line}</li>)}</ol>
+      <p className="text-sm font-black text-primary">Draft subtotal {subtotal}</p>
+    </div>
+  );
+}
+
+/** The unconfirmed attempt of the editor (M7B-INVOICES-P2): what it is doing or why it is not confirmed, and Check again. */
+function EditAttemptCard({ attempt, expired, waiting, onCheck }: { readonly attempt: EditAttempt; readonly expired: boolean; readonly waiting: boolean; readonly onCheck: () => void }) {
+  const working = attempt.state !== 'unresolved';
+  const old = expired || attempt.body === '';
+  const text = attempt.state === 'sending' ? EDIT_TEXT.saving : attempt.state === 'checking' ? EDIT_TEXT.checking : old ? EDIT_TEXT.tooOld : EDIT_TEXT.unresolved;
+  return (
+    <div data-testid="draft-edit-attempt" data-state={attempt.state} className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2">
+      <p role="status" className="text-sm font-bold text-amber-900">{text}</p>
+      {attempt.note !== '' && !working && <p data-testid="draft-edit-attempt-note" className="text-xs font-bold text-amber-900">{attempt.note}</p>}
+      {!working && !old && (
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button" data-testid="draft-edit-check-again" disabled={waiting} aria-describedby={waiting ? 'draft-edit-check-wait' : undefined}
+            onClick={onCheck} className={button}
+          >
+            Check again
+          </button>
+          {waiting && <span id="draft-edit-check-wait" className={hintClass}>{HOLD_TEXT.waiting}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The editor (M7B-INVOICES-P2): a working copy of one saved draft — its customer and its ordered lines — seeded from the
+ * detail the reopen dialog read, and only ever sent by Save or Reapply (the section's sendEdit). The section owns its
+ * attempt and its conflict; the working copy lives here, so closing the editor drops it.
+ */
+function EditDraftDialog({
+  uid, state, canViewCustomers, customerText, session, customers, identity, now, expired, waiting, onSend, onCheck, onDiscard, onReadAgain, onClose, returnFocus,
+}: {
+  readonly uid: string; readonly state: EditorState; readonly canViewCustomers: boolean; readonly customerText: (id: string) => string;
+  readonly session: TenantSessionClient; readonly customers: CustomersClient; readonly identity: Pick<ShopIdentity, 'idToken'>; readonly now?: () => number;
+  readonly expired: boolean; readonly waiting: boolean;
+  readonly onSend: (p: PreparedEdit) => Promise<void>; readonly onCheck: () => void;
+  readonly onDiscard: () => ServerCustomerReference | null | undefined; readonly onReadAgain: () => void;
+  readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const [customer, setCustomer] = useState<ServerCustomerReference | null>(state.customer);
+  const [lines, setLines] = useState<readonly LineDraft[]>(() => linesOf(state.base));
+  const [errors, setErrors] = useState<FormErrors>(NO_ERRORS);
+  const [saving, setSaving] = useState(false);
+  const alive = useRef(false);
+  const dialogRoot = useRef<HTMLDivElement | null>(null);
+  const firstField = useRef<HTMLElement | null>(null);
+  const subtotalError = useRef<HTMLParagraphElement | null>(null);
+  const sizeError = useRef<HTMLParagraphElement | null>(null);
+
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+
+  const attempt = state.attempt;
+  const conflict = state.conflict;
+  const found = conflict?.current ?? null;
+
+  /** The body built ONCE from the working copy at `version`; an invalid form is marked here and nothing is sent (no key). */
+  function prepare(version: number): PreparedEdit | null {
+    const built = draftEditBody(state.store.tenantId, version, customer?.id ?? state.store.tenantId, lines);
+    const next = formErrorsOf(lines, built, customer === null);
+    setErrors(next);
+    if (customer === null || built.kind === 'invalid') {
+      setTimeout(() => focusFirstInvalid(dialogRoot.current, next, subtotalError.current, sizeError.current), 0); // after the render that marks the fields
+      return null;
+    }
+    return { body: built.body, expectedVersion: version, customer };
+  }
+  async function send(p: PreparedEdit | null): Promise<void> {
+    if (p === null) return;
+    setSaving(true);
+    try {
+      await onSend(p);
+    } finally {
+      if (alive.current) setSaving(false);
+    }
+  }
+  const idle = !saving && attempt === null && !waiting;
+  const atLast = state.base.version > MAX_EXPECTED_VERSION; // no save can expect it: said, never a silent no-op
+  const foundAtLast = found !== null && found.version > MAX_EXPECTED_VERSION;
+  const save = (): void => { if (idle && conflict === null && !atLast) void send(prepare(state.base.version)); };
+  // The same working copy, at the version the conflict's read found; the section mints a NEW key for it.
+  const reapply = (): void => {
+    if (!idle || found === null || foundAtLast) return;
+    const p = prepare(found.version);
+    void send(p === null ? null : { ...p, base: found });
+  };
+  const discard = (): void => {
+    if (found === null || saving || attempt !== null) return;
+    const seeded = onDiscard();
+    if (seeded === undefined) return;
+    setCustomer(seeded);
+    setLines(linesOf(found));
+    setErrors(NO_ERRORS);
+  };
+
+  const blocked = !idle || conflict !== null || atLast;
+  const locked = saving || attempt !== null;
+  // Why Save (or Reapply) is disabled, said to it — not while its own press is under way.
+  const why = saving ? undefined : attempt !== null ? 'draft-edit-save-held' : waiting ? 'draft-edit-save-wait' : conflict !== null ? 'draft-edit-save-conflict'
+    : atLast ? 'draft-edit-save-last' : undefined;
+  const reapplyWhy = saving ? undefined : waiting ? 'draft-edit-reapply-wait' : foundAtLast ? 'draft-edit-reapply-last' : undefined;
+  const mineSubtotal = liveSubtotal(lines);
+
+  return (
+    <DialogFrame labelledBy="draft-edit-title" testId="draft-edit" busy={saving || (attempt !== null && attempt.state !== 'unresolved')} onClose={onClose} returnFocus={returnFocus} initialFocus={firstField}>
+      <div ref={dialogRoot} className="space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <h2 id="draft-edit-title" className="text-xl font-black text-primary tracking-tight">Edit server draft</h2>
+          <button type="button" data-testid="draft-edit-cancel" aria-describedby="draft-edit-cancel-hint" onClick={onClose} className={quiet}>Cancel</button>
+        </div>
+        <p className="text-sm font-medium text-slate-600">
+          For <span data-testid="draft-edit-store" className="font-bold text-primary">{storeLabel(state.store)}</span>, in US dollars, version{' '}
+          <span data-testid="draft-edit-version" className="font-bold text-primary">{state.base.version}</span>. Saving replaces this draft's customer and lines on the server.
+        </p>
+        {/* Once a request is out, closing no longer leaves the server's draft as it was: the hint says so then. */}
+        <p id="draft-edit-cancel-hint" data-testid="draft-edit-cancel-hint" className={hintClass}>{attempt === null ? EDIT_TEXT.cancelHint : EDIT_TEXT.closeWarning}</p>
+
+        {/* Locked from Save's press while its request is out or unconfirmed: the screen keeps showing what was sent. */}
+        <fieldset disabled={locked} data-testid="draft-edit-working" className="space-y-4 border-0 p-0 m-0 min-w-0">
+          <fieldset className="space-y-2" aria-describedby={errors.customer ? 'draft-edit-customer-error' : undefined}>
+            <legend className={labelClass}>Customer</legend>
+            <ServerCustomerField
+              uid={uid} value={customer} canView={canViewCustomers} invalid={errors.customer} errorId="draft-edit-customer-error"
+              onChange={(next) => { setCustomer(next); setErrors((e) => ({ ...e, customer: false })); }} session={session} customers={customers} identity={identity} now={now}
+            />
+            {/* Without the local Customers View hint the field shows no customer: the draft's own is kept, as the server named it. */}
+            {!canViewCustomers && customer !== null && <p data-testid="draft-edit-customer-kept" className="text-sm font-bold text-primary break-words">{EDIT_TEXT.kept(customer.name)}</p>}
+            {errors.customer && <p id="draft-edit-customer-error" data-testid="draft-edit-customer-error" role="alert" className="text-xs font-bold text-rose-700">{DRAFT_RULE_TEXT.customer}</p>}
+          </fieldset>
+
+          <LinesEditor prefix="draft-edit" lines={lines} setLines={setLines} errors={errors} reorder firstField={firstField} subtotalError={subtotalError} sizeError={sizeError} />
+        </fieldset>
+
+        {conflict !== null && (
+          <section data-testid="draft-edit-conflict" data-phase={conflict.phase} aria-labelledby="draft-edit-conflict-title" className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-3">
+            <h3 id="draft-edit-conflict-title" className={labelClass}>Your changes and the draft on the server now</h3>
+            {conflict.phase !== 'ready' && <p data-testid="draft-edit-conflict-state" role="status" className="text-sm font-bold text-amber-900">{conflict.text}</p>}
+            {conflict.phase === 'failed' && (
+              <button type="button" data-testid="draft-edit-read-again" disabled={waiting} aria-describedby={waiting ? 'draft-edit-read-wait' : undefined} onClick={onReadAgain} className={quiet}>
+                Try again
+              </button>
+            )}
+            {conflict.phase === 'failed' && waiting && <span id="draft-edit-read-wait" className="sr-only">{EDIT_TEXT.readWaiting}</span>}
+            {found !== null && (
+              <>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <DraftSide
+                    testId="draft-edit-server" title={`On the server now (version ${found.version})`} customer={customerText(found.customerId)} subtotal={formatCents(found.subtotalCents)}
+                    lines={found.lines.map((line) => lineSummary(line.position, line.description, String(line.quantity), formatCents(line.unitPriceCents), formatCents(line.lineTotalCents)))}
+                  />
+                  <DraftSide
+                    testId="draft-edit-mine" title="Your changes (not saved)" customer={customer?.name ?? 'None selected'} subtotal={mineSubtotal === null ? '—' : formatCents(mineSubtotal)}
+                    lines={lines.map((line, index) => {
+                      const { quantity, cents, total } = lineAmounts(line); // as typed where a field does not parse
+                      return lineSummary(
+                        index + 1, line.description.trim(), quantity === null ? line.quantity.trim() : String(quantity),
+                        cents === null ? line.unitPrice.trim() : formatCents(cents), total === null ? '—' : formatCents(total),
+                      );
+                    })}
+                  />
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {reapplyWhy === 'draft-edit-reapply-wait' && <span id={reapplyWhy} className="sr-only">{EDIT_TEXT.reapplyWaiting}</span>}
+                  {reapplyWhy === 'draft-edit-reapply-last' && <span id={reapplyWhy} className="sr-only">{EDIT_TEXT.saveLast}</span>}
+                  <button type="button" data-testid="draft-edit-reapply" disabled={!idle || foundAtLast} aria-describedby={reapplyWhy} onClick={reapply} className={button}>
+                    Reapply my changes
+                  </button>
+                  <button type="button" data-testid="draft-edit-discard" disabled={saving || attempt !== null} onClick={discard} className={quiet}>Discard my changes</button>
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {attempt !== null && <EditAttemptCard attempt={attempt} expired={expired} waiting={waiting} onCheck={onCheck} />}
+        {state.status !== null && <p data-testid="draft-edit-status" role={state.status.alert ? 'alert' : 'status'} className={`text-sm font-bold ${state.status.alert ? 'text-rose-800' : 'text-slate-700'}`}>{state.status.text}</p>}
+
+        <div className="flex justify-end gap-3">
+          {why === 'draft-edit-save-held' && <span id={why} className="sr-only">{EDIT_TEXT.saveHeld}</span>}
+          {why === 'draft-edit-save-wait' && <span id={why} className="sr-only">{EDIT_TEXT.saveWaiting}</span>}
+          {why === 'draft-edit-save-conflict' && <span id={why} className="sr-only">{EDIT_TEXT.saveConflict}</span>}
+          {why === 'draft-edit-save-last' && <span id={why} data-testid="draft-edit-save-last" className="text-xs font-bold text-slate-600">{EDIT_TEXT.saveLast}</span>}
+          <button type="button" data-testid="draft-edit-save" disabled={blocked} aria-describedby={why} onClick={save} className={button}>Save changes</button>
         </div>
       </div>
     </DialogFrame>

@@ -302,6 +302,38 @@
 //          parked at the front; B signs in in a second tab (SDB-08's window: B's profile held, A's page mounted). Released
 //          then, the allowance offers nothing — the section had ended at the sign-out (its stores say so) — and starts
 //          nothing; no request after the switch but A's logout carries A's token; B's page then shows no New of A's.
+// M7B-INVOICES-P2 — EDITING A SAVED DRAFT: PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and GET
+// …/{id}/edit-eligibility (Invoices Edit), answered by the real entry over migration 029. E/V/W of editCounts: the
+// tenant's draft edit audits, its edit events and the draft's stored version. Each case says which kind of evidence it is.
+//   SDB-11 (AC-16, observable end to end: the wire, the page and the database) EDIT, RELOAD, SECOND SESSION: the owner
+//          saves a two-line draft, then Edit — offered only once the server's edit eligibility answered — opens the
+//          editor seeded with the draft (customer, ordered lines, version 1); another customer, a line edited, one
+//          added, one removed, one moved up; Save: ONE PATCH of exactly { expectedTenant, expectedVersion: 1,
+//          customerId, lines } under a v4 key, 200 { draftId, version: 2, changed: true }; one version step, one
+//          store-scope edit audit naming the draft, one edit event, one completion, the lines replaced; "Saved" after
+//          ONE read-back. A reload and a second browser through the second entry read version 2 and the new lines. A
+//          sales_staff account (Invoices Create by default) lists the draft but gets no Edit (the edit eligibility 403,
+//          said), and its direct PATCH from the page — its own cookie, session token, intent header, a v4 key — is
+//          refused 403 with nothing written.
+//   SDB-12 (AC-16, observable end to end) A CONFLICT NEEDS EXPLICIT REVIEW: two browsers (two entries) open the editor
+//          at version 1; the second saves first (version 2); the first's save is the sealed 409 write_conflict, writing
+//          only its completion: the server keeps the second browser's line, the first keeps its working copy, reads the
+//          draft afresh ONCE and shows both, sends nothing more on its own and holds Save back; Reapply sends the same
+//          working copy under a NEW key at version 2 and lands version 3 (two edit audits in all).
+//   SDB-13 (AC-17, observable end to end) UNKNOWN OUTCOME: the PATCH commits and its answer is dropped at the front
+//          (st.lose): "Not confirmed yet", never "Saved"; a focus and a visibilitychange send nothing; "Check again"
+//          sends exactly one more PATCH with the SAME key and byte-identical body (read from the network log), answered
+//          200 as a replay: still ONE version step. A second lost edit, then a reload: no editor comes back and nothing
+//          is sent (that edit committed: version 3).
+//   SDB-14 (AC-17, observable no-old-content) SIGN-OUT DURING AN UNKNOWN OUTCOME: the lost edit's owner signs out (the
+//          route guard unmounts the page) and signs in again in the same document: no editor, attempt, Check again,
+//          dialog or typed line, and no PATCH after the sign-out; the server kept the edit it committed.
+//   SDB-15 (AC-17, a late answer actually delivered) DA-198's window: A's PATCH is answered by the entry (committed)
+//          and its answer parked at the front; B signs in in a second tab (B's profile held, A's page mounted). The
+//          editor closed at the sign-out; released, the answer IS received by A's page (no session end aborts the PATCH
+//          — it carries only the client's own request deadline — so the browser reports it finished) and shows nothing
+//          — no "Saved", no dialog, no read-back — and starts nothing; no request after the switch but A's logout
+//          carries A's token.
 // M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
 // guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
 // of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
@@ -1420,6 +1452,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
+  'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15',
   'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
 ]);
 const registered = new Set();
@@ -3813,7 +3846,7 @@ scenario('SRL-13', 'INVOICES LEVEL — the Permissions tab holds a labelled, ser
     return { heading: document.getElementById(section.getAttribute('aria-labelledby'))?.textContent.trim(), text: section.textContent };
   })()`);
   assert.equal(copy.heading, 'Server-saved Invoices level');
-  assert.ok(copy.text.includes('only the Invoices level of the built-in roles') && copy.text.includes('decide who may save, list and open server drafts at a store')
+  assert.ok(copy.text.includes('only the Invoices level of the built-in roles') && copy.text.includes('decide who may save, list, open and edit server drafts at a store')
     && copy.text.includes('Other invoices are still saved in this browser and are not checked by the server'), copy.text);
   assert.equal(await page.evaluate(`document.querySelectorAll('[data-testid="server-customer-levels"]').length`), 1, 'the Customers panel is still there, once');
   assert.equal(await page.evaluate(`(() => { const ids = [...document.querySelectorAll('[id]')].map((e) => e.id); return ids.length === new Set(ids).size; })()`), true, 'no id is used twice with both panels mounted');
@@ -4150,10 +4183,10 @@ async function waitDraftRows(page, ids, label, customer = null) {
   }, 30_000, label).catch((e) => { throw new Error(`${e.message}; rows shown: ${JSON.stringify(seen)?.slice(0, 600)}`); });
   return seen;
 }
-/** Type over one field of line `i` (0-based) of the New server draft dialog as a user does: select it all, then type. */
-async function typeLineField(page, i, field, text) {
+/** Type over one field of line `i` (0-based) of the New server draft dialog (or, M7B-INVOICES-P2, the editor: `prefix` 'draft-edit') as a user does: select it all, then type. */
+async function typeLineField(page, i, field, text, prefix = 'draft-new') {
   const mark = `[data-sdb="line-${i}-${field}"]`;
-  await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('draft-new-line'))})][${i}].querySelector(${JSON.stringify(by(`draft-new-${field}`))}).setAttribute('data-sdb', 'line-${i}-${field}')`);
+  await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by(`${prefix}-line`))})][${i}].querySelector(${JSON.stringify(by(`${prefix}-${field}`))}).setAttribute('data-sdb', 'line-${i}-${field}')`);
   await page.click(mark);
   await page.evaluate(`document.querySelector(${JSON.stringify(mark)}).select()`);
   await page.type(text);
@@ -4374,6 +4407,7 @@ scenario('SDB-01', 'AC-13 SAVE, RELOAD, LIST, REOPEN — the owner chooses a rea
   await pickStore(other, north.id);
   await waitDraftRows(other, [draft.id], 'the second browser lists the draft', customer.name);
   const otherView = await reopenDraft(other, draft.id, customer.name);
+  await quiet(other, 0); // M7B-INVOICES-P2: the reopen also asks the edit eligibility; every read answered before they are judged
   const otherReads = sentBy(other, isDraftsRoute);
   assert.deepEqual(otherView, view, 'the same draft in another session');
   assert.ok(otherReads.length > 0 && otherReads.every((r) => r.via === 2 && r.status === 200), `through the second entry: ${otherReads.map(apiLine).join('; ')}`);
@@ -5482,6 +5516,513 @@ scenario('SDB-10', 'DA-201 A STALE ALLOWANCE ACROSS A SESSION/USER SWITCH (AC-13
   }, 'released while A\'s section was mounted, A\'s allowance offered nothing and started nothing');
   assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
   assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
+  await assertNoLeak(page);
+}, 180_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P2 — the editor of a saved server draft (AC-16, AC-17): PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}
+// and GET …/{id}/edit-eligibility, answered by the real entry over migration 029. Literals: the shop's own texts.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const EDIT_DRAFT_ACTION = 'store.invoice_draft.update';
+const EDIT_DRAFT_EVENT = 'invoice_draft.updated';
+const isDraftPatch = (store, id) => (r) => r.method === 'PATCH' && r.path === `${draftsPath(store)}/${id}`;
+const isEditEligibility = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}/edit-eligibility`;
+/** ServerInvoiceDrafts.tsx EDIT_TEXT.saved, .later, .unresolved (its start) and EDIT_ELIGIBILITY_TEXT.denied. */
+const EDIT_SAVED = (version) => `Saved on the server: this draft is now version ${version}.`;
+const EDIT_LATER = (version) => `It has been changed on the server again since: this is version ${version}.`;
+const EDIT_UNRESOLVED = 'Not confirmed yet: the server may have saved your changes.';
+const EDIT_DENIED = 'This account may not edit drafts at this store.';
+/** The exact PATCH body the shop must send (invoiceDraftsClient.ts draftEditBody: these keys in this order, the lines in order). */
+const editBodyFor = (tenant, expectedVersion, customerId, lines) => JSON.stringify({
+  expectedTenant: tenant, expectedVersion, customerId,
+  lines: lines.map((l) => ({ description: l.description, quantity: Number(l.quantity), unitPriceCents: l.cents })),
+});
+
+/** E/V/W: one tenant's draft edit audits and edit events, and `draftId`'s stored version, as the database owner reads them. */
+async function editCounts(tenant, draftId) {
+  const [r] = await owner`select
+    (select count(*) from public.audit_event where action_id = ${EDIT_DRAFT_ACTION} and tenant_id = ${tenant})::int as e,
+    (select count(*) from tmpos_internal.outbox_event where event_type = ${EDIT_DRAFT_EVENT}
+      and (payload ->> 'storeId')::uuid in (select store_id from public.store where tenant_id = ${tenant}))::int as v,
+    (select version::int from tmpos_invoice_draft.invoice_draft where draft_id = ${draftId}) as w`;
+  return { E: r.e, V: r.v, W: r.w };
+}
+/** The edit audits of one tenant: scope, store and subject, oldest first. */
+async function editAudits(tenant) {
+  const rows = await owner`select scope_type, store_id, subject_invoice_draft_id from public.audit_event
+    where action_id = ${EDIT_DRAFT_ACTION} and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => ({ scope: r.scope_type, store: r.store_id, subject: r.subject_invoice_draft_id }));
+}
+/** Mark the control `testId` inside line `i` (0-based) of the `prefix` dialog, so a real click can reach it. */
+async function markInLine(page, i, testId, prefix = 'draft-edit') {
+  const mark = `[data-sdb="line-${i}-${testId}"]`;
+  await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by(`${prefix}-line`))})][${i}].querySelector(${JSON.stringify(by(testId))}).setAttribute('data-sdb', 'line-${i}-${testId}')`);
+  return mark;
+}
+/** The editor's lines as its fields hold them: [description, quantity, price] each, in order. */
+const editorLines = (page) => page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('draft-edit-line'))})].map((line) =>
+  ['description', 'quantity', 'price'].map((f) => line.querySelector('[data-testid="draft-edit-' + f + '"]').value))`);
+/** Reopen row `id`, wait for Edit (offered only on the server's own edit eligibility), press it: the editor. */
+async function openEditor(page, store, id, customerName) {
+  const from = st.api.length;
+  await reopenDraft(page, id, customerName);
+  await page.waitFor(() => offered(page, 'draft-view-edit'), 30_000, 'Edit is offered: the server\'s edit eligibility allowed it');
+  const asked = sentBy(page, isEditEligibility(store, id), from);
+  await page.click(by('draft-view-edit'));
+  await page.waitFor(`!!${q('draft-edit')} && !${q('draft-view')}`, 15_000, 'the editor replaced the reopen dialog');
+  return asked;
+}
+/**
+ * Arm a guard that records every PATCH `page` sends from now on (let through, so the case then fails on it rather than
+ * hangs): the "nothing is sent on its own" claims hold it across the page's own observable reaction to what was done
+ * (focusAndSettle, a reload's reads and rendered state) — never across a fixed sleep. disarm() answers what it saw.
+ */
+function patchGuard(page) {
+  const seen = [];
+  const guard = { phase: 'request', match: (r) => r.frameId === page.frameId && r.method === 'PATCH', hit: (r) => { seen.push(apiLine(r)); st.gates.add(guard); }, released: Promise.resolve() };
+  st.gates.add(guard);
+  return { disarm: () => { st.gates.delete(guard); return seen; } };
+}
+/**
+ * A window focus (or a tab return) and the page's OWN reaction to it, as a barrier: the session read(s) it sends for it
+ * (the section's focus check, and a server-customer field's), every one answered, then two frames.
+ */
+async function focusAndSettle(page, event = 'focus') {
+  const from = st.api.length;
+  // A hidden page checks nothing on either event (the section's and the field's own rule): then its reaction is none.
+  const visible = await page.evaluate(`document.visibilityState === 'visible'`);
+  await page.evaluate(event === 'focus' ? `dispatchEvent(new Event('focus'))` : `document.dispatchEvent(new Event('visibilitychange'))`);
+  if (visible) await page.waitFor(() => sentBy(page, isSessionRead, from).length > 0, 15_000, `the page's own session check on ${event}`);
+  await quiet(page, from);
+  await page.settle();
+}
+/** Whether `text` is on the page: in its text or the value of any field (an editor's working copy lives in its inputs). */
+const typedAnywhere = (text) => `document.body.innerText.includes(${JSON.stringify(text)}) || [...document.querySelectorAll('input, textarea')].some((f) => f.value.includes(${JSON.stringify(text)}))`;
+/** The reopen dialog after a save: its saved note, its version, its lines. */
+const savedViewOf = (page) => page.evaluate(`({
+  saved: ${q('draft-view-saved')}?.textContent.trim() ?? null,
+  version: ${q('draft-view-version')}?.textContent.trim() ?? null,
+  lines: [...document.querySelectorAll(${JSON.stringify(by('draft-view-line'))})].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
+})`);
+
+scenario('SDB-11', 'AC-16 EDIT, RELOAD, SECOND SESSION — the owner edits a saved draft (another customer, a line edited, one added, one removed, one moved up): Edit only on the server\'s edit eligibility; ONE PATCH of the exact body under a v4 key, 200 version 2; one version step, one store-scope edit audit naming the draft, one edit event, one completion; "Saved" after ONE read-back; the reload and a second browser through the second entry read version 2 and the new lines; a Create-level account sees no Edit (the server\'s denial) and its direct PATCH from the page is refused 403 with nothing written', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d11', ['main']);
+  const [avery, blake] = await seedCustomers(tenant, [`M7SDB d11 Avery ${SUFFIX}`, `M7SDB d11 Blake ${SUFFIX}`]);
+  const staff = await actor('d11-staff', [grant(tenant, 'sales_staff'), storeGrant(tenant, main.id, 'sales_staff')], { role: 'sales_staff' });
+  const lines = [typed(`Screen ${SUFFIX}`, '1', '100', 10_000), typed(`Cable ${SUFFIX}`, '2', '5.25', 525)];
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [], 'no draft yet');
+  await composeDraft(page, avery.id, lines);
+  await page.click(by('draft-new-save'));
+  await page.waitFor(`!${q('draft-new')} && ${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DRAFT_SAVED)}`, 30_000, 'the draft saved and read back');
+  const [created] = await storedDrafts(tenant);
+  await waitDraftRows(page, [created.id], 'the saved draft is listed', avery.name);
+
+  // 1. The editor: Edit offered on the server's own answer, seeded from the draft just read; then the user's changes.
+  const asked = await openEditor(page, main.id, created.id, avery.name);
+  const seeded = { lines: await editorLines(page), version: await textOf(page, 'draft-edit-version'), customer: await boundId(page) };
+  await openPicker(page, 'picker-change');
+  await pickRow(page, blake.id);
+  await typeLineField(page, 0, 'description', `Screen glass ${SUFFIX}`, 'draft-edit');
+  await page.click(by('draft-edit-add-line'));
+  await page.waitFor(`document.querySelectorAll(${JSON.stringify(by('draft-edit-line'))}).length === 3`, 10_000, 'a third line');
+  await typeLineField(page, 2, 'description', `Labour ${SUFFIX}`, 'draft-edit');
+  await typeLineField(page, 2, 'quantity', '3', 'draft-edit');
+  await typeLineField(page, 2, 'price', '40', 'draft-edit');
+  await page.click(await markInLine(page, 1, 'draft-edit-remove-line')); // Cable goes
+  await page.waitFor(`document.querySelectorAll(${JSON.stringify(by('draft-edit-line'))}).length === 2`, 10_000, 'the line removed');
+  await page.click(await markInLine(page, 1, 'draft-edit-up')); // Labour moves up
+  const edited = [typed(`Labour ${SUFFIX}`, '3', '40', 4_000), typed(`Screen glass ${SUFFIX}`, '1', '100.00', 10_000)]; // its seeded price, untouched
+  const working = await editorLines(page);
+  const before = await counts();
+  const dBefore = await draftCounts(tenant);
+  const eBefore = await editCounts(tenant, created.id);
+  const from = st.api.length;
+  await page.click(by('draft-edit-save'));
+  await page.waitFor(`!${q('draft-edit')} && ${q('draft-view-saved')}?.textContent.trim() === ${JSON.stringify(EDIT_SAVED(2))} && ${q('draft-view-version')}?.textContent.trim() === '2'`,
+    30_000, 'saved, the editor closed, the draft read back at version 2');
+  await quiet(page, from);
+  const view = await savedViewOf(page);
+  const patches = sentBy(page, isDraftPatch(main.id, created.id));
+  const readBack = sentBy(page, isDraftGet(main.id, created.id), from);
+  const [stored] = await storedDrafts(tenant);
+  const eDelta = minus(await editCounts(tenant, created.id), eBefore);
+  const dDelta = minus(await draftCounts(tenant), dBefore);
+  record('SDB-11', { phase: 'edited', asked: asked.map(apiLine), seeded, working, patches: patches.map(apiLine), readBack: readBack.map(answered), eDelta, dDelta, view });
+
+  assert.deepEqual(asked.map(answered), ['200'], 'Edit followed ONE edit-eligibility read, answered allowed');
+  assert.equal(asked[0].body, '', 'a read: no body');
+  assert.deepEqual(seeded, { lines: [[lines[0].description, '1', '100.00'], [lines[1].description, '2', '5.25']], version: '1', customer: avery.id },
+    'the editor holds the draft as the server answered it: its customer, its lines in order (prices as dollars), version 1');
+  assert.deepEqual(working, edited.map((l) => [l.description, l.quantity, l.price]), 'the working copy: Labour moved up, Cable removed');
+  assert.equal(patches.length, 1, `ONE PATCH: ${patches.map(apiLine).join('; ')}`);
+  const [patch] = patches;
+  assert.equal(patch.query, '', 'nothing rides the query');
+  assert.equal(patch.body, editBodyFor(tenant, 1, blake.id, edited), 'exactly { expectedTenant, expectedVersion, customerId, lines }, in the new order');
+  assert.match(patch.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.equal(patch.headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the request-intent header');
+  assert.deepEqual(Object.keys(patch.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], 'no selecting header');
+  assert.equal(patch.status, 200);
+  assert.deepEqual(JSON.parse(patch.replied.text), { draftId: created.id, version: 2, changed: true }, 'the sealed answer');
+  assert.deepEqual(readBack.map(answered), ['200'], 'read back ONCE, never a second PATCH');
+  assert.ok(readBack[0].at > patch.doneAt, 'the read-back follows the 200');
+  assert.deepEqual(stored, {
+    ...created, customerId: blake.id, version: 2, lineCount: 2, subtotalCents: subtotalOf(edited), lines: linesFor(edited),
+  }, 'the draft as stored: the new customer, the ordered lines and subtotal, version 2; id, store, status, currency and creation time unchanged');
+  assert.deepEqual(eDelta, { E: 1, V: 1, W: 1 }, 'one edit audit, one edit event, one version step');
+  assert.deepEqual(dDelta, { D: 0, L: 0, A: 0, O: 0 }, 'no new draft, the lines replaced (two before, two after), no create audit or event');
+  assert.deepEqual(await editAudits(tenant), [{ scope: 'store', store: main.id, subject: created.id }], 'the edit audit is store-scope and names the draft');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, 'the edit: one completion, one idempotency record');
+  assert.deepEqual(view, { saved: EDIT_SAVED(2), version: '2', lines: viewCells(edited) }, 'the read-back: version 2 and the new lines');
+
+  // 2. A reload: the server's draft, version 2.
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the reloaded Invoices page');
+  const reloaded = { editor: await has(page, 'draft-edit'), view: await has(page, 'draft-view') };
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [created.id], 'the edited draft after a reload', blake.name);
+  const afterReload = { ...(await reopenDraft(page, created.id, blake.name)), version: await textOf(page, 'draft-view-version') };
+  await closeView(page);
+  assert.deepEqual(reloaded, { editor: false, view: false }, 'a fresh page: no editor, no dialog');
+  assert.deepEqual([afterReload.version, afterReload.customer, afterReload.lines], ['2', blake.name, viewCells(edited)], 'the reload reads version 2');
+
+  // 3. A second session: a second browser through the second entry.
+  const other = viaSecond(await recordWrites(await openPage()));
+  await signIn(other, boss);
+  await openDrafts(other);
+  await pickStore(other, main.id);
+  await waitDraftRows(other, [created.id], 'the second browser lists the draft', blake.name);
+  const otherView = { ...(await reopenDraft(other, created.id, blake.name)), version: await textOf(other, 'draft-view-version') };
+  const otherReads = sentBy(other, isDraftGet(main.id, created.id));
+  assert.deepEqual([otherView.version, otherView.lines], ['2', viewCells(edited)], 'the second session reads version 2');
+  assert.ok(otherReads.length === 1 && otherReads[0].via === 2 && otherReads[0].status === 200, `through the second entry: ${otherReads.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(other, (r) => r.method === 'PATCH'), [], 'the second browser sent no PATCH');
+  await closeView(other);
+
+  // 4. A Create-level account (sales_staff's default Invoices level): the draft opens, but the server refuses Edit.
+  const sales = await recordWrites(await openPage());
+  await signIn(sales, staff);
+  await openDrafts(sales);
+  await pickStore(sales, main.id);
+  await waitDraftRows(sales, [created.id], 'the sales account lists the draft (Invoices View and up)');
+  await sales.click(`${by('drafts-row')}[data-id="${created.id}"] ${by('drafts-open')}`);
+  await waitData(sales, 'draft-view-edit-state', 'phase', 'denied');
+  const salesView = { edit: await has(sales, 'draft-view-edit'), text: await textOf(sales, 'draft-view-edit-state'), reads: sentBy(sales, isEditEligibility(main.id, created.id)).map(answered) };
+  const token = answeredTokens(sentBy(sales, () => true)).at(-1);
+  assert.ok(typeof token === 'string', 'the session CSRF token the entry answered the sales account');
+  const sBefore = await counts();
+  const sDraft = await editCounts(tenant, created.id);
+  const sFrom = st.api.length;
+  const key = randomUUID();
+  const directBody = editBodyFor(tenant, 2, avery.id, lines);
+  const direct = await sales.evaluate(`fetch(${JSON.stringify(`${draftsPath(main.id)}/${created.id}`)}, {
+    method: 'PATCH', credentials: 'include', mode: 'same-origin', cache: 'no-store', redirect: 'error',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ${JSON.stringify(CSRF_HEADER)}: ${JSON.stringify(CSRF_HEADER_VALUE)},
+      ${JSON.stringify(SESSION_CSRF_HEADER)}: ${JSON.stringify(token)}, 'Idempotency-Key': ${JSON.stringify(key)} },
+    body: ${JSON.stringify(directBody)},
+  }).then((r) => r.status)`);
+  await quiet(sales, sFrom);
+  record('SDB-11', { phase: 'create level', salesView, direct, patches: sentBy(sales, (r) => r.method === 'PATCH').map(apiLine) });
+  assert.deepEqual(salesView, { edit: false, text: EDIT_DENIED, reads: ['403 forbidden'] }, 'no Edit: the server\'s edit eligibility is 403 for Invoices Create');
+  assert.equal(direct, 403, 'the direct PATCH from the page is refused');
+  assert.deepEqual(sentBy(sales, (r) => r.method === 'PATCH').map(answered), ['403 forbidden'], 'ONE PATCH, refused');
+  assert.deepEqual(await editCounts(tenant, created.id), sDraft, 'nothing written: version 2, no edit audit or event');
+  await assertDelta(sBefore, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'refused before anything is recorded');
+  assert.equal((await storedDrafts(tenant))[0].customerId, blake.id, 'the draft keeps the owner\'s edit');
+
+  await assertDraftsNowhere([page, other, sales], [created.id, patch.headers['idempotency-key'], blake.id, patch.body, ...edited.map((l) => l.description), key, directBody]);
+  await assertNoLeak(page);
+}, 300_000);
+
+scenario('SDB-12', 'AC-16 A CONFLICT NEEDS EXPLICIT REVIEW — two browsers (two entries) edit the same draft at version 1; the second saves first (version 2); the first\'s save is the sealed 409 write_conflict: nothing overwritten (its completion only), the working copy kept, the server\'s draft read afresh and shown beside it, nothing sent on its own; Reapply sends the same working copy under a NEW key at version 2 and lands version 3', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d12', ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d12 Dale ${SUFFIX}`]);
+  const [draftId] = await seedDrafts(tenant, main.id, customer.id, boss.id, 1, 'M7SDB d12 seed');
+  const seedLine = `M7SDB d12 seed 1 ${SUFFIX}`;
+  const theirs = [typed(`Theirs ${SUFFIX}`, '1', '1.00', 100)];
+  const mine = [typed(`Mine ${SUFFIX}`, '1', '1.00', 100)];
+  const first = await recordWrites(await openPage());
+  await signIn(first, boss);
+  await openDrafts(first);
+  await pickStore(first, main.id);
+  await waitDraftRows(first, [draftId], 'the seeded draft', customer.name);
+  await openEditor(first, main.id, draftId, customer.name);
+  const second = viaSecond(await recordWrites(await openPage()));
+  await signIn(second, boss);
+  await openDrafts(second);
+  await pickStore(second, main.id);
+  await waitDraftRows(second, [draftId], 'the seeded draft, second browser', customer.name);
+  await openEditor(second, main.id, draftId, customer.name);
+  const both = { first: await textOf(first, 'draft-edit-version'), second: await textOf(second, 'draft-edit-version'), lines: await editorLines(first) };
+
+  // The second browser saves first.
+  await typeLineField(second, 0, 'description', theirs[0].description, 'draft-edit');
+  await second.click(by('draft-edit-save'));
+  await second.waitFor(`${q('draft-view-saved')}?.textContent.trim() === ${JSON.stringify(EDIT_SAVED(2))}`, 30_000, 'the second browser saved version 2');
+
+  // The first browser's save, at version 1: a conflict, reviewed.
+  await typeLineField(first, 0, 'description', mine[0].description, 'draft-edit');
+  const before = await counts();
+  const eBefore = await editCounts(tenant, draftId);
+  const from = st.api.length;
+  await first.click(by('draft-edit-save'));
+  await waitData(first, 'draft-edit-conflict', 'phase', 'ready');
+  await quiet(first, from);
+  const guard = patchGuard(first); // nothing on its own: across a focus and the page's own reaction to it
+  await focusAndSettle(first);
+  const unexpected = guard.disarm();
+  const conflict = {
+    status: await textOf(first, 'draft-edit-status'), server: await textOf(first, 'draft-edit-server'), mine: await textOf(first, 'draft-edit-mine'),
+    working: await editorLines(first), saveOff: !(await offered(first, 'draft-edit-save')), reapply: await offered(first, 'draft-edit-reapply'),
+  };
+  const sent = sentBy(first, () => true, from);
+  const [stale] = sentBy(first, isDraftPatch(main.id, draftId));
+  const fresh = sentBy(first, isDraftGet(main.id, draftId), from);
+  const [afterConflict] = await storedDrafts(tenant);
+  record('SDB-12', { phase: 'conflict', both, conflict, sent: sent.map(apiLine), unexpected });
+  assert.deepEqual(unexpected, [], 'no PATCH on its own after the conflict, a focus included');
+  assert.deepEqual(both, { first: '1', second: '1', lines: [[seedLine, '1', '1.00']] }, 'both editors opened the draft at version 1');
+  assert.equal(stale.body, editBodyFor(tenant, 1, customer.id, mine), 'the first browser sent its working copy at version 1');
+  assert.deepEqual([stale.status, stale.replied.text], [409, '{"error":"write_conflict"}'], 'the sealed conflict');
+  assert.deepEqual(sentBy(first, (r) => r.method === 'PATCH').length, 1, 'ONE PATCH from the first browser: nothing re-sent, nothing rebased on its own');
+  assert.deepEqual(fresh.map(answered), ['200'], 'ONE fresh read of the server\'s draft for the review');
+  assert.deepEqual(afterConflict.lines.map((l) => l.description), [theirs[0].description], 'nothing overwritten: the server keeps the second browser\'s line');
+  assert.equal(afterConflict.version, 2);
+  assert.deepEqual(minus(await editCounts(tenant, draftId), eBefore), { E: 0, V: 0, W: 0 }, 'the conflict wrote no edit, audit or event');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, 'the conflict: its sealed completion only');
+  assert.ok(conflict.status?.startsWith('Not saved: this draft was changed on the server after you opened it.'), conflict.status);
+  assert.ok(conflict.server?.includes('version 2') && conflict.server.includes(theirs[0].description), `the server's draft shown: ${conflict.server}`);
+  assert.ok(conflict.mine?.includes(mine[0].description), `the working copy shown: ${conflict.mine}`);
+  assert.deepEqual([conflict.working, conflict.saveOff, conflict.reapply], [[[mine[0].description, '1', '1.00']], true, true], 'the working copy kept; Save waits for a decision; Reapply offered');
+
+  // Reapply: the same working copy, a NEW key, the version the review read.
+  const again = st.api.length;
+  await first.click(by('draft-edit-reapply'));
+  await first.waitFor(`${q('draft-view-saved')}?.textContent.trim() === ${JSON.stringify(EDIT_SAVED(3))}`, 30_000, 'reapplied: version 3');
+  await quiet(first, again);
+  const patches = sentBy(first, isDraftPatch(main.id, draftId));
+  const [, reapplied] = patches;
+  const [last] = await storedDrafts(tenant);
+  record('SDB-12', { phase: 'reapplied', patches: patches.map(apiLine) });
+  assert.equal(patches.length, 2, 'one more PATCH, on the press');
+  assert.notEqual(reapplied.headers['idempotency-key'], stale.headers['idempotency-key'], 'a NEW key');
+  assert.match(reapplied.headers['idempotency-key'] ?? '', UUID_V4_RE);
+  assert.equal(reapplied.body, editBodyFor(tenant, 2, customer.id, mine), 'the same working copy at the version the review read');
+  assert.deepEqual(JSON.parse(reapplied.replied.text), { draftId, version: 3, changed: true });
+  assert.deepEqual([last.version, last.lines.map((l) => l.description)], [3, [mine[0].description]], 'version 3, the first browser\'s line');
+  assert.deepEqual(await editAudits(tenant), [{ scope: 'store', store: main.id, subject: draftId }, { scope: 'store', store: main.id, subject: draftId }], 'two edits, two audits');
+  const [theirsPatch] = sentBy(second, isDraftPatch(main.id, draftId));
+  await assertDraftsNowhere([first, second], [
+    draftId, stale.headers['idempotency-key'], reapplied.headers['idempotency-key'], theirsPatch.headers['idempotency-key'],
+    stale.body, reapplied.body, theirsPatch.body, mine[0].description, theirs[0].description,
+  ]);
+  await assertNoLeak(first);
+}, 300_000);
+
+scenario('SDB-13', 'AC-17 UNKNOWN OUTCOME — the PATCH commits and its answer is dropped at the front: "Not confirmed yet", never saved; a focus and a visibilitychange event send nothing; "Check again" sends exactly one more PATCH with the SAME key and byte-identical body (the network log), answered 200 as a replay; ONE version step in the database; a second lost edit followed by a reload sends nothing and restores no editor', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d13', ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d13 Eden ${SUFFIX}`]);
+  const [draftId] = await seedDrafts(tenant, main.id, customer.id, boss.id, 1, 'M7SDB d13 seed');
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [draftId], 'the seeded draft', customer.name);
+  await openEditor(page, main.id, draftId, customer.name);
+  const changed = [typed(`Unconfirmed ${SUFFIX}`, '1', '1.00', 100)];
+  await typeLineField(page, 0, 'description', changed[0].description, 'draft-edit');
+  const myPatches = () => sentBy(page, isDraftPatch(main.id, draftId));
+  const before = await counts();
+  const eBefore = await editCounts(tenant, draftId);
+  let lost = 0;
+  try {
+    // st.lose: the entry answered (and committed); that answer never reaches the page.
+    st.lose = (rec, phase) => phase === 'response' && isDraftPatch(main.id, draftId)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-edit-save'));
+    await waitData(page, 'draft-edit-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const [first] = myPatches();
+  const afterLoss = { patches: myPatches().map((r) => `${r.status} ${r.lost ?? 'delivered'}`), e: minus(await editCounts(tenant, draftId), eBefore), card: await textOf(page, 'draft-edit-attempt') };
+  record('SDB-13', { phase: 'lost reply', ...afterLoss });
+  assert.deepEqual(afterLoss.patches, ['200 response'], 'ONE PATCH: it committed, its answer lost at the front');
+  assert.deepEqual(afterLoss.e, { E: 1, V: 1, W: 1 }, 'committed: one version step, one audit, one event');
+  assert.ok(afterLoss.card?.startsWith(EDIT_UNRESOLVED), `held, never saved: ${afterLoss.card}`);
+  assert.equal(await has(page, 'draft-view-saved'), false, 'never "Saved" on an answer that did not arrive');
+
+  // Nothing re-sends on its own: a focus and a tab return, each held until the page's own session check has answered.
+  const mid = await counts();
+  const guard = patchGuard(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  const unexpected = guard.disarm();
+  const held = { patches: myPatches().length, unexpected, state: await page.evaluate(`${q('draft-edit-attempt')}?.dataset.state ?? null`), check: await offered(page, 'draft-edit-check-again') };
+  assert.deepEqual(held, { patches: 1, unexpected: [], state: 'unresolved', check: true }, 'still ONE PATCH, still unresolved, Check again offered');
+
+  // Check again: the SAME key and the SAME bytes, once.
+  const again = st.api.length;
+  await page.click(by('draft-edit-check-again'));
+  await page.waitFor(`!${q('draft-edit')} && ${q('draft-view-saved')}?.textContent.trim() === ${JSON.stringify(EDIT_SAVED(2))}`, 30_000, 'confirmed by the check, read back');
+  await quiet(page, again);
+  const patches = myPatches();
+  const second = patches[1];
+  record('SDB-13', { phase: 'Check again', patches: patches.map(apiLine), replayed: second?.replied.headers['idempotent-replayed'] ?? null });
+  assert.equal(patches.length, 2, 'exactly one more PATCH, on the press');
+  assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
+  assert.deepEqual([second.path, second.headers['idempotency-key'], second.body], [first.path, first.headers['idempotency-key'], first.body], 'the SAME draft, key and byte-identical body');
+  assert.equal(second.headers[SESSION_CSRF], first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
+  assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'], JSON.parse(second.replied.text)], [200, 'true', { draftId, version: 2, changed: true }], 'answered as a replay of the committed edit');
+  assert.deepEqual(minus(await editCounts(tenant, draftId), eBefore), { E: 1, V: 1, W: 1 }, 'still ONE version step, one audit, one event');
+  await assertDelta(mid, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'the replay wrote nothing');
+  await assertDelta(before, { K: 1, L: 1 }, 'one completion and one idempotency record for the edit');
+
+  // A second edit whose answer is lost, then a reload: nothing is sent, no editor comes back; that PATCH committed.
+  await closeView(page);
+  await openEditor(page, main.id, draftId, customer.name);
+  await typeLineField(page, 0, 'description', `Reloaded ${SUFFIX}`, 'draft-edit');
+  lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isDraftPatch(main.id, draftId)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-edit-save'));
+    await waitData(page, 'draft-edit-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const reload = st.api.length;
+  const reloadGuard = patchGuard(page); // across the reload, its reads, the list it shows and a focus check
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the reloaded Invoices page');
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [draftId], 'the draft after the reload', customer.name);
+  await focusAndSettle(page);
+  const reloaded = {
+    editor: await has(page, 'draft-edit'), attempt: await has(page, 'draft-edit-attempt'), patches: sentBy(page, isDraftPatch(main.id, draftId), reload).length,
+    unexpected: reloadGuard.disarm(),
+  };
+  record('SDB-13', { phase: 'reload', reloaded, version: (await editCounts(tenant, draftId)).W });
+  assert.deepEqual(reloaded, { editor: false, attempt: false, patches: 0, unexpected: [] }, 'a reload restores no editor and sends nothing');
+  assert.equal((await editCounts(tenant, draftId)).W, 3, 'the second lost edit committed under its own attempt');
+  assert.equal(myPatches().length, 3, 'three PATCHes in the whole case');
+  const secondAttempt = myPatches()[2];
+  await assertDraftsNowhere([page], [
+    draftId, first.headers['idempotency-key'], first.body, changed[0].description,
+    secondAttempt.headers['idempotency-key'], secondAttempt.body, `Reloaded ${SUFFIX}`,
+  ]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-14', 'AC-17 SIGN-OUT DURING AN UNKNOWN OUTCOME (observable no-old-content) — an edit\'s PATCH commits and its answer is lost; the owner signs out (the route guard unmounts the page) and signs in again in the same document: no editor, attempt, Check again or typed line shows, and no PATCH leaves the page after the sign-out; the server kept the committed edit', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('d14', ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB d14 Finn ${SUFFIX}`]);
+  const [draftId] = await seedDrafts(tenant, main.id, customer.id, boss.id, 1, 'M7SDB d14 seed');
+  const secret = `Signed out line ${SUFFIX}`;
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [draftId], 'the seeded draft', customer.name);
+  await openEditor(page, main.id, draftId, customer.name);
+  await typeLineField(page, 0, 'description', secret, 'draft-edit');
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isDraftPatch(main.id, draftId)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-edit-save'));
+    await waitData(page, 'draft-edit-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await page.evaluate(`window.__sdbMarker = true`);
+  const guard = patchGuard(page); // across the sign-out, the sign-in, the section's reads and a focus check
+  const out = await signOutHere(page);
+  await signInHere(page, boss);
+  await page.waitFor(`window.__sdbMarker === true`, 5_000, 'the same document');
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [draftId], 'the draft, listed again', customer.name);
+  await focusAndSettle(page);
+  await quiet(page, out);
+  const seen = {
+    unexpected: guard.disarm(),
+    editor: await has(page, 'draft-edit'), attempt: await has(page, 'draft-edit-attempt'), check: await has(page, 'draft-edit-check-again'),
+    view: await has(page, 'draft-view'), typed: await page.evaluate(typedAnywhere(secret)),
+    patchesAfter: sentBy(page, (r) => r.method === 'PATCH', out).map(apiLine),
+  };
+  record('SDB-14', { seen, version: (await editCounts(tenant, draftId)).W });
+  assert.deepEqual(seen, { unexpected: [], editor: false, attempt: false, check: false, view: false, typed: false, patchesAfter: [] },
+    'nothing of the old editor after the sign-out and sign-in: no editor, attempt, Check again, dialog or typed line, no PATCH');
+  assert.equal(sentBy(page, (r) => r.method === 'PATCH').length, 1, 'ONE PATCH in the whole case, the lost one');
+  assert.equal((await editCounts(tenant, draftId)).W, 2, 'the server kept the edit it committed under the old attempt');
+  const [lostPatch] = sentBy(page, (r) => r.method === 'PATCH');
+  await assertDraftsNowhere([page], [draftId, lostPatch.headers['idempotency-key'], lostPatch.body, secret]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-15', 'AC-17 A LATE PATCH ANSWER ACTUALLY DELIVERED (DA-198 window) — user A\'s PATCH is answered by the entry (committed) and that answer parked at the front; B signs in in another tab (B\'s profile held, A\'s page mounted: the section heard the sign-out, the editor closed); released, the answer IS delivered to A\'s page and shows nothing — no "Saved", no read-back, no editor — and starts nothing; only A\'s logout carries A\'s token after the switch', async () => {
+  const tenant = await newTenant('d15');
+  const westName = `M7SDB d15 west ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const a = await actor('d15-a', [grant(tenant, 'store_owner'), storeGrant(tenant, west.id, 'store_owner')], { role: 'store_owner' });
+  const b = await actor('d15-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const [customer] = await seedCustomers(tenant, [`M7SDB d15 Gale ${SUFFIX}`]);
+  const [draftId] = await seedDrafts(tenant, west.id, customer.id, a.id, 1, 'M7SDB d15 seed');
+  const secret = `Late line ${SUFFIX}`;
+  const page = await watchNetwork(await recordWrites(await openPage()));
+  await signIn(page, a);
+  await openDrafts(page);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, [draftId], 'the seeded draft', customer.name);
+  await openEditor(page, west.id, draftId, customer.name);
+  await typeLineField(page, 0, 'description', secret, 'draft-edit');
+  const path = `${draftsPath(west.id)}/${draftId}`;
+  const parkMark = page.net.mark(path);
+  const parked = gate((r) => r.frameId === page.frameId && isDraftPatch(west.id, draftId)(r), 'response');
+  await page.click(by('draft-edit-save'));
+  const patch = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(patch, 'the PATCH was answered by the entry and its answer parked at the front');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  const from = st.api.length;
+  const profile = await switchHeld(page, b, from);
+  await page.settle();
+  const closed = { editor: await has(page, 'draft-edit'), typed: await page.evaluate(typedAnywhere(secret)) };
+  parked.release();
+  await page.waitFor(() => patch.handedBack === true, 15_000, 'the parked answer was handed back to the browser');
+  const parkedEnd = await page.net.endOfParked(path, parkMark);
+  assert.ok(parkedEnd !== null, 'the browser ended the parked request');
+  await page.settle();
+  const whileMounted = {
+    section: await has(page, 'drafts-section'), stores: await page.evaluate(`${q('drafts-stores-state')}?.dataset.phase ?? null`),
+    editor: await has(page, 'draft-edit'), saved: await has(page, 'draft-view-saved'), view: await has(page, 'draft-view'),
+  };
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from);
+  const after = sentBy(page, () => true, from);
+  const seen = {
+    closed, whileMounted, browserEnd: parkedEnd,
+    readBacks: after.filter((r) => isDraftGet(west.id, draftId)(r)).map(apiLine),
+    patches: after.filter((r) => r.method === 'PATCH').map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+  };
+  record('SDB-15', { parked: answered(patch), ...seen, requests: after.map(apiLine), version: (await editCounts(tenant, draftId)).W });
+  assert.equal(patch.status, 200, 'the parked answer was the committed edit\'s 200');
+  assert.equal((await editCounts(tenant, draftId)).W, 2, 'the server committed it under the old attempt');
+  assert.deepEqual(seen, {
+    closed: { editor: false, typed: false },
+    whileMounted: { section: true, stores: 'signed-out', editor: false, saved: false, view: false },
+    browserEnd: parkedEnd, readBacks: [], patches: [], carriersOfA: [],
+  }, 'the editor closed at the sign-out; the late answer, delivered while A\'s section was mounted, showed nothing and started nothing');
+  assert.equal(parkedEnd, 'finished', 'the browser RECEIVED the answer: no session end aborts the PATCH (it carries only the client\'s own request deadline), so it was delivered to the page');
+  assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
+  await assertDraftsNowhere([page], [draftId, patch.headers['idempotency-key'], patch.body, secret]);
   await assertNoLeak(page);
 }, 180_000);
 

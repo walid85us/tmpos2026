@@ -4,14 +4,16 @@
 // every line and on the subtotal, the description rule (the customer name rule at 256) and the body's 64 KiB in exact UTF-8
 // bytes. Every accepted answer is one server/runtime/invoiceDrafts.ts and storeDirectory.ts would serve, and nothing they
 // would refuse to serve is accepted. M7B-INVOICES-P1-R2: the eligibility read (IDC-17, IDC-18) — `allowed` only for the
-// exact closed body, each refusal only in its envelope, everything else `unavailable`. Ids are built at run time (secret scanning), special characters from code points, so
+// exact closed body, each refusal only in its envelope, everything else `unavailable`. M7B-INVOICES-P2: a detail's version is
+// any safe integer of 1 or more (IDC-05), the edit's body (IDC-19), its PATCH and every answer it may get (IDC-20..IDC-22) and
+// the edit eligibility (IDC-23). Ids are built at run time (secret scanning), special characters from code points, so
 // the test data stays ASCII.
 import { Buffer } from 'node:buffer';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, STORES_PATH, createInvoiceDraftsClient, draftBody, draftPathOf, draftsPathOf, eligibilityPathOf, formatCents,
-  isDraftBodyTooLarge, isDraftCreatedAt, normalizeDraftDescription, parsePriceCents, parseQuantity,
+  DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, MAX_EXPECTED_VERSION, STORES_PATH, createInvoiceDraftsClient, draftBody, draftEditBody, draftPathOf, draftsPathOf,
+  editEligibilityPathOf, eligibilityPathOf, formatCents, isDraftBodyTooLarge, isDraftCreatedAt, normalizeDraftDescription, parsePriceCents, parseQuantity, priceText,
 } from './invoiceDraftsClient';
 import { normalizeCustomerName } from './customersClient';
 
@@ -519,4 +521,164 @@ test('IDC-18. eligibility refusals: 401 signed-out, 403 denied, 429 rate-limited
     assert.deepEqual(await client.eligibility(store, CSRF), { kind: 'denied' }, store);
   }
   assert.deepEqual(calls, []);
+});
+
+// ---- M7B-INVOICES-P2: the edit ----
+
+const EDIT_LINES = [{ description: '  Cable ', quantity: '2', unitPrice: '2.75' }, { description: 'Screen repair', quantity: '1', unitPrice: '20' }];
+const EDIT = draftEditBody(TENANT, 3, CUSTOMER, EDIT_LINES);
+const updated = (extra: Record<string, unknown> = {}) => ({ draftId: DRAFT, version: 4, changed: true, ...extra });
+
+test('IDC-19. the edit body is built once by the create\'s own line check, in a fixed key order (expectedTenant, expectedVersion, customerId, lines — no currency), the lines in the order given; a version outside 1..2^53-2 builds nothing; a price is seeded as the text it reads back', () => {
+  assert.equal(EDIT.kind, 'ok');
+  if (EDIT.kind !== 'ok') return;
+  assert.equal(EDIT.body, JSON.stringify({
+    expectedTenant: TENANT, expectedVersion: 3, customerId: CUSTOMER,
+    lines: [{ description: 'Cable', quantity: 2, unitPriceCents: 275 }, { description: 'Screen repair', quantity: 1, unitPriceCents: 2000 }],
+  }));
+  assert.deepEqual([EDIT.lineCount, EDIT.subtotalCents], [2, 2550]);
+  // The same lines give the same per-line verdicts as the create's body: one check, shared.
+  const lines = [{ description: '', quantity: '0', unitPrice: '1.234' }, { description: 'ok', quantity: '1', unitPrice: '1' }, { description: 'big', quantity: '2', unitPrice: '90071992547409.91' }];
+  const edit = draftEditBody(TENANT, 1, CUSTOMER, lines);
+  const create = draftBody(TENANT, CUSTOMER, lines);
+  assert.equal(edit.kind, 'invalid');
+  assert.deepEqual(edit, create);
+  const sum = [{ description: 'a', quantity: '1', unitPrice: '90071992547409.91' }, { description: 'b', quantity: '1', unitPrice: '0.01' }];
+  assert.deepEqual(draftEditBody(TENANT, 1, CUSTOMER, sum), draftBody(TENANT, CUSTOMER, sum)); // the subtotal over 2^53-1
+  for (const version of [0, -1, 1.5, MAX_EXPECTED_VERSION + 1, Number.NaN, -0]) {
+    assert.equal(draftEditBody(TENANT, version, CUSTOMER, EDIT_LINES).kind, 'invalid', String(version));
+  }
+  assert.equal(draftEditBody(TENANT, MAX_EXPECTED_VERSION, CUSTOMER, EDIT_LINES).kind, 'ok');
+  assert.equal(draftEditBody(TENANT, 1, 'c1', EDIT_LINES).kind, 'invalid');
+  assert.equal(draftEditBody(TENANT, 1, CUSTOMER, []).kind, 'invalid');
+  for (const cents of [0, 1, 99, 100, 1250, 275, 123456789, MAX]) assert.equal(parsePriceCents(priceText(cents)), BigInt(cents), String(cents));
+  assert.deepEqual([priceText(0), priceText(5), priceText(1250), priceText(MAX)], ['0.00', '0.05', '12.50', '90071992547409.91']);
+});
+
+test('IDC-20. an edit is ONE PATCH of the draft\'s path with the exact bytes and the intent, session and key headers; saved ONLY on an exact 200 for that draft whose version is the expected one plus one (changed) or the expected one (not changed); a replay says so', async () => {
+  if (EDIT.kind !== 'ok') return assert.fail('body');
+  const { calls, client } = scripted(json(200, updated()));
+  assert.deepEqual(await client.updateDraft(STORE, DRAFT, EDIT.body, KEY, CSRF), { kind: 'saved', result: updated(), replayed: false });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, draftPathOf(STORE, DRAFT));
+  assert.equal(calls[0].init.method, 'PATCH');
+  assert.equal(calls[0].init.body, EDIT.body); // the very string: never re-serialized
+  const h = headersOf(calls[0]);
+  assert.equal(h.get('idempotency-key'), KEY);
+  assert.equal(h.get('x-tmpos-csrf'), '1');
+  assert.equal(h.get('x-tmpos-session-csrf'), CSRF);
+  assert.equal(h.get('content-type'), 'application/json');
+  assert.deepEqual([calls[0].init.credentials, calls[0].init.mode, calls[0].init.cache, calls[0].init.redirect], ['include', 'same-origin', 'no-store', 'error']);
+  const send = (res: Response | Error) => scripted(res).client.updateDraft(STORE, DRAFT, EDIT.body, KEY, CSRF);
+  assert.deepEqual(await send(json(200, updated({ version: 3, changed: false }))), { kind: 'saved', result: updated({ version: 3, changed: false }), replayed: false });
+  assert.deepEqual(await send(json(200, updated(), { 'idempotent-replayed': 'true' })), { kind: 'saved', result: updated(), replayed: true });
+  const unknown = { kind: 'unknown', responded: true };
+  for (const [body, headers] of [
+    [updated({ version: 3 }), {}], [updated({ version: 5 }), {}], [updated({ version: 4, changed: false }), {}], // not the version this body's expectedVersion gives
+    [updated({ draftId: uuid(0xd42) }), {}], [updated({ draftId: DRAFT.toUpperCase() }), {}], [updated({ changed: 'true' }), {}], [updated({ version: '4' }), {}],
+    [updated({ extra: 1 }), {}], [{ draftId: DRAFT, version: 4 }, {}], [{ draft: updated() }, {}], [updated(), { 'idempotent-replayed': 'false' }],
+    [updated(), { 'idempotent-replayed': 'TRUE' }], [updated({ version: 0, changed: false }), {}],
+  ] as Array<[unknown, Record<string, string>]>) {
+    assert.deepEqual(await send(json(200, body, headers)), unknown, JSON.stringify([body, headers]).slice(0, 160));
+  }
+  for (const status of [201, 204]) {
+    assert.deepEqual(await send(status === 204 ? new Response(null, { status }) : json(status, updated())), unknown, String(status));
+  }
+});
+
+test('IDC-21. every other edit answer maps to one outcome, told apart by status AND error word AND shape: the sealed 409s, the chain\'s 409s, its 404 and 422, the shared refusals; anything undecided is unknown', async () => {
+  if (EDIT.kind !== 'ok') return assert.fail('body');
+  const send = (res: Response | Error) => scripted(res).client.updateDraft(STORE, DRAFT, EDIT.body, KEY, CSRF);
+  const unknown = { kind: 'unknown', responded: true };
+  const cases: Array<[Response | Error, unknown]> = [
+    [json(409, { error: 'write_conflict' }), { kind: 'conflict' }], // sealed: another version (a stale no-op too)
+    [json(409, { error: 'write_conflict', requestId: 'r' }), { kind: 'tenant-changed' }], // the chain's: another tenant than expectedTenant, rolled back
+    [json(409, { error: 'invalid_state' }), { kind: 'not-editable' }], // sealed
+    [json(409, { error: 'invalid_state', requestId: 'r' }), unknown], // never the chain's
+    [json(409, { error: 'request_in_progress', requestId: 'r' }), { kind: 'in-progress' }],
+    [json(409, { error: 'request_in_progress' }), unknown], // never sealed
+    [json(409, { error: 'write_conflict', detail: 'x' }), unknown],
+    [json(404, { error: 'not_found', requestId: 'r' }), { kind: 'not-found' }], // one answer for a missing or foreign draft or customer
+    [json(404, { error: 'not_found' }), unknown], [json(404, { error: 'not_found', requestId: 'r', extra: 1 }), unknown],
+    [new Response('<html>', { status: 404, headers: { 'content-type': 'text/html' } }), unknown],
+    [json(422, { error: 'idempotency_key_reused', requestId: 'r' }), { kind: 'key-reused' }],
+    [json(422, { error: 'idempotency_key_reused' }), unknown], [json(422, { error: 'customer_not_found' }), unknown], // the create's sealed 422 is no edit answer
+    [json(401, { error: 'unauthenticated', requestId: 'r' }), { kind: 'signed-out' }],
+    [json(403, { error: 'forbidden', requestId: 'r' }), { kind: 'denied' }],
+    [json(400, { error: 'invalid_request', requestId: 'r' }), { kind: 'invalid' }],
+    [json(413, { error: 'content_too_large', requestId: 'r' }), { kind: 'invalid' }],
+    [json(415, { error: 'unsupported_media_type', requestId: 'r' }), { kind: 'invalid' }],
+    [json(429, { error: 'rate_limited', requestId: 'r' }, { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [json(429, { error: 'rate_limited', requestId: 'r' }), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    ...([[401, 'unauthenticated'], [403, 'forbidden'], [400, 'invalid_request'], [429, 'rate_limited']] as Array<[number, string]>)
+      .map(([status, word]): [Response, unknown] => [json(status, { error: word }), unknown]), // sealed: never these
+    [json(403, { error: 'unauthenticated', requestId: 'r' }), unknown],
+    [json(503, { error: 'service_unavailable', requestId: 'r' }), unknown], [json(500, { error: 'internal_error', requestId: 'r' }), unknown],
+    [new Response('<html>', { status: 502, headers: { 'content-type': 'text/html' } }), unknown],
+    [new Error('offline'), { kind: 'unknown', responded: false }],
+  ];
+  for (const [res, expected] of cases) {
+    const label = res instanceof Response ? `${res.status} ${res.headers.get('content-type')}` : 'no answer';
+    assert.deepEqual(await send(res), expected, `${label} -> ${(expected as { kind: string }).kind}`);
+  }
+  // A timeout: the client's own deadline; the outcome is undecided.
+  const hang = (async (_input: RequestInfo | URL, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+    init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  })) as typeof globalThis.fetch;
+  assert.deepEqual(await createInvoiceDraftsClient({ fetch: hang, timeoutMs: 5 }).updateDraft(STORE, DRAFT, EDIT.body, KEY, CSRF), { kind: 'unknown', responded: false });
+});
+
+test('IDC-22. an edit sends nothing for a body or an id the server would refuse — the create\'s body (a currency), a missing or extra key, a version outside 1..2^53-2, every line rule — and the create sends nothing for an edit\'s body', async () => {
+  if (EDIT.kind !== 'ok' || BODY.kind !== 'ok') return assert.fail('body');
+  const parsed = JSON.parse(EDIT.body) as Record<string, unknown>;
+  const only = (parsed.lines as Array<Record<string, unknown>>)[0];
+  const { calls, client } = scripted();
+  const bodies = [
+    BODY.body, JSON.stringify({ ...parsed, currency: 'USD' }), JSON.stringify({ ...parsed, expectedVersion: undefined }), JSON.stringify({ ...parsed, extra: 1 }),
+    ...[0, -1, 1.5, '3', null, MAX_EXPECTED_VERSION + 1, MAX].map((expectedVersion) => JSON.stringify({ ...parsed, expectedVersion })),
+    JSON.stringify({ ...parsed, lines: [] }), JSON.stringify({ ...parsed, lines: [{ ...only, quantity: 0 }] }), JSON.stringify({ ...parsed, lines: [{ ...only, description: ' ' }] }),
+    JSON.stringify({ ...parsed, customerId: 'c1' }), JSON.stringify({ ...parsed, expectedTenant: TENANT.toUpperCase() }), 'not json',
+    EDIT.body.replace('"expectedVersion":3', '"expectedVersion":-0'),
+  ];
+  for (const body of bodies) assert.deepEqual(await client.updateDraft(STORE, DRAFT, body, KEY, CSRF), { kind: 'invalid' }, body.slice(0, 100));
+  for (const [store, draft] of [['store-1', DRAFT], [STORE, 'd1'], [STORE, DRAFT.toUpperCase()], [STORE, `${DRAFT}/x`], [`${STORE}/..`, DRAFT]]) {
+    assert.deepEqual(await client.updateDraft(store, draft, EDIT.body, KEY, CSRF), { kind: 'invalid' }, `${store} ${draft}`);
+  }
+  assert.deepEqual(await client.createDraft(STORE, EDIT.body, KEY, CSRF), { kind: 'invalid' });
+  assert.deepEqual(calls, []);
+  // The largest version an edit may name is sent.
+  const top = draftEditBody(TENANT, MAX_EXPECTED_VERSION, CUSTOMER, EDIT_LINES);
+  const sent = scripted(json(200, { draftId: DRAFT, version: MAX, changed: true }));
+  assert.equal(top.kind === 'ok' && (await sent.client.updateDraft(STORE, DRAFT, top.body, KEY, CSRF)).kind, 'saved');
+});
+
+test('IDC-23. edit eligibility: a GET of the draft\'s edit-eligibility path with the session token only; allowed ONLY for the exact closed body; its refusals the reads\' (each only in its envelope); anything else unavailable; an id outside its grammar sends nothing', async () => {
+  const { calls, client } = scripted(json(200, { eligibility: 'allowed' }));
+  assert.deepEqual(await client.editEligibility(STORE, DRAFT, CSRF), { kind: 'allowed' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, editEligibilityPathOf(STORE, DRAFT));
+  assert.equal(calls[0].url, `${STORES_PATH}/${STORE}/invoice-drafts/${DRAFT}/edit-eligibility`); // no query
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.body, undefined);
+  const h = headersOf(calls[0]);
+  assert.equal(h.get('x-tmpos-session-csrf'), CSRF);
+  assert.equal(h.get('idempotency-key'), null);
+  assert.equal(h.get('x-tmpos-csrf'), null);
+  for (const body of [{ eligibility: 'allowed', draft: DRAFT }, {}, { eligibility: 'denied' }, { eligibility: true }, ['allowed'], null]) {
+    assert.deepEqual(await scripted(json(200, body)).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
+  }
+  assert.deepEqual(await scripted(refused(401, 'unauthenticated')).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'signed-out' });
+  assert.deepEqual(await scripted(refused(403, 'forbidden')).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'denied' });
+  assert.deepEqual(await scripted(refused(429, 'rate_limited', { 'retry-after': '4' })).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'rate-limited', retryAfterSeconds: 4 });
+  for (const res of [refused(404, 'not_found'), refused(400, 'invalid_request'), refused(503, 'service_unavailable'), json(403, { error: 'forbidden' }), json(401, { error: 'unauthenticated' })]) {
+    assert.deepEqual(await scripted(res).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' }, String(res.status));
+  }
+  assert.deepEqual(await scripted(new Error('offline')).client.editEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' });
+  const none = scripted();
+  for (const [store, draft] of [['store-1', DRAFT], [STORE, 'd1'], [STORE, DRAFT.toUpperCase()], [STORE, `${DRAFT}/edit-eligibility`], [STORE, '']]) {
+    assert.deepEqual(await none.client.editEligibility(store, draft, CSRF), { kind: 'denied' }, `${store} ${draft}`);
+  }
+  assert.deepEqual(none.calls, []);
+  // The creation eligibility's path is not the edit's: neither answer is read as the other.
+  assert.notEqual(editEligibilityPathOf(STORE, DRAFT), eligibilityPathOf(STORE));
 });

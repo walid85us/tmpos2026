@@ -157,7 +157,7 @@ const DOMAIN_COPY: Record<RoleLevelsDomain, DomainCopy> = {
     sectionId: 'server-invoice-levels',
     titleId: 'server-invoice-levels-title',
     title: 'Server-saved Invoices level',
-    description: 'Saved on the store server: only the Invoices level of the built-in roles (store owner fixed). The server uses it to decide who may save, list and open server drafts at a store. Other invoices are still saved in this browser and are not checked by the server.',
+    description: 'Saved on the store server: only the Invoices level of the built-in roles (store owner fixed). The server uses it to decide who may save, list, open and edit server drafts at a store. Other invoices are still saved in this browser and are not checked by the server.',
     denied: INVOICES_DENIED_NOTE,
     sessionEnded: 'Your server session ended. Reconnect to see the server-saved Invoices level.',
     signIn: 'Sign in with your store account to see the server-saved Invoices level.',
