@@ -289,10 +289,10 @@ const commit = (command) => store.transactions.commit(command, signal());
 // migration 008 as applied
 // ---------------------------------------------------------------------------
 
-test('M5D-01: 001-029 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
+test('M5D-01: 001-030 apply clean; 008 is its column, trigger and operation, and 009 its two routines and grants', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029'].map((v) => [v, false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030'].map((v) => [v, false]));
 
   const [column] = await owner`select a.atttypid::regtype::text as type, a.attnotnull as not_null, pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt,
       (select pg_catalog.pg_get_constraintdef(c.oid) from pg_catalog.pg_constraint c where c.conname = 'tenant_row_version_chk') as chk

@@ -1,6 +1,6 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-029, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-030, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 //
 // M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
 // the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
@@ -334,7 +334,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-029 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-030 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 

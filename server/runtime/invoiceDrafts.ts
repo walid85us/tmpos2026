@@ -98,11 +98,14 @@
 // shape is readable but not editable (a recorded residual — every id this runtime mints is a v4). The body is bounded at
 // 64 KiB like the save's. app.ts binds the path's DRAFT id as the fingerprint's target and the trusted tenant, store and
 // actor beside it, so one key at two drafts is the 422 and never a replay. In ONE transaction: the lease fence; the
-// store-scope revalidation (Invoices Edit decided again); the mutator's one call into migration 029's routine, which
-// decides authority again, then locks the draft header in the trusted tenant and store and judges its state and its version
-// BEFORE the contents, then the replacement customer, then whether anything changes (and, only for a change, its role's
-// Invoices level again under a lock). A real change replaces the lines, sets the customer and
-// subtotal and steps the version by exactly one, with one audit record (action store.invoice_draft.update, the draft as
+// store-scope revalidation (Invoices Edit decided again); the mutator's one call into migration 030's
+// tmpos_invoice_edit.m7b_invoice_draft_update_v2, which decides authority again, then locks the draft header in the trusted
+// tenant and store, then (for a role whose Invoices level is configurable) takes that role's transaction-scoped advisory key
+// SHARED and decides the Invoices level again under it — so every outcome after that is decided with the level held until
+// the command transaction ends: a sealed answer or a change commits under it, while a customer not found (the 404) or a
+// refusal (the 503) rolls the transaction back — and judges the draft's state and its version BEFORE the contents, then the
+// replacement customer, then whether anything changes. A real change replaces the
+// lines, sets the customer and subtotal and steps the version by exactly one, with one audit record (action store.invoice_draft.update, the draft as
 // its subject) and one outbox event invoice_draft.updated v1 { storeId, customerId, lineCount } (its envelope's aggregate
 // version is the new version), and the sealed 200 { "draftId", "version": expectedVersion + 1, "changed": true }. The same
 // customer and the same ordered lines (equal totals alone are not equal; reordering is a change) at the current version

@@ -612,9 +612,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // property above is untouched.
     'tests/db/invoiceDraftRoutine.integration.test.mjs',
     'tests/db/invoiceDraftsHttp.integration.test.mjs',
-    // M7B-INVOICES-P2: the draft edit proof needs 001-029 applied (and 029 rolled back through its down file, refused while a
-    // draft's version is above 1, and re-applied; the 028 database upgraded to 029) before it can say anything about migration
-    // 029's routine, trigger or privilege containment; it applies them through the SAME trusted executor, validating its target
+    // M7B-INVOICES-P2: the draft edit proof needs 001-030 applied (030 rolled back through its down file first, then 029
+    // through its own, refused while a draft's version is above 1, and both re-applied; the 028 database upgraded to 029 and
+    // the 029 one to 030) before it can say anything about migration 029's and 030's routines, trigger or privilege
+    // containment; it applies them through the SAME trusted executor, validating its target
     // with the same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property
     // above is untouched.
     'tests/db/invoiceDraftEditRoutine.integration.test.mjs',

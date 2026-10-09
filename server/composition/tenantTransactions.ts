@@ -89,7 +89,7 @@
 // authorized read, a 200 refreshes the session's lastSeenAt, and each request spends the request limit.
 //
 // M7B-INVOICES-P2 UPDATE (draft edit). The edit, PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, over its store-scope
-// mutator (migration 029's routine), in `writes`; its edit eligibility, GET …/invoice-drafts/{id}/edit-eligibility, a
+// mutator (migration 030's v2 routine), in `writes`; its edit eligibility, GET …/invoice-drafts/{id}/edit-eligibility, a
 // portless store-scope read under the edit's own requirement, in `reads` (a read-only actor reaches it and is denied Edit,
 // the same 403). Neither adds a readiness probe; the edit's event contract (invoice_draft.updated) is the entry's to compose
 // (tenantEntry.ts), like the save's.

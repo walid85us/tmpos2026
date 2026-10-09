@@ -413,14 +413,15 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftsHttp.integration.test.mjs
-      # M7B-INVOICES-P2 — migration 029's draft edit as the runtime login (the postcondition and its refusals, the exact
+      # M7B-INVOICES-P2 and -P2-R1 — migration 029's draft edit and 030's guard on the Invoices level as the runtime login (the postcondition and its refusals, the exact
       # grantees, the immutability trigger, the edit's applied / unchanged / conflict / not_found / refused answers and that the
       # sealed and rolled-back ones write nothing, every SQL bound, the get's one snapshot against a VOLATILE control, ordering
       # against a second editor, an owner's narrowing, a suspended grant and a read-only store by lock waits, the down refused
       # while a draft's version is above 1 and otherwise rolled back and restored, the upgrade over 028 drafts). It runs AFTER
-      # every step that rolls 028 back (each of those now rolls 029 back first, through its committed down, and re-applies it):
-      # its own rollback takes 029 back to 028 only after removing its drafts, and it ends with 029 applied, the ledger
-      # 001-029 and no draft, line, Invoices lock anchor or audit subject of its own; no later step rolls back below 029.
+      # every step that rolls 028 back (each of those now rolls 030 and 029 back first, through their committed downs, and
+      # re-applies them): its own rollback takes 029 back to 028 only after removing its drafts (030's rollback never refuses on
+      # data), and it ends with 029 and 030 applied, the ledger 001-030 and no draft, line, Invoices lock anchor or audit
+      # subject of its own; no later step rolls back below 030.
       # Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
       - name: Invoice draft edit routine against disposable PostgreSQL (M7B-INVOICES-P2)
         env:
@@ -436,12 +437,17 @@ jobs:
       # tenant isolation, a narrowed grant, a lost reply and a moved grant) against the same tenant entries and service.
       # The step limit stays 12: the six directory scenarios are about 12 s of a 2m49s local run (the step took 3m07s in
       # CI at the stage's entry), so the limit is still more than three times the run.
-      # M7B-INVOICES-P1 — it also drives the Invoices page's Server drafts section (SDB-01..04: save, reload, list and
-      # reopen; a lost reply and its Check again; store and session changes and a late answer ignored; a lost request and
-      # its Check again), so it STORES DRAFTS in the shared service: it runs after every step that rolls 028 back (it sits
-      # after them), and before it finishes it removes its drafts, lines and draft events and clears their audit subjects,
-      # then checks none is left (R8). The four scenarios are about 18 s of a 3m57s local run under the Firestore emulator;
-      # the limit stays 12.
+      # M7B-INVOICES-P1 and -P2 — it also drives the Invoices page's Server drafts section (SDB-01..15). SDB-01..10 save,
+      # reload, list and reopen drafts; hold a lost reply and a lost request for Check again; follow store, session and user
+      # changes with late answers ignored; keep focus off the page body in real Chromium; set a browser-only custom role
+      # against the server's authority; and read the server's creation eligibility, a stale allowance across a switch
+      # included. SDB-11..15 COMMIT EDITS (PATCH): SDB-11 edits a saved draft (one version step, one edit audit, one edit
+      # event, one completion) and reads it in a reload and a second browser, SDB-12 makes the first of two editors' save a
+      # sealed 409 that needs an explicit Reapply, SDB-13 loses a PATCH's answer and replays it with Check again (still one
+      # version step), SDB-14 signs out during such an unknown outcome and SDB-15 delivers a late answer after a user
+      # switch. So the step STORES AND EDITS DRAFTS in the shared service, leaving drafts above version 1 that 029's and
+      # 028's downs refuse: it runs after every step that rolls 028 or 029 back (it sits after them), and before it finishes
+      # it removes its drafts, lines and created-draft events and clears their audit subjects, then checks none is left (R8).
       - name: Shop role levels and customer directory in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2, M7A-CUSTOMERS-P5)
         timeout-minutes: 12
         env:
@@ -455,7 +461,7 @@ jobs:
       # edit eligibility, the sealed no-op and 409s, two instances ordered by lock waits, a read during a held edit, the
       # non-enumerating 404, injected faults, key reuse, both lost-COMMIT branches, revocations ordered against the commit, the
       # 64 KiB bound), against the SAME disposable service. Its edits leave drafts above version 1 and draft audit subjects,
-      # which 029's and 028's downs refuse, so it runs AFTER every step that rolls either back (it sits after all of them), and
+      # which 029's and 028's downs refuse, so it runs AFTER every step that rolls any of 030, 029 and 028 back (it sits after all of them), and
       # before it ends it removes every draft, line, Invoices lock anchor and draft event of its own and clears their audit
       # subjects, then checks none is left. Synthetic data and keys made at run time only. Same binding, no new service, no
       # secret, no permission change.

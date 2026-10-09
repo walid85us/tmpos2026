@@ -1,5 +1,5 @@
 // Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator, the edit's mutator (M7B-INVOICES-P2)
-// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's or 029's
+// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's or 030's
 // session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
 //
 // THE MUTATOR (INVOICE_DRAFT_CREATE_MUTATOR, context scope 'store'). The one business mutation the tenant store commits for
@@ -27,7 +27,8 @@
 //
 // THE EDIT'S MUTATOR (INVOICE_DRAFT_UPDATE_MUTATOR, M7B-INVOICES-P2, context scope 'store'). For PATCH
 // /api/v1/stores/{storeId}/invoice-drafts/{id}, at the same point of the same order, one statement —
-// tmpos_invoice_draft.m7b_invoice_draft_update (migration 029) — bound exactly like the save's: the session key, the
+// tmpos_invoice_edit.m7b_invoice_draft_update_v2 (migration 030; 029's routine with the role's Invoices level held through
+// completion) — bound exactly like the save's: the session key, the
 // REVALIDATED trusted store as p_store_id (the change set's storeId must equal it), the draft (the command's aggregate id),
 // the expected tenant and version, the customer, the lines as one jsonb text and the planner's subtotal. Its answers, one row:
 // 'applied' naming exactly this transaction's tenant, store, actor and grant at expectedVersion + 1; 'unchanged' naming
@@ -143,7 +144,7 @@ async function applyInvoiceDraftUpdate(sql: PgStatement, mutation: TransactionMu
   const text = linesText(lines);
   if (text === null) return 'unavailable';
   const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version
-    from tmpos_invoice_draft.m7b_invoice_draft_update(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid,
+    from tmpos_invoice_edit.m7b_invoice_draft_update_v2(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid,
       ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint, ${customerId}::uuid, ${text}::text::jsonb, ${String(subtotalCents)}::bigint)`;
   if (rows.length !== 1 || !hasColumns(rows[0], UPDATE_COLUMNS)) return 'mismatch';
   const { o_outcome: outcome, o_tenant_id: tenant, o_store_id: store, o_actor_id: actor, o_membership_id: membership, o_version: version } = rows[0];

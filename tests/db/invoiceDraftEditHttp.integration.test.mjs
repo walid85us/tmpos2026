@@ -1,10 +1,15 @@
-// Phase 4.0 M7B-INVOICES-P2 — editing a saved store invoice draft END TO END: the tenant entry (server/entry/tenantEntry.ts,
+// Phase 4.0 M7B-INVOICES-P2 and P2-R1 — editing a saved store invoice draft END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) serving PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and GET …/{id}/edit-eligibility over REAL
-// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-029), composed exactly as
+// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-030), composed exactly as
 // server/entry/tenantMain.ts composes it but for its construction. The route module (server/runtime/invoiceDrafts.ts), the
 // store-scope authorizer and revalidator, the tenant command transaction, the edit's mutator
-// (server/persistence/postgresInvoiceDrafts.ts), migration 029's routine, the audit writer (subject_invoice_draft_id) and the
-// outbox enqueue are production's own code. Every draft is saved first through the production POST.
+// (server/persistence/postgresInvoiceDrafts.ts), migration 030's edit routine (the guarded v2: the Invoices level held through
+// the sealed outcome and the completion, by an advisory key every writer of a level takes through migration 030's trigger), the
+// audit writer (subject_invoice_draft_id) and the outbox enqueue are production's own code. Every draft is saved first through
+// the production POST.
+//
+// Case labels: R = red on the entry source (029's routine, no guard) for the defect DA-204, N = the new contract of 030, G = a
+// guard that holds before and after.
 //
 // WHAT IS SUBSTITUTED, STATED EXACTLY — tests/db/invoiceDraftsHttp.integration.test.mjs's three, none on the path under test:
 // the database client (a supervised kernel over the cluster as a non-owner least-privilege runtime LOGIN, tmpos_ieh_probe,
@@ -21,8 +26,9 @@
 //   IEH-02 (AC-03 AC-04) authority: built-in roles, owner-edited Invoices levels (None..Full; Customers None never matters),
 //          a tenant-only grant, a read_only store; the edit eligibility answers 200 iff the PATCH is authorized and is the
 //          creation eligibility's exact bytes; a Create-only role is allowed the creation eligibility and refused both.
-//   IEH-03 (AC-06) a current-version no-op: the sealed 200 changed:false, nothing written (rows and their xmin), no role anchor,
-//          replayed; sealed while it holds the header (a rival edit waits for it); equal totals and a reorder are changes.
+//   IEH-03 (AC-06 AC-05, G/N) a current-version no-op: the sealed 200 changed:false, nothing written (rows and their xmin), no role
+//          row, replayed; sealed while it holds the header (a rival edit waits for it) and, parked at its completion, the role's
+//          advisory key (an edit makes no role row at all, 030); equal totals and a reorder are changes.
 //   IEH-04 (AC-07 AC-12) a stale edit and a stale no-op: the sealed 409 write_conflict, replayed, nothing else written; a
 //          completed edit's retry replays its 200 after later edits moved the version.
 //   IEH-05 (AC-08) two entries, two Edit actors, one version: one 200 and one sealed 409, ordered by an owner's hold of the
@@ -31,18 +37,30 @@
 //          complete later one.
 //   IEH-07 (AC-10, D3) a missing draft, another store's, another tenant's, a missing customer and another tenant's are one 404
 //          writing nothing (the lease open); an expectedTenant that is not the store's is the unsealed 409.
-//   IEH-08 (AC-11) a fault at the line DELETE, the line INSERT, the header UPDATE, the audit INSERT, the outbox INSERT or the
-//          completion — and at a no-op's completion — is the 503 with the earlier draft intact and the lease open.
+//   IEH-08 (AC-11, G; AC-08, N) a fault at the line DELETE, the line INSERT, the header UPDATE, the audit INSERT, the outbox INSERT
+//          or the completion — and at a no-op's completion — is the 503 with the earlier draft intact and the lease open; and a
+//          no-op's and a sealed conflict's completion parked and then raising (N): while parked the edit's backend holds the
+//          role's advisory key SHARED and a non-NULL level write is blocked by it; the raise is the 503 LEASE_ONLY with no
+//          role row, and the writer then commits.
 //   IEH-09 (AC-12) one key: other bytes, another draft, another store are each the 422 before any write.
 //   IEH-10 (AC-13) a lost COMMIT answer with the COMMIT landed (an edit, a no-op, a sealed 409) and with it never landed;
 //          same-key, same-bytes recovery; the version stepped exactly once.
-//   IEH-11 (AC-14) a downgrade to Invoices Create, a grant suspension, a store made read_only and a session revocation
-//          committed while the edit waits on 016's hold; a downgrade committed while the edit waits on the role row; the
-//          reverse — the edit holding the role row, the downgrade waiting for its COMMIT.
+//   IEH-11 (AC-14, G; barriers N) a downgrade to Invoices Create, a grant suspension, a store made read_only and a session
+//          revocation committed while the edit waits on 016's hold; a downgrade held uncommitted and committed while the edit
+//          waits for the role's advisory KEY (not the role row); the reverse — the edit parked at its completion holding the
+//          key, the downgrade's UPDATE waiting for it and for its COMMIT.
 //   IEH-12 (AC-15) the closed body, the version bounds, the line contract and the 64 KiB bound (65,536 bytes accepted, one more
 //          the 413), each refusal writing nothing; a malformed and an unversioned draft id.
 //   IEH-13 the chain around the edit and its eligibility: 401, the session CSRF witness, Origin and X-TMPOS-CSRF, no key, a
 //          query, another host, no-store; the eligibility the same bytes for any well-formed draft id.
+//   IEH-15 (AC-01 AC-02 AC-03 DA-204, R) two tenant entries: the owner's PUT downgrading the manager's Invoices level (an existing
+//          override, then an absent one) commits on entry B while a current no-op or a stale edit waits on the draft header on
+//          entry A; released, the edit is the 503 transaction_unavailable — nothing changed since the downgrade, the lease open.
+//   IEH-16 (AC-04, N) the edit parked at its completion holds the key; the owner's PUT on entry B waits for that key behind the
+//          edit's backend; released, the edit is the sealed 200 and then the PUT is the 200; a later PATCH is the authorizer's 403.
+//   IEH-17 (AC-09, G) a sealed no-op and a sealed conflict replay exactly; after the owner's PUT downgrade the replay is the 403;
+//          after the PUT restores the level the replay answers the retained bytes (idempotent-replayed) and that draft's version,
+//          audit records and outbox events are unchanged.
 //   IEH-14 no log line carries a description, a customer, a draft, a session key or an Idempotency-Key (run last).
 //
 // DETERMINISTIC WAITS ONLY: a request is known to wait by pg_stat_activity (a Lock wait, its blocker named) or an owner lock
@@ -51,7 +69,7 @@
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Synthetic data only, every id
 // and key made at run time. Its edits leave drafts above version 1 and audit records naming drafts, which block 029's and
-// 028's rollback: on a shared service it runs after every step that rolls 028 or 029 back, and before it finishes it removes
+// 028's rollback: on a shared service it runs after every step that rolls 028, 029 or 030 back, and before it finishes it removes
 // every draft, line and Invoices lock anchor of its tenants, clears every audit subject naming one of its drafts and deletes
 // its tenants' draft events, with its sessions, mint-ledger rows, idempotency records, proof schema and login, and restores
 // the limiter fingerprint and issuer key row it found.
@@ -101,8 +119,11 @@ const WAIT_MS = 10_000;
 const SEND_TIMEOUT_MS = 20_000;
 /** The revalidator's first lock: 016's hold of the actor's standing. */
 const AT_HOLD = /m5_hold_tenant_standing/;
-/** The edit routine's statement: where an edit waits for the draft header or its role row (after every authority lock). */
-const AT_UPDATE = /tmpos_invoice_draft\.m7b_invoice_draft_update/;
+/**
+ * The edit routine's statement: where an edit waits for the draft header or its role row (after every authority lock). It
+ * names either routine — 029's and the one migration 030 introduced — so one pattern serves the entry source and the correction.
+ */
+const AT_UPDATE = /(?:tmpos_invoice_draft\.m7b_invoice_draft_update|tmpos_invoice_edit\.m7b_invoice_draft_update_v2)\(/;
 const SMALL_KERNEL = Object.freeze({ createSupervisedPgClient, MAX_POOLS: 4, runtimeClientOptions });
 /** The completion: the one UPDATE of an idempotency record that seals its response. */
 const COMPLETION = 'old.response is null and new.response is not null';
@@ -350,8 +371,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version = '029'`;
-  assert.equal(applied, 1, 'migration 029 is applied: the edit routine exists');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('029', '030')`;
+  assert.equal(applied, 2, 'migrations 029 and 030 are applied: the guarded edit routine exists');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -534,6 +555,15 @@ async function leaseOpen(key, principal) {
 }
 const anchorsOf = async (tenant, role) => (await owner`select domain from tmpos_role.tenant_role_level where tenant_id = ${tenant} and role_id = ${role} order by domain`)
   .map((r) => r.domain);
+/** A tenant's role rows and role-level edit counters exactly as stored, row versions (xmin) included: a write by anyone moves them. */
+async function invoicesRowsOf(tenant) {
+  return {
+    roles: (await owner`select role_id, domain, level, xmin::text as xmin from tmpos_role.tenant_role_level where tenant_id = ${tenant} order by role_id, domain`).map((r) => ({ ...r })),
+    versions: (await owner`select role_id, domain, version::text as version, xmin::text as xmin from tmpos_role_edit.role_level_version where tenant_id = ${tenant} order by role_id, domain`).map((r) => ({ ...r })),
+  };
+}
+/** A diagnostic line the evidence is read from (printed by the runner whether the case passes or fails). */
+const evidence = (t, what) => t.diagnostic(`EVIDENCE ${JSON.stringify(what)}`);
 
 // ---------------------------------------------------------------------------
 // the entry harness
@@ -578,6 +608,8 @@ async function withEntry(fn) {
     editEligibility: (s, store, id, { query = '', headers = {} } = {}) => ctx.read(s, `/api/v1/stores/${store}/invoice-drafts/${id}/edit-eligibility${query}`, headers),
     save: (s, store, body, { key = randomUUID(), headers = {} } = {}) => unsafe(s, 'POST', `/api/v1/stores/${store}/invoice-drafts`, body, key, headers),
     patch: (s, store, id, body, { key = randomUUID(), headers = {} } = {}) => unsafe(s, 'PATCH', `/api/v1/stores/${store}/invoice-drafts/${id}`, body, key, headers),
+    /** The owner's PUT /api/v1/roles/levels (a tenant command under an Idempotency-Key and a recent sign-in). */
+    levels: (s, body, { key = randomUUID(), headers = {} } = {}) => unsafe(s, 'PUT', '/api/v1/roles/levels', body, key, headers),
     reason: (reply) => {
       const found = lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } })
         .filter((r) => r.event === 'request' && r.requestId === reply.headers['x-request-id']);
@@ -738,6 +770,8 @@ async function headerFree(draft) {
 const TRIGGER_ACTIONS = Object.freeze({
   raise: `raise exception 'IEH injected fault' using errcode = 'P0001';`,
   park: `perform pg_catalog.pg_advisory_xact_lock(${PARK[0]}, ${PARK[1]}); return coalesce(new, old);`,
+  /** Parks on PARK, and raises once the park is released: the command fails AFTER it has done everything but complete. */
+  parkRaise: `perform pg_catalog.pg_advisory_xact_lock(${PARK[0]}, ${PARK[1]}); raise exception 'IEH injected fault' using errcode = 'P0001';`,
 });
 /**
  * `work` runs with ONE owner trigger BEFORE `event` (insert | update | delete) on `table` for each row matching `when`: it
@@ -760,6 +794,13 @@ const LINE_TABLE = 'tmpos_invoice_draft.invoice_draft_line';
 /** The locks `pid` waits for (pg_locks, ungranted): locktype, mode, the transaction id or the relation. */
 const waitsOf = async (pid) => (await probe`select l.locktype, l.mode, l.transactionid::text as xid, l.relation::regclass::text as relation
   from pg_catalog.pg_locks l where l.pid = ${pid} and not l.granted`).map((r) => ({ ...r }));
+/** The guard key of (tenant, role) as the database computes it (migration 030): hashtext of 'tenant/role', an int4. */
+const guardKey = async (tenant, role) => (await probe`select pg_catalog.hashtext(${tenant}::text || '/' || ${role}::text) as k`)[0].k;
+/** The advisory locks of the guard's class (530030, objsubid 2) `pid` holds or waits for: key (int4), mode, granted. */
+const guardLocksOf = async (pid) => (await probe`select l.objid::int as key, l.objsubid::int as sub, l.mode::text as mode, l.granted
+  from pg_catalog.pg_locks l where l.pid = ${pid} and l.locktype = 'advisory' and l.classid::int = 530030 order by 1, 3, 4`).map((r) => ({ ...r }));
+/** The guard lock an edit holds (ShareLock) or a level writer holds or waits for (ExclusiveLock) on (tenant, role). */
+const guardLock = async (tenant, role, mode, granted = true) => ({ key: await guardKey(tenant, role), sub: 2, mode, granted });
 /** The transaction id `pid` holds (it has written or row-locked something). */
 const xidOf = async (pid) => (await probe`select backend_xid::text as xid from pg_catalog.pg_stat_activity where pid = ${pid}`)[0]?.xid ?? null;
 /** The granted locks `pid` holds on `relation` of `locktype` and `mode`. */
@@ -936,7 +977,7 @@ test('IEH-02 (AC-03 AC-04): the edit eligibility answers 200 exactly when the PA
 // IEH-03: the current-version no-op
 // ===========================================================================
 
-test('IEH-03 (AC-06): a current-version no-op is the sealed 200 changed:false — no row written (xmin unchanged), no audit record, event or role anchor — replayed under its key and sealed while it holds the header (a rival edit waits for it); equal totals and a reorder are changes', async () => {
+test('IEH-03 (AC-06 AC-05, G/N): a current-version no-op is the sealed 200 changed:false — no row written (xmin unchanged), no audit record, event or role row — replayed under its key and sealed while it holds the header and the role\'s key (a rival edit waits for the header); equal totals and a reorder are changes; an edit makes no role row at all', async () => {
   const T = await newTenant('ieh03');
   const S = await newStore(T, 'IEH03 store');
   const C = await newCustomer(T, 'ieh03');
@@ -968,6 +1009,8 @@ test('IEH-03 (AC-06): a current-version no-op is the sealed 200 changed:false �
       try {
         parked = quietly(ctx.patch(s, S, id, editBody(T, 1, C, lines)));
         const noopPid = waitingPid(await blockedOrSettled(parked, { by: lever.pid }), 'the no-op parked at its completion');
+        // N (030): the parked no-op holds the manager's guard key SHARED — the sealed answer is committed under it, never without.
+        assert.deepEqual(await guardLocksOf(noopPid), [await guardLock(T, 'manager', 'ShareLock')], 'the parked no-op holds the manager\'s key SHARED');
         pending = quietly(ctx.patch(so, S, id, editBody(T, 1, C, rivalLines)));
         const rivalPid = waitingPid(await blockedOrSettled(pending, { by: noopPid, query: AT_UPDATE }), 'the rival edit waiting on the no-op\'s header lock');
         await assertWaitsOnHeaderBehind(rivalPid, noopPid, 'the rival edit');
@@ -988,7 +1031,8 @@ test('IEH-03 (AC-06): a current-version no-op is the sealed 200 changed:false �
     // A description normalized to the stored one (trimmed) is the same line.
     const padded = [{ ...sameTotal[1], description: `  ${sameTotal[1].description}  ` }, sameTotal[0]];
     editedOf(await ctx.patch(s, S, id, editBody(T, 5, C, padded)), { draftId: id, version: 5, changed: false }, 'a description that normalizes to the stored one');
-    assert.deepEqual(await anchorsOf(T, 'manager'), ['invoices'], 'the change path took the manager\'s Invoices row only — never its Customers row');
+    assert.deepEqual(await anchorsOf(T, 'manager'), [], 'an edit makes no role row at all (030): the change path made none, and took no Customers row either');
+    assert.deepEqual(await invoicesRowsOf(T), { roles: [], versions: [] }, 'and no role_level_version row');
   });
 });
 
@@ -1194,7 +1238,7 @@ test('IEH-07 (AC-10, D3): a missing draft, another store\'s, another tenant\'s, 
 // IEH-08: faults inside the command
 // ===========================================================================
 
-test('IEH-08 (AC-11): a fault at the line DELETE, the line INSERT, the header UPDATE, the audit INSERT, the outbox INSERT or the completion — or at a no-op\'s completion — is the 503 with the earlier draft intact, nothing recorded and the lease open', async () => {
+test('IEH-08 (AC-11, G; AC-08, N): a fault at the line DELETE, the line INSERT, the header UPDATE, the audit INSERT, the outbox INSERT or the completion — or at a no-op\'s completion — is the 503 with the earlier draft intact, nothing recorded and the lease open; a no-op\'s and a sealed conflict\'s completion that parks holding the role\'s key and then raises is the 503 LEASE_ONLY with no role row, the key gone with the transaction, and the blocked level writer then commits', async (t) => {
   const T = await newTenant('ieh08');
   const S = await newStore(T, 'IEH08 store');
   const C = await newCustomer(T, 'ieh08');
@@ -1226,6 +1270,65 @@ test('IEH-08 (AC-11): a fault at the line DELETE, the line INSERT, the header UP
       assert.deepEqual(await stateOf(id), state, `${label}: the earlier draft intact — header, version, lines and xmin`);
       assert.equal(await leaseOpen(key, who.principal), true, `${label}: the lease, taken in its own transaction, is open`);
       assertRefusal(await ctx.patch(s, S, id, body, { key }), 409, 'request_in_progress', `${label}: the retry within the lease`);
+    }
+    // N (030): the fault comes AFTER the edit has done everything but complete, with the role's key held. While the completion is
+    // parked the edit's backend holds the manager's key SHARED — a no-op's and a sealed conflict's answer alike — and a non-NULL
+    // level write by the owner is blocked by exactly that backend; when the park is released the completion raises: the 503, the
+    // lease open, no role row made by the edit — and the key goes with the transaction, so the writer commits.
+    for (const [label, body] of [
+      ['a no-op', editBody(T, 1, C, seeded)],
+      ['a sealed conflict', editBody(T, 2, C2, [line(described('fault stale'), 1, 1)])],
+    ]) {
+      const key = randomUUID();
+      const keys = [{ key, principal: who.principal }];
+      const before = await counts([T], keys);
+      const firedBefore = await fired();
+      // The seed's own save (the production POST by this manager) made the manager's NULL lock anchors: the rows the edit must not add to.
+      const rowsBefore = await invoicesRowsOf(T);
+      let writer;
+      let reply;
+      const clock = {};
+      await withTrigger('tmpos_internal.idempotency_record', 'update', COMPLETION, 'parkRaise', async () => {
+        const lever = await holdPark();
+        let pending;
+        try {
+          clock.sent = Date.now();
+          pending = quietly(ctx.patch(s, S, id, body, { key }));
+          const editPid = waitingPid(await blockedOrSettled(pending, { by: lever.pid }), `${label}: parked at its completion`);
+          assert.deepEqual(await guardLocksOf(editPid), [await guardLock(T, 'manager', 'ShareLock')], `${label}: the parked edit holds the manager's key SHARED`);
+          // (The edit's own uncommitted rows would be invisible here — IDE-18 reads them inside the edit's transaction and finds none;
+          // what shows it is the writer below: it waits for the key ALONE, never for a role row the edit would have locked or made.)
+          assert.deepEqual(await invoicesRowsOf(T), rowsBefore, `${label}: parked, the committed role and version rows are as they were`);
+          writer = ownerWrite(`${label}: a non-NULL level write`, (sql) => setLevel(T, 'manager', 'invoices', 'full', sql));
+          const outcome = await ownerOutcome(writer);
+          assert.ok(outcome?.blocked && outcome.blockers.includes(editPid), `${label}: the level write is blocked by the edit's backend (${JSON.stringify(outcome)})`);
+          const writerPid = (await writer.started).pid;
+          assert.deepEqual((await guardLocksOf(writerPid)).filter((l) => !l.granted), [await guardLock(T, 'manager', 'ExclusiveLock', false)], `${label}: waiting for the manager's key, EXCLUSIVE`);
+          assert.deepEqual((await waitsOf(writerPid)).map((w) => w.locktype), ['advisory'], `${label}: for nothing else`);
+          clock.released = Date.now();
+        } finally {
+          await lever.commit();
+        }
+        reply = await replyTo(pending, label);
+      });
+      evidence(t, { case: `IEH-08 ${label}`, msSentToRelease: clock.released - clock.sent, limitMs: CONCLUSIVE_WINDOW_MS });
+      assert.ok(clock.released - clock.sent < CONCLUSIVE_WINDOW_MS,
+        `INCONCLUSIVE: ${label} was in flight ${clock.released - clock.sent} ms when the park was released (limit ${CONCLUSIVE_WINDOW_MS} ms): a lock timeout could be the failure`);
+      assertRefusal(reply, 503, 'service_unavailable', `${label}: the raise after the park`);
+      assert.notEqual(ctx.reason(reply), 'transaction_timeout', `${label}: the injected fault, not a lock timeout`);
+      assert.equal(await fired(), firedBefore + 1, `${label}: the fault ran, inside the command`);
+      assert.deepEqual(delta(await counts([T], keys), before), LEASE_ONLY, `${label}: nothing recorded but the open lease`);
+      assert.equal(await leaseOpen(key, who.principal), true, `${label}: the lease open`);
+      assert.deepEqual(await stateOf(id), state, `${label}: the earlier draft intact`);
+      assert.equal(await within(writer.done, `${label}: the level writer`), 'committed', `${label}: the key went with the transaction: the writer committed`);
+      const rowsAfter = await invoicesRowsOf(T);
+      assert.deepEqual(rowsAfter.roles.map(({ xmin, ...r }) => r), rowsBefore.roles.map(({ xmin, ...r }) => (r.domain === 'invoices' ? { ...r, level: 'full' } : r)),
+        `${label}: the same role rows as before, the Invoices one as the writer wrote it — the edit made none`);
+      assert.deepEqual(rowsAfter.versions.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', version: '1' }], `${label}: and the only version row is the writer's own`);
+      assert.equal((await probe`select count(*)::int as n from pg_catalog.pg_locks where locktype = 'advisory' and classid::int = 530030`)[0].n, 0, `${label}: no guard lock stands`);
+      // The writer's level back to the NULL anchor, its version row removed: the next round starts as this one did.
+      await owner`update tmpos_role.tenant_role_level set level = null where tenant_id = ${T} and role_id = 'manager' and domain = 'invoices'`;
+      await owner`delete from tmpos_role_edit.role_level_version where tenant_id = ${T}`;
     }
     // Control: without a fault the same change commits.
     editedOf(await ctx.patch(s, S, id, change), { draftId: id, version: 2, changed: true }, 'the change without a fault');
@@ -1357,7 +1460,7 @@ test('IEH-10 (AC-13): the COMMIT lands and its answer is lost (an edit, a no-op,
 // IEH-11: authority ordered against the commit
 // ===========================================================================
 
-test('IEH-11 (AC-14): a downgrade to Invoices Create, a grant suspension, a store made read_only and a session revocation committed while the edit waits on 016\'s hold — or a downgrade committed while the edit waits on its role row — leave nothing; a downgrade attempted while the edit holds its role row waits for the edit\'s COMMIT', async () => {
+test('IEH-11 (AC-14, G; barriers N): a downgrade to Invoices Create, a grant suspension, a store made read_only and a session revocation committed while the edit waits on 016\'s hold — or a downgrade committed while the edit waits for the role\'s guard key — leave nothing; a downgrade attempted while the edit holds the key waits for the edit\'s COMMIT', async () => {
   const one = async (statement, what) => assert.equal((await statement).count, 1, `${what}: exactly one row changed`);
   await withEntry(async (ctx) => {
     // (a) committed while the edit waits on 016's hold: the revalidator re-reads and refuses inside the transaction.
@@ -1404,9 +1507,10 @@ test('IEH-11 (AC-14): a downgrade to Invoices Create, a grant suspension, a stor
       const after = await ctx.patch(s, S, id, editBody(T, 1, C, [line(described(`next ${label}`), 3, 3)]));
       assertRefusal(after, next[0], next[1], `${label}: the next request`);
     }
-    // (b) committed while the edit waits on its ROLE ROW: the owner's uncommitted downgrade holds the manager's Invoices row;
-    // the edit passes every unlocked check, locks the header, and waits on that row at its change path; the downgrade commits,
-    // and the routine's locked re-decision refuses — nothing written.
+    // (b) committed while the edit waits for the role's KEY: the owner's uncommitted downgrade holds the manager's Invoices row
+    // and, through migration 030's trigger, the role's advisory key EXCLUSIVE; the edit passes every unlocked check, locks the
+    // header, and waits for the key at step 5b (never for the role row); the downgrade commits, and 5b's fresh re-read after the
+    // wait refuses — nothing written.
     {
       const T = await newTenant('ieh11-b');
       const S = await newStore(T, 'IEH11 b');
@@ -1424,19 +1528,22 @@ test('IEH-11 (AC-14): a downgrade to Invoices Create, a grant suspension, a stor
       let pending;
       try {
         pending = quietly(ctx.patch(s, S, id, editBody(T, 1, C, [line(described('role row edit'), 2, 2)]), { key }));
-        waitingPid(await blockedOrSettled(pending, { by: h.pid, query: AT_UPDATE }), 'the edit waiting on its role row');
+        const pid = waitingPid(await blockedOrSettled(pending, { by: h.pid, query: AT_UPDATE }), 'the edit waiting for the role\'s guard key');
+        assert.deepEqual((await waitsOf(pid)).map((w) => w.locktype), ['advisory'], 'it waits for an advisory lock — not the role row');
+        assert.deepEqual(await guardLocksOf(pid), [await guardLock(T, 'manager', 'ShareLock', false)], 'the manager\'s key, SHARED, ungranted');
+        assert.deepEqual(await guardLocksOf(h.pid), [await guardLock(T, 'manager', 'ExclusiveLock')], 'held EXCLUSIVE by the uncommitted downgrade');
       } finally {
         await h.commit();
       }
       const reply = await replyTo(pending, 'the edit after the downgrade');
-      assertRefusal(reply, 503, 'service_unavailable', 'the locked re-decision refuses');
+      assertRefusal(reply, 503, 'service_unavailable', 'the re-decision after the key wait refuses');
       assert.equal(ctx.reason(reply), 'transaction_unavailable');
       assert.deepEqual(delta(await counts([T], keys), before), LEASE_ONLY, 'nothing written but the open lease');
       assert.deepEqual(await stateOf(id), state, 'the draft untouched');
       assertRefusal(await ctx.patch(s, S, id, editBody(T, 1, C, [line(described('role row next'), 3, 3)])), 403, 'forbidden', 'the next request: the authorizer');
     }
-    // (c) The reverse: the edit holds its role row (parked at its completion, every write done); the downgrade waits for the
-    // edit, which commits first; then the downgrade applies, and the next edit is refused.
+    // (c) The reverse: the edit holds the role's key SHARED (parked at its completion, every write done); the downgrade's UPDATE
+    // waits for that key, behind the edit, which commits first; then the downgrade applies, and the next edit is refused.
     {
       const T = await newTenant('ieh11-c');
       const S = await newStore(T, 'IEH11 c');
@@ -1457,6 +1564,10 @@ test('IEH-11 (AC-14): a downgrade to Invoices Create, a grant suspension, a stor
             where tenant_id = ${T} and role_id = 'manager' and domain = 'invoices'`, 'the downgrade'));
           const outcome = await ownerOutcome(rival);
           assert.ok(outcome?.blocked && outcome.blockers.includes(editPid), `the downgrade waits for the edit (${JSON.stringify(outcome)})`);
+          const rivalPid = (await rival.started).pid;
+          assert.deepEqual(await guardLocksOf(editPid), [await guardLock(T, 'manager', 'ShareLock')], 'the parked edit holds the manager\'s key SHARED');
+          assert.deepEqual((await guardLocksOf(rivalPid)).filter((l) => !l.granted), [await guardLock(T, 'manager', 'ExclusiveLock', false)], 'the downgrade waits for that key, EXCLUSIVE');
+          assert.deepEqual((await waitsOf(rivalPid)).map((w) => w.locktype), ['advisory'], 'and for nothing else');
         } finally {
           await lever.commit();
         }
@@ -1466,6 +1577,286 @@ test('IEH-11 (AC-14): a downgrade to Invoices Create, a grant suspension, a stor
       assert.deepEqual(delta(await counts([T]), before), { D: 0, L: 0, A: 1, O: 1, K: 0, AA: 1, OO: 1, C: 1, LE: 0 }, 'one change');
       assertRefusal(await ctx.patch(s, S, id, editBody(T, 2, C, [line(described('reverse next'), 3, 3)])), 403, 'forbidden', 'then the downgrade decides');
     }
+  });
+});
+
+// ===========================================================================
+// IEH-15: DA-204 — a downgrade committed through the owner's own PUT while the edit waits on the draft header
+// ===========================================================================
+
+/**
+ * The edit's lock waits are bounded (lock_timeout 1400 ms, a 2 s transaction): a PATCH that was in flight longer than this when
+ * the header was released may have been refused by a TIMEOUT, which would look like the refusal under test. Such a case is
+ * INCONCLUSIVE — a failure, never a pass.
+ */
+const CONCLUSIVE_WINDOW_MS = 1_100;
+
+test('IEH-15 (AC-01 AC-02 AC-03 DA-204): two tenant entries over one database — the owner\'s PUT downgrading the manager\'s Invoices level (an existing override, then an absent one) commits on entry B while a current no-op or a stale edit waits on the draft header on entry A; released, the edit is the 503 transaction_unavailable, nothing changed since the downgrade, the lease open', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [name, absent, stale] of [
+      ['(a) an existing override, a current no-op', false, false],
+      ['(b) an existing override, a stale version', false, true],
+      ['(c) an absent override, a current no-op', true, false],
+      ['(d) an absent override, a stale version', true, true],
+    ]) {
+      await t.test(`DA-204 defect reproduction: ${name}`, async (st) => {
+        const tag = randomUUID().slice(0, 6);
+        const T = await newTenant(`ieh15-${tag}`);
+        const S = await newStore(T, `IEH15 ${tag}`);
+        const C = await newCustomer(T, `ieh15-${tag}`);
+        // The store owner (fixed Full: it never makes a role row) saves and prepares the draft; the manager is the editor under
+        // test; the owner of the downgrade is a THIRD actor holding exactly one tenant-scope grant (the setter's authority shape).
+        const storeOwner = await actor(`ieh15-so-${tag}`, [storeGrant(T, S, 'store_owner')]);
+        const manager = await actor(`ieh15-mgr-${tag}`, [storeGrant(T, S, 'manager')]);
+        const boss = await actor(`ieh15-boss-${tag}`, [tenantGrant(T, 'store_owner')]);
+        if (!absent) await setLevel(T, 'manager', 'invoices', 'edit');
+        const so = await signIn(a, storeOwner);
+        const sm = await signIn(a, manager);
+        const sb = await signIn(b, boss);
+        const lines = [line(described(`ieh15 ${tag}`), 2, 100)];
+        const id = await seed(a, so, S, T, C, lines);
+        if (stale) {
+          editedOf(await a.patch(so, S, id, editBody(T, 1, C, [line(described(`ieh15 prepared ${tag}`), 1, 5)])), { draftId: id, version: 2, changed: true }, `${name}: the draft prepared at version 2`);
+        }
+        // The edit: a current no-op, or a version-1 edit of a version-2 draft (the sealed 409 of the entry source).
+        const body = stale ? editBody(T, 1, C, [line(described(`ieh15 stale ${tag}`), 3, 3)]) : editBody(T, 1, C, lines);
+        // The owner is signed in on entry B, its pool warmed and the version it reviews read, BEFORE the edit starts to wait.
+        const read = await b.read(sb, '/api/v1/roles/levels/invoices');
+        assert.equal(read.status, 200, `${name}: the owner reads the Invoices levels: ${read.body}`);
+        const reviewed = Number(JSON.parse(read.body).roles.find((r) => r.roleId === 'manager').version);
+        const putBody = { roleId: 'manager', domain: 'invoices', level: 'create', reason: described(`ieh15 downgrade ${tag}`), expectedTenant: T, expectedVersion: reviewed };
+        const rolesBefore = await invoicesRowsOf(T);
+        if (absent) assert.deepEqual(rolesBefore, { roles: [], versions: [] }, `${name}: no Invoices role row and no version row: the catalog default governs`);
+        else assert.deepEqual(rolesBefore.roles.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', level: 'edit' }], `${name}: the stored override`);
+        const state = await stateOf(id);
+        const key = randomUUID();
+        const keys = [{ key, principal: manager.principal }];
+        const putKey = randomUUID();
+        const putKeys = [{ key: putKey, principal: boss.principal }];
+        const before = await counts([T], keys);
+        const h = await holdHeader(id);
+        let pending;
+        let mid;
+        let rolesAfterPut;
+        let stillWaiting;
+        let waitedOn;
+        const clock = {};
+        try {
+          clock.sent = Date.now();
+          pending = quietly(a.patch(sm, S, id, body, { key }));
+          // THE BARRIER: past every unlocked decision (016's hold, the session, the grant, step 3's Invoices level), the edit
+          // waits on the draft header an owner session holds — and holds nothing the downgrade needs.
+          const pid = waitingPid(await blockedOrSettled(pending, { by: h.pid, query: AT_UPDATE }), `${name}: the edit waiting on the draft header`);
+          clock.waiting = Date.now();
+          await assertWaitsOnHeaderBehind(pid, h.pid, name);
+          waitedOn = await waitsOf(pid);
+          assert.deepEqual(delta(await counts([T], keys), before), LEASE_ONLY, `${name}: parked on the header, the edit holds its lease only`);
+          assert.deepEqual(await invoicesRowsOf(T), rolesBefore, `${name}: the downgrade has not run yet`);
+          // The downgrade: the owner's own PUT on the OTHER entry, through the production chain, commits while the edit waits.
+          clock.put = Date.now();
+          const put = await replyTo(b.levels(sb, putBody, { key: putKey }), `${name}: the owner's downgrade`);
+          clock.putDone = Date.now();
+          assert.equal(put.status, 200, `${name}: the downgrade commits while the edit waits: ${put.body}`);
+          assert.deepEqual(JSON.parse(put.body), { roleLevel: { roleId: 'manager', domain: 'invoices', level: 'create', version: reviewed + 1 } }, `${name}: the PUT's own answer`);
+          // The PUT's own footprint, separately: its role row and version row, one tenant-scope audit record, its own completion.
+          rolesAfterPut = await invoicesRowsOf(T);
+          assert.deepEqual(rolesAfterPut.roles.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', level: 'create' }], `${name}: the PUT's role row`);
+          assert.deepEqual(rolesAfterPut.versions.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', version: String(reviewed + 1) }], `${name}: the PUT's version row`);
+          assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 1, `${name}: the PUT's one audit record`);
+          assert.equal((await counts([T], putKeys)).K, 1, `${name}: the PUT's own sealed completion`);
+          // The baseline for the edit's own effects, taken while it still waits: from here on only the edit can write.
+          mid = await counts([T], keys);
+          stillWaiting = (await blockedNow({ by: h.pid, query: AT_UPDATE })).length === 1;
+          assert.equal(stillWaiting, true, `${name}: the edit still waits on the header after the downgrade committed`);
+          clock.released = Date.now();
+        } finally {
+          await h.commit();
+        }
+        const reply = await replyTo(pending, name);
+        const after = await counts([T], keys);
+        const reason = (() => { try { return a.reason(reply); } catch (err) { return `unread: ${err.message}`; } })();
+        evidence(st, { case: `IEH-15 ${name}`, decidingRead: 'step 3 (unlocked Invoices level) before the header wait; the revalidator\'s unlocked read before it', waitedOn,
+          downgradeCommittedBeforeRelease: stillWaiting === true, answer: { status: reply.status, body: reply.body, reason },
+          msFromSendToRelease: clock.released - clock.sent, msFromWaitSeenToRelease: clock.released - clock.waiting, msPut: clock.putDone - clock.put,
+          deltaSinceMid: delta(after, mid), leaseOpen: await leaseOpen(key, manager.principal),
+          draftUntouched: JSON.stringify(await stateOf(id)) === JSON.stringify(state),
+          rolesUnchangedSincePut: JSON.stringify(await invoicesRowsOf(T)) === JSON.stringify(rolesAfterPut) });
+        assert.ok(clock.released - clock.sent < CONCLUSIVE_WINDOW_MS,
+          `INCONCLUSIVE: the edit was in flight ${clock.released - clock.sent} ms when the header was released (limit ${CONCLUSIVE_WINDOW_MS} ms): a timeout could be the refusal`);
+        assertRefusal(reply, 503, 'service_unavailable', `${name}: refused inside the transaction, not sealed`);
+        assert.equal(reason, 'transaction_unavailable', `${name}: refused, never a timeout`);
+        assert.deepEqual(delta(after, mid), NOTHING, `${name}: nothing changed since the downgrade committed — no completion, audit, event, draft or line`);
+        assert.equal(await leaseOpen(key, manager.principal), true, `${name}: the lease open`);
+        assert.deepEqual(await stateOf(id), state, `${name}: that draft's row and lines untouched (xmin included)`);
+        assert.deepEqual(await invoicesRowsOf(T), rolesAfterPut, `${name}: the role and version rows exactly as the PUT wrote them`);
+      });
+    }
+  }));
+});
+
+// ===========================================================================
+// IEH-16, IEH-17: the guard key through the HTTP chain — an owner's PUT behind a parked edit; sealed answers replayed against the level
+// ===========================================================================
+
+/** A case's own edit columns: this draft's rows, its edit audit records, its events, its sealed completions (no whole-table column). */
+const mine = ({ D, L, A, O, K }) => ({ D, L, A, O, K });
+
+test('IEH-16 (AC-04, N): an edit parked at its completion holds the role\'s key — the owner\'s PUT on the other entry waits for that key behind the edit\'s backend; released, the edit is the sealed 200 and then the PUT is the 200; a later PATCH is the authorizer\'s 403', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [name, absent] of [['(a) an existing override, a real change', false], ['(b) an absent override, a current no-op', true]]) {
+      const tag = randomUUID().slice(0, 6);
+      const T = await newTenant(`ieh16-${tag}`);
+      const S = await newStore(T, `IEH16 ${tag}`);
+      const C = await newCustomer(T, `ieh16-${tag}`);
+      const storeOwner = await actor(`ieh16-so-${tag}`, [storeGrant(T, S, 'store_owner')]);
+      const manager = await actor(`ieh16-mgr-${tag}`, [storeGrant(T, S, 'manager')]);
+      const boss = await actor(`ieh16-boss-${tag}`, [tenantGrant(T, 'store_owner')]);
+      if (!absent) await setLevel(T, 'manager', 'invoices', 'edit');
+      const so = await signIn(a, storeOwner);
+      const sm = await signIn(a, manager);
+      const sb = await signIn(b, boss);
+      const lines = [line(described(`ieh16 ${tag}`), 2, 100)];
+      const id = await seed(a, so, S, T, C, lines);
+      // The owner is signed in on entry B, its pool warmed and the version it reviews read, BEFORE the edit parks (the park and the
+      // PUT's wait both live inside the edit's lock timeout).
+      const read = await b.read(sb, '/api/v1/roles/levels/invoices');
+      assert.equal(read.status, 200, `${name}: the owner reads the Invoices levels: ${read.body}`);
+      const reviewed = Number(JSON.parse(read.body).roles.find((r) => r.roleId === 'manager').version);
+      const putBody = { roleId: 'manager', domain: 'invoices', level: 'create', reason: described(`ieh16 downgrade ${tag}`), expectedTenant: T, expectedVersion: reviewed };
+      const body = absent ? editBody(T, 1, C, lines) : editBody(T, 1, C, [line(described(`ieh16 change ${tag}`), 3, 3)]);
+      const key = randomUUID();
+      const keys = [{ key, principal: manager.principal }];
+      const putKey = randomUUID();
+      const putKeys = [{ key: putKey, principal: boss.principal }];
+      const before = await counts([T], keys);
+      const rolesBefore = await invoicesRowsOf(T);
+      const state = await stateOf(id);
+      let parked;
+      let put;
+      let edited;
+      let putReply;
+      let putSettled = false;
+      const clock = {};
+      await withTrigger('tmpos_internal.idempotency_record', 'update', COMPLETION, 'park', async () => {
+        const lever = await holdPark();
+        try {
+          parked = quietly(a.patch(sm, S, id, body, { key }));
+          const editPid = waitingPid(await blockedOrSettled(parked, { by: lever.pid }), `${name}: the edit parked at its completion`);
+          clock.parked = Date.now();
+          assert.deepEqual(await guardLocksOf(editPid), [await guardLock(T, 'manager', 'ShareLock')], `${name}: the parked edit holds the manager's key SHARED`);
+          // The edit's own uncommitted rows would be invisible to the owner here (IDE-18 reads them inside the edit's transaction and
+          // finds none); what is shown is the committed state and, below, that the PUT waits for the key ALONE — never for a role row.
+          assert.deepEqual(await invoicesRowsOf(T), rolesBefore, `${name}: parked, the committed role and version rows are as they were`);
+          // The owner's PUT on the OTHER entry, through the production chain: it reaches the level UPDATE and waits for the key.
+          put = quietly(b.levels(sb, putBody, { key: putKey }));
+          put.then(() => { putSettled = true; });
+          const putPid = waitingPid(await blockedOrSettled(put, { by: editPid }), `${name}: the owner's PUT waiting for the key behind the edit`);
+          clock.putWaiting = Date.now();
+          assert.deepEqual((await waitsOf(putPid)).map((w) => w.locktype), ['advisory'], `${name}: the PUT waits for an advisory lock — nothing else`);
+          assert.deepEqual((await guardLocksOf(putPid)).filter((l) => !l.granted), [await guardLock(T, 'manager', 'ExclusiveLock', false)], `${name}: the manager's key, EXCLUSIVE`);
+          assert.equal(putSettled, false, `${name}: the PUT has not answered while the edit holds the key`);
+          clock.released = Date.now();
+        } finally {
+          await lever.commit();
+        }
+        // Both answers are awaited INSIDE the trigger's scope: its DROP (ACCESS EXCLUSIVE on the idempotency table) must not queue
+        // between the PUT's lease check and its completion.
+        edited = await replyTo(parked, `${name}: the parked edit`);
+        putReply = await replyTo(put, `${name}: the owner's PUT`);
+      });
+      evidence(t, { case: `IEH-16 ${name}`, msParkedToPutWaiting: clock.putWaiting - clock.parked, msParkedToRelease: clock.released - clock.parked, limitMs: CONCLUSIVE_WINDOW_MS });
+      assert.ok(clock.released - clock.parked < CONCLUSIVE_WINDOW_MS,
+        `INCONCLUSIVE: ${name}: ${clock.released - clock.parked} ms from the edit's park to its release (limit ${CONCLUSIVE_WINDOW_MS} ms): its park wait could have timed out`);
+      editedOf(edited, { draftId: id, version: absent ? 1 : 2, changed: !absent }, `${name}: the edit is the sealed 200 under its authority`);
+      assert.equal(putReply.status, 200, `${name}: then the PUT commits: ${putReply.body}`);
+      assert.deepEqual(JSON.parse(putReply.body), { roleLevel: { roleId: 'manager', domain: 'invoices', level: 'create', version: reviewed + 1 } }, `${name}: the PUT's own answer`);
+      // The edit's own effects, target-specifically: that draft, its lines, its audit record and event, its completion.
+      assert.deepEqual(mine(delta(await counts([T], keys), before)), absent ? { D: 0, L: 0, A: 0, O: 0, K: 1 } : { D: 0, L: 0, A: 1, O: 1, K: 1 }, `${name}: the edit's own effects`);
+      if (absent) assert.deepEqual(await stateOf(id), state, `${name}: the no-op wrote nothing`);
+      // The PUT's own footprint, separately: its role row, its version row, one tenant-scope audit record, its own completion.
+      const after = await invoicesRowsOf(T);
+      assert.deepEqual(after.roles.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', level: 'create' }], `${name}: the PUT's role row`);
+      assert.deepEqual(after.versions.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', version: String(reviewed + 1) }], `${name}: the PUT's version row`);
+      assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 1, `${name}: the PUT's one audit record`);
+      assert.equal((await counts([T], putKeys)).K, 1, `${name}: the PUT's own sealed completion`);
+      assert.equal((await probe`select count(*)::int as n from pg_catalog.pg_locks where locktype = 'advisory' and classid::int = 530030`)[0].n, 0, `${name}: no guard lock stands`);
+      // The downgrade now governs: the next edit is the authorizer's 403, nothing written.
+      const beforeLater = await counts([T]);
+      assertRefusal(await a.patch(sm, S, id, editBody(T, absent ? 1 : 2, C, [line(described(`ieh16 later ${tag}`), 4, 4)])), 403, 'forbidden', `${name}: a later edit meets the downgrade`);
+      assert.deepEqual(mine(delta(await counts([T]), beforeLater)), { D: 0, L: 0, A: 0, O: 0, K: 0 }, `${name}: and wrote nothing`);
+    }
+  }));
+});
+
+/** What a draft holds that a replay must not move: its header and lines, its audit records and events (every column), and its two sealed completions. */
+async function replayFootprint(draft, keys) {
+  const [audit] = await owner`select coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(a) order by pg_catalog.to_jsonb(a)::text), '[]'::jsonb) as rows
+    from public.audit_event a where a.subject_invoice_draft_id = ${draft}`;
+  const [outbox] = await owner`select coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(o) order by pg_catalog.to_jsonb(o)::text), '[]'::jsonb) as rows
+    from tmpos_internal.outbox_event o where o.aggregate_id = ${draft}`;
+  const completions = (await owner`select response, xmin::text as xmin from tmpos_internal.idempotency_record
+    where scope = any(${keys.map(({ key, principal }) => scopeOf(key, principal)).sort()}::text[]) order by scope`).map((r) => ({ ...r }));
+  return { state: await stateOf(draft), audit: audit.rows, outbox: outbox.rows, completions };
+}
+
+test('IEH-17 (AC-09, G): a sealed no-op and a sealed conflict replay exactly; after the owner\'s PUT downgrade the replay is the authorizer\'s 403, after the PUT restores the level it answers the retained bytes (idempotent-replayed) — and that draft\'s version, audit records, events and sealed completions never moved', async () => {
+  const tag = randomUUID().slice(0, 6);
+  const T = await newTenant(`ieh17-${tag}`);
+  const S = await newStore(T, `IEH17 ${tag}`);
+  const C = await newCustomer(T, `ieh17-${tag}`);
+  const storeOwner = await actor(`ieh17-so-${tag}`, [storeGrant(T, S, 'store_owner')]);
+  const manager = await actor(`ieh17-mgr-${tag}`, [storeGrant(T, S, 'manager')]);
+  const boss = await actor(`ieh17-boss-${tag}`, [tenantGrant(T, 'store_owner')]);
+  await withEntry(async (ctx) => {
+    const so = await signIn(ctx, storeOwner);
+    const sm = await signIn(ctx, manager);
+    const sb = await signIn(ctx, boss);
+    const lines = [line(described(`ieh17 ${tag}`), 2, 100)];
+    const id = await seed(ctx, so, S, T, C, lines);
+    // To version 2, so that a version-1 edit is a sealed 409 and a version-2 edit of the stored contents a sealed no-op.
+    const lines2 = [line(described(`ieh17 edited ${tag}`), 3, 30)];
+    editedOf(await ctx.patch(sm, S, id, editBody(T, 1, C, lines2)), { draftId: id, version: 2, changed: true }, 'the real edit to version 2');
+    const noopKey = randomUUID();
+    const conflictKey = randomUUID();
+    const keys = [{ key: noopKey, principal: manager.principal }, { key: conflictKey, principal: manager.principal }];
+    const noopBody = editBody(T, 2, C, lines2);
+    const conflictBody = editBody(T, 1, C, [line(described(`ieh17 stale ${tag}`), 5, 5)]);
+    const noop = await ctx.patch(sm, S, id, noopBody, { key: noopKey });
+    editedOf(noop, { draftId: id, version: 2, changed: false }, 'the sealed no-op');
+    const conflict = await ctx.patch(sm, S, id, conflictBody, { key: conflictKey });
+    sealedOf(conflict, 'write_conflict', 'the sealed conflict');
+    const replays = async (when) => {
+      const n = await ctx.patch(sm, S, id, noopBody, { key: noopKey });
+      editedOf(n, { draftId: id, version: 2, changed: false }, `${when}: the no-op replayed`, { replayed: true });
+      assert.equal(n.body, noop.body, `${when}: the no-op's retained bytes`);
+      const c = await ctx.patch(sm, S, id, conflictBody, { key: conflictKey });
+      sealedOf(c, 'write_conflict', `${when}: the conflict replayed`, { replayed: true });
+      assert.equal(c.body, conflict.body, `${when}: the conflict's retained bytes`);
+    };
+    await replays('before any downgrade');
+    const settled = await replayFootprint(id, keys);
+    assert.equal(settled.completions.length, 2, 'both sealed completions are stored');
+    // The owner downgrades the manager's Invoices level through the production PUT: the replays meet the authorizer.
+    const read = await ctx.read(sb, '/api/v1/roles/levels/invoices');
+    assert.equal(read.status, 200, `the owner reads the Invoices levels: ${read.body}`);
+    const reviewed = Number(JSON.parse(read.body).roles.find((r) => r.roleId === 'manager').version);
+    const down = await ctx.levels(sb, { roleId: 'manager', domain: 'invoices', level: 'create', reason: described(`ieh17 downgrade ${tag}`), expectedTenant: T, expectedVersion: reviewed });
+    assert.equal(down.status, 200, `the downgrade: ${down.body}`);
+    assert.deepEqual(JSON.parse(down.body), { roleLevel: { roleId: 'manager', domain: 'invoices', level: 'create', version: reviewed + 1 } }, 'the downgrade\'s own answer');
+    assertRefusal(await ctx.patch(sm, S, id, noopBody, { key: noopKey }), 403, 'forbidden', 'the no-op\'s replay after the downgrade');
+    assertRefusal(await ctx.patch(sm, S, id, conflictBody, { key: conflictKey }), 403, 'forbidden', 'the conflict\'s replay after the downgrade');
+    assert.deepEqual(await replayFootprint(id, keys), settled, 'downgraded: that draft, its audit records, events and sealed completions did not move');
+    // The owner restores it (Full, the manager's default word): the same keys and bytes replay the retained answers.
+    const up = await ctx.levels(sb, { roleId: 'manager', domain: 'invoices', level: 'full', reason: described(`ieh17 restore ${tag}`), expectedTenant: T, expectedVersion: reviewed + 1 });
+    assert.equal(up.status, 200, `the restore: ${up.body}`);
+    assert.deepEqual(JSON.parse(up.body), { roleLevel: { roleId: 'manager', domain: 'invoices', level: 'full', version: reviewed + 2 } }, 'the restore\'s own answer');
+    await replays('after the restore');
+    assert.deepEqual(await replayFootprint(id, keys), settled, 'restored: that draft, its audit records, events and sealed completions still did not move');
+    // The downgrade's and the restore's own writes, separately: the role row as restored, the version row twice stepped, two tenant audit records.
+    const after = await invoicesRowsOf(T);
+    assert.deepEqual(after.roles.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', level: 'full' }], 'the role row as the restore left it');
+    assert.deepEqual(after.versions.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'invoices', version: String(reviewed + 2) }], 'the version row stepped by each PUT');
+    assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 2, 'one tenant audit record per PUT');
   });
 });
 

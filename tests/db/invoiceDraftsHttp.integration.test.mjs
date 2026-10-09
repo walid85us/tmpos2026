@@ -1,6 +1,6 @@
 // Phase 4.0 M7B-INVOICES-P1 — store-owned invoice drafts END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) saving, listing and reopening drafts over REAL loopback HTTP and a disposable PostgreSQL holding every
-// migration in the directory (001-029), composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// migration in the directory (001-030), composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 // The route module (server/runtime/invoiceDrafts.ts), the store-scope authorizer and revalidator, the tenant command
 // transaction, the mutator and reads (server/persistence/postgresInvoiceDrafts.ts), migration 028's routines, the audit
 // writer (subject_invoice_draft_id) and the outbox enqueue are production's own code.

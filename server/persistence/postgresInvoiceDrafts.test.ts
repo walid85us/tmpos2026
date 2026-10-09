@@ -107,7 +107,7 @@ test('M7B-INVOICES-P2 AC-05: the edit\'s mutator is the store-scope update; ONE 
   const r = recorder([updateRow('applied', '5')]);
   assert.equal(await INVOICE_DRAFT_UPDATE_MUTATOR.apply(r.sql, updateMutation(), authority()), 'applied');
   assert.equal(r.texts.length, 1);
-  assert.match(r.texts[0], /^select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version\s+from tmpos_invoice_draft\.m7b_invoice_draft_update\(\?::text, \?::uuid, \?::uuid,\s+\?::uuid, \?::bigint, \?::uuid, \?::text::jsonb, \?::bigint\)$/);
+  assert.match(r.texts[0], /^select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version\s+from tmpos_invoice_edit\.m7b_invoice_draft_update_v2\(\?::text, \?::uuid, \?::uuid,\s+\?::uuid, \?::bigint, \?::uuid, \?::text::jsonb, \?::bigint\)$/);
   assert.deepEqual(r.values[0], [SESSION_KEY, STORE, DRAFT, TENANT, '4', CUSTOMER,
     '[{"description":"Glass","quantity":2,"unitPriceCents":50},{"description":"Labour","quantity":1,"unitPriceCents":0}]', '100']);
   // The largest expected version binds exactly, as text: 2^53 - 2, never through a float.

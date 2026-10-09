@@ -14,7 +14,7 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–029, clean, checksums pinned (each of 020-029 moves with its build);
+//    5. the migration ledger — exactly 001–030, clean, checksums pinned (each of 020-030 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role

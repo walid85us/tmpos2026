@@ -303,7 +303,7 @@
 //          then, the allowance offers nothing — the section had ended at the sign-out (its stores say so) — and starts
 //          nothing; no request after the switch but A's logout carries A's token; B's page then shows no New of A's.
 // M7B-INVOICES-P2 — EDITING A SAVED DRAFT: PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and GET
-// …/{id}/edit-eligibility (Invoices Edit), answered by the real entry over migration 029. E/V/W of editCounts: the
+// …/{id}/edit-eligibility (Invoices Edit), answered by the real entry over the v2 routine of migration 030. E/V/W of editCounts: the
 // tenant's draft edit audits, its edit events and the draft's stored version. Each case says which kind of evidence it is.
 //   SDB-11 (AC-16, observable end to end: the wire, the page and the database) EDIT, RELOAD, SECOND SESSION: the owner
 //          saves a two-line draft, then Edit — offered only once the server's edit eligibility answered — opens the
@@ -5521,7 +5521,7 @@ scenario('SDB-10', 'DA-201 A STALE ALLOWANCE ACROSS A SESSION/USER SWITCH (AC-13
 
 // ---------------------------------------------------------------------------------------------------------------------
 // M7B-INVOICES-P2 — the editor of a saved server draft (AC-16, AC-17): PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}
-// and GET …/{id}/edit-eligibility, answered by the real entry over migration 029. Literals: the shop's own texts.
+// and GET …/{id}/edit-eligibility, answered by the real entry over the v2 routine of migration 030. Literals: the shop's own texts.
 // ---------------------------------------------------------------------------------------------------------------------
 
 const EDIT_DRAFT_ACTION = 'store.invoice_draft.update';

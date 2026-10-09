@@ -78,7 +78,11 @@ const UP_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.up.sql`, 'utf8');
 const DOWN_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.down.sql`, 'utf8');
 /** M7B-INVOICES-P2: 029 (the draft edit) lives in 028's schema and rolls back before it. */
 const DOWN_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.down.sql`, 'utf8');
+/** M7B-INVOICES-P2-R1: 030 (the Invoices level guard and the guarded edit, in its own schema) sits above 029 and rolls back first. */
+const DOWN_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.down.sql`, 'utf8');
 const UP_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.up.sql`, 'utf8');
+/** M7B-INVOICES-P2-R1: 030 (the Invoices level guard and the guarded edit) sits above 029 and is applied with it. */
+const UP_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.up.sql`, 'utf8');
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_024 = UP_024.slice(UP_024.lastIndexOf('do $$'));
@@ -184,7 +188,7 @@ test.after(async () => {
   if (TENANTS.length > 0) await swallow(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
   // The shared service is left with 024 applied, whatever failed above: the executor applies it if it is not.
   await swallow(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '029') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '030') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -520,15 +524,15 @@ const applyReport = await trustedApply();
 test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough023.outcome, 'complete', JSON.stringify(applyThrough023).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['024', '025', '026', '027', '028', '029'], `024 (and 025, 026, 027, 028 and 029 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['024', '025', '026', '027', '028', '029', '030'], `024 (and 025, 026, 027, 028, 029 and 030 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 29 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 30 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[23].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   // M7B-INVOICES-P1: 028 adds its composite-key UNIQUE (customer_tenant_customer_key) to the customer table, which 024's exact
   // constraint and index lists do not know; 024's postcondition is therefore judged on 024's own surface — 028's committed
   // down run first, in the same rolled-back transaction (no draft exists here).
-  assert.equal((await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(POSTCONDITION_024).simple(); })).code, undefined,
+  assert.equal((await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(POSTCONDITION_024).simple(); })).code, undefined,
     'the postcondition holds as applied (028 rolled back above it)');
   const on028 = await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_024).simple());
   assert.equal(on028.code, '55000', `028 applied: 024's exact list sees 028's UNIQUE (${JSON.stringify(on028)})`);
@@ -554,7 +558,7 @@ test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its
     ['a default on the audit subject', `alter table public.audit_event alter column subject_customer_id set default '${randomUUID()}'`, /subject_customer_id/],
   ]) {
     const out = await rolledBack(RC, async (tx) => {
-      await tx.unsafe(DOWN_029).simple();
+      await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple();
       await tx.unsafe(DOWN_028).simple();
       await tx.unsafe(widen);
       await tx.unsafe(POSTCONDITION_024).simple();
@@ -565,7 +569,7 @@ test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its
   // A row at a version the apply could not have left: refused. (That no row was rewritten is M7CE-02's tuple proof.)
   for (const [label, write] of [['a version of 2', 'row_version = 2']]) {
     const out = await rolledBack(RC, async (tx) => {
-      await tx.unsafe(DOWN_029).simple();
+      await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple();
       await tx.unsafe(DOWN_028).simple();
       await tx.unsafe(`update tmpos_customer.customer set ${write} where customer_id = '${LEGACY[0]}'`);
       await tx.unsafe(POSTCONDITION_024).simple();
@@ -589,7 +593,7 @@ test('M7CE-02: the upgrade over populated rows sets every row_version to 1 and r
   assert.ok(ROWS_023.some((r) => r.phone !== null) && ROWS_023.some((r) => r.email !== null), 'contacts were present to be kept');
   // M7B-INVOICES-P1: 028 adds its composite-key UNIQUE to the customer table and its own audit subject column and index; 024's
   // additions are judged on 024's surface (028's committed down first, rolled back), and 028's are only those.
-  const at024 = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); return surface(tx); });
+  const at024 = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); return surface(tx); });
   assert.ok(at024.value !== undefined, JSON.stringify(at024));
   const now = at024.value;
   const with028 = await surface(owner);
@@ -1189,7 +1193,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
   // M7B-INVOICES-P1: 028 (no draft here) adds a UNIQUE and a foreign key to the customer table that 023's and 024's exact
   // lists do not know, so each rolled-back proof below starts on 024's own surface: 028's committed down first.
   const cleared = async (tx) => {
-    await tx.unsafe(DOWN_029).simple();
+    await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple();
     await tx.unsafe(DOWN_028).simple();
     await tx`update tmpos_customer.customer set row_version = 1 where row_version <> 1`;
     await clearCustomerSubjects(tx);
@@ -1278,6 +1282,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     await tx.unsafe(UP_027).simple();
     await tx.unsafe(UP_028).simple();
     await tx.unsafe(UP_029).simple();
+    await tx.unsafe(UP_030).simple();
     return { down, reapplied: await routineState(tx), reappliedSurface: await surface(tx), up: await preflightOn(tx),
       versions: (await tx`select pg_catalog.array_agg(distinct row_version)::text as v from tmpos_customer.customer`)[0].v };
   });
@@ -1309,7 +1314,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     'customers with contacts, creation times and unknown creation times remain');
   const { rolledBack: down, restore } = await rollBackAbove(owner, MIG_DIR, '023');
   try {
-    assert.deepEqual(down, ['029', '028', '027', '026', '025', '024'], 'newest first: 029 above 028 above 027 above 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2)');
+    assert.deepEqual(down, ['030', '029', '028', '027', '026', '025', '024'], 'newest first: 030 above 029 above 028 above 027 above 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1)');
     assert.deepEqual(await keptRows(), kept, 'the rollback dropped no name, contact or creation time');
     assert.deepEqual(await surface(owner), SURFACE_023, 'exactly 001-023');
   } finally {

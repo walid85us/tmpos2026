@@ -79,6 +79,8 @@ const UP_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.up.sql`, 'utf8');
 const UP_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.up.sql`, 'utf8');
 /** M7B-INVOICES-P2: 029 (the draft edit) sits above 028 and is applied with it. */
 const UP_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.up.sql`, 'utf8');
+/** M7B-INVOICES-P2-R1: 030 (the Invoices level guard and the guarded edit) sits above 029 and is applied with it. */
+const UP_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
@@ -103,7 +105,7 @@ const RC = 'isolation level read committed';
  * rolled-back transaction) it accepts.
  */
 const PREFLIGHT_AT_023 = Object.freeze({ runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] });
-/** 024, 025, 026 (M5-INVOICES-AUTH-P1), 027 and 028 (M7B-INVOICES-P1) and 029 (M7B-INVOICES-P2) applied on `tx`, their ledger rows recorded, as the trusted executor would leave them. */
+/** 024, 025, 026 (M5-INVOICES-AUTH-P1), 027 and 028 (M7B-INVOICES-P1), 029 (M7B-INVOICES-P2) and 030 (M7B-INVOICES-P2-R1) applied on `tx`, their ledger rows recorded, as the trusted executor would leave them. */
 async function applyLater(tx) {
   await tx.unsafe(UP_024).simple();
   await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
@@ -123,6 +125,9 @@ async function applyLater(tx) {
   await tx.unsafe(UP_029).simple();
   await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
     values ('029', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.up.sql`)).digest('hex')}, false, now(), now())`;
+  await tx.unsafe(UP_030).simple();
+  await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
+    values ('030', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.up.sql`)).digest('hex')}, false, now(), now())`;
 }
 const PROFILE_NULLS = Object.freeze({ o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null });
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -192,10 +197,10 @@ test.after(async () => {
   // Every customer this file made, legacy or created through 023: a later suite's rollback of 023 refuses while any
   // customer holds a creation time, so none of ours may stay behind.
   if (TENANTS.length > 0) await quietly(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 023, 024, 025, 026, 027, 028 AND 029 applied, whatever failed above: the executor applies what is not
+  // The shared service is left with 023, 024, 025, 026, 027, 028, 029 AND 030 applied, whatever failed above: the executor applies what is not
   // (024 and 025, which this file keeps out while it proves 023, always).
   await quietly(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '029') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '030') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -507,7 +512,7 @@ test('M7CN-03: the login executes 023\'s two routines and uses their schema, exe
   const verdict = await rolledBack(RC, (tx) => preflightOn(tx));
   assert.deepEqual(verdict.value, PREFLIGHT_AT_023, `the P8 runtime refuses a 023 database: ${JSON.stringify(verdict)}`);
   const with024 = await rolledBack(RC, async (tx) => { await applyLater(tx); return preflightOn(tx); });
-  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's, 025's, 026's, 027's, 028's and 029's applied: accepted (${JSON.stringify(with024)})`);
+  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's, 025's, 026's, 027's, 028's, 029's and 030's applied: accepted (${JSON.stringify(with024)})`);
 });
 
 // ---------------------------------------------------------------------------
