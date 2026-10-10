@@ -35,7 +35,12 @@
 //     a scratch database: the suites run serially, the relay and kernels stay on one database, and M6-PG's frozen store
 //     clock set the precedent. A process killed mid-test would leave the fake in place — which fails closed (unavailable);
 //   * an observing wrapper around the kernel (never around the adapter) records the failure each failed transaction ended
-//     with, so a timeout can be shown to be PostgreSQL's (55P03, 57014) rather than the adapter's own deadline.
+//     with, so a timeout can be shown to be PostgreSQL's (55P03, 57014) rather than the adapter's own deadline;
+//   * the relay can withhold the reply to a named session's first query (M6R-PERF-R1) — never a sleep for ordering.
+//
+// M6R-PERF-R1 traced CI's `unhandledRejection write CONNECTION_DESTROYED` in M6R-PERF to the driver's own array-type query
+// on a fresh connection, whose promise nothing handled when the kernel retired the pool during it; the kernel now turns
+// that query off (RLR-06, DA-110).
 //
 // DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe
@@ -137,13 +142,53 @@ function startRelay() {
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6r-relay-'));
   const pairs = new Set();
   // closes: the connections through this relay the driver has finished closing, as kernel() counts them.
-  const state = { closes: 0, pairs };
+  // holds: per application_name, the next such connection whose reply to its first query after startup is withheld.
+  const state = { closes: 0, pairs, holds: new Map() };
   const server = createServer((client) => {
     const db = netConnect(upstream);
-    const pair = { cut: () => { pairs.delete(pair); client.destroy(); db.destroy(); } };
+    let hold = null;
+    const pair = { cut: () => { pairs.delete(pair); client.destroy(); db.destroy(); hold?.cut(); } };
     pairs.add(pair);
+    // The startup message — read whole, however the client's bytes arrive — names the session's application_name: a hold
+    // armed for it takes this connection; after startup only the last 16 bytes are kept, enough to find a query's name
+    // across a chunk boundary.
+    let sentBytes = Buffer.alloc(0);
+    let started = false;
+    client.on('data', (chunk) => {
+      if (started && hold === null) return;
+      // Until the startup message is whole, everything; after it, only enough of the stream to find the query's name
+      // across a chunk boundary.
+      sentBytes = Buffer.concat([started ? sentBytes.subarray(-16) : sentBytes, chunk]);
+      if (!started && sentBytes.length >= 4 && sentBytes.length >= sentBytes.readUInt32BE(0)) {
+        started = true;
+        const startup = sentBytes.subarray(0, sentBytes.readUInt32BE(0));
+        for (const [name, armed] of state.holds) {
+          if (startup.includes(`application_name\0${name}\0`)) { hold = armed; state.holds.delete(name); break; }
+        }
+      }
+      if (hold !== null && sentBytes.includes('typcategory')) hold.typeFetch = true;
+    });
     client.pipe(db);
-    db.pipe(client);
+    // Server to client, in order. A held connection forwards whole messages up to and including its first
+    // ReadyForQuery, then nothing more: the reply to its first query never arrives, and the connection stays open.
+    let ready = false;
+    let pending = Buffer.alloc(0);
+    db.on('data', (chunk) => {
+      if (hold === null) { client.write(chunk); return; }
+      if (ready) { hold.held(); return; }
+      pending = Buffer.concat([pending, chunk]);
+      let at = 0;
+      while (!ready && pending.length - at >= 5) {
+        const length = pending.readUInt32BE(at + 1);
+        if (pending.length - at < 1 + length) break;
+        ready = pending[at] === 0x5a; // 'Z'
+        at += 1 + length;
+      }
+      if (at > 0) client.write(pending.subarray(0, at));
+      pending = pending.subarray(at);
+      if (ready && pending.length > 0) hold.held();
+    });
+    db.on('end', () => client.end());
     for (const socket of [client, db]) { socket.on('error', pair.cut); socket.on('close', pair.cut); }
   });
   const path = join(dir, '.s.PGSQL.5432');
@@ -153,6 +198,25 @@ function startRelay() {
   return {
     dir, state, refuse, listening: listen(),
     restore: async () => { if (!server.listening) await listen(); },
+    /**
+     * The next connection whose session names `applicationName` gets no reply to its first query after startup:
+     * `withheld` settles once a reply is withheld, `closed` once the connection is cut; `typeFetch` says whether the
+     * client sent the driver's own array-type catalog query on it. `cancel()` disarms a hold no connection took.
+     */
+    holdFirstReply(applicationName) {
+      let withheld;
+      let closed;
+      const hold = {
+        typeFetch: false,
+        withheld: new Promise((done) => { withheld = done; }),
+        closed: new Promise((done) => { closed = done; }),
+        held: () => withheld(),
+        cut: () => closed(),
+        cancel: () => state.holds.delete(applicationName),
+      };
+      state.holds.set(applicationName, hold);
+      return hold;
+    },
     async close() {
       const drained = refuse();
       for (const pair of [...pairs]) pair.cut();
@@ -235,6 +299,22 @@ async function settle() {
   for (let quiet = 0; quiet < 3 && performance.now() < stop; await sleep(10)) {
     const [{ n }] = await owner`select pg_catalog.count(*)::int as n from pg_catalog.pg_stat_activity where usename = ${LOGIN} and xact_start is not null`;
     quiet = n === 0 ? quiet + 1 : 0;
+  }
+}
+
+/**
+ * Lets a rejection nothing handles surface — node:test fails the running test with it — before the test goes on: the
+ * driver rejects in the timer that destroys the connection, before the socket closes, and Node reports an unhandled
+ * rejection once the microtasks after it drain; a few event-loop turns past the close are ample.
+ */
+const turns = async () => { for (let i = 0; i < 5; i += 1) await new Promise((done) => setImmediate(done)); };
+/** `promise`, or a failure naming `what` after `ms` — a wait the test bounds, never a hang. */
+async function within(promise, ms, what) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`${what}: not within ${ms} ms`)), ms); })]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1225,6 +1305,54 @@ test('M6R-14: a read-only store is never ready and counts nothing', async () => 
   }
   assert.deepEqual(await rowsOf([k]), [], 'no bucket was written');
   assert.equal(await A.probe(live()), true, 'the writable store is ready');
+});
+
+// ---------------------------------------------------------------------------
+// M6R-PERF-R1: the driver's own type query
+// ---------------------------------------------------------------------------
+
+test('RLR-06: a fresh connection sends no array-type query of its own, so a transaction ended while its first reply is withheld — by an abort, or by the limiter\'s own deadline — leaves nothing unhandled, its connection closed and no session behind, and the kernel serves again', async (t) => {
+  const cases = [
+    ['an abort', async (kx, hold) => {
+      const controller = new AbortController();
+      const tx = kx.transaction(controller.signal, RATE_LIMIT_STORE_BOUNDS, (sql) => sql`select 1 as one`);
+      await within(hold.withheld, 5_000, 'the first reply withheld');
+      controller.abort();
+      await assert.rejects(tx, (err) => err === TransactionFailure.unavailable);
+    }],
+    ['the limiter\'s deadline', async (kx, hold) => {
+      const X = createPostgresRateLimiter({ client: kx, keySecret: KEY });
+      const [answer, ms] = await timed(() => X.consume(req(key('rlr06'), 3), live()));
+      assert.deepEqual(answer, UNAVAILABLE);
+      assert.ok(ms >= LIMITER_DEADLINE_MS - 1, `answered at the deadline (${Math.round(ms)} ms)`);
+      await within(hold.withheld, 5_000, 'the first reply withheld');
+    }],
+  ];
+  for (const [i, [label, end]] of cases.entries()) {
+    const name = `m6r-rlr06-${RUN}-${i}`;
+    const kx = kernel(1, { application_name: name });
+    const hold = relay.holdFirstReply(name);
+    try {
+      await end(kx, hold);
+      await within(hold.closed, 5_000, 'the held connection closed'); // the kernel retired the pool and the driver closed it
+      await turns(); // a rejection nothing handles surfaces here, failing this test (DA-110's signature)
+      assert.equal(hold.typeFetch, false, `${label}: the connection never sent the driver's array-type query`);
+      t.diagnostic(`${label}: the first reply withheld, the connection closed, nothing unhandled`);
+      assert.deepEqual((await kx.transaction(live(), RATE_LIMIT_STORE_BOUNDS, (sql) => sql`select 1 as one`)).map((r) => ({ ...r })), [{ one: 1 }],
+        `${label}: a fresh pool serves the next transaction`);
+    } finally {
+      hold.cancel();
+      await kx.end();
+    }
+    // RLR-07: what this test opened is gone — its kernel's sessions, and its connections through the relay.
+    const until = performance.now() + 2_000;
+    let left = -1;
+    while (left !== 0 && performance.now() < until) {
+      [{ n: left }] = await owner`select pg_catalog.count(*)::int as n from pg_catalog.pg_stat_activity where application_name = ${name}`;
+      if (left !== 0) await sleep(10);
+    }
+    assert.equal(left, 0, `${label}: RLR-07 — no session of the ended kernel remains`);
+  }
 });
 
 // ---------------------------------------------------------------------------

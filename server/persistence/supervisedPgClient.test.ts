@@ -136,10 +136,10 @@ test('options are checked, and nothing is opened before a transaction needs it',
 test('a transaction runs BEGIN, its settings, the body and COMMIT on one reserved connection of a one-connection pool, resets it, then releases it', async () => {
   const fake = fakeDriver((text) => ({ rows: /select 7/.test(text) ? [{ n: 7 }] : [{}] }));
   const observed: unknown[] = [];
-  const client = clientOver(fake, 2, { onclose: (id: unknown) => observed.push(id), prepare: true });
+  const client = clientOver(fake, 2, { onclose: (id: unknown) => observed.push(id), prepare: true, fetch_types: true });
   assert.equal(await client.transaction(live(), BOUNDS, async (sql) => (await sql`select 7 as n`)[0].n), 7);
-  assert.deepEqual([fake.built.length, fake.built[0].max, fake.built[0].prepare, typeof fake.built[0].onclose], [1, 1, false, 'function'],
-    'max forced to 1, prepare forced off (DISCARD ALL removes prepared statements), onclose the kernel\'s own');
+  assert.deepEqual([fake.built.length, fake.built[0].max, fake.built[0].prepare, fake.built[0].fetch_types, typeof fake.built[0].onclose], [1, 1, false, false, 'function'],
+    'max forced to 1, prepare forced off (DISCARD ALL removes prepared statements), fetch_types forced off (DA-110), onclose the kernel\'s own');
   const [conn] = fake.connections;
   assert.deepEqual(kinds(conn.texts), ['open select 1', 'begin', 'settings', 'body', 'commit', 'reset']);
   assert.equal(conn.released, 1);

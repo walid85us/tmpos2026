@@ -287,7 +287,10 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
       }
     };
     // `prepare` off: DISCARD ALL removes prepared statements, and a driver that kept one would send it again by itself.
-    pool.driver = driver(url, { ...options, max: 1, prepare: false, onclose });
+    // `fetch_types` off: on a new connection's first ReadyForQuery the driver otherwise sends its own array-type query
+    // outside this gate and drops that query's promise, so a retirement landing during it rejects with no handler and
+    // ends the process (DA-110). No statement sent here binds or returns an array type.
+    pool.driver = driver(url, { ...options, max: 1, prepare: false, fetch_types: false, onclose });
     pools.add(pool);
     return pool;
   }
