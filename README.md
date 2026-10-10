@@ -307,6 +307,7 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 - [Backend] Saving an invoice draft is now also judged against the team member's customer access at the moment it is saved. If the owner lowers that access before the save is decided, the save is refused and nothing is saved, also when the chosen customer would be reported as not found; a save completed before the change stands. Not yet switched on.
 - [Backend] If the answer to a save or an edit is lost, the shop app offers "Check again", which sends the same request again and cannot save or apply it twice. For an edit, this works while its editor stays open. Not yet switched on.
 - [Backend] Signing out clears the customer and invoice-draft changes the browser was holding, and an answer that arrives after sign-out does not change what is shown. Not yet switched on.
+- [Backend] Request limiting behaves more carefully when the server is busy: a request is no longer started once its time to be checked has run out, and an answer that comes back too late is never treated as permission. A rare fault in the server's main database connection handling that could stop the server is removed. Not yet switched on.
 
 ### v0.8: Server-checked permissions and business-account management
 *18–30 September 2026*
