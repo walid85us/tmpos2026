@@ -42,6 +42,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createServer, connect } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,9 +53,9 @@ import { resolveDisposableTarget, testClient, testDriverVia } from './localPostg
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
-import { createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
+import { TransactionFailure, createSupervisedPgClient } from '../../server/persistence/supervisedPgClient.ts';
 import { createPostgresPlatformAdmission } from '../../server/persistence/postgresPlatformAdmission.ts';
-import { createPostgresRateLimiter, rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
+import { RATE_LIMIT_STORE_BOUNDS, createPostgresRateLimiter, rateLimitKeyFingerprint } from '../../server/persistence/postgresRateLimiter.ts';
 import { createPostgresSessionStore } from '../../server/persistence/postgresSessionStore.ts';
 import { createPostgresTenantAdmission } from '../../server/persistence/postgresTenantAdmission.ts';
 import { createPostgresTenantDirectory } from '../../server/persistence/postgresTenantDirectory.ts';
@@ -237,15 +238,42 @@ function principal(label) {
 }
 
 /**
- * Production's factories, verbatim, but for the client: each call a kernel of its own through the relay.
+ * M6R-PERF-R2: every kernel's limiter transactions — the consumes and the readiness probes, the transactions under
+ * RATE_LIMIT_STORE_BOUNDS — as the kernel saw them: when each was handed over, when the routine answered, and how it ended
+ * (committed, PostgreSQL's SQLSTATE, or the kernel's own failure). Observed at the kernel, never around the adapter: every
+ * factory's call reaches the kernel with its own signal and bounds — its work wrapped only to stamp when the routine
+ * answered — and gets exactly the kernel's answer. Bounded: each kernel's log keeps between 1 000 and 2 000 of its latest.
+ */
+const kernelLogs = [];
+const faultOf = (err) => (err === TransactionFailure.unavailable ? 'kernel_unavailable'
+  : err === TransactionFailure.outcomeUnknown ? 'kernel_outcome_unknown' : typeof err?.code === 'string' ? err.code : 'other');
+function observedKernel(k) {
+  const log = [];
+  kernelLogs.push(log);
+  return Object.freeze({
+    transaction: (signal, bounds, work) => {
+      if (bounds !== RATE_LIMIT_STORE_BOUNDS) return k.transaction(signal, bounds, work);
+      const tx = { at: Date.now(), decidedAt: null, endedAt: null, ended: 'pending' };
+      log.push(tx);
+      if (log.length > 2_000) log.splice(0, 1_000);
+      return k.transaction(signal, bounds, async (sql) => { const value = await work(sql); tx.decidedAt = Date.now(); return value; })
+        .then((value) => { tx.ended = 'committed'; tx.endedAt = Date.now(); return value; },
+          (err) => { tx.ended = faultOf(err); tx.endedAt = Date.now(); throw err; });
+    },
+    end: () => k.end(),
+  });
+}
+
+/**
+ * Production's factories, verbatim, but for the client: each call a kernel of its own through the relay, observed as above.
  * The driver dials the relay's socket through the harness (testDriverVia); the relay forwards only to TARGET.
  */
 const FACTORIES = Object.freeze({
-  client: () => createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
+  client: () => observedKernel(createSupervisedPgClient(testDriverVia(TARGET, relay.dir), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
     ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 4, idle_timeout: 0,
     onclose: () => { relay.state.closes += 1; },
     user: RUNTIME_LOGIN,
-  }),
+  })),
   store: createPostgresTransactionalStore,
   platformAdmission: (c) => createPostgresPlatformAdmission({ client: c }),
   // The administrative login's standing check (M5-ADMIN-REVOKE-P1), forwarded exactly as PRODUCTION_FACTORIES forward it.
@@ -271,7 +299,10 @@ const instances = new Set();
 /** One runtime instance, composed from its own environment exactly as an entry composes one, and served. */
 async function compose(label, rateLimitKey = CANONICAL_KEY) {
   const env = Object.freeze({ ...CONFIGURED_ENV, RATE_LIMIT_KEY: rateLimitKey.toString('base64url') });
+  const kernelsBefore = kernelLogs.length;
   const tx = assembleTransactions(PRODUCTION_INVENTORY, env, FACTORIES);
+  assert.equal(kernelLogs.length - kernelsBefore, 1, 'the composition built exactly one kernel');
+  const [limiterLog] = kernelLogs.slice(kernelsBefore);
   const keySecret = parseRateLimitKey(env.RATE_LIMIT_KEY); // the session root's one parse of the key
   const sessions = assembleSessions({
     origins: ORIGINS, verifier: VERIFIER, trustedProxies: TRUSTED_PROXIES, keySecret, ...durableSessionAdapters(bundleOf(tx), keySecret),
@@ -286,7 +317,7 @@ async function compose(label, rateLimitKey = CANONICAL_KEY) {
   const server = createBoundedServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const instance = {
-    label, tx, logs, port: server.address().port,
+    label, tx, logs, limiterLog, port: server.address().port,
     async close() {
       instances.delete(instance);
       await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
@@ -353,7 +384,7 @@ function send(instance, method, path, headers, from) {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => { text += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text, ms: Date.now() - started, instance }));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text, started, ms: Date.now() - started, instance }));
     });
     req.on('error', reject);
     req.setTimeout(10_000, () => req.destroy(new Error(`no reply within 10 s: ${method} ${path}`)));
@@ -400,6 +431,25 @@ function unavailableReply(reply) {
   assert.ok(['rate_limit_unavailable', 'rate_limit_timeout'].includes(reasonOf(reply)), `limiter outage: ${reasonOf(reply)}`);
   assert.ok(reply.ms < 2_000, `bounded: ${reply.ms} ms`);
 }
+/**
+ * M6R-PERF-R2: what the instances' kernels did for their limiters between `from` and `to` (Date.now()): every transaction
+ * open at some point in that span — `carriedIn` counts those handed over before it, such as a row's holder — how each ended,
+ * the slowest from handover to the routine's answer and to its end, and the slowest from the routine's answer to its end:
+ * the COMMIT and, unless an abort abandoned it, the connection's reset, while the bucket's row stays locked (a consume
+ * waiting on that row fails with 55P03 after lock_timeout). A transaction still open at `to` counts to `to`.
+ */
+function limiterActivity(instances, from, to) {
+  const txs = instances.flatMap((instance) => instance.limiterLog.filter((tx) => tx.at <= to && (tx.endedAt ?? to) >= from));
+  const ended = {};
+  for (const tx of txs) ended[tx.ended] = (ended[tx.ended] ?? 0) + 1;
+  const slowest = (span) => (txs.length === 0 ? null : Math.max(...txs.map(span)));
+  const decided = txs.filter((tx) => tx.decidedAt !== null);
+  return {
+    sent: txs.length, carriedIn: txs.filter((tx) => tx.at < from).length, ended, slowestToAnswerMs: slowest((tx) => (tx.decidedAt ?? tx.endedAt ?? to) - tx.at), slowestToEndMs: slowest((tx) => (tx.endedAt ?? to) - tx.at),
+    slowestAnswerToEndMs: decided.length === 0 ? null : Math.max(...decided.map((tx) => (tx.endedAt ?? to) - tx.decidedAt)),
+  };
+}
+
 /** The instances in turn, so every sequence of requests is split across both runtimes. */
 const alternate = (i) => (i % 2 === 0 ? A : B);
 
@@ -558,7 +608,7 @@ test('M6RS-06: one client at its limit does not limit another behind the same pr
   assert.equal((await loginBucket(other)).consumed, 2);
 });
 
-test('M6RS-07: the tenant, admin, tenant-login and admin-login namespaces are isolated', async () => {
+test('M6RS-07: the tenant, admin, tenant-login and admin-login namespaces are isolated', async (t) => {
   // Each login namespace exhausted leaves the other login namespace and both request namespaces untouched.
   for (const [spent, other] of [['tenant', 'admin'], ['admin', 'tenant']]) {
     const client = await proxied();
@@ -572,15 +622,42 @@ test('M6RS-07: the tenant, admin, tenant-login and admin-login namespaces are is
   const total = REQUEST.limit + 6;
   async function exhaustRequests(audience, from) {
     const statuses = [];
-    for (let sent = 0; sent < total; sent += 20) {
-      const wave = await Promise.all(Array.from({ length: Math.min(20, total - sent) }, (_, i) => current(alternate(i), audience, from)));
-      for (const reply of wave) {
-        statuses.push(reply.status);
-        if (reply.status === 429) limitedReply(reply, 'rate_limited', REQUEST);
+    // M6R-PERF-R2: the replies that are neither a 401 nor a 429 — observed: each one's wave, instance, status, the reason its
+    // instance logged, its request id and its time; inferred: that instance's limiter transactions open while it waited
+    // (all of them, not only its own) — the first five in full, with the count of all; each wave's time; and the longest
+    // this process's event loop was held. One line per call, also the message of both counts below.
+    const odd = [];
+    const waves = [];
+    const started = Date.now();
+    const loop = monitorEventLoopDelay({ resolution: 10 });
+    loop.enable();
+    try {
+      for (let sent = 0; sent < total; sent += 20) {
+        const t0 = Date.now();
+        const wave = await Promise.all(Array.from({ length: Math.min(20, total - sent) }, (_, i) => current(alternate(i), audience, from)));
+        waves.push(Date.now() - t0);
+        for (const reply of wave) {
+          statuses.push(reply.status);
+          if (reply.status === 429) limitedReply(reply, 'rate_limited', REQUEST);
+          else if (reply.status !== 401) {
+            odd.push({
+              observed: { wave: waves.length - 1, instance: reply.instance.label, status: reply.status, reason: reasonOf(reply) ?? null,
+                requestId: reply.headers['x-request-id'] ?? null, ms: reply.ms },
+              inferred: { itsInstanceLimiterMeanwhile: limiterActivity([reply.instance], reply.started, reply.started + reply.ms) },
+            });
+          }
+        }
       }
+    } finally {
+      loop.disable();
     }
-    assert.equal(statuses.filter((s) => s === 401).length, REQUEST.limit);
-    assert.equal(statuses.filter((s) => s === 429).length, total - REQUEST.limit);
+    const line = `${audience} requests: ${JSON.stringify({
+      replies: statuses.length, neither401Nor429: odd.length, slowestWaveMs: Math.max(...waves), eventLoopDelayMaxMs: Math.round(loop.max / 1e6),
+      limiter: limiterActivity([A, B], started, Date.now()), odd: odd.slice(0, 5),
+    })}`;
+    t.diagnostic(line);
+    assert.equal(statuses.filter((s) => s === 401).length, REQUEST.limit, line);
+    assert.equal(statuses.filter((s) => s === 429).length, total - REQUEST.limit, line);
     assert.equal((await bucket(audience, 'client', subjectOf(from), REQUEST)).consumed, REQUEST.limit);
   }
   const client = await proxied(4);

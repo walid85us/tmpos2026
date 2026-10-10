@@ -288,8 +288,9 @@ export function createSupervisedPgClient(driver: PgDriver, url: string, options:
     };
     // `prepare` off: DISCARD ALL removes prepared statements, and a driver that kept one would send it again by itself.
     // `fetch_types` off: on a new connection's first ReadyForQuery the driver otherwise sends its own array-type query
-    // outside this gate and drops that query's promise, so a retirement landing during it rejects with no handler and
-    // ends the process (DA-110). No statement sent here binds or returns an array type.
+    // outside this gate and drops that query's promise, so a retirement — or any failure of the connection — landing during
+    // it rejects with no handler and ends the process (DA-110). No statement this codebase sends through the kernel binds
+    // or returns an array type, and the kernel refuses an array parameter; it does not check result types.
     pool.driver = driver(url, { ...options, max: 1, prepare: false, fetch_types: false, onclose });
     pools.add(pool);
     return pool;

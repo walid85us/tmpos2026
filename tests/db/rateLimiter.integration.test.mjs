@@ -41,12 +41,18 @@
 //   * load is the test's own (M6R-PERF-R1): the relay can delay every reply by a set time, the client can stall its own
 //     event loop, and the relay can withhold the reply to a named session's first query — never a sleep for ordering.
 //
-// M6R-PERF-R1 traced CI's failures of M6R-03 and M6R-PERF to three mechanisms, each reproduced here or in its unit suite:
-// a consume deep in a bucket's line reaching its 500 ms deadline on a slow host (fail-closed, as designed — M6R-03 now
-// proves exactness consume by consume and RLR-04 forces the case); a waiter that sent a transaction after its deadline
-// had passed, when the line freed before its own timer callback ran (the adapter now checks the clock: RLR-04, unit
-// M6R-10b); and the driver's own array-type query on a fresh connection, whose promise nothing handled when the kernel
-// retired the pool during it (the kernel now turns that query off: RLR-06, DA-110).
+// M6R-PERF-R1 traced CI's M6R-03 failures and M6R-PERF's unhandled rejections to one false test assumption and two
+// defects, each reproduced here or in its unit suite: a consume deep in a bucket's line reaching its 500 ms deadline on a
+// slow host (fail-closed, as designed — M6R-03 now proves exactness consume by consume and RLR-04 forces the case); a waiter
+// that sent a transaction after its deadline had passed, when the line freed before its own timer callback ran (the adapter
+// now checks the clock: RLR-04, unit M6R-10b); and the driver's own array-type query on a fresh connection, whose promise
+// nothing handled when the kernel retired the pool during it (the kernel now turns that query off: RLR-06, DA-110).
+// M6R-PERF-R2 traced the rest — M6R-PERF's "nothing unavailable" and rateLimitRuntime's M6RS-07 — to two fail-closed
+// mechanisms, each reproduced with a schedule the test owns: a hot bucket's line waiting past the deadline, and a bucket row
+// held past lock_timeout by a consume whose COMMIT came late (55P03). M6R-PERF now accounts for every consume and every
+// bucket (its time line by line, what is established about each transaction, the owner's count reconciled), before its
+// assertions; and a burst measures each "no later than its deadline" bound from the end of the call's synchronous step, where
+// the adapter fixes its deadline (measured from the step's start, a pause inside it failed a correct adapter).
 //
 // DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe
@@ -57,6 +63,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createServer, connect as netConnect } from 'node:net';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -279,8 +286,11 @@ async function storeDown() {
 
 /** Every failure a consume or probe transaction ended with, in order: the SQLSTATE of a statement error, or the kernel's own. */
 const faults = [];
-/** The adapter's other transactions (the out-of-band reclaim): how many began, the most in flight at once per kernel, their failures. */
-const reclaims = { started: 0, maxInFlight: 0, faults: [] };
+/**
+ * The adapter's other transactions (the out-of-band reclaim): how many began, the most in flight at once per kernel, their
+ * failures, and the longest one (M6R-PERF-R2: a reclaim holds one of its kernel's connections while it runs).
+ */
+const reclaims = { started: 0, maxInFlight: 0, faults: [], longestMs: 0 };
 const faultOf = (err) => (err === TransactionFailure.unavailable ? 'kernel_unavailable'
   : err === TransactionFailure.outcomeUnknown ? 'kernel_outcome_unknown' : typeof err?.code === 'string' ? err.code : 'other');
 /** The kernel, observed: the adapter still calls exactly transaction(signal, bounds, work) and gets exactly its answer. */
@@ -298,7 +308,9 @@ const observed = (k) => {
       }
       reclaims.started += 1;
       reclaims.maxInFlight = Math.max(reclaims.maxInFlight, ++inFlight);
-      return k.transaction(signal, bounds, work).catch((err) => { reclaims.faults.push(faultOf(err)); throw err; }).finally(() => { inFlight -= 1; });
+      const began = performance.now();
+      return k.transaction(signal, bounds, work).catch((err) => { reclaims.faults.push(faultOf(err)); throw err; })
+        .finally(() => { inFlight -= 1; reclaims.longestMs = Math.max(reclaims.longestMs, performance.now() - began); });
     },
     end: () => k.end(),
   });
@@ -326,16 +338,20 @@ async function settle() {
  * adapter or changing what it is handed.
  */
 const consumeContext = new AsyncLocalStorage();
-/** Per consume of a burst: every consume transaction it sent — when, what the routine decided, and how it ended. */
+/**
+ * Per consume of a burst: every consume transaction it sent — when it was handed over, when the kernel began its work (it
+ * had a connection by then, a fresh one's startup done, and BEGIN and the settings acknowledged: M6R-PERF-R2), what the
+ * routine decided and when, and how the transaction ended.
+ */
 const sentBy = new Map();
 /** The kernel, traced per consume: the adapter still calls exactly transaction(signal, bounds, work) and gets exactly its answer. */
 const traced = (k) => Object.freeze({
   transaction: (signal, bounds, work) => {
     const id = consumeContext.getStore();
     if (bounds !== RATE_LIMIT_STORE_BOUNDS || id === undefined) return k.transaction(signal, bounds, work);
-    const tx = { at: performance.now(), decision: undefined, decidedAt: null, ended: 'pending', endedAt: null };
+    const tx = { at: performance.now(), workAt: null, decision: undefined, decidedAt: null, ended: 'pending', endedAt: null };
     sentBy.set(id, [...(sentBy.get(id) ?? []), tx]);
-    return k.transaction(signal, bounds, async (sql) => { tx.decision = await work(sql); tx.decidedAt = performance.now(); return tx.decision; })
+    return k.transaction(signal, bounds, async (sql) => { tx.workAt = performance.now(); tx.decision = await work(sql); tx.decidedAt = performance.now(); return tx.decision; })
       .then((value) => { tx.ended = 'committed'; tx.endedAt = performance.now(); return value; },
         (err) => { tx.ended = faultOf(err); tx.endedAt = performance.now(); throw err; });
   },
@@ -345,9 +361,12 @@ const traced = (k) => Object.freeze({
 const fourTraced = () => [k1, k2, k1, k2].map((k) => createPostgresRateLimiter({ client: traced(k), keySecret: KEY }));
 let burstSerial = 0;
 /**
- * `requests` at once, the i-th on instances[i % n], each timed from just before its call (monotonic clock), with a timer of
- * the deadline's length set just before it — set first, so it fires just before the adapter's own, in the same batch — whose
- * firing time is what "the deadline" means for that call, however late a busy event loop runs it. `during` runs alongside,
+ * `requests` at once, the i-th on instances[i % n], each timed from just before its call (monotonic clock) and again just after
+ * the call's synchronous step returns — the adapter fixes its deadline inside that step, so that deadline lies between the two
+ * plus LIMITER_DEADLINE_MS; the step is usually microseconds, but a pause of the process (a garbage collection, say) can
+ * stretch it to many milliseconds (M6R-PERF-R2 measured up to 17 ms) — with a timer of the deadline's length set just before
+ * the call — set first, so it fires no later than the adapter's own — whose firing time is what "the deadline" means for that
+ * call, however late a busy event loop runs it. `during` runs alongside,
  * handed the burst's start and a function counting the instances with a transaction outstanding. Returns once every consume has
  * answered and every transaction they sent has ended (a COMMIT still on its way when its caller was answered ends later).
  */
@@ -358,10 +377,12 @@ async function burst(instances, requests, during) {
     const start = performance.now();
     let deadlineAt = null;
     const sentinel = setTimeout(() => { deadlineAt = performance.now(); }, LIMITER_DEADLINE_MS);
-    const answer = await instances[i % instances.length].consume(request, live());
+    const pending = instances[i % instances.length].consume(request, live());
+    const called = performance.now();
+    const answer = await pending;
     const answeredAt = performance.now();
     clearTimeout(sentinel);
-    return { id: `${tag}:${i}`, instance: i % instances.length, cost: request.cost, start, answer, answeredAt, elapsed: answeredAt - start, deadlineAt };
+    return { id: `${tag}:${i}`, instance: i % instances.length, cost: request.cost, start, called, answer, answeredAt, elapsed: answeredAt - start, deadlineAt };
   })));
   /** How many instances have a transaction of this burst outstanding right now. */
   const outstanding = () => new Set([...sentBy].filter(([id, txs]) => id.startsWith(`${tag}:`) && txs.some((tx) => tx.ended === 'pending'))
@@ -397,6 +418,7 @@ function describeBurst({ calls, ms }) {
   }
   const lateness = calls.filter((c) => c.deadlineAt !== null).map((c) => c.deadlineAt - c.start - LIMITER_DEADLINE_MS);
   return JSON.stringify({ ms: Math.round(ms), slowestAnswerMs: Math.round(Math.max(...calls.map((c) => c.elapsed))),
+    slowestCallStepMs: Math.round(Math.max(...calls.map((c) => c.called - c.start))),
     deadlineTimerLateMs: lateness.length > 0 ? Math.round(Math.max(...lateness)) : null, classes });
 }
 /**
@@ -410,16 +432,25 @@ function describeBurst({ calls, ms }) {
  *     and no consume was refused while its cost still fitted the count the burst ended with.
  * Unavailable answers are counted, not refused: under load they are the contract's fail-closed answer (RLR-04).
  */
+/**
+ * The longest a consume's call may take to return its promise (M6R-PERF-R2): pauses of up to 17 ms were measured inside it
+ * under load; a fifth of the deadline is far above that and still refuses an adapter that stalls before fixing its deadline.
+ */
+const CALL_STEP_CAP_MS = 100;
 /** How a consume transaction may fail and still be fail-closed: the kernel's own two answers, and PostgreSQL's lock and statement timeouts. */
 const FAIL_CLOSED = new Set(['kernel_unavailable', 'kernel_outcome_unknown', '55P03', '57014']);
 function assertBurst({ calls }, limit, consumed, label, { windowMs = 6_000, strict = false } = {}) {
   for (const c of calls) {
     assert.ok(c.txs.length <= 1, `${label}: consume ${c.id} sent ${c.txs.length} transactions — nothing is retried or replayed`);
     const [tx] = c.txs;
-    // The adapter reads its deadline in the synchronous step after this call's timestamp, so its own bound is this one plus
-    // that step — microseconds; the millisecond here is for that, not a longer deadline.
+    // The adapter fixes its deadline inside the call's synchronous step, so no later than `called` + LIMITER_DEADLINE_MS:
+    // every "no later than its deadline" bound is measured from `called` and every "not before its deadline" one from
+    // `start` (M6R-PERF-R2: measured from `start` alone, a pause inside the step failed a correct adapter). The step itself
+    // is capped at CALL_STEP_CAP_MS, so an adapter that stalls before fixing its deadline is not forgiven. The 5 ms here is
+    // for a pause between the adapter's own check and this tracer's timestamp, not a longer deadline.
+    assert.ok(c.called - c.start < CALL_STEP_CAP_MS, `${label}: consume ${c.id}'s call took ${Math.round(c.called - c.start)} ms to return its promise — its synchronous step fixes its deadline, and may not take ${CALL_STEP_CAP_MS} ms`);
     if (tx !== undefined) {
-      assert.ok(tx.at - c.start < LIMITER_DEADLINE_MS + 1, `${label}: consume ${c.id} sent its transaction ${Math.round(tx.at - c.start)} ms after it was called — nothing is sent once its deadline has passed`);
+      assert.ok(tx.at - c.called < LIMITER_DEADLINE_MS + 5, `${label}: consume ${c.id} sent its transaction ${Math.round(tx.at - c.called)} ms after its call returned (${Math.round(tx.at - c.start)} ms after it was called) — nothing is sent once its deadline has passed`);
     }
     if (tx !== undefined && tx.ended !== 'committed') {
       assert.ok(FAIL_CLOSED.has(tx.ended), `${label}: consume ${c.id}'s transaction failed with ${tx.ended} — not a timeout or a lost connection, but a store fault`);
@@ -428,20 +459,21 @@ function assertBurst({ calls }, limit, consumed, label, { windowMs = 6_000, stri
         assert.ok(tx.ended === '55P03' || tx.ended === '57014', `${label}: consume ${c.id}'s transaction failed with ${tx.ended} before its deadline`);
       }
     }
-    // No answer of any kind outlives its deadline, as its own sentinel timer fired, by more than the timer batch it shares.
+    // No answer of any kind outlives its deadline, as its own sentinel timer fired, by more than the timer batch it shares —
+    // plus the call's synchronous step, by which the adapter's own timer may start after the sentinel.
     if (c.deadlineAt !== null) {
-      assert.ok(c.answeredAt <= c.deadlineAt + 20, `${label}: consume ${c.id} answered ${Math.round(c.answeredAt - c.deadlineAt)} ms after its deadline fired`);
+      assert.ok(c.answeredAt <= c.deadlineAt + 20 + (c.called - c.start), `${label}: consume ${c.id} answered ${Math.round(c.answeredAt - c.deadlineAt)} ms after its deadline fired`);
     }
     if (c.answer.outcome === 'unavailable') {
       const atDeadline = c.elapsed >= LIMITER_DEADLINE_MS - 1;
       const afterItsFailure = tx !== undefined && tx.ended !== 'committed' && c.answeredAt >= tx.endedAt;
       assert.ok(atDeadline || afterItsFailure, `${label}: consume ${c.id} answered unavailable after ${Math.round(c.elapsed)} ms, ${tx === undefined ? 'never sent' : `its transaction ${tx.ended}`} — only the deadline or its transaction's failure answers unavailable`);
       if (tx?.ended === 'committed') {
-        assert.ok(tx.endedAt - c.start >= LIMITER_DEADLINE_MS - 2, `${label}: consume ${c.id}'s decision arrived ${Math.round(tx.endedAt - c.start)} ms after its call, in time, and was withheld`);
+        assert.ok(tx.endedAt - c.start >= LIMITER_DEADLINE_MS - 5, `${label}: consume ${c.id}'s decision arrived ${Math.round(tx.endedAt - c.start)} ms after its call, in time, and was withheld`);
       }
     } else {
       // A decision is obeyed only inside its deadline (the adapter's clock, read in the step that obeys it).
-      assert.ok(c.elapsed < LIMITER_DEADLINE_MS + 5, `${label}: consume ${c.id} was answered ${c.answer.outcome} ${Math.round(c.elapsed)} ms after its call — past its deadline`);
+      assert.ok(c.answeredAt - c.called < LIMITER_DEADLINE_MS + 5, `${label}: consume ${c.id} was answered ${c.answer.outcome} ${Math.round(c.answeredAt - c.called)} ms after its call returned — past its deadline`);
       assert.ok(tx !== undefined && tx.ended === 'committed', `${label}: consume ${c.id} answered ${c.answer.outcome} without a committed transaction`);
       assert.deepEqual(c.answer, tx.decision, `${label}: consume ${c.id}'s answer is exactly what its own transaction decided`);
       if (c.answer.outcome === 'limited') {
@@ -1655,9 +1687,149 @@ test('RLR-09: the burst account refuses what a defective adapter or store would 
   }
 });
 
+test('RLR-10: the accounts state their own limits — more than twelve grants whose COMMIT acknowledgement was lost fails as unexplained, never passes unchecked; the deadline bounds hold from the end of the call\'s step, which is itself capped; and an owner-side count outside its acknowledged grants plus the unacknowledged ones is reported', () => {
+  // Synthetic consumes, no database: each sent one transaction that ended as `ended` with the routine's `outcome`.
+  const consume = (i, ended, outcome, remaining) => ({
+    id: `rlr10:${i}`, instance: 0, cost: 1, key: 'k', start: 0, called: 0, answeredAt: 10, elapsed: 10, deadlineAt: null,
+    answer: ended === 'committed' ? { outcome, ...(outcome === 'allowed' ? { remaining } : { retryAfterMs: 1_000 }) } : UNAVAILABLE,
+    txs: [{ at: 1, workAt: 2, decision: outcome === 'allowed' ? { outcome, remaining } : { outcome, retryAfterMs: 1_000 }, decidedAt: 3, ended, endedAt: 4 }],
+  });
+  // Thirteen unacknowledged allowances: refused by name before any subset is tried.
+  const lost = Array.from({ length: 13 }, (_, i) => consume(i, 'kernel_outcome_unknown', 'allowed', 39 - i));
+  assert.throws(() => assertBurst({ calls: lost }, 40, 13, 'thirteen lost'), /at most twelve grants whose COMMIT acknowledgement was lost \(13\)/);
+  // Twelve are checked: every subset is tried, and one that sums to the owner's count passes; none that does fails.
+  assert.doesNotThrow(() => assertBurst({ calls: lost.slice(0, 12) }, 40, 5, 'twelve lost'));
+  assert.throws(() => assertBurst({ calls: lost.slice(0, 12) }, 40, 13, 'twelve lost, thirteen counted'), /fit one serial order/);
+  // The deadline bounds measured from the end of the call's step (here 17 ms after its start): a hand-over 500 ms after it
+  // passes, 506 ms after it is refused; an allowance answered 506 ms after it is refused; a 150 ms step is refused.
+  const timed1 = (at, answeredAt, called = 17) => {
+    const c = consume(0, 'committed', 'allowed', 39);
+    return { ...c, start: 0, called, answeredAt, elapsed: answeredAt, txs: [{ ...c.txs[0], at }] };
+  };
+  assert.doesNotThrow(() => assertBurst({ calls: [timed1(517, 520)] }, 40, 1, 'in time'));
+  assert.throws(() => assertBurst({ calls: [timed1(523, 524)] }, 40, 1, 'late hand-over'), /nothing is sent once its deadline has passed/);
+  assert.throws(() => assertBurst({ calls: [timed1(100, 523)] }, 40, 1, 'late answer'), /past its deadline/);
+  assert.throws(() => assertBurst({ calls: [timed1(200, 210, 150)] }, 40, 1, 'long step'), /may not take/);
+  // PERF's per-bucket reconciliation: known 2, unknown 1 — the owner's 2 and 3 fit; 1 and 4 are reported.
+  const two = [consume(0, 'committed', 'allowed', 2), consume(1, 'committed', 'allowed', 1), consume(2, 'kernel_outcome_unknown', 'allowed', 0),
+    consume(3, 'kernel_unavailable', 'allowed', 0), consume(4, 'committed', 'limited')];
+  for (const [owner, flagged] of [[2, 0], [3, 0], [1, 1], [4, 1]]) {
+    const { counted, unreconciled } = unreconciledCounts(two, new Map([['k', owner]]));
+    assert.deepEqual([counted, unreconciled.length], [1, flagged], `owner ${owner}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // bounded local concurrency check — not a load test
 // ---------------------------------------------------------------------------
+
+/**
+ * M6R-PERF-R2: per bucket key, the costs whose COMMIT was acknowledged with an allowance (known) and the allowances whose
+ * acknowledgement was lost (unknown) — from how each transaction ended, never from the answers — and the buckets whose
+ * owner-side count (`consumed`, a Map) lies outside [known, known + unknown].
+ */
+function unreconciledCounts(calls, consumed) {
+  const ledger = new Map();
+  for (const c of calls) {
+    const e = ledger.get(c.key) ?? { key: c.key, known: 0, unknown: 0 };
+    const [tx] = c.txs;
+    if (tx?.decision?.outcome === 'allowed' && tx.ended === 'committed') e.known += c.cost;
+    if (tx?.decision?.outcome === 'allowed' && tx.ended === 'kernel_outcome_unknown') e.unknown += c.cost;
+    ledger.set(c.key, e);
+  }
+  return { counted: ledger.size, unreconciled: [...ledger.values()].map((e) => ({ ...e, owner: consumed.get(e.key) ?? 0 }))
+    .filter((e) => e.owner < e.known || e.owner > e.known + e.unknown) };
+}
+/**
+ * M6R-PERF-R2: what is established about a consume's transaction, from how the kernel ended it — never from the answer:
+ * none was sent; it committed (the COMMIT was acknowledged); its outcome is unknown (the COMMIT was handed over and its
+ * acknowledgement lost); it did not commit (the kernel's `unavailable`, or PostgreSQL's own error answered after the
+ * ROLLBACK's acknowledgement — a COMMIT never sent, refused by the server or answered as a rollback; an abandoned session
+ * PostgreSQL rolls back when it ends); or it is still open (no end recorded yet).
+ */
+const establishedBy = (tx) => (tx === undefined ? 'not sent' : tx.ended === 'committed' ? 'committed'
+  : tx.ended === 'kernel_outcome_unknown' ? 'commit unknown' : tx.ended === 'pending' ? 'still open' : 'not committed');
+/**
+ * M6R-PERF-R2: one consume's time, in milliseconds from its call — OBSERVED: when the call's synchronous step returned (the
+ * adapter's deadline is fixed inside it), when its deadline sentinel fired, when its
+ * transaction was handed to the kernel, when the kernel began its work (a connection held — a fresh one's startup
+ * included — and BEGIN and the settings acknowledged; those the kernel does not tell apart), when the routine answered (what
+ * it decided), when the transaction ended and how (its SQLSTATE, or the kernel's own failure — an abort at the deadline
+ * ends one as the kernel's, whatever PostgreSQL was doing — unless its COMMIT was already on its way, when it ends with the
+ * COMMIT's own outcome), and when the consume was answered; INFERRED (under `inferred`): how many consumes of its bucket on
+ * its instance were in line at its call, itself included (begun, and their transaction not yet ended — or, if none was
+ * sent, not yet answered). The end is the kernel's answer: after the COMMIT's acknowledgement and the connection's reset when
+ * it committed, at once when an abort abandoned it. null is unknown — never a time made up.
+ */
+function timelineOf(c, calls) {
+  const [tx] = c.txs;
+  const rel = (at) => (at === null || at === undefined ? null : Math.round(at - c.start));
+  const inLine = calls.filter((o) => o.instance === c.instance && o.key === c.key && o.start <= c.start
+    && (o.txs[0]?.endedAt ?? o.answeredAt ?? Infinity) > c.start).length;
+  return {
+    id: c.id, instance: c.instance, bucket: c.hot ? 'hot' : 'cold', callReturned: rel(c.called), deadlineFired: rel(c.deadlineAt),
+    handedOver: rel(tx?.at), workBegan: rel(tx?.workAt), routineAnswered: rel(tx?.decidedAt), decided: tx?.decision === undefined ? null : tx.decision.outcome,
+    ended: rel(tx?.endedAt), endedWith: tx?.ended ?? null, established: establishedBy(tx), answered: rel(c.answeredAt), answer: c.answer.outcome,
+    inferred: { inLineAtCall: inLine },
+  };
+}
+
+/**
+ * M6R-PERF-R2: M6R-PERF's account, one line — the answers by class, this process's event-loop delay, the deadline timers'
+ * lateness, the time split into waiting in line, hand-over to the kernel's work, the routine, and the routine's answer to
+ * the end; what is established about every transaction; connections closed; the reclaims; the per-bucket reconciliation
+ * (or why it is inconclusive); transactions that ended late or not at all; and the hot bucket's window — then the consumes
+ * answered unavailable or whose transaction failed, at most twelve, each in full.
+ */
+async function perfAccount(t, { calls, loop, closesBefore, before, hot, account }) {
+  const sent = calls.filter((c) => c.txs.length > 0);
+  const spans = (pick) => {
+    const v = sent.map(pick).filter((x) => x !== null).sort((x, y) => x - y);
+    return v.length === 0 ? null : { p50: Math.round(percentile(v, 0.5)), p95: Math.round(percentile(v, 0.95)), max: Math.round(v.at(-1)) };
+  };
+  const byClass = {};
+  for (const c of calls) {
+    const [tx] = c.txs;
+    const k = c.answer.outcome !== 'unavailable' ? c.answer.outcome
+      : tx === undefined ? 'unavailable: deadline before it was sent' : `unavailable: transaction ${tx.ended}${tx.ended === 'committed' ? ` (${tx.decision?.outcome}) after the deadline` : ''}`;
+    byClass[k] = (byClass[k] ?? 0) + 1;
+  }
+  const [hotRow] = await rowsOf([hot]);
+  const failing = calls.filter((c) => c.answer.outcome === 'unavailable' || (c.txs[0] !== undefined && c.txs[0].ended !== 'committed'));
+  const lateness = calls.filter((c) => c.deadlineAt !== null).map((c) => c.deadlineAt - c.start - LIMITER_DEADLINE_MS);
+  t.diagnostic(`M6R-PERF account: ${JSON.stringify({
+    classes: byClass,
+    eventLoopDelayMs: { max: Math.round(loop.max / 1e6), p99: Math.round(loop.percentile(99) / 1e6) },
+    deadlineTimerLateMaxMs: lateness.length > 0 ? Math.round(Math.max(...lateness)) : null,
+    waitedToHandOverMs: { hot: spans((c) => (c.hot ? c.txs[0].at - c.start : null)), cold: spans((c) => (c.hot ? null : c.txs[0].at - c.start)) },
+    handOverToWorkMs: {
+      hot: spans((c) => (c.hot && c.txs[0].workAt !== null ? c.txs[0].workAt - c.txs[0].at : null)),
+      cold: spans((c) => (!c.hot && c.txs[0].workAt !== null ? c.txs[0].workAt - c.txs[0].at : null)),
+    },
+    routineMs: {
+      hot: spans((c) => (c.hot && c.txs[0].decidedAt !== null ? c.txs[0].decidedAt - c.txs[0].workAt : null)),
+      cold: spans((c) => (!c.hot && c.txs[0].decidedAt !== null ? c.txs[0].decidedAt - c.txs[0].workAt : null)),
+    },
+    routineAnswerToEndMs: spans((c) => (c.txs[0].decidedAt !== null && c.txs[0].endedAt !== null ? c.txs[0].endedAt - c.txs[0].decidedAt : null)),
+    established: Object.fromEntries(['not sent', 'committed', 'not committed', 'commit unknown', 'still open']
+      .map((e) => [e, calls.filter((c) => establishedBy(c.txs[0]) === e).length])),
+    connectionsClosed: relay.state.closes - closesBefore,
+    reclaims: { started: reclaims.started, longestMs: Math.round(reclaims.longestMs) },
+    buckets: {
+      counted: account.counted, unreconciled: account.unreconciled.length, oneWindow: account.oneWindow,
+      first: account.unreconciled.slice(0, 3).map(({ key: k, ...e }) => ({ hot: k === hot, ...e })),
+      ...(account.oneWindow ? {} : { inconclusive: 'the run outlasted one window on the database clock: a bucket may have rolled' }),
+    },
+    lateOrOpenTransactions: account.lateOrOpen, untracedAnswers: account.untraced,
+    hotWindow: hotRow === undefined ? null : {
+      openedMsAfterRunStart: Math.round(Number(BigInt(hotRow.start_us) - before) / 1000),
+      spanMs: Number(BigInt(hotRow.expires_us) - BigInt(hotRow.start_us)) / 1000, consumed: hotRow.consumed,
+    },
+  })}`);
+  // The consumes answered unavailable or whose transaction failed, at most twelve, each in full.
+  for (const c of failing.slice(0, 12)) t.diagnostic(`M6R-PERF consume: ${JSON.stringify(timelineOf(c, calls))}`);
+  if (failing.length > 12) t.diagnostic(`M6R-PERF consume: ${failing.length - 12} more not shown`);
+}
 
 test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold buckets — exact accounting and nothing unavailable', async (t) => {
   const CONCURRENCY = 32;
@@ -1674,17 +1846,39 @@ test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold
   const latencies = new Array(CONSUMES);
   let next = 0;
   faults.length = 0;
-  Object.assign(reclaims, { started: 0, maxInFlight: 0, faults: [] });
+  Object.assign(reclaims, { started: 0, maxInFlight: 0, faults: [], longestMs: 0 });
+  // M6R-PERF-R2: the same two production adapters over the same two kernels, observed as Aobs's and Bobs's are and traced
+  // too, so each consume is tied to the one transaction it sent (the async context its call inherits); each consume has a
+  // deadline sentinel of its own, set just before the call as a burst's are; and this process's event-loop delay is sampled
+  // throughout. The workload, the owner-side snapshot and the original assertions are as they were: R2's account is taken
+  // after that snapshot, printed before those assertions, and checked after them.
+  const [Bperf, Aperf] = [k2, k1].map((k) => createPostgresRateLimiter({ client: traced(observed(k)), keySecret: KEY }));
+  const calls = new Array(CONSUMES);
+  const loop = monitorEventLoopDelay({ resolution: 10 });
+  const closesBefore = relay.state.closes;
+  const before = await dbNowUs();
+  const open = () => calls.filter((c) => c !== undefined && (sentBy.get(c.id) ?? []).some((tx) => tx.ended === 'pending')).length;
   try {
+    loop.enable();
     const [, duration] = await timed(() => Promise.all(Array.from({ length: CONCURRENCY }, async (_, w) => {
-      const instance = w % 2 ? Aobs : Bobs;
+      const instance = w % 2 ? Aperf : Bperf;
       while (next < CONSUMES) {
         const i = next++;
-        const [answer, took] = await timed(() => instance.consume(req(plan[i].k, plan[i].limit, WINDOW), live()));
+        const call = { id: `perf:${RUN}:${i}`, instance: w % 2, key: plan[i].k, hot: plan[i].k === hot, start: performance.now(), called: null, deadlineAt: null, answeredAt: null };
+        calls[i] = call;
+        const sentinel = setTimeout(() => { call.deadlineAt = performance.now(); }, LIMITER_DEADLINE_MS);
+        const [answer, took] = await timed(() => consumeContext.run(call.id, () => {
+          const pending = instance.consume(req(plan[i].k, plan[i].limit, WINDOW), live());
+          call.called = performance.now();
+          return pending;
+        }));
+        call.answeredAt = performance.now();
+        clearTimeout(sentinel);
         answers[i] = answer;
         latencies[i] = took;
       }
     })));
+    loop.disable();
     await settle(); // the background reclaims the run started end before they are counted
     // Exact accounting, per bucket: min(calls, limit) allowed, each at its own count, the rest limited, and the owner-side
     // count equal to what was granted.
@@ -1725,12 +1919,46 @@ test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold
     };
     t.diagnostic(JSON.stringify(report));
     if (process.env.M6R_PERF_OUT) writeFileSync(`${REPO}.workflow/scratch/m6r/perf.json`, `${JSON.stringify(report, null, 2)}\n`);
+
+    // M6R-PERF-R2, after the original snapshot above and changing nothing in it: every transaction a consume sent ends — a
+    // COMMIT still on its way when its consume was answered ends later — within 3 s of the last answer (bounded: never a
+    // hang); then a second owner-side snapshot, for the reconciliation alone; then the account, printed before the original
+    // assertions. A fault in any of it is held, not thrown, so it can never mask them, and fails after them.
+    let account;
+    try {
+      const endBy = Math.max(...calls.map((c) => c.answeredAt)) + 3_000;
+      while (open() > 0 && performance.now() < endBy) await sleep(5);
+      calls.forEach((c, i) => { c.answer = answers[i]; c.txs = sentBy.get(c.id) ?? []; });
+      const consumedAfter = new Map((await owner`select limiter_key, consumed from tmpos_rate_limit.bucket
+        where limiter_key = any (${[...expected.keys()]}::text[])`).map((r) => [r.limiter_key, r.consumed]));
+      // Every bucket's window opens at its first consume, at or after `before`, and lasts WINDOW: a run shorter than that on
+      // the database clock cannot have rolled one, so each owner count covers this run alone.
+      const oneWindow = (await dbNowUs()) - before < BigInt(WINDOW) * 1000n;
+      account = {
+        lateOrOpen: calls.flatMap((c) => c.txs).filter((tx) => tx.endedAt === null || tx.endedAt > endBy).length,
+        untraced: calls.filter((c) => c.answer.outcome !== 'unavailable' && c.txs.length === 0).length,
+        oneWindow, ...unreconciledCounts(calls.map((c) => ({ ...c, cost: 1 })), consumedAfter),
+      };
+      await perfAccount(t, { calls, loop, closesBefore, before, hot, account });
+    } catch (err) {
+      account = { error: String(err?.message ?? err) };
+      t.diagnostic(`M6R-PERF account: could not be computed — ${account.error}`);
+    }
     assert.deepEqual([overAllowed, underCounted], [0, 0], 'fail-closed: never over-allowed, never under-counted');
     assert.equal(report.unavailable, 0, 'nothing unavailable');
     assert.equal(report.databaseErrors, 0, 'no transaction failed');
     assert.equal(exact, true, 'exact accounting on every bucket');
     assert.equal(report.allowed + report.limited, CONSUMES);
+    // M6R-PERF-R2: the account was computed; every allowance or limit was traced to its own transaction; every transaction
+    // ended within 3 s of the last answer; and — when the run fitted one window (otherwise reported above as inconclusive) —
+    // every bucket's count is what its acknowledged COMMITs granted, plus at most the allowances whose acknowledgement was lost.
+    assert.equal(account.error, undefined, 'the M6R-PERF account was computed');
+    assert.equal(account.untraced, 0, 'every allowance or limit was traced to its own transaction');
+    assert.equal(account.lateOrOpen, 0, 'every transaction M6R-PERF sent ended within 3 s of the last answer');
+    if (account.oneWindow) assert.equal(account.unreconciled.length, 0, 'every owner-side count lies between its acknowledged grants and those plus the unacknowledged ones');
   } finally {
+    loop.disable();
+    for (const c of calls) if (c !== undefined) sentBy.delete(c.id);
     await owner`delete from tmpos_rate_limit.bucket where limiter_key = any (${[hot, ...cold]}::text[])`;
   }
 });

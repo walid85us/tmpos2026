@@ -213,7 +213,10 @@ export function createPostgresRateLimiter(deps: { readonly client: SupervisedPgC
         return client.transaction(bound.signal, bounds, work);
       });
       started = true;
-      // The bucket stays this call's until the kernel has finished with it.
+      // The bucket stays this call's until the kernel answers: after COMMIT's outcome and the connection's reset — or at once
+      // when this call's bound aborts it first, unless its COMMIT or ROLLBACK is already on its way. PostgreSQL may then still
+      // be ending that transaction, so the next consume can briefly wait on the row behind it, never past its lock_timeout
+      // (M6R-PERF-R2).
       void transaction.then(ended, () => ended(undefined));
       // An answer is obeyed only while the bound still holds: one that arrives past it — when a busy event loop runs the
       // reply before the deadline timer — is unavailable too, its cost spent without an allowance, never a late allowance.
