@@ -458,7 +458,7 @@ jobs:
       # tenant isolation, a narrowed grant, a lost reply and a moved grant) against the same tenant entries and service.
       # The step limit stays 12: the six directory scenarios are about 12 s of a 2m49s local run (the step took 3m07s in
       # CI at the stage's entry), so the limit is still more than three times the run.
-      # M7B-INVOICES-P1 and -P2 — it also drives the Invoices page's Server drafts section (SDB-01..15). SDB-01..10 save,
+      # M7B-INVOICES-P1 and -P2 — it also drives the Invoices page's Server drafts section (SDB-01..17). SDB-01..10 save,
       # reload, list and reopen drafts; hold a lost reply and a lost request for Check again; follow store, session and user
       # changes with late answers ignored; keep focus off the page body in real Chromium; set a browser-only custom role
       # against the server's authority; and read the server's creation eligibility, a stale allowance across a switch
@@ -466,7 +466,10 @@ jobs:
       # event, one completion) and reads it in a reload and a second browser, SDB-12 makes the first of two editors' save a
       # sealed 409 that needs an explicit Reapply, SDB-13 loses a PATCH's answer and replays it with Check again (still one
       # version step), SDB-14 signs out during such an unknown outcome and SDB-15 delivers a late answer after a user
-      # switch. So the step STORES AND EDITS DRAFTS in the shared service, leaving drafts above version 1 that 029's and
+      # switch. M7B-INVOICES-P1-R3: SDB-05's sign-out boundary is the page's own initiation of its one logout, not the runner's
+      # observation index; SDB-16 (initiation before sign-out) and SDB-17 (sign-out before initiation) hold the edit-eligibility
+      # read in each order across a user switch: nothing of A's is initiated after the logout and no late answer has any effect.
+      # So the step STORES AND EDITS DRAFTS in the shared service, leaving drafts above version 1 that 029's and
       # 028's downs refuse: it runs after every step that rolls 028, 029, 030 or 031 back (it sits after them), and before it finishes
       # it removes its drafts, lines and created-draft events and clears their audit subjects, then checks none is left (R8).
       - name: Shop role levels and customer directory in a real browser against the tenant entry and disposable PostgreSQL (M7A-CUSTOMERS-P3-R2, M7A-CUSTOMERS-P5)

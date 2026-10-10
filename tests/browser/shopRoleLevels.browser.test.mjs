@@ -245,11 +245,18 @@
 //          A signs out; user B (another account of the tenant with its own store grant at W) signs in in the same tab.
 //          Nothing of A shows — no store choice, row, dialog or held attempt (no "Check again"), before or after B's own
 //          "Show server drafts", which lists B's stores with none chosen; no draft POST leaves the page during or after
-//          the switch (its only POSTs: A's logout and B's login); no request after the sign-out carries A's session CSRF
-//          token but the logout that ends A's session (A's cookie then reads 401), and once that logout has run A's token
-//          is held nowhere in the page's JavaScript heap (a CDP heap snapshot of the renderer, searched as text: the draft
-//          hold store, which kept it beside the held attempt, heard the sign-out — DA-198 in a real browser); B's own list
-//          of W works. B signs out
+//          the switch (its only POSTs: A's logout and B's login, the only sign-in B's); A's logout (A's cookie then reads
+//          401) is the page's sign-out boundary, and once it has run A's token is held nowhere in the page's JavaScript
+//          heap (a CDP heap snapshot of the renderer, searched as text: the draft hold store, which kept it beside the held
+//          attempt, heard the sign-out — DA-198 in a real browser); B's own list of W works. M7B-INVOICES-P1-R3 (SDB-05's
+//          CI failure, an edit-eligibility GET "after the sign-out"): the boundary is the page's OWN initiation of its one
+//          logout, from FETCH_LOG — not the runner's index taken before it clears the persisted sign-in, which the app
+//          notices only on its Firebase poll (the reopen's edit-eligibility read, started after the detail read and its
+//          own session read, can be initiated in that window, or observed in it). The page initiates NOTHING between that
+//          logout and B's sign-in; a request the runner recorded after its index that carries A's session CSRF token or
+//          cookie, other than the logout, must have been recorded before B's sign-in began — so, by the empty window, it
+//          was initiated before the logout — and be a GET of a route the page initiated before it; each is listed in the
+//          record (labels and sequence numbers only), and nothing of it shows. B signs out
 //          and A signs in again in the same document: A's attempt is shown detached (no "Check again"), Stop tracking
 //          puts focus on the section heading, and still no draft POST: one in the whole case, the lost one.
 //   SDB-06 (DA-199) FOCUS IN REAL CHROMIUM, outside the dialogs: document.activeElement after each press is what the
@@ -334,6 +341,21 @@
 //          — it carries only the client's own request deadline — so the browser reports it finished) and shows nothing
 //          — no "Saved", no dialog, no read-back — and starts nothing; no request after the switch but A's logout
 //          carries A's token.
+// M7B-INVOICES-P1-R3 — SDB-05'S TWO ORDERINGS, DETERMINISTIC (AC-15): the reopen's edit-eligibility read against A's sign-out
+// in SDB-08's window (B signs in in a second tab, B's profile held, A's page mounted), with the page's own initiation log
+// (FETCH_LOG: { seq, label, t } per /api/ request it starts) beside the runner's observation; the page's one logout of A
+// is its sign-out boundary in both. The jsdom halves, each answer actually delivered late, are ServerInvoiceDrafts.test.tsx
+// SID-112 and SID-113.
+//   SDB-16 INITIATION BEFORE SIGN-OUT: the edit-eligibility GET, answered by the entry (allowed), parked at the front; the
+//          log shows it initiated before any logout. At the switch the page cancels it (the browser ends it "canceled"
+//          before the release); released, the answer shows nothing — no Edit, editor, line, eligibility or customer of A
+//          — and the page initiates nothing after its logout while mounted; after the switch nothing but that logout
+//          carries A's token, and no sign-in is A's.
+//   SDB-17 SIGN-OUT BEFORE INITIATION: the session read that the edit-eligibility check sends first (after the detail
+//          read answered) parked at the front, answered with A's live session; the GET not yet initiated (the log's last
+//          two: the detail read, that session read; the dialog says checking). At the switch the page cancels that read;
+//          released, nothing follows: no edit-eligibility GET is ever initiated or recorded, nothing after the logout, and
+//          nothing of A shows.
 // M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
 // guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
 // of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
@@ -1452,7 +1474,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
-  'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15',
+  'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17',
   'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
 ]);
 const registered = new Set();
@@ -4272,6 +4294,66 @@ async function recordWrites(page) {
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: WRITE_HOOKS });
   return page;
 }
+/**
+ * M7B-INVOICES-P1-R3 (SDB-05): a request's INITIATION, as the page itself orders it. The runner sees a request only when
+ * it handles Chrome's Fetch.requestPaused (st.api): that is OBSERVATION, later and in the runner's own order. Each record
+ * is only { seq, label, t }: seq its place in the page's initiation order, label the method and the route template (every
+ * path segment that is not a plain lower-case word or the API version becomes ":id"; no query), t the page's clock in
+ * whole milliseconds — never a URL id, query, header, token, cookie or body. The wire is untouched.
+ */
+const routeTemplate = (path) => path.split('/').map((s) => (s === '' || /^[a-z][a-z-]*$/.test(s) || /^v[0-9]+$/.test(s) ? s : ':id')).join('/');
+/** The label FETCH_LOG gives the request the runner recorded as `r`. */
+const labelOf = (r) => `${r.method} ${routeTemplate(r.path)}`;
+const LOGOUT_LABEL = 'POST /api/v1/session/logout';
+/**
+ * Installed in every document of a page before any script of the app runs: window.fetch wrapped (every shop client
+ * resolves globalThis.fetch at each call), so each same-origin /api/ request the page starts is logged at the call, before
+ * anything is sent. The runner adds its own markers to the same sequence ("runner: …"): evidence of where the runner acted,
+ * never an application boundary.
+ */
+const FETCH_LOG = `(() => {
+  if (window.__sdbFetch) return;
+  const log = [];
+  let seq = 0;
+  const stamp = (label) => { log.push({ seq: ++seq, label, t: Math.round(performance.now()) }); };
+  const template = ${routeTemplate.toString()};
+  const original = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
+        stamp(String((init && init.method) || (input instanceof Request ? input.method : 'GET')).toUpperCase() + ' ' + template(url.pathname));
+      }
+    } catch { /* never in the page's way */ }
+    return original.apply(this, arguments);
+  };
+  Object.defineProperty(window, '__sdbFetch', { value: Object.freeze({ log, mark: (label) => stamp('runner: ' + label) }) });
+})()`;
+/** Log the API requests `page` initiates, from its next document on (call before signIn). */
+async function recordFetches(page) {
+  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: FETCH_LOG });
+  return page;
+}
+/** The page's initiation log so far: [{ seq, label, t }]. */
+const fetchLog = (page) => page.evaluate('window.__sdbFetch.log.slice()');
+/** The runner's own marker in the page's initiation sequence. */
+const markFetches = (page, label) => page.evaluate(`window.__sdbFetch.mark(${JSON.stringify(label)})`);
+/**
+ * The page's sign-out boundary in `log`: the initiation of its ONE logout POST (logout() sends it synchronously, after
+ * announcing the session end to every holder and before anything is awaited, when no earlier logout runs and a token is
+ * remembered). Asserts that precondition: exactly one logout in the whole log.
+ * The application's sign-out transition itself is the start of that same synchronous run (the announcement, whose
+ * `onSessionEnd` listeners run before the POST is initiated, TSC-32). A request a listener initiated in that run would sit
+ * just before the POST here, indistinguishable from one initiated before the sign-out: this log cannot see that window, so
+ * it is asserted where it can be — SID-112 marks the fake's initiation record immediately before `logout()`, with the
+ * Invoices page's own listeners mounted, and requires that the logout POST is the only request initiated from the mark on.
+ */
+function signOutBoundary(log, label) {
+  const logouts = log.filter((e) => e.label === LOGOUT_LABEL);
+  assert.equal(logouts.length, 1, `${label}: the page initiated exactly one logout (${log.map((e) => `${e.seq} ${e.label}`).join('; ')})`);
+  return logouts[0].seq;
+}
+const seqLines = (entries) => entries.map((e) => `${e.seq} ${e.label}`);
 
 /**
  * None of `values` (draft ids, Idempotency-Keys, customer ids, descriptions, bodies) in a page's address, browser storage,
@@ -4777,11 +4859,13 @@ const SAME_DOCUMENT = 'window.__sdbSameDocument === true';
 /**
  * Sign out in this tab as SRL-09 does — the persisted Firebase sign-in cleared, what a sign-out in another tab leaves
  * behind; the shop has no sign-out control of its own — and wait for the route guard's /login in the same document.
- * Answers the API record count before the sign-out began.
+ * Answers the API record count before the sign-out began. A page that logs its initiations (recordFetches) gets the
+ * runner's marker where the clearing starts: the app notices it only later, on its own Firebase poll.
  */
 async function signOutHere(page) {
   const from = st.api.length;
   await page.evaluate(`new Promise((resolve, reject) => {
+    window.__sdbFetch?.mark('sign-out begins (the persisted sign-in cleared)');
     const open = indexedDB.open('firebaseLocalStorageDb');
     open.onerror = () => reject(open.error);
     open.onsuccess = () => {
@@ -4914,7 +4998,7 @@ const carries = (r, values) => {
   return values.some((v) => wire.includes(v));
 };
 
-scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, with a store chosen, its row listed, the reopen dialog open and an unconfirmed save held, signs out and user B signs in in the same document: no A store choice, row, dialog or held attempt shows, no draft POST is sent during or after the switch, no request after the sign-out but A\'s logout carries A\'s session CSRF token, and B\'s own list works; A, back in the same document, finds the attempt detached (no Check again)', async () => {
+scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, with a store chosen, its row listed, the reopen dialog open and an unconfirmed save held, signs out and user B signs in in the same document: no A store choice, row, dialog or held attempt shows, no draft POST is sent during or after the switch, the page initiates nothing after its logout of A until B signs in and no request after the sign-out but that logout and reads the page initiated before it (listed) carries A\'s session CSRF token or cookie, and B\'s own list works; A, back in the same document, finds the attempt detached (no Check again)', async () => {
   const tenant = await newTenant('d5');
   const westName = `M7SDB d5 west ${SUFFIX}`;
   const west = { id: await newStore(tenant, westName), name: westName };
@@ -4924,7 +5008,7 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
   const b = await actor('d5-b', [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
   const seedLabel = 'M7SDB d5 seed';
   const [dSeed] = await seedDrafts(tenant, west.id, customer.id, a.id, 1, seedLabel);
-  const page = await recordWrites(await openPage());
+  const page = await recordFetches(await recordWrites(await openPage()));
   await signIn(page, a);
 
   // 1. A: W chosen, its row listed, a save held unconfirmed (it committed; its answer lost at the front), the reopen open.
@@ -4976,6 +5060,9 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
     if (i > 0) await delay(1_000);
     aTokensInHeap = (await heldInHeap(page, aTokens)).length;
   }
+  // Read BEFORE the marker is placed: every request the runner records from here on was initiated after that marker.
+  const bAt = st.api.length;
+  await markFetches(page, 'B signs in');
   await signInHere(page, b);
   const same = await page.evaluate(SAME_DOCUMENT);
   await go(page, '/invoices');
@@ -4987,7 +5074,7 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
   };
   const atSwitch = {
     hold: await has(page, 'drafts-hold'), check: await has(page, 'drafts-check-again'), view: await has(page, 'draft-view'),
-    store: await has(page, 'drafts-store'), rows: await has(page, 'drafts-row'), notice: await has(page, 'drafts-notice'), shownOfA: await shownOfA(),
+    editor: await has(page, 'draft-edit'), store: await has(page, 'drafts-store'), rows: await has(page, 'drafts-row'), notice: await has(page, 'drafts-notice'), shownOfA: await shownOfA(),
   };
   // B's own "Show server drafts": B's stores, none chosen; still nothing of A.
   await page.click(by('drafts-show'));
@@ -5012,11 +5099,35 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
     lists: sentBy(page, isDraftList(west.id), out).map((r) => `${carries(r, aTokens) ? 'A' : carries(r, answeredTokens(after)) ? 'B' : 'none'} ${answered(r)}`),
   };
   record('SDB-05', { phase: 'B after the switch', ...evidenceOfSwitch, requests: after.map(apiLine) });
+  const aLogouts = after.filter((r) => isLogout(r) && r.status === 204 && (r.headers.cookie ?? '').includes(aLogin.cookie));
+  // INITIATION vs OBSERVATION (M7B-INVOICES-P1-R3). `out` is the runner's index taken before it cleared the persisted
+  // sign-in; the app notices that only on its own Firebase poll, so a request A's live page starts in between — or one it
+  // started earlier whose paused event the runner handled later — is recorded after `out` though it precedes the sign-out.
+  // The application's sign-out boundary is the page's own initiation of its one logout (signOutBoundary).
+  const log = await fetchLog(page);
+  const markOut = log.find((e) => e.label.startsWith('runner: sign-out begins'));
+  const markB = log.find((e) => e.label === 'runner: B signs in');
+  assert.ok(markOut && markB && markOut.seq < markB.seq, 'the runner\'s markers are in the page\'s log, in order');
+  const boundary = signOutBoundary(log.filter((e) => e.seq < markB.seq), 'SDB-05');
+  const getsBefore = new Set(log.filter((e) => e.seq < boundary && e.label.startsWith('GET ')).map((e) => e.label));
+  // A request the runner recorded after `out` that carries A's session CSRF token or A's cookie, other than the logout:
+  // recorded before B's sign-in began (bAt), the page initiated it before that marker; the page initiates nothing
+  // between its logout and that marker (asserted below), so it was initiated BEFORE the logout. Each is listed — never
+  // allowed as a class: a GET of a route the page initiated before its logout, recorded before B began, and nothing of
+  // it may show (the DOM and heap checks above, and no request it could cause: below).
+  const lateObserved = st.api.slice(out).map((r, i) => ({ r, at: out + i }))
+    .filter(({ r }) => r.frameId === page.frameId && r !== aLogouts[0] && (carries(r, aTokens) || (r.headers.cookie ?? '').includes(aLogin.cookie)))
+    .map(({ r, at }) => ({ label: labelOf(r), status: r.status, recordedBeforeB: at < bAt }));
+  const ordering = {
+    window: seqLines(log.filter((e) => e.seq >= markOut.seq - 4 && e.seq <= markB.seq + 3)), boundary,
+    initiatedAfterLogoutBeforeB: seqLines(log.filter((e) => e.seq > boundary && e.seq < markB.seq)), lateObserved,
+  };
+  record('SDB-05', { phase: 'initiation vs observation (labels and sequence numbers only)', ...ordering });
   assert.equal(same, true, 'the same document: nothing was reloaded, the module memory is the one A left');
   assert.deepEqual(atLogin, { view: false, section: false }, 'signed out: the Invoices page and its dialog are gone');
   assert.equal(aTokensInHeap, 0, 'once signed out, A\'s session CSRF token is held nowhere in the page\'s JavaScript heap (the draft hold store and the picker heard the sign-out)');
-  assert.deepEqual(atSwitch, { hold: false, check: false, view: false, store: false, rows: false, notice: false, shownOfA: 0 },
-    'B\'s Invoices page shows no store choice, row, dialog, held attempt or notice of A');
+  assert.deepEqual(atSwitch, { hold: false, check: false, view: false, editor: false, store: false, rows: false, notice: false, shownOfA: 0 },
+    'B\'s Invoices page shows no store choice, row, dialog, editor, held attempt or notice of A');
   assert.deepEqual(afterShow, { options: ['', west.id], chosen: '', rows: false, hold: false, view: false, shownOfA: 0 },
     'B\'s stores, none chosen; no row, held attempt or dialog of A');
   assert.equal(bNew, true, 'B, a manager at W, is offered a draft of its own');
@@ -5024,12 +5135,17 @@ scenario('SDB-05', 'AC-15 USER SWITCH IN ONE TAB (DA-193, DA-198) — user A, wi
   assert.ok(evidenceOfSwitch.posts.length > 0 && evidenceOfSwitch.posts.every((p) => p.startsWith('/api/v1/session/logout ') || p.startsWith(`${LOGIN} `)),
     `the switch's only POSTs: a logout and B's login (${evidenceOfSwitch.posts.join('; ')})`);
   assert.equal(bLogins.length, 1, 'B signed in to the tenant server once');
-  const aLogouts = after.filter((r) => isLogout(r) && r.status === 204 && (r.headers.cookie ?? '').includes(aLogin.cookie));
   assert.equal(aLogouts.length, 1, `one logout, carrying A's cookie, ended A's session: ${after.map(apiLine).join('; ')}`);
   assert.ok(carries(aLogouts[0], aTokens), 'that logout names A\'s session by its CSRF token');
-  assert.deepEqual(after.filter((r) => r !== aLogouts[0] && carries(r, aTokens)).map(apiLine), [],
-    'no request after the sign-out but that logout carries A\'s session CSRF token');
-  assert.deepEqual(after.filter((r) => r !== aLogouts[0] && (r.headers.cookie ?? '').includes(aLogin.cookie)).map(apiLine), [], 'nor A\'s session cookie');
+  // The security claim at the application's boundary: after A's logout was initiated the page initiated NOTHING until
+  // B began signing in — no edit-eligibility GET, retry, session read, sign-in or mutation for A.
+  assert.deepEqual(ordering.initiatedAfterLogoutBeforeB, [], 'the page initiated no request after its logout of A until B began signing in');
+  assert.deepEqual(after.filter(isLogin).map(bearerUid), [b.uid], 'the only sign-in after the sign-out is B\'s');
+  // A's session CSRF token and cookie ride no request after the sign-out but that logout and requests the page initiated
+  // BEFORE it (each listed in the record; by the argument above: recorded before B began, a GET of a route initiated
+  // before the logout) — never one recorded after B began, never a mutation.
+  assert.deepEqual(lateObserved.filter((x) => !(x.recordedBeforeB && getsBefore.has(x.label))), [],
+    `A's session CSRF token or cookie rides only that logout and GETs the page initiated before it (${JSON.stringify(lateObserved)})`);
   assert.deepEqual(evidenceOfSwitch.lists, ['B 200'], 'B\'s list of W: one read, under B\'s session');
   assert.deepEqual(await draftCounts(tenant), dBefore, 'no draft, line, audit or event written by the switch');
   await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'no completion or idempotency record written by the switch');
@@ -6023,6 +6139,145 @@ scenario('SDB-15', 'AC-17 A LATE PATCH ANSWER ACTUALLY DELIVERED (DA-198 window)
   assert.equal(parkedEnd, 'finished', 'the browser RECEIVED the answer: no session end aborts the PATCH (it carries only the client\'s own request deadline), so it was delivered to the page');
   assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
   await assertDraftsNowhere([page], [draftId, patch.headers['idempotency-key'], patch.body, secret]);
+  await assertNoLeak(page);
+}, 180_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-P1-R3 — SDB-05's two orderings made deterministic (AC-15): the reopen's edit-eligibility read against A's
+// sign-out, with the page's own initiation log (FETCH_LOG) beside the runner's observation. A's page stays mounted through
+// the release (SDB-08's window: B signs in in another tab, B's profile held), so a stale effect could show.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A (store owner at W) signed in with W listed, B (a manager at W), and one seeded draft of A's; A's page logs its initiations and the network's ends. */
+async function reopenCase(label) {
+  const tenant = await newTenant(label);
+  const westName = `M7SDB ${label} west ${SUFFIX}`;
+  const west = { id: await newStore(tenant, westName), name: westName };
+  const [customer] = await seedCustomers(tenant, [`M7SDB ${label} Avery ${SUFFIX}`]);
+  const a = await actor(`${label}-a`, [grant(tenant, 'store_owner'), storeGrant(tenant, west.id, 'store_owner')], { role: 'store_owner' });
+  const b = await actor(`${label}-b`, [grant(tenant, 'manager'), storeGrant(tenant, west.id, 'manager')], { role: 'manager' });
+  const [draftId] = await seedDrafts(tenant, west.id, customer.id, a.id, 1, `M7SDB ${label} seed`);
+  const page = await watchNetwork(await recordFetches(await recordWrites(await openPage())));
+  await signIn(page, a);
+  await openDrafts(page);
+  await pickStore(page, west.id);
+  await waitDraftRows(page, [draftId], 'A lists W', customer.name);
+  return { west, customer, b, draftId, seedLine: `M7SDB ${label} seed 1 ${SUFFIX}`, page };
+}
+/** What A's mounted section shows: its stores' and reopen dialog's phases, the dialog's lines, Edit, its state, the editor, and how many of A's draft values the page holds. */
+const mountedOfA = async (page, c) => ({
+  section: await has(page, 'drafts-section'), stores: await page.evaluate(`${q('drafts-stores-state')}?.dataset.phase ?? null`),
+  view: await page.evaluate(`${q('draft-view-state')}?.dataset.phase ?? null`),
+  lines: await page.evaluate(`document.querySelectorAll(${JSON.stringify(by('draft-view-line'))}).length`),
+  edit: await has(page, 'draft-view-edit'), editState: await has(page, 'draft-view-edit-state'), editor: await has(page, 'draft-edit'),
+  shownOfA: await page.evaluate(`${JSON.stringify([c.draftId, c.seedLine, c.customer.name, c.customer.id])}.filter((v) => document.documentElement.outerHTML.includes(v)).length`),
+});
+const MOUNTED_SIGNED_OUT = Object.freeze({ section: true, stores: 'signed-out', view: 'signed-out', lines: 0, edit: false, editState: false, editor: false, shownOfA: 0 });
+const openRow = (page, id) => page.click(`${by('drafts-row')}[data-id="${id}"] ${by('drafts-open')}`);
+const CHECKING_EDIT = `${q('draft-view-edit-state')}?.dataset.phase === 'checking' && !!${q('draft-view-lines')}`;
+
+scenario('SDB-16', 'AC-15 INITIATION BEFORE SIGN-OUT (M7B-INVOICES-P1-R3, SDB-05\'s race in order) — A reopens a saved draft; the edit-eligibility GET it starts is answered by the entry (allowed) and parked at the front, and the page\'s own log shows it initiated before any logout; B signs in in another tab (B\'s profile held, A\'s page mounted): the page\'s one logout of A is its sign-out boundary and the page cancelled the parked GET there; released after it, the answer shows nothing — no Edit, editor, line, eligibility or customer of A — and the page initiates nothing after its logout: no retry, session read, sign-in, PATCH or POST; only that logout carries A\'s token after the switch', async () => {
+  const c = await reopenCase('d16');
+  const { page, west, draftId, b } = c;
+  // 1. The reopen's edit-eligibility GET, answered by the entry (A's live session), parked at the front.
+  const path = `${draftsPath(west.id)}/${draftId}/edit-eligibility`;
+  const parkMark = page.net.mark(path);
+  const parked = gate((r) => r.frameId === page.frameId && isEditEligibility(west.id, draftId)(r), 'response');
+  await openRow(page, draftId);
+  const elig = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(elig, 'the edit-eligibility GET was answered by the entry and its answer parked at the front');
+  await page.waitFor(CHECKING_EDIT, 15_000, 'the reopened draft is checking Edit');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  const initiated = (await fetchLog(page)).filter((e) => e.label === labelOf(elig));
+  // 2. B signs in in another tab: this tab's AccessContext logs A out (the app's sign-out) and awaits B's profile, held.
+  const from = st.api.length;
+  const profile = await switchHeld(page, b, from);
+  await page.waitFor(`${q('drafts-stores-state')}?.dataset.phase === 'signed-out'`, 15_000, 'the section heard the sign-out');
+  // The browser's own end of the parked GET BEFORE its answer is released (canceled: the page aborted it at the sign-out).
+  const endAtSignOut = await page.net.endOfParked(path, parkMark, 5_000);
+  // 3. The answer released while A's section is still mounted.
+  parked.release();
+  await page.waitFor(() => elig.handedBack === true, 15_000, 'the parked answer was handed back to the browser');
+  await page.settle();
+  const whileMounted = await mountedOfA(page, c);
+  const log = await fetchLog(page); // everything A's page initiated, through the release
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from);
+  const after = sentBy(page, () => true, from);
+  const boundary = signOutBoundary(log, 'SDB-16');
+  const seen = {
+    initiated: initiated.map((e) => (e.seq < boundary ? 'before the logout' : `after the logout (${e.seq})`)),
+    initiatedAfterLogout: seqLines(log.filter((e) => e.seq > boundary)),
+    endAtSignOut, whileMounted,
+    editEligRecordedAfter: after.filter(isEditEligibility(west.id, draftId)).map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+    writes: after.filter((r) => r.method !== 'GET' && !isLogout(r) && !isLogin(r)).map(apiLine),
+  };
+  record('SDB-16', { parked: answered(elig), boundary, log: seqLines(log.slice(-8)), ...seen, logins: after.filter(isLogin).map((r) => (bearerUid(r) === b.uid ? 'B' : 'not B')), requests: after.map(apiLine) });
+  assert.equal(elig.status, 200, 'the parked answer was a real one');
+  assert.ok(elig.replied.text.includes('"allowed"') && carries(elig, aTokens), 'an allowance, asked under A\'s session');
+  assert.deepEqual(seen, {
+    initiated: ['before the logout'], initiatedAfterLogout: [], endAtSignOut: 'canceled', whileMounted: MOUNTED_SIGNED_OUT,
+    editEligRecordedAfter: [], carriersOfA: [], writes: [],
+  }, 'initiated before the sign-out and cancelled at it: released after it while A\'s section was mounted, the answer showed nothing and started nothing');
+  assert.ok(after.filter(isLogin).every((r) => bearerUid(r) === b.uid), 'no sign-in for A after the switch');
+  assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
+  await assertNoLeak(page);
+}, 180_000);
+
+scenario('SDB-17', 'AC-15 SIGN-OUT BEFORE INITIATION (M7B-INVOICES-P1-R3) — A reopens a saved draft; the session read its edit-eligibility check sends first is answered by the entry (A\'s session) and parked at the front, the GET not yet initiated (the page\'s log has none, the dialog says checking); B signs in in another tab (B\'s profile held, A\'s page mounted): the page\'s one logout of A is its sign-out boundary and the page cancelled the parked read there; released after it, nothing follows — no edit-eligibility GET at all, no retry, session read, sign-in, PATCH or POST after the logout — and nothing of A shows', async () => {
+  const c = await reopenCase('d17');
+  const { page, west, draftId, b } = c;
+  const SESSION = '/api/v1/session';
+  // 1. The reopen's detail read answered; the edit-eligibility check's own session read (the first session read after
+  // that answer) answered by the entry with A's live session and parked at the front.
+  const preOpen = page.net.mark(SESSION);
+  const parked = gate((r) => r.frameId === page.frameId && isSessionRead(r) && sentBy(page, isDraftGet(west.id, draftId)).some((x) => x.status === 200), 'response');
+  await openRow(page, draftId);
+  const read = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(read, 'the edit-eligibility check\'s session read was answered by the entry and parked at the front');
+  await page.waitFor(CHECKING_EDIT, 15_000, 'the reopened draft is checking Edit');
+  await page.waitFor(() => page.net.mark(SESSION) === preOpen + 2, 10_000, 'the browser sent the open\'s two session reads: the reopen\'s and the check\'s');
+  const parkMark = preOpen + 1; // the check's session read is the only one the browser sent after the reopen's
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  const lastTwo = (await fetchLog(page)).slice(-2).map((e) => e.label);
+  // 2. B signs in in another tab: this tab's AccessContext logs A out (the app's sign-out) and awaits B's profile, held.
+  const from = st.api.length;
+  const profile = await switchHeld(page, b, from);
+  await page.waitFor(`${q('drafts-stores-state')}?.dataset.phase === 'signed-out'`, 15_000, 'the section heard the sign-out');
+  // The browser's own end of the parked read BEFORE its answer is released (canceled: the page aborted it at the sign-out).
+  const endAtSignOut = await page.net.endOfParked(SESSION, parkMark, 5_000);
+  // 3. A's session answer released while A's section is still mounted.
+  parked.release();
+  await page.waitFor(() => read.handedBack === true, 15_000, 'the parked answer was handed back to the browser');
+  await page.settle();
+  const whileMounted = await mountedOfA(page, c);
+  const log = await fetchLog(page); // everything A's page initiated, through the release
+  profile.release();
+  await page.waitFor(`!!${q('drafts-show')} && !${q('drafts-stores-state')}`, 30_000, 'B\'s Invoices page in this tab (A\'s section gone)');
+  await quiet(page, from);
+  const after = sentBy(page, () => true, from);
+  const boundary = signOutBoundary(log, 'SDB-17');
+  const seen = {
+    lastTwo, editEligInitiated: seqLines(log.filter((e) => e.label.endsWith('/edit-eligibility'))),
+    initiatedAfterLogout: seqLines(log.filter((e) => e.seq > boundary)),
+    endAtSignOut, whileMounted,
+    editEligRecorded: sentBy(page, isEditEligibility(west.id, draftId)).map(apiLine),
+    carriersOfA: after.filter((r) => !isLogout(r) && carries(r, aTokens)).map(apiLine),
+    writes: after.filter((r) => r.method !== 'GET' && !isLogout(r) && !isLogin(r)).map(apiLine),
+  };
+  record('SDB-17', { parked: answered(read), boundary, log: seqLines(log.slice(-8)), ...seen, logins: after.filter(isLogin).map((r) => (bearerUid(r) === b.uid ? 'B' : 'not B')), requests: after.map(apiLine) });
+  assert.equal(read.status, 200, 'the parked answer was A\'s live session');
+  assert.ok(answeredTokens([read]).length === 1 && aTokens.includes(answeredTokens([read])[0]), 'it named A\'s session by its CSRF token');
+  assert.deepEqual(seen, {
+    lastTwo: ['GET /api/v1/stores/:id/invoice-drafts/:id', 'GET /api/v1/session'], editEligInitiated: [], initiatedAfterLogout: [],
+    endAtSignOut: 'canceled', whileMounted: MOUNTED_SIGNED_OUT, editEligRecorded: [], carriersOfA: [], writes: [],
+  }, 'the sign-out began before the edit-eligibility GET was initiated: the session read it waited for was cancelled, no GET was ever initiated, nothing showed and nothing followed the logout');
+  assert.ok(after.filter(isLogin).every((r) => bearerUid(r) === b.uid), 'no sign-in for A after the switch');
+  assert.equal(after.filter((r) => isLogout(r) && carries(r, aTokens)).length, 1, `one logout, naming A's session: ${after.map(apiLine).join('; ')}`);
+  assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
   await assertNoLeak(page);
 }, 180_000);
 

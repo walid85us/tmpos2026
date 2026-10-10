@@ -20,7 +20,10 @@
 // (SID-60..62), answers outrun by a store change, a newer check, a sign-out, a user switch or a new generation, released
 // in both orders (SID-63..65), a save's 403 and 429 (SID-66, SID-67), Save and Check again unchanged (SID-68) and the
 // check's owner and lifetime (SID-69); SID-48 and SID-50 take New away through the server (Try again, a new generation)
-// instead of the local role hint the section no longer has.
+// instead of the local role hint the section no longer has. M7B-INVOICES-P1-R3 (SDB-05, AC-15): the edit-eligibility read
+// against a sign-out in both orders, by the fake's record of what the page INITIATED — the sign-out begun before the read is
+// initiated, its session read held across it or answered just before it (SID-112), and the read initiated before the
+// sign-out with its answer released after it (SID-113).
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { StrictMode, type ReactNode } from 'react';
@@ -3772,5 +3775,93 @@ describe('Server drafts — editing a saved draft (M7B-INVOICES-P2)', () => {
     await user().click(screen.getByRole('button', { name: 'Move line 3 up' }));
     expect(said()).not.toBe(second);
     expect(said().trim()).toBe(first);
+  });
+
+  // M7B-INVOICES-P1-R3 (SDB-05, AC-15): the two orderings of an edit-eligibility read and a sign-out, told apart by the
+  // fake's record of what the page INITIATED (server.sent, pushed at the fetch call: its index is the initiation order).
+  /** What the page initiated from `from` on, as method and path (the fake's ids are synthetic). */
+  const sentFrom = (server: Server, from: number) => server.sent.slice(from).map((x) => `${x.method} ${x.url}`);
+  /** Nothing of the old user's draft or eligibility is shown: no Edit, editor, line, customer or line text; the view and stores say signed out. */
+  const signedOutView = () => ({
+    edit: screen.queryByTestId('draft-view-edit') !== null, editor: screen.queryByTestId('draft-edit') !== null,
+    editState: screen.queryByTestId('draft-view-edit-state') !== null, lines: screen.queryAllByTestId('draft-view-line').length, rows: rows().length,
+    view: screen.getByTestId('draft-view-state').getAttribute('data-phase'), stores: screen.getByTestId('drafts-stores-state').getAttribute('data-phase'),
+    reconnect: screen.getByTestId('drafts-retry').textContent, shown: ['Item 1', 'Ada Customer'].filter((t) => document.body.textContent?.includes(t)),
+  });
+  const SIGNED_OUT_VIEW = { edit: false, editor: false, editState: false, lines: 0, rows: 0, view: 'signed-out', stores: 'signed-out', reconnect: 'Reconnect', shown: [] };
+
+  it.each(['the session read held across the sign-out, then answered', 'the session read answered just before the sign-out began'] as const)('SID-112. AC-15 (sign-out BEFORE initiation; jsdom-only callback ordering): a sign-out that begins before the edit-eligibility read is initiated — %s — leaves the old context initiating nothing but the logout: no edit-eligibility GET, retry, session read, sign-in, PATCH or POST; the view is signed out with no lines, Edit or editor; a focus then sends nothing', async (order) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    const r = rig(server);
+    const real = r.props().session!;
+    let trip = false;
+    let mark = -1;
+    // Armed only for the edit-eligibility read's connect: its session answers ok, and the sign-out begins before it continues.
+    const session: TenantSessionClient = { ...real, ensure: async (...args) => { const s = await real.ensure(...args); if (trip) { trip = false; mark = server.sent.length; void real.logout(); } return s; } };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await showAndChoose(STORE_1);
+    server.hold.get = 1; // the reopen's detail read: the edit-eligibility read is asked only once it has answered
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['get']));
+    const logins = server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login).length;
+    let connect: Sent | null = null;
+    if (order === 'the session read held across the sign-out, then answered') {
+      server.hold.current = 1; // the NEXT session read: the edit-eligibility read's own connect
+      await release(server);
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+      expect(editPhase()).toBe('checking'); // that read is out, its GET not yet initiated
+      connect = server.sent.at(-1)!;
+      expect(`${connect.method} ${connect.url}`).toBe(`GET ${TENANT_SESSION_PATHS.current}`);
+      mark = server.sent.length;
+      await act(async () => { void real.logout(); });
+      expect(connect.signal?.aborted).toBe(true); // the session client cancelled it at the sign-out
+      await release(server); // A's session, answered after the sign-out began
+    } else {
+      trip = true;
+      await release(server);
+      await waitFor(() => expect(trip).toBe(false));
+    }
+    await settle();
+    expect(mark).toBeGreaterThan(0);
+    expect(sentFrom(server, mark)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]); // the sign-out boundary, and nothing after it
+    expect(server.editEligReads()).toEqual([]);
+    expect(signedOutView()).toEqual(SIGNED_OUT_VIEW);
+    const sent = server.sent.length;
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(sentFrom(server, sent)).toEqual([]); // no automatic reconnection
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
+    expect(server.patches()).toEqual([]);
+    expect(server.posts()).toEqual([]);
+  });
+
+  it.each([['an allowance (200)', null], ['a refusal (403)', 403]] as const)('SID-113. AC-15 (initiation BEFORE sign-out; jsdom-only callback ordering): an edit-eligibility read initiated before a sign-out and answered after it began — %s — counts for nothing: the page cancelled it at the sign-out, and its late answer initiates nothing (no fresh session check, retry, sign-in, PATCH or POST), restores no eligibility, Edit, editor or line, and revives no session; a focus then sends nothing', async (_answer, status) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, props, draft } = await ready();
+    server.hold.editElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    const logins = server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login).length;
+    const asked = server.sent.findIndex((x) => x.url === editEligibilityPathOf(STORE_1, draft.id));
+    const mark = server.sent.length;
+    expect(asked).toBeGreaterThanOrEqual(0);
+    expect(asked).toBeLessThan(mark); // initiated BEFORE the sign-out
+    await act(async () => { void props.session!.logout(); });
+    expect(sentFrom(server, mark)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]); // the sign-out boundary
+    expect(server.sent[asked].signal?.aborted).toBe(true); // the page cancelled the read at the sign-out
+    await release(server, 0, status === null ? undefined : refusal(status, 'forbidden')); // delivered anyway (the fake ignores the abort)
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(server.editEligReads()).toHaveLength(1);
+    expect(signedOutView()).toEqual(SIGNED_OUT_VIEW);
+    const sent = server.sent.length;
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(sentFrom(server, sent)).toEqual([]); // no automatic reconnection: no token was taken back
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
+    expect(server.patches()).toEqual([]);
+    expect(server.posts()).toEqual([]);
   });
 });
