@@ -1,5 +1,5 @@
 // M5-INVOICES-AUTH-P1 — THE OWNER'S INVOICES LEVEL OVER HTTP: the tenant entry (server/entry/tenantEntry.ts,
-// startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-031),
+// startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-032),
 // composed as tests/db/roleLevels.integration.test.mjs composes it. PUT /api/v1/roles/levels with domain 'invoices' writes
 // through migration 026's tmpos_role_invoice.m7a_invoice_role_level_set; GET /api/v1/roles/levels/invoices reads 026's
 // m7a_invoice_role_level_states. (M7B-INVOICES-P1 UPDATE: migration 028's invoice-draft routes now decide on this level;
@@ -1091,7 +1091,7 @@ test('M5IRLH-06 (AC-06): a stale version or another tenant\'s id is an UNSEALED 
 // M5IRLH-07 (AC-06): two entries race on one role row
 // ===========================================================================
 
-test('M5IRLH-07 (AC-06): two entries on one database — an Invoices edit parked holding the role row makes the other instance\'s Invoices edit of the same role (same precondition) wait INSIDE 026\'s set routine; the first commits (200), the second is 409 write_conflict; parked the same way, it never holds back a Customers edit of that role', async () => {
+test('M5IRLH-07 (AC-06): two entries on one database — an Invoices edit parked holding the role row makes the other instance\'s Invoices edit of the same role (same precondition) wait INSIDE 026\'s set routine; the first commits (200), the second is 409 write_conflict; parked the same way, it never holds back a Customers edit of another role, while a Customers edit of the same role waits for it on the per-role advisory key and commits right after', async () => {
   const { tenant, boss } = await shop('m5irlh07');
   // A SECOND owner of the same tenant on instance B: 016's standing hold locks the actor's app_user row FOR UPDATE, so one
   // principal's two commands would serialize there, before either reached a role row.
@@ -1100,32 +1100,48 @@ test('M5IRLH-07 (AC-06): two entries on one database — an Invoices edit parked
     const oa = await signIn(a, boss);
     const ob = await signIn(b, coOwner);
 
-    // (1) Isolation under the lock: the Invoices edit parks at its audit INSERT holding the Invoices row FOR UPDATE; the
-    //     other instance's Customers edit of the same role (another row) commits meanwhile, then the Invoices edit commits.
+    // (1) Isolation under the lock: the Invoices edit parks at its audit INSERT holding the Invoices row FOR UPDATE and the
+    //     per-(tenant, role) advisory key EXCLUSIVE (030's guard; migration 032 widened the same key to Customers writes). The
+    //     other instance's Customers edit of ANOTHER role (another row, another key) commits meanwhile; its Customers edit of
+    //     the SAME role (another row, the same key) waits on the parked edit's key — not on its row — and commits right after it.
     let invoiceReply;
     let customersReply;
+    let sameRoleReply;
+    let sameRoleLocks;
     let parkedMs;
-    // Both drafts are made before the lever: the parked edit's lock wait is bounded (COMMAND_LOCK_BOUND_MS), so the park
-    // lasts only the Customers request itself.
+    // The drafts are made before the lever: the parked edit's lock wait is bounded (COMMAND_LOCK_BOUND_MS), so the park
+    // lasts only the two Customers requests themselves.
     const invoicePre = await preOf(tenant, 'sales_staff');
+    const otherRolePre = await preOf(tenant, 'technician', 'customers');
     const customersPre = await preOf(tenant, 'sales_staff', 'customers');
     await withTrigger('public.audit_event', INVOICE_EDIT_AUDIT, 'park', async () => {
       const lever = await holdPark();
       let invoiceReq;
+      let sameRoleReq;
       const parkedAt = Date.now();
       try {
         invoiceReq = quietly(a.put(oa, levelBody('sales_staff', 'invoices', 'view', invoicePre)));
-        waitingPid(await blockedOrSettled(invoiceReq, { by: lever.pid }), 'the Invoices edit parked at its audit INSERT');
-        customersReply = await replyTo(quietly(b.put(ob, levelBody('sales_staff', 'customers', 'view', customersPre))),
-          'the Customers edit beside the parked Invoices edit');
+        const invoicePid = waitingPid(await blockedOrSettled(invoiceReq, { by: lever.pid }), 'the Invoices edit parked at its audit INSERT');
+        customersReply = await replyTo(quietly(b.put(ob, levelBody('technician', 'customers', 'none', otherRolePre))),
+          'the Customers edit of another role beside the parked Invoices edit');
+        sameRoleReq = quietly(b.put(ob, levelBody('sales_staff', 'customers', 'view', customersPre)));
+        const sameRolePid = waitingPid(await blockedOrSettled(sameRoleReq, { by: invoicePid }),
+          'the Customers edit of the same role waiting on the parked Invoices edit');
+        sameRoleLocks = await waitingLocks(sameRolePid);
       } finally {
         parkedMs = Date.now() - parkedAt;
         await lever.commit();
       }
       invoiceReply = await replyTo(invoiceReq, 'the Invoices edit');
+      sameRoleReply = await replyTo(sameRoleReq, 'the Customers edit of the same role');
     });
-    editedOf(customersReply, 'sales_staff', 'customers', 'view', 'the Customers edit is not held by the Invoices row', { version: 1 });
+    assert.ok(sameRoleLocks.length > 0 && sameRoleLocks.every((l) => l.locktype === 'advisory'),
+      `the same-role Customers edit waited on the per-role advisory key, not a row: ${JSON.stringify(sameRoleLocks)}`);
+    editedOf(customersReply, 'technician', 'customers', 'none', 'the Customers edit of another role is not held by the Invoices edit', { version: 1 });
+    // A park past the command's lock bound ends the edit in the 503 whatever the product does: inconclusive, never a pass.
+    assert.ok(parkedMs < COMMAND_LOCK_BOUND_MS, `INCONCLUSIVE: the Invoices edit was parked ${parkedMs} ms, past the ${COMMAND_LOCK_BOUND_MS} ms lock bound`);
     editedOf(invoiceReply, 'sales_staff', 'invoices', 'view', `the parked Invoices edit then commits (logged ${JSON.stringify(a.records(invoiceReply).map((r) => r.reason ?? r.event))}, parked ${parkedMs} ms)`, { version: 1 });
+    editedOf(sameRoleReply, 'sales_staff', 'customers', 'view', 'the same-role Customers edit commits once the Invoices edit has', { version: 1 });
 
     // (2) Serialization: both instances draft from version 1. A parks holding the row; B waits inside 026's routine; A commits
     //     None at version 2; B, asserting version 1, is refused with nothing written.
@@ -1164,7 +1180,7 @@ test('M5IRLH-07 (AC-06): two entries on one database — an Invoices edit parked
     assert.ok(repliedAt - sentAt < COMMAND_LOCK_BOUND_MS, `answered before any lock bound could expire (${repliedAt - sentAt} ms)`);
     await assertDelta(before, { ...EDIT, L: 2 }, 'one edit applied whole, the other its lease only');
     assert.deepEqual((await stateOf(tenant)).invoices, { levels: { sales_staff: 'none' }, versions: { sales_staff: 2 } }, 'the first edit stands');
-    assert.deepEqual((await stateOf(tenant)).customers, { levels: { sales_staff: 'view' }, versions: { sales_staff: 1 } }, 'Customers untouched by the race');
+    assert.deepEqual((await stateOf(tenant)).customers, { levels: { sales_staff: 'view', technician: 'none' }, versions: { sales_staff: 1, technician: 1 } }, 'Customers untouched by the race');
   }));
 });
 

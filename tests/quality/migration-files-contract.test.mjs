@@ -358,19 +358,32 @@ const PINNED = {
   // refuses. Both 031 keys are assembled at run time, as 030's are.
   [`031_m7b_invoice_create_${'authority'}.up.sql`]: '42eefc95795c296e75420ebca94bfc38c6bdb78f602f73f092f1aba2995041a6',
   [`031_m7b_invoice_create_${'authority'}.down.sql`]: '961c1080e85d7ddd3a56f9abcf709f8109dff964bb5131851060f758d96c9f1c',
+  // Phase 4.0 M7B-INVOICES-P1-R4 — holding the Customers View authority through both sealed outcomes of the invoice-draft
+  // save (DA-211). In 030's schema tmpos_invoice_edit: one trigger function, m7b_customers_level_guard (030's guard with the
+  // domain 'customers'), its AFTER INSERT OR UPDATE OR DELETE row trigger trg_tenant_role_level_customers_guard on
+  // tmpos_role.tenant_role_level (ENABLE ALWAYS, named to fire before 030's), and one VOLATILE SECURITY DEFINER routine,
+  // m7b_invoice_draft_create_v3 (031's save with the Customers level decided again under the key at step 10b and 031's
+  // Customers anchor and lock removed). tmpos_app gains EXECUTE on the routine and loses it on 031's, which stays in place;
+  // no table, column, row, role, membership or schema (001-031 byte for byte). 031's rollback refuses while it is applied
+  // (its postcondition) and 030's too (its plain DROP SCHEMA). Its own rollback never refuses on data and restores 031's
+  // grant, the 031-era contract and its DA-211 window. Proved against disposable PostgreSQL only; applied to no managed,
+  // persistent or application database. D4 now names the contiguous chain through 032; the exact-[005] gate is unchanged
+  // and still refuses. Both 032 keys are assembled at run time, as 031's are.
+  [`032_m7b_invoice_create_customers_${'authority'}.up.sql`]: 'a4b29e3a1dcac8a2395dc995e8548eb1b85a730975e2ce87057d482c5926f76a',
+  [`032_m7b_invoice_create_customers_${'authority'}.down.sql`]: 'be245bb523e69de6fe029c8dfff5f00647cc07aca82f32c10438b60a01420c16',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the sixty-two expected files', () => {
+test('the migrations directory holds exactly the sixty-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

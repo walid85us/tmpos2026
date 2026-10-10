@@ -1,13 +1,13 @@
 // Phase 4.0 M7B-INVOICES-P2 and P2-R1 — editing a saved store invoice draft END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) serving PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and GET …/{id}/edit-eligibility over REAL
-// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-031), composed exactly as
+// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-032), composed exactly as
 // server/entry/tenantMain.ts composes it but for its construction. The route module (server/runtime/invoiceDrafts.ts), the
 // store-scope authorizer and revalidator, the tenant command transaction, the edit's mutator
 // (server/persistence/postgresInvoiceDrafts.ts), migration 030's edit routine (the guarded v2: the Invoices level held through
 // the sealed outcome and the completion, by an advisory key every writer of a level takes through migration 030's trigger), the
 // audit writer (subject_invoice_draft_id) and the outbox enqueue are production's own code. Every draft is saved first through
-// the production POST (since migration 031, M7B-INVOICES-P1-R3, through 031's guarded save, which anchors the role's Customers
-// row only and makes no Invoices row).
+// the production POST (since migration 031, M7B-INVOICES-P1-R3, through 031's guarded save, and since migration 032,
+// M7B-INVOICES-P1-R4, through 032's version-3 save, which locks and makes no role row of either domain).
 //
 // Case labels: R = red on the entry source (029's routine, no guard) for the defect DA-204, N = the new contract of 030, G = a
 // guard that holds before and after.
@@ -70,7 +70,7 @@
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Synthetic data only, every id
 // and key made at run time. Its edits leave drafts above version 1 and audit records naming drafts, which block 029's and
-// 028's rollback: on a shared service it runs after every step that rolls 028, 029, 030 or 031 back, and before it finishes it removes
+// 028's rollback: on a shared service it runs after every step that rolls 028, 029, 030, 031 or 032 back, and before it finishes it removes
 // every draft, line and Invoices lock anchor of its tenants, clears every audit subject naming one of its drafts and deletes
 // its tenants' draft events, with its sessions, mint-ledger rows, idempotency records, proof schema and login, and restores
 // the limiter fingerprint and issuer key row it found.
@@ -372,8 +372,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('029', '030', '031')`;
-  assert.equal(applied, 3, 'migrations 029, 030 and 031 are applied: the guarded edit routine and the guarded save exist');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('029', '030', '031', '032')`;
+  assert.equal(applied, 4, 'migrations 029, 030, 031 and 032 are applied: the guarded edit routine and the guarded save exist');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -1272,11 +1272,12 @@ test('IEH-08 (AC-11, G; AC-08, N): a fault at the line DELETE, the line INSERT, 
       assert.equal(await leaseOpen(key, who.principal), true, `${label}: the lease, taken in its own transaction, is open`);
       assertRefusal(await ctx.patch(s, S, id, body, { key }), 409, 'request_in_progress', `${label}: the retry within the lease`);
     }
-    // Since 031 (M7B-INVOICES-P1-R3) the seed's own save (the production POST by this manager) made the manager's Customers NULL
-    // lock anchor alone and no Invoices row. The owner makes the Invoices NULL row 028's save used to make, so the writer below is
-    // a level UPDATE of an existing row (021's counter advancing to 1), exactly the ordering these rounds prove.
-    assert.deepEqual((await invoicesRowsOf(T)).roles.map(({ xmin, ...r }) => r), [{ role_id: 'manager', domain: 'customers', level: null }],
-      'the save made the Customers anchor alone (031)');
+    // Since 032 (M7B-INVOICES-P1-R4) the seed's own save (the production POST by this manager) makes no role row at all — 031's
+    // save still made the manager's Customers NULL lock anchor, and 028's the Invoices one. The owner makes the Invoices NULL row
+    // 028's save used to make, so the writer below is a level UPDATE of an existing row (021's counter advancing to 1), exactly the
+    // ordering these rounds prove.
+    assert.deepEqual((await invoicesRowsOf(T)).roles.map(({ xmin, ...r }) => r), [],
+      'the save made no role row (032): no Customers anchor, no Invoices row');
     await setLevel(T, 'manager', 'invoices', null);
     // N (030): the fault comes AFTER the edit has done everything but complete, with the role's key held. While the completion is
     // parked the edit's backend holds the manager's key SHARED — a no-op's and a sealed conflict's answer alike — and a non-NULL
@@ -1290,7 +1291,7 @@ test('IEH-08 (AC-11, G; AC-08, N): a fault at the line DELETE, the line INSERT, 
       const keys = [{ key, principal: who.principal }];
       const before = await counts([T], keys);
       const firedBefore = await fired();
-      // The manager's NULL lock anchors (the seed's Customers one, and the Invoices one made above): the rows the edit must not add to.
+      // The manager's NULL lock anchor (the Invoices one made above; the seed's save made none): the rows the edit must not add to.
       const rowsBefore = await invoicesRowsOf(T);
       let writer;
       let reply;

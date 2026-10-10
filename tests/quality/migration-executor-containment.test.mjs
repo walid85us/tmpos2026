@@ -612,8 +612,8 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // property above is untouched.
     'tests/db/invoiceDraftRoutine.integration.test.mjs',
     'tests/db/invoiceDraftsHttp.integration.test.mjs',
-    // M7B-INVOICES-P2: the draft edit proof needs 001-031 applied (031 and then 030 rolled back through their down files first,
-    // then 029 through its own, refused while a draft's version is above 1, and all re-applied; the 028 database upgraded to 029
+    // M7B-INVOICES-P2: the draft edit proof needs 001-032 applied (032, 031 and then 030 rolled back through their down files
+    // first, then 029 through its own, refused while a draft's version is above 1, and all re-applied; the 028 database upgraded to 029
     // and the 029 one to 030) before it can say anything about migration 029's and 030's routines, trigger or privilege
     // containment; it applies them through the SAME trusted executor, validating its target
     // with the same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property
@@ -632,6 +632,8 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // directory — the routine proof also rolls 031 back through its down file, finds 030's down refused while 031 is applied,
     // and re-applies 031 — through the SAME trusted executor, validating their target with the same assertDisposableTestDsn.
     // Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    // M7B-INVOICES-P1-R4 adds no suite: the same two proofs carry migration 032 (its down first, 031's refused while 032 is
+    // applied), through the same executor.
     'tests/db/invoiceDraftCreateAuthority.integration.test.mjs',
     'tests/db/invoiceDraftCreateAuthorityHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports

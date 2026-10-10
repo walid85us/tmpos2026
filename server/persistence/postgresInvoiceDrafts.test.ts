@@ -1,7 +1,8 @@
 // Phase 4.0 M7B-INVOICES-P1 — the PostgreSQL side of invoice drafts, DATABASE-FREE: what the save's mutator hands migration
-// 031's create (028's, guarded: M7B-INVOICES-P1-R3) and how it reads the one row back; what the reads hand 028's page and get
-// and what they refuse to read back as an answer; and the readiness probe. The routines themselves are proved against a real
-// cluster (tests/db/invoiceDraftRoutine.integration.test.mjs, tests/db/invoiceDraftsHttp.integration.test.mjs).
+// 032's create (031's, with the Customers level guarded too: M7B-INVOICES-P1-R4) and how it reads the one row back; what the
+// reads hand 028's page and get and what they refuse to read back as an answer; and the readiness probe. The routines
+// themselves are proved against a real cluster (tests/db/invoiceDraftRoutine.integration.test.mjs,
+// tests/db/invoiceDraftsHttp.integration.test.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -60,7 +61,7 @@ test('AC-01 AC-06: the mutator is the store-scope create; ONE fixed call binding
   const r = recorder([row('applied')]);
   assert.equal(await INVOICE_DRAFT_CREATE_MUTATOR.apply(r.sql, mutation(), authority()), 'applied');
   assert.equal(r.texts.length, 1);
-  assert.match(r.texts[0], /^select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id\s+from tmpos_invoice_edit\.m7b_invoice_draft_create_v2\(\?::text, \?::uuid, \?::uuid,\s+\?::uuid, \?::uuid, \?::text::jsonb, \?::bigint\)$/);
+  assert.match(r.texts[0], /^select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id\s+from tmpos_invoice_edit\.m7b_invoice_draft_create_v3\(\?::text, \?::uuid, \?::uuid,\s+\?::uuid, \?::uuid, \?::text::jsonb, \?::bigint\)$/);
   assert.deepEqual(r.values[0], [SESSION_KEY, STORE, DRAFT, TENANT, CUSTOMER,
     '[{"description":"Glass","quantity":2,"unitPriceCents":50},{"description":"Labour","quantity":1,"unitPriceCents":0}]', '100']);
 });

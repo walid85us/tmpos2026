@@ -1,15 +1,18 @@
-// Phase 4.0 M7B-INVOICES-P1-R3 — the Invoices authority of an invoice-draft CREATE (POST /api/v1/stores/{storeId}/invoice-drafts)
-// held through its newly sealed outcome, END TO END: two tenant entries (server/entry/tenantEntry.ts, startTenantEntry) over
-// REAL loopback HTTP and ONE disposable PostgreSQL holding every migration in the directory, composed exactly as
-// server/entry/tenantMain.ts composes them but for their construction. The route module (server/runtime/invoiceDrafts.ts), the
-// store-scope authorizer and revalidator, the tenant command transaction, the create's mutator
-// (server/persistence/postgresInvoiceDrafts.ts) and the create routine it calls (migration 028's, or the guarded replacement a
-// later migration binds), the owner's PUT /api/v1/roles/levels with migration 026's setter and 030's writer trigger, the audit
-// writer and the outbox enqueue are production's own code. The narrowing is always the tenant OWNER's own PUT on the OTHER
-// entry, by a DIFFERENT operator from the one whose create is under test (no shared account lock can serialize the race).
+// Phase 4.0 M7B-INVOICES-P1-R3 / -R4 — the Invoices AND the Customers authority of an invoice-draft CREATE (POST
+// /api/v1/stores/{storeId}/invoice-drafts) held through both newly sealed outcomes, END TO END: two tenant entries
+// (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and ONE disposable PostgreSQL holding every migration
+// in the directory, composed exactly as server/entry/tenantMain.ts composes them but for their construction. The route module
+// (server/runtime/invoiceDrafts.ts), the store-scope authorizer and revalidator, the tenant command transaction, the create's
+// mutator (server/persistence/postgresInvoiceDrafts.ts) and the create routine it calls (migration 028's, or the guarded
+// replacement a later migration binds: 031's create_v2, 032's create_v3), the owner's PUT /api/v1/roles/levels with migration
+// 026's Invoices setter and 030's writer trigger or 021's Customers setter and 032's writer trigger, the audit writer and the
+// outbox enqueue are production's own code. The narrowing is always the tenant OWNER's own PUT on the OTHER entry, by a
+// DIFFERENT operator from the one whose create is under test (no shared account lock can serialize the race).
 //
-// Case labels: R = red on the entry source c4ba482 (migrations 001-030, the create runs 028's routine) for the defect DA-210,
-// N = the new contract of the correction, G = a guard that holds before and after.
+// Case labels: R = red on an entry source — c4ba482 (migrations 001-030, 028's routine) for DA-210 (ICA-01/02), 30828fc
+// (001-031, 031's create_v2) for DA-211 (CCA-01) — N = the new contract of the correction, G = a guard that holds before and
+// after. Under 032 the create (create_v3) decides BOTH levels again after taking the role's key SHARED (step 10b) and writes no
+// role row and no version row at all (031's Customers NULL anchor is gone).
 //
 // WHAT IS SUBSTITUTED, STATED EXACTLY — tests/db/invoiceDraftEditHttp.integration.test.mjs's three, none on the path under test:
 // the database client (a supervised kernel over the cluster as a non-owner least-privilege runtime LOGIN, tmpos_ica_probe,
@@ -35,7 +38,8 @@
 //          View and commits on entry B; released, the create must not be the sealed 422: it is the 503
 //          transaction_unavailable, its idempotency record unsealed and its lease held (the same-key retry the authorizer's
 //          403 or 409, never a replay), no draft, line, audit record or event, the role and version rows exactly the PUT's.
-//          (a) [R] a customer id that does not exist in the tenant; (b) [G] an existing customer (028's locked re-decision).
+//          (a) [R] a customer id that does not exist in the tenant; (b) [G] an existing customer (028's locked re-decision;
+//          under 032, step 10b's re-read under the key).
 //   ICA-02 (AC-03 DA-210) an absent override: a sales_staff (default Invoices Create, NO stored row for that role and domain);
 //          the PUT is the role's FIRST Invoices insertion, to View; the same barrier and assertions, and no role or version
 //          row other than the PUT's own. (a) [R] a missing customer; (b) [G] an existing customer.
@@ -47,10 +51,12 @@
 //          a later create under a new key is the authorizer's 403, writing nothing. (a) an existing override (manager);
 //          (b) an absent override (sales_staff, the PUT's first insertion).
 //   ICA-04 (AC-05, N) the same for a successful create (an existing customer): the 201 with exactly one draft, its line, one
-//          audit record, one event and the completion — committed while the PUT waited for the key — the Customers NULL
-//          anchor its only role row, then the PUT's 200, then the 403. (a) and (b) as ICA-03.
+//          audit record, one event and the completion — committed while the PUT waited for the key — and NO role row of the
+//          create's (032: no Customers NULL anchor; the only role row is the PUT's), then the PUT's 200, then the 403. (a) and
+//          (b) as ICA-03.
 //   ICA-08 (AC-09, N) the completion fails: parked holding the key with the PUT waiting, the completion then raises: the 503,
-//          rolled back (no draft, line, audit record, event, completion or role row of the create), the lease held, the key
+//          rolled back (no draft, line, audit record, event, completion or role row of the create — 032's create writes none
+//          even when it succeeds), the lease held, the key
 //          gone with that transaction — the waiting PUT (here a widening to Edit, so the create stays authorized) commits
 //          its 200 — and the same-key retry is the 409 request_in_progress. (a) an applied create; (b) a customer_not_found.
 //   ICA-09 (AC-10, G) replay and current authority: a sealed 422 and a sealed 201 replay byte for byte (Idempotent-Replayed:
@@ -62,15 +68,45 @@
 //          530030, objsubid 2, ShareLock, granted, on its backend); released, [G] the 503 transaction_timeout at the commit
 //          deadline, the outcome unknown; what landed is whole (one draft, its line, one audit record, one event, the
 //          completion); the same-key retry replays it; no guard key stands afterwards and the owner's PUT then commits.
+//   CCA-01 (M7B-INVOICES-P1-R4, DA-211) ICA-01/02's barrier and assertions with the CUSTOMERS level narrowed instead: the
+//          create, parked at its customer read after its unlocked Customers >= View decision (it holds the level table's
+//          AccessShareLock and no guard key), and the owner's PUT {domain: 'customers', level: 'none'} (021's setter) committed
+//          on entry B; released, the create must not seal a new outcome. [R] = red on the entry source 30828fc (031's create
+//          decides Customers only at its unlocked step 8 before customer_not_found). (a) [R] missing / (b) [G] existing
+//          customer (031's applied path re-decides Customers on its anchored row FOR SHARE). CCA-01a: a stored Customers
+//          override (manager, Edit); CCA-01b: none (sales_staff, default Create; the PUT is the role's first Customers row).
+//          On the correction (032) both variants are AC-02's transaction-time refusal (CCA-02 (b)): step 10b re-reads the
+//          Customers level under the key.
+//   CCA-02 (AC-02; (a) and (c) G — they pass on the entry code too; (b) is CCA-01's N) a Customers narrowing and the
+//          create's decisions, on the correction: (a) committed BEFORE the request:
+//          the authorizer's request-time 403 — no idempotency record, no lease, nothing written; (b) committed while the create
+//          waits at its customer read: CCA-01's transaction-time refusal; (c) removed AND restored (two PUTs, both committed)
+//          while the create waits at its customer read, before its deciding read: the create proceeds under the restored
+//          authority — the sealed 422 for a missing customer, the 201 for an existing one — writing no role row.
+//   CCA-03 (AC-03, N) command-first under a Customers narrowing: ICA-03/04's key-hold contract with the owner's PUT {domain:
+//          'customers', level: 'none'} (021's setter, 032's trigger) waiting for exactly the key the parked create holds SHARED;
+//          released, (a) the sealed 422 commits (its completion only) / (b) the 201 commits (one draft, its line, one audit
+//          record, one event, the completion), neither writing a role or version row, THEN the PUT's 200, THEN a later create
+//          is the authorizer's 403. Each with a stored Customers override (manager, Edit) and with none (sales_staff, the PUT's
+//          first insertion).
+//   CCA-09 (AC-09, N) atomic effects on failure while a Customers PUT (a widening, View -> Edit) waits for the key: the
+//          completion raises (an applied create and a customer_not_found), or the create's own audit INSERT raises: the 503,
+//          rolled back (no draft, line, audit record, event, completion or role row of the create), the lease held (the
+//          same-key retry the 409 request_in_progress), the key gone with that transaction so the waiting PUT commits.
+//   CCA-10 (AC-10, G/N) replay and an unknown outcome under Customers authority: ICA-09 with the Customers level narrowed to
+//          None and restored; and a lost COMMIT acknowledgement while a Customers PUT waits for the key — the 503
+//          transaction_timeout (unknown, never a rollback), what landed whole, the same-key retry replays it, no guard key
+//          stands and the PUT commits.
 // ICA-05..07, ICA-10 and ICA-11 are the routine-level cases (tests/db/invoiceDraftCreateAuthority.integration.test.mjs). The
-// parking trigger (ICA-03, -04, -08, -12) is an OWNER trigger on tmpos_internal.idempotency_record that fires only for the
-// create's own completion (its record's scope) and waits on a test advisory key the OWNER holds: a test-only lever, like the
-// barrier.
+// parking trigger (ICA-03, -04, -08, -12, CCA-03, -09, -10) is an OWNER trigger on tmpos_internal.idempotency_record that
+// fires only for the create's own completion (its record's scope) — or, for CCA-09's audit case, on public.audit_event for the
+// create's own audit INSERT (its action and tenant) — and waits on a test advisory key the OWNER holds: a test-only lever,
+// like the barrier.
 //
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Synthetic data only, every id
 // and key made at run time. Before it finishes it drops its proof schema (ica_proof: the parking trigger's function and
-// counter), removes every draft, line and Invoices lock anchor of its tenants, clears every
+// counter), removes every draft, line, role row and role-level version row of its tenants, clears every
 // audit subject naming one of its drafts and deletes its tenants' draft events, with its sessions, mint-ledger rows, idempotency
 // records and login, and restores the limiter fingerprint and issuer key row it found.
 import test from 'node:test';
@@ -117,10 +153,10 @@ const EVENT = 'invoice_draft.created';
 const WAIT_MS = 10_000;
 const SEND_TIMEOUT_MS = 20_000;
 /**
- * The create routine's statement, where the create waits at the barrier. It names either routine — 028's and the guarded
- * replacement (tmpos_invoice_edit.m7b_invoice_draft_create_v2) — so one pattern serves the entry source and the correction.
+ * The create routine's statement, where the create waits at the barrier. It names 028's routine and the guarded replacements
+ * (tmpos_invoice_edit.m7b_invoice_draft_create_v2, 031; _v3, 032), so one pattern serves the entry source and the correction.
  */
-const AT_CREATE = /(?:tmpos_invoice_draft\.m7b_invoice_draft_create|tmpos_invoice_edit\.m7b_invoice_draft_create_v2)\(/;
+const AT_CREATE = /(?:tmpos_invoice_draft\.m7b_invoice_draft_create|tmpos_invoice_edit\.m7b_invoice_draft_create_v[23])\(/;
 /** The barrier's relation: the create's first touch of it is its customer-existence read. */
 const CUSTOMER_TABLE = 'tmpos_customer.customer';
 /**
@@ -185,7 +221,7 @@ const scopeOf = (key, principal) => KEYRING.operationOf(key, principal, {
   method: 'POST', path: '/', audience: 'tenant', tenant: null, store: null, actor: null, body: new Uint8Array(0),
 }).scope;
 
-/** Every draft, line and Invoices lock anchor of this suite's tenants, and every audit subject naming one of its drafts. */
+/** Every draft, line, role row and version row of this suite's tenants, and every audit subject naming one of its drafts. */
 async function cleanDrafts() {
   if (TENANTS.length === 0) return;
   await owner.begin('isolation level read committed', async (sql) => {
@@ -640,13 +676,15 @@ const readSoFar = async (pid) => (await probe`select l.relation::regclass::text 
 // ===========================================================================
 
 /**
- * One race: `role`'s Invoices level is `stored` (null: no row, the catalog default) and authorizes the create; the create (a
+ * One race: `role`'s `domain` level is `stored` (null: no row, the catalog default) and authorizes the create; the create (a
  * missing or an existing customer) is sent on entry `a` and parked at its customer read by the barrier; the tenant owner — a
- * different operator, signed in on entry `b` — narrows `role`'s Invoices level to View through the production PUT, which
- * commits; the table is released. Every safety observation is gathered BEFORE any is asserted, so the evidence line carries
- * all of them whichever assertion fails first.
+ * different operator, signed in on entry `b` — narrows `role`'s `domain` level to `narrowTo` (below the create's requirement:
+ * Invoices < Create, Customers < View) through the production PUT, which commits; with `restoreTo`, a second PUT then
+ * restores it (CCA-02 (c): removed and restored before the create's deciding read, so the create must proceed); the table is
+ * released. Every safety observation is gathered BEFORE any is asserted, so the evidence line carries all of them whichever
+ * assertion fails first.
  */
-async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customerExists }) {
+async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customerExists, domain = 'invoices', narrowTo = 'view', defect = 'DA-210', restoreTo = null, acceptance }) {
   const tag = randomUUID().slice(0, 6);
   const T = await newTenant(`${role}-${tag}`);
   const S = await newStore(T, `ICA ${tag}`);
@@ -656,20 +694,18 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
   // setter's authority shape): two accounts, two sessions, two entries.
   const operator = await actor(`op-${tag}`, [storeGrant(T, S, role)]);
   const boss = await actor(`boss-${tag}`, [tenantGrant(T, 'store_owner')]);
-  if (stored !== null) await setLevel(T, role, 'invoices', stored);
+  if (stored !== null) await setLevel(T, role, domain, stored);
   const so = await signIn(a, operator);
   const sb = await signIn(b, boss);
   // Request authorization passes before the race: the create's own eligibility at the store is the closed 200.
   const eligible = await a.eligibility(so, S);
   assert.deepEqual([eligible.status, eligible.body], [200, '{"eligibility":"allowed"}'], `${name}: the create is authorized before the race`);
   // The owner's pool warmed and the version it reviews read on entry B BEFORE the create starts to wait.
-  const read = await b.read(sb, '/api/v1/roles/levels/invoices');
-  assert.equal(read.status, 200, `${name}: the owner reads the Invoices levels: ${read.body}`);
-  const reviewed = Number(JSON.parse(read.body).roles.find((r) => r.roleId === role).version);
-  const putBody = { roleId: role, domain: 'invoices', level: 'view', reason: described(`narrowing ${tag}`), expectedTenant: T, expectedVersion: reviewed };
+  const reviewed = await reviewedOf(b, sb, role, name, domain);
+  const putBody = { roleId: role, domain, level: narrowTo, reason: described(`narrowing ${tag}`), expectedTenant: T, expectedVersion: reviewed };
   const rolesBefore = await invoicesRowsOf(T);
   if (stored === null) assert.deepEqual(rolesBefore, { roles: [], versions: [] }, `${name}: no role row and no version row at all: the catalog default governs`);
-  else assert.deepEqual(withoutXmin(rolesBefore.roles), [{ role_id: role, domain: 'invoices', level: stored }], `${name}: the stored override`);
+  else assert.deepEqual(withoutXmin(rolesBefore.roles), [{ role_id: role, domain, level: stored }], `${name}: the stored override`);
   const body = saveBody(T, customer, [line(described(`create ${tag}`), 1, 5)]);
   const key = randomUUID();
   const keys = [{ key, principal: operator.principal }];
@@ -680,8 +716,10 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
   let pending;
   let pid;
   let put;
+  let restore = null;
   let mid;
   let rolesAfterPut;
+  let rolesAfterRestore = null;
   const barrier = {};
   try {
     clock.sent = Date.now();
@@ -696,6 +734,9 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
     assert.deepEqual(barrier.waitsFor, [{ locktype: 'relation', mode: 'AccessShareLock', xid: null, relation: CUSTOMER_TABLE }],
       `${name}: the create waits for exactly the customer table (its customer read), nothing else`);
     assert.deepEqual(barrier.waitersBehindHolder, [pid], `${name}: the create's backend is the one backend the barrier blocks`);
+    // Past its unlocked decision (step 8 read the level table; the lock is held to COMMIT) and before the guard key (step 10b).
+    assert.ok(barrier.readSoFar.includes('tmpos_role.tenant_role_level AccessShareLock'), `${name}: the create has read the role levels (${barrier.readSoFar})`);
+    assert.deepEqual(barrier.guardKeys, [], `${name}: parked before the guard key`);
     assert.deepEqual(delta(await counts([T], keys), before), LEASE_ONLY, `${name}: parked, the create holds its lease only`);
     // The narrowing: the owner's own PUT on the OTHER entry, through the production chain, commits while the create waits.
     clock.put = Date.now();
@@ -703,7 +744,14 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
     clock.putDone = Date.now();
     assert.equal(put.status, 200, `${name}: the narrowing commits while the create waits: ${put.body}`);
     rolesAfterPut = await invoicesRowsOf(T);
-    assert.deepEqual(withoutXmin(rolesAfterPut.roles), [{ role_id: role, domain: 'invoices', level: 'view' }], `${name}: the committed role row reads View`);
+    assert.deepEqual(withoutXmin(rolesAfterPut.roles), [{ role_id: role, domain, level: narrowTo }], `${name}: the committed role row reads ${narrowTo}`);
+    if (restoreTo !== null) {
+      // The owner's second PUT, still while the create waits: the authority restored before the create's deciding read.
+      restore = await replyTo(b.levels(sb, { ...putBody, level: restoreTo, reason: described(`restoring ${tag}`), expectedVersion: reviewed + 1 }), `${name}: the owner's restoration`);
+      assert.equal(restore.status, 200, `${name}: the restoration commits while the create waits: ${restore.body}`);
+      rolesAfterRestore = await invoicesRowsOf(T);
+      assert.deepEqual(withoutXmin(rolesAfterRestore.roles), [{ role_id: role, domain, level: restoreTo }], `${name}: the committed role row reads ${restoreTo}`);
+    }
     // The baseline for the create's own effects, taken while it still waits: from here on only the create can write.
     mid = await counts([T], keys);
     barrier.stillWaiting = (await blockedNow({ by: h.pid, query: AT_CREATE })).map((r) => r.pid);
@@ -724,23 +772,39 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
   const afterRetry = await counts([T], keys);
   const recordAfterRetry = await recordOf(key, operator.principal);
   evidence(st, {
-    case: name, role, storedOverride: stored, customer: customerExists ? 'existing' : 'missing',
+    case: name, acceptance, role, domain, storedOverride: stored, narrowTo, restoreTo, customer: customerExists ? 'existing' : 'missing',
     barrier, answer: { status: reply.status, body: reply.body, reason, replayed: reply.headers['idempotent-replayed'] ?? null },
-    record, deltaSinceNarrowing: delta(after, mid),
+    // K at `mid` (after the PUT's 200, the create still parked) against `after`: a completion here committed after the PUT.
+    record, countsAtNarrowing: mid, deltaSinceNarrowing: delta(after, mid),
     retry: { status: retry.status, error: errorOf(retry), reason: retryReason, replayed: retry.headers['idempotent-replayed'] ?? null },
     deltaFromRetry: delta(afterRetry, after), recordAfterRetry,
-    put: { status: put.status, body: put.body },
-    rolesBefore: { roles: withoutXmin(rolesBefore.roles), versions: withoutXmin(rolesBefore.versions) },
-    rolesAfterPut: { roles: withoutXmin(rolesAfterPut.roles), versions: withoutXmin(rolesAfterPut.versions) },
-    rolesUnchangedSincePut: JSON.stringify(rolesFinal) === JSON.stringify(rolesAfterPut),
+    put: { status: put.status, body: put.body }, restore: restore === null ? null : { status: restore.status, body: restore.body },
+    rolesBefore, rolesAfterPut, rolesAfterRestore, rolesFinal,
+    rolesUnchangedSincePut: JSON.stringify(rolesFinal) === JSON.stringify(rolesAfterRestore ?? rolesAfterPut),
     ms: { sendToWaitSeen: clock.waiting - clock.sent, sendToRelease: clock.released - clock.sent, put: clock.putDone - clock.put,
       tableHeld: clock.released - clock.held, releaseToAnswer: clock.answered - clock.released },
   });
   // ---- assertions, in order: the conclusive window, then each safety property separately ----
   assert.ok(clock.released - clock.sent < CONCLUSIVE_WINDOW_MS,
     `INCONCLUSIVE: the create was in flight ${clock.released - clock.sent} ms when the table was released (limit ${CONCLUSIVE_WINDOW_MS} ms): a timeout could be the refusal`);
+  if (restoreTo !== null) {
+    // Removed and restored before the deciding read: the create proceeds under the authority it finds there.
+    if (customerExists) createdOf(reply, S, { lineCount: 1, subtotalCents: 5 }, `${name}: the 201 under the restored authority`);
+    else notFoundOf(reply, `${name}: the sealed 422 under the restored authority`);
+    assert.equal(record.sealed, true, `${name}: its completion committed (the record sealed)`);
+    assert.deepEqual(mine(delta(after, mid)), customerExists ? { D: 1, L: 1, A: 1, O: 1, K: 1 } : { ...MINE_NOTHING, K: 1 },
+      `${name}: exactly the create's own effects since the restoration`);
+    assert.deepEqual(bytesOf(retry), bytesOf(reply), `${name}: the same-key retry replays the stored bytes`);
+    assert.equal(retry.headers['idempotent-replayed'], 'true', `${name}: marked replayed`);
+    assert.deepEqual(delta(afterRetry, after), NOTHING, `${name}: the replay wrote nothing`);
+    assert.deepEqual(JSON.parse(restore.body), { roleLevel: { roleId: role, domain, level: restoreTo, version: reviewed + 2 } }, `${name}: the restoration's own answer`);
+    assert.deepEqual(withoutXmin(rolesAfterRestore.versions), [{ role_id: role, domain, version: String(reviewed + 2) }], `${name}: the version row is the two PUTs'`);
+    assert.deepEqual(rolesFinal, rolesAfterRestore, `${name}: the role and version rows exactly as the restoration wrote them (xmin included): the create wrote none`);
+    assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 2, `${name}: the two PUTs' audit records`);
+    return;
+  }
   assert.notEqual(reply.status, 422,
-    `SAFETY (DA-210): the create answered the sealed ${reply.status} ${reply.body} AFTER the narrowing to View committed first — its completion committed: ${record.sealed}`);
+    `SAFETY (${defect}): the create answered the sealed ${reply.status} ${reply.body} AFTER the ${domain} narrowing to ${narrowTo} committed first — its completion committed: ${record.sealed}`);
   assertRefusal(reply, 503, 'service_unavailable', `${name}: refused inside the transaction, not sealed`);
   assert.equal(reason, 'transaction_unavailable', `${name}: refused, never a timeout`);
   assert.equal(record.exists && !record.sealed, true, `SAFETY: nothing sealed — the create's idempotency record has no response (${JSON.stringify(record)})`);
@@ -751,9 +815,9 @@ async function narrowedWhileCreateWaits(st, { a, b, name, role, stored, customer
   assert.deepEqual(delta(after, mid), NOTHING, `SAFETY: no draft, line, audit record, event or completion since the narrowing committed`);
   assert.deepEqual(delta(afterRetry, after), NOTHING, 'SAFETY: the retry wrote nothing');
   assert.deepEqual(recordAfterRetry, record, 'SAFETY: the retry left the record as it was');
-  assert.deepEqual(JSON.parse(put.body), { roleLevel: { roleId: role, domain: 'invoices', level: 'view', version: reviewed + 1 } }, `${name}: the PUT's own answer`);
-  assert.deepEqual(withoutXmin(rolesAfterPut.versions), [{ role_id: role, domain: 'invoices', version: String(reviewed + 1) }],
-    `SAFETY: the version rows are exactly the PUT's (${role} invoices ${reviewed + 1}), no other`);
+  assert.deepEqual(JSON.parse(put.body), { roleLevel: { roleId: role, domain, level: narrowTo, version: reviewed + 1 } }, `${name}: the PUT's own answer`);
+  assert.deepEqual(withoutXmin(rolesAfterPut.versions), [{ role_id: role, domain, version: String(reviewed + 1) }],
+    `SAFETY: the version rows are exactly the PUT's (${role} ${domain} ${reviewed + 1}), no other`);
   assert.deepEqual(rolesFinal, rolesAfterPut, 'SAFETY: the role and version rows exactly as the PUT wrote them (xmin included): the create wrote none');
   assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 1, `${name}: the PUT's one audit record`);
   assert.equal((await counts([T], [{ key: putKey, principal: boss.principal }])).K, 1, `${name}: the PUT's own sealed completion`);
@@ -777,6 +841,89 @@ test('ICA-02 (AC-03 DA-210): an absent override — a sales_staff\'s create (def
       ['(b) the same ordering, existing customer', true],
     ]) {
       await t.test(name, (st) => narrowedWhileCreateWaits(st, { a, b, name: `ICA-02 ${name}`, role: 'sales_staff', stored: null, customerExists }));
+    }
+  }));
+});
+
+const CUSTOMERS_NARROWING = Object.freeze({
+  domain: 'customers', narrowTo: 'none', defect: 'DA-211',
+  acceptance: 'AC-02 (CCA-02 (b)): on the correction, the transaction-time refusal of a Customers narrowing committed before the deciding read (AC-01 [R] on the entry source 30828fc)',
+});
+
+test('CCA-01a (DA-211): an existing stored Customers override — a manager\'s create (Customers stored at Edit, Invoices at its default Full) waits at its customer read on entry A, past its unlocked Customers decision, while the owner\'s PUT narrows the manager\'s Customers level from Edit to None and commits on entry B; released, the create must not seal a new outcome: the 503 transaction_unavailable, nothing sealed, the lease held, no draft, line, audit record or event, the role and version rows exactly the PUT\'s', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [name, customerExists] of [
+      ['(a) [R] DA-211 defect reproduction — missing customer', false],
+      ['(b) [G] the same ordering, existing customer', true],
+    ]) {
+      await t.test(name, (st) => narrowedWhileCreateWaits(st, { a, b, name: `CCA-01a ${name}`, role: 'manager', stored: 'edit', customerExists, ...CUSTOMERS_NARROWING }));
+    }
+  }));
+});
+
+test('CCA-01b (DA-211): no Customers override — a sales_staff\'s create (Customers and Invoices at their default Create, no stored row) waits at its customer read on entry A, past its unlocked Customers decision, while the owner\'s PUT makes the role\'s FIRST Customers row, None, and commits on entry B; released, the create must not seal a new outcome: the 503 transaction_unavailable, nothing sealed, the lease held, nothing written, no role or version row but the PUT\'s own', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [name, customerExists] of [
+      ['(a) [R] DA-211 defect reproduction — first narrowing over the default', false],
+      ['(b) [G] the same ordering, existing customer', true],
+    ]) {
+      await t.test(name, (st) => narrowedWhileCreateWaits(st, { a, b, name: `CCA-01b ${name}`, role: 'sales_staff', stored: null, customerExists, ...CUSTOMERS_NARROWING }));
+    }
+  }));
+});
+
+// ===========================================================================
+// CCA-02: a Customers narrowing before the request, before the deciding read, and removed-and-restored before it
+// ===========================================================================
+
+/** The two override shapes the Customers cases run under: a stored override and none (the PUT's first insertion). */
+const CUSTOMERS_SHAPES = Object.freeze([
+  ['a stored Customers override (manager, Edit)', 'manager', 'edit'],
+  ['no Customers override (sales_staff, the default Create)', 'sales_staff', null],
+]);
+
+test('CCA-02 (AC-02; (a), (c) G, (b) = CCA-01 N): a Customers narrowing and the create\'s decisions — (a) committed BEFORE the request: the authorizer\'s request-time 403, no idempotency record, no lease, nothing written; (b) committed while the create waits before its deciding read: CCA-01a/b\'s transaction-time refusal (their EVIDENCE lines carry AC-02); (c) removed AND restored by two committed PUTs while the create waits at its customer read: the create proceeds — the sealed 422 for a missing customer, the 201 for an existing one — writing no role row', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [shape, role, stored] of CUSTOMERS_SHAPES) {
+      await t.test(`(a) ${shape}: narrowed to None before the request`, async (st) => {
+        const label = `CCA-02 (a) ${shape}`;
+        const { tag, T, S, C, operator, boss, so, sb } = await sceneOf(a, b, role, stored, 'customers');
+        const eligible = await a.eligibility(so, S);
+        assert.deepEqual([eligible.status, eligible.body], [200, '{"eligibility":"allowed"}'], `${label}: authorized before the narrowing`);
+        const reviewed = await reviewedOf(b, sb, role, label, 'customers');
+        const putKey = randomUUID();
+        const put = await b.levels(sb, { roleId: role, domain: 'customers', level: 'none', reason: described(`before ${tag}`), expectedTenant: T, expectedVersion: reviewed }, { key: putKey });
+        assert.equal(put.status, 200, `${label}: the narrowing commits first: ${put.body}`);
+        const roles = await invoicesRowsOf(T);
+        const o = { case: label, acceptance: 'AC-02: the request-time denial', put: { status: put.status, body: put.body }, roles, creates: [] };
+        for (const [what, customer] of [['missing customer', randomUUID()], ['existing customer', C]]) {
+          const key = randomUUID();
+          const before = await counts([T], [{ key, principal: operator.principal }]);
+          const reply = await a.save(so, S, saveBody(T, customer, [line(described(`after ${tag}`), 1, 5)]), { key });
+          o.creates.push({ what, status: reply.status, body: reply.body, reason: readReason(a, reply), record: await recordOf(key, operator.principal),
+            delta: delta(await counts([T], [{ key, principal: operator.principal }]), before) });
+        }
+        o.rolesAfter = await invoicesRowsOf(T);
+        evidence(st, o);
+        for (const c of o.creates) {
+          assert.equal(c.status, 403, `SAFETY: ${label}, ${c.what}: the request-time denial, never a sealed answer (${c.status} ${c.body})`);
+          assert.equal(JSON.parse(c.body).error, 'forbidden', `${label}, ${c.what}: forbidden`);
+          assert.equal(c.reason, 'authz_denied', `${label}, ${c.what}: the authorizer refused it`);
+          assert.deepEqual(c.record, { exists: false, sealed: false, leaseHeld: false }, `SAFETY: ${label}, ${c.what}: no idempotency record and no lease — refused before its key was read`);
+          assert.deepEqual(c.delta, NOTHING, `SAFETY: ${label}, ${c.what}: no draft, line, audit record, event, completion or lease`);
+        }
+        assert.deepEqual(o.rolesAfter, roles, `${label}: the role and version rows exactly the PUT's (xmin included)`);
+        assert.equal((await counts([T], [{ key: putKey, principal: boss.principal }])).K, 1, `${label}: the PUT's own sealed completion`);
+      });
+    }
+    for (const [shape, role, stored] of CUSTOMERS_SHAPES) {
+      for (const [what, customerExists] of [['missing customer', false], ['existing customer', true]]) {
+        const name = `(c) ${shape}, ${what}: removed and restored before the deciding read`;
+        await t.test(name, (st) => narrowedWhileCreateWaits(st, {
+          a, b, name: `CCA-02 ${name}`, role, stored, customerExists, ...CUSTOMERS_NARROWING, restoreTo: stored ?? 'create',
+          acceptance: 'AC-02: the existing policy for authority removed and restored before the deciding read',
+        }));
+      }
     }
   }));
 });
@@ -915,42 +1062,51 @@ function trapCommit(relay, mode, anchor) {
   };
 }
 
-/** A tenant, a store, an existing customer, the operator under test (one store grant) and the owner (one tenant-scope grant). */
-async function sceneOf(a, b, role, stored) {
+/**
+ * A tenant, a store, an existing customer, the operator under test (one store grant) and the owner (one tenant-scope grant);
+ * `role`'s `domain` level stored at `stored` (null: no row, the catalog default).
+ */
+async function sceneOf(a, b, role, stored, domain = 'invoices') {
   const tag = randomUUID().slice(0, 6);
   const T = await newTenant(`${role}-${tag}`);
   const S = await newStore(T, `ICA ${tag}`);
   const C = await newCustomer(T, `${role}-${tag}`);
   const operator = await actor(`op-${tag}`, [storeGrant(T, S, role)]);
   const boss = await actor(`boss-${tag}`, [tenantGrant(T, 'store_owner')]);
-  if (stored !== null) await setLevel(T, role, 'invoices', stored);
+  if (stored !== null) await setLevel(T, role, domain, stored);
   return { tag, T, S, C, operator, boss, so: await signIn(a, operator), sb: await signIn(b, boss) };
 }
-/** The version the owner reviews for `role`'s Invoices level, read through entry B (its pool warmed). */
-async function reviewedOf(b, sb, role, label) {
-  const read = await b.read(sb, '/api/v1/roles/levels/invoices');
-  assert.equal(read.status, 200, `${label}: the owner reads the Invoices levels: ${read.body}`);
-  return Number(JSON.parse(read.body).roles.find((r) => r.roleId === role).version);
+/** The version the owner reviews for `role`'s `domain` level, read through entry B (its pool warmed): Customers at GET /api/v1/roles/levels. */
+async function reviewedOf(b, sb, role, label, domain = 'invoices') {
+  const read = await b.read(sb, domain === 'invoices' ? '/api/v1/roles/levels/invoices' : '/api/v1/roles/levels');
+  assert.equal(read.status, 200, `${label}: the owner reads the ${domain} levels: ${read.body}`);
+  const answer = JSON.parse(read.body);
+  assert.equal(answer.domain, domain, `${label}: the read-back is the ${domain} one`);
+  return Number(answer.roles.find((r) => r.roleId === role).version);
 }
 
 // ===========================================================================
 // ICA-03, ICA-04, ICA-08: the role's key held SHARED from step 10b to the end of the command transaction
 // ===========================================================================
 
+/** The statement a create parked at its audit record is in (CCA-09): the runtime's audit INSERT. */
+const AT_AUDIT = /insert into public\.audit_event/i;
 /**
- * One race at the create's completion. `role`'s Invoices level is `stored` (null: the catalog default) and authorizes the
- * create; the create (a missing or an existing customer) is sent on entry `a` and parked at its completion by the owner trigger
- * (`action` 'park', or 'parkRaise': the completion then raises); while it is parked the owner — a different operator, signed in
- * on entry `b` — sends the PUT setting `role`'s Invoices level to `putLevel`; the park is released. Every observation is
- * gathered and returned; nothing is asserted here but that the levers engaged (the callers assert, in order).
+ * One race at the create's completion. `role`'s `domain` level is `stored` (null: the catalog default) and authorizes the
+ * create; the create (a missing or an existing customer) is sent on entry `a` and parked by the owner trigger at its completion
+ * (`at` 'completion') or at its own audit INSERT (`at` 'audit'; an applied create only) — `action` 'park', or 'parkRaise': the
+ * statement then raises; while it is parked the owner — a different operator, signed in on entry `b` — sends the PUT setting
+ * `role`'s `domain` level to `putLevel`; the park is released. With `lose`, entry `a`'s relay forwards the create's COMMIT and
+ * drops its answer (the lost acknowledgement). Every observation is gathered and returned; nothing is asserted here but that
+ * the levers engaged (the callers assert, in order).
  */
-async function parkedAtCompletion({ a, b, name, role, stored, customerExists, action, putLevel }) {
-  const sc = await sceneOf(a, b, role, stored);
+async function parkedAtCompletion({ a, b, name, role, stored, customerExists, action, putLevel, domain = 'invoices', at = 'completion', lose = false }) {
+  const sc = await sceneOf(a, b, role, stored, domain);
   const { tag, T, S, C, operator, boss, so, sb } = sc;
   const eligible = await a.eligibility(so, S);
   assert.deepEqual([eligible.status, eligible.body], [200, '{"eligibility":"allowed"}'], `${name}: the create is authorized before the race`);
-  const reviewed = await reviewedOf(b, sb, role, name);
-  const putBody = { roleId: role, domain: 'invoices', level: putLevel, reason: described(`${putLevel} ${tag}`), expectedTenant: T, expectedVersion: reviewed };
+  const reviewed = await reviewedOf(b, sb, role, name, domain);
+  const putBody = { roleId: role, domain, level: putLevel, reason: described(`${putLevel} ${tag}`), expectedTenant: T, expectedVersion: reviewed };
   const rolesBefore = await invoicesRowsOf(T);
   const body = saveBody(T, customerExists ? C : randomUUID(), [line(described(`create ${tag}`), 2, 5)]);
   const key = randomUUID();
@@ -961,19 +1117,25 @@ async function parkedAtCompletion({ a, b, name, role, stored, customerExists, ac
   const before = await counts([T], keys);
   const firedBefore = await fired();
   const clock = {};
-  const o = { case: name, role, storedOverride: stored, customer: customerExists ? 'existing' : 'missing', action, putLevel,
+  const o = { case: name, role, domain, storedOverride: stored, customer: customerExists ? 'existing' : 'missing', at, action, putLevel, lose,
     expectedKey: await guardKey(T, role) };
   let pending;
   let put;
   let putSettled = false;
-  // Only THIS create's completion parks: the PUT's own completion (another scope) never fires the trigger.
-  await withTrigger('tmpos_internal.idempotency_record', 'update', `${COMPLETION} and old.scope = '${scope}'`, action, async () => {
+  // Only THIS create parks: at its own completion (its record's scope; the PUT's completion has another) or its own audit
+  // INSERT (the create action in its tenant; the PUT's audit record is another action).
+  const [table, event, when, query] = at === 'audit'
+    ? ['public.audit_event', 'insert', `new.action_id = '${ACTION}' and new.tenant_id = '${T}'`, AT_AUDIT]
+    : ['tmpos_internal.idempotency_record', 'update', `${COMPLETION} and old.scope = '${scope}'`, AT_COMPLETION];
+  const trap = lose ? trapCommit(a.relay, 'lose', AUDIT_ANCHOR) : null;
+  try { await withTrigger(table, event, when, action, async () => {
     const lever = await holdPark();
     try {
       clock.sent = Date.now();
       pending = quietly(a.save(so, S, body, { key }));
-      o.createPid = waitingPid(await blockedOrSettled(pending, { by: lever.pid, query: AT_COMPLETION }), `${name}: the create parked at its completion`);
+      o.createPid = waitingPid(await blockedOrSettled(pending, { by: lever.pid, query }), `${name}: the create parked at its ${at}`);
       clock.parked = Date.now();
+      if (trap !== null) o.commitsSentWhileParked = trap.hit.length;
       o.createGuard = await guardLocksOf(o.createPid);
       o.createWaits = await waitsOf(o.createPid);
       o.rolesParked = await invoicesRowsOf(T);
@@ -1000,7 +1162,7 @@ async function parkedAtCompletion({ a, b, name, role, stored, customerExists, ac
       if (pending !== undefined) { o.reply = await within(pending, `${name}: the create`); clock.answered = Date.now(); }
       if (put !== undefined) { o.putReply = await within(put, `${name}: the owner's PUT`); clock.putAnswered = Date.now(); }
     }
-  });
+  }); } finally { if (trap !== null) { o.commitsTrapped = trap.hit.length; trap.release(); } }
   const after = await counts([T], keys);
   o.firedDelta = (await fired()) - firedBefore;
   o.deltaAll = delta(after, before);
@@ -1010,8 +1172,8 @@ async function parkedAtCompletion({ a, b, name, role, stored, customerExists, ac
   o.answer = typeof o.reply?.status === 'number' ? { status: o.reply.status, body: o.reply.body, reason: readReason(a, o.reply), replayed: o.reply.headers['idempotent-replayed'] ?? null } : o.reply;
   o.putAnswer = typeof o.putReply?.status === 'number' ? { status: o.putReply.status, body: o.putReply.body } : o.putReply;
   o.ms = { sendToParked: clock.parked - clock.sent, sendToPutWaiting: clock.putWaiting - clock.sent, sendToRelease: clock.released - clock.sent,
-    releaseToAnswer: clock.answered - clock.released, releaseToPutAnswer: clock.putAnswered - clock.released };
-  return { ...sc, role, o, clock, reviewed, rolesBefore, body, key, keys, putKey, before, after };
+    sendToAnswer: clock.answered - clock.sent, releaseToAnswer: clock.answered - clock.released, releaseToPutAnswer: clock.putAnswered - clock.released };
+  return { ...sc, role, domain, o, clock, reviewed, rolesBefore, body, key, keys, putKey, before, after };
 }
 
 /** The key-hold contract, asserted in order: the window, the create's SHARED key, the PUT waiting for exactly that key. */
@@ -1031,11 +1193,12 @@ async function assertHeldThroughCompletion(r, name) {
 }
 /** The PUT's own footprint: its answer, its one tenant-scope audit record, its own completion. */
 async function assertPut(r, level, name) {
-  const { o, T, role, reviewed, boss, putKey } = r;
+  const { o, T, role, domain, reviewed, boss, putKey } = r;
   assert.ok(typeof o.putReply?.status === 'number', `${name}: the PUT answered: ${JSON.stringify(o.putReply)}`);
   assert.equal(o.putReply.status, 200, `${name}: the PUT commits after the create's transaction ended: ${o.putReply.body}`);
-  assert.deepEqual(JSON.parse(o.putReply.body), { roleLevel: { roleId: role, domain: 'invoices', level, version: reviewed + 1 } }, `${name}: the PUT's own answer`);
-  assert.deepEqual(withoutXmin(o.rolesAfter.versions), [{ role_id: role, domain: 'invoices', version: String(reviewed + 1) }], `${name}: the only version row is the PUT's`);
+  assert.deepEqual(JSON.parse(o.putReply.body), { roleLevel: { roleId: role, domain, level, version: reviewed + 1 } }, `${name}: the PUT's own answer`);
+  assert.deepEqual(withoutXmin(o.rolesAfter.versions), [{ role_id: role, domain, version: String(reviewed + 1) }], `${name}: the only version row is the PUT's`);
+  assert.deepEqual(withoutXmin(o.rolesAfter.roles), [{ role_id: role, domain, level }], `${name}: the only role row is the PUT's: the create wrote none`);
   assert.equal((await owner`select count(*)::int as n from public.audit_event where action_id = 'tenant.role.level.update' and tenant_id = ${T}`)[0].n, 1, `${name}: the PUT's one audit record`);
   assert.equal((await counts([T], [{ key: putKey, principal: boss.principal }])).K, 1, `${name}: the PUT's own sealed completion`);
 }
@@ -1068,7 +1231,7 @@ test('ICA-03 (AC-04, N): an authorized customer_not_found holds the role\'s key 
   }));
 });
 
-test('ICA-04 (AC-05, N): a successful create holds the role\'s key through its completion — parked there with the key SHARED while the owner\'s PUT waits for exactly that key; released, the 201 commits exactly one draft, its line, one audit record, one event and the completion (its only role row the Customers NULL anchor), then the PUT is the 200, and a later create is the authorizer\'s 403', async (t) => {
+test('ICA-04 (AC-05, N): a successful create holds the role\'s key through its completion — parked there with the key SHARED while the owner\'s PUT waits for exactly that key; released, the 201 commits exactly one draft, its line, one audit record, one event and the completion (and no role row: 032 writes no anchor), then the PUT is the 200, and a later create is the authorizer\'s 403', async (t) => {
   await withEntry((a) => withEntry(async (b) => {
     for (const [name, role, stored] of [['(a) an existing override (manager, stored Create)', 'manager', 'create'], ['(b) an absent override (sales_staff, the default Create)', 'sales_staff', null]]) {
       await t.test(name, async (st) => {
@@ -1085,8 +1248,8 @@ test('ICA-04 (AC-05, N): a successful create holds the role\'s key through its c
         assert.deepEqual(mine(r.o.deltaAll), { D: 1, L: 1, A: 1, O: 1, K: 1 }, `${label}: and nothing else of the tenant's`);
         assert.equal((await owner`select draft_id from tmpos_invoice_draft.invoice_draft where tenant_id = ${r.T}`)[0].draft_id, id, `${label}: the tenant's one draft is the answered one`);
         await assertPut(r, 'view', label);
-        assert.deepEqual(withoutXmin(r.o.rolesAfter.roles), [{ role_id: role, domain: 'customers', level: null }, { role_id: role, domain: 'invoices', level: 'view' }],
-          `${label}: the create's only role row is the Customers NULL anchor (no Invoices anchor); the Invoices row is the PUT's`);
+        assert.deepEqual(withoutXmin(r.o.rolesAfter.roles), [{ role_id: role, domain: 'invoices', level: 'view' }],
+          `${label}: the create wrote no role row (032: no Customers NULL anchor, no Invoices anchor); the only row is the PUT's`);
         assert.equal(r.o.guardLocksStandingAfter, 0, `${label}: no guard lock stands`);
         await assertLaterCreateRefused(r, a, label);
       });
@@ -1110,7 +1273,72 @@ test('ICA-08 (AC-09, N): the completion fails while the create holds the role\'s
         assert.deepEqual(mine(r.o.deltaAll), MINE_NOTHING, `${label}: rolled back — no draft, line, audit record, event or completion`);
         assert.deepEqual(r.o.record, { exists: true, sealed: false, leaseHeld: true }, `${label}: the separately acquired lease is held, nothing sealed`);
         await assertPut(r, 'edit', label);
-        assert.deepEqual(withoutXmin(r.o.rolesAfter.roles), [{ role_id: 'manager', domain: 'invoices', level: 'edit' }], `${label}: the only role row is the PUT's (the create's anchor went with its rollback)`);
+        assert.deepEqual(withoutXmin(r.o.rolesAfter.roles), [{ role_id: 'manager', domain: 'invoices', level: 'edit' }], `${label}: the only role row is the PUT's (the create writes none)`);
+        assert.equal(r.o.guardLocksStandingAfter, 0, `${label}: no guard lock stands`);
+        const before = await counts([r.T], r.keys);
+        assertRefusal(await a.save(r.so, r.S, r.body, { key: r.key }), 409, 'request_in_progress', `${label}: the same-key retry within the lease`);
+        assert.deepEqual(delta(await counts([r.T], r.keys), before), NOTHING, `${label}: the retry wrote nothing`);
+      });
+    }
+  }));
+});
+
+// ===========================================================================
+// CCA-03, CCA-09: the same key held through both sealed outcomes against the owner's CUSTOMERS PUT (021's setter, 032's trigger)
+// ===========================================================================
+
+test('CCA-03 (AC-03, N): command-first under a Customers narrowing — parked at its completion, the create holds the role\'s key SHARED and the owner\'s PUT {domain: customers, level: none} waits for exactly that key; released, (a) the sealed 422 commits (its completion only) / (b) the 201 commits (one draft, its line, one audit record, one event, the completion), neither writing a role or version row, THEN the PUT\'s 200, THEN a later create is the authorizer\'s 403 — with a stored Customers override and with none', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [variant, customerExists] of [['CCA-03a customer_not_found', false], ['CCA-03b applied', true]]) {
+      for (const [shape, role, stored] of CUSTOMERS_SHAPES) {
+        await t.test(`${variant}, ${shape}`, async (st) => {
+          const label = `${variant}, ${shape}`;
+          const r = await parkedAtCompletion({ a, b, name: label, role, stored, customerExists, action: 'park', putLevel: 'none', domain: 'customers' });
+          r.o.draft = r.o.reply?.status === 201 ? JSON.parse(r.o.reply.body).draft.id : null;
+          r.o.effects = r.o.draft === null ? null : await effectsOf(r.o.draft);
+          evidence(st, { ...r.o, reply: undefined, putReply: undefined });
+          await assertHeldThroughCompletion(r, label);
+          assert.ok(typeof r.o.reply?.status === 'number', `${label}: the create answered: ${JSON.stringify(r.o.reply)}`);
+          if (customerExists) {
+            const id = createdOf(r.o.reply, r.S, { lineCount: 1, subtotalCents: 10 }, `${label}: the 201 under the Customers authority it held`);
+            assert.deepEqual(r.o.effects, { drafts: 1, lines: 1, audits: 1, events: 1 }, `${label}: exactly that draft, its line, one audit record and one event`);
+            assert.deepEqual(mine(r.o.deltaAll), { D: 1, L: 1, A: 1, O: 1, K: 1 }, `${label}: and nothing else of the tenant's`);
+            assert.equal((await owner`select draft_id from tmpos_invoice_draft.invoice_draft where tenant_id = ${r.T}`)[0].draft_id, id, `${label}: the tenant's one draft is the answered one`);
+          } else {
+            notFoundOf(r.o.reply, label);
+            assert.deepEqual(mine(r.o.deltaAll), { ...MINE_NOTHING, K: 1 }, `${label}: the completion only — no draft, line, audit record or event`);
+          }
+          assert.equal(r.o.record.sealed, true, `${label}: its completion committed (the record sealed)`);
+          // The PUT's answer, its one version row and its one role row: the create wrote no role or version row.
+          await assertPut(r, 'none', label);
+          assert.equal(r.o.guardLocksStandingAfter, 0, `${label}: no guard lock stands`);
+          await assertLaterCreateRefused(r, a, label);
+        });
+      }
+    }
+  }));
+});
+
+test('CCA-09 (AC-09, N): atomic effects on failure while the owner\'s Customers PUT (a widening, View -> Edit) waits for the key the create holds — the completion raises (an applied create, a customer_not_found) or the create\'s own audit INSERT raises: the 503, rolled back (no draft, line, audit record, event, completion or role row of the create), the lease held (the same-key retry the 409 request_in_progress), the key gone with that transaction, so the waiting PUT commits its 200', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    for (const [name, customerExists, at] of [
+      ['(a) the completion raises — an applied create', true, 'completion'],
+      ['(b) the completion raises — a customer_not_found', false, 'completion'],
+      ['(c) the create\'s audit INSERT raises — an applied create', true, 'audit'],
+    ]) {
+      await t.test(name, async (st) => {
+        const label = `CCA-09 ${name}`;
+        // The PUT WIDENS the manager's Customers level (View -> Edit): the create stays authorized afterwards, so the same-key
+        // retry meets the lease (the 409), not the authorizer.
+        const r = await parkedAtCompletion({ a, b, name: label, role: 'manager', stored: 'view', customerExists, action: 'parkRaise', putLevel: 'edit', domain: 'customers', at });
+        evidence(st, { ...r.o, reply: undefined, putReply: undefined });
+        await assertHeldThroughCompletion(r, label);
+        assert.ok(typeof r.o.reply?.status === 'number', `${label}: the create answered: ${JSON.stringify(r.o.reply)}`);
+        assertRefusal(r.o.reply, 503, 'service_unavailable', `${label}: the injected fault`);
+        assert.notEqual(r.o.answer.reason, 'transaction_timeout', `${label}: the injected fault, not a lock timeout`);
+        assert.deepEqual(mine(r.o.deltaAll), MINE_NOTHING, `SAFETY: ${label}: rolled back — no draft, line, audit record, event or completion`);
+        assert.deepEqual(r.o.record, { exists: true, sealed: false, leaseHeld: true }, `SAFETY: ${label}: the separately acquired lease is held, nothing sealed`);
+        await assertPut(r, 'edit', label);
         assert.equal(r.o.guardLocksStandingAfter, 0, `${label}: no guard lock stands`);
         const before = await counts([r.T], r.keys);
         assertRefusal(await a.save(r.so, r.S, r.body, { key: r.key }), 409, 'request_in_progress', `${label}: the same-key retry within the lease`);
@@ -1125,48 +1353,55 @@ test('ICA-08 (AC-09, N): the completion fails while the create holds the role\'s
 // ===========================================================================
 
 test('ICA-09 (AC-10, G): a sealed 422 and a sealed 201 replay byte for byte; after the owner\'s PUT narrows the role, the same-key replay is the authorizer\'s 403; restored, the replay returns the stored bytes; another body under either key is the 422 idempotency_key_reused; nothing new written', async () => {
-  await withEntry((a) => withEntry(async (b) => {
-    const { tag, T, S, C, operator, so, sb } = await sceneOf(a, b, 'manager', 'create');
-    const missing = saveBody(T, randomUUID(), [line(described(`replay missing ${tag}`), 1, 5)]);
-    const real = saveBody(T, C, [line(described(`replay real ${tag}`), 3, 7)]);
-    const k422 = randomUUID();
-    const k201 = randomUUID();
-    const keys = [{ key: k422, principal: operator.principal }, { key: k201, principal: operator.principal }];
-    const before = await counts([T], keys);
-    const sealed422 = await a.save(so, S, missing, { key: k422 });
-    notFoundOf(sealed422, 'the sealed 422');
-    const sealed201 = await a.save(so, S, real, { key: k201 });
-    createdOf(sealed201, S, { lineCount: 1, subtotalCents: 21 }, 'the sealed 201');
-    assert.deepEqual(mine(delta(await counts([T], keys), before)), { D: 1, L: 1, A: 1, O: 1, K: 2 }, 'one draft and two completions');
-    const footprint = await footprintOf(T, keys);
-    const replays = async (label) => {
-      for (const [body, key, original] of [[missing, k422, sealed422], [real, k201, sealed201]]) {
-        const replay = await a.save(so, S, body, { key });
-        assert.deepEqual(bytesOf(replay), bytesOf(original), `${label}: key ${key === k422 ? '422' : '201'} replays the stored bytes`);
-        assert.equal(replay.headers['idempotent-replayed'], 'true', `${label}: marked replayed`);
-        assertBaseline(replay, label);
-      }
-    };
-    await replays('under the authority they were sealed under');
-    // The owner narrows the manager's Invoices level to View: a key is no authority.
-    const reviewed = await reviewedOf(b, sb, 'manager', 'ICA-09');
-    const narrowed = await b.levels(sb, { roleId: 'manager', domain: 'invoices', level: 'view', reason: described(`narrow ${tag}`), expectedTenant: T, expectedVersion: reviewed });
-    assert.equal(narrowed.status, 200, `the narrowing: ${narrowed.body}`);
-    for (const [body, key] of [[missing, k422], [real, k201]]) {
-      const refused = await a.save(so, S, body, { key });
-      assertRefusal(refused, 403, 'forbidden', 'the same-key replay without current authority');
-      assert.equal(refused.headers['idempotent-replayed'], undefined, 'never a replay');
-    }
-    // Restored (the owner's second PUT), the stored bytes come back.
-    const restored = await b.levels(sb, { roleId: 'manager', domain: 'invoices', level: 'create', reason: described(`restore ${tag}`), expectedTenant: T, expectedVersion: reviewed + 1 });
-    assert.equal(restored.status, 200, `the restoration: ${restored.body}`);
-    await replays('restored');
-    assertRefusal(await a.save(so, S, { ...missing, lines: [line(described(`changed ${tag}`), 1, 5)] }, { key: k422 }), 422, 'idempotency_key_reused', 'another body under the 422\'s key');
-    assertRefusal(await a.save(so, S, { ...real, lines: [line(described(`changed ${tag}`), 3, 7)] }, { key: k201 }), 422, 'idempotency_key_reused', 'another body under the 201\'s key');
-    assert.deepEqual(await footprintOf(T, keys), footprint, 'nothing new written: drafts, lines, audit records, events and both records exactly as sealed (row versions included)');
-    assert.deepEqual(mine(delta(await counts([T], keys), before)), { D: 1, L: 1, A: 1, O: 1, K: 2 }, 'still one draft and two completions');
-  }));
+  await withEntry((a) => withEntry((b) => replayUnderAuthority(a, b, { role: 'manager', stored: 'create', domain: 'invoices', narrowTo: 'view', label: 'ICA-09' })));
 });
+
+/**
+ * ICA-09's sequence for `role`'s `domain` level (stored at `stored`, null: the default): two sealed answers replay; the owner
+ * narrows the level to `narrowTo` — the same-key replays are the authorizer's 403; the owner restores it (`stored`, or the
+ * default's Create when none was stored) — the replays return the stored bytes; another body is idempotency_key_reused.
+ */
+async function replayUnderAuthority(a, b, { role, stored, domain, narrowTo, label }) {
+  const { tag, T, S, C, operator, so, sb } = await sceneOf(a, b, role, stored, domain);
+  const missing = saveBody(T, randomUUID(), [line(described(`replay missing ${tag}`), 1, 5)]);
+  const real = saveBody(T, C, [line(described(`replay real ${tag}`), 3, 7)]);
+  const k422 = randomUUID();
+  const k201 = randomUUID();
+  const keys = [{ key: k422, principal: operator.principal }, { key: k201, principal: operator.principal }];
+  const before = await counts([T], keys);
+  const sealed422 = await a.save(so, S, missing, { key: k422 });
+  notFoundOf(sealed422, 'the sealed 422');
+  const sealed201 = await a.save(so, S, real, { key: k201 });
+  createdOf(sealed201, S, { lineCount: 1, subtotalCents: 21 }, 'the sealed 201');
+  assert.deepEqual(mine(delta(await counts([T], keys), before)), { D: 1, L: 1, A: 1, O: 1, K: 2 }, 'one draft and two completions');
+  const footprint = await footprintOf(T, keys);
+  const replays = async (label) => {
+    for (const [body, key, original] of [[missing, k422, sealed422], [real, k201, sealed201]]) {
+      const replay = await a.save(so, S, body, { key });
+      assert.deepEqual(bytesOf(replay), bytesOf(original), `${label}: key ${key === k422 ? '422' : '201'} replays the stored bytes`);
+      assert.equal(replay.headers['idempotent-replayed'], 'true', `${label}: marked replayed`);
+      assertBaseline(replay, label);
+    }
+  };
+  await replays('under the authority they were sealed under');
+  // The owner narrows the role's level: a key is no authority.
+  const reviewed = await reviewedOf(b, sb, role, label, domain);
+  const narrowed = await b.levels(sb, { roleId: role, domain, level: narrowTo, reason: described(`narrow ${tag}`), expectedTenant: T, expectedVersion: reviewed });
+  assert.equal(narrowed.status, 200, `${label}: the ${domain} narrowing: ${narrowed.body}`);
+  for (const [body, key] of [[missing, k422], [real, k201]]) {
+    const refused = await a.save(so, S, body, { key });
+    assertRefusal(refused, 403, 'forbidden', `SAFETY: ${label}: the same-key replay without current ${domain} authority`);
+    assert.equal(refused.headers['idempotent-replayed'], undefined, `SAFETY: ${label}: never a replay`);
+  }
+  // Restored (the owner's second PUT), the stored bytes come back.
+  const restored = await b.levels(sb, { roleId: role, domain, level: stored ?? 'create', reason: described(`restore ${tag}`), expectedTenant: T, expectedVersion: reviewed + 1 });
+  assert.equal(restored.status, 200, `${label}: the restoration: ${restored.body}`);
+  await replays(`${label}: restored`);
+  assertRefusal(await a.save(so, S, { ...missing, lines: [line(described(`changed ${tag}`), 1, 5)] }, { key: k422 }), 422, 'idempotency_key_reused', `${label}: another body under the 422's key`);
+  assertRefusal(await a.save(so, S, { ...real, lines: [line(described(`changed ${tag}`), 3, 7)] }, { key: k201 }), 422, 'idempotency_key_reused', `${label}: another body under the 201's key`);
+  assert.deepEqual(await footprintOf(T, keys), footprint, `${label}: nothing new written: drafts, lines, audit records, events and both records exactly as sealed (row versions included)`);
+  assert.deepEqual(mine(delta(await counts([T], keys), before)), { D: 1, L: 1, A: 1, O: 1, K: 2 }, `${label}: still one draft and two completions`);
+}
 
 // ===========================================================================
 // ICA-12: the lost COMMIT acknowledgement under the guarded routine
@@ -1233,5 +1468,38 @@ test('ICA-12 (AC-11, G/N): [N] parked at its completion BEFORE its COMMIT is sen
     assert.equal(await guardLocksStanding(), 0, 'no guard key stands after the landed COMMIT');
     const put = await replyTo(b.levels(sb, { roleId: 'sales_staff', domain: 'invoices', level: 'view', reason: described(`after ${tag}`), expectedTenant: T, expectedVersion: reviewed }), 'the owner\'s PUT');
     assert.equal(put.status, 200, `the owner's PUT commits: nothing holds the role's key: ${put.body}`);
+  }));
+});
+
+// ===========================================================================
+// CCA-10: replay and the unknown outcome under Customers authority
+// ===========================================================================
+
+test('CCA-10 (AC-10, G/N): replay and an unknown outcome under Customers authority — [G] a sealed 422 and a sealed 201 replay byte for byte; after the owner\'s PUT narrows the role\'s Customers level to None the same-key replay is the authorizer\'s 403; restored by a second PUT it replays the stored bytes; another body is the 422 idempotency_key_reused; nothing new written; [N] a lost COMMIT acknowledgement while the owner\'s Customers PUT waits for the key: the 503 transaction_timeout (unknown, never a rollback), what landed whole, the same-key retry replays it, no guard key stands and the PUT commits', async (t) => {
+  await withEntry((a) => withEntry(async (b) => {
+    await t.test('(a) [G] replay under the current Customers authority (no override: sales_staff, the default Create)', () =>
+      replayUnderAuthority(a, b, { role: 'sales_staff', stored: null, domain: 'customers', narrowTo: 'none', label: 'CCA-10 (a)' }));
+    await t.test('(b) [N] the lost COMMIT acknowledgement while the owner\'s Customers PUT (a widening, View -> Edit) waits for the key', async (st) => {
+      const label = 'CCA-10 (b)';
+      // The PUT WIDENS the Customers level: the create stays authorized, so the same-key retry may replay what landed.
+      const r = await parkedAtCompletion({ a, b, name: label, role: 'manager', stored: 'view', customerExists: true, action: 'park', putLevel: 'edit', domain: 'customers', lose: true });
+      evidence(st, { ...r.o, reply: undefined, putReply: undefined });
+      await assertHeldThroughCompletion(r, label);
+      assert.equal(r.o.commitsSentWhileParked, 0, `${label}: observed before the create's COMMIT was sent`);
+      assert.ok(typeof r.o.reply?.status === 'number', `${label}: the create answered: ${JSON.stringify(r.o.reply)}`);
+      assert.equal(r.o.commitsTrapped, 1, `${label}: one COMMIT reached the server, and its answer was dropped`);
+      assertRefusal(r.o.reply, 503, 'service_unavailable', `${label}: the lost answer`);
+      assert.equal(r.o.answer.reason, 'transaction_timeout', `${label}: unknown at the commit deadline — never reported as a rollback`);
+      assert.ok(r.o.ms.sendToAnswer >= COMMAND_TRANSACTION_DEADLINE_MS - 50, `${label}: answered at the commit's own deadline (${r.o.ms.sendToAnswer} ms)`);
+      // The PUT got the key only when the create's COMMIT released it: what landed is visible, whole.
+      assert.deepEqual(mine(r.o.deltaAll), { D: 1, L: 1, A: 1, O: 1, K: 1 }, `${label}: what committed is whole: one draft, its line, one audit record, one event, the completion`);
+      const [{ draft_id: landedId }] = await owner`select draft_id from tmpos_invoice_draft.invoice_draft where tenant_id = ${r.T}`;
+      assert.deepEqual(await effectsOf(landedId), { drafts: 1, lines: 1, audits: 1, events: 1 }, `${label}: all of it the landed draft's`);
+      await assertPut(r, 'edit', label);
+      assert.equal(r.o.guardLocksStandingAfter, 0, `${label}: no guard key stands after the landed COMMIT`);
+      const replay = await a.save(r.so, r.S, r.body, { key: r.key });
+      assert.equal(createdOf(replay, r.S, { lineCount: 1, subtotalCents: 10 }, `${label}: the same-key retry replays what landed`, { replayed: true }), landedId);
+      assert.deepEqual(mine(delta(await counts([r.T], r.keys), r.before)), { D: 1, L: 1, A: 1, O: 1, K: 1 }, `${label}: never a second draft, audit record or event`);
+    });
   }));
 });

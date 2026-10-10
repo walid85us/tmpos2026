@@ -5,7 +5,7 @@
 // alone, with no runtime in front of it; the HTTP route over it, its audit, idempotency and step-up, and the runtime's
 // comparison of each answer with its trusted context, are tests/db/roleLevels.integration.test.mjs's.
 //
-// WHAT IS PROVEN. 001-031 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
+// WHAT IS PROVEN. 001-032 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M7RV-01); the installed inventory and
 // the login's effective privileges: EXECUTE on the two new routines and on 020's levels read, create and page_v3, NONE on
 // 020's unconditional edit (has_function_privilege, and 42501 when called), nothing on the version table (M7RV-02); the
@@ -73,8 +73,14 @@ const UP_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.up.sql`, 
 const DOWN_031 = readFileSync(`${MIG_DIR}/031_m7b_invoice_create_authority.down.sql`, 'utf8');
 /** M7B-INVOICES-P1-R3: 031 (the guarded draft save) sits above 030 and is applied with it. */
 const UP_031 = readFileSync(`${MIG_DIR}/031_m7b_invoice_create_authority.up.sql`, 'utf8');
-/** 031's routine, whose presence says 031 is applied. */
+/** M7B-INVOICES-P1-R4: 032 (the Customers authority of the guarded draft save, in 030's schema) sits above 031 and rolls back first. */
+const DOWN_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_authority.down.sql`, 'utf8');
+/** M7B-INVOICES-P1-R4: 032 sits above 031 and is applied with it. */
+const UP_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_authority.up.sql`, 'utf8');
+/** 031's routine, whose presence says 031 is applied (it stays installed, owner-only, once 032 is). */
 const CREATE_V2_031 = 'tmpos_invoice_edit.m7b_invoice_draft_create_v2(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
+/** 032's routine, whose presence says 032 is applied. */
+const CREATE_V3_032 = 'tmpos_invoice_edit.m7b_invoice_draft_create_v3(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_021 = UP_021.slice(UP_021.lastIndexOf('do $$'));
 const STATES = 'tmpos_role_edit.m7a_role_level_states(uuid)';
@@ -90,11 +96,13 @@ const CREATE_023 = 'tmpos_customer_contact.m7a_contact_create(text, uuid, text, 
  * 021's postcondition, run again inside `tx`. 021's check (f) requires the login to hold EXECUTE on 020's create, which
  * migration 023 revoked (its create became the login's one path, deciding through 020's): the grant is given back first,
  * inside the same transaction that is always rolled back, so 021's own end state is what is judged. Check (l) requires 021's
- * trigger to be the ONLY trigger on 020's table, which migration 030's guard trigger is not: it is dropped first, likewise.
+ * trigger to be the ONLY trigger on 020's table, which migration 030's guard trigger and 032's Customers guard trigger
+ * (M7B-INVOICES-P1-R4) are not: both are dropped first, likewise.
  */
 const postcondition021 = async (tx) => {
   await tx.unsafe(`grant execute on function ${CREATE_020} to tmpos_app`);
   await tx.unsafe('drop trigger trg_tenant_role_level_invoice_guard on tmpos_role.tenant_role_level');
+  await tx.unsafe('drop trigger trg_tenant_role_level_customers_guard on tmpos_role.tenant_role_level');
   await tx.unsafe(POSTCONDITION_021).simple();
 };
 const PAGE_020 = 'tmpos_role.m7a_customer_page_v3(text, uuid, integer)';
@@ -183,7 +191,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-031), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-032), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -300,10 +308,14 @@ const setV2 = async (key, role, level, tenant, version, db = runtime, domain = '
  * (invoice drafts, none stored here) sits above 027 likewise, and M7B-INVOICES-P2's 029 (the draft edit, in 028's schema)
  * above 028. M7B-INVOICES-P2-R1's 030 (the Invoices level guard and the guarded edit, in its own schema, with a trigger on
  * 020's table) sits above 029: it rolls back before it and is re-applied after it. M7B-INVOICES-P1-R3's 031 (the guarded draft
- * save, in 030's schema) sits above 030: it rolls back before it and is re-applied after it.
+ * save, in 030's schema) sits above 030: it rolls back before it and is re-applied after it. M7B-INVOICES-P1-R4's 032 (the
+ * Customers authority of that save: routines in 030's schema and a trigger on 020's table) sits above 031 likewise.
  */
 const down023 = async () => {
   await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
+  if (!(await owner`select pg_catalog.to_regprocedure(${CREATE_V3_032}) is null as absent`)[0].absent) {
+    await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_032).simple());
+  }
   if (!(await owner`select pg_catalog.to_regprocedure(${CREATE_V2_031}) is null as absent`)[0].absent) {
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_031).simple());
   }
@@ -357,6 +369,9 @@ const up023IfAbsent = async () => {
   }
   if ((await owner`select pg_catalog.to_regprocedure(${CREATE_V2_031}) is null as absent`)[0].absent) {
     await owner.begin((tx) => tx.unsafe(UP_031).simple());
+  }
+  if ((await owner`select pg_catalog.to_regprocedure(${CREATE_V3_032}) is null as absent`)[0].absent) {
+    await owner.begin((tx) => tx.unsafe(UP_032).simple());
   }
 };
 /** 021's read-back, as the runtime login. */
@@ -428,11 +443,11 @@ const onRoleRow = (locks) => locks.length > 0 && locks.every((l) => l.locktype =
 // M7RV-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7RV-01: 001-031 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M7RV-01: 001-032 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 31 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 32 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   // 001-020 byte-identical: the ledger, the startup pins and the files on disk agree (the pins are bound to the committed
   // bytes by tests/quality/migration-files-contract.test.mjs).
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
@@ -500,9 +515,10 @@ test('M7RV-02: the installed inventory, and the login\'s effective privileges â€
       g.tgfoid::regprocedure::text as fn, g.tgqual is null as no_when, g.tgattr::text as columns
     from pg_catalog.pg_trigger g where g.tgrelid = 'tmpos_role.tenant_role_level'::regclass and not g.tgisinternal order by g.tgname`;
   assert.deepEqual(triggers.map((r) => ({ ...r })), [
+    { name: 'trg_tenant_role_level_customers_guard', tgtype: 29, enabled: 'A', fn: 'tmpos_invoice_edit.m7b_customers_level_guard()', no_when: true, columns: '' },
     { name: 'trg_tenant_role_level_invoice_guard', tgtype: 29, enabled: 'A', fn: 'tmpos_invoice_edit.m7b_invoice_level_guard()', no_when: true, columns: '' },
     { name: TRIGGER, tgtype: 17, enabled: 'A', fn: ADVANCE, no_when: true, columns: '' },
-  ], 'two triggers on the role table, both enabled ALWAYS, every column, no WHEN: 021\'s AFTER ROW UPDATE and 030\'s guard, AFTER ROW INSERT, UPDATE and DELETE');
+  ], 'three triggers on the role table, all enabled ALWAYS, every column, no WHEN: 021\'s AFTER ROW UPDATE and the guards of 032 (Customers) and 030 (Invoices), AFTER ROW INSERT, UPDATE and DELETE');
   const [{ pg17 }] = await owner`select pg_catalog.current_setting('server_version_num')::int >= 170000 as pg17`;
   const [table] = await owner`select c.relrowsecurity as rls, c.relforcerowsecurity as forced, c.relacl::text as acl,
       n.nspacl::text as schema_acl,
