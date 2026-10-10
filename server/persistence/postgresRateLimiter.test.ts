@@ -669,6 +669,45 @@ test('M6R-10 the same bucket serializes on the transaction\'s own settlement, di
   await fresh;
 });
 
+test('M6R-10b a waiter whose deadline has passed sends nothing, even when the line frees before its own deadline timer has run (M6R-PERF-R1)', async () => {
+  const { client, calls } = deferredClient();
+  const limiter = createPostgresRateLimiter({ client, keySecret: KEY32 });
+  const bucket = { ...REQUEST, key: 'Q'.repeat(43) };
+  const head = callConsume(limiter, bucket, live());
+  await flush();
+  const waiter = callConsume(limiter, bucket, live());
+  await flush();
+  assert.equal(calls.length, 1, 'the waiter waits in line');
+  // The process is busy past both deadlines, and the head's transaction settles in that same turn: the line frees in
+  // microtasks that run before any timer callback — the moment the deadline timers fire one callback at a time.
+  const busyUntil = performance.now() + LIMITER_DEADLINE_MS + 20;
+  while (performance.now() < busyUntil) { /* the event loop runs nothing else */ }
+  calls[0].resolve({ outcome: 'allowed', remaining: 50 });
+  for (let i = 0; i < 50; i += 1) await Promise.resolve(); // microtasks only: no timer has run yet
+  assert.equal(calls.length, 1, 'past its deadline, the waiter sends nothing when the line frees');
+  assert.deepEqual(await waiter, { outcome: 'unavailable' });
+  await head;
+  await flush();
+  assert.equal(calls.length, 1, 'nor later');
+});
+
+test('M6R-10c a transaction whose answer arrives past the deadline, before the deadline timer has run, is answered unavailable — never a late allowance (M6R-PERF-R1)', async () => {
+  const { client, calls } = deferredClient();
+  const limiter = createPostgresRateLimiter({ client, keySecret: KEY32 });
+  let answer: unknown = 'pending';
+  const consume = callConsume(limiter, { ...REQUEST, key: 'R'.repeat(43) }, live()).then((a) => { answer = a; });
+  await flush();
+  assert.equal(calls.length, 1, 'its transaction is in flight');
+  // The process is busy past the deadline, and the transaction's answer arrives in that same turn: it settles in microtasks
+  // that run before the deadline timer's callback.
+  const busyUntil = performance.now() + LIMITER_DEADLINE_MS + 20;
+  while (performance.now() < busyUntil) { /* the event loop runs nothing else */ }
+  calls[0].resolve({ outcome: 'allowed', remaining: 50 });
+  for (let i = 0; i < 50; i += 1) await Promise.resolve(); // microtasks only: no timer has run yet
+  assert.deepEqual(answer, { outcome: 'unavailable' }, 'past its deadline, the allowance that arrived is not obeyed');
+  await consume;
+});
+
 // --- the early answer -------------------------------------------------------------------------------------------
 
 test('M6R-11 an early answer never becomes a late allowance, the lane stays held until the late transaction really settles, and a late rejection is absorbed silently', async () => {

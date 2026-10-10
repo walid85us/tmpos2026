@@ -44,7 +44,9 @@
 // BOUNDED. A call already aborted sends nothing. Every call is bounded by its caller's signal and by LIMITER_DEADLINE_MS
 // here too, whichever ends first, and answers the moment that bound ends — even when its transaction's COMMIT is already on
 // its way, whose outcome the kernel still supervises (supervisedPgClient.ts): an allowance committed after the bound is
-// answered unavailable, at most one consume's cost spent without an allowance, never an allowance unrecorded. PostgreSQL
+// answered unavailable, at most one consume's cost spent without an allowance, never an allowance unrecorded. The deadline is
+// read on the monotonic clock as well as by its timer, which a busy event loop runs late: a call past it when its line frees
+// sends nothing, and an answer that arrives past it is unavailable, never a late allowance (M6R-PERF-R1). PostgreSQL
 // itself cancels a statement past its bounds (RATE_LIMIT_STORE_BOUNDS, or RATE_LIMIT_RECLAIM_BOUNDS for a reclaim), below
 // that cap, so the server does not keep working for a caller that has gone.
 //
@@ -52,6 +54,7 @@
 // the session root already parsed. Importing this file connects to nothing and reads no secret. Nothing is logged: the
 // limiter key is a parameter, never part of a message, an error or a return value, and a driver error is discarded.
 import { createHmac } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { secretKeyOf } from '../runtime/keyMaterial.js';
 import { LIMITER_DEADLINE_MS, RATE_LIMIT_BOUNDS } from '../runtime/rateLimit.js';
 import type { DistributedRateLimiter, RateLimitOutcome } from '../runtime/rateLimit.js';
@@ -71,7 +74,8 @@ export const RATE_LIMIT_RECLAIM_BOUNDS: TransactionBounds = Object.freeze({ lock
 
 /**
  * The most consumes of one bucket one instance holds in line, the one in flight included. Past it a consume is refused at
- * once: a waiter that deep would outlive LIMITER_DEADLINE_MS behind the others anyway.
+ * once: a waiter that deep could outlive LIMITER_DEADLINE_MS behind the others anyway (64 answer inside 500 ms only when
+ * each takes under about 8 ms).
  */
 export const RATE_LIMIT_LANE_DEPTH = 64;
 
@@ -88,6 +92,8 @@ export function rateLimitKeyFingerprint(keySecret: Uint8Array): Buffer {
 
 const UNAVAILABLE: RateLimitOutcome = Object.freeze({ outcome: 'unavailable' });
 const SETTLED: Promise<void> = Promise.resolve();
+/** A call whose deadline passed before its transaction could be handed over: nothing was sent. */
+const OVERDUE = Object.freeze(new Error('rate_limit_overdue'));
 const noop = (): void => undefined;
 const NAMESPACES: ReadonlySet<unknown> = new Set(['runtime', 'tenant', 'admin', 'tenant-login', 'admin-login']);
 const DIMENSIONS: ReadonlySet<unknown> = new Set(['client', 'account', 'tenant', 'store']);
@@ -195,15 +201,24 @@ export function createPostgresRateLimiter(deps: { readonly client: SupervisedPgC
     let started = false;
     try {
       if (!(signal instanceof AbortSignal) || signal.aborted) return fallback; // nothing is sent
+      const due = performance.now() + LIMITER_DEADLINE_MS; // never later than the timer below fires
       signal.addEventListener('abort', stop, { once: true });
       timer = setTimeout(stop, LIMITER_DEADLINE_MS);
       await Promise.race([ahead, stopped]);
-      if (bound.signal.aborted) return fallback; // its deadline passed while it waited: nothing is sent
-      const transaction = Promise.resolve().then(() => client.transaction(bound.signal, bounds, work));
+      if (bound.signal.aborted) return fallback; // its bound — its deadline or its caller's abort — ended while it waited: nothing is sent
+      // Checked in the very step that hands it to the kernel: past its deadline nothing is sent — also when the line frees in
+      // the turn in which the deadline timers fire, one callback at a time, before this one's own has run.
+      const transaction = Promise.resolve().then(() => {
+        if (bound.signal.aborted || performance.now() >= due) throw OVERDUE;
+        return client.transaction(bound.signal, bounds, work);
+      });
       started = true;
       // The bucket stays this call's until the kernel has finished with it.
       void transaction.then(ended, () => ended(undefined));
-      return await Promise.race([transaction, stopped]);
+      // An answer is obeyed only while the bound still holds: one that arrives past it — when a busy event loop runs the
+      // reply before the deadline timer — is unavailable too, its cost spent without an allowance, never a late allowance.
+      const answer = transaction.then((value) => (bound.signal.aborted || performance.now() >= due ? fallback : value));
+      return await Promise.race([answer, stopped]);
     } catch {
       return fallback; // an outage, an abort, an overrun or a driver fault: nothing is disclosed
     } finally {

@@ -35,12 +35,18 @@
 //     a scratch database: the suites run serially, the relay and kernels stay on one database, and M6-PG's frozen store
 //     clock set the precedent. A process killed mid-test would leave the fake in place — which fails closed (unavailable);
 //   * an observing wrapper around the kernel (never around the adapter) records the failure each failed transaction ended
-//     with, so a timeout can be shown to be PostgreSQL's (55P03, 57014) rather than the adapter's own deadline;
-//   * the relay can withhold the reply to a named session's first query (M6R-PERF-R1) — never a sleep for ordering.
+//     with, so a timeout can be shown to be PostgreSQL's (55P03, 57014) rather than the adapter's own deadline; a tracing
+//     one (M6R-PERF-R1) also ties each consume of a burst to the one transaction it sent, through the async context the
+//     adapter's call inherits, and records what the routine decided and how the transaction ended;
+//   * load is the test's own (M6R-PERF-R1): the relay can delay every reply by a set time, the client can stall its own
+//     event loop, and the relay can withhold the reply to a named session's first query — never a sleep for ordering.
 //
-// M6R-PERF-R1 traced CI's `unhandledRejection write CONNECTION_DESTROYED` in M6R-PERF to the driver's own array-type query
-// on a fresh connection, whose promise nothing handled when the kernel retired the pool during it; the kernel now turns
-// that query off (RLR-06, DA-110).
+// M6R-PERF-R1 traced CI's failures of M6R-03 and M6R-PERF to three mechanisms, each reproduced here or in its unit suite:
+// a consume deep in a bucket's line reaching its 500 ms deadline on a slow host (fail-closed, as designed — M6R-03 now
+// proves exactness consume by consume and RLR-04 forces the case); a waiter that sent a transaction after its deadline
+// had passed, when the line freed before its own timer callback ran (the adapter now checks the clock: RLR-04, unit
+// M6R-10b); and the driver's own array-type query on a fresh connection, whose promise nothing handled when the kernel
+// retired the pool during it (the kernel now turns that query off: RLR-06, DA-110).
 //
 // DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe
@@ -50,6 +56,7 @@
 // test key (32 bytes of 0x07) before it ends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createServer, connect as netConnect } from 'node:net';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -142,8 +149,9 @@ function startRelay() {
   const dir = mkdtempSync(join(tmpdir(), 'tmpos-m6r-relay-'));
   const pairs = new Set();
   // closes: the connections through this relay the driver has finished closing, as kernel() counts them.
+  // replyDelayMs: a delay the test sets on every chunk the server sends (0: none) — latency it owns, not a sleep.
   // holds: per application_name, the next such connection whose reply to its first query after startup is withheld.
-  const state = { closes: 0, pairs, holds: new Map() };
+  const state = { closes: 0, pairs, replyDelayMs: 0, holds: new Map() };
   const server = createServer((client) => {
     const db = netConnect(upstream);
     let hold = null;
@@ -174,7 +182,13 @@ function startRelay() {
     let ready = false;
     let pending = Buffer.alloc(0);
     db.on('data', (chunk) => {
-      if (hold === null) { client.write(chunk); return; }
+      if (hold === null) {
+        const ms = state.replyDelayMs;
+        if (ms <= 0) { client.write(chunk); return; }
+        db.pause();
+        setTimeout(() => { if (!client.destroyed) client.write(chunk); db.resume(); }, ms);
+        return;
+      }
       if (ready) { hold.held(); return; }
       pending = Buffer.concat([pending, chunk]);
       let at = 0;
@@ -302,6 +316,199 @@ async function settle() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// bursts, consume by consume (M6R-PERF-R1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which consume a transaction serves. A burst runs each consume in a context of its own, which the adapter's call into
+ * the kernel inherits through its awaits, so the kernel observer below can tell consumes apart without wrapping the
+ * adapter or changing what it is handed.
+ */
+const consumeContext = new AsyncLocalStorage();
+/** Per consume of a burst: every consume transaction it sent — when, what the routine decided, and how it ended. */
+const sentBy = new Map();
+/** The kernel, traced per consume: the adapter still calls exactly transaction(signal, bounds, work) and gets exactly its answer. */
+const traced = (k) => Object.freeze({
+  transaction: (signal, bounds, work) => {
+    const id = consumeContext.getStore();
+    if (bounds !== RATE_LIMIT_STORE_BOUNDS || id === undefined) return k.transaction(signal, bounds, work);
+    const tx = { at: performance.now(), decision: undefined, decidedAt: null, ended: 'pending', endedAt: null };
+    sentBy.set(id, [...(sentBy.get(id) ?? []), tx]);
+    return k.transaction(signal, bounds, async (sql) => { tx.decision = await work(sql); tx.decidedAt = performance.now(); return tx.decision; })
+      .then((value) => { tx.ended = 'committed'; tx.endedAt = performance.now(); return value; },
+        (err) => { tx.ended = faultOf(err); tx.endedAt = performance.now(); throw err; });
+  },
+  end: () => k.end(),
+});
+/** Four production adapters, two per kernel, each over a traced kernel. */
+const fourTraced = () => [k1, k2, k1, k2].map((k) => createPostgresRateLimiter({ client: traced(k), keySecret: KEY }));
+let burstSerial = 0;
+/**
+ * `requests` at once, the i-th on instances[i % n], each timed from just before its call (monotonic clock), with a timer of
+ * the deadline's length set just before it — set first, so it fires just before the adapter's own, in the same batch — whose
+ * firing time is what "the deadline" means for that call, however late a busy event loop runs it. `during` runs alongside,
+ * handed the burst's start and a function counting the instances with a transaction outstanding. Returns once every consume has
+ * answered and every transaction they sent has ended (a COMMIT still on its way when its caller was answered ends later).
+ */
+async function burst(instances, requests, during) {
+  const tag = `burst${burstSerial++}`;
+  const t0 = performance.now();
+  const answers = Promise.all(requests.map((request, i) => consumeContext.run(`${tag}:${i}`, async () => {
+    const start = performance.now();
+    let deadlineAt = null;
+    const sentinel = setTimeout(() => { deadlineAt = performance.now(); }, LIMITER_DEADLINE_MS);
+    const answer = await instances[i % instances.length].consume(request, live());
+    const answeredAt = performance.now();
+    clearTimeout(sentinel);
+    return { id: `${tag}:${i}`, instance: i % instances.length, cost: request.cost, start, answer, answeredAt, elapsed: answeredAt - start, deadlineAt };
+  })));
+  /** How many instances have a transaction of this burst outstanding right now. */
+  const outstanding = () => new Set([...sentBy].filter(([id, txs]) => id.startsWith(`${tag}:`) && txs.some((tx) => tx.ended === 'pending'))
+    .map(([id]) => Number(id.slice(tag.length + 1)) % instances.length)).size;
+  let answered;
+  let ms;
+  try {
+    if (during !== undefined) await during({ t0, outstanding });
+    answered = await answers;
+    ms = performance.now() - t0;
+  } finally {
+    await Promise.allSettled([answers]);
+  }
+  // Read once every transaction has ended and the probe login is quiet — so one a consume sent after it was answered
+  // is seen too (none may be: assertBurst) — bounded: a transaction that never ends fails here, never hangs the suite.
+  const ids = new Set(answered.map((c) => c.id));
+  const until = performance.now() + 3_000;
+  while ([...sentBy].some(([id, txs]) => ids.has(id) && txs.some((tx) => tx.ended === 'pending'))) {
+    assert.ok(performance.now() < until, 'every transaction a burst sent ends within 3 s');
+    await sleep(5);
+  }
+  await settle();
+  return { calls: answered.map((c) => ({ ...c, txs: sentBy.get(c.id) ?? [] })), ms };
+}
+/** Each consume's class, counted — for the diagnostic line. */
+function describeBurst({ calls, ms }) {
+  const classes = {};
+  for (const c of calls) {
+    const [tx] = c.txs;
+    const k = c.answer.outcome !== 'unavailable' ? c.answer.outcome
+      : tx === undefined ? 'unavailable: deadline before it was sent' : `unavailable: transaction ${tx.ended}${tx.ended === 'committed' ? ` (${tx.decision?.outcome}) after the deadline` : ''}`;
+    classes[k] = (classes[k] ?? 0) + 1;
+  }
+  const lateness = calls.filter((c) => c.deadlineAt !== null).map((c) => c.deadlineAt - c.start - LIMITER_DEADLINE_MS);
+  return JSON.stringify({ ms: Math.round(ms), slowestAnswerMs: Math.round(Math.max(...calls.map((c) => c.elapsed))),
+    deadlineTimerLateMs: lateness.length > 0 ? Math.round(Math.max(...lateness)) : null, classes });
+}
+/**
+ * What a burst proves consume by consume, however fast or slow the host:
+ *   * faithful — an allowance or a limit is exactly the decision its own transaction committed; a consume sends at most
+ *     one transaction (nothing is retried or replayed) and none once its deadline has passed; an unavailable answer is
+ *     the deadline — met before the consume was sent, or while its transaction ran — or a failure its transaction ended
+ *     with, never a decision withheld in time;
+ *   * exact — the committed grants fit one serial order, each leaving exactly the limit minus every grant before it, and
+ *     sum to `consumed`, the owner-side count (a grant whose COMMIT acknowledgement was lost counts only if it landed);
+ *     and no consume was refused while its cost still fitted the count the burst ended with.
+ * Unavailable answers are counted, not refused: under load they are the contract's fail-closed answer (RLR-04).
+ */
+/** How a consume transaction may fail and still be fail-closed: the kernel's own two answers, and PostgreSQL's lock and statement timeouts. */
+const FAIL_CLOSED = new Set(['kernel_unavailable', 'kernel_outcome_unknown', '55P03', '57014']);
+function assertBurst({ calls }, limit, consumed, label, { windowMs = 6_000, strict = false } = {}) {
+  for (const c of calls) {
+    assert.ok(c.txs.length <= 1, `${label}: consume ${c.id} sent ${c.txs.length} transactions — nothing is retried or replayed`);
+    const [tx] = c.txs;
+    // The adapter reads its deadline in the synchronous step after this call's timestamp, so its own bound is this one plus
+    // that step — microseconds; the millisecond here is for that, not a longer deadline.
+    if (tx !== undefined) {
+      assert.ok(tx.at - c.start < LIMITER_DEADLINE_MS + 1, `${label}: consume ${c.id} sent its transaction ${Math.round(tx.at - c.start)} ms after it was called — nothing is sent once its deadline has passed`);
+    }
+    if (tx !== undefined && tx.ended !== 'committed') {
+      assert.ok(FAIL_CLOSED.has(tx.ended), `${label}: consume ${c.id}'s transaction failed with ${tx.ended} — not a timeout or a lost connection, but a store fault`);
+      // Strict (no load forced): before its deadline, only PostgreSQL's own lock or statement bound fails a transaction.
+      if (strict && c.elapsed < LIMITER_DEADLINE_MS - 1) {
+        assert.ok(tx.ended === '55P03' || tx.ended === '57014', `${label}: consume ${c.id}'s transaction failed with ${tx.ended} before its deadline`);
+      }
+    }
+    // No answer of any kind outlives its deadline, as its own sentinel timer fired, by more than the timer batch it shares.
+    if (c.deadlineAt !== null) {
+      assert.ok(c.answeredAt <= c.deadlineAt + 20, `${label}: consume ${c.id} answered ${Math.round(c.answeredAt - c.deadlineAt)} ms after its deadline fired`);
+    }
+    if (c.answer.outcome === 'unavailable') {
+      const atDeadline = c.elapsed >= LIMITER_DEADLINE_MS - 1;
+      const afterItsFailure = tx !== undefined && tx.ended !== 'committed' && c.answeredAt >= tx.endedAt;
+      assert.ok(atDeadline || afterItsFailure, `${label}: consume ${c.id} answered unavailable after ${Math.round(c.elapsed)} ms, ${tx === undefined ? 'never sent' : `its transaction ${tx.ended}`} — only the deadline or its transaction's failure answers unavailable`);
+      if (tx?.ended === 'committed') {
+        assert.ok(tx.endedAt - c.start >= LIMITER_DEADLINE_MS - 2, `${label}: consume ${c.id}'s decision arrived ${Math.round(tx.endedAt - c.start)} ms after its call, in time, and was withheld`);
+      }
+    } else {
+      // A decision is obeyed only inside its deadline (the adapter's clock, read in the step that obeys it).
+      assert.ok(c.elapsed < LIMITER_DEADLINE_MS + 5, `${label}: consume ${c.id} was answered ${c.answer.outcome} ${Math.round(c.elapsed)} ms after its call — past its deadline`);
+      assert.ok(tx !== undefined && tx.ended === 'committed', `${label}: consume ${c.id} answered ${c.answer.outcome} without a committed transaction`);
+      assert.deepEqual(c.answer, tx.decision, `${label}: consume ${c.id}'s answer is exactly what its own transaction decided`);
+      if (c.answer.outcome === 'limited') {
+        const wait = c.answer.retryAfterMs;
+        assert.ok(Number.isSafeInteger(wait) && wait >= 1 && wait <= windowMs, `${label}: consume ${c.id}'s limit waits ${wait} ms, inside the window`);
+      }
+    }
+  }
+  // Work-conserving: an instance whose consumes waited out their deadline unsent was busy the whole time — each of its
+  // transactions sent within 50 ms of the one before ending, the last still running within 50 ms of the first of those
+  // deadlines (the margin is for the process's own pauses, not for an idle line). A lazy or throttling
+  // adapter that refuses without sending leaves its line idle and fails here.
+  for (const instance of new Set(calls.map((c) => c.instance))) {
+    const unsent = calls.filter((c) => c.instance === instance && c.answer.outcome === 'unavailable' && c.txs.length === 0);
+    if (unsent.length === 0) continue;
+    const txs = calls.filter((c) => c.instance === instance).flatMap((c) => c.txs).sort((x, y) => x.at - y.at);
+    for (let i = 1; i < txs.length; i += 1) {
+      assert.ok(txs[i].at - txs[i - 1].endedAt < 50, `${label}: instance ${instance}'s line sat idle ${Math.round(txs[i].at - txs[i - 1].endedAt)} ms while consumes waited in it`);
+    }
+    const firstDeadline = Math.min(...unsent.map((c) => c.start)) + LIMITER_DEADLINE_MS;
+    assert.ok(txs.length > 0 && txs.at(-1).endedAt >= firstDeadline - 50, `${label}: instance ${instance} refused consumes unsent while its line was not busy up to their deadline`);
+  }
+  const decided = calls.filter((c) => c.txs[0]?.ended === 'committed').map((c) => ({ cost: c.cost, decision: c.txs[0].decision, tx: c.txs[0] }));
+  assert.ok(decided.every((d) => d.decision.outcome === 'allowed' || d.decision.outcome === 'limited'), `${label}: every committed decision is an allowance or a limit`);
+  const grants = decided.filter((d) => d.decision.outcome === 'allowed');
+  const uncertain = calls.filter((c) => c.txs[0]?.ended === 'kernel_outcome_unknown' && c.txs[0].decision?.outcome === 'allowed')
+    .map((c) => ({ cost: c.cost, decision: c.txs[0].decision }));
+  // shortcut: subsets of the uncertain grants are enumerated, so they are capped at twelve — one COMMIT in doubt per pool
+  // connection at a time; more than that in one burst fails here as unexplained rather than being checked another way.
+  // At most one COMMIT is ever in doubt per pool connection: two kernels of six.
+  assert.ok(uncertain.length <= 12, `${label}: at most twelve grants whose COMMIT acknowledgement was lost (${uncertain.length})`);
+  let serial = false;
+  for (let landed = 0; landed < 2 ** uncertain.length && !serial; landed += 1) {
+    const all = [...grants, ...uncertain.filter((_, i) => landed & (1 << i))].sort((x, y) => y.decision.remaining - x.decision.remaining);
+    let left = limit;
+    serial = all.every((g) => (left -= g.cost) === g.decision.remaining) && limit - left === consumed;
+  }
+  assert.ok(serial, `${label}: the ${grants.length} committed grants (and ${uncertain.length} uncertain) fit one serial order that sums to the owner-side count ${consumed}`);
+  for (const d of decided) {
+    if (d.decision.outcome !== 'limited') continue;
+    assert.ok(consumed + d.cost > limit, `${label}: no consume was refused while its cost ${d.cost} still fitted (${consumed} of ${limit})`);
+    // And causally — sound, not complete: a grant sent only after this refusal was answered was decided after it (one already
+    // on its way may have been decided either side of it, and is not compared), so the count at the refusal left
+    // at least that grant's cost plus what it left — which must not have fitted this one.
+    for (const g of grants) {
+      if (g.tx.at > d.tx.decidedAt) assert.ok(d.cost > g.decision.remaining + g.cost, `${label}: a consume of cost ${d.cost} was refused while a later grant still found ${g.decision.remaining + g.cost} left — refused while its cost still fitted`);
+    }
+  }
+}
+/** After a burst, the rest of the window's capacity, exactly: what it left is allowed down to zero, and then nothing. */
+async function assertRestOfWindow(instances, k, limit, consumed, label) {
+  if (consumed < limit) {
+    assert.deepEqual(await instances[0].consume(req(k, limit, 6_000, limit - consumed), live()), allowed(0), `${label}: exactly the ${limit - consumed} the burst left are still there`);
+  }
+  assert.equal((await instances[1].consume(req(k, limit), live())).outcome, 'limited', `${label}: and then nothing is`);
+}
+/** The bucket's one window, on the database clock, holds every decision made between `before` and now; the count is the limit. */
+async function assertOneWindow(k, limit, before, label, windowMs = 6_000) {
+  const after = await dbNowUs();
+  const [row] = await rowsOf([k]);
+  const [start, expires, span] = [BigInt(row.start_us), BigInt(row.expires_us), BigInt(windowMs) * 1000n];
+  assert.ok(after - before < span, `${label}: everything ran inside one window's length (${after - before} us, database clock)`);
+  assert.ok(start >= before && start <= after && expires - start === span && expires > after,
+    `${label}: one window of exactly ${windowMs} ms opened after ${before} us and lasts past ${after} us — every decision fell inside it`);
+  assert.deepEqual([row.consumed, row.limit_count], [limit, limit], `${label}: the owner sees exactly the limit consumed`);
+}
+const busy = (ms) => { const until = performance.now() + ms; while (performance.now() < until) { /* the client process runs nothing else */ } };
 /**
  * Lets a rejection nothing handles surface — node:test fails the running test with it — before the test goes on: the
  * driver rejects in the timer that destroys the connection, before the socket closes, and Node reports an unhandled
@@ -649,43 +856,42 @@ test('M6R-02: the UNCHANGED conformance suite passes over two adapter instances 
 // beyond the suite
 // ---------------------------------------------------------------------------
 
-test('M6R-03: 120 concurrent consumes of one bucket over four instances on both kernels grant exactly the limit, once per count; mixed costs never overrun', async (t) => {
+test('M6R-03: 120 concurrent consumes of one bucket over four instances on both kernels, and 200 of mixed cost: each answer is its own committed decision or fail-closed, the committed grants are one serial order summing to the owner\'s count inside one window, and the rest of that window is exactly what they left', async (t) => {
   // Every pool open first, so the burst measures the store, not twelve connection handshakes.
   await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? A : B).probe(live())));
   // One instance holds at most RATE_LIMIT_LANE_DEPTH consumes of one bucket in line and refuses the rest at once (M6R-13),
-  // so 120 at once are spread over four instances, two per kernel: 30 in each line, none refused at the door. The limit is
-  // 40, not more, because every allowance waits for its own WAL flush while it holds the row: with durable commits (CI's
-  // stock server) one bucket grants roughly a hundred in the 500 ms deadline, and this proves exactness, not throughput.
-  const instances = [Aobs, Bobs, createPostgresRateLimiter({ client: k1obs, keySecret: KEY }), createPostgresRateLimiter({ client: observed(k2), keySecret: KEY })];
-  assert.ok(120 / instances.length < RATE_LIMIT_LANE_DEPTH);
-  const hot = key('m6r03-hot');
-  faults.length = 0;
-  const [burst, ms] = await timed(() => Promise.all(Array.from({ length: 120 }, (_, i) => instances[i % 4].consume(req(hot, 40), live()))));
-  const lost = burst.filter((o) => o.outcome === 'unavailable').length;
-  t.diagnostic(`120 concurrent consumes of one bucket (limit 40) over 4 instances on 2 kernels x 6 connections: ${Math.round(ms)} ms, ${lost} unavailable ${JSON.stringify(faults)}`);
-  const granted = burst.filter((o) => o.outcome === 'allowed').map((o) => o.remaining).sort((x, y) => x - y);
-  assert.deepEqual(granted, Array.from({ length: 40 }, (_, i) => i), 'exactly 40 allowed, each at its own count 39..0');
-  assert.equal(lost, 0, `none unavailable — ${lost} outlived LIMITER_DEADLINE_MS queued behind this one bucket (the burst took ${Math.round(ms)} ms)`);
-  const limited = burst.filter((o) => o.outcome === 'limited');
-  assert.equal(limited.length, 80, 'every other consume is limited');
-  assert.ok(limited.every((o) => Number.isSafeInteger(o.retryAfterMs) && o.retryAfterMs >= 1 && o.retryAfterMs <= 6_000));
-  assert.deepEqual((await rowsOf([hot])).map((r) => [r.consumed, r.limit_count]), [[40, 40]], 'the owner sees exactly the limit consumed');
-
-  const mixedKey = key('m6r03-mixed');
-  const costs = Array.from({ length: 200 }, (_, i) => [1, 2, 3, 5, 7][i % 5]);
-  const mixed = await Promise.all(costs.map((cost, i) => instances[i % 4].consume(req(mixedKey, 100, 6_000, cost), live())));
-  assert.ok(mixed.every((o) => o.outcome === 'allowed' || o.outcome === 'limited'), 'every consume is an allowance or a limit');
-  // A serial order exists: sorted by what each grant left, every step down is exactly that grant's cost.
-  const grants = costs.map((cost, i) => ({ cost, o: mixed[i] })).filter((g) => g.o.outcome === 'allowed').sort((x, y) => y.o.remaining - x.o.remaining);
-  let left = 100;
-  for (const g of grants) {
-    left -= g.cost;
-    assert.equal(g.o.remaining, left, 'each grant leaves exactly the limit minus every grant before it');
+  // so the bursts are spread over four instances, two per kernel: 30 and 50 in each line, none refused at the door. Each
+  // consume in a line waits for every transaction ahead of it under its own 500 ms deadline, so how many answer before it
+  // depends on the host — durable commits, a busy CPU, a stalled client — and the deepest answer unavailable when it is
+  // slow: the contract's fail-closed answer, not a fault (M6R-PERF-R1 traced CI's failures of this test to exactly that).
+  // So this test proves exactness consume by consume, whatever the host's speed (assertBurst), and then the rest of the
+  // window; how many were unavailable is reported, and RLR-04 forces that case and proves it fail-closed. When none was,
+  // the burst itself must have granted exactly the limit and refused past it.
+  const instances = fourTraced();
+  assert.ok(120 / instances.length < RATE_LIMIT_LANE_DEPTH && 200 / instances.length < RATE_LIMIT_LANE_DEPTH);
+  for (const [label, limit, costs] of [
+    ['120 at cost 1, limit 40', 40, Array.from({ length: 120 }, () => 1)],
+    ['200 at costs 1, 2, 3, 5 and 7, limit 100', 100, Array.from({ length: 200 }, (_, i) => [1, 2, 3, 5, 7][i % 5])],
+  ]) {
+    const k = key(`m6r03-${limit}`);
+    const before = await dbNowUs();
+    const run = await burst(instances, costs.map((cost) => req(k, limit, 6_000, cost)));
+    t.diagnostic(`${label} over 4 instances on 2 kernels x 6 connections: ${describeBurst(run)}`);
+    const [{ consumed }] = await rowsOf([k]);
+    assertBurst(run, limit, consumed, label, { strict: true });
+    // A burst that lost no consume to its deadline granted exactly the limit and refused past it. One that did lost them
+    // behind lines assertBurst has proved busy, so how far it got is the host's speed — the rest of the window, below,
+    // still holds exactly what it left.
+    if (!run.calls.some((c) => c.answer.outcome === 'unavailable')) {
+      assert.equal(consumed, limit, `${label}: the burst itself granted exactly the limit`);
+      assert.ok(run.calls.some((c) => c.txs[0]?.ended === 'committed' && c.txs[0].decision.outcome === 'limited'), `${label}: and refused past it`);
+    }
+    for (let i = 0; i < instances.length; i += 1) {
+      assert.ok(run.calls.some((c) => c.instance === i && c.txs.length === 1), `${label}: instance ${i} reached the store`);
+    }
+    await assertRestOfWindow(instances, k, limit, consumed, label);
+    await assertOneWindow(k, limit, before, label);
   }
-  const spent = 100 - left;
-  costs.forEach((cost, i) => { if (mixed[i].outcome === 'limited') assert.ok(spent + cost > 100, 'no consume is limited while its cost still fits'); });
-  assert.deepEqual((await rowsOf([mixedKey])).map((r) => r.consumed), [spent], 'the owner-side count is the sum of the granted costs');
-  t.diagnostic(`mixed costs: ${grants.length} grants spending ${spent} of 100, ${costs.length - grants.length} limited`);
 });
 
 test('M6R-04: the window and the wait are the database clock\'s and the stored row\'s; the window reopens exactly at windowMs; a refused consume writes nothing', async () => {
@@ -1308,8 +1514,51 @@ test('M6R-14: a read-only store is never ready and counts nothing', async () => 
 });
 
 // ---------------------------------------------------------------------------
-// M6R-PERF-R1: the driver's own type query
+// M6R-PERF-R1: overload, the driver's own type query, and the burst account's controls
 // ---------------------------------------------------------------------------
+
+test('RLR-04: overload is fail-closed — with every reply 5 ms late, and with the client stalled past the deadline once every line is busy, the bursts lose consumes only to the deadline, a lock or statement timeout, or a lost connection; each answer is still its own decision, no later than its own deadline firing; the instances recover', async (t) => {
+  // RLR-05: the production bounds these schedules run against, unchanged.
+  assert.equal(LIMITER_DEADLINE_MS, 500);
+  assert.equal(RATE_LIMIT_LANE_DEPTH, 64);
+  assert.deepEqual({ ...RATE_LIMIT_STORE_BOUNDS }, { lock: '200ms', statement: '300ms', idle: '400ms' });
+  await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? A : B).probe(live())));
+  const instances = fourTraced();
+  // Each consume is five round trips (BEGIN, the settings, the routine, COMMIT, the reset), so 5 ms on every reply puts
+  // a line 30 deep well past 500 ms on any host; a stall of this process past the deadline holds every reply and timer behind it.
+  for (const [label, delayMs, during] of [
+    ['every reply 5 ms late', 5, undefined],
+    // Once every line has a transaction outstanding at the same moment, the client stalls until past every consume's deadline.
+    ['the client stalled past the deadline', 0, async ({ t0, outstanding }) => {
+      while (outstanding() < instances.length) await new Promise((done) => setImmediate(done));
+      busy(t0 + LIMITER_DEADLINE_MS + 50 - performance.now());
+    }],
+  ]) {
+    const k = key(`rlr04-${delayMs}`);
+    const before = await dbNowUs();
+    relay.state.replyDelayMs = delayMs;
+    let run;
+    try {
+      run = await burst(instances, Array.from({ length: 120 }, () => req(k, 40)), during);
+    } finally {
+      relay.state.replyDelayMs = 0;
+    }
+    t.diagnostic(`${label}: ${describeBurst(run)}`);
+    const unavailable = run.calls.filter((c) => c.answer.outcome === 'unavailable');
+    assert.ok(unavailable.length > 0, `${label}: the schedule did overload the lines`);
+    const consumed = (await rowsOf([k]))[0]?.consumed ?? 0; // no row: every transaction was aborted before it committed
+    assertBurst(run, 40, consumed, label);
+    // assertBurst bounds every answer by its own deadline sentinel: a starved loop runs the adapter's timer late, and the
+    // answer may be that late — the measured firing, not a larger deadline.
+    await assertRestOfWindow(instances, k, 40, consumed, label);
+    await assertOneWindow(k, 40, before, label);
+    // Recovery: every instance serves a fresh bucket at once, and is ready.
+    for (const [i, instance] of instances.entries()) {
+      assert.deepEqual(await instance.consume(req(key(`rlr04-${delayMs}-after-${i}`), 3), live()), allowed(2), `${label}: instance ${i} recovered`);
+      assert.equal(await instance.probe(live()), true);
+    }
+  }
+});
 
 test('RLR-06: a fresh connection sends no array-type query of its own, so a transaction ended while its first reply is withheld — by an abort, or by the limiter\'s own deadline — leaves nothing unhandled, its connection closed and no session behind, and the kernel serves again', async (t) => {
   const cases = [
@@ -1352,6 +1601,57 @@ test('RLR-06: a fresh connection sends no array-type query of its own, so a tran
       if (left !== 0) await sleep(10);
     }
     assert.equal(left, 0, `${label}: RLR-07 — no session of the ended kernel remains`);
+  }
+});
+
+test('RLR-09: the burst account refuses what a defective adapter or store would do — an allowance for an unavailable consume, a limit answered as an allowance, an unavailable answer before the deadline, a retry, a send after the answer, a double spend, an early refusal and a store fault', async () => {
+  const [inner] = fourTraced();
+  // Each control is refused by the account's own assertion for that defect — not merely by some assertion.
+  const defective = [
+    ['an allowance for an unavailable consume', (r, s) => inner.consume(r, s).then((a) => (a.outcome === 'unavailable' ? { outcome: 'allowed', remaining: 0 } : a)),
+      /answered allowed without a committed transaction|answer is exactly what its own transaction decided/],
+    ['an unavailable answer before the deadline, never sent', () => Promise.resolve(UNAVAILABLE),
+      /only the deadline or its transaction's failure answers unavailable/],
+    ['a send after the answer', (r, s) => inner.consume(r, s).then((a) => { if (a.outcome === 'unavailable') void inner.consume(r, live()); return a; }),
+      /nothing is retried or replayed|nothing is sent once its deadline has passed/],
+    ['a limit answered as an allowance', (r, s) => inner.consume(r, s).then((a) => (a.outcome === 'limited' ? { outcome: 'allowed', remaining: 0 } : a)),
+      /answer is exactly what its own transaction decided/],
+    ['a retry of an unavailable consume', (r, s) => inner.consume(r, s).then((a) => (a.outcome === 'unavailable' ? inner.consume(r, live()) : a)),
+      /nothing is retried or replayed|nothing is sent once its deadline has passed/],
+  ];
+  for (const [label, consume, refusal] of defective) {
+    const k = key(`rlr09-${label}`);
+    relay.state.replyDelayMs = 5; // 40 in one line: some answer, some reach the deadline
+    let run;
+    try {
+      run = await burst([{ consume }], Array.from({ length: 40 }, () => req(k, 5)));
+    } finally {
+      relay.state.replyDelayMs = 0;
+    }
+    const consumed = (await rowsOf([k]))[0]?.consumed ?? 0; // no row: nothing reached the store
+    assert.throws(() => assertBurst(run, 5, consumed, label), refusal, `${label}: refused`);
+  }
+  // Defective stores, each behind the real kernel: the first transaction runs the real routine, the rest misbehave.
+  const stores = [
+    ['a double spend', (sql, work) => work(sql).then(() => work(sql)), /fit one serial order/],
+    // A routine that answers limited while capacity remains: the adapter's own statement gets a well-formed limited row.
+    ['an early refusal', (sql, work) => work(Object.assign(async () => [{ outcome: 'limited', remaining: null, retry_after_ms: 1_000 }], { json: sql.json })),
+      /refused while its cost/],
+    ['a store fault', async () => { throw Object.assign(new Error('m6r: a store fault'), { code: '42P01' }); }, /not a timeout or a lost connection, but a store fault/],
+  ];
+  for (const [label, misbehave, refusal] of stores) {
+    let first = true;
+    const store = { transaction: (s, b, work) => k1.transaction(s, b, async (sql) => {
+      if (first) { first = false; return work(sql); }
+      return misbehave(sql, work);
+    }), end: () => k1.end() };
+    const X = createPostgresRateLimiter({ client: traced(store), keySecret: KEY });
+    const k = key(`rlr09-${label}`);
+    await X.consume(req(k, 40), live()); // the window opens on the real routine, outside the burst
+    const run = await burst([X], Array.from({ length: 6 }, () => req(k, 40)));
+    const [{ consumed }] = await rowsOf([k]);
+    // The opening consume spent 1 outside the burst: what the burst saw was a bucket of 39.
+    assert.throws(() => assertBurst(run, 39, consumed - 1, label), refusal, `${label}: refused`);
   }
 });
 
