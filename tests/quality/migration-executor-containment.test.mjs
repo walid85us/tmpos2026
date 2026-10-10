@@ -612,9 +612,9 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // property above is untouched.
     'tests/db/invoiceDraftRoutine.integration.test.mjs',
     'tests/db/invoiceDraftsHttp.integration.test.mjs',
-    // M7B-INVOICES-P2: the draft edit proof needs 001-030 applied (030 rolled back through its down file first, then 029
-    // through its own, refused while a draft's version is above 1, and both re-applied; the 028 database upgraded to 029 and
-    // the 029 one to 030) before it can say anything about migration 029's and 030's routines, trigger or privilege
+    // M7B-INVOICES-P2: the draft edit proof needs 001-031 applied (031 and then 030 rolled back through their down files first,
+    // then 029 through its own, refused while a draft's version is above 1, and all re-applied; the 028 database upgraded to 029
+    // and the 029 one to 030) before it can say anything about migration 029's and 030's routines, trigger or privilege
     // containment; it applies them through the SAME trusted executor, validating its target
     // with the same assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property
     // above is untouched.
@@ -628,6 +628,12 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // included) and applies them through the SAME trusted executor before any request, validating its target with the same
     // assertDisposableTestDsn. Same category (a tests/db/ suite), same reasoning; the containment property above is untouched.
     'tests/db/invoiceDraftEditHttp.integration.test.mjs',
+    // M7B-INVOICES-P1-R3: the draft-create authority proofs (migration 031's guarded save) stand up every migration in the
+    // directory — the routine proof also rolls 031 back through its down file, finds 030's down refused while 031 is applied,
+    // and re-applies 031 — through the SAME trusted executor, validating their target with the same assertDisposableTestDsn.
+    // Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    'tests/db/invoiceDraftCreateAuthority.integration.test.mjs',
+    'tests/db/invoiceDraftCreateAuthorityHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

@@ -5,17 +5,22 @@
 // (530030, hashtext(tenant || '/' || role)) EXCLUSIVE, and the edit routine tmpos_invoice_edit.m7b_invoice_draft_update_v2 that
 // takes the same key SHARED right after the draft header and decides the level again), exercised as the runtime's own
 // non-owner login, every call bound as the production adapter binds it (the lines serialized once as jsonb text, every bigint
-// as decimal text). The routine under test is UPDATE_FN, the single place it is named.
+// as decimal text). The routine under test is UPDATE_FN, the single place it is named. Since migration 031 (M7B-INVOICES-P1-R3)
+// the drafts this file edits are saved through 031's guarded save tmpos_invoice_edit.m7b_invoice_draft_create_v2 (CREATE_FN; 031
+// closed 028's create to the login), which sits in 030's schema: every rollback of 030 here rolls 031 back first.
 //
 // Case labels: R = red on the entry source (029's routine, no guard) for the defect DA-204, N = the new contract of 030, G = a
 // guard that holds before and after. A case that mixes them says which block is which.
 //
 // WHAT IS PROVEN (each title carries the stage brief's acceptance criteria it evidences).
-//   IDE-01 (AC-18 AC-12, N) 001-030 applied clean by the trusted executor, every ledger checksum the pinned one; 029's postcondition
+//   IDE-01 (AC-18 AC-12, N) 001-031 applied clean by the trusted executor, every ledger checksum the pinned one; 029's postcondition
 //          re-proven over the applied state once 030's one revoke is undone inside a rolled-back transaction (and refusing
-//          without it), 030's own re-proven and refusing every widening it names; a second apply refused.
+//          without it), 030's own re-proven and refusing every widening it names (031, whose routine 030's exact inventory does
+//          not know, rolled back first in the same rolled-back transaction); a second apply refused.
 //   IDE-02 (AC-18 AC-05 AC-12, N) the exact surface: 029's routine now executable by nobody but its owner; schema tmpos_invoice_edit
-//          granting USAGE to tmpos_app alone beside its owner's own; the edit v2 a VOLATILE SECURITY DEFINER pinned, EXECUTE
+//          granting USAGE to tmpos_app alone beside its owner's own and holding exactly 030's two functions and 031's guarded save
+//          m7b_invoice_draft_create_v2 (M7B-INVOICES-P1-R3: EXECUTE held by its owner and tmpos_app alone, non-grantable; 028's
+//          create closed to tmpos_app); the edit v2 a VOLATILE SECURITY DEFINER pinned, EXECUTE
 //          held by its owner and tmpos_app alone (non-grantable); the guard function a SECURITY INVOKER no runtime role may
 //          execute (no grantee beside its owner); the level table's two ENABLE ALWAYS row triggers (021's and 030's); 029's
 //          draft trigger and widened CHECK; no grant beyond the owner's on either draft table; the login holds no table or
@@ -76,30 +81,33 @@
 //          another role's and another tenant's Invoices write do not wait; an owner TRUNCATE waits on the relation behind the
 //          edit (and truncates once the edit ends, rolled back after); conversely each writer path holding uncommitted blocks the
 //          edit at the guard and the committed level decides it; a waiting writer queues a later
-//          edit behind it; a draft create and an edit do not block each other; two owner transactions of opposite key-moving
+//          edit behind it; a draft create and an edit do not block each other (since 031 the create holds the key SHARED too: N);
+//          two owner transactions of opposite key-moving
 //          UPDATEs, both parked in flight on the smaller key, hold none and both commit once it is released (no 40P01).
 //   IDE-13 (AC-15 AC-18, N) the parity of every SQL restatement in 029 and in 030's v2 (defaults, owner literal, editable set,
 //          ordering, Edit threshold, 017's description regexes), the two key expressions of v2 and of the trigger function
 //          identical, v2's order (the key after the header FOR UPDATE and before the invalid_state, conflict and unchanged
 //          returns, in the outermost block, no step-10 anchor), no raw invisible code point, the exact ordered change lists of
 //          030's up and down, and every file's lock block first, in the writers' order, before every check and change.
-//   IDE-14 (AC-18, N) the rollback and the upgrade, over an edited draft of its own, 030 rolled back first (029's down cannot
-//          see it): 029's down refused while not applied and while a draft is at version > 1 (everything unchanged), and —
+//   IDE-14 (AC-18, N) the rollback and the upgrade, over an edited draft of its own, 031 and 030 rolled back first (029's down
+//          cannot see them): 029's down refused while not applied and while a draft is at version > 1 (everything unchanged), and —
 //          locks first — refused when an edit it waited for commits; retained edit audit and outbox rows do not block it; with
 //          no edited draft it restores 028's contract exactly (CHECK, no trigger or function, three routines, 028's comments,
-//          028's own postcondition) and the 001-030 runtime refuses that database; the 028 database holding drafts and role
-//          configuration upgrades to 030 with every row unchanged and edits at once.
-//   IDE-21 (AC-12, N) 030 down, up and down again over drafts above version 1 and stored overrides: every row identical; the
+//          028's own postcondition; 028's create executable by tmpos_app again, 031's down having given its grant back) and the
+//          001-031 runtime refuses that database; the 028 database holding drafts and role configuration (saved there through
+//          028's create) upgrades to 031 with every row unchanged and edits at once.
+//   IDE-21 (AC-12, N) 030 down, up and down again over drafts above version 1 and stored overrides, 031 (its routine in 030's
+//          schema, which 030's down would refuse to drop) rolled back before each 030 down: every row identical; the
 //          down restores 029's contract exactly (its routine's body, ACL and comment, the level table's one trigger of 021, the
-//          schema gone) and the 001-030 runtime refuses what is left; a second down is refused; the down and the up each wait
+//          schema gone) and the 001-031 runtime refuses what is left; a second down is refused; the down and the up each wait
 //          for a held edit and a held writer and finish, without deadlock; the up refuses when 029's EXECUTE is already gone;
-//          the upgrade 029 -> 030 changes no row.
+//          the upgrade 029 -> 031 changes no row.
 //
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
-// creates and destroys. Every fixture is synthetic and randomly suffixed; every id and key is made at run time. It rolls 030 and
-// 029 back and restores them (IDE-14, IDE-21), so on a shared service it runs after every step that rolls 028 back. It leaves
-// 030 applied, the ledger 001-030, the issuer key row it found, and NO draft, line, audit subject, role row, session, mint-ledger
-// row, throwaway schema or login of its own.
+// creates and destroys. Every fixture is synthetic and randomly suffixed; every id and key is made at run time. It rolls 031, 030
+// and 029 back and restores them (IDE-14, IDE-21), so on a shared service it runs after every step that rolls 028 back. It leaves
+// 030 and 031 applied, the ledger 001-031, the issuer key row it found, and NO draft, line, audit subject, role row, session,
+// mint-ledger row, throwaway schema or login of its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -124,11 +132,21 @@ const UP_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.up.sql`, 'utf
 const DOWN_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.down.sql`, 'utf8');
 const UP_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.up.sql`, 'utf8');
 const DOWN_030 = readFileSync(`${MIG_DIR}/030_m7b_invoice_edit_authority.down.sql`, 'utf8');
+/** M7B-INVOICES-P1-R3: 031 (the guarded draft save, in 030's schema) sits above 030: it rolls back first and is applied with it. */
+const UP_031 = readFileSync(`${MIG_DIR}/031_m7b_invoice_create_authority.up.sql`, 'utf8');
+const DOWN_031 = readFileSync(`${MIG_DIR}/031_m7b_invoice_create_authority.down.sql`, 'utf8');
 /** Each up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_028 = UP_028.slice(UP_028.lastIndexOf('do $$'));
 const POSTCONDITION_029 = UP_029.slice(UP_029.lastIndexOf('do $$'));
 const POSTCONDITION_030 = UP_030.slice(UP_030.lastIndexOf('do $$'));
 const CREATE = 'tmpos_invoice_draft.m7b_invoice_draft_create(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
+/**
+ * The save the suite's create() calls, by name: migration 031's guarded save (M7B-INVOICES-P1-R3), which 031 granted the login
+ * in place of 028's create (CREATE_FN_028, which create() calls with { fn } on a database 031 is rolled back from).
+ */
+const CREATE_FN = 'tmpos_invoice_edit.m7b_invoice_draft_create_v2';
+const CREATE_FN_028 = 'tmpos_invoice_draft.m7b_invoice_draft_create';
+const CREATE_V2 = `${CREATE_FN}(text, uuid, uuid, uuid, uuid, jsonb, bigint)`;
 const PAGE = 'tmpos_invoice_draft.m7b_invoice_draft_page(text, uuid, uuid, uuid, integer)';
 const GET = 'tmpos_invoice_draft.m7b_invoice_draft_get(text, uuid, uuid, uuid)';
 const UPDATE = 'tmpos_invoice_draft.m7b_invoice_draft_update(text, uuid, uuid, uuid, bigint, uuid, jsonb, bigint)';
@@ -247,9 +265,9 @@ test.after(async () => {
   try {
     await step(() => owner.unsafe(`drop schema if exists ${SCRATCH_SCHEMA} cascade`));
     await step(cleanDrafts);
-    // A failed IDE-14 or IDE-21 may have left 030 (and 029) rolled back: the executor applies them again.
+    // A failed IDE-14 or IDE-21 may have left 031 and 030 (and 029) rolled back: the executor applies them again.
     await step(async () => {
-      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '030') as applied`)[0].applied) {
+      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '031') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -279,14 +297,16 @@ test.after(async () => {
           exists (select 1 from public.schema_migrations where version = '029') as ledger_029,
           pg_catalog.to_regprocedure(${UPDATE_V2}) is not null as routine_030,
           exists (select 1 from public.schema_migrations where version = '030') as ledger_030,
+          pg_catalog.to_regprocedure(${CREATE_V2}) is not null as routine_031,
+          exists (select 1 from public.schema_migrations where version = '031') as ledger_031,
           pg_catalog.to_regnamespace(${SCRATCH_SCHEMA}) is null as no_scratch,
           (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[]))::int as drafts,
           (select count(*) from public.audit_event where subject_invoice_draft_id is not null and tenant_id = any(${TENANTS}::uuid[]))::int as subjects,
           (select count(*) from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[]))::int as anchors,
           (select count(*) from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[]))::int as sessions,
           exists (select 1 from pg_catalog.pg_roles where rolname = ${RUNTIME_LOGIN}) as login`;
-      assert.deepEqual({ ...state }, { routine_029: true, ledger_029: true, routine_030: true, ledger_030: true, no_scratch: true, drafts: 0, subjects: 0, anchors: 0, sessions: 0, login: false },
-        'left as found: 029 and 030 applied and recorded, nothing of this suite\'s retained');
+      assert.deepEqual({ ...state }, { routine_029: true, ledger_029: true, routine_030: true, ledger_030: true, routine_031: true, ledger_031: true, no_scratch: true, drafts: 0, subjects: 0, anchors: 0, sessions: 0, login: false },
+        'left as found: 029, 030 and 031 applied and recorded, nothing of this suite\'s retained');
     });
   } finally {
     await step(() => owner.end({ timeout: 5 }));
@@ -296,7 +316,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-030), a real non-owner runtime login, the issuer key installed by the owner
+// setup: every migration in the directory (001-031), a real non-owner runtime login, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -376,11 +396,11 @@ async function mint(who, { lifetime = 8 * HOUR } = {}) {
 }
 const line = (description, quantity, unitPriceCents) => ({ description, quantity, unitPriceCents });
 const sumOf = (lines) => lines.reduce((s, l) => s + BigInt(l.quantity) * BigInt(l.unitPriceCents), 0n);
-/** 028's create, as its mutator binds it. */
-async function create(key, store, tenant, customer, lines, { db = runtime } = {}) {
+/** The save (CREATE_FN, 031's; `fn` names another with the same signature, 028's), as its mutator binds it. */
+async function create(key, store, tenant, customer, lines, { db = runtime, fn = CREATE_FN } = {}) {
   const draft = randomUUID();
-  const [row] = await db`select o_outcome from tmpos_invoice_draft.m7b_invoice_draft_create(${key}::text, ${store}::uuid, ${draft}::uuid,
-    ${tenant}::uuid, ${customer}::uuid, ${JSON.stringify(lines)}::text::jsonb, ${String(sumOf(lines))}::bigint)`;
+  const [row] = await db.unsafe(`select o_outcome from ${fn}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text::jsonb, $7::bigint)`,
+    [key, store, draft, tenant, customer, JSON.stringify(lines), String(sumOf(lines))]);
   assert.equal(row.o_outcome, 'applied', 'the draft saved');
   return draft;
 }
@@ -536,8 +556,8 @@ const C_A2 = await newCustomer(T_A, 'a2');
 const C_B = await newCustomer(T_B, 'b');
 const LINES = [line('Screen replacement', 1, 12_999), line('Labour  (1 hr)', 2, 4_500), line('Tempered glass ' + String.fromCodePoint(0x1f4f1), 3, 0)];
 
-/** A fresh tenant, store, two customers, its store owner (no role row ever) and a manager, and one saved draft. */
-async function scene(label, { managerLevel } = {}) {
+/** A fresh tenant, store, two customers, its store owner (no role row ever) and a manager, and one saved draft (through `createFn`, else CREATE_FN). */
+async function scene(label, { managerLevel, createFn } = {}) {
   const T = await newTenant(label);
   const S = await newStore(T, `${label} ${SUFFIX}`);
   const C1 = await newCustomer(T, `${label}-1`);
@@ -547,7 +567,7 @@ async function scene(label, { managerLevel } = {}) {
   if (managerLevel !== undefined) await setLevel(T, 'manager', 'invoices', managerLevel);
   const kBoss = await mint(boss);
   const kManager = await mint(manager);
-  const draft = await create(kBoss, S, T, C1, LINES);
+  const draft = await create(kBoss, S, T, C1, LINES, createFn === undefined ? {} : { fn: createFn });
   return { T, S, C1, C2, boss, manager, kBoss, kManager, draft };
 }
 
@@ -555,20 +575,28 @@ async function scene(label, { managerLevel } = {}) {
 // IDE-01..02: the migration, the surface and the ACL
 // ===========================================================================
 
-test('IDE-01 (AC-18 AC-12, N): 001-030 applied clean, every checksum the pinned one; 029\'s postcondition holds once 030\'s one revoke is undone (and refuses without it) and refuses every widening it names; 030\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('IDE-01 (AC-18 AC-12, N): 001-031 applied clean, every checksum the pinned one; 029\'s postcondition holds once 030\'s one revoke is undone (and refuses without it) and refuses every widening it names; 030\'s postcondition holds once 031 is rolled back above it (and refuses without that) and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 30 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 31 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'every ledger checksum is the pinned one');
   assert.equal(ledger[28].checksum, createHash('sha256').update(UP_029).digest('hex'), '029\'s checksum is its up bytes');
   assert.equal(ledger[29].checksum, createHash('sha256').update(UP_030).digest('hex'), '030\'s checksum is its up bytes');
+  assert.equal(ledger[30].checksum, createHash('sha256').update(UP_031).digest('hex'), '031\'s checksum is its up bytes');
   // 029's postcondition demands tmpos_app's EXECUTE on 029's routine; 030 revoked it (the new routine took its place), so the
   // postcondition holds over the applied state only with that one grant restored — inside a rolled-back transaction here.
   const without = await rolledBack((tx) => tx.unsafe(POSTCONDITION_029).simple());
   assert.equal(without.code, '55000', 'as applied, 029\'s postcondition sees 030\'s revoke');
   assert.match(without.message, /^migration 029 refused/);
   assert.equal((await rolledBack((tx) => post029(tx))).code, undefined, 'with 029\'s EXECUTE granted back, the applied state satisfies 029\'s postcondition');
-  assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_030).simple())).code, undefined, 'the applied state satisfies 030\'s postcondition');
+  // M7B-INVOICES-P1-R3: 030's postcondition demands that its schema hold exactly its two functions; 031 put its guarded save
+  // there, so 030's postcondition is judged on 030's own surface — 031's committed down run first, in the same rolled-back
+  // transaction (031's down never refuses on data) — and as applied it sees 031's routine.
+  const on031 = await rolledBack((tx) => tx.unsafe(POSTCONDITION_030).simple());
+  assert.equal(on031.code, '55000', `031 applied: 030's exact inventory sees 031's routine in its schema (${JSON.stringify(on031)})`);
+  assert.match(on031.message, /^migration 030 refused/);
+  assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(POSTCONDITION_030).simple(); })).code, undefined,
+    'the applied state satisfies 030\'s postcondition (031 rolled back above it)');
   for (const [label, widen] of [
     ['EXECUTE to PUBLIC', `grant execute on function ${UPDATE} to public`],
     ['EXECUTE to the audit writer', `grant execute on function ${UPDATE} to tmpos_audit_writer`],
@@ -595,7 +623,8 @@ test('IDE-01 (AC-18 AC-12, N): 001-030 applied clean, every checksum the pinned 
     assert.equal(out.code, '55000', `${label}: refused (${JSON.stringify(out)})`);
     assert.match(out.message, /^migration 029 refused/, label);
   }
-  // 030's postcondition refuses each widening of its own surface (each in a rolled-back transaction over the applied state).
+  // 030's postcondition refuses each widening of its own surface (each in a rolled-back transaction over the applied state, 031
+  // rolled back above it first).
   for (const [label, widen] of [
     ['v2 EXECUTE to PUBLIC', `grant execute on function ${UPDATE_V2} to public`],
     ['v2 EXECUTE to the audit writer', `grant execute on function ${UPDATE_V2} to tmpos_audit_writer`],
@@ -618,7 +647,7 @@ test('IDE-01 (AC-18 AC-12, N): 001-030 applied clean, every checksum the pinned 
     ['USAGE on the schema revoked from tmpos_app', 'revoke usage on schema tmpos_invoice_edit from tmpos_app'],
     ['the schema comment dropped', 'comment on schema tmpos_invoice_edit is null'],
   ]) {
-    const out = await rolledBack(async (tx) => { await tx.unsafe(widen); await tx.unsafe(POSTCONDITION_030).simple(); });
+    const out = await rolledBack(async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(widen); await tx.unsafe(POSTCONDITION_030).simple(); });
     assert.equal(out.code, '55000', `${label}: refused (${JSON.stringify(out)})`);
     assert.match(out.message, /^migration 030 refused/, label);
   }
@@ -630,7 +659,7 @@ test('IDE-01 (AC-18 AC-12, N): 001-030 applied clean, every checksum the pinned 
   assert.match(again030.message, /^migration 030 refused: schema tmpos_invoice_edit or the trigger trg_tenant_role_level_invoice_guard already exists$/);
 });
 
-test('IDE-02 (AC-18 AC-05 AC-12, N): 029\'s routine executable by nobody but its owner; schema tmpos_invoice_edit granting USAGE to tmpos_app alone beside its owner\'s own; the edit v2 a pinned VOLATILE definer tmpos_app alone may execute beside its owner; the guard function an invoker no runtime role may execute; the level table\'s two ENABLE ALWAYS row triggers; 029\'s one BEFORE UPDATE draft trigger; the widened CHECK; no new table grant; the login\'s direct writes refused', async () => {
+test('IDE-02 (AC-18 AC-05 AC-12, N): 029\'s routine executable by nobody but its owner; schema tmpos_invoice_edit granting USAGE to tmpos_app alone beside its owner\'s own and holding exactly 030\'s two functions and 031\'s guarded save (tmpos_app alone may execute it beside its owner; 028\'s create closed to tmpos_app); the edit v2 a pinned VOLATILE definer tmpos_app alone may execute beside its owner; the guard function an invoker no runtime role may execute; the level table\'s two ENABLE ALWAYS row triggers; 029\'s one BEFORE UPDATE draft trigger; the widened CHECK; no new table grant; the login\'s direct writes refused', async () => {
   const fns = (await owner`select p.proname::text as name, p.prosecdef, p.provolatile::text as volatility, p.proconfig, l.lanname::text as lang
     from pg_catalog.pg_proc p join pg_catalog.pg_language l on l.oid = p.prolang
     where p.pronamespace = 'tmpos_invoice_draft'::regnamespace order by 1`).map((r) => ({ ...r }));
@@ -641,26 +670,31 @@ test('IDE-02 (AC-18 AC-05 AC-12, N): 029\'s routine executable by nobody but its
     ['m7b_invoice_draft_page', 'plpgsql', true, 's', ['search_path=pg_catalog, pg_temp', 'row_security=off']],
     ['m7b_invoice_draft_update', 'plpgsql', true, 'v', ['search_path=pg_catalog, pg_temp', 'row_security=off']],
   ]);
-  // 030's schema: exactly the guard function and the v2 edit, each pinned, owned by the schema's owner, no relation.
+  // 030's schema: exactly the guard function and the v2 edit, and (M7B-INVOICES-P1-R3) 031's guarded save, each pinned, owned
+  // by the schema's owner, no relation.
   const edits = (await owner`select p.proname::text as name, p.prosecdef, p.provolatile::text as volatility, p.proconfig, l.lanname::text as lang,
       p.prorettype::regtype::text as returns, p.proowner = n.nspowner as owner_is_schema_owner
     from pg_catalog.pg_proc p join pg_catalog.pg_language l on l.oid = p.prolang join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     where p.pronamespace = 'tmpos_invoice_edit'::regnamespace order by 1`).map((r) => ({ ...r }));
   assert.deepEqual(edits.map((f) => [f.name, f.lang, f.prosecdef, f.volatility, f.proconfig, f.returns, f.owner_is_schema_owner]), [
+    ['m7b_invoice_draft_create_v2', 'plpgsql', true, 'v', ['search_path=pg_catalog, pg_temp', 'row_security=off'], 'record', true],
     ['m7b_invoice_draft_update_v2', 'plpgsql', true, 'v', ['search_path=pg_catalog, pg_temp', 'row_security=off'], 'record', true],
     ['m7b_invoice_level_guard', 'plpgsql', false, 'v', ['search_path=pg_catalog, pg_temp'], 'trigger', true],
-  ], 'schema tmpos_invoice_edit: the v2 edit and the guard function, nothing else');
+  ], 'schema tmpos_invoice_edit: the v2 edit and the guard function (030) and 031\'s guarded save m7b_invoice_draft_create_v2, nothing else');
   assert.equal((await owner`select count(*)::int as n from pg_catalog.pg_class c where c.relnamespace = 'tmpos_invoice_edit'::regnamespace`)[0].n, 0, 'and no relation');
-  // EXACT grantees, read from the ACL itself (owner aside): v2's one non-grantable EXECUTE to tmpos_app and nothing on the guard
-  // function, on 029's routine (030 revoked tmpos_app's) or on 029's trigger function.
+  // EXACT grantees, read from the ACL itself (owner aside): v2's one non-grantable EXECUTE to tmpos_app, 031's save's likewise,
+  // and nothing on the guard function, on 029's routine (030 revoked tmpos_app's), on 028's create (031 revoked tmpos_app's) or
+  // on 029's trigger function.
   const grantees = async (sig) => (await owner`select g.grantee::regrole::text as grantee, g.privilege_type as priv, g.is_grantable as grantable
     from pg_catalog.pg_proc p, pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) g
     where p.oid = ${sig}::regprocedure and g.grantee <> p.proowner order by 1, 2`).map((r) => ({ ...r }));
   assert.deepEqual(await grantees(UPDATE_V2), [{ grantee: 'tmpos_app', priv: 'EXECUTE', grantable: false }]);
+  assert.deepEqual(await grantees(CREATE_V2), [{ grantee: 'tmpos_app', priv: 'EXECUTE', grantable: false }], '031\'s save: tmpos_app\'s one non-grantable EXECUTE');
   assert.deepEqual(await grantees(UPDATE), [], '029\'s routine: no grantee at all, PUBLIC and tmpos_app included');
+  assert.deepEqual(await grantees(CREATE), [], '028\'s create: no grantee at all since 031, PUBLIC and tmpos_app included');
   assert.deepEqual(await grantees(GUARD), [], 'the guard function: no grantee at all, PUBLIC included');
   assert.deepEqual(await grantees(IMMUTABLE), [], 'no grantee at all, PUBLIC included');
-  for (const [sig, login] of [[UPDATE_V2, true], [UPDATE, false], [GUARD, false], [IMMUTABLE, false]]) {
+  for (const [sig, login] of [[UPDATE_V2, true], [CREATE_V2, true], [UPDATE, false], [CREATE, false], [GUARD, false], [IMMUTABLE, false]]) {
     const [can] = await owner`select pg_catalog.has_function_privilege(${RUNTIME_LOGIN}, ${sig}::regprocedure, 'EXECUTE') as login,
       pg_catalog.has_function_privilege('tmpos_audit_writer', ${sig}::regprocedure, 'EXECUTE') as audit,
       pg_catalog.has_function_privilege('anon', ${sig}::regprocedure, 'EXECUTE') as anon,
@@ -678,9 +712,11 @@ test('IDE-02 (AC-18 AC-05 AC-12, N): 029\'s routine executable by nobody but its
       pg_catalog.has_schema_privilege('authenticated', 'tmpos_invoice_edit', 'USAGE') as authenticated,
       pg_catalog.has_schema_privilege(${RUNTIME_LOGIN}, 'tmpos_invoice_edit', 'CREATE') as login_create`)[0] },
   { login: true, audit: false, anon: false, authenticated: false, login_create: false }, 'schema USAGE');
-  // The login calls 029's routine and the guard function and is refused (42501); v2 it executes.
+  // The login calls 029's routine, 028's create and the guard function and is refused (42501); v2 and 031's save it executes.
   const prober = await actor('surface-probe', [storeGrant(T_A, S_A1, 'store_owner')]);
   const probeKey = await mint(prober);
+  const call028 = await errorOf(create(probeKey, S_A1, T_A, C_A, LINES, { fn: CREATE_FN_028 }));
+  assert.equal(call028?.code, '42501', `the login cannot execute 028's create (${JSON.stringify(call028)})`);
   const probeDraft = await create(probeKey, S_A1, T_A, C_A, LINES);
   const call029 = await errorOf(edit(probeKey, S_A1, T_A, probeDraft, 1, C_A, LINES, { fn: UPDATE_FN_029 }));
   assert.equal(call029?.code, '42501', `the login cannot execute 029's routine (${JSON.stringify(call029)})`);
@@ -1688,8 +1724,8 @@ const WRITER_PATHS = [
  * tenant's owner. `f.role` is the role whose edit the path holds (the manager, or the technician when `editor` says so), `f.editor`
  * its actor and `f.kEditor` that actor's session key.
  */
-async function guardScene(label, { stored, technician, customers, editor = 'manager' } = {}) {
-  const f = await scene(label, stored === undefined ? {} : { managerLevel: stored });
+async function guardScene(label, { stored, technician, customers, editor = 'manager', createFn } = {}) {
+  const f = await scene(label, { ...(stored === undefined ? {} : { managerLevel: stored }), createFn });
   if (technician !== undefined) await setLevel(f.T, 'technician', 'invoices', technician);
   if (customers !== undefined) await setLevel(f.T, 'manager', 'customers', customers);
   f.own = await tenantOwner(f.T, label);
@@ -1867,7 +1903,8 @@ test('IDE-20 (AC-11, N): while an edit holds the role\'s key every writer path w
     }
   }
 
-  // (f) A draft create and an edit do not block each other: 028's create takes the role's NULL anchors (FOR SHARE) and no key.
+  // (f) A draft create and an edit do not block each other. Since 031 (M7B-INVOICES-P1-R3) the save takes the role's key SHARED
+  // (and its Customers NULL anchor FOR SHARE, no Invoices row): SHARED beside the edit's SHARED, so neither waits.
   {
     const f = await guardScene('k20f', {});
     const manager2 = await actor('k20f-manager-2', [storeGrant(f.T, f.S, 'manager')]);
@@ -1882,10 +1919,10 @@ test('IDE-20 (AC-11, N): while an edit holds the role\'s key every writer path w
     }
     const creating = holding(runtime, async (tx) => { await create(k2, f.S, f.T, f.C1, [line('Held create', 1, 1)], { db: tx }); });
     try {
-      await until(() => creating.ready, 'create: the second manager\'s create made its anchors and holds them, uncommitted');
-      assert.deepEqual(await guardLocksOf(creating.pid), [], 'the create takes no key');
+      await until(() => creating.ready, 'create: the second manager\'s create made its anchor and holds it and the key, uncommitted');
+      assert.deepEqual(await guardLocksOf(creating.pid), [await guardLock(f.T, 'manager', 'ShareLock')], 'the create holds exactly the manager\'s key, SHARED (031)');
       const edited = await settlesUnblocked(running(runtime, (tx) => edit(f.kManager, f.S, f.T, f.draft, 1, f.C2, [line('Beside a create', 1, 1)], { db: tx })),
-        'an edit beside a create holding the anchors');
+        'an edit beside a create holding its anchor and the key SHARED');
       assert.deepEqual(edited.value, [done('applied', f.manager, f.T, f.S, 2)], 'and it applied');
     } finally {
       creating.release('rollback');
@@ -2220,13 +2257,14 @@ async function rowsOf(tenants) {
   };
 }
 
-test('IDE-14 (AC-18, N): with 030 rolled back first (029\'s down cannot see it), 029\'s down is refused while not applied and while a draft is at version > 1 (everything unchanged), and when an edit it waited for commits; retained edit audit and outbox rows do not block it; clean, the rollback restores 028\'s contract exactly and the 001-030 runtime refuses that database; the 028 database with drafts and role configuration upgrades to 030 unchanged', async () => {
+test('IDE-14 (AC-18, N): with 031 and 030 rolled back first (029\'s down cannot see them), 029\'s down is refused while not applied and while a draft is at version > 1 (everything unchanged), and when an edit it waited for commits; retained edit audit and outbox rows do not block it; clean, the rollback restores 028\'s contract exactly and the 001-031 runtime refuses that database; the 028 database with drafts and role configuration upgrades to 031 unchanged', async () => {
   const UP_028_COMMENTS = COMMENTED.map((t) => commentIn(UP_028, t));
   const UP_029_COMMENTS = COMMENTED.map((t) => commentIn(UP_029, t));
   // 029's down cannot see 030 (v2 is plpgsql: no catalog dependency records 029's routine, and 029's down would leave the guard
   // trigger and v2 behind), so every proof of it rolls 030 back first, in the same rolled-back transaction — 030's own rollback
-  // never refuses on data.
-  const down029 = async (tx) => { await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); };
+  // never refuses on data — and 031 before 030 (M7B-INVOICES-P1-R3: 030's down refuses while 031's save is in its schema; 031's
+  // rollback never refuses on data either).
+  const down029 = async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); };
   assert.deepEqual(COMMENTED.map((t) => commentIn(DOWN_029, t)), UP_028_COMMENTS, 'the down restores 028\'s three comments, character for character');
   // 1. An edited draft of its own (version 2), whatever the cases before it left: refused, nothing changed.
   const e = await scene('down-edited');
@@ -2288,16 +2326,24 @@ test('IDE-14 (AC-18, N): with 030 rolled back first (029\'s down cannot see it),
   }
   await cleanDrafts();
   // 4. Clean: the executor's own path — 029's down and its ledger row — restores 028's contract exactly.
-  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-030 runtime is accepted');
+  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-031 runtime is accepted');
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '028');
   let restored = false;
   try {
-    assert.deepEqual(undone, ['030', '029'], 'only 030 and 029 sit above 028, newest first');
+    assert.deepEqual(undone, ['031', '030', '029'], 'only 031, 030 and 029 sit above 028, newest first');
     const at028 = await contract();
     assert.deepEqual(at028.check, { def: 'CHECK ((version = 1))', valid: true }, '028\'s CHECK, validated');
     assert.deepEqual(at028.triggers, [], 'no trigger');
-    assert.deepEqual(at028.routines, with029.routines.filter((f) => !/m7b_invoice_draft_(update|immutable)\(/.test(f.fn)),
-      'exactly 028\'s three routines, each byte for byte and with its ACL as before');
+    // M7B-INVOICES-P1-R3: on the 001-031 chain 028's create is its owner's alone (031 revoked tmpos_app's EXECUTE); 031's down
+    // gave that EXECUTE back, so 028's create's ACL is the one difference from the routines captured there — exactly as 028
+    // granted it.
+    const me = (await owner`select current_user::text as me`)[0].me;
+    const ACL_028 = `{${me}=X/${me},tmpos_app=X/${me}}`;
+    const ACL_031 = `{${me}=X/${me}}`;
+    const isCreate = (f) => f.fn.startsWith(`${CREATE_FN_028}(`);
+    assert.equal(with029.routines.find(isCreate)?.acl, ACL_031, 'on the 001-031 chain 028\'s create is its owner\'s alone (031)');
+    assert.deepEqual(at028.routines, with029.routines.filter((f) => !/m7b_invoice_draft_(update|immutable)\(/.test(f.fn)).map((f) => (isCreate(f) ? { ...f, acl: ACL_028 } : f)),
+      'exactly 028\'s three routines, each byte for byte and with its ACL as before — 028\'s create\'s with tmpos_app\'s EXECUTE back (031\'s down)');
     assert.equal(at028.routines.length, 3);
     // Independently of any state captured with 029 applied: each surviving routine is exactly the body 028's file declares.
     const bodyOf = (file, name) => {
@@ -2312,32 +2358,35 @@ test('IDE-14 (AC-18, N): with 030 rolled back first (029\'s down cannot see it),
     assert.deepEqual(Object.values(at028.comments), UP_028_COMMENTS, '028\'s comments, as 028\'s file wrote them');
     assert.deepEqual([at028.constraints, at028.acls], [with029.constraints, with029.acls], 'every other constraint and the table ACLs unchanged');
     assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_028).simple())).code, undefined, '028\'s own postcondition holds again');
-    assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing'], migrationLedger: ['migration_missing'] },
-      'the 001-030 runtime refuses the 028 database: its grants and its ledger');
+    assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
+      'the 001-031 runtime refuses the 028 database: its grants (031\'s save, 030\'s v2 and schema missing; 028\'s create\'s EXECUTE, given back by 031\'s down, not approved) and its ledger');
     // 5. THE UPGRADE: a 028 database holding drafts (an owner's and a manager's) and role configuration (a stored level, the
-    //    manager's save's lock anchors), upgraded by the trusted executor.
-    const u = await scene('upgrade', { managerLevel: 'edit' });
-    const managerDraft = await create(u.kManager, u.S, u.T, u.C2, [line('Saved at 028', 2, 250)]);
+    //    manager's save's lock anchors), upgraded by the trusted executor. The drafts are saved through 028's create: on this
+    //    database it is the save the login executes (031's does not exist).
+    const u = await scene('upgrade', { managerLevel: 'edit', createFn: CREATE_FN_028 });
+    const managerDraft = await create(u.kManager, u.S, u.T, u.C2, [line('Saved at 028', 2, 250)], { fn: CREATE_FN_028 });
     await setLevel(u.T, 'technician', 'invoices', 'edit');
     const rows028 = await rowsOf([u.T]);
     assert.equal(rows028.drafts.length, 2);
     assert.ok(rows028.levels.length >= 2, 'role configuration and lock anchors exist at 028');
     const upgrade = await trustedApply();
-    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['029', '030']], JSON.stringify(upgrade).slice(0, 300));
+    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['029', '030', '031']], JSON.stringify(upgrade).slice(0, 300));
     restored = true;
     assert.deepEqual(await rowsOf([u.T]), rows028, 'every draft, line, level and level version unchanged: ids, ownership, created_at, contents');
     const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-    assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-030 again');
+    assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-031 again');
     assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
     assert.equal((await rolledBack((tx) => post029(tx))).code, undefined, 'the upgraded state satisfies 029\'s postcondition (030\'s one revoke undone in the proof)');
-    assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_030).simple())).code, undefined, 'and 030\'s own');
+    assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(POSTCONDITION_030).simple(); })).code, undefined,
+      'and 030\'s own (031 rolled back above it in the proof)');
     const reapplied = await contract();
     assert.deepEqual(reapplied, with029, 'the same contract as the fresh chain\'s');
     // The up leaves 028's routines, every other constraint and the table ACLs exactly as the 028 database held them (with the
     // down's statements, which touch none of them, this closes the chain: neither file alters an object 028 owns but the CHECK
-    // and the comments).
+    // and the comments) — but 028's create's ACL, which 031's up narrows to its owner's EXECUTE (M7B-INVOICES-P1-R3).
     assert.deepEqual([reapplied.routines.filter((f) => !/m7b_invoice_draft_(update|immutable)\(/.test(f.fn)), reapplied.constraints, reapplied.acls],
-      [at028.routines, at028.constraints, at028.acls], 're-applied over 028: 028\'s objects untouched');
+      [at028.routines.map((f) => (isCreate(f) ? { ...f, acl: ACL_031 } : f)), at028.constraints, at028.acls],
+      're-applied over 028: 028\'s objects untouched but its create\'s ACL, which 031 narrows to the owner\'s EXECUTE');
     // The upgraded database edits at once: a draft saved at 028, by a technician the owner raised to Edit.
     const technician = await actor('upgrade-technician', [storeGrant(u.T, u.S, 'technician')]);
     assert.deepEqual(await edit(await mint(technician), u.S, u.T, managerDraft, 1, u.C1, LINES), [done('applied', technician, u.T, u.S, 2)]);
@@ -2370,7 +2419,7 @@ async function routine029() {
   return { ...r, grants };
 }
 
-test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1 and stored overrides — every row identical; the down restores 029\'s contract exactly (its routine\'s body, grants and comment, the level table\'s one trigger of 021, no schema) and the 001-030 runtime refuses what is left; a second down is refused; the up and the down each wait for a held edit and a held writer and finish, without deadlock; the up refuses when 029\'s EXECUTE is already gone; the upgrade 029 -> 030 changes no row', async () => {
+test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1 and stored overrides, 031 rolled back before each 030 down — every row identical; the down restores 029\'s contract exactly (its routine\'s body, grants and comment, the level table\'s one trigger of 021, no schema) and the 001-031 runtime refuses what is left; a second down is refused; the up and the down each wait for a held edit and a held writer and finish, without deadlock; the up refuses when 029\'s EXECUTE is already gone; the upgrade 029 -> 031 changes no row', async () => {
   // Drafts above version 1 (edited by the manager and by the owner, so by both routines' callers) and stored overrides: the
   // manager's Invoices level, the technician's, and the sales staff's through the REAL setter (which makes a version row).
   const u = await scene('cycle', { managerLevel: 'edit' });
@@ -2385,7 +2434,9 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
   const rows0 = await rowsOf([u.T]);
   assert.ok(rows0.levels.length >= 3 && rows0.versions.length >= 1, 'stored overrides and a version row exist');
   const with030 = await contract030();
-  assert.equal(with030.functions.length, 2);
+  // M7B-INVOICES-P1-R3: 031's guarded save sits in 030's schema beside 030's two functions.
+  assert.deepEqual(with030.functions.map((f) => f.fn), [`${CREATE_FN}(text,uuid,uuid,uuid,uuid,jsonb,bigint)`,
+    `${UPDATE_FN}(text,uuid,uuid,uuid,bigint,uuid,jsonb,bigint)`, GUARD], '030\'s two functions and 031\'s save');
   assert.equal(with030.triggers.length, 2);
   const body029 = createHash('md5').update(routineBody(UP_029, 'tmpos_invoice_draft', 'm7b_invoice_draft_update')).digest('hex');
   const comment029 = functionComment(UP_029, UPDATE);
@@ -2396,8 +2447,9 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '029');
   let restored = false;
   try {
-    // 1. THE DOWN: 029's contract, exactly. It never refused on the drafts above version 1.
-    assert.deepEqual(undone, ['030'], 'only 030 sits above 029');
+    // 1. THE DOWN: 029's contract, exactly. It never refused on the drafts above version 1. (031 first: its save sits in 030's
+    //    schema, which 030's down drops; 031's down never refuses on data either.)
+    assert.deepEqual(undone, ['031', '030'], 'only 031 and 030 sit above 029, newest first');
     const at029 = await routine029();
     assert.equal(at029.src, body029, '029\'s routine: its body, md5 of prosrc, as 029\'s file declares it');
     assert.equal(at029.comment, comment029, 'its comment');
@@ -2410,10 +2462,10 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
     assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_029).simple())).code, undefined, '029\'s own postcondition holds again, unaided');
     assert.deepEqual(await contract030(), { schema: [], functions: [], triggers: [with030.triggers.find((t) => t.name === 'trg_tenant_role_level_version_advance')] },
       'no schema, no function, and the level table carries 021\'s one trigger');
-    assert.equal((await owner`select count(*)::int as n from pg_catalog.pg_proc p where p.proname in ('m7b_invoice_draft_update_v2', 'm7b_invoice_level_guard')`)[0].n, 0, 'no 030 function anywhere');
+    assert.equal((await owner`select count(*)::int as n from pg_catalog.pg_proc p where p.proname in ('m7b_invoice_draft_update_v2', 'm7b_invoice_level_guard', 'm7b_invoice_draft_create_v2')`)[0].n, 0, 'no 030 or 031 function anywhere');
     assert.deepEqual(await rowsOf([u.T]), rows0, 'every draft, line, level and level version identical');
     assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
-      'the 001-030 runtime refuses what is left: v2\'s EXECUTE and the schema\'s USAGE are missing, 029\'s EXECUTE is not approved, 030 is not recorded');
+      'the 001-031 runtime refuses what is left: v2\'s and 031\'s save\'s EXECUTE and the schema\'s USAGE are missing, 029\'s and 028\'s create\'s EXECUTE are not approved, 030 and 031 are not recorded');
     const refusedAgain = await rolledBack((tx) => tx.unsafe(DOWN_030).simple());
     assert.equal(refusedAgain.code, '55000', 'a second down is refused');
     assert.match(refusedAgain.message, /^migration 030 rollback refused: migration 030 is not applied \(/);
@@ -2421,8 +2473,9 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
     assert.equal((await errorOf(edit(u.kManager, u.S, u.T, u.draft, 3, u.C2, [line('Gone', 1, 1)])))?.code, '3F000', 'v2 no longer exists');
     assert.deepEqual(await edit(u.kManager, u.S, u.T, u.draft, 3, u.C2, [line('Back at 029', 1, 1)], { fn: UPDATE_FN_029 }), [done('applied', u.manager, u.T, u.S, 4)], '029\'s routine is the one the login executes');
 
-    // 2. THE UP waits for a held edit and a held writer and finishes — no deadlock (rolled back each time; 029 stays).
-    const w = await guardScene('k21up', { stored: 'edit' });
+    // 2. THE UP waits for a held edit and a held writer and finishes — no deadlock (rolled back each time; 029 stays). The scene's
+    //    draft is saved through 028's create: on this database it is the save the login executes again (031's down).
+    const w = await guardScene('k21up', { stored: 'edit', createFn: CREATE_FN_028 });
     const waitsOnASeven = async (pid, holder, what) => {
       const wait = await lockWaitOf(pid, holder);
       assert.equal(wait.ungranted.length, 1, `${what}: one ungranted lock (${JSON.stringify(wait.locks)})`);
@@ -2461,22 +2514,25 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
     assert.equal(precondition.code, '55000', JSON.stringify(precondition));
     assert.match(precondition.message, /^migration 030 refused: the applying principal does not own 029's edit routine, or tmpos_app's EXECUTE on it is not the one non-grantable entry 029 issued$/);
 
-    // 3. THE UPGRADE 029 -> 030 by the trusted executor: no row changes, the same objects the first apply left.
+    // 3. THE UPGRADE 029 -> 031 by the trusted executor: no row changes, the same objects the first apply left.
     const rows1 = await rowsOf([u.T]);
     const upgrade = await trustedApply();
-    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['030']], JSON.stringify(upgrade).slice(0, 300));
+    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['030', '031']], JSON.stringify(upgrade).slice(0, 300));
     restored = true;
     assert.deepEqual(await rowsOf([u.T]), rows1, 'every draft, line, level and level version identical across the upgrade');
     assert.deepEqual(await contract030(), with030, 'the same schema, functions (bodies, grants, attributes, comments) and triggers as the first apply left');
     assert.deepEqual((await routine029()).grants.filter((g) => g.grantee === 'tmpos_app'), [], '029\'s EXECUTE revoked again');
     const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-    assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-030 again');
+    assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-031 again');
     assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
-    assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_030).simple())).code, undefined, '030\'s postcondition holds again');
+    assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(POSTCONDITION_030).simple(); })).code, undefined,
+      '030\'s postcondition holds again (031 rolled back above it in the proof)');
     assert.deepEqual(await edit(u.kManager, u.S, u.T, u.draft, 4, u.C1, [line('Back at 030', 1, 1)]), [done('applied', u.manager, u.T, u.S, 5)], 'and the guarded edit works at once');
 
     // 4. THE DOWN waits for a held edit (v2), a held writer and a queued writer behind a held edit, and finishes — no deadlock
-    //    (rolled back each time: 030 stays applied).
+    //    (rolled back each time: 030 stays applied). It is 031's down and then 030's in one transaction, the supported order
+    //    (030's alone refuses while 031's save is in its schema); 031's takes the same seven locks first, in the same order.
+    const down031030 = async (tx) => { await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); };
     const d = await guardScene('k21down', { stored: 'edit' });
     for (const [what, holder] of [
       ['a held edit (v2)', () => holdingEdit(d)],
@@ -2488,7 +2544,7 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
       let down = null;
       try {
         await until(() => held.ready, `the down: ${what} reached`);
-        down = holding(owner, (tx) => tx.unsafe(DOWN_030).simple());
+        down = holding(owner, down031030);
         await until(() => blockedBy(down.pid, held.pid), `the down waits for ${what}`);
         await waitsOnASeven(down.pid, held.pid, `the down behind ${what}`);
         held.release('rollback');
@@ -2513,7 +2569,7 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
         writer = running(owner, (tx) => tx`update tmpos_role.tenant_role_level set level = 'full', updated_at = now()
           where tenant_id = ${d.T} and role_id = 'manager' and domain = 'invoices'`);
         await until(() => blockedBy(writer.pid, heldEdit.pid), 'convoy: the writer waits on the key behind the edit');
-        down = holding(owner, (tx) => tx.unsafe(DOWN_030).simple());
+        down = holding(owner, down031030);
         await until(() => blockedBy(down.pid, heldEdit.pid), 'convoy: the down waits behind the edit');
         heldEdit.release('commit');
         assert.equal((await heldEdit.done).outcome, 'committed');
@@ -2529,7 +2585,7 @@ test('IDE-21 (AC-12, N): 030 down, up and down again over drafts above version 1
       }
     }
     assert.deepEqual(await contract030(), with030, 'every down was rolled back: 030 as it was');
-    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-030 runtime accepts it');
+    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-031 runtime accepts it');
   } finally {
     if (!restored) await restore();
   }

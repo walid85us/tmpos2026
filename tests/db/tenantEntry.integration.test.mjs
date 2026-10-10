@@ -88,6 +88,9 @@
 //
 // M7B-INVOICES-P2-R1 UPDATE (Invoices authority guard). Migration 030 adds the guarded draft edit routine and the level
 // guard trigger: the ledger is 001-030, so M7TE-10 judges 030 as the newest row and its fake next row is '031'.
+//
+// M7B-INVOICES-P1-R3 UPDATE (guarded draft save). Migration 031 adds the guarded draft save routine: the ledger is 001-031, so
+// M7TE-10 judges 031 as the newest row and its fake next row is '032'.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -1189,30 +1192,30 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-030 refuses startup migration_state_invalid', async () => {
+test('M7TE-10: a migration ledger that is not exactly 001-031 refuses startup migration_state_invalid', async () => {
   // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); M7A-CUSTOMERS-P6 made it 023 (the contact
   // records), M7A-CUSTOMERS-P7 024 (customer edits), M7A-CUSTOMERS-P8 025 (the name search), M5-INVOICES-AUTH-P1 026 (the Invoices level)
   // and M7B-INVOICES-P1 027 (store discovery) and 028 (invoice drafts), M7B-INVOICES-P2 029 (the draft edit) and
-  // M7B-INVOICES-P2-R1 030 (the Invoices authority guard), so the fake "next migration" row is '031' — the restore below
-  // never removes the real 030 row it re-inserts.
+  // M7B-INVOICES-P2-R1 030 (the Invoices authority guard) and M7B-INVOICES-P1-R3 031 (the guarded draft save), so the fake
+  // "next migration" row is '032' — the restore below never removes the real 031 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '030'`;
-  assert.ok(row !== undefined, '030 is recorded');
+    from public.schema_migrations where version = '031'`;
+  assert.ok(row !== undefined, '031 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('030', '031')`;
+    await sql`delete from public.schema_migrations where version in ('031', '032')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '030'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 029'));
+    await owner`delete from public.schema_migrations where version = '031'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 030'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 030').digest('hex')} where version = '030'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '030 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 031').digest('hex')} where version = '031'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '031 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('031', ${createHash('sha256').update('031').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 031'));
+      values ('032', ${createHash('sha256').update('032').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 032'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1222,7 +1225,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-030 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '030'`;
+    from public.schema_migrations where version = '031'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 

@@ -1,6 +1,6 @@
 // Phase 4.0 M7B-INVOICES-P1 — store-owned invoice drafts END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) saving, listing and reopening drafts over REAL loopback HTTP and a disposable PostgreSQL holding every
-// migration in the directory (001-030), composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// migration in the directory (001-031), composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 // The route module (server/runtime/invoiceDrafts.ts), the store-scope authorizer and revalidator, the tenant command
 // transaction, the mutator and reads (server/persistence/postgresInvoiceDrafts.ts), migration 028's routines, the audit
 // writer (subject_invoice_draft_id) and the outbox enqueue are production's own code.
@@ -120,8 +120,11 @@ const WAIT_MS = 10_000;
 const SEND_TIMEOUT_MS = 20_000;
 /** The revalidator's first lock: 016's hold of the actor's standing. */
 const AT_HOLD = /m5_hold_tenant_standing/;
-/** The create routine's statement: where a save waits for the customer row (after every authority lock). */
-const AT_CREATE = /tmpos_invoice_draft\.m7b_invoice_draft_create/;
+/**
+ * The create routine's statement: where a save waits for the customer row (after every authority lock). Since migration 031
+ * (M7B-INVOICES-P1-R3) the adapter calls the guarded save in 030's schema, so that is the statement the barrier names.
+ */
+const AT_CREATE = /tmpos_invoice_edit\.m7b_invoice_draft_create_v2\(/;
 const SMALL_KERNEL = Object.freeze({ createSupervisedPgClient, MAX_POOLS: 4, runtimeClientOptions });
 const MICROS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 assert.equal(IDEMPOTENCY_POLICY.leaseMs, 60_000, 'the idempotency lease the in-progress cases rely on');
@@ -1128,7 +1131,8 @@ test('IDH-09 (AC-10): a level narrowing, a grant suspension or deletion, a sessi
       const who = await actor(`idh09-b-${tag}`, [storeGrant(T, S, 'sales_staff')]);
       const f = { T, S, who, s: await signIn(ctx, who) };
       // The role lock rows exist already (the customers row an earlier read made, here the owner's explicit defaults), so the
-      // narrowing is an UPDATE that must wait for the save's FOR SHARE.
+      // narrowing is an UPDATE that must wait for the save: a Customers one for its FOR SHARE, an Invoices one (since 031,
+      // M7B-INVOICES-P1-R3) for 030's key, which the save holds SHARED and the level write's trigger asks EXCLUSIVE.
       await setLevel(T, 'sales_staff', 'invoices', 'create');
       await setLevel(T, 'sales_staff', 'customers', 'create');
       const before = await counts([T]);

@@ -1,13 +1,14 @@
 // Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator, the edit's mutator (M7B-INVOICES-P2)
-// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's or 030's
-// session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
+// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's, 030's or
+// 031's session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
 //
 // THE MUTATOR (INVOICE_DRAFT_CREATE_MUTATOR, context scope 'store'). The one business mutation the tenant store commits for
 // POST /api/v1/stores/{storeId}/invoice-drafts, handed to the store in trusted source by the tenant transaction root alone.
 // It runs inside the command's transaction, after the idempotency fence and the store-scope revalidation
 // (tenantAuthorization.ts createTenantContextRevalidator), and before the audit record, the outbox event and the completion
 // (postgresTransactionalStore.ts commit): the store owns that order, this file owns one statement —
-// tmpos_invoice_draft.m7b_invoice_draft_create. Its ONE authority input is the presenting session's key, handed here as
+// tmpos_invoice_edit.m7b_invoice_draft_create_v2 (migration 031, M7B-INVOICES-P1-R3; 028's routine with the role's Invoices
+// level held through completion). Its ONE authority input is the presenting session's key, handed here as
 // `authority.sessionKey`; p_store_id is bound from the REVALIDATED trusted store (`authority.context.store`), never from the
 // change set or the request target — the change set's storeId (the path's) must merely EQUAL it, so the Location the plan
 // built names the store the draft is saved at. The expected tenant and the customer come from the change set (both judged
@@ -21,7 +22,7 @@
 // 'mismatch'. 'tenant_mismatch' (the expected tenant is not the store's) is 'precondition_failed': rolled back, the unsealed
 // 409. 'customer_not_found' (missing, or another tenant's — one answer) passes through: the routine decided it before
 // writing anything, and the store records the command's sealed 422 as the completion. 'refused' (the session's authority,
-// the store grant or a level no longer holds) passes through and rolls everything back — the NULL role rows included — as
+// the store grant or a level no longer holds) passes through and rolls everything back — the NULL role row included — as
 // the generic 503 (DA-70). A raise (a reused id, a value a CHECK refuses, a malformed argument, an isolation other than READ
 // COMMITTED) is not caught: the kernel rolls back, a 503, and a retry re-plans. No row, value or driver message is logged.
 //
@@ -103,7 +104,7 @@ async function applyInvoiceDraftCreate(sql: PgStatement, mutation: TransactionMu
   const text = linesText(lines);
   if (text === null) return 'unavailable';
   const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id
-    from tmpos_invoice_draft.m7b_invoice_draft_create(${sessionKey}::text, ${context.store}::uuid, ${mutation.aggregateId}::uuid,
+    from tmpos_invoice_edit.m7b_invoice_draft_create_v2(${sessionKey}::text, ${context.store}::uuid, ${mutation.aggregateId}::uuid,
       ${expectedTenant}::uuid, ${customerId}::uuid, ${text}::text::jsonb, ${String(subtotalCents)}::bigint)`;
   if (rows.length !== 1 || !hasColumns(rows[0], CREATE_COLUMNS)) return 'mismatch';
   const { o_outcome: outcome, o_tenant_id: tenant, o_store_id: store, o_actor_id: actor, o_membership_id: membership } = rows[0];

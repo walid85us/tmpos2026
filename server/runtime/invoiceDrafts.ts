@@ -24,7 +24,9 @@
 // server authority (a membership admits the four built-in roles only). A read-only account, tenant or store reads only.
 // Inside the save's transaction the tenant store re-proves the store scope (the presenting session held, the actor's
 // standing held and re-read, the grant at the trusted scope's own store re-selected, the levels re-decided), and migration
-// 028's routine decides again under locks; the reads' routines re-derive everything from the session key.
+// 031's routine (028's save with the role's Invoices level held, from before either sealed answer to the end of the command
+// transaction, under migration 030's advisory key) decides again under locks; the reads' routines re-derive everything from
+// the session key.
 //
 // THE SAVE. Request { expectedTenant, customerId, currency: "USD", lines: [ { description, quantity, unitPriceCents } ] },
 // no other key at either level. expectedTenant — the tenant GET /api/v1/stores answered for the store — is a PRECONDITION,
@@ -84,7 +86,7 @@
 // 503 an outage, 404 another host or path. It writes no business row: no draft, line, audit record, outbox event, lease,
 // idempotency completion or role-level row; like every authorized read, a 200 refreshes the session's lastSeenAt, and each
 // request spends the request limit. It is a snapshot: the save decides again, under locks, when it commits (the transaction
-// revalidator and migration 028's routine), and an "allowed" answer covers none of the save's own checks — its request
+// revalidator and migration 031's routine), and an "allowed" answer covers none of the save's own checks — its request
 // security (Origin, Sec-Fetch-Site, X-TMPOS-CSRF), its body and customer, or its Idempotency-Key and lease.
 //
 // THE EDIT (M7B-INVOICES-P2). PATCH replaces the editable part of one saved draft: its customer and its COMPLETE ordered
