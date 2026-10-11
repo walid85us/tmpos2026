@@ -708,6 +708,102 @@ test('M6R-10c a transaction whose answer arrives past the deadline, before the d
   await consume;
 });
 
+test('M6R-10d the deadline is the adapter\'s own monotonic reading, fixed inside the call\'s synchronous step: work is handed over, and an answer obeyed, only while the clock reads strictly before it — at the deadline\'s very reading nothing is sent and nothing obeyed, its timer not yet run — and a pause later in that step moves nothing (M6R-PERF-R3)', async (t) => {
+  // A scoped clock and timer, nothing else changed: `performance.now` reads `clock`, and the deadline timers the adapter sets
+  // are held here and never run — so every case is decided by the adapter's own clock comparison alone, as when a busy event
+  // loop runs its timers late. `pause` advances the clock the moment the adapter sets its timer: a stall of the call's
+  // synchronous step after the deadline was read. The kernel only records hand-overs and answers what the test says.
+  assert.equal(LIMITER_DEADLINE_MS, 500, 'the readings below are written for a 500 ms deadline');
+  let clock = 1_000;
+  let pause = 0;
+  const held: number[] = [];
+  t.mock.method(performance, 'now', () => clock);
+  t.mock.method(globalThis, 'setTimeout', ((_fn: () => void, ms: number) => {
+    held.push(ms);
+    clock += pause;
+    return { held: true };
+  }) as never);
+  t.mock.method(globalThis, 'clearTimeout', (() => undefined) as never);
+  const microtasks = async (): Promise<void> => { for (let i = 0; i < 50; i += 1) await Promise.resolve(); };
+  const ALLOWED = { outcome: 'allowed', remaining: 50 }; // never limit - cost: no reclaim here
+  const UNAVAILABLE = { outcome: 'unavailable' };
+  let serial = 0;
+  const setup = (): { limiter: DistributedRateLimiter; calls: PendingTx[]; bucket: typeof REQUEST } => {
+    const { client, calls } = deferredClient();
+    serial += 1;
+    return { limiter: createPostgresRateLimiter({ client, keySecret: KEY32 }), calls, bucket: { ...REQUEST, key: `${String(serial).padStart(2, '0')}${'D'.repeat(41)}` } };
+  };
+  /** Called at `clock`; its answer is recorded the moment it settles. */
+  const call = (limiter: DistributedRateLimiter, bucket: typeof REQUEST): { answer: () => unknown; done: Promise<unknown> } => {
+    let answer: unknown = 'pending';
+    const done = callConsume(limiter, bucket, live()).then((a) => { answer = a; return a; });
+    return { answer: () => answer, done };
+  };
+
+  // A consume waits in line behind one in flight; its deadline is read at 1000, so it is 1500. The line frees at `freeAt`.
+  for (const [freeAt, sends] of [[1_499, true], [1_500, false], [1_501, false]] as const) {
+    clock = 1_000;
+    const { limiter, calls, bucket } = setup();
+    const head = call(limiter, bucket);
+    const waiter = call(limiter, bucket);
+    await microtasks();
+    assert.equal(calls.length, 1, `free at ${freeAt}: the waiter waits in line`);
+    clock = freeAt;
+    calls[0].resolve(ALLOWED);
+    await microtasks();
+    assert.equal(calls.length, sends ? 2 : 1, `free at ${freeAt}: ${sends ? 'handed over one reading before its deadline' : 'at or past its deadline, nothing is sent'}`);
+    if (sends) {
+      assert.equal(calls[1].signal.aborted, false, `free at ${freeAt}: handed over live`);
+      calls[1].resolve(ALLOWED); // answered at the same reading, before the deadline: obeyed
+      await microtasks();
+      assert.deepEqual(waiter.answer(), ALLOWED, `free at ${freeAt}: an answer one reading before the deadline is obeyed`);
+    } else {
+      assert.deepEqual(waiter.answer(), UNAVAILABLE, `free at ${freeAt}: answered unavailable by the clock, its timer held unrun`);
+    }
+    await Promise.all([head.done, waiter.done]);
+  }
+
+  // A transaction in flight since 1000 (deadline 1500) answers allowed at `answerAt`, the deadline timer not yet run.
+  for (const [answerAt, obeyed] of [[1_499, true], [1_500, false], [1_501, false]] as const) {
+    clock = 1_000;
+    const { limiter, calls, bucket } = setup();
+    const consume = call(limiter, bucket);
+    await microtasks();
+    assert.equal(calls.length, 1, `answer at ${answerAt}: handed over at once`);
+    clock = answerAt;
+    calls[0].resolve(ALLOWED);
+    await microtasks();
+    assert.deepEqual(consume.answer(), obeyed ? ALLOWED : UNAVAILABLE,
+      `answer at ${answerAt}: ${obeyed ? 'obeyed one reading before the deadline' : 'at or past the deadline, never obeyed'}`);
+    await consume.done;
+  }
+
+  // The call's synchronous step stalls `stall` ms after the deadline is read at 1000, so the call returns at 1000 + stall.
+  // Measured from that return the deadline would be 1500 + stall; the adapter's own stays 1500.
+  for (const stall of [600, 499]) {
+    clock = 1_000;
+    pause = stall;
+    const { limiter, calls, bucket } = setup();
+    const consume = call(limiter, bucket);
+    const returned = performance.now();
+    pause = 0;
+    assert.equal(returned, 1_000 + stall, `stall ${stall}: the call returned ${stall} ms after its deadline was read`);
+    await microtasks();
+    if (stall >= LIMITER_DEADLINE_MS) {
+      assert.equal(calls.length, 0, `stall ${stall}: past the deadline fixed inside the step nothing is sent, though the call has only just returned`);
+      assert.deepEqual(consume.answer(), UNAVAILABLE, `stall ${stall}: answered unavailable`);
+    } else {
+      assert.equal(calls.length, 1, `stall ${stall}: handed over before the deadline fixed inside the step`);
+      clock = 1_550; // 51 ms after the call returned: inside a deadline measured from the return, past the adapter's own
+      calls[0].resolve(ALLOWED);
+      await microtasks();
+      assert.deepEqual(consume.answer(), UNAVAILABLE, `stall ${stall}: an answer past the deadline read inside the step is never obeyed, however late the call returned`);
+    }
+    await consume.done;
+  }
+  assert.ok(held.length === 11 && held.every((ms) => ms === LIMITER_DEADLINE_MS), `every consume set one deadline timer of LIMITER_DEADLINE_MS (${held.length}), each held, never run by this mock`);
+});
+
 // --- the early answer -------------------------------------------------------------------------------------------
 
 test('M6R-11 an early answer never becomes a late allowance, the lane stays held until the late transaction really settles, and a late rejection is absorbed silently', async () => {

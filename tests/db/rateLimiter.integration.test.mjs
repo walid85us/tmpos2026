@@ -47,12 +47,16 @@
 // that sent a transaction after its deadline had passed, when the line freed before its own timer callback ran (the adapter
 // now checks the clock: RLR-04, unit M6R-10b); and the driver's own array-type query on a fresh connection, whose promise
 // nothing handled when the kernel retired the pool during it (the kernel now turns that query off: RLR-06, DA-110).
-// M6R-PERF-R2 traced the rest — M6R-PERF's "nothing unavailable" and rateLimitRuntime's M6RS-07 — to two fail-closed
-// mechanisms, each reproduced with a schedule the test owns: a hot bucket's line waiting past the deadline, and a bucket row
-// held past lock_timeout by a consume whose COMMIT came late (55P03). M6R-PERF now accounts for every consume and every
-// bucket (its time line by line, what is established about each transaction, the owner's count reconciled), before its
-// assertions; and a burst measures each "no later than its deadline" bound from the end of the call's synchronous step, where
-// the adapter fixes its deadline (measured from the step's start, a pause inside it failed a correct adapter).
+// M6R-PERF-R2 traced M6R-PERF's "nothing unavailable" to two fail-closed mechanisms, each reproduced with a schedule the
+// test owns: a hot bucket's line waiting past the deadline, and a bucket row held past lock_timeout by a consume whose
+// COMMIT came late (55P03) — and rateLimitRuntime's M6RS-07, probably, to the second (its odd reply was never logged; a
+// lock timeout was, in its wave, and a held COMMIT reproduces its counts). M6R-PERF now accounts for every consume and every
+// bucket (its time line by line, what is established about each transaction, the owner's count checked where the snapshot
+// shows the run's one window and otherwise reported inconclusive: M6R-PERF-R3), before its assertions; and a burst checks
+// each hand-over and answer against an observation envelope around the call's synchronous step, inside which the adapter
+// fixes its deadline — refusing what no correct adapter could do while the host's pauses stay inside its margins — while
+// the contract itself, hand-over and obeying only strictly before the adapter's own monotonic deadline, is proved against
+// the adapter in its unit tests (M6R-10b/10c/10d).
 //
 // DISPOSABLE ONLY. The target is resolveDisposableTarget's supplied DSN when CI binds one, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Keys, buckets and the probe
@@ -317,15 +321,21 @@ const observed = (k) => {
 };
 /**
  * Lets an out-of-band reclaim that a window-opening consume started finish before a snapshot: a moment for it to begin,
- * then until no session of the probe login is inside a transaction for three samples running (at most 2 s).
+ * then until no session of the probe login is inside a transaction for three samples running (at most 2 s). Returns
+ * whether that quiet was reached, and how long it waited, its 50 ms lead-in included (M6R-PERF-R3): the server's own
+ * evidence that no transaction of the login is still running, which the kernel's answers alone do not establish — per
+ * login, not per transaction, and not asserted.
  */
 async function settle() {
+  const began = performance.now();
   await sleep(50);
   const stop = performance.now() + 2_000;
-  for (let quiet = 0; quiet < 3 && performance.now() < stop; await sleep(10)) {
+  let quiet = 0;
+  for (; quiet < 3 && performance.now() < stop; await sleep(10)) {
     const [{ n }] = await owner`select pg_catalog.count(*)::int as n from pg_catalog.pg_stat_activity where usename = ${LOGIN} and xact_start is not null`;
     quiet = n === 0 ? quiet + 1 : 0;
   }
+  return { reached: quiet >= 3, waitedMs: Math.round(performance.now() - began) };
 }
 
 // ---------------------------------------------------------------------------
@@ -443,11 +453,17 @@ function assertBurst({ calls }, limit, consumed, label, { windowMs = 6_000, stri
   for (const c of calls) {
     assert.ok(c.txs.length <= 1, `${label}: consume ${c.id} sent ${c.txs.length} transactions — nothing is retried or replayed`);
     const [tx] = c.txs;
-    // The adapter fixes its deadline inside the call's synchronous step, so no later than `called` + LIMITER_DEADLINE_MS:
-    // every "no later than its deadline" bound is measured from `called` and every "not before its deadline" one from
-    // `start` (M6R-PERF-R2: measured from `start` alone, a pause inside the step failed a correct adapter). The step itself
-    // is capped at CALL_STEP_CAP_MS, so an adapter that stalls before fixing its deadline is not forgiven. The 5 ms here is
-    // for a pause between the adapter's own check and this tracer's timestamp, not a longer deadline.
+    // The adapter fixes its deadline inside the call's synchronous step, so somewhere between `start` and `called`, plus
+    // LIMITER_DEADLINE_MS: every "no later than its deadline" bound is measured from `called` and every "not before its
+    // deadline" one from `start` (M6R-PERF-R2: measured from `start` alone, a pause inside the step failed a correct
+    // adapter). These are an observation envelope, not the contract: a hand-over before `called` + LIMITER_DEADLINE_MS can
+    // still be past the adapter's own deadline when the step paused after fixing it. The exact contract — hand-over and
+    // obeying only strictly before the adapter's own monotonic deadline, nothing at it, a pause later in the step moving
+    // nothing — is proved deterministically against the adapter itself by unit M6R-10b/10c/10d (M6R-PERF-R3). This envelope
+    // refuses what no correct adapter could produce only while the host's pauses stay inside its margins: the step is capped
+    // at CALL_STEP_CAP_MS (which bounds, rather than forbids, a stall before the deadline is fixed — and would refuse a
+    // correct adapter whose step paused that long), and the 5 ms here is for a pause between the adapter's own check and
+    // this tracer's timestamp, not a longer deadline.
     assert.ok(c.called - c.start < CALL_STEP_CAP_MS, `${label}: consume ${c.id}'s call took ${Math.round(c.called - c.start)} ms to return its promise — its synchronous step fixes its deadline, and may not take ${CALL_STEP_CAP_MS} ms`);
     if (tx !== undefined) {
       assert.ok(tx.at - c.called < LIMITER_DEADLINE_MS + 5, `${label}: consume ${c.id} sent its transaction ${Math.round(tx.at - c.called)} ms after its call returned (${Math.round(tx.at - c.start)} ms after it was called) — nothing is sent once its deadline has passed`);
@@ -1687,7 +1703,7 @@ test('RLR-09: the burst account refuses what a defective adapter or store would 
   }
 });
 
-test('RLR-10: the accounts state their own limits — more than twelve grants whose COMMIT acknowledgement was lost fails as unexplained, never passes unchecked; the deadline bounds hold from the end of the call\'s step, which is itself capped; and an owner-side count outside its acknowledged grants plus the unacknowledged ones is reported', () => {
+test('RLR-10: the accounts state their own limits — more than twelve grants whose COMMIT acknowledgement was lost fails as unexplained, never passes unchecked; the burst\'s observation envelope is measured from the end of the call\'s step, which is itself capped; and an owner-side count outside its acknowledged grants plus the unacknowledged ones fails only where the snapshot shows the run\'s one window (or no row before any window could have ended) — elsewhere it is inconclusive, never a pass', () => {
   // Synthetic consumes, no database: each sent one transaction that ended as `ended` with the routine's `outcome`.
   const consume = (i, ended, outcome, remaining) => ({
     id: `rlr10:${i}`, instance: 0, cost: 1, key: 'k', start: 0, called: 0, answeredAt: 10, elapsed: 10, deadlineAt: null,
@@ -1700,7 +1716,7 @@ test('RLR-10: the accounts state their own limits — more than twelve grants wh
   // Twelve are checked: every subset is tried, and one that sums to the owner's count passes; none that does fails.
   assert.doesNotThrow(() => assertBurst({ calls: lost.slice(0, 12) }, 40, 5, 'twelve lost'));
   assert.throws(() => assertBurst({ calls: lost.slice(0, 12) }, 40, 13, 'twelve lost, thirteen counted'), /fit one serial order/);
-  // The deadline bounds measured from the end of the call's step (here 17 ms after its start): a hand-over 500 ms after it
+  // The envelope's bounds, measured from the end of the call's step (here 17 ms after its start): a hand-over 500 ms after it
   // passes, 506 ms after it is refused; an allowance answered 506 ms after it is refused; a 150 ms step is refused.
   const timed1 = (at, answeredAt, called = 17) => {
     const c = consume(0, 'committed', 'allowed', 39);
@@ -1710,13 +1726,55 @@ test('RLR-10: the accounts state their own limits — more than twelve grants wh
   assert.throws(() => assertBurst({ calls: [timed1(523, 524)] }, 40, 1, 'late hand-over'), /nothing is sent once its deadline has passed/);
   assert.throws(() => assertBurst({ calls: [timed1(100, 523)] }, 40, 1, 'late answer'), /past its deadline/);
   assert.throws(() => assertBurst({ calls: [timed1(200, 210, 150)] }, 40, 1, 'long step'), /may not take/);
-  // PERF's per-bucket reconciliation: known 2, unknown 1 — the owner's 2 and 3 fit; 1 and 4 are reported.
+  // PERF's per-bucket reconciliation (M6R-PERF-R3: eligibility per bucket): known 2, unknown 1 — in a window the snapshot
+  // shows to be the run's one, the owner's 2 and 3 pass and 1 and 4 fail; a window that is not shown to be the run's one is
+  // inconclusive whatever the count — never a pass.
   const two = [consume(0, 'committed', 'allowed', 2), consume(1, 'committed', 'allowed', 1), consume(2, 'kernel_outcome_unknown', 'allowed', 0),
     consume(3, 'kernel_unavailable', 'allowed', 0), consume(4, 'committed', 'limited')];
-  for (const [owner, flagged] of [[2, 0], [3, 0], [1, 1], [4, 1]]) {
-    const { counted, unreconciled } = unreconciledCounts(two, new Map([['k', owner]]));
-    assert.deepEqual([counted, unreconciled.length], [1, flagged], `owner ${owner}`);
+  const SPAN = 60_000_000n;
+  const reconcile = (owner, { startUs = 1_000n, expiresUs = startUs + SPAN, atUs = 2_000_000n, row = true, calls = two, pending = new Set() } = {}) => {
+    const r = reconcileBuckets(calls, { atUs, rows: new Map(row ? [['k', { consumed: owner, startUs, expiresUs }]] : []), pending }, { before: 0n, spanUs: SPAN });
+    assert.equal(r.counted, 1);
+    assert.equal(r.passed + r.failed + r.inconclusive, 1);
+    return r.buckets[0];
+  };
+  for (const [owner, result] of [[2, 'passed'], [3, 'passed'], [1, 'failed'], [4, 'failed']]) {
+    const b = reconcile(owner);
+    assert.deepEqual([b.result, b.eligible, b.known, b.knownGrants, b.unknown, b.unknownGrants, b.owner], [result, true, 2, 2, 1, 1, owner], `owner ${owner}`);
   }
+  for (const [label, opts, reason] of [
+    ['a window that opened before the run', { startUs: -1n }, /opened before this run/],
+    ['a window that opened a span after the run began', { startUs: SPAN, atUs: SPAN + 1_000n }, /earlier one may have rolled/],
+    ['a window ended by the snapshot', { startUs: 1_000n, expiresUs: 1_000n + SPAN, atUs: 1_000n + SPAN }, /had ended by the snapshot/],
+    ['no row once a window could have ended', { row: false, atUs: SPAN }, /could have ended and been reclaimed/],
+    ['a transaction still unanswered', { calls: [...two, { ...consume(5, 'committed', 'allowed', 0), txs: [{ ...consume(5, 'committed', 'allowed', 0).txs[0], ended: 'pending', endedAt: null }] }] }, /unanswered by the kernel at the snapshot/],
+    ['a transaction unanswered when the snapshot was read, answered since', { pending: new Set(['rlr10:1']) }, /unanswered by the kernel at the snapshot/],
+  ]) {
+    for (const owner of [1, 2, 3, 4]) {
+      const b = reconcile(owner, opts);
+      assert.equal(b.result, 'inconclusive', `${label}, owner ${owner}: inconclusive, never passed or failed`);
+      assert.match(b.inconclusive, reason, label);
+      assert.equal(b.eligible, false, label);
+    }
+  }
+  // The eligible side of each boundary: a window opened at the run's very start, or one reading short of a span after it;
+  // a window expiring one reading after the snapshot; no row one reading short of a span — each still decides.
+  for (const [label, opts] of [
+    ['a window opened at the run\'s start', { startUs: 0n }],
+    ['a window opened just short of a span after it', { startUs: SPAN - 1n, expiresUs: 2n * SPAN - 1n, atUs: SPAN }],
+    ['a window expiring just after the snapshot', { startUs: 1_000n, expiresUs: 1_000n + SPAN, atUs: 1_000n + SPAN - 1n }],
+  ]) {
+    assert.deepEqual([reconcile(2, opts).result, reconcile(4, opts).result], ['passed', 'failed'], label);
+  }
+  // No row, before any window could have ended: the owner's count is zero, and two acknowledged grants do not fit it.
+  assert.equal(reconcile(0, { row: false }).result, 'failed', 'no row while a window of this run was still open, after acknowledged grants');
+  assert.equal(reconcile(0, { row: false, atUs: SPAN - 1n }).result, 'failed', 'no row one reading short of a span: still decided');
+  // Each bucket is decided on its own: one eligible and outside its range fails while another, whose window opened before
+  // the run, is inconclusive — in one call.
+  const mixed = reconcileBuckets([...two, { ...consume(9, 'committed', 'allowed', 0), key: 'j' }],
+    { atUs: 2_000_000n, rows: new Map([['k', { consumed: 4, startUs: 1_000n, expiresUs: 1_000n + SPAN }], ['j', { consumed: 1, startUs: -1n, expiresUs: SPAN - 1n }]]), pending: new Set() },
+    { before: 0n, spanUs: SPAN });
+  assert.deepEqual([mixed.counted, mixed.passed, mixed.failed, mixed.inconclusive], [2, 0, 1, 1], 'decided per bucket, never run-wide');
 });
 
 // ---------------------------------------------------------------------------
@@ -1724,42 +1782,94 @@ test('RLR-10: the accounts state their own limits — more than twelve grants wh
 // ---------------------------------------------------------------------------
 
 /**
- * M6R-PERF-R2: per bucket key, the costs whose COMMIT was acknowledged with an allowance (known) and the allowances whose
- * acknowledgement was lost (unknown) — from how each transaction ended, never from the answers — and the buckets whose
- * owner-side count (`consumed`, a Map) lies outside [known, known + unknown].
+ * M6R-PERF-R2, made explicit per bucket by M6R-PERF-R3: the owner-side reconciliation, and when it applies at all.
+ *
+ * Per bucket key, from how each transaction ended — never from the answers: the acknowledged grants (an allowance whose
+ * COMMIT was acknowledged: their number and cost, `known`) and the possible ones (an allowance whose COMMIT was handed over
+ * and its acknowledgement lost: `unknown`, either way). The rule: the owner-side count lies in [known, known + unknown].
+ *
+ * The rule applies to a bucket only when the snapshot (`snapshot.rows`, read at `snapshot.atUs` on the database clock,
+ * after a bounded wait for the kernel's answers — one still unanswered then fails M6R-PERF's own assertion) shows the one
+ * window this run's consumes of it fell in:
+ *   * no transaction of the bucket was unanswered by the kernel just before the snapshot was read (`snapshot.pending`, the
+ *     consumes', and any still unanswered now): one could yet commit;
+ *   * its window opened at or after `before`, the run's start — not a window that held anything else;
+ *   * its window opened before `before` + the window's span — an earlier window of this run that had rolled would have
+ *     ended at or after that instant, so a window opening before it is the run's first;
+ *   * its window was still open at the snapshot — not one ended, to be reset or reclaimed;
+ *   * or, with no row at all, the snapshot came before any window of this run could have ended (a row is only removed
+ *     once its window has).
+ * Otherwise it is inconclusive, with its reason: never a pass. An eligible bucket outside the range fails.
  */
-function unreconciledCounts(calls, consumed) {
+function reconcileBuckets(calls, snapshot, { before, spanUs }) {
   const ledger = new Map();
   for (const c of calls) {
-    const e = ledger.get(c.key) ?? { key: c.key, known: 0, unknown: 0 };
-    const [tx] = c.txs;
-    if (tx?.decision?.outcome === 'allowed' && tx.ended === 'committed') e.known += c.cost;
-    if (tx?.decision?.outcome === 'allowed' && tx.ended === 'kernel_outcome_unknown') e.unknown += c.cost;
+    const e = ledger.get(c.key) ?? { key: c.key, known: 0, knownGrants: 0, unknown: 0, unknownGrants: 0, open: 0, consumes: 0 };
+    e.consumes += 1;
+    if (snapshot.pending?.has(c.id)) e.open += 1;
+    for (const tx of c.txs) { // one at most (nothing is retried); every one is counted all the same
+      if (tx.ended === 'pending' && !snapshot.pending?.has(c.id)) e.open += 1;
+      if (tx.decision?.outcome === 'allowed' && tx.ended === 'committed') { e.known += c.cost; e.knownGrants += 1; }
+      if (tx.decision?.outcome === 'allowed' && tx.ended === 'kernel_outcome_unknown') { e.unknown += c.cost; e.unknownGrants += 1; }
+    }
     ledger.set(c.key, e);
   }
-  return { counted: ledger.size, unreconciled: [...ledger.values()].map((e) => ({ ...e, owner: consumed.get(e.key) ?? 0 }))
-    .filter((e) => e.owner < e.known || e.owner > e.known + e.unknown) };
+  const buckets = [...ledger.values()].map((e) => {
+    const row = snapshot.rows.get(e.key);
+    const window = row === undefined ? null
+      : { openedUsAfterRunStart: Number(row.startUs - before), expiresUsAfterSnapshot: Number(row.expiresUs - snapshot.atUs) };
+    const owner = row?.consumed ?? 0;
+    const inconclusive = e.open > 0 ? 'a transaction of it was unanswered by the kernel at the snapshot'
+      : row === undefined ? (snapshot.atUs - before >= spanUs ? 'no row, and a window of this run could have ended and been reclaimed' : null)
+        : row.startUs < before ? 'its window opened before this run'
+          : row.startUs - before >= spanUs ? 'its window opened a whole span after the run began: an earlier one may have rolled'
+            : row.expiresUs <= snapshot.atUs ? 'its window had ended by the snapshot' : null;
+    const result = inconclusive !== null ? 'inconclusive' : owner >= e.known && owner <= e.known + e.unknown ? 'passed' : 'failed';
+    return { ...e, owner, window, eligible: inconclusive === null, result, ...(inconclusive === null ? {} : { inconclusive }) };
+  });
+  const tally = (r) => buckets.filter((b) => b.result === r).length;
+  return { counted: buckets.length, passed: tally('passed'), failed: tally('failed'), inconclusive: tally('inconclusive'), buckets };
 }
 /**
- * M6R-PERF-R2: what is established about a consume's transaction, from how the kernel ended it — never from the answer:
- * none was sent; it committed (the COMMIT was acknowledged); its outcome is unknown (the COMMIT was handed over and its
- * acknowledgement lost); it did not commit (the kernel's `unavailable`, or PostgreSQL's own error answered after the
- * ROLLBACK's acknowledgement — a COMMIT never sent, refused by the server or answered as a rollback; an abandoned session
- * PostgreSQL rolls back when it ends); or it is still open (no end recorded yet).
+ * M6R-PERF-R2, phases named by M6R-PERF-R3: what is established about a consume's transaction, from how the kernel answered
+ * for it — never from the consume's answer, which may be unavailable for any of these:
+ *   * not dispatched — nothing was handed to the kernel;
+ *   * established commit — the kernel's value: COMMIT acknowledged (supervisedPgClient.ts settles a value nowhere else);
+ *   * established non-commit — the body's own failure (PostgreSQL's SQLSTATE, or another), answered only once its ROLLBACK
+ *     was acknowledged; or the kernel's `unavailable`, which never follows a COMMIT the server could have committed: COMMIT
+ *     was never handed over — after an abort the kernel's gate checks keep it off the connection, besides its check after
+ *     the body (the kernel's unit test "once COMMIT is handed over only its own outcome answers…" pins that nothing is
+ *     handed over, and that an abort or close once COMMIT is on its way never answers unavailable) — or the server
+ *     answered it with an error or as a rollback;
+ *   * commit unknown — the kernel's outcomeUnknown: COMMIT handed over and no answer establishes what it did;
+ *   * still pending — the kernel has not answered.
+ * Commit status is not the server's end: `serverEndOf` says what is established about that.
  */
-const establishedBy = (tx) => (tx === undefined ? 'not sent' : tx.ended === 'committed' ? 'committed'
-  : tx.ended === 'kernel_outcome_unknown' ? 'commit unknown' : tx.ended === 'pending' ? 'still open' : 'not committed');
+const establishedBy = (tx) => (tx === undefined ? 'not dispatched' : tx.ended === 'committed' ? 'established commit'
+  : tx.ended === 'kernel_outcome_unknown' ? 'commit unknown' : tx.ended === 'pending' ? 'still pending' : 'established non-commit');
+/**
+ * M6R-PERF-R3: whether the server's own transaction is known to have ended when the kernel answered — the kernel's answer
+ * settles the caller's promise, not the backend. Established by an acknowledged COMMIT, or by the body's own failure (its
+ * ROLLBACK acknowledged first); not established by the kernel's `unavailable` (often an abandoned connection whose
+ * backend may still be running its statement and holding its row lock until a cancel or the disconnect reaches it) or by
+ * outcomeUnknown; not yet answered while pending; null when nothing was dispatched.
+ */
+const serverEndOf = (tx) => (tx === undefined ? null : tx.ended === 'pending' ? 'kernel not answered'
+  : tx.ended === 'kernel_unavailable' || tx.ended === 'kernel_outcome_unknown' ? 'not established' : 'established');
 /**
  * M6R-PERF-R2: one consume's time, in milliseconds from its call — OBSERVED: when the call's synchronous step returned (the
  * adapter's deadline is fixed inside it), when its deadline sentinel fired, when its
  * transaction was handed to the kernel, when the kernel began its work (a connection held — a fresh one's startup
  * included — and BEGIN and the settings acknowledged; those the kernel does not tell apart), when the routine answered (what
- * it decided), when the transaction ended and how (its SQLSTATE, or the kernel's own failure — an abort at the deadline
- * ends one as the kernel's, whatever PostgreSQL was doing — unless its COMMIT was already on its way, when it ends with the
- * COMMIT's own outcome), and when the consume was answered; INFERRED (under `inferred`): how many consumes of its bucket on
- * its instance were in line at its call, itself included (begun, and their transaction not yet ended — or, if none was
- * sent, not yet answered). The end is the kernel's answer: after the COMMIT's acknowledgement and the connection's reset when
- * it committed, at once when an abort abandoned it. null is unknown — never a time made up.
+ * it decided), when the kernel answered for the transaction and how (its SQLSTATE, or the kernel's own failure — an abort
+ * at the deadline is answered as the kernel's, whatever PostgreSQL was doing — unless its COMMIT was already on its way,
+ * when the COMMIT's own outcome answers, or its outcome was already fixed), what that establishes (established and
+ * serverEnd), and when the consume was answered; INFERRED (under `inferred`): how many consumes of its bucket on its
+ * instance were in line at its call, itself included (begun, and the kernel not yet answering for their transaction — or,
+ * if none was sent, not yet answered). The kernel's answer comes after the COMMIT's acknowledgement and the connection's
+ * reset when it committed — at once if an abort arrives during the reset — and at once when an abort abandoned it, the
+ * backend then perhaps still running (serverEnd: not established). Here "end" in a name means the kernel's answer. null is
+ * unknown — never a time made up.
  */
 function timelineOf(c, calls) {
   const [tx] = c.txs;
@@ -1769,17 +1879,34 @@ function timelineOf(c, calls) {
   return {
     id: c.id, instance: c.instance, bucket: c.hot ? 'hot' : 'cold', callReturned: rel(c.called), deadlineFired: rel(c.deadlineAt),
     handedOver: rel(tx?.at), workBegan: rel(tx?.workAt), routineAnswered: rel(tx?.decidedAt), decided: tx?.decision === undefined ? null : tx.decision.outcome,
-    ended: rel(tx?.endedAt), endedWith: tx?.ended ?? null, established: establishedBy(tx), answered: rel(c.answeredAt), answer: c.answer.outcome,
+    kernelAnswered: rel(tx?.endedAt), endedWith: tx?.ended ?? null, established: establishedBy(tx), serverEnd: serverEndOf(tx), answered: rel(c.answeredAt), answer: c.answer.outcome,
     inferred: { inLineAtCall: inLine },
   };
 }
 
 /**
+ * M6R-PERF-R3: the reconciliation in the account — how many buckets passed, failed or were inconclusive and why, then the
+ * hot bucket and every bucket that did not pass (at most twelve), each in full: its window (opened after the run's start,
+ * expiring after the snapshot, database clock), its consumes, its acknowledged and possible grants, the owner's count.
+ */
+function reconciliationLine({ snapshotUsAfterRunStart, reconciliation: r }, hot) {
+  const full = ({ key: k, ...b }) => ({ bucket: k === hot ? 'hot' : `cold ${k.slice(0, 8)}`, ...b });
+  const notPassed = r.buckets.filter((b) => b.result !== 'passed');
+  const reasons = {};
+  for (const b of notPassed) if (b.inconclusive !== undefined) reasons[b.inconclusive] = (reasons[b.inconclusive] ?? 0) + 1;
+  return {
+    snapshotUsAfterRunStart, counted: r.counted, passed: r.passed, failed: r.failed, inconclusive: r.inconclusive, reasons,
+    hot: r.buckets.filter((b) => b.key === hot).map(full)[0] ?? null,
+    notPassed: notPassed.slice(0, 12).map(full), ...(notPassed.length > 12 ? { notPassedNotShown: notPassed.length - 12 } : {}),
+  };
+}
+/**
  * M6R-PERF-R2: M6R-PERF's account, one line — the answers by class, this process's event-loop delay, the deadline timers'
  * lateness, the time split into waiting in line, hand-over to the kernel's work, the routine, and the routine's answer to
- * the end; what is established about every transaction; connections closed; the reclaims; the per-bucket reconciliation
- * (or why it is inconclusive); transactions that ended late or not at all; and the hot bucket's window — then the consumes
- * answered unavailable or whose transaction failed, at most twelve, each in full.
+ * the kernel's answer; what is established about every transaction and about the server's end of it (M6R-PERF-R3), and
+ * whether the probe login's backends went quiet; connections closed; the reclaims; the per-bucket reconciliation (passed,
+ * failed, or inconclusive and why: M6R-PERF-R3); transactions the kernel had not answered for within 3 s; and the hot
+ * bucket's window — then the consumes answered unavailable or whose transaction failed, at most twelve, each in full.
  */
 async function perfAccount(t, { calls, loop, closesBefore, before, hot, account }) {
   const sent = calls.filter((c) => c.txs.length > 0);
@@ -1811,16 +1938,15 @@ async function perfAccount(t, { calls, loop, closesBefore, before, hot, account 
       cold: spans((c) => (!c.hot && c.txs[0].decidedAt !== null ? c.txs[0].decidedAt - c.txs[0].workAt : null)),
     },
     routineAnswerToEndMs: spans((c) => (c.txs[0].decidedAt !== null && c.txs[0].endedAt !== null ? c.txs[0].endedAt - c.txs[0].decidedAt : null)),
-    established: Object.fromEntries(['not sent', 'committed', 'not committed', 'commit unknown', 'still open']
+    established: Object.fromEntries(['not dispatched', 'established commit', 'established non-commit', 'commit unknown', 'still pending']
       .map((e) => [e, calls.filter((c) => establishedBy(c.txs[0]) === e).length])),
+    serverEnd: Object.fromEntries(['established', 'not established', 'kernel not answered']
+      .map((e) => [e, calls.filter((c) => serverEndOf(c.txs[0]) === e).length])),
+    backendQuiet: account.backendQuiet,
     connectionsClosed: relay.state.closes - closesBefore,
     reclaims: { started: reclaims.started, longestMs: Math.round(reclaims.longestMs) },
-    buckets: {
-      counted: account.counted, unreconciled: account.unreconciled.length, oneWindow: account.oneWindow,
-      first: account.unreconciled.slice(0, 3).map(({ key: k, ...e }) => ({ hot: k === hot, ...e })),
-      ...(account.oneWindow ? {} : { inconclusive: 'the run outlasted one window on the database clock: a bucket may have rolled' }),
-    },
-    lateOrOpenTransactions: account.lateOrOpen, untracedAnswers: account.untraced,
+    buckets: reconciliationLine(account, hot),
+    unansweredByKernelIn3s: account.lateOrOpen, untracedAnswers: account.untraced,
     hotWindow: hotRow === undefined ? null : {
       openedMsAfterRunStart: Math.round(Number(BigInt(hotRow.start_us) - before) / 1000),
       spanMs: Number(BigInt(hotRow.expires_us) - BigInt(hotRow.start_us)) / 1000, consumed: hotRow.consumed,
@@ -1920,24 +2046,37 @@ test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold
     t.diagnostic(JSON.stringify(report));
     if (process.env.M6R_PERF_OUT) writeFileSync(`${REPO}.workflow/scratch/m6r/perf.json`, `${JSON.stringify(report, null, 2)}\n`);
 
-    // M6R-PERF-R2, after the original snapshot above and changing nothing in it: every transaction a consume sent ends — a
-    // COMMIT still on its way when its consume was answered ends later — within 3 s of the last answer (bounded: never a
-    // hang); then a second owner-side snapshot, for the reconciliation alone; then the account, printed before the original
-    // assertions. A fault in any of it is held, not thrown, so it can never mask them, and fails after them.
+    // M6R-PERF-R2, after the original snapshot above and changing nothing in it: the kernel answers for every transaction a
+    // consume sent — a COMMIT still on its way when its consume was answered is answered later — within 3 s of the last
+    // answer (bounded: never a hang); then (M6R-PERF-R3) the server's own quiet for the probe login, reported, not assumed
+    // from those answers; then a second owner-side snapshot, for the reconciliation alone; then the account, printed before
+    // the original assertions. A fault in any of it is held, not thrown, so it can never mask them, and fails after them.
     let account;
     try {
       const endBy = Math.max(...calls.map((c) => c.answeredAt)) + 3_000;
       while (open() > 0 && performance.now() < endBy) await sleep(5);
       calls.forEach((c, i) => { c.answer = answers[i]; c.txs = sentBy.get(c.id) ?? []; });
-      const consumedAfter = new Map((await owner`select limiter_key, consumed from tmpos_rate_limit.bucket
-        where limiter_key = any (${[...expected.keys()]}::text[])`).map((r) => [r.limiter_key, r.consumed]));
-      // Every bucket's window opens at its first consume, at or after `before`, and lasts WINDOW: a run shorter than that on
-      // the database clock cannot have rolled one, so each owner count covers this run alone.
-      const oneWindow = (await dbNowUs()) - before < BigInt(WINDOW) * 1000n;
+      const backendQuiet = await settle();
+      // M6R-PERF-R3: the second snapshot reads each bucket's window with its count, and the database clock in the same
+      // statement, so whether the reconciliation applies is decided per bucket (reconcileBuckets), not assumed; the consumes
+      // whose transaction the kernel had not answered for are taken just before it is read.
+      const pending = new Set(calls.filter((c) => c.txs.some((tx) => tx.ended === 'pending')).map((c) => c.id));
+      const after = await owner`select b.limiter_key, b.consumed,
+          (extract(epoch from b.window_start) * 1000000)::bigint::text as start_us, (extract(epoch from b.expires_at) * 1000000)::bigint::text as expires_us,
+          (extract(epoch from pg_catalog.statement_timestamp()) * 1000000)::bigint::text as at_us
+        from tmpos_rate_limit.bucket b where b.limiter_key = any (${[...expected.keys()]}::text[])`;
+      const snapshot = {
+        atUs: after.length > 0 ? BigInt(after[0].at_us) : await dbNowUs(),
+        rows: new Map(after.map((r) => [r.limiter_key, { consumed: r.consumed, startUs: BigInt(r.start_us), expiresUs: BigInt(r.expires_us) }])),
+        pending,
+      };
+      assert.equal(snapshot.rows.size, after.length, 'one bucket row per key: each key is used with one limit and window');
+      assert.equal(new Set(calls.map((c) => c.key)).size, expected.size, 'every planned bucket is in the reconciliation');
       account = {
         lateOrOpen: calls.flatMap((c) => c.txs).filter((tx) => tx.endedAt === null || tx.endedAt > endBy).length,
         untraced: calls.filter((c) => c.answer.outcome !== 'unavailable' && c.txs.length === 0).length,
-        oneWindow, ...unreconciledCounts(calls.map((c) => ({ ...c, cost: 1 })), consumedAfter),
+        snapshotUsAfterRunStart: Number(snapshot.atUs - before), backendQuiet,
+        reconciliation: reconcileBuckets(calls.map((c) => ({ ...c, cost: 1 })), snapshot, { before, spanUs: BigInt(WINDOW) * 1000n }),
       };
       await perfAccount(t, { calls, loop, closesBefore, before, hot, account });
     } catch (err) {
@@ -1950,12 +2089,19 @@ test('M6R-PERF: 2000 consumes at concurrency 32 over two instances, hot and cold
     assert.equal(exact, true, 'exact accounting on every bucket');
     assert.equal(report.allowed + report.limited, CONSUMES);
     // M6R-PERF-R2: the account was computed; every allowance or limit was traced to its own transaction; every transaction
-    // ended within 3 s of the last answer; and — when the run fitted one window (otherwise reported above as inconclusive) —
-    // every bucket's count is what its acknowledged COMMITs granted, plus at most the allowances whose acknowledgement was lost.
+    // ended within 3 s of the last answer (the kernel answered for it: client-side settlement, not the server's own end);
+    // and every bucket the reconciliation applies to (M6R-PERF-R3: decided per bucket — the rest are reported above as
+    // inconclusive, with why, and are not a pass) has the count its acknowledged COMMITs granted, plus at most the
+    // allowances whose acknowledgement was lost.
     assert.equal(account.error, undefined, 'the M6R-PERF account was computed');
     assert.equal(account.untraced, 0, 'every allowance or limit was traced to its own transaction');
-    assert.equal(account.lateOrOpen, 0, 'every transaction M6R-PERF sent ended within 3 s of the last answer');
-    if (account.oneWindow) assert.equal(account.unreconciled.length, 0, 'every owner-side count lies between its acknowledged grants and those plus the unacknowledged ones');
+    assert.equal(account.lateOrOpen, 0, 'the kernel answered for every transaction M6R-PERF sent within 3 s of the last answer');
+    assert.equal(account.reconciliation.failed, 0, 'every eligible owner-side count lies between its acknowledged grants and those plus the unacknowledged ones');
+    // And the check ran: with every transaction answered and the snapshot inside one window's span of the run's start, no
+    // bucket can be ineligible — so an eligibility rule broken into refusing every bucket fails here, not silently.
+    if (account.lateOrOpen === 0 && account.snapshotUsAfterRunStart < WINDOW * 1_000) {
+      assert.equal(account.reconciliation.inconclusive, 0, 'inside one window\'s span with every transaction answered, every bucket was eligible for the reconciliation');
+    }
   } finally {
     loop.disable();
     for (const c of calls) if (c !== undefined) sentBy.delete(c.id);

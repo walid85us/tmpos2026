@@ -259,6 +259,70 @@ test('COMMIT: a server ERROR is unavailable on a reusable connection; a loss onc
   for (const c of [c1, c2, c3]) await c.end();
 });
 
+test('once COMMIT is handed over only its own outcome answers — an abort waits for it (acknowledged: the value; lost: outcomeUnknown) and a close is outcomeUnknown, never unavailable; and a body that returns after an abort never commits (M6R-PERF-R3)', async () => {
+  // What the rate limiter's diagnostics rely on: `unavailable` never follows a COMMIT the server could have committed, and
+  // a COMMIT handed over without an answer is outcomeUnknown — so neither is ever read as the other.
+  for (const then of ['acknowledged', 'lost'] as const) {
+    let answerCommit: () => void = () => undefined;
+    const commitHeld = new Promise<void>((resolve) => { answerCommit = resolve; });
+    const fake = fakeDriver((text) => (text === 'commit' ? { hold: commitHeld, ...(then === 'lost' ? { error: lost() } : {}) } : {}));
+    const client = clientOver(fake);
+    const ctl = new AbortController();
+    let answered: unknown = 'pending';
+    const answer = client.transaction(ctl.signal, BOUNDS, async (sql) => { await sql`select 1`; return 'applied'; });
+    void answer.then((v) => { answered = v; }, (e: unknown) => { answered = e; });
+    for (let i = 0; i < 10; i++) await tick();
+    const [conn] = fake.connections;
+    assert.deepEqual(kinds(conn.texts).slice(-1), ['commit'], `${then}: COMMIT handed over, its answer held`);
+    ctl.abort();
+    for (let i = 0; i < 10; i++) await tick();
+    assert.equal(answered, 'pending', `${then}: an abort with COMMIT on its way does not answer before COMMIT's own outcome`);
+    answerCommit();
+    if (then === 'acknowledged') assert.equal(await answer, 'applied', 'acknowledged: the committed value, never unavailable');
+    else await assert.rejects(answer, (err: unknown) => err === TransactionFailure.outcomeUnknown, 'lost: outcomeUnknown, never unavailable');
+    for (let i = 0; i < 3; i++) await tick();
+    assert.deepEqual([conn.queries.find((q) => q.text === 'commit')?.cancelledAt, conn.texts.includes('discard all'), conn.released, conn.ended, fake.writesAfterClose()],
+      [0, false, 0, true, 0], `${then}: COMMIT never cancelled, no reset (${then === 'acknowledged' ? 'the caller aborted' : 'COMMIT unacknowledged'}), never released, the pool retired`);
+    await client.end();
+  }
+
+  // A close while COMMIT is on its way, never answered: the close rejects it, and that is outcomeUnknown — the close does
+  // not abandon the transaction as unavailable.
+  const closed = fakeDriver((text) => (text === 'commit' ? { stall: true } : {}));
+  const c2 = clientOver(closed);
+  const answer2 = c2.transaction(live(), BOUNDS, async (sql) => { await sql`select 1`; return 'applied'; });
+  for (let i = 0; i < 10; i++) await tick();
+  assert.deepEqual(kinds(closed.connections[0].texts).slice(-1), ['commit']);
+  closed.connections[0].close();
+  await assert.rejects(answer2, (err: unknown) => err === TransactionFailure.outcomeUnknown, 'a close with COMMIT handed over: outcomeUnknown');
+  assert.deepEqual([closed.connections[0].released, closed.connections[0].ended, closed.writesAfterClose()], [0, true, 0]);
+  await c2.end();
+
+  // An abort while a body statement runs: answered unavailable at the abort. The body catches its statement's cancel and
+  // returns a value anyway — and COMMIT (or anything else) is still never handed over.
+  const body = fakeDriver((text) => (/pg_sleep/.test(text) ? { hold: new Promise<void>(() => undefined) } : {}));
+  const c3 = clientOver(body);
+  const ctl3 = new AbortController();
+  let returned = false;
+  const answer3 = c3.transaction(ctl3.signal, BOUNDS, async (sql) => {
+    await sql`select 1`;
+    try { await sql`select pg_sleep(1000)`; } catch { /* the cancel, swallowed */ }
+    returned = true;
+    return 'applied';
+  });
+  for (let i = 0; i < 10; i++) await tick();
+  ctl3.abort();
+  await assert.rejects(answer3, isUnavailable, 'an abort before COMMIT: unavailable');
+  for (let i = 0; i < 10; i++) await tick();
+  const [conn3] = body.connections;
+  // The fake records no statement handed to a connection once it is ended (the abort retires the pool): writesAfterClose,
+  // not the texts, is what would see a COMMIT or ROLLBACK handed over after the abort.
+  assert.deepEqual([returned, kinds(conn3.texts), conn3.queries.find((q) => /pg_sleep/.test(q.text))!.cancelledAt > 0, conn3.released, conn3.ended, body.writesAfterClose()],
+    [true, ['open select 1', 'begin', 'settings', 'body', 'body'], true, 0, true, 0],
+    'the body returned a value after the abort, yet no COMMIT, ROLLBACK or reset was handed over; its statement was cancelled; the pool retired');
+  await c3.end();
+});
+
 test('a body that fails on a usable connection is rolled back and its own failure returned, once — nothing is retried', async () => {
   const fake = fakeDriver();
   const client = clientOver(fake);

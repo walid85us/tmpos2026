@@ -433,10 +433,13 @@ function unavailableReply(reply) {
 }
 /**
  * M6R-PERF-R2: what the instances' kernels did for their limiters between `from` and `to` (Date.now()): every transaction
- * open at some point in that span — `carriedIn` counts those handed over before it, such as a row's holder — how each ended,
- * the slowest from handover to the routine's answer and to its end, and the slowest from the routine's answer to its end:
- * the COMMIT and, unless an abort abandoned it, the connection's reset, while the bucket's row stays locked (a consume
- * waiting on that row fails with 55P03 after lock_timeout). A transaction still open at `to` counts to `to`.
+ * the kernel had not yet answered for at some point in that span — `carriedIn` counts those handed over before it, such
+ * as a row's holder — how the kernel answered for each, the slowest from handover to the routine's answer and to the
+ * kernel's answer, and the slowest from the routine's answer to the kernel's answer: the COMMIT and, unless an abort
+ * abandoned it, the connection's reset. These are the client's times, not the server's (M6R-PERF-R3): the bucket's row
+ * lock is held until the COMMIT or ROLLBACK ends the server's transaction — so the reset after a COMMIT is not lock time,
+ * and an abandoned transaction's lock can outlast the kernel's answer until a cancel or the disconnect reaches it; a
+ * consume waiting on that row fails with 55P03 after lock_timeout. One not yet answered for at `to` counts to `to`.
  */
 function limiterActivity(instances, from, to) {
   const txs = instances.flatMap((instance) => instance.limiterLog.filter((tx) => tx.at <= to && (tx.endedAt ?? to) >= from));
