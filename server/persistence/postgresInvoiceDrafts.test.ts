@@ -1,15 +1,16 @@
 // Phase 4.0 M7B-INVOICES-P1 — the PostgreSQL side of invoice drafts, DATABASE-FREE: what the save's mutator hands migration
 // 032's create (031's, with the Customers level guarded too: M7B-INVOICES-P1-R4) and how it reads the one row back; what the
-// reads hand 028's page and get and what they refuse to read back as an answer; and the readiness probe. The routines
-// themselves are proved against a real cluster (tests/db/invoiceDraftRoutine.integration.test.mjs,
-// tests/db/invoiceDraftsHttp.integration.test.mjs).
+// edit's (030) and the discard's (033, M7B-INVOICES-DISCARD-P1) mutators hand their routines and read back; what the reads
+// hand 033's open-only page_v2 and get_v2 (028's contract) and what they refuse to read back as an answer; and the readiness
+// probe. The routines themselves are proved against a real cluster (tests/db/invoiceDraftRoutine.integration.test.mjs,
+// tests/db/invoiceDraftsHttp.integration.test.mjs, tests/db/invoiceDraftDiscardRoutine.integration.test.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import {
-  INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_READ_BOUNDS, INVOICE_DRAFT_UPDATE_MUTATOR, createPostgresInvoiceDrafts, invoiceDraftAnswerOf, invoiceDraftPageAnswerOf,
-  probeInvoiceDrafts,
+  INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_DISCARD_MUTATOR, INVOICE_DRAFT_READ_BOUNDS, INVOICE_DRAFT_UPDATE_MUTATOR, createPostgresInvoiceDrafts, invoiceDraftAnswerOf,
+  invoiceDraftPageAnswerOf, probeInvoiceDrafts,
 } from './postgresInvoiceDrafts.js';
 import type { MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient } from './supervisedPgClient.js';
@@ -157,6 +158,69 @@ test('M7B-INVOICES-P2 AC-05 AC-06 AC-07 AC-10: the edit routine\'s one row decid
   }
 });
 
+// --- the discard's mutator (M7B-INVOICES-DISCARD-P1) -------------------------------------------------------------------------
+
+const discardMutation = (expectedVersion: unknown = 4, over: Record<string, unknown> = {}, aggregateId: unknown = DRAFT): TransactionMutation => Object.freeze({
+  kind: 'store.invoice_draft.discard', aggregateType: 'invoice_draft', aggregateId: aggregateId as string, expectedVersion: expectedVersion as number,
+  changes: Object.freeze({ storeId: STORE, expectedTenant: TENANT, ...over }),
+});
+
+test('M7B-INVOICES-DISCARD-P1 DSC-01 DSC-18: the discard\'s mutator is the store-scope update; ONE fixed call into 033\'s routine binding the key, the REVALIDATED store, the draft, the precondition and the expected version as bigint text — nothing else', async () => {
+  assert.deepEqual([INVOICE_DRAFT_DISCARD_MUTATOR.kind, INVOICE_DRAFT_DISCARD_MUTATOR.mode, INVOICE_DRAFT_DISCARD_MUTATOR.aggregateType, INVOICE_DRAFT_DISCARD_MUTATOR.contextScope],
+    ['store.invoice_draft.discard', 'update', 'invoice_draft', 'store']);
+  assert.ok(Object.isFrozen(INVOICE_DRAFT_DISCARD_MUTATOR), 'frozen');
+  const r = recorder([updateRow('applied', '5')]);
+  assert.equal(await INVOICE_DRAFT_DISCARD_MUTATOR.apply(r.sql, discardMutation(), authority()), 'applied');
+  assert.equal(r.texts.length, 1);
+  assert.equal(r.texts[0], `select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version
+    from tmpos_invoice_discard.m7b_invoice_draft_discard(?::text, ?::uuid, ?::uuid,
+      ?::uuid, ?::bigint)`, 'the exact statement text');
+  assert.deepEqual(r.values[0], [SESSION_KEY, STORE, DRAFT, TENANT, '4']);
+  // The largest expected version binds exactly, as text: 2^53 - 2, never through a float.
+  const top = recorder([updateRow('applied', String(MAX))]);
+  assert.equal(await INVOICE_DRAFT_DISCARD_MUTATOR.apply(top.sql, discardMutation(MAX - 1), authority()), 'applied');
+  assert.deepEqual(top.values[0], [SESSION_KEY, STORE, DRAFT, TENANT, String(MAX - 1)]);
+});
+
+test('M7B-INVOICES-DISCARD-P1 DSC-05 DSC-06 DSC-10 DSC-18: the discard routine\'s one row decides — applied only at expected + 1 for exactly the revalidated identities; every refusal names nothing; tenant_mismatch the precondition; never unchanged; anything else a mismatch — and no statement runs unless the store is the revalidated one', async () => {
+  const cases: Array<[string, unknown[], string]> = [
+    ['applied', [updateRow('applied', '5')], 'applied'],
+    ['applied at the expected version', [updateRow('applied', '4')], 'mismatch'], ['applied two ahead', [updateRow('applied', '6')], 'mismatch'],
+    ['applied with a numeric version', [updateRow('applied', 5 as never)], 'mismatch'], ['applied without a version', [updateRow('applied', null)], 'mismatch'],
+    ['applied for another tenant', [updateRow('applied', '5', { o_tenant_id: randomUUID() })], 'mismatch'],
+    ['applied at another store', [updateRow('applied', '5', { o_store_id: OTHER })], 'mismatch'],
+    ['applied by another actor', [updateRow('applied', '5', { o_actor_id: randomUUID() })], 'mismatch'],
+    ['applied under another grant', [updateRow('applied', '5', { o_membership_id: randomUUID() })], 'mismatch'],
+    ['applied naming no one', [updateRow('applied', '5', { o_tenant_id: null, o_store_id: null, o_actor_id: null, o_membership_id: null })], 'mismatch'],
+    ['conflict', [updateRow('conflict', null)], 'conflict'], ['invalid_state', [updateRow('invalid_state', null)], 'invalid_state'],
+    ['not_found', [updateRow('not_found', null)], 'not_found'], ['refused', [updateRow('refused', null)], 'refused'],
+    ['tenant_mismatch', [updateRow('tenant_mismatch', null)], 'precondition_failed'],
+    ['unchanged (no discard answers it)', [updateRow('unchanged', '4')], 'mismatch'],
+    ['a conflict naming a version', [updateRow('conflict', '4')], 'mismatch'], ['an invalid_state naming a version', [updateRow('invalid_state', '5')], 'mismatch'],
+    ['a not_found naming a store', [updateRow('not_found', null, { o_store_id: STORE })], 'mismatch'],
+    ['a refusal naming an actor', [updateRow('refused', null, { o_actor_id: ACTOR })], 'mismatch'],
+    ['a tenant_mismatch naming a tenant', [updateRow('tenant_mismatch', null, { o_tenant_id: TENANT })], 'mismatch'],
+    ['the create\'s word', [updateRow('customer_not_found', null)], 'mismatch'], ['an unknown word', [updateRow('denied', null)], 'mismatch'],
+    ['no row', [], 'mismatch'], ['two rows', [updateRow('applied', '5'), updateRow('applied', '5')], 'mismatch'],
+    ['an extra column', [{ ...updateRow('applied', '5'), o_extra: 1 }], 'mismatch'], ['the create\'s columns', [row('applied')], 'mismatch'],
+  ];
+  for (const [label, rows, expected] of cases) assert.equal(await INVOICE_DRAFT_DISCARD_MUTATOR.apply(recorder(rows).sql, discardMutation(), authority()), expected, label);
+  // DSC-18: never a call without the revalidated STORE context and its key, for a path store that is not the revalidated one,
+  // for a malformed draft or tenant, or for a version outside 1..2^53 - 2 — refused before any statement.
+  for (const [label, m, a] of [
+    ['no authority', discardMutation(), undefined], ['a tenant context', discardMutation(), authority({ scope: 'tenant', store: null })],
+    ['no key', discardMutation(), authority({}, null)], ['the path store is not the revalidated store', discardMutation(4, { storeId: OTHER }), authority()],
+    ['the revalidated store is another', discardMutation(), authority({ store: OTHER })], ['no store in the change set', discardMutation(4, { storeId: undefined }), authority()],
+    ['a non-uuid tenant', discardMutation(4, { expectedTenant: 'x' }), authority()], ['a non-uuid draft', discardMutation(4, {}, 'x'), authority()],
+    ['version 0', discardMutation(0), authority()], ['version 2^53 - 1', discardMutation(MAX), authority()], ['version null', discardMutation(null), authority()],
+    ['version 1.5', discardMutation(1.5), authority()], ['version as text', discardMutation('4'), authority()],
+  ] as const) {
+    const r = recorder([updateRow('applied', '5')]);
+    assert.equal(await INVOICE_DRAFT_DISCARD_MUTATOR.apply(r.sql, m, a), 'unavailable', label);
+    assert.equal(r.texts.length, 0, `${label}: no statement`);
+  }
+});
+
 // --- the reads -----------------------------------------------------------------------------------------------------------
 
 interface Fake extends SupervisedPgClient { readonly statements: string[]; readonly values: unknown[][]; readonly bounds: unknown[] }
@@ -189,11 +253,12 @@ const getRow = (position: number, over: Record<string, unknown> = {}) => ({
 });
 const GET_NULLS = Object.fromEntries(Object.keys(getRow(1)).filter((k) => k !== 'o_outcome').map((k) => [k, null]));
 
-test('AC-12: the page is ONE fixed call with the key and the TRUSTED tenant and store, the anchor id and limit + 1; rows become the page, the lookahead hasMore', async () => {
+test('AC-12 DSC-15: the page is ONE fixed call into 033\'s open-only page_v2 with the key and the TRUSTED tenant and store, the anchor id and limit + 1; rows become the page, the lookahead hasMore', async () => {
   const client = fakeClient([pageRow(1), pageRow(2), pageRow(3)]);
   const answer = await createPostgresInvoiceDrafts({ client }).page(SCOPE, SESSION_KEY, { after: D(0), limit: 2 }, live());
   assert.equal(client.statements.length, 1);
-  assert.match(client.statements[0], /from tmpos_invoice_draft\.m7b_invoice_draft_page\(\?::text, \?::uuid, \?::uuid, \?::uuid,\s+\?::integer\)$/);
+  assert.match(client.statements[0], /from tmpos_invoice_discard\.m7b_invoice_draft_page_v2\(\?::text, \?::uuid, \?::uuid, \?::uuid,\s+\?::integer\)$/);
+  assert.ok(!client.statements[0].includes('tmpos_invoice_draft.'), 'never 028\'s page, which 033 revokes');
   assert.deepEqual(client.values[0], [SESSION_KEY, TENANT, STORE, D(0), 3]);
   assert.equal(client.bounds[0], INVOICE_DRAFT_READ_BOUNDS);
   assert.deepEqual(answer, { outcome: 'page', hasMore: true, drafts: [1, 2].map((i) => ({
@@ -212,7 +277,7 @@ test('AC-02 AC-12: every row out of shape — another tenant or store above all 
     ['more than limit + 1', [pageRow(1), pageRow(2), pageRow(3), pageRow(4)], q], ['out of order', [pageRow(2), pageRow(1)], q],
     ['a draft twice', [pageRow(1), pageRow(1)], q], ['the anchor back', [pageRow(1)], { after: D(1), limit: 2 }],
     ['a float amount', [pageRow(1, { o_subtotal_cents: 100 })], q], ['an unsafe amount', [pageRow(1, { o_subtotal_cents: '9007199254740992' })], q],
-    ['another status', [pageRow(1, { o_status: 'issued' })], q], ['a millisecond time', [pageRow(1, { o_created_at: '2026-10-04T12:00:00.000Z' })], q],
+    ['another status', [pageRow(1, { o_status: 'issued' })], q], ['a discarded status', [pageRow(1, { o_status: 'discarded' })], q], ['a millisecond time', [pageRow(1, { o_created_at: '2026-10-04T12:00:00.000Z' })], q],
     ['invalid', [{ o_outcome: 'invalid', ...PAGE_NULLS }], q], ['cursor_unknown without a cursor', [{ o_outcome: 'cursor_unknown', ...PAGE_NULLS }], q],
     ['a refusal naming a store', [{ o_outcome: 'denied', ...PAGE_NULLS, o_store_id: STORE }], q], ['a refusal beside a draft', [{ o_outcome: 'denied', ...PAGE_NULLS }, pageRow(1)], q],
     ['an extra column', [{ ...pageRow(1), o_role_id: 'manager' }], q], ['not an array', { rows: [] }, q],
@@ -220,10 +285,11 @@ test('AC-02 AC-12: every row out of shape — another tenant or store above all 
   for (const [label, rows, query] of cases) assert.throws(() => invoiceDraftPageAnswerOf(rows, SCOPE, query), /invoice draft answer invalid/, label);
 });
 
-test('AC-02 AC-06: the get is ONE fixed call; its rows become the draft with exact amounts up to 2^53 - 1; missing and foreign alike pass as not_found; every inconsistency a throw', async () => {
+test('AC-02 AC-06 DSC-15: the get is ONE fixed call into 033\'s open-only get_v2; its rows become the draft with exact amounts up to 2^53 - 1; missing, discarded and foreign alike pass as not_found; every inconsistency — a discarded status above all — a throw', async () => {
   const client = fakeClient([getRow(1), getRow(2)]);
   const answer = await createPostgresInvoiceDrafts({ client }).get(SCOPE, SESSION_KEY, DRAFT, live());
-  assert.match(client.statements[0], /from tmpos_invoice_draft\.m7b_invoice_draft_get\(\?::text, \?::uuid, \?::uuid, \?::uuid\)$/);
+  assert.match(client.statements[0], /from tmpos_invoice_discard\.m7b_invoice_draft_get_v2\(\?::text, \?::uuid, \?::uuid, \?::uuid\)$/);
+  assert.ok(!client.statements[0].includes('tmpos_invoice_draft.'), 'never 028\'s get, which 033 revokes');
   assert.deepEqual(client.values[0], [SESSION_KEY, TENANT, STORE, DRAFT]);
   assert.deepEqual(answer, { outcome: 'draft', draft: {
     id: DRAFT, storeId: STORE, customerId: CUSTOMER, status: 'draft', currency: 'USD', version: 1, createdAt: AT, subtotalCents: 9007199254740991, lines: [
@@ -242,6 +308,7 @@ test('AC-02 AC-06: the get is ONE fixed call; its rows become the draft with exa
     ['a header that differs between rows', [getRow(1), getRow(2, { o_customer_id: randomUUID() })]], ['a missing line', [getRow(1)]],
     ['positions out of order', [getRow(2), getRow(1)]], ['a wrong line total', [getRow(1, { o_line_total_cents: '1' }), getRow(2)]],
     ['a subtotal not the sum', [getRow(1, { o_subtotal_cents: '1' }), getRow(2, { o_subtotal_cents: '1' })]],
+    ['a discarded status', [getRow(1, { o_status: 'discarded' }), getRow(2, { o_status: 'discarded' })]],
     ['version 0', [getRow(1, { o_version: '0' }), getRow(2, { o_version: '0' })]], ['version 2^53', [getRow(1, { o_version: '9007199254740992' }), getRow(2, { o_version: '9007199254740992' })]],
     ['version as a number', [getRow(1, { o_version: 2 }), getRow(2, { o_version: 2 })]], ['version 01', [getRow(1, { o_version: '01' }), getRow(2, { o_version: '01' })]],
     ['a version that differs between rows', [getRow(1, { o_version: '2' }), getRow(2, { o_version: '3' })]],
@@ -275,8 +342,8 @@ test('readiness: true only when both reads refuse a random key with their one de
   const client = fakeClient(both);
   assert.equal(await probeInvoiceDrafts(client, live()), true);
   assert.equal(client.statements.length, 2);
-  assert.match(client.statements[0], /m7b_invoice_draft_page\(/);
-  assert.match(client.statements[1], /m7b_invoice_draft_get\(/);
+  assert.match(client.statements[0], /from tmpos_invoice_discard\.m7b_invoice_draft_page_v2\(/);
+  assert.match(client.statements[1], /from tmpos_invoice_discard\.m7b_invoice_draft_get_v2\(/);
   assert.match(String(client.values[0][0]), /^[A-Za-z0-9_-]{43}$/, 'a random key of the store-key shape');
   assert.equal(await probeInvoiceDrafts(fakeClient((i) => (i === 0 ? [{ o_outcome: 'denied', ...PAGE_NULLS }] : [{ o_outcome: 'invalid', ...GET_NULLS }])), live()), false);
   assert.equal(await probeInvoiceDrafts(fakeClient([pageRow(1)]), live()), false);

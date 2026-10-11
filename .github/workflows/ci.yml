@@ -457,6 +457,31 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftCreateAuthorityHttp.integration.test.mjs
+      # M7B-INVOICES-DISCARD-P1 — migration 033's draft discard as the runtime login (the postcondition and its refusals, the
+      # exact surface and grants, the Manage threshold on stored levels, the state before the version, edit/discard and
+      # discard/discard ordering on the header, an owner's narrowing and a session expiry while the discard waits, the terminal
+      # guards through owner paths, the open-only page and get, no deadlock against either level writer, 033's down refused
+      # while a discarded draft exists and otherwise rolled back, restored and re-applied, and 032's, 030's, 029's and 028's
+      # downs refused while 033 is applied), then the discard end to end over real loopback HTTP on two tenant entries (the
+      # Manage boundary and its eligibility, the owner's PUT while a discard waits, revocations ordered against the commit,
+      # non-enumerating 404s and the trailing path, the sealed 409s, key reuse, injected faults, both lost-COMMIT branches, the
+      # hidden draft in the reads, the audit record, replay against current authority), against the SAME disposable service.
+      # Every step that rolls 033 or an older migration back runs BEFORE them (each rolls 033 back first, which a discarded
+      # draft would refuse), so they sit right after the create authority steps; the routine suite rolls 033 back and
+      # re-applies it itself, so it runs BEFORE the HTTP suite, whose discards leave discarded drafts until its own teardown.
+      # Each ends with 001-033 applied and no draft (open or discarded), line, role row or audit subject of its own: it removes
+      # its drafts with the terminal triggers lifted only inside one owner transaction and leaves them ALWAYS. Synthetic data
+      # and keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Invoice draft discard routine against disposable PostgreSQL (M7B-INVOICES-DISCARD-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftDiscardRoutine.integration.test.mjs
+      - name: Invoice draft discard over HTTP against the tenant entry and disposable PostgreSQL (M7B-INVOICES-DISCARD-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceDraftDiscardHttp.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

@@ -54,6 +54,11 @@
 // to the authorizer as RouteView.storeTarget — the canonical lowercase uuid, or null for any other spelling, which then
 // selects no grant (a 403 like a missing or foreign store) — and nothing else ever reads it. A path outside that grammar is
 // no route (the terminal 404). No literal route may sit below /api/v1/stores/.
+// M7B-INVOICES-P2 adds PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} (a second idempotency-required `command`) and GET
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility; M7B-INVOICES-DISCARD-P1 adds POST
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/discard (a third, the first command with a literal segment after {id}: the
+// chain reads its target before the matched route's own suffix, app.ts) and GET
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility — eight store templates, three of them commands.
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -219,8 +224,9 @@ export interface CommandContext {
    * planner validates it and the store's mutator decides whether it names anything. For the store template's command
    * (M7B-INVOICES-P1: POST /api/v1/stores/{storeId}/invoice-drafts) it is the store the path selects — the one the
    * authorizer selected the actor's grant at — so one key and body at two stores never replay each other's answer. For a
-   * store template's command that also carries {id} (M7B-INVOICES-P2: PATCH /api/v1/stores/{storeId}/invoice-drafts/{id})
-   * it is that {id} — the draft — and the store is `storeId` below.
+   * store template's command that also carries {id} (M7B-INVOICES-P2: PATCH /api/v1/stores/{storeId}/invoice-drafts/{id};
+   * M7B-INVOICES-DISCARD-P1: POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard, read before the matched route's own
+   * suffix) it is that {id} — the draft — and the store is `storeId` below.
    */
   readonly targetId?: string;
   /**
@@ -425,7 +431,8 @@ export const STORE_SEGMENT = '/{storeId}';
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
 /**
  * The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1; the eligibility read since M7B-INVOICES-P1-R2; the edit
- * and its eligibility read since M7B-INVOICES-P2): any other {storeId} template is refused.
+ * and its eligibility read since M7B-INVOICES-P2; the discard and its eligibility read since M7B-INVOICES-DISCARD-P1): any
+ * other {storeId} template is refused.
  */
 const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`,
@@ -433,10 +440,16 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts/eligibility`,
   `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/edit-eligibility`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/discard`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/discard-eligibility`,
 ]);
-/** The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create and the draft edit. */
+/**
+ * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit and
+ * (M7B-INVOICES-DISCARD-P1) the draft discard.
+ */
 const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/discard`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -545,7 +558,8 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
  * response never replays in another's context, and the tenant store re-proves both inside the committing
  * transaction while holding the presenting session — which a Bearer-authenticated tenant route does not
  * have, and a `perform` never reaches. A store-scoped route may require one only as a store command decided
- * (M7B-INVOICES-P1, M7B-INVOICES-P2): a tenant-session `command` on the closed store POST or PATCH template, whose
+ * (M7B-INVOICES-P1, M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1): a tenant-session `command` on the closed store POST, PATCH
+ * or discard POST template, whose
  * fingerprint binds the trusted tenant, store and actor the same way; every other store-scoped route may not.
  */
 function parseIdempotency(raw: unknown, method: string, path: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
@@ -651,7 +665,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly six declared strings, so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly eight declared strings (M7B-INVOICES-DISCARD-P1), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -720,8 +734,9 @@ const isIdSegment = (segment: string): boolean =>
  * one more id segment. A rest that is exactly a store template's literal rest matches that template first, so
  * /invoice-drafts/eligibility (M7B-INVOICES-P1-R2) is never the {id} template's. The store selector is never part of any
  * other lookup. M7B-INVOICES-P2: failing those, the store template with {id} before one literal last segment matches when
- * the segment before the last is an id segment and the rest is exactly that template's (only the edit eligibility's is
- * declared, so a PATCH or any other suffix there matches nothing).
+ * the segment before the last is an id segment and the rest is exactly that template's (the edit eligibility's GET and,
+ * since M7B-INVOICES-DISCARD-P1, the discard's POST and its eligibility's GET are declared, so another method or any other
+ * suffix there matches nothing).
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();

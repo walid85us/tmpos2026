@@ -95,6 +95,14 @@
 // line-only edit that keeps the current customer). So the store thresholds admit View, Create and Edit. Decided exactly
 // like the other two: the same materializer, ordering, owner-edited levels and read_only rule (read_only caps at View, so
 // it never reaches Edit); no key, default or ordering of the catalog changes.
+//
+// M7B-INVOICES-DISCARD-P1 UPDATE — ONE STORE ROUTE PERMISSION AT MANAGE (owner decision D-DIS-2). discard_invoice_drafts, the
+// Invoices domain at Manage or above, with NO corequisite and no recent sign-in. The load-time guard is widened NARROWLY:
+// View, Create and Edit stay the general rule, and the one entry admitted above them is exactly this key on Invoices at
+// Manage — any other key at Manage, this key at any other threshold, and Approve or Full anywhere still refuse to load.
+// Decided exactly like the other three (the same materializer, canonical ordering, owner-edited levels and read_only rule,
+// which denies it: read_only caps at View), so Edit alone does not discard, Full (manager's default) does, and the owner
+// is Full wherever it holds a store grant; no key, default or ordering of the catalog changes.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -213,14 +221,20 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
  * requested store (tenantAuthorization.ts). Each names one tenant DOMAIN and the level the store grant's role must hold on
  * it — its tenant's owner-edited level, the catalog default otherwise — and, where a draft also names a customer, a
  * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View, Create or
- * Edit, shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain.
- *   * view_invoice_drafts   — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
- *   * create_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts and, since M7B-INVOICES-P1-R2, its read-only
+ * Edit — or is exactly discard_invoice_drafts at Invoices Manage with no corequisite, the one entry admitted above Edit
+ * (M7B-INVOICES-DISCARD-P1, D-DIS-2) — shares no key with a sub-permission or a tenant route permission, and any corequisite
+ * is View on a different domain (assertStoreRoutePermissions).
+ *   * view_invoice_drafts    — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
+ *   * create_invoice_drafts  — POST /api/v1/stores/{storeId}/invoice-drafts and, since M7B-INVOICES-P1-R2, its read-only
  *     creation eligibility GET /api/v1/stores/{storeId}/invoice-drafts/eligibility: the Invoices domain at Create or above
  *     AND the Customers domain at View or above.
- *   * edit_invoice_drafts   — PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and its read-only edit eligibility
+ *   * edit_invoice_drafts    — PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and its read-only edit eligibility
  *     GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility (M7B-INVOICES-P2): the Invoices domain at Edit or
  *     above, and nothing else.
+ *   * discard_invoice_drafts — POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard and its read-only discard
+ *     eligibility GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility (M7B-INVOICES-DISCARD-P1): the
+ *     Invoices domain at Manage or above, and nothing else (no Customers corequisite, no recent sign-in). Edit alone does not
+ *     reach it; read-only never does (the read_only rule: View only).
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
@@ -229,19 +243,35 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
     corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
   })],
   ['edit_invoice_drafts', Object.freeze({ key: 'edit_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'edit' as const })],
+  ['discard_invoice_drafts', Object.freeze({ key: 'discard_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'manage' as const })],
 ]));
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
-for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
-  if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
-  if (entry.sensitive || entry.threshold === null || !STORE_ROUTE_THRESHOLDS.has(entry.threshold)) {
-    throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold');
-  }
-  const corequisite = entry.corequisite;
-  if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {
-    throw new Error('a store route permission corequisite is not View on another domain');
+/** The one store route permission admitted at Manage (M7B-INVOICES-DISCARD-P1): exactly this key, on Invoices, no corequisite. */
+const STORE_ROUTE_MANAGE_KEY = 'discard_invoice_drafts';
+
+/**
+ * The load-time guard over a store route permission table: throws unless every entry is non-sensitive at View, Create or
+ * Edit, or is exactly the discard pair (key discard_invoice_drafts, parent invoices, threshold manage, no corequisite); any
+ * other key at Manage, that key at any other threshold, and Approve or Full anywhere are refused. Exported so its refusals
+ * can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
+ */
+export function assertStoreRoutePermissions(permissions: ReadonlyMap<string, CanonicalPermission>): void {
+  for (const [key, entry] of permissions) {
+    if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
+    const manage = key === STORE_ROUTE_MANAGE_KEY;
+    if (entry.sensitive || entry.threshold === null || (manage
+      ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'manage' || entry.corequisite !== undefined
+      : !STORE_ROUTE_THRESHOLDS.has(entry.threshold))) {
+      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage');
+    }
+    const corequisite = entry.corequisite;
+    if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {
+      throw new Error('a store route permission corequisite is not View on another domain');
+    }
   }
 }
+assertStoreRoutePermissions(STORE_ROUTE_PERMISSIONS);
 
 /** The one message a refusal to evaluate the tenant plane carries, so every caller says the same thing. */
 export const GAP_11_TENANT_ORDERING_UNRESOLVED =

@@ -1,6 +1,7 @@
-// Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator, the edit's mutator (M7B-INVOICES-P2)
-// and the two reads' production adapter (server/runtime/invoiceDrafts.ts), each one fixed call into migration 028's, 030's or
-// 032's session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION, G-PERSIST).
+// Phase 4.0 M7b — the PostgreSQL side of store-owned invoice drafts: the save's mutator, the edit's mutator (M7B-INVOICES-P2),
+// the discard's mutator (M7B-INVOICES-DISCARD-P1) and the two reads' production adapter (server/runtime/invoiceDrafts.ts),
+// each one fixed call into migration 030's, 032's or 033's session-bound routines (M7B-INVOICES-P1; G-IAM, G-ISOLATION,
+// G-PERSIST).
 //
 // THE MUTATOR (INVOICE_DRAFT_CREATE_MUTATOR, context scope 'store'). The one business mutation the tenant store commits for
 // POST /api/v1/stores/{storeId}/invoice-drafts, handed to the store in trusted source by the tenant transaction root alone.
@@ -40,11 +41,25 @@
 // refusal — is 'mismatch' (rolled back, the 503). A raise is not caught, as for the save. The version is bigint text,
 // compared as text, never through a float.
 //
+// THE DISCARD'S MUTATOR (INVOICE_DRAFT_DISCARD_MUTATOR, M7B-INVOICES-DISCARD-P1, context scope 'store'). For POST
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/discard, at the same point of the same order, one statement —
+// tmpos_invoice_discard.m7b_invoice_draft_discard (migration 033) — bound like the edit's: the session key, the REVALIDATED
+// trusted store as p_store_id (the change set's storeId must equal it, or nothing is called), the draft (the command's
+// aggregate id), the expected tenant and the expected version as bigint text. Its answers, one row: 'applied' naming exactly
+// this transaction's tenant, store, actor and grant at expectedVersion + 1; every refusal with every other column null —
+// 'conflict' (another version: the sealed 409), 'invalid_state' (not 'draft': the sealed 409), 'not_found' (a missing or
+// foreign draft: rolled back, the 404), 'tenant_mismatch' as 'precondition_failed' (rolled back, the unsealed 409),
+// 'refused' (rolled back, the 503). Anything else is 'mismatch' (rolled back, the 503). It writes nothing else and the store
+// enqueues no event for it (its contract declares none). A raise is not caught, as for the save.
+//
 // THE READS (createPostgresInvoiceDrafts). page and get each run ONE statement on the kernel's client, in one short
-// transaction: the routine is handed the session key and the TRUSTED scope's tenant and store as its expected ones (never
+// transaction — M7B-INVOICES-DISCARD-P1: migration 033's open-only tmpos_invoice_discard.m7b_invoice_draft_page_v2 and
+// m7b_invoice_draft_get_v2 (028's contract, a discarded draft excluded in SQL; 033 revokes 028's two from the runtime) — and
+// the routine is handed the session key and the TRUSTED scope's tenant and store as its expected ones (never
 // anything the request carried beyond a validated anchor id, draft id and page size). Every row is untrusted: a refusal must
 // be the routine's only row with every other column null; every other row must name exactly the trusted tenant and store —
-// any mismatch is a fault — and carry well-formed values (canonical ids, status 'draft', 'USD', a version that is a safe
+// any mismatch is a fault — and carry well-formed values (canonical ids, status 'draft' (a discarded row reaching here is a
+// fault: the SQL already excludes them), 'USD', a version that is a safe
 // integer >= 1 (M7B-INVOICES-P2: an edit steps it), a microsecond UTC creation time, bigint amounts as exact decimal text
 // within 2^53 - 1, ordered rows). Anything else — more rows than asked,
 // an 'invalid' answer (every argument was checked first, so it is a fault), an abort, a timeout, a lost connection, a driver
@@ -59,8 +74,8 @@ import { isTrustedScope } from '../runtime/principals.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
 import {
-  INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_CURRENCY, INVOICE_DRAFT_MAX_LIMIT, INVOICE_DRAFT_MAX_LINES, INVOICE_DRAFT_STATUS,
-  INVOICE_DRAFT_UPDATE_CONTRACT, inInvoiceDraftOrder, isDraftCreatedAt, normalizeDraftDescription,
+  INVOICE_DRAFT_CREATE_CONTRACT, INVOICE_DRAFT_CURRENCY, INVOICE_DRAFT_DISCARD_CONTRACT, INVOICE_DRAFT_MAX_LIMIT, INVOICE_DRAFT_MAX_LINES,
+  INVOICE_DRAFT_STATUS, INVOICE_DRAFT_UPDATE_CONTRACT, inInvoiceDraftOrder, isDraftCreatedAt, normalizeDraftDescription,
 } from '../runtime/invoiceDrafts.js';
 import type { InvoiceDraftListQuery, InvoiceDraftReadPort } from '../runtime/invoiceDrafts.js';
 import type { AggregateMutator, MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
@@ -166,6 +181,41 @@ export const INVOICE_DRAFT_UPDATE_MUTATOR: AggregateMutator = Object.freeze({
   aggregateType: INVOICE_DRAFT_UPDATE_CONTRACT.aggregateType,
   contextScope: 'store',
   apply: applyInvoiceDraftUpdate,
+});
+
+async function applyInvoiceDraftDiscard(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<string> {
+  const context = authority?.context ?? null;
+  const sessionKey = authority?.sessionKey ?? null;
+  const { aggregateId, expectedVersion, changes } = mutation;
+  const { storeId, expectedTenant } = changes;
+  // As the edit: the revalidated STORE context and its key, the path's store equal to the revalidated one (DSC-18), a uuid
+  // draft and tenant, and the planner's version bound — else nothing is called.
+  if (context === null || context.scope !== 'store' || context.tenant === null || context.store === null || typeof sessionKey !== 'string') return 'unavailable';
+  if (storeId !== context.store || !isUuid(aggregateId) || !isUuid(expectedTenant)) return 'unavailable';
+  if (typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1
+    || expectedVersion > Number.MAX_SAFE_INTEGER - 1) return 'unavailable';
+  const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version
+    from tmpos_invoice_discard.m7b_invoice_draft_discard(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid,
+      ${expectedTenant}::uuid, ${String(expectedVersion)}::bigint)`;
+  if (rows.length !== 1 || !hasColumns(rows[0], UPDATE_COLUMNS)) return 'mismatch';
+  const { o_outcome: outcome, o_tenant_id: tenant, o_store_id: store, o_actor_id: actor, o_membership_id: membership, o_version: version } = rows[0];
+  if (outcome === 'applied') {
+    const identified = tenant === context.tenant && store === context.store && actor === context.actor && membership === context.membershipId;
+    return identified && version === String(expectedVersion + 1) ? 'applied' : 'mismatch';
+  }
+  // A refusal names nothing: every other column null. A discard never answers 'unchanged'.
+  if (tenant !== null || store !== null || actor !== null || membership !== null || version !== null) return 'mismatch';
+  if (outcome === 'tenant_mismatch') return 'precondition_failed';
+  return typeof outcome === 'string' && UPDATE_REFUSALS.has(outcome) ? outcome : 'mismatch';
+}
+
+/** The mutator the tenant inventory registers for the draft discard (M7B-INVOICES-DISCARD-P1; server/composition/tenantTransactions.ts). */
+export const INVOICE_DRAFT_DISCARD_MUTATOR: AggregateMutator = Object.freeze({
+  kind: INVOICE_DRAFT_DISCARD_CONTRACT.kind,
+  mode: 'update',
+  aggregateType: INVOICE_DRAFT_DISCARD_CONTRACT.aggregateType,
+  contextScope: 'store',
+  apply: applyInvoiceDraftDiscard,
 });
 
 // ---------------------------------------------------------------------------
@@ -303,7 +353,7 @@ export function createPostgresInvoiceDrafts(deps: { readonly client: SupervisedP
       const { limit, after } = query;
       return client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => invoiceDraftPageAnswerOf(
         await sql`select o_outcome, o_tenant_id, o_store_id, o_draft_id, o_customer_id, o_status, o_currency, o_line_count, o_subtotal_cents, o_created_at
-          from tmpos_invoice_draft.m7b_invoice_draft_page(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${after}::uuid,
+          from tmpos_invoice_discard.m7b_invoice_draft_page_v2(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${after}::uuid,
             ${limit + 1}::integer)`,
         scope, query,
       ));
@@ -314,7 +364,7 @@ export function createPostgresInvoiceDrafts(deps: { readonly client: SupervisedP
       return client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => invoiceDraftAnswerOf(
         await sql`select o_outcome, o_tenant_id, o_store_id, o_draft_id, o_customer_id, o_status, o_currency, o_version, o_created_at,
             o_line_count, o_subtotal_cents, o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents
-          from tmpos_invoice_draft.m7b_invoice_draft_get(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${draftId}::uuid)`,
+          from tmpos_invoice_discard.m7b_invoice_draft_get_v2(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${draftId}::uuid)`,
         scope, draftId,
       ));
     },
@@ -329,11 +379,11 @@ export async function probeInvoiceDrafts(client: SupervisedPgClient, signal: Abo
   try {
     return await client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => {
       const page = await sql`select o_outcome, o_tenant_id, o_store_id, o_draft_id, o_customer_id, o_status, o_currency, o_line_count, o_subtotal_cents, o_created_at
-        from tmpos_invoice_draft.m7b_invoice_draft_page(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${null}::uuid, ${1}::integer)`;
+        from tmpos_invoice_discard.m7b_invoice_draft_page_v2(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${null}::uuid, ${1}::integer)`;
       if (!Array.isArray(page) || page.length !== 1 || !hasColumns(page[0], PAGE_COLUMNS) || page[0].o_outcome !== 'denied' || !isRefusal(page[0], PAGE_COLUMNS)) return false;
       const got = await sql`select o_outcome, o_tenant_id, o_store_id, o_draft_id, o_customer_id, o_status, o_currency, o_version, o_created_at,
           o_line_count, o_subtotal_cents, o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents
-        from tmpos_invoice_draft.m7b_invoice_draft_get(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${draft}::uuid)`;
+        from tmpos_invoice_discard.m7b_invoice_draft_get_v2(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${draft}::uuid)`;
       return Array.isArray(got) && got.length === 1 && hasColumns(got[0], GET_COLUMNS) && got[0].o_outcome === 'denied' && isRefusal(got[0], GET_COLUMNS);
     });
   } catch {

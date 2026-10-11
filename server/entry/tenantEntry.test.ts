@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 20 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 22 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -230,8 +230,11 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 20 frozen tenant routes', ()
     // M7B-INVOICES-P2: the edit's eligibility, read-only, and the idempotent draft edit.
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'json', idempotency: 'required' },
+    // M7B-INVOICES-DISCARD-P1: the discard's eligibility, read-only, and the idempotent draft discard.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard', access: 'session', body: 'json', idempotency: 'required' },
   ]);
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 20);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 22);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });
@@ -649,6 +652,19 @@ test('M7TU-16 the host lock: the customer route and the login answer the bounded
       assert.equal((await send(port, 'GET', path, { host: TENANT_HOST })).status, 404, path);
     }
     assert.equal((await send(port, 'POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility`, { host: TENANT_HOST })).status, 404, 'no POST names the eligibility');
+    // M7B-INVOICES-DISCARD-P1: the discard and its eligibility reach the chain for any id segment (the discard answered exactly
+    // as the save's POST is, the eligibility the 401 with no session, both before the id is judged); another method or suffix
+    // there is no route.
+    const saveStatus = (await send(port, 'POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host: TENANT_HOST })).status;
+    assert.notEqual(saveStatus, 404, 'the save reaches the chain');
+    for (const segment of [DETAIL_ID, 'NOT-AN-ID']) {
+      assert.equal((await send(port, 'POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${segment}/discard`, { host: TENANT_HOST })).status, saveStatus, `${segment}/discard`);
+      assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${segment}/discard-eligibility`, { host: TENANT_HOST })).status, 401, `${segment}/discard-eligibility`);
+    }
+    for (const [method, path] of [['GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/discard`], ['POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/discard-eligibility`],
+      ['POST', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}/discard/x`], ['DELETE', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/${DETAIL_ID}`]] as const) {
+      assert.equal((await send(port, method, path, { host: TENANT_HOST })).status, 404, `${method} ${path}`);
+    }
     for (const host of [ADMIN_HOST, 'unknown.tmpos.test']) {
       assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts`, { host })).status, 404, `the draft list on ${host}`);
       assert.equal((await send(port, 'GET', `/api/v1/stores/${DETAIL_ID}/invoice-drafts/eligibility`, { host })).status, 404, `the eligibility on ${host}`);

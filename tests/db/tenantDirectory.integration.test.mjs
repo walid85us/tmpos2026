@@ -197,11 +197,11 @@ const routine = (sql, s, after = null, limit = 51) => sql`select o_outcome, o_te
 // migration 012 as applied
 // ---------------------------------------------------------------------------
 
-test('M5T-01: 001-032 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
+test('M5T-01: 001-033 apply clean; 012 is one STABLE SECURITY DEFINER routine in its own schema, reachable by tmpos_app alone', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032'].map((v) => [v, false]));
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033'].map((v) => [v, false]));
   const routines = await owner`select p.proname, p.prosecdef, p.provolatile, p.proconfig
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_directory'::regnamespace`;
   assert.deepEqual(routines.map((r) => ({ ...r })), [{

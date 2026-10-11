@@ -636,6 +636,13 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // applied), through the same executor.
     'tests/db/invoiceDraftCreateAuthority.integration.test.mjs',
     'tests/db/invoiceDraftCreateAuthorityHttp.integration.test.mjs',
+    // M7B-INVOICES-DISCARD-P1: the draft-discard proofs (migration 033's routine, terminal guards, open-only reads and the HTTP
+    // discard) stand up every migration in the directory — the routine proof also rolls 033 back through its down file, finds
+    // the older downs refused while 033 is applied, and re-applies 033 — through the SAME trusted executor, validating their
+    // target with the same assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment
+    // property above is untouched.
+    'tests/db/invoiceDraftDiscardRoutine.integration.test.mjs',
+    'tests/db/invoiceDraftDiscardHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

@@ -1,6 +1,8 @@
 # 11 — Discarding a saved server invoice draft: decision pack and route contract
 
-**Status: PROPOSED / UNADOPTED.** This is a proposal for the owner to decide (stage M7B-INVOICES-D1-P1, documentation only). Nothing in it is implemented, and it adopts no new policy. Each rule is labelled:
+**Status update (M7B-INVOICES-DISCARD-P1, 2026-10-11): D-DIS-1 to D-DIS-5 ACCEPTED** by the owner's stage instruction, exactly as §9 words them, and adopted for implementation as code only. The server slice (migration 033, the route, its eligibility read and the permission) is delivered first; the shop slice and the documentation of record (ADR-49, docs 05, 08 and 09) follow in this stage. Nothing is deployed or applied to a managed database. Until that record lands, the text below is the decision pack as it was proposed; where it says PROPOSED, read "accepted for this slice".
+
+**Original status: PROPOSED / UNADOPTED.** This is a proposal for the owner to decide (stage M7B-INVOICES-D1-P1, documentation only). Nothing in it is implemented, and it adopts no new policy. Each rule is labelled:
 - **FIXED** quotes policy already adopted, with a citation to where it is set.
 - **EXISTING** describes current code.
 - **PROPOSED** marks every new rule.

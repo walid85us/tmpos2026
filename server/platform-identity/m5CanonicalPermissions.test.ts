@@ -9,6 +9,7 @@ import {
   BUILT_IN_PLATFORM_ROLES,
   STORE_ROUTE_PERMISSIONS,
   TENANT_ROUTE_PERMISSIONS,
+  assertStoreRoutePermissions,
   canonicalPermission,
   evaluateCanonicalPermission,
   isDecidablePermission,
@@ -356,9 +357,9 @@ test('edit_customers (M7A-CUSTOMERS-P7) is the Customers domain at Edit or above
   }
 });
 
-test('isDecidablePermission: every platform key, the four tenant route permissions at tenant scope and the three store route permissions at store scope — nothing else', () => {
+test('isDecidablePermission: every platform key, the four tenant route permissions at tenant scope and the four store route permissions at store scope — nothing else', () => {
   for (const sub of PLATFORM_SUB_PERMISSIONS) assert.equal(isDecidablePermission('platform', sub.id), true, sub.id);
-  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
+  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']) {
     assert.equal(isDecidablePermission('store', key), true, key);
     for (const scope of ['tenant', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${key}`);
   }
@@ -524,8 +525,8 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-test('M7B: exactly three store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
-  assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()], ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']);
+test('M7B: exactly four store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()], ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']);
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
     { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
@@ -533,6 +534,9 @@ test('M7B: exactly three store route permissions, decided at store scope only, n
   // M7B-INVOICES-P2: Invoices at Edit, and no corequisite (design D1).
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('edit_invoice_drafts'),
     { key: 'edit_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'edit' });
+  // M7B-INVOICES-DISCARD-P1 (D-DIS-2): Invoices at Manage, and no corequisite.
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('discard_invoice_drafts'),
+    { key: 'discard_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'manage' });
   const subIds = new Set(TENANT_SUB_PERMISSIONS.map((sub) => sub.id));
   for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
     assert.ok(Object.isFrozen(entry) && (entry.corequisite === undefined || Object.isFrozen(entry.corequisite)), key);
@@ -622,5 +626,78 @@ test('M7B-INVOICES-P2: edit_invoice_drafts is Invoices at Edit or above on every
   // Only at store scope: the key names nothing at tenant or platform scope.
   for (const scope of ['tenant', 'platform'] as const) {
     assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'edit_invoice_drafts', limitation: 'none', levels: {} }), 'denied', scope);
+  }
+});
+
+// --- M7B-INVOICES-DISCARD-P1: discard_invoice_drafts at Invoices Manage, and the narrowly widened guard ---------------------
+
+test('M7B-INVOICES-DISCARD-P1 DSC-23 (D-DIS-2): the load-time guard admits Manage for exactly discard_invoice_drafts on Invoices with no corequisite — any other key at Manage, that key at any other threshold or domain, a corequisite, a sensitive entry, and Approve or Full anywhere are refused', () => {
+  assert.doesNotThrow(() => assertStoreRoutePermissions(STORE_ROUTE_PERMISSIONS), 'the shipped table loads');
+  const entry = (key: string, threshold: string, over: Record<string, unknown> = {}) =>
+    Object.freeze({ key, plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold, ...over });
+  const discard = STORE_ROUTE_PERMISSIONS.get('discard_invoice_drafts');
+  assert.ok(discard !== undefined);
+  const without = [...STORE_ROUTE_PERMISSIONS].filter(([key]) => key !== 'discard_invoice_drafts');
+  const table = (...extra: Array<[string, unknown]>) => new Map([...without, ...extra]) as never;
+  // Controls: the table without the discard, and with exactly the discard pair re-added, both load.
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table()), 'View, Create and Edit stay the general rule');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table(['discard_invoice_drafts', entry('discard_invoice_drafts', 'manage')])), 'the one Manage pair');
+  for (const [label, extra] of [
+    ['another key at Manage', ['archive_invoice_drafts', entry('archive_invoice_drafts', 'manage')]],
+    ['another key at Manage beside the discard', ['archive_invoice_drafts', entry('archive_invoice_drafts', 'manage')]],
+    ['the discard at Edit', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'edit')]],
+    ['the discard at View', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'view')]],
+    ['the discard at Create', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'create')]],
+    ['the discard at Approve', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'approve')]],
+    ['the discard at Full', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'full')]],
+    ['the discard on Customers', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'manage', { parent: 'customers' })]],
+    ['the discard with a Customers corequisite', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'manage', { corequisite: Object.freeze({ parent: 'customers', threshold: 'view' }) })]],
+    ['the discard sensitive', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'manage', { sensitive: true })]],
+    ['the discard pair under another entry key', ['discard_invoice_drafts', entry('edit_invoice_drafts', 'manage')]],
+    ['the discard with no threshold', ['discard_invoice_drafts', entry('discard_invoice_drafts', null as never)]],
+    ['another key at Approve', ['approve_invoice_drafts', entry('approve_invoice_drafts', 'approve')]],
+    ['another key at Full', ['purge_invoice_drafts', entry('purge_invoice_drafts', 'full')]],
+    ['the edit at Manage', ['edit_invoice_drafts', entry('edit_invoice_drafts', 'manage')]],
+  ] as const) {
+    const extras: Array<[string, unknown]> = label === 'another key at Manage beside the discard'
+      ? [['discard_invoice_drafts', discard], extra as [string, unknown]] : [extra as [string, unknown]];
+    assert.throws(() => assertStoreRoutePermissions(table(...extras)), /not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage/, label);
+  }
+  // The other guards still hold for the new entry's neighbours.
+  assert.throws(() => assertStoreRoutePermissions(table(['view_customers', entry('view_customers', 'view', { parent: 'customers' })])), /collides with a tenant permission/);
+});
+
+test('M7B-INVOICES-DISCARD-P1 DSC-02 (D-DIS-2): discard_invoice_drafts is Invoices at Manage or above on every built-in role — Edit denies, Manage, Approve and Full allow, the owner and a default manager allow, read-only never, Customers never matters', () => {
+  const decide = (roleId: string, levels: unknown = {}, limitation: 'none' | 'read_only' = 'none') =>
+    evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'discard_invoice_drafts', limitation, levels });
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r), decide(r, {}, 'read_only')]), [
+    ['store_owner', 'granted', 'denied'],
+    ['manager', 'granted', 'denied'],
+    ['technician', 'denied', 'denied'],
+    ['sales_staff', 'denied', 'denied'],
+  ], 'the owner and a default manager (Full) may discard; technician (View) and sales staff (Create) may not; read-only never');
+  const LEVELS = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+  for (const roleId of ['manager', 'technician', 'sales_staff']) {
+    for (const level of LEVELS) {
+      const expected = ['manage', 'approve', 'full'].includes(level) ? 'granted' : 'denied';
+      for (const customers of [undefined, 'none', 'full']) {
+        const levels = customers === undefined ? { invoices: level } : { invoices: level, customers };
+        assert.equal(decide(roleId, levels), expected, `${roleId} ${JSON.stringify(levels)}`);
+        assert.equal(decide(roleId, levels, 'read_only'), 'denied', `${roleId} read_only ${JSON.stringify(levels)}`);
+      }
+    }
+  }
+  // Edit alone does not discard: a manager the owner set to Edit edits and is refused the discard — the role's name grants nothing.
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission: 'edit_invoice_drafts', limitation: 'none', levels: { invoices: 'edit' } }), 'granted');
+  assert.equal(decide('manager', { invoices: 'edit' }), 'denied');
+  // The owner is Full wherever it holds a store grant: an edit stored against store_owner never applies.
+  assert.equal(decide('store_owner', { invoices: 'none', customers: 'none' }), 'granted');
+  // Levels are required and validated; unknown roles and limitations deny; only at store scope.
+  for (const levels of [null, [], 'x', { invoices: 'Manage' }, { invoice: 'full' }]) assert.equal(decide('manager', levels), 'denied', JSON.stringify(levels));
+  for (const roleId of ['system_owner', 'cashier', '', 'Manager']) assert.equal(decide(roleId), 'denied', roleId);
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission: 'discard_invoice_drafts', limitation: 'limited' as never, levels: {} }), 'denied');
+  for (const scope of ['tenant', 'platform'] as const) {
+    assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'discard_invoice_drafts', limitation: 'none', levels: {} }), 'denied', scope);
+    assert.equal(canonicalPermission(scope, 'discard_invoice_drafts'), null, scope);
   }
 });

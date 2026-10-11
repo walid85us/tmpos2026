@@ -192,7 +192,7 @@ test('the selector is the actor\'s own grants: exactly one at the route\'s scope
   // M7B-INVOICES-P1: a store requirement on a view naming no store (a literal path) selects NOTHING — not even the actor's
   // one store grant — whatever the key: the undecidable catalogued one and both decided store route permissions.
   const single = admitted([grant({ scopeType: 'store', store: STORE, storeStatus: 'active' })]);
-  for (const permission of [CANONICAL, 'view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
+  for (const permission of [CANONICAL, 'view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']) {
     assert.equal(await authorize(stub(single), { scope: 'store', permission }, undefined, ROUTE), false, `one store grant on a literal path: ${permission}`);
   }
   // The same one store grant AT the store a store template names, under an active tenant, selects, so the rules above are not vacuous.
@@ -728,7 +728,7 @@ test('M7B-AZ-01 view_invoice_drafts and create_invoice_drafts are decided on the
   assert.equal((await decide('manager', VIEW_DRAFTS, { invoices: 'none' })).granted, false, 'view: a manager narrowed to Invoices None');
   assert.equal((await decide('technician', VIEW_DRAFTS, { customers: 'none' })).granted, true, 'view needs no Customers level');
   // The keys name nothing at tenant scope, and the tenant keys nothing at store scope.
-  for (const permission of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
+  for (const permission of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']) {
     assert.equal(grantedOf(await withLevels(stub(admitted([grant()])), {}).decide({ scope: 'tenant', permission })), false, `${permission} at tenant scope`);
   }
   // (A catalogued but undecidable sub-permission such as reopen_invoice is still judged on membership and lifecycle alone, as
@@ -944,6 +944,28 @@ test('M7B-RV-03 (M7B-INVOICES-P2) the revalidator decides edit_invoice_drafts ag
   for (const [label, over, scope, expected] of cases) {
     const { revalidate, steps } = revalidator(over);
     assert.equal(await revalidate('tx', scope, 'edit_invoice_drafts', null, KEY), false, label);
+    assert.deepEqual(steps.map(([step]) => step), expected, `${label}: steps`);
+  }
+});
+
+test('M7B-RV-04 (M7B-INVOICES-DISCARD-P1, D-DIS-2) the revalidator decides discard_invoice_drafts again on the role\'s CURRENT level: Manage or above holds; Edit or below, a technician or sales staff at its default, a read-only scope are false', async () => {
+  assert.equal(await revalidator({ read: storeRead() }).revalidate('tx', STORE_SCOPE, 'discard_invoice_drafts', null, KEY), true, 'a manager at its default (Full)');
+  for (const level of ['manage', 'approve', 'full']) {
+    assert.equal(await revalidator({ read: storeRead(), levels: { invoices: level, customers: 'none' } }).revalidate('tx', STORE_SCOPE, 'discard_invoice_drafts', null, KEY), true, level);
+  }
+  const cases: Array<[string, Parameters<typeof revalidator>[0], TrustedScope, string[]]> = [
+    ['a manager narrowed to Invoices Edit', { read: storeRead(), levels: { invoices: 'edit' } }, STORE_SCOPE, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a manager narrowed to Invoices Create', { read: storeRead(), levels: { invoices: 'create' } }, STORE_SCOPE, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a technician at its default (View)', { read: admitted([storeGrantOf('technician')]) }, { ...STORE_SCOPE, roleId: 'technician' }, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['sales staff at its default (Create)', { read: admitted([storeGrantOf('sales_staff')]) }, { ...STORE_SCOPE, roleId: 'sales_staff' }, ['peek', 'hold', 'session', 'read', 'levels']],
+    ['a read-only store scope', {}, { ...STORE_SCOPE, limitation: 'read_only' }, []],
+    ['a store turned read-only', { read: storeRead({ storeStatus: 'read_only' }) }, STORE_SCOPE, ['peek', 'hold', 'session', 'read']],
+    ['a recent-authentication claim (the discard declares none)', {}, STORE_SCOPE, []],
+  ];
+  for (const [label, over, scope, expected] of cases) {
+    const { revalidate, steps } = revalidator(over);
+    const authNotAfter = label.startsWith('a recent-authentication') ? 1_700_000_000_000 : null;
+    assert.equal(await revalidate('tx', scope, 'discard_invoice_drafts', authNotAfter, KEY), false, label);
     assert.deepEqual(steps.map(([step]) => step), expected, `${label}: steps`);
   }
 });

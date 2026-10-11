@@ -371,19 +371,33 @@ const PINNED = {
   // and still refuses. Both 032 keys are assembled at run time, as 031's are.
   [`032_m7b_invoice_create_customers_${'authority'}.up.sql`]: 'a4b29e3a1dcac8a2395dc995e8548eb1b85a730975e2ce87057d482c5926f76a',
   [`032_m7b_invoice_create_customers_${'authority'}.down.sql`]: 'be245bb523e69de6fe029c8dfff5f00647cc07aca82f32c10438b60a01420c16',
+  // Phase 4.0 M7B-INVOICES-DISCARD-P1 — discarding a saved store invoice draft (owner decisions D-DIS-1 to D-DIS-5). In its OWN
+  // schema tmpos_invoice_discard: the VOLATILE SECURITY DEFINER discard routine m7b_invoice_draft_discard (030's edit derivation
+  // and guard at Invoices Manage; draft -> discarded, version + 1, nothing else written), the STABLE open-only reads
+  // m7b_invoice_draft_page_v2 and m7b_invoice_draft_get_v2 (028's bodies with status = 'draft'), two SECURITY INVOKER trigger
+  // functions granted to nobody behind two ENABLE ALWAYS BEFORE INSERT OR UPDATE OR DELETE row triggers that make 'discarded'
+  // terminal on the header and its lines, and a SQL-standard-body anchor whose recorded dependencies refuse the rollbacks of
+  // 032, 030, 029 and 028 while it is applied; 028's status CHECK widened to ('draft', 'discarded') under its own name and a
+  // partial index of the open page. tmpos_app gains USAGE on the schema and EXECUTE on the three routines and loses EXECUTE on
+  // 028's page and get, which stay in place; no table, column, row, role or membership (001-032 byte for byte). Its rollback
+  // refuses while any draft is discarded and otherwise restores the 032-era contract. Proved against disposable PostgreSQL
+  // only; applied to no managed, persistent or application database. D4 now names the contiguous chain through 033; the
+  // exact-[005] gate is unchanged and still refuses. Both 033 keys are assembled at run time, as 032's are.
+  [`033_m7b_invoice_draft_${'discard'}.up.sql`]: 'ea4c3080da7523fe711e5bbac94af09e576a82e81f15194dd81442e06be1b130',
+  [`033_m7b_invoice_draft_${'discard'}.down.sql`]: '310aaf2f9901aad57a9d82989e0b10304462e6e3f3625139fc26cd5b027f4842',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the sixty-four expected files', () => {
+test('the migrations directory holds exactly the sixty-six expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

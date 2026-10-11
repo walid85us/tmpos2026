@@ -14,7 +14,7 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–032, clean, checksums pinned (each of 020-032 moves with its build);
+//    5. the migration ledger — exactly 001–033, clean, checksums pinned (each of 020-033 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
@@ -63,8 +63,13 @@
 // /api/v1/stores/{storeId}/invoice-drafts/{id}, a versioned edit of that draft's customer and lines (idempotent, committed
 // through the tenant store with its audit record, its one outbox event and its completion; the draft id is the fingerprint's
 // target), and GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility, whether an edit would be authorized at that
-// store now, decided under the edit's own requirement and writing no business row; each authorized only
-// through the actor's own store grant at exactly that store — then the bounded 404.
+// store now, decided under the edit's own requirement and writing no business row; — M7B-INVOICES-DISCARD-P1 — GET
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility, whether a discard would be authorized at that store now,
+// decided under the discard's own requirement and writing no business row, and POST
+// /api/v1/stores/{storeId}/invoice-drafts/{id}/discard, a logical, terminal discard of that draft (idempotent, committed
+// through the tenant store with its audit record and its completion and NO outbox event; the draft id is the
+// fingerprint's target); each authorized only through the actor's own store grant at exactly that store — then the bounded
+// 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -121,6 +126,8 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**

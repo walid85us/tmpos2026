@@ -1,7 +1,8 @@
 // Phase 4.0 M7b — store-owned invoice drafts: save one, list a store's, reopen one read-only (M7B-INVOICES-P1; G-IAM,
-// G-ISOLATION, G-PERSIST, G-IDEMPOT, G-AUDIT; docs/phase-4/10), and edit a saved one (M7B-INVOICES-P2; see THE EDIT).
+// G-ISOLATION, G-PERSIST, G-IDEMPOT, G-AUDIT; docs/phase-4/10), edit a saved one (M7B-INVOICES-P2; see THE EDIT), and
+// discard a saved one (M7B-INVOICES-DISCARD-P1; see THE DISCARD).
 //
-// THE SIX ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
+// THE EIGHT ROUTES, the route table's closed STORE templates (routes.ts), each a session route of the TENANT boundary
 // requiring a STORE-scope permission (m5CanonicalPermissions.ts STORE_ROUTE_PERMISSIONS):
 //   POST  /api/v1/stores/{storeId}/invoice-drafts              create_invoice_drafts — save a draft (a command, under a key)
 //   GET   /api/v1/stores/{storeId}/invoice-drafts              view_invoice_drafts   — the store's drafts, newest first
@@ -12,6 +13,10 @@
 //                                                                                     (M7B-INVOICES-P2; a command, under a key)
 //   GET   /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility
 //                                                              edit_invoice_drafts   — whether an edit would be authorized now
+//   POST  /api/v1/stores/{storeId}/invoice-drafts/{id}/discard discard_invoice_drafts — discard a saved draft (logical, terminal)
+//                                                                                      (M7B-INVOICES-DISCARD-P1; a command, under a key)
+//   GET   /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility
+//                                                              discard_invoice_drafts — whether a discard would be authorized now
 // The {storeId} segment is a REQUESTED TARGET: the chain hands it to the tenant authorizer, which selects the actor's OWN
 // active store-scope grant at exactly that store (no tenant-to-store inheritance; none, two roles at one store, a foreign
 // or missing store and a non-canonical segment are all the same 403), decides the permission on that grant's role and its
@@ -66,7 +71,10 @@
 // nextCursor only behind a full page. Get: { "draft": { "id", "storeId", "customerId", "status", "currency", "version",
 // "createdAt", "subtotalCents", "lines": [ { "position", "description", "quantity", "unitPriceCents", "lineTotalCents" } ]
 // } }; a missing id and another store's or tenant's are the same 404 not_found. createdAt is the database's UTC time with
-// microseconds (YYYY-MM-DDTHH:MM:SS.ffffffZ). A draft names its customer by id only: a display name is the existing
+// microseconds (YYYY-MM-DDTHH:MM:SS.ffffffZ). M7B-INVOICES-DISCARD-P1: both reads serve OPEN drafts only — migration 033's
+// page and get exclude a discarded one in SQL, before counting and paging, so a discarded draft is absent from the list
+// and its reopen is the same 404 as a missing one; a status other than 'draft' reaching this module is still a fault (the
+// bounded 503), never served. A draft names its customer by id only: a display name is the existing
 // Customers-authorized read's to resolve. Both reads declare the session binding (the presenting session's CSRF token in
 // X-TMPOS-Session-CSRF, even on GET) and hand their routine the session key; every answer is validated again here before
 // it reaches a response, and anything out of shape is a bounded 503. No read writes an audit record (the customer reads'
@@ -113,8 +121,8 @@
 // customer and the same ordered lines (equal totals alone are not equal; reordering is a change) at the current version
 // write nothing but the sealed 200 { "draftId", "version": expectedVersion, "changed": false } — no version step, no audit
 // record, no event. Another version — a stale no-op included — is the sealed 409 { "error": "write_conflict" }; a draft
-// whose state admits no edit is the sealed 409 { "error": "invalid_state" } (unreachable while migration 028 pins the status
-// to draft); a missing draft, another store's or tenant's, and a missing or another tenant's customer are ONE unsealed 404
+// whose state admits no edit is the sealed 409 { "error": "invalid_state" } (since M7B-INVOICES-DISCARD-P1, a discarded draft:
+// a stale editor fails closed); a missing draft, another store's or tenant's, and a missing or another tenant's customer are ONE unsealed 404
 // not_found, rolled back. Each sealed answer is the key's completion: a retry under the key replays it, even after a later
 // edit moved the version. A lost COMMIT answer is the bounded 503, as for the save.
 //
@@ -124,7 +132,33 @@
 // scope check. It reads no draft, so its answer is the same for every well-formed id: it never tells whether a draft exists.
 // The creation eligibility is unchanged and proves Create only; neither answer authorizes the other's route.
 //
-// NOT HERE (deferred, owner decisions): discarding or deleting a draft, issuing and numbering, tax, discounts, shipping,
+// THE DISCARD (M7B-INVOICES-DISCARD-P1; owner decisions D-DIS-1..5, docs/phase-4/11). POST …/{id}/discard moves one saved
+// draft's status 'draft' to the terminal 'discarded': nothing is deleted (its row, lines, id, version counter and audit records
+// stay), and no restore exists in this slice. Authority: discard_invoice_drafts — Invoices at Manage or above on the store
+// grant's role (Edit alone is refused, Full admits it), on any draft in the trusted store whoever created it; no Customers
+// level, no recent sign-in, read-only never. Request exactly { expectedTenant, expectedVersion }, no other key:
+// expectedTenant is the save's precondition (another tenant is the same unsealed 409 write_conflict, rolled back);
+// expectedVersion is the version the reopen read reported, a safe integer from 1 to 2^53 - 2. The path's draft id must match
+// the outbox's aggregate-id shape, as the edit's; app.ts reads it directly before the matched route's own '/discard' suffix
+// and binds it as the fingerprint's target beside the trusted tenant, store and actor. The body is bounded at 1 KiB. In ONE
+// transaction: the lease fence; the store-scope revalidation (Invoices Manage decided again); the mutator's one call into
+// migration 033's tmpos_invoice_discard.m7b_invoice_draft_discard, which derives the caller from the session key, locks the
+// header in the trusted tenant and store, takes the role's guard key SHARED and decides the Invoices level again under it,
+// then judges the state BEFORE the version (D-DIS-3), and steps the version by exactly one; one audit record (action
+// store.invoice_draft.discard, permission discard_invoice_drafts, scope store, the draft as its subject, metadata {}); NO
+// outbox event (D-DIS-4: the contract declares none); the sealed 200 { "draftId", "version": expectedVersion + 1, "status":
+// "discarded" }; COMMIT. Another version is the sealed 409 { "error": "write_conflict" }; a draft already discarded (any
+// state but 'draft') is the sealed 409 { "error": "invalid_state" } — never a no-op 200, and it takes precedence over the
+// version; a missing draft, another store's or tenant's is ONE unsealed 404 not_found, rolled back. Each sealed answer is
+// the key's completion: a retry under the key replays it byte for byte, even though the reads now hide the draft. A lost
+// COMMIT answer is the bounded 503, as for the save and the edit.
+//
+// THE DISCARD ELIGIBILITY (M7B-INVOICES-DISCARD-P1). The discard's counterpart of THE EDIT ELIGIBILITY, decided by the
+// discard's own requirement object (INVOICE_DRAFT_DISCARD_REQUIREMENT) with exactly its conventions and its one handler
+// (idEligibilityRoute): no query, the scope at the path's store, a canonical id segment, then 200 { "eligibility":
+// "allowed" }. It reads no draft, acquires no lease and reserves no version or authority; it never authorizes the POST.
+//
+// NOT HERE (deferred, owner decisions): deleting or restoring a draft, issuing and numbering, tax, discounts, shipping,
 // payments, fractional quantities, catalog prices, legacy customer or invoice mapping, retention and privacy.
 //
 // PURE AND PORTABLE: part of the emitted tenant runtime artifact, importing only the runtime. The planner holds no
@@ -151,13 +185,23 @@ export const INVOICE_DRAFT_ELIGIBILITY_PATH = `${INVOICE_DRAFTS_PATH}/eligibilit
 const EDIT_ELIGIBILITY_SUFFIX = '/edit-eligibility';
 /** The edit-eligibility template (M7B-INVOICES-P2): the draft's {id}, then one literal segment. */
 export const INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH = `${INVOICE_DRAFT_PATH}${EDIT_ELIGIBILITY_SUFFIX}`;
+/** The discard template's last segment, after the draft id (M7B-INVOICES-DISCARD-P1). */
+const DISCARD_SUFFIX = '/discard';
+/** The discard template (M7B-INVOICES-DISCARD-P1): the draft's {id}, then one literal segment — a command. */
+export const INVOICE_DRAFT_DISCARD_PATH = `${INVOICE_DRAFT_PATH}${DISCARD_SUFFIX}`;
+/** The discard-eligibility template's last segment, after the draft id (M7B-INVOICES-DISCARD-P1). */
+const DISCARD_ELIGIBILITY_SUFFIX = '/discard-eligibility';
+/** The discard-eligibility template (M7B-INVOICES-DISCARD-P1): the draft's {id}, then one literal segment. */
+export const INVOICE_DRAFT_DISCARD_ELIGIBILITY_PATH = `${INVOICE_DRAFT_PATH}${DISCARD_ELIGIBILITY_SUFFIX}`;
 /**
  * The store route permissions (m5CanonicalPermissions.ts): Invoices View; Invoices Create with Customers View; Invoices Edit
- * (M7B-INVOICES-P2: the edit and its eligibility share this one object).
+ * (M7B-INVOICES-P2: the edit and its eligibility share this one object); Invoices Manage (M7B-INVOICES-DISCARD-P1: the
+ * discard and its eligibility share this one object).
  */
 export const INVOICE_DRAFT_VIEW_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'view_invoice_drafts' });
 export const INVOICE_DRAFT_CREATE_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'create_invoice_drafts' });
 export const INVOICE_DRAFT_EDIT_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'edit_invoice_drafts' });
+export const INVOICE_DRAFT_DISCARD_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'discard_invoice_drafts' });
 
 /** Lines per draft, and a line description's length in Unicode scalar values (migration 028's CHECKs). */
 export const INVOICE_DRAFT_MAX_LINES = 50;
@@ -166,6 +210,8 @@ export const INVOICE_DRAFT_DESCRIPTION_MAX_CHARACTERS = 256;
 export const INVOICE_DRAFT_MAX_AMOUNT = Number.MAX_SAFE_INTEGER;
 /** The save's body bound (the stage brief): 64 KiB. */
 export const INVOICE_DRAFT_MAX_BODY_BYTES = 64 * 1024;
+/** The discard's body bound (M7B-INVOICES-DISCARD-P1, doc 11 §5 B): 1 KiB — two keys, a uuid and a version, fit well inside it. */
+export const INVOICE_DRAFT_DISCARD_MAX_BODY_BYTES = 1024;
 /** The list's page sizes. */
 export const INVOICE_DRAFT_DEFAULT_LIMIT = 20;
 export const INVOICE_DRAFT_MAX_LIMIT = 50;
@@ -385,6 +431,64 @@ const UPDATE_ROUTE: RouteDefinition = {
 /** The edit route, as the tenant inventory registers it (server/composition/tenantTransactions.ts). */
 export const INVOICE_DRAFT_UPDATE_ROUTE: RouteDefinition = Object.freeze(UPDATE_ROUTE);
 
+/**
+ * The discard (M7B-INVOICES-DISCARD-P1; see THE DISCARD): an update of the same aggregate whose change set carries the path's
+ * store and the expected tenant alone, and which enqueues NO event (owner decision D-DIS-4). No typed sealed refusal.
+ */
+export const INVOICE_DRAFT_DISCARD_CONTRACT: CommandContract = Object.freeze({
+  kind: 'store.invoice_draft.discard',
+  mode: 'update',
+  aggregateType: 'invoice_draft',
+  changes: Object.freeze({ storeId: ID_FIELD, expectedTenant: ID_FIELD }),
+  events: Object.freeze([]),
+  contextScope: 'store',
+});
+
+const DISCARD_BODY_KEYS: readonly string[] = ['expectedTenant', 'expectedVersion'];
+
+/**
+ * The discard's plan from its context alone, or COMMAND_REQUEST_INVALID (M7B-INVOICES-DISCARD-P1; see THE DISCARD): the path's
+ * draft and store, the expected tenant and version, no event, and the one 200 — built from the plan alone, so it is
+ * deterministic and sealed. No unchanged answer: a discard is never a no-op (D-DIS-3).
+ */
+export function planInvoiceDraftDiscard(ctx: CommandContext): CommandPlan | typeof COMMAND_REQUEST_INVALID {
+  // As the edit: the path's draft id (read by app.ts before the route's own '/discard' suffix) in the outbox's aggregate-id
+  // shape, and the path's store, which app.ts proved is the trusted scope's.
+  const id = ctx.targetId;
+  const storeId = ctx.storeId;
+  if (typeof id !== 'string' || !AGGREGATE_ID_RE.test(id) || !isUuid(storeId)) return COMMAND_REQUEST_INVALID;
+  const body: unknown = ctx.body;
+  if (!isObject(body) || !hasKeys(body, DISCARD_BODY_KEYS)) return COMMAND_REQUEST_INVALID;
+  const { expectedTenant, expectedVersion } = body;
+  if (!isUuid(expectedTenant)) return COMMAND_REQUEST_INVALID;
+  // 1..2^53 - 2, as the edit's: expectedVersion + 1 is still exact and within the column's bound.
+  if (!isWhole(expectedVersion, 1) || expectedVersion > Number.MAX_SAFE_INTEGER - 1) return COMMAND_REQUEST_INVALID;
+  return {
+    aggregateId: id,
+    expectedVersion,
+    changes: { storeId, expectedTenant },
+    events: [],
+    response: { status: 200, body: { draftId: id, version: expectedVersion + 1, status: 'discarded' } },
+  };
+}
+
+// Frozen throughout, as the save's.
+const DISCARD_ROUTE: RouteDefinition = {
+  method: 'POST',
+  path: INVOICE_DRAFT_DISCARD_PATH,
+  policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: INVOICE_DRAFT_DISCARD_REQUIREMENT } as const),
+  body: Object.freeze({ kind: 'json', maxBytes: INVOICE_DRAFT_DISCARD_MAX_BODY_BYTES, required: true } as const),
+  idempotency: 'required',
+  // As the save and the edit: a resolved actor and store grant; no fresh authentication (D-DIS-2); the store binds the
+  // presenting session.
+  trustedContext: 'required',
+  recentAuth: 'none',
+  command: Object.freeze({ contract: INVOICE_DRAFT_DISCARD_CONTRACT, plan: planInvoiceDraftDiscard }),
+};
+
+/** The discard route, as the tenant inventory registers it (server/composition/tenantTransactions.ts). */
+export const INVOICE_DRAFT_DISCARD_ROUTE: RouteDefinition = Object.freeze(DISCARD_ROUTE);
+
 // ---------------------------------------------------------------------------
 // The reads: the cursor, the query, the answers' validation and the two routes
 // ---------------------------------------------------------------------------
@@ -488,7 +592,8 @@ export interface InvoiceDraft {
 }
 
 /**
- * The port to migration 028's two session-bound reads, each handed the trusted STORE scope (its tenant and store are the
+ * The port to the two session-bound reads (migration 028's contract, served since M7B-INVOICES-DISCARD-P1 by migration 033's
+ * open-only page_v2 and get_v2), each handed the trusted STORE scope (its tenant and store are the
  * routine's expected ones), the presenting session's session key (a SQL parameter it never logs, echoes or stores) and the
  * request's validated values. Answers are untrusted input, expected to be
  *   page: { outcome: 'page', drafts: InvoiceDraftSummary[], hasMore } | { outcome: 'denied' } | { outcome: 'cursor_unknown' };
@@ -762,15 +867,16 @@ export function createInvoiceDraftEligibilityRoute(): RouteDefinition {
 }
 
 /**
- * Whether the session's actor may edit a draft at the path's store now (M7B-INVOICES-P2; see THE EDIT ELIGIBILITY). The
- * chain decides it under INVOICE_DRAFT_EDIT_REQUIREMENT — the edit's own requirement object — before this handler runs; the
- * handler reads no port and writes no business row, and checks the id segment's shape only, never whether a draft exists.
+ * A target-blind eligibility read at `{id}` then `suffix`, under a command's own requirement object: the chain decides it
+ * before the handler runs; the handler reads no port and writes no business row, and checks the id segment's shape only,
+ * never whether a draft exists. The edit's and (M7B-INVOICES-DISCARD-P1) the discard's eligibility are built here, so the
+ * two answer with one handler, one order and the chain's same headers.
  */
-export function createInvoiceDraftEditEligibilityRoute(): RouteDefinition {
+function idEligibilityRoute(path: string, authorization: AuthorizationRequirement, suffix: string, queryReason: string): RouteDefinition {
   const route: RouteDefinition = {
     method: 'GET',
-    path: INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH,
-    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization: INVOICE_DRAFT_EDIT_REQUIREMENT } as const),
+    path,
+    policy: Object.freeze({ access: 'session', audience: 'tenant', authorization } as const),
     body: Object.freeze({ kind: 'none' } as const),
     idempotency: 'none',
     trustedContext: 'required',
@@ -778,13 +884,32 @@ export function createInvoiceDraftEditEligibilityRoute(): RouteDefinition {
     sessionBinding: 'required',
     handler: (req, res, ctx) => {
       // The reopen route's order: the query, the scope, then the id segment (one canonical lowercase uuid).
-      if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_edit_eligibility_query_invalid');
+      if ((typeof req.url === 'string' ? req.url : '').includes('?')) return refuse(res, ctx, 400, 'invalid_request', queryReason);
       if (readerOf(req, ctx) === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
-      if (pathIdBeforeSuffixOf(typeof req.path === 'string' ? req.path : '', EDIT_ELIGIBILITY_SUFFIX) === null) {
+      if (pathIdBeforeSuffixOf(typeof req.path === 'string' ? req.path : '', suffix) === null) {
         return refuse(res, ctx, 400, 'invalid_request', 'invoice_draft_id_invalid');
       }
       res.status(200).json({ eligibility: 'allowed' });
     },
   };
   return Object.freeze(route);
+}
+
+/**
+ * Whether the session's actor may edit a draft at the path's store now (M7B-INVOICES-P2; see THE EDIT ELIGIBILITY), decided
+ * under INVOICE_DRAFT_EDIT_REQUIREMENT — the edit's own requirement object.
+ */
+export function createInvoiceDraftEditEligibilityRoute(): RouteDefinition {
+  return idEligibilityRoute(INVOICE_DRAFT_EDIT_ELIGIBILITY_PATH, INVOICE_DRAFT_EDIT_REQUIREMENT, EDIT_ELIGIBILITY_SUFFIX,
+    'invoice_draft_edit_eligibility_query_invalid');
+}
+
+/**
+ * Whether the session's actor may discard a draft at the path's store now (M7B-INVOICES-DISCARD-P1; see THE DISCARD
+ * ELIGIBILITY), decided under INVOICE_DRAFT_DISCARD_REQUIREMENT — the discard's own requirement object. Target-blind: it reads
+ * no draft, so its answer is the same for every well-formed id.
+ */
+export function createInvoiceDraftDiscardEligibilityRoute(): RouteDefinition {
+  return idEligibilityRoute(INVOICE_DRAFT_DISCARD_ELIGIBILITY_PATH, INVOICE_DRAFT_DISCARD_REQUIREMENT, DISCARD_ELIGIBILITY_SUFFIX,
+    'invoice_draft_discard_eligibility_query_invalid');
 }

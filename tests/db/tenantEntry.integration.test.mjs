@@ -94,6 +94,11 @@
 //
 // M7B-INVOICES-P1-R4 UPDATE (Customers authority of the guarded draft save). Migration 032 adds the version-3 save routine and the
 // Customers level guard: the ledger is 001-032, so M7TE-10 judges 032 as the newest row and its fake next row is '033'.
+//
+// M7B-INVOICES-DISCARD-P1 UPDATE (draft discard). Migration 033 adds the open-only draft reads, the discard routine, the discarded
+// status and two terminal-state triggers, in its own schema; the tenant entry serves two routes more (the discard POST and its
+// bodiless eligibility GET: twenty-two): M7TE-01 pins twenty-two routes, the ledger is 001-033, so M7TE-10 judges 033 as the newest
+// row and its fake next row is '034'.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -872,8 +877,9 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     // (M7A-CUSTOMERS-P3-R2) is a bodiless session read, and so is its Invoices sibling (M5-INVOICES-AUTH-P1), and so is the
     // store directory (M7B-INVOICES-P1); the invoice drafts' save is a third body-bearing, idempotent route, their list and
     // read bodiless session reads (M7B-INVOICES-P1), and so is the save's creation eligibility (M7B-INVOICES-P1-R2); the draft
-    // edit is a fourth body-bearing, idempotent route and its edit eligibility a bodiless session read (M7B-INVOICES-P2):
-    // twenty routes.
+    // edit is a fourth body-bearing, idempotent route and its edit eligibility a bodiless session read (M7B-INVOICES-P2); the
+    // draft discard is a fifth body-bearing, idempotent route and its discard eligibility a bodiless session read
+    // (M7B-INVOICES-DISCARD-P1): twenty-two routes.
     assert.deepEqual(canonical(ctx.result.routes), [
       'GET /api/v1/customers session none none',
       'GET /api/v1/customers/{id} session none none',
@@ -885,6 +891,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'GET /api/v1/stores/{storeId}/invoice-drafts session none none',
       'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility session none none',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id} session none none',
+      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility session none none',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility session none none',
       'GET /health public none none',
       'GET /readiness public none none',
@@ -894,6 +901,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'POST /api/v1/session/login login none none',
       'POST /api/v1/session/logout session none none',
       'POST /api/v1/stores/{storeId}/invoice-drafts session json required',
+      'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard session json required',
       'PUT /api/v1/roles/levels session json required',
     ]);
     assert.equal(ctx.bindAttempts, 1, 'exactly one real bind attempt');
@@ -1195,31 +1203,31 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-032 refuses startup migration_state_invalid', async () => {
+test('M7TE-10: a migration ledger that is not exactly 001-033 refuses startup migration_state_invalid', async () => {
   // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); M7A-CUSTOMERS-P6 made it 023 (the contact
   // records), M7A-CUSTOMERS-P7 024 (customer edits), M7A-CUSTOMERS-P8 025 (the name search), M5-INVOICES-AUTH-P1 026 (the Invoices level)
   // and M7B-INVOICES-P1 027 (store discovery) and 028 (invoice drafts), M7B-INVOICES-P2 029 (the draft edit) and
   // M7B-INVOICES-P2-R1 030 (the Invoices authority guard) and M7B-INVOICES-P1-R3 031 (the guarded draft save) and
-  // M7B-INVOICES-P1-R4 032 (the Customers authority of the guarded draft save), so the fake "next migration" row is '033' — the
-  // restore below never removes the real 032 row it re-inserts.
+  // M7B-INVOICES-P1-R4 032 (the Customers authority of the guarded draft save) and M7B-INVOICES-DISCARD-P1 033 (the draft
+  // discard), so the fake "next migration" row is '034' — the restore below never removes the real 033 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '032'`;
-  assert.ok(row !== undefined, '032 is recorded');
+    from public.schema_migrations where version = '033'`;
+  assert.ok(row !== undefined, '033 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('032', '033')`;
+    await sql`delete from public.schema_migrations where version in ('033', '034')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '032'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 031'));
+    await owner`delete from public.schema_migrations where version = '033'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 032'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 032').digest('hex')} where version = '032'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '032 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 033').digest('hex')} where version = '033'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '033 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('033', ${createHash('sha256').update('033').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 033'));
+      values ('034', ${createHash('sha256').update('034').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 034'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1229,7 +1237,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-032 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '032'`;
+    from public.schema_migrations where version = '033'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 

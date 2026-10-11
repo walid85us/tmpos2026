@@ -156,7 +156,9 @@ import type { CommandContract, CommandTransactionDeps, CommandTransactions } fro
 import { defineOutboxEvents } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
-import { COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_SEGMENT, defineRoutes, pathIdOf, sessionPaths, storeTargetOf } from './routes.js';
+import {
+  COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_SEGMENT, defineRoutes, pathIdBeforeSuffixOf, pathIdOf, sessionPaths, storeTargetOf,
+} from './routes.js';
 import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 import type { TrustedScope } from './principals.js';
 
@@ -511,12 +513,13 @@ const PROBE_REUSE_MS = 1_000;
 const NO_BYTES = Buffer.alloc(0);
 
 /**
- * The one UPDATE contract whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by its kind
- * (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT). Every other update's
- * is the 503. The tenant store admits the answer from the same kind alone (postgresTransactionalStore.ts). A literal, as
- * app.ts imports no route module; postgresTransactionalStore.test.ts fails if it, the store's or the contract's kind drift.
+ * The UPDATE contracts whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by kind: a closed
+ * set of exactly two (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
+ * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT). Every other update's is the 503. The tenant
+ * store admits the answer from the same kinds alone (postgresTransactionalStore.ts). Literals, as app.ts imports no route
+ * module; postgresTransactionalStore.test.ts fails if this set, the store's or the contracts' kinds drift.
  */
-export const PRECONDITION_UPDATE_KIND = 'store.invoice_draft.update';
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard']);
 
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
 function forwardedForOf(req: Request): string | string[] | undefined {
@@ -810,10 +813,12 @@ export function createApp(deps: AppDeps): Express {
     try {
       // Map lookups: nothing is read or parsed. A template (routes.ts) matches its prefix, one raw id segment and its own
       // literal suffix, if it has one; the route's view and log class carry the template's path, never the segment. Only
-      // the three templated commands (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7, whose target is its id;
-      // POST /api/v1/stores/{storeId}/invoice-drafts, M7B-INVOICES-P1, whose target is its store; and
-      // PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, M7B-INVOICES-P2, whose target is its id) carry their validated
-      // segment further: into the idempotency fingerprint's target slot and the planner's ctx.targetId (below), never a log.
+      // the four templated commands (PATCH /api/v1/customers/{id}, M7A-CUSTOMERS-P7, whose target is its id;
+      // POST /api/v1/stores/{storeId}/invoice-drafts, M7B-INVOICES-P1, whose target is its store;
+      // PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}, M7B-INVOICES-P2, whose target is its id; and
+      // POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard, M7B-INVOICES-DISCARD-P1, whose target is its id, read
+      // directly before the matched route's own suffix) carry their validated segment further: into the idempotency
+      // fingerprint's target slot and the planner's ctx.targetId (below), never a log.
       const route = table.lookup(req.method, req.path);
       // A host this runtime does not serve is answered like an unknown route, before the limiter: one Host line, naming
       // a served authority exactly (DNS names compare case-insensitively). The probes answer on any host.
@@ -953,7 +958,12 @@ export function createApp(deps: AppDeps): Express {
       // M7B-INVOICES-P2: a store template's command that also carries {id} (PATCH /api/v1/stores/{storeId}/invoice-drafts/{id})
       // targets that {id} — the draft — judged the same way as the customer edit's, after the same store check; the store
       // stays bound through the trusted scope (the fingerprint's store slot) and reaches the planner as ctx.storeId. A route
-      // without {id} (the save) still targets its store, so the save's fingerprints are unchanged.
+      // without {id} (the save) still targets its store, so the save's fingerprints are unchanged. M7B-INVOICES-DISCARD-P1: a
+      // store command whose {id} is followed by a literal segment (POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard)
+      // reads its {id} directly before the MATCHED ROUTE's own declared suffix — taken from the route's template, never from
+      // the request — so the target is the draft, never the suffix, the store or another segment; the table matched only a
+      // path ending in exactly that suffix, and a malformed id is the same 400 at the same point. A template whose {id} is
+      // final (the edit) reads the path's final segment exactly as before, so the edit's fingerprints are unchanged too.
       let targetId: string | null = null;
       let storeId: string | null = null;
       if ('command' in route && route.path.includes(STORE_SEGMENT)) {
@@ -963,7 +973,8 @@ export function createApp(deps: AppDeps): Express {
           return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
         }
         if (route.path.includes(PATH_ID_SEGMENT)) {
-          targetId = pathIdOf(req.path);
+          const suffix = route.path.slice(route.path.indexOf(PATH_ID_SEGMENT) + PATH_ID_SEGMENT.length);
+          targetId = suffix === '' ? pathIdOf(req.path) : pathIdBeforeSuffixOf(req.path, suffix);
           if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
           storeId = store;
         } else {
@@ -1064,9 +1075,9 @@ export function createApp(deps: AppDeps): Express {
           // A precondition the request asserted no longer holds (M7A-CUSTOMERS-P4; DA-125): the store rolled everything back and
           // recorded nothing — no completion, unlike the sealed conflict above — so this 409 is the runtime's own, UNSEALED,
           // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback. Admitted from a
-          // create, and (M7B-INVOICES-P2) from the one update contract that asserts a tenant — the draft edit, by its kind —
-          // and from no other update: there it committed nothing and is the 503 below.
-          if (refused === 'transaction_precondition_failed' && (contract.mode === 'create' || contract.kind === PRECONDITION_UPDATE_KIND)) {
+          // create, and from the update contracts that assert a tenant — the draft edit (M7B-INVOICES-P2) and the draft
+          // discard (M7B-INVOICES-DISCARD-P1), by kind — and from no other update: there it committed nothing and is the 503 below.
+          if (refused === 'transaction_precondition_failed' && (contract.mode === 'create' || PRECONDITION_UPDATE_KINDS.includes(contract.kind))) {
             return refuse(req, res, 409, 'write_conflict', refused);
           }
           if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);

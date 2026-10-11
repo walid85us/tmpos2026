@@ -592,6 +592,9 @@ const DRAFT = '/api/v1/stores/{storeId}/invoice-drafts/{id}';
 const ELIGIBILITY = '/api/v1/stores/{storeId}/invoice-drafts/eligibility';
 const STORE_EDIT = { scope: 'store', permission: 'edit_invoice_drafts' };
 const EDIT_ELIGIBILITY = '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility';
+const STORE_DISCARD = { scope: 'store', permission: 'discard_invoice_drafts' };
+const DISCARD = '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard';
+const DISCARD_ELIGIBILITY = '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility';
 const storeRead = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   route({ path: DRAFTS, policy: SESSION('tenant', STORE_VIEW), trustedContext: 'required', sessionBinding: 'required', ...over });
 const storeCreate = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -602,18 +605,21 @@ const directory = (over: Record<string, unknown> = {}): Record<string, unknown> 
   route({ path: '/api/v1/stores', policy: BARE_SESSION('tenant'), sessionBinding: 'required', ...over });
 const STORE = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 
-test('M7B: exactly the six store templates register — the four GETs without idempotency, the POST and the PATCH as idempotency-required commands, each a tenant-session store-scope route', () => {
+test('M7B: exactly the eight store templates register — the five GETs without idempotency, the POST, the PATCH and the discard POST as idempotency-required commands, each a tenant-session store-scope route', () => {
   // M7B-INVOICES-P1-R2: the fourth, the drafts' creation eligibility, a GET under the save's own requirement. M7B-INVOICES-P2:
   // the edit, a PATCH command on the draft template, and its eligibility, a GET with {id} before one literal segment.
+  // M7B-INVOICES-DISCARD-P1: the discard, a POST command with {id} before one literal segment, and its eligibility, a GET.
   const all = [storeRead(), storeRead({ path: DRAFT }), storeRead({ path: ELIGIBILITY, policy: SESSION('tenant', STORE_CREATE) }), storeCreate(),
-    storeCreate({ method: 'PATCH', path: DRAFT, policy: SESSION('tenant', STORE_EDIT) }), storeRead({ path: EDIT_ELIGIBILITY, policy: SESSION('tenant', STORE_EDIT) })];
+    storeCreate({ method: 'PATCH', path: DRAFT, policy: SESSION('tenant', STORE_EDIT) }), storeRead({ path: EDIT_ELIGIBILITY, policy: SESSION('tenant', STORE_EDIT) }),
+    storeRead({ path: DISCARD_ELIGIBILITY, policy: SESSION('tenant', STORE_DISCARD) }), storeCreate({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })];
   assert.equal(setupCode(all), undefined);
   assert.equal(setupCode([...all, directory(), list(), detail(), profile(), patch()]), undefined, 'beside the store directory and the customer templates');
   const table = defineRoutes(all);
   assert.deepEqual(table.list().map((r) => `${r.method} ${r.path}`),
-    [`GET ${DRAFTS}`, `GET ${DRAFT}`, `GET ${ELIGIBILITY}`, `POST ${DRAFTS}`, `PATCH ${DRAFT}`, `GET ${EDIT_ELIGIBILITY}`]);
+    [`GET ${DRAFTS}`, `GET ${DRAFT}`, `GET ${ELIGIBILITY}`, `POST ${DRAFTS}`, `PATCH ${DRAFT}`, `GET ${EDIT_ELIGIBILITY}`, `GET ${DISCARD_ELIGIBILITY}`, `POST ${DISCARD}`]);
   assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts`)?.idempotency, 'required');
   assert.equal(table.lookup('PATCH', `/api/v1/stores/${STORE}/invoice-drafts/${ID}`)?.idempotency, 'required');
+  assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`)?.idempotency, 'required');
   const { command: _command, ...noCommand } = storeCreate();
   for (const [label, def] of [
     ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/invoices' })],
@@ -634,6 +640,16 @@ test('M7B: exactly the six store templates register — the four GETs without id
     ['a deeper edit-eligibility template', storeRead({ path: `${EDIT_ELIGIBILITY}/x` })],
     ['another word after the draft id', storeRead({ path: `${DRAFT}/eligibility` })],
     ['the edit-eligibility word without the draft id', storeRead({ path: `${DRAFTS}/edit-eligibility` })],
+    // M7B-INVOICES-DISCARD-P1: the discard is a POST command under a key, its eligibility a keyless GET — nothing else.
+    ['the discard as a GET read', storeRead({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['the discard POST without idempotency, as a handler', storeRead({ method: 'POST', path: DISCARD, policy: SESSION('tenant', STORE_DISCARD), body: { kind: 'json', maxBytes: 1_024, required: true }, sessionBinding: 'none' })],
+    ['the discard as a PATCH command', storeCreate({ method: 'PATCH', path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['the discard as a DELETE', storeRead({ method: 'DELETE', path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['the discard eligibility under a key', storeCreate({ method: 'GET', path: DISCARD_ELIGIBILITY, body: { kind: 'none' }, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['a POST command on the discard eligibility', storeCreate({ path: DISCARD_ELIGIBILITY, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['a deeper discard template', storeCreate({ path: `${DISCARD}/x`, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['the discard word without the draft id', storeCreate({ path: `${DRAFTS}/discard`, policy: SESSION('tenant', STORE_DISCARD) })],
+    ['another suffix as a command', storeCreate({ path: `${DRAFT}/archive`, policy: SESSION('tenant', STORE_DISCARD) })],
     ['a PUT on the list template', storeCreate({ method: 'PUT' })],
     ['a DELETE on the draft template', storeRead({ method: 'DELETE', path: DRAFT })],
     ['the POST without idempotency, as a handler', { ...noCommand, idempotency: 'none', trustedContext: 'required', handler }],
@@ -662,6 +678,49 @@ test('M7B: exactly the six store templates register — the four GETs without id
   // The store POST and PATCH are the only store-scoped routes that may require idempotency.
   assert.equal(setupCode([storeCreate({ path: '/api/v1/probe' })]), 'route_idempotency_policy_invalid', 'a store command on a literal path');
   assert.equal(setupCode([storeCreate({ method: 'PATCH', path: EDIT_ELIGIBILITY })]), 'route_path_invalid', 'a PATCH command on the edit eligibility');
+  assert.equal(setupCode([storeCreate({ path: DISCARD_ELIGIBILITY, policy: SESSION('tenant', STORE_DISCARD) })]), 'route_path_invalid',
+    'a POST on the discard eligibility is no declared template');
+  assert.equal(setupCode([storeCreate({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) }), storeCreate({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })]), 'route_duplicate');
+});
+
+test('M7B-INVOICES-DISCARD-P1 DSC-23 AC-04: lookup — the discard POST and its eligibility GET each reach their template by the segment before their one literal last segment; another method, suffix or depth reaches nothing; the edit\'s templates are unchanged beside them', () => {
+  const table = defineRoutes([storeRead(), storeRead({ path: DRAFT }), storeRead({ path: ELIGIBILITY, policy: SESSION('tenant', STORE_CREATE) }), storeCreate(),
+    storeCreate({ method: 'PATCH', path: DRAFT, policy: SESSION('tenant', STORE_EDIT) }), storeRead({ path: EDIT_ELIGIBILITY, policy: SESSION('tenant', STORE_EDIT) }),
+    storeRead({ path: DISCARD_ELIGIBILITY, policy: SESSION('tenant', STORE_DISCARD) }), storeCreate({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) }),
+    list(), detail(), profile(), patch()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  // Any one id segment reaches the template: the chain judges it (the 400) after authorization, never the table.
+  for (const segment of [ID, ID.toUpperCase(), '{id}', 'x', '..', '%2F', 'a'.repeat(128), 'eligibility', 'discard', 'discard-eligibility', 'edit-eligibility']) {
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}/discard`, 'POST'), DISCARD, `discard ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}/discard-eligibility`), DISCARD_ELIGIBILITY, `discard eligibility ${segment}`);
+  }
+  assert.deepEqual(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`)?.policy, SESSION('tenant', STORE_DISCARD));
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard-eligibility`)?.policy, SESSION('tenant', STORE_DISCARD));
+  // The edit's templates and the literal creation eligibility are unchanged; a draft named 'discard' is the draft template's.
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}/edit-eligibility`), EDIT_ELIGIBILITY);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}`, 'PATCH'), DRAFT);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/discard`), DRAFT, 'a GET of a draft named discard');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/discard-eligibility`), DRAFT, 'a GET of a draft named discard-eligibility');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/eligibility`), ELIGIBILITY);
+  for (const [method, miss] of [
+    ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`], ['PATCH', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`],
+    ['PUT', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`], ['DELETE', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`],
+    ['post', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard-eligibility`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/edit-eligibility`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard/`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard/x`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/Discard`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discards`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/${ID}/discard`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts//discard`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/discard`], ['POST', `/api/v1/stores/${STORE}/discard`], ['POST', `/api/v1/stores/${STORE}/${ID}/discard`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${'a'.repeat(129)}/discard`],
+    ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard-eligibility/`], ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard-eligibility/x`],
+    ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/Discard-eligibility`],
+  ] as const) {
+    assert.equal(hit(miss, method), undefined, `${method} ${miss}`);
+  }
+  // Without the discard templates the same paths are no route: the middle {id} matches only a registered template.
+  const before = defineRoutes([storeRead({ path: DRAFT }), storeCreate({ method: 'PATCH', path: DRAFT, policy: SESSION('tenant', STORE_EDIT) })]);
+  assert.equal(before.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`), undefined);
+  assert.equal(before.lookup('GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard-eligibility`), undefined);
 });
 
 test('M7B-INVOICES-P2: lookup — the PATCH reaches the draft template by its last segment, the edit eligibility by the segment before its one literal last segment; nothing else does', () => {

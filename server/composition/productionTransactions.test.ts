@@ -685,7 +685,7 @@ test('a deployed route may require only a canonical platform permission, and sta
   assert.deepEqual(uncataloguedRoutePermissions(PRODUCTION_INVENTORY.routes), []);
 });
 
-test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are decidable tenant keys and, since M7B-INVOICES-P1, view_invoice_drafts and create_invoice_drafts (since M7B-INVOICES-P2 also edit_invoice_drafts) the decidable store keys: each clears the gate at its own scope alone, every other tenant or store key does not, and a store-scope route off a store template never registers', () => {
+test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are decidable tenant keys and, since M7B-INVOICES-P1, view_invoice_drafts and create_invoice_drafts (since M7B-INVOICES-P2 also edit_invoice_drafts, since M7B-INVOICES-DISCARD-P1 also discard_invoice_drafts) the decidable store keys: each clears the gate at its own scope alone, every other tenant or store key does not, and a store-scope route off a store template never registers', () => {
   const customerRoute = createCustomerDirectoryRoute({ customers: { page: () => ({ outcome: 'page', customers: [], hasMore: false }) } });
   assert.deepEqual(uncataloguedRoutePermissions([customerRoute]), [], 'the customer directory\'s requirement is catalogued and decidable');
   assert.deepEqual(uncataloguedRoutePermissions(tenantRouteDeclarations()), [], 'M7A-CUSTOMERS-P3: so is the customer create\'s, create_customers');
@@ -708,8 +708,8 @@ test('M7A-CUSTOMERS-P1 view_customers (and, since P3, create_customers) are deci
   // view_customers names nothing outside tenant scope.
   assert.deepEqual(uncataloguedRoutePermissions([at('view_customers', 'store')]), ['route_permission_uncatalogued'], 'store scope');
   assert.deepEqual(uncataloguedRoutePermissions([at('view_customers', 'platform')]), ['route_permission_uncatalogued'], 'platform scope');
-  // The three store route permissions clear the gate at store scope, on a store template, and name nothing at any other scope.
-  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts']) {
+  // The four store route permissions clear the gate at store scope, on a store template, and name nothing at any other scope.
+  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']) {
     assert.deepEqual(uncataloguedRoutePermissions([at(key, 'store')]), [], `store/${key}`);
     assert.deepEqual(uncataloguedRoutePermissions([at(key, 'tenant')]), ['route_permission_uncatalogued'], `tenant/${key}`);
     assert.deepEqual(uncataloguedRoutePermissions([at(key, 'platform')]), ['route_permission_uncatalogued'], `platform/${key}`);
@@ -1288,7 +1288,7 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the ten reads classified as reads, the five commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the eleven reads classified as reads, the six commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3') || text.includes('m7a_customer_get')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
@@ -1321,6 +1321,8 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/stores/{storeId}/invoice-drafts/eligibility', 'session', 'tenant', 'required', 'required', 'none'],
     // M7B-INVOICES-P2: the drafts' edit eligibility, a session-bound store-scope read appended after the creation eligibility.
     ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
+    // M7B-INVOICES-DISCARD-P1: the drafts' discard eligibility, a session-bound store-scope read appended after the edit eligibility.
+    ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
@@ -1328,29 +1330,35 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['POST', '/api/v1/stores/{storeId}/invoice-drafts', 'session', 'tenant', 'none', 'required', 'required'],
     // M7B-INVOICES-P2: the draft edit, its second.
     ['PATCH', '/api/v1/stores/{storeId}/invoice-drafts/{id}', 'session', 'tenant', 'none', 'required', 'required'],
+    // M7B-INVOICES-DISCARD-P1: the draft discard, its third.
+    ['POST', '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
   assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
     'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
-    'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility'],
+    'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility',
+    'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
     ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
       'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}', 'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility',
-      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility',
+      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility',
       'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts',
-      'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}']);
+      'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard']);
   assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
-  assert.deepEqual([6, 7, 8, 13, 9, 14].map((i) => ttx.routes[i].policy), [
+  assert.deepEqual([6, 7, 8, 14, 9, 15, 10, 16].map((i) => ttx.routes[i].policy), [
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'edit_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'edit_invoice_drafts' } },
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'discard_invoice_drafts' } },
+    { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'discard_invoice_drafts' } },
   ], 'the draft routes require the STORE route permissions — each eligibility read exactly its command\'s');
-  assert.deepEqual([8, 13, 9, 14].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
+  assert.deepEqual([8, 14, 9, 15, 10, 16].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
     ['GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts',
-      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}']);
+      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}',
+      'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard']);
   assert.ok(ttx.idempotency !== undefined && ttx.transactions !== undefined, 'the write slot composes both ports, together');
   assert.deepEqual(Buffer.from(ttx.idempotency.keySecret), Buffer.from(IDEMPOTENCY_KEY, 'base64url'), 'under this process\'s own key');
   const preflight = ttx.preflight as unknown as Record<string, unknown>;
@@ -1533,10 +1541,10 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.equal(await ttx.readsProbe(signal), true, 'all seven routines\' one refusal of an unknown key');
   const asked = (): string[] => kernel.statements.map((st) => (/m7a_customer_page_v3\(/.test(st.text) ? 'page_v3' : /m7a_customer_get\(/.test(st.text) ? 'get'
     : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search'
-      : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : /tmpos_invoice_draft\.m7b_invoice_draft_page\(/.test(st.text) ? 'draft_page'
-        : /tmpos_invoice_draft\.m7b_invoice_draft_get\(/.test(st.text) ? 'draft_get' : 'other'));
+      : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : /tmpos_invoice_discard\.m7b_invoice_draft_page_v2\(/.test(st.text) ? 'draft_page'
+        : /tmpos_invoice_discard\.m7b_invoice_draft_get_v2\(/.test(st.text) ? 'draft_get' : 'other'));
   assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get'],
-    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then 028\'s two (M7B-INVOICES-P1)');
+    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then the drafts\' two reads (M7B-INVOICES-P1; 033\'s open-only page_v2 and get_v2 since M7B-INVOICES-DISCARD-P1)');
   // M7B-INVOICES-P1: the invoice drafts' two reads are asked last, only once the store directory's has refused.
   draftGot = [{ ...draftGetDenied[0], o_outcome: 'not_found' }];
   kernel.statements.length = 0;
