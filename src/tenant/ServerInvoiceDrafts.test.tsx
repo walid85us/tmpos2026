@@ -23,7 +23,10 @@
 // instead of the local role hint the section no longer has. M7B-INVOICES-P1-R3 (SDB-05, AC-15): the edit-eligibility read
 // against a sign-out in both orders, by the fake's record of what the page INITIATED — the sign-out begun before the read is
 // initiated, its session read held across it or answered just before it (SID-112), and the read initiated before the
-// sign-out with its answer released after it (SID-113).
+// sign-out with its answer released after it (SID-113). M7B-INVOICES-DISCARD-P1 (SID-114..): the discard — the fake
+// answers its eligibility from a per-role `discardAllow` table (Invoices Manage or above: owner and manager) and its POST
+// under its own idempotency ledger use (the store, the draft and the exact bytes; a discarded draft leaves the list and
+// the draft read, as migration 033's reads); each title names the DSC id(s) of doc 11 §7 it covers.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { StrictMode, type ReactNode } from 'react';
@@ -33,10 +36,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
-  DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
+  DISCARD_ELIGIBILITY_TEXT, DISCARD_REFUSED_TEXT, DISCARD_TEXT, DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
   bindDraftHoldsToSessionEnd, createDraftHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
-import { STORES_PATH, createInvoiceDraftsClient, draftPathOf, draftsPathOf, editEligibilityPathOf, eligibilityPathOf, type StoreEntry } from './invoiceDraftsClient';
+import {
+  STORES_PATH, createInvoiceDraftsClient, discardEligibilityPathOf, discardPathOf, draftPathOf, draftsPathOf, editEligibilityPathOf, eligibilityPathOf, type StoreEntry,
+} from './invoiceDraftsClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, type TenantSessionClient } from './tenantSessionClient';
 import { ServerCustomerField, hasSessionPair, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
@@ -66,11 +71,14 @@ interface Sent { readonly method: string; readonly url: string; readonly headers
 /** `role`: the role the server holds for the user — the fake's `allow` table decides a draft save and its eligibility by it. */
 interface User { uid: string; tenant: string; view: boolean; role: string }
 interface Line { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number }
-interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[]; version: number }
-type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig' | 'update' | 'editElig';
+/** `status`: 'discarded' once the server discarded it (M7B-INVOICES-DISCARD-P1): it then leaves the list and the draft read. */
+interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[]; version: number; status?: 'discarded' }
+type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig' | 'update' | 'editElig' | 'discard' | 'discardElig';
 type CreateScript = 'lose' | 'lose-before' | 503 | 429 | 'hold' | 'key-reused';
 /** M7B-INVOICES-P2: what the next PATCHes do — lose the answer after deciding (committed), lose the request, or answer this status (in the chain's envelope) instead. */
 type UpdateScript = 'lose' | 'lose-before' | number;
+/** M7B-INVOICES-DISCARD-P1: what the next discard POSTs do, as the PATCHes' — or a whole answer, before anything is decided. */
+type DiscardScript = UpdateScript | Response;
 
 /** One fake tenant server. `cookie` is the session the browser presents. */
 function fakeServer() {
@@ -84,7 +92,7 @@ function fakeServer() {
   // sessions.ts, invoiceDrafts.ts) — the drafts client decides a read's refusal only in that exact envelope. A 429 carries
   // `retryAfter` (seconds, as text) when one is set.
   const WORDS: Record<number, string> = {
-    400: 'invalid_request', 401: 'unauthenticated', 403: 'forbidden', 404: 'not_found', 429: 'rate_limited', 500: 'internal_error', 503: 'service_unavailable',
+    400: 'invalid_request', 401: 'unauthenticated', 403: 'forbidden', 404: 'not_found', 422: 'idempotency_key_reused', 429: 'rate_limited', 500: 'internal_error', 503: 'service_unavailable',
   };
   const refuse = (status: number, error = WORDS[status] ?? `e${status}`): Response =>
     reply(status, { error, requestId: 'req-synthetic' }, status === 429 && server.retryAfter !== null ? { 'retry-after': server.retryAfter } : {});
@@ -113,12 +121,17 @@ function fakeServer() {
     editAllow: { owner: true, manager: true } as Record<string, boolean>,
     editEligStatus: [] as Array<number | Response>, // what the next edit-eligibility GETs answer instead, in order
     updates: [] as UpdateScript[], // what the next PATCHes do (then normally)
+    // M7B-INVOICES-DISCARD-P1: the server's per-role decision of a discard (Invoices Manage or above: the owner, and a
+    // manager at its default Full) — the same table answers its discard eligibility.
+    discardAllow: { owner: true, manager: true } as Record<string, boolean>,
+    discardEligStatus: [] as Array<number | Response>, // what the next discard-eligibility GETs answer instead, in order
+    discards: [] as DiscardScript[], // what the next discard POSTs do (then normally)
     currentStatus: [] as number[], // what the next session reads (GET /api/v1/session) answer instead (503, 429…), in order
     nameStatus: new Map<string, number>(), // a customer read answered with this status
     nameInFlight: 0,
     nameMaxInFlight: 0,
     second: 100,
-    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0, update: 0, editElig: 0 } as Record<Kind, number>,
+    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0, update: 0, editElig: 0, discard: 0, discardElig: 0 } as Record<Kind, number>,
     held: [] as Array<{ kind: Kind; url: string; release: (late?: Response) => void }>,
     seedCustomer(tenant: string, name: string): string {
       const id = uuid(0xc00 + server.customers.size + 1);
@@ -142,6 +155,14 @@ function fakeServer() {
     patches(): Sent[] { return server.sent.filter((r) => r.method === 'PATCH'); },
     /** The edit-eligibility reads sent. */
     editEligReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/edit-eligibility')); },
+    /** The discard POSTs sent (M7B-INVOICES-DISCARD-P1). */
+    discardPosts(): Sent[] { return server.sent.filter((r) => r.method === 'POST' && r.url.endsWith('/discard')); },
+    /** The discard-eligibility reads sent. */
+    discardEligReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/discard-eligibility')); },
+    mayDiscard(user: User, storeId: string): boolean {
+      const grant = server.stores[user.uid]?.find((s) => s.id === storeId);
+      return grant !== undefined && !grant.readOnly && server.discardAllow[user.role] === true;
+    },
     /** The draft GETs (reopen, read-back, a conflict's read) of `id`. */
     detailReads(storeId: string, id: string): Sent[] { return server.sent.filter((r) => r.method === 'GET' && r.url === draftPathOf(storeId, id)); },
     mayEdit(user: User, storeId: string): boolean {
@@ -245,6 +266,50 @@ function fakeServer() {
         })();
         return server.maybeHold('editElig', url, decided);
       }
+      const discardEligibility = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts\/([0-9a-f-]{36})\/discard-eligibility$/.exec(url); // reads no draft
+      if (method === 'GET' && discardEligibility !== null) {
+        const decided = gate() ?? (() => {
+          const scripted = server.discardEligStatus.shift();
+          if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+          return server.mayDiscard(session!.user, discardEligibility[1]) ? reply(200, { eligibility: 'allowed' }) : refuse(403, 'forbidden');
+        })();
+        return server.maybeHold('discardElig', url, decided);
+      }
+      // M7B-INVOICES-DISCARD-P1: the discard, keyed like the server's (the store, the DRAFT and the exact bytes): a sealed
+      // 200 or 409 replays under its key; the tenant precondition and a missing (or other store's) draft are unsealed.
+      const discardPath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts\/([0-9a-f-]{36})\/discard$/.exec(path);
+      if (method === 'POST' && discardPath !== null) {
+        const [, storeId, draftId] = discardPath;
+        const script = server.discards.shift();
+        if (script === 'lose-before') throw new TypeError('network');
+        if (typeof script === 'number') return refuse(script);
+        if (script instanceof Response) return script;
+        const refused = gate();
+        const decide = (): Response => {
+          if (refused !== null) return refused;
+          if (headers.get('x-tmpos-csrf') !== '1') return refuse(403, 'forbidden');
+          const grant = server.stores[session!.user.uid]?.find((s) => s.id === storeId);
+          if (grant === undefined || !server.mayDiscard(session!.user, storeId)) return refuse(403, 'forbidden');
+          const key = headers.get('idempotency-key') ?? '';
+          const fingerprint = `discard\n${storeId}\n${draftId}\n${body}`;
+          const known = server.keys.get(key);
+          if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+          if (known !== undefined) return reply(known.response.status, known.response.body, { 'idempotent-replayed': 'true' });
+          const parsed = JSON.parse(body ?? '{}') as { expectedTenant: string; expectedVersion: number };
+          if (parsed.expectedTenant !== grant.tenantId) return refuse(409, 'write_conflict'); // unsealed
+          const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId);
+          if (draft === undefined) return refuse(404, 'not_found');
+          const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, response: { status, body: sealed } }); return reply(status, sealed); };
+          if (draft.status === 'discarded') return seal(409, { error: 'invalid_state' }); // before the version (D-DIS-3)
+          if (draft.version !== parsed.expectedVersion) return seal(409, { error: 'write_conflict' });
+          draft.status = 'discarded';
+          draft.version += 1;
+          return seal(200, { draftId, version: draft.version, status: 'discarded' });
+        };
+        const decided = decide();
+        if (script === 'lose') throw new TypeError('network'); // committed, but the answer is lost
+        return server.maybeHold('discard', url, decided);
+      }
       const storePath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts(?:\/([0-9a-f-]{36}))?$/.exec(path);
       if (storePath !== null) {
         const [, storeId, draftId] = storePath;
@@ -261,9 +326,9 @@ function fakeServer() {
             const all = server.drafts.filter((d) => d.storeId === storeId).sort(order);
             const cursor = params.get('cursor');
             const anchorId = cursor === null ? null : idOfCursor(cursor);
-            const anchor = anchorId === null ? null : all.findIndex((d) => d.id === anchorId);
+            const anchor = anchorId === null ? null : all.findIndex((d) => d.id === anchorId); // the anchor's lookup is status-blind
             if (cursor !== null && (anchor === null || anchor < 0)) return refuse(400, 'invalid_request');
-            const rest = anchor === null ? all : all.slice(anchor + 1);
+            const rest = (anchor === null ? all : all.slice(anchor + 1)).filter((d) => d.status !== 'discarded'); // open drafts only
             const page = rest.slice(0, limit);
             return reply(200, { drafts: page.map(summaryOf), nextCursor: rest.length > limit ? cursorOf(page[page.length - 1].id) : null });
           });
@@ -274,7 +339,7 @@ function fakeServer() {
             if (grant === undefined) return refuse(403, 'forbidden');
             const scripted = server.detailStatus.shift();
             if (scripted !== undefined) return refuse(scripted);
-            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId);
+            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId && d.status !== 'discarded'); // a discarded one: as a missing one
             return draft === undefined ? refuse(404, 'not_found') : reply(200, detailOf(draft));
           });
         }
@@ -335,6 +400,7 @@ function fakeServer() {
             const c = server.customers.get(parsed.customerId);
             if (draft === undefined || c === undefined || c.tenant !== grant.tenantId) return refuse(404, 'not_found'); // one answer for both
             const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, response: { status, body: sealed } }); return reply(status, sealed); };
+            if (draft.status === 'discarded') return seal(409, { error: 'invalid_state' }); // M7B-INVOICES-DISCARD-P1: a stale editor
             if (draft.version !== parsed.expectedVersion) return seal(409, { error: 'write_conflict' }); // a stale no-op too
             const lines = parsed.lines.map((l, i) => ({ position: i + 1, description: l.description, quantity: l.quantity, unitPriceCents: l.unitPriceCents, lineTotalCents: l.quantity * l.unitPriceCents }));
             const same = draft.customerId === parsed.customerId && JSON.stringify(draft.lines) === JSON.stringify(lines);
@@ -624,7 +690,9 @@ describe('Server drafts — store choice, list and reopen (M7B-INVOICES-P1)', ()
     expect(within(view).queryAllByRole('textbox')).toEqual([]);
     // M7B-INVOICES-P2: the view stays read-only; editing is the separate editor behind Edit, offered on the server's answer.
     await waitFor(() => expect(within(view).getByTestId('draft-view-edit-state')).toHaveAttribute('data-phase', 'allowed'));
-    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft']);
+    // M7B-INVOICES-DISCARD-P1: and Discard draft… on the discard's own answer (the owner may discard); it only opens a confirmation.
+    await waitFor(() => expect(within(view).getByTestId('draft-discard-open')).toBeInTheDocument());
+    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft', 'Discard draft…']);
     expect(view.textContent).not.toMatch(/amount due|balance|invoice number|issued|payment|tax|discount/i);
     expect(server.sent.filter((s) => s.url === draftPathOf(STORE_1, draft.id))).toHaveLength(1);
     await user().keyboard('{Escape}');
@@ -2779,7 +2847,9 @@ describe('Server drafts — editing a saved draft (M7B-INVOICES-P2)', () => {
     expect(screen.queryByTestId('draft-view-edit')).toBeNull();
     expect(screen.queryByTestId('draft-view-edit-retry')).toBeNull();
     const after = server.sent.slice(before).map((x) => x.url);
-    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(3); // the reopen's, the eligibility's and its ONE fresh check
+    // The reopen's, the eligibility's and its ONE fresh check — and (M7B-INVOICES-DISCARD-P1) the discard eligibility's own
+    // ONE fresh check after its 403 (its session read is the edit eligibility's, asked at the same moment).
+    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(4);
     expect(after.filter((u) => u.endsWith('/edit-eligibility'))).toHaveLength(1);
     await click('draft-view-close');
     server.users['tok-a'].role = 'owner';
@@ -3863,5 +3933,1011 @@ describe('Server drafts — editing a saved draft (M7B-INVOICES-P2)', () => {
     expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
     expect(server.patches()).toEqual([]);
     expect(server.posts()).toEqual([]);
+  });
+});
+
+describe('Server drafts — discarding a saved draft (M7B-INVOICES-DISCARD-P1)', () => {
+  const release = async (server: Server, i = 0, late?: Response) => { const [held] = server.held.splice(i, 1); await act(async () => { held.release(late); }); };
+  const discardBody = (tenant: string, version: number) => `{"expectedTenant":"${tenant}","expectedVersion":${version}}`;
+  const confirm = () => screen.queryByTestId('draft-discard-confirm');
+  const view = () => screen.queryByTestId('draft-view');
+  const notice = () => screen.queryByTestId('drafts-notice');
+  const attemptState = () => screen.queryByTestId('draft-discard-attempt')?.getAttribute('data-state') ?? 'none';
+  const heading = () => screen.getByRole('heading', { name: 'Server drafts' });
+  /** Page one's list reads of Main Street sent from `mark` on. */
+  const pageOneReads = (server: Server, mark: number) => server.sent.slice(mark).filter((x) => x.method === 'GET' && x.url.startsWith(`${draftsPathOf(STORE_1)}?`));
+  /** Open the listed draft at `index`; wait for its read, the server's answers about Edit and Discard, and the customer's name. */
+  async function openDraft(server: Server, index = 0) {
+    const asked = server.discardEligReads().length;
+    await user().click(within(rows()[index]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit-state')).not.toHaveAttribute('data-phase', 'checking'));
+    await waitFor(() => expect(server.discardEligReads()).toHaveLength(asked + 1));
+    await settle();
+    await waitFor(() => expect(screen.getByTestId('draft-view-customer')).not.toHaveTextContent('ID ending'));
+  }
+  /** Open the draft, then its discard confirmation (first focus on Keep draft). */
+  async function openConfirm(server: Server, index = 0) {
+    await openDraft(server, index);
+    await click('draft-discard-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('draft-discard-keep')));
+  }
+  /** uid-a's draft at Main Street: Item 1 and Item 2, one each at $2.50, for Ada; at version 3. */
+  async function ready(over: Partial<ServerInvoiceDraftsProps> = {}) {
+    const { server, ada, bea } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    draft.version = 3;
+    const r = rig(server);
+    const props = r.props(over);
+    const page = render(<ServerInvoiceDrafts {...props} />);
+    await showAndChoose(STORE_1);
+    return { server, ada, bea, draft, r, props, page };
+  }
+
+  it('SID-114. DSC-19: Discard draft… is offered ONLY on the server\'s own discard eligibility for exactly this draft, store and session — absent and unsaid while it is asked (the edit\'s line is the one announced answer); one discard-eligibility GET per open, carrying that session\'s token and nothing else; none at a read-only store; never in the editor or beside a new draft; nothing is POSTed', async () => {
+    const { server, draft } = await ready();
+    const ro = server.seedDraft(STORE_RO, draft.customerId, at(6));
+    server.hold.discardElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discardElig']));
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled());
+    const dialog = screen.getByTestId('draft-view');
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    expect(screen.queryByTestId('draft-discard-elig-again')).toBeNull();
+    expect(within(dialog).queryAllByRole('status').map((x) => x.textContent)).toEqual(['']); // the edit's live region only (empty once allowed)
+    expect(within(dialog).queryAllByRole('alert')).toEqual([]);
+    expect(dialog.textContent).not.toMatch(/discard/i);
+    const asked = server.discardEligReads();
+    expect(asked.map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${discardEligibilityPathOf(STORE_1, draft.id)}`]);
+    expect(asked[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect([asked[0].headers.get('x-tmpos-csrf'), asked[0].headers.get('idempotency-key'), asked[0].body]).toEqual([null, null, undefined]);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-open')).toBeEnabled());
+    expect(screen.getByTestId('draft-discard-open')).toHaveTextContent('Discard draft…');
+    await click('draft-view-close');
+    await openDraft(server);
+    expect(server.discardEligReads()).toHaveLength(2); // each open asks again: never a last answer
+    // The editor offers none (its "Discard my changes" is local), nor does a new draft.
+    await click('draft-view-edit');
+    await waitFor(() => expect(screen.getByTestId('draft-edit')).toBeInTheDocument());
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    expect(within(screen.getByTestId('draft-edit')).queryByRole('button', { name: /Discard draft/ })).toBeNull();
+    await click('draft-edit-cancel');
+    await settle();
+    await click('drafts-new');
+    expect(within(screen.getByTestId('draft-new')).queryByRole('button', { name: /Discard/ })).toBeNull();
+    await click('draft-new-cancel');
+    await settle();
+    fireEvent.change(storeSelect(), { target: { value: STORE_RO } });
+    await listReady();
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('1'));
+    await settle();
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull(); // a read-only store: nothing asked, nothing offered
+    expect(server.discardEligReads().filter((x) => x.url.includes(ro.id))).toEqual([]);
+    expect(server.discardPosts()).toEqual([]);
+  });
+
+  it.each([
+    ['View (it may list and open drafts only)', 'viewer', false],
+    ['Create (it may save drafts, not edit or discard them)', 'sales', false],
+    ['Edit (it may edit drafts, not discard them)', 'technician', true],
+  ] as const)('SID-115. DSC-19: a role below Manage — Invoices %s — gets no Discard draft…: the discard eligibility\'s 403 gets ONE fresh session check and stands, and nothing is shown or said for it; the edit\'s line stays the dialog\'s one announced answer (one denial announcement, never two)', async (_level, role, edits) => {
+    const { server } = await ready();
+    server.users['tok-a'].role = role;
+    server.editAllow[role] = edits;
+    const before = server.sent.length;
+    await openDraft(server);
+    const dialog = screen.getByTestId('draft-view');
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    expect(screen.queryByTestId('draft-discard-elig-again')).toBeNull();
+    const said = [...within(dialog).queryAllByRole('status'), ...within(dialog).queryAllByRole('alert')].map((x) => x.textContent).filter((t) => t !== '');
+    expect(said).toEqual(edits ? [] : [EDIT_ELIGIBILITY_TEXT.denied]);
+    expect(dialog.textContent).not.toMatch(/discard/i);
+    if (edits) expect(screen.getByTestId('draft-view-edit')).toBeEnabled();
+    const after = server.sent.slice(before).map((x) => x.url);
+    expect(after.filter((u) => u.endsWith('/discard-eligibility'))).toHaveLength(1);
+    // The reopen's session read, the two eligibilities' shared one, and ONE fresh check per 403.
+    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(edits ? 3 : 4);
+    expect(server.discardPosts()).toEqual([]);
+  });
+
+  it('SID-116. DSC-19: a discard eligibility that cannot be answered (an outage) offers no Discard draft… but one Try again, described (not live) by why; Try again asks once per press and offers Discard draft… on the server\'s allowance; a 429 holds Try again back for its wait, said in its description; nothing is ever POSTed', async () => {
+    const { server } = await ready();
+    server.discardEligStatus.push(503);
+    await openDraft(server);
+    const again = screen.getByTestId('draft-discard-elig-again');
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    expect(again).toBeEnabled();
+    expect(again).toHaveAccessibleDescription(DISCARD_ELIGIBILITY_TEXT.unavailable);
+    const why = screen.getByTestId('draft-discard-elig-why');
+    expect([why.getAttribute('role'), why.getAttribute('aria-live')]).toEqual([null, null]);
+    expect(screen.getByTestId('draft-view-edit')).toBeEnabled(); // the edit's answer is its own
+    const asked = server.discardEligReads().length;
+    await click('draft-discard-elig-again');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-open')).toBeEnabled());
+    expect(server.discardEligReads()).toHaveLength(asked + 1);
+    expect(screen.queryByTestId('draft-discard-elig-again')).toBeNull();
+    await click('draft-view-close');
+    server.retryAfter = '30';
+    server.discardEligStatus.push(429);
+    await openDraft(server);
+    expect(screen.getByTestId('draft-discard-elig-again')).toBeDisabled();
+    expect(screen.getByTestId('draft-discard-elig-again')).toHaveAccessibleDescription(`${pickerWaitText(30)} ${DISCARD_ELIGIBILITY_TEXT.waiting}`);
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    const sent = server.sent.length;
+    await settle();
+    expect(server.sent).toHaveLength(sent);
+    expect(server.discardPosts()).toEqual([]);
+  });
+
+  it('SID-117. DSC-21: the confirmation is an alertdialog named "Discard this draft?" and described by ONE element — what a discard does and the draft it names from the reopen read (customer, store, created time, lines, subtotal, version and its ID; no contact detail, no reason field) — first focus on Keep draft, the reopen dialog inert beneath, Tab kept inside; Keep draft and Escape close it, send nothing and return focus to Discard draft… in the unchanged reopen dialog', async () => {
+    const { server, draft } = await ready();
+    await openConfirm(server);
+    const dialog = confirm()!;
+    expect(dialog).toHaveAttribute('role', 'alertdialog');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAccessibleName(DISCARD_TEXT.title);
+    const identity = `Ada Customer · Main Street · created 2026-10-04 12:00 UTC · 2 lines · Draft subtotal $5.00 · version 3 · draft ID ${draft.id}`;
+    expect(screen.getByTestId('draft-discard-identity').textContent).toBe(identity);
+    expect(dialog).toHaveAccessibleDescription(`${DISCARD_TEXT.explain} ${identity}`);
+    expect(dialog.getAttribute('aria-describedby')!.split(' ')).toHaveLength(1);
+    const description = document.getElementById(dialog.getAttribute('aria-describedby')!)!;
+    expect(within(description).queryAllByRole('button')).toEqual([]);
+    expect(within(dialog).queryAllByRole('textbox')).toEqual([]);
+    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Keep draft', 'Discard draft']);
+    expect(screen.getByTestId('draft-view').closest('[inert]')).not.toBeNull(); // the reopen dialog is inert beneath it
+    expect(dialog.closest('[inert]')).toBeNull();
+    await user().tab();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-discard-send'));
+    await user().tab();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-discard-keep')); // wraps inside
+    const sent = server.sent.length;
+    await user().keyboard('{Escape}');
+    await settle();
+    expect(confirm()).toBeNull();
+    expect(view()).toBeInTheDocument();
+    expect(screen.getByTestId('draft-view').closest('[inert]')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-discard-open'));
+    await click('draft-discard-open');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('draft-discard-keep')));
+    await click('draft-discard-keep');
+    await settle();
+    expect(confirm()).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-discard-open'));
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(screen.getByTestId('draft-view-version')).toHaveTextContent('3');
+    expect(draft.status).toBeUndefined();
+  });
+
+  it('SID-118. DSC-01, DSC-15, DSC-21: ONE press is ONE POST of the exact bytes under ONE fresh key (the store\'s tenant, the version read); Discard draft is gone from that press on and Keep draft reads Close, described as only stopping the tracking; "Discarding…" is said and nothing says discarded before the 200 — then both dialogs close, "Draft discarded." is said outside them, focus is on the heading, and page one is read again without that draft, the notice kept and nothing "unavailable"', async () => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    server.hold.discard = 1;
+    const send = screen.getByTestId('draft-discard-send');
+    await user().click(send);
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    expect(send.isConnected).toBe(false); // no second key from this dialog
+    expect(screen.queryByTestId('draft-discard-send')).toBeNull();
+    expect(attemptState()).toBe('sending');
+    expect(within(screen.getByTestId('draft-discard-attempt')).getByRole('status')).toHaveTextContent(DISCARD_TEXT.sending);
+    const keep = screen.getByTestId('draft-discard-keep');
+    expect(keep).toHaveTextContent('Close');
+    expect(keep).toHaveAccessibleDescription(DISCARD_TEXT.closeWarning);
+    expect(document.activeElement).toBe(keep); // the focus the press took away, recovered inside the dialog
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    expect(notice()).toBeNull();
+    const posts = server.discardPosts();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe(discardPathOf(STORE_1, draft.id));
+    expect(posts[0].body).toBe(discardBody(TENANT_A, 3));
+    expect(posts[0].headers.get('idempotency-key')).toBe(r.keys[0]);
+    expect(posts[0].headers.get('x-tmpos-csrf')).toBe('1');
+    expect(posts[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect(posts[0].headers.get('content-type')).toBe('application/json');
+    expect(r.keys).toHaveLength(1);
+    const mark = server.sent.length;
+    // The section's live regions before the answer: the notice's is already there (empty), so its text is announced.
+    const regions = within(screen.getByTestId('drafts-section')).queryAllByRole('status', { hidden: true });
+    // Focus goes to the heading at once, in the render that closes both dialogs: never to <body>, never back to the
+    // discarded draft's Open on the way.
+    const fell = watchBody();
+    const focused: EventTarget[] = [];
+    const record = (e: FocusEvent): void => { if (e.target !== null) focused.push(e.target); };
+    document.addEventListener('focusin', record);
+    await release(server);
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    expect(notice()).toHaveAttribute('role', 'status');
+    expect(regions).toContain(notice()); // written into the standing region, never inserted with its text
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(document.activeElement).toBe(heading());
+    await listReady();
+    await settle();
+    fell.stop();
+    document.removeEventListener('focusin', record);
+    expect(fell.fell).toEqual([]);
+    expect(focused).toEqual([heading()]);
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id);
+    expect(pageOneReads(server, mark)).toHaveLength(1);
+    expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded); // the re-read keeps it
+    expect(document.activeElement).toBe(heading());
+    expect(document.body).not.toHaveTextContent(/unavailable/i);
+    expect(server.discardPosts()).toHaveLength(1);
+    expect([draft.status, draft.version]).toEqual(['discarded', 4]);
+  });
+
+  it('SID-119. DSC-01, DSC-13: a 200 this client cannot name (another version) is no discard: the attempt stays unresolved in the confirmation — nothing says discarded — and only Check again settles it: the SAME key and IDENTICAL bytes, whose sealed replay is the validated 200', async () => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    await release(server, 0, new Response(JSON.stringify({ draftId: draft.id, version: 9, status: 'discarded' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-discard-attempt')).toHaveTextContent(DISCARD_TEXT.unresolved);
+    expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('The server answered, but not with a result.');
+    expect(notice()).toBeNull();
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    await click('draft-discard-check');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    const [first, again] = server.discardPosts();
+    expect([again.url, again.body, again.headers.get('idempotency-key'), again.headers.get('x-tmpos-session-csrf')])
+      .toEqual([first.url, first.body, first.headers.get('idempotency-key'), first.headers.get('x-tmpos-session-csrf')]);
+    expect(r.keys).toHaveLength(1);
+    expect([confirm(), view()]).toEqual([null, null]);
+  });
+
+  it('SID-120. DSC-06, DSC-21: a stale version (another session edited it) is never rebased: the sealed 409 closes the confirmation, the reopen dialog reads the draft ONCE and says why in an alert of its own, and focus goes to Discard draft… (offered again for the new version); only a new press sends again — a new confirmation, a NEW key, the version that read found', async () => {
+    const { server, ada, draft, r } = await ready();
+    await openConfirm(server);
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // version 4, elsewhere
+    const mark = server.sent.length;
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-view-discard-refused')).toHaveTextContent(DISCARD_REFUSED_TEXT.conflict));
+    expect(screen.getByTestId('draft-view-discard-refused')).toHaveAttribute('role', 'alert');
+    expect(confirm()).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('draft-discard-open')));
+    expect(screen.getByTestId('draft-view-version')).toHaveTextContent('4');
+    expect(screen.getAllByTestId('draft-view-line').map((x) => x.textContent)).toEqual(['1Elsewhere1$1.00$1.00']);
+    expect(server.detailReads(STORE_1, draft.id).filter((x) => server.sent.indexOf(x) >= mark)).toHaveLength(1);
+    await settle();
+    expect(server.discardPosts()).toHaveLength(1); // nothing on its own
+    expect(notice()).toBeNull();
+    await click('draft-discard-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    expect(screen.getByTestId('draft-discard-identity')).toHaveTextContent('version 4');
+    await click('draft-discard-send');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    const [stale, fresh] = server.discardPosts();
+    expect(fresh.headers.get('idempotency-key')).not.toBe(stale.headers.get('idempotency-key'));
+    expect([stale.body, fresh.body]).toEqual([discardBody(TENANT_A, 3), discardBody(TENANT_A, 4)]);
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it.each([
+    ['already discarded elsewhere (the sealed 409 invalid_state)', 'not-open'],
+    ['no longer at this store (the chain\'s 404)', 'not-found'],
+  ] as const)('SID-121. DSC-10, DSC-15, DSC-21: a draft %s: both dialogs close, page one is read again (the draft is not in it), the notice says why — never "Draft discarded.", never "unavailable" — and focus is on the heading', async (_why, kind) => {
+    const { server, draft } = await ready();
+    await openConfirm(server);
+    if (kind === 'not-open') { draft.status = 'discarded'; draft.version += 1; } else server.drafts.splice(server.drafts.indexOf(draft), 1);
+    const mark = server.sent.length;
+    const fell = watchBody();
+    await click('draft-discard-send');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_REFUSED_TEXT[kind]));
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(document.activeElement).toBe(heading());
+    fell.stop();
+    expect(fell.fell).toEqual([]); // focus went straight to the heading
+    await listReady();
+    await settle();
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id);
+    expect(pageOneReads(server, mark)).toHaveLength(1);
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    expect(document.body).not.toHaveTextContent(/unavailable/i);
+    expect(server.discardPosts()).toHaveLength(1);
+  });
+
+  it.each([
+    ['the store is no longer in the tenant the draft was for (the chain\'s 409 write_conflict)', 'tenant-changed'],
+    ['the key was used for another request (422)', 'key-reused'],
+    ['the server does not accept the request (400)', 'invalid'],
+  ] as const)('SID-122. DSC-14, DSC-21: a first send refused because %s ends the attempt with its own alert in the confirmation — Discard draft stays gone (no second key), Close no longer warns — and Close then closes the reopen dialog too and reads page one again, nothing else sent: Discard draft… comes back only with a fresh read of the draft and a fresh eligibility, and a new press is a NEW key', async (_why, kind) => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    if (kind === 'tenant-changed') server.stores['uid-a'] = server.stores['uid-a'].map((x) => (x.id === STORE_1 ? { ...x, tenantId: TENANT_B } : x));
+    else server.discards.push(kind === 'key-reused' ? 422 : 400);
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_REFUSED_TEXT[kind]));
+    expect(screen.getByTestId('draft-discard-status')).toHaveAttribute('role', 'alert');
+    expect(screen.queryByTestId('draft-discard-attempt')).toBeNull();
+    expect(screen.queryByTestId('draft-discard-send')).toBeNull();
+    expect(screen.queryByTestId('draft-discard-check')).toBeNull();
+    expect(screen.getByTestId('draft-discard-keep')).toHaveTextContent('Close');
+    expect(screen.getByTestId('draft-discard-keep')).not.toHaveAttribute('aria-describedby');
+    const mark = server.sent.length;
+    await click('draft-discard-keep');
+    await listReady();
+    await settle();
+    expect([confirm(), view()]).toEqual([null, null]); // never back to a reopen dialog still offering the old eligibility and version
+    expect(pageOneReads(server, mark)).toHaveLength(1);
+    expect(server.sent.slice(mark).filter((x) => x.method !== 'GET')).toEqual([]);
+    expect(rows().map((x) => x.getAttribute('data-id'))).toContain(draft.id);
+    expect(document.activeElement).toBe(within(rows()[0]).getByTestId('drafts-open')); // back where the draft was opened
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    expect(draft.status).toBeUndefined();
+    const reads = server.detailReads(STORE_1, draft.id).length;
+    const asked = server.discardEligReads().length;
+    await openConfirm(server);
+    expect(server.detailReads(STORE_1, draft.id)).toHaveLength(reads + 1);
+    expect(server.discardEligReads()).toHaveLength(asked + 1);
+    expect(screen.getByTestId('draft-discard-keep')).toHaveTextContent('Keep draft');
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.discardPosts()).toHaveLength(2));
+    await settle();
+    const [refused, fresh] = server.discardPosts();
+    expect(fresh.headers.get('idempotency-key')).not.toBe(refused.headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-123. DSC-19, DSC-21: a POST refused 403 (the owner lowered the level meanwhile) gets ONE fresh session check, then the confirmation closes, Discard draft… goes and the reopen dialog says why in an alert of its own, with focus on its Close — nothing re-sent', async () => {
+    const { server, draft } = await ready();
+    await openConfirm(server);
+    server.discardAllow.owner = false;
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-view-discard-refused')).toHaveTextContent(DISCARD_REFUSED_TEXT.denied));
+    expect(screen.getByTestId('draft-view-discard-refused')).toHaveAttribute('role', 'alert');
+    expect(confirm()).toBeNull();
+    expect(screen.queryByTestId('draft-discard-open')).toBeNull();
+    await settle();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-view-close'));
+    const post = server.sent.indexOf(server.discardPosts()[0]);
+    expect(server.sent.slice(post + 1).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(screen.getByTestId('draft-view-edit')).toBeEnabled(); // the edit's answer is its own
+    expect(draft.status).toBeUndefined();
+  });
+
+  it('SID-124. DSC-14, DSC-21: a first send answered 429 ends the attempt with its own alert and starts the section\'s wait; Close then closes both dialogs, and page one — not read during the wait — keeps its rows marked last known, with the wait and a Try again held back through it; nothing is sent when it passes. One answered 401 ends the session as any request\'s does: both dialogs go, the stores say so, and nobody is signed in again (only Reconnect would)', async () => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    fakeClock();
+    server.retryAfter = '3';
+    server.discards.push(429);
+    fireEvent.click(screen.getByTestId('draft-discard-send'));
+    await until(() => expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_REFUSED_TEXT['rate-limited']));
+    expect(screen.queryByTestId('draft-discard-send')).toBeNull();
+    const sent = server.sent.length;
+    fireEvent.click(screen.getByTestId('draft-discard-keep'));
+    await until(() => expect([confirm(), view()]).toEqual([null, null]));
+    expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited');
+    expect(screen.getByTestId('drafts-list-state')).toHaveTextContent(pickerWaitText(3));
+    expect(screen.getByTestId('drafts-last-known')).toBeInTheDocument();
+    expect(rows().map((x) => x.getAttribute('data-id'))).toContain(draft.id);
+    expect(screen.getByTestId('drafts-list-retry')).toBeDisabled();
+    await advance(3_000);
+    await settle();
+    expect(server.sent).toHaveLength(sent);
+    expect(screen.getByTestId('drafts-list-retry')).toBeEnabled();
+    vi.useRealTimers();
+    await click('drafts-list-retry');
+    await listReady();
+    await openConfirm(server);
+    server.discards.push(401);
+    await click('draft-discard-send');
+    await waitFor(() => expect(confirm()).toBeNull());
+    expect(view()).toBeNull();
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    expect(screen.getByTestId('drafts-retry')).toHaveTextContent('Reconnect');
+    await settle();
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(1); // only the first sign-in
+    expect(server.discardPosts()).toHaveLength(2);
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-125. DSC-13: a POST whose answer is lost after the server discarded the draft stays UNRESOLVED in the confirmation — nothing is sent or asked on a focus, a tab return or a re-render (no POST, no discard eligibility); only Check again re-sends, the SAME key and IDENTICAL bytes to the same draft under the attempt\'s own token, and its sealed replay is "Draft discarded."', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, draft, r, props, page } = await ready();
+    await openConfirm(server);
+    server.discards.push('lose');
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-discard-attempt')).toHaveTextContent(DISCARD_TEXT.unresolved);
+    expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('No answer from the server.');
+    expect(screen.getByTestId('draft-discard-keep')).toHaveAccessibleDescription(DISCARD_TEXT.closeWarning);
+    expect(draft.status).toBe('discarded'); // committed on the server
+    expect(notice()).toBeNull();
+    const eligAsked = server.discardEligReads().length;
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    page.rerender(<ServerInvoiceDrafts {...props} />);
+    await settle();
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(server.discardEligReads()).toHaveLength(eligAsked); // never asked again on its own
+    expect(attemptState()).toBe('unresolved');
+    await click('draft-discard-check');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    const [first, again] = server.discardPosts();
+    expect(again.body).toBe(first.body); // identical bytes
+    expect(again.headers.get('idempotency-key')).toBe(first.headers.get('idempotency-key')); // the same key
+    expect([again.url, again.headers.get('x-tmpos-session-csrf')]).toEqual([first.url, first.headers.get('x-tmpos-session-csrf')]);
+    expect(first.body).toBe(discardBody(TENANT_A, 3));
+    expect(r.keys).toHaveLength(1);
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(draft.version).toBe(4);
+  });
+
+  it('SID-126. DSC-13: a first send answered request_in_progress stays unresolved, and so does a Check again answered request_in_progress (Check again still offered); a Check again answered 503, or refused 403 (after its ONE fresh check), stays unresolved; a Check again\'s 429 holds Check again back for its Retry-After (said why) and sends nothing on its own; every POST is the same key, token and bytes, and the last settles it', async () => {
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(refusal(409, 'request_in_progress'), refusal(409, 'request_in_progress'), 503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('The server is still working on it. Check again in a moment.'));
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.discardPosts()).toHaveLength(2));
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('The server is still working on it. Check again in a moment.');
+    expect(screen.getByTestId('draft-discard-check')).toBeEnabled();
+    expect(screen.queryByTestId('draft-discard-status')).toBeNull(); // in progress decides nothing
+    await click('draft-discard-check');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('The server answered, but not with a result.'));
+    server.discardAllow.owner = false;
+    await click('draft-discard-check');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('The server refused this check.'));
+    const fourth = server.sent.indexOf(server.discardPosts()[3]);
+    expect(server.sent.slice(fourth + 1).map((x) => x.url)).toEqual([TENANT_SESSION_PATHS.current]); // its ONE fresh check
+    expect(attemptState()).toBe('unresolved');
+    expect(confirm()).toBeInTheDocument();
+    server.discardAllow.owner = true;
+    fakeClock();
+    server.retryAfter = '3';
+    server.discards.push(429);
+    fireEvent.click(screen.getByTestId('draft-discard-check'));
+    await until(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('Too many requests. Wait 3 seconds.'));
+    expect(screen.getByTestId('draft-discard-check')).toBeDisabled();
+    expect(screen.getByTestId('draft-discard-check')).toHaveAccessibleDescription(HOLD_TEXT.waiting);
+    const sent = server.sent.length;
+    await advance(3_000);
+    await settle();
+    expect(screen.getByTestId('draft-discard-check')).toBeEnabled();
+    expect(server.sent).toHaveLength(sent);
+    vi.useRealTimers();
+    await click('draft-discard-check');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    expect(server.discardPosts()).toHaveLength(6);
+    expect(new Set(server.discardPosts().map((x) => `${x.headers.get('idempotency-key')} ${x.headers.get('x-tmpos-session-csrf')} ${x.body}`)).size).toBe(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it.each(['the wall clock', 'the monotonic clock', 'the session check (judged again right before the POST)'] as const)('SID-127. DSC-13: past the 23-hour cutoff on %s, Check again sends nothing and says the attempt is too old (no Check again any more); closing it then closes both dialogs', async (arm) => {
+    const { server, ada } = seeded();
+    server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    const r = rig(server);
+    const real = r.props().session!;
+    let bump = false;
+    const session: TenantSessionClient = { ...real, ensure: async (...args) => { const s = await real.ensure(...args); if (bump) { bump = false; r.clock.wall += 23 * HOUR; } return s; } };
+    render(<ServerInvoiceDrafts {...r.props({ session })} />);
+    await showAndChoose(STORE_1);
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    if (arm === 'the wall clock') r.clock.wall += 23 * HOUR;
+    else if (arm === 'the monotonic clock') r.clock.mono += 23 * HOUR;
+    else { r.clock.wall += 23 * HOUR - 1; bump = true; } // just under: the press passes, the session check takes it over
+    await click('draft-discard-check');
+    await settle();
+    expect(screen.getByTestId('draft-discard-attempt')).toHaveTextContent(DISCARD_TEXT.tooOld);
+    expect(screen.queryByTestId('draft-discard-check')).toBeNull();
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    await click('draft-discard-keep');
+    await settle();
+    expect([confirm(), view()]).toEqual([null, null]);
+  });
+
+  it('SID-128. DSC-13, DSC-14: a Check again whose session check finds ANOTHER token (another tab\'s session) sends nothing: the new generation drops the attempt and both dialogs at once', async () => {
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    server.otherTab('uid-a');
+    await click('draft-discard-check');
+    await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    expect([confirm(), view()]).toEqual([null, null]);
+    await settle();
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it.each(['Close', 'Escape'] as const)('SID-129. DSC-14, DSC-21: closing a confirmation whose attempt is unresolved (%s) closes the reopen dialog too and reads page one again — saying neither "cancelled" nor "discarded"; reopening the draft never revives the attempt: a fresh eligibility, the version a fresh read found, a NEW key', async (how) => {
+    const { server, ada, draft, r } = await ready();
+    await openConfirm(server);
+    server.discards.push('lose-before'); // it never reached the server
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    const mark = server.sent.length;
+    if (how === 'Close') await click('draft-discard-keep');
+    else await user().keyboard('{Escape}');
+    await settle();
+    expect([confirm(), view()]).toEqual([null, null]);
+    await listReady();
+    await settle();
+    expect(pageOneReads(server, mark)).toHaveLength(1);
+    expect(server.sent.slice(mark).filter((x) => x.method !== 'GET')).toEqual([]);
+    expect(document.body.textContent).not.toMatch(/cancel|discarded/i);
+    expect(notice()).toBeNull();
+    expect(rows().map((x) => x.getAttribute('data-id'))).toContain(draft.id); // it was not discarded
+    expect(document.activeElement).toBe(within(rows()[0]).getByTestId('drafts-open')); // back where the draft was opened
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // version 4
+    const asked = server.discardEligReads().length;
+    await openConfirm(server);
+    expect(server.discardEligReads()).toHaveLength(asked + 1);
+    expect(screen.queryByTestId('draft-discard-attempt')).toBeNull();
+    expect(screen.getByTestId('draft-discard-keep')).toHaveTextContent('Keep draft');
+    expect(screen.getByTestId('draft-discard-identity')).toHaveTextContent('version 4');
+    await click('draft-discard-send');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    const [lost, fresh] = server.discardPosts();
+    expect(fresh.headers.get('idempotency-key')).not.toBe(lost.headers.get('idempotency-key'));
+    expect(fresh.body).toBe(discardBody(TENANT_A, 4));
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-130. DSC-14: a sign-out while a discard is out drops the attempt and BOTH dialogs at once (the sign-out\'s own render); the late 200 — the server DID discard it — changes nothing: no notice, no read; after Reconnect the list is read again and the draft is not in it', async () => {
+    const { server, props, draft } = await ready();
+    await openConfirm(server);
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    const mark = server.sent.length;
+    let during: unknown = 'not sampled';
+    // Sampled inside the sign-out call itself, before anything else runs.
+    await act(async () => { void props.session!.logout(); during = [confirm(), view()]; });
+    expect(during).toEqual([null, null]);
+    await release(server);
+    await settle();
+    expect(draft.status).toBe('discarded');
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`POST ${TENANT_SESSION_PATHS.logout}`]);
+    expect(notice()).toBeNull();
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out');
+    server.expire();
+    await click('drafts-retry'); // Reconnect
+    await showAndChoose(STORE_1);
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id);
+    expect([confirm(), view(), notice()]).toEqual([null, null, null]);
+    expect(server.discardPosts()).toHaveLength(1);
+  });
+
+  it.each([
+    'a new generation (another tab\'s session, noticed on focus)',
+    'a session end (found by the focus check)',
+    'a store change',
+    'a user change',
+  ] as const)('SID-131. DSC-14: %s while a discard is out drops the attempt and both dialogs at once; the late 200 changes nothing — no notice, no read, nothing of the attempt', async (change) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, draft, r, page } = await ready();
+    server.stores['uid-b'] = [store(STORE_2, 'B Store', false, TENANT_B)];
+    await openConfirm(server);
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    if (change === 'a new generation (another tab\'s session, noticed on focus)') {
+      server.otherTab('uid-a');
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      await waitFor(() => expect(screen.getByTestId('drafts-connection-changed')).toBeInTheDocument());
+    } else if (change === 'a session end (found by the focus check)') {
+      server.expire();
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    } else if (change === 'a store change') {
+      fireEvent.change(storeSelect(), { target: { value: STORE_2 } });
+      expect([confirm(), view()]).toEqual([null, null]); // at once
+      await listReady();
+    } else {
+      page.rerender(<ServerInvoiceDrafts {...r.props({ uid: 'uid-b' })} />);
+    }
+    expect([confirm(), view()]).toEqual([null, null]);
+    await settle();
+    const out = server.sent.length;
+    await release(server);
+    await settle();
+    expect(draft.status).toBe('discarded');
+    expect(server.sent.slice(out)).toEqual([]);
+    expect(notice()).toBeNull();
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    expect([confirm(), view(), screen.queryByTestId('draft-discard-attempt')]).toEqual([null, null, null]);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-132. DSC-20: a discard writes no browser storage (local or session) and logs nothing — its key, body and token stay in memory, never in the DOM — through an unresolved attempt, its Check again and the confirmed discard', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(document.body.innerHTML).not.toContain('s'.repeat(40)); // no session token in the DOM
+    expect(document.body.innerHTML).not.toContain(r.keys[0]); // nor the key
+    expect(document.body.innerHTML).not.toContain('expectedVersion');
+    await click('draft-discard-check');
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    expect(setItem).not.toHaveBeenCalled();
+    expect([localStorage.length, sessionStorage.length]).toEqual([0, 0]);
+    for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+    expect(window.location.href).not.toContain(r.keys[0]);
+  });
+
+  it('SID-133. edge (the version bound, as SID-100): a draft at the largest version the server records (2^53-1) cannot be discarded — no discard can name it: the press says so in an alert, and no key is minted and nothing is sent', async () => {
+    const { server, draft, r } = await ready();
+    draft.version = Number.MAX_SAFE_INTEGER;
+    await openConfirm(server);
+    expect(screen.getByTestId('draft-discard-identity')).toHaveTextContent(`version ${Number.MAX_SAFE_INTEGER}`);
+    const sent = server.sent.length;
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_TEXT.last));
+    expect(screen.getByTestId('draft-discard-status')).toHaveAttribute('role', 'alert');
+    expect(server.sent.slice(sent)).toEqual([]);
+    expect(r.keys).toEqual([]);
+    expect(screen.queryByTestId('draft-discard-attempt')).toBeNull();
+  });
+
+  it('SID-134. DSC-14: closing the confirmation while its POST is still out (the server has decided it, its answer not yet back) stops tracking it: both dialogs close and page one is read again at once — the draft is not in it, and nothing says it was discarded; the late 200 then changes nothing (no notice, no read)', async () => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    expect(screen.getByTestId('draft-discard-keep')).toHaveAccessibleDescription(DISCARD_TEXT.closeWarning);
+    const mark = server.sent.length;
+    await click('draft-discard-keep');
+    await listReady();
+    await settle();
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(pageOneReads(server, mark)).toHaveLength(1);
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id); // the server's list, not a claim of this attempt
+    expect(notice()).toBeNull();
+    const out = server.sent.length;
+    await release(server);
+    await settle();
+    expect(draft.status).toBe('discarded');
+    expect(server.sent.slice(out)).toEqual([]);
+    expect(notice()).toBeNull();
+    expect(document.body.textContent).not.toMatch(/cancel|discarded/i);
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-135. DSC-06, DSC-21: a second stale version in a row is announced again: a new confirmation takes the earlier refusal\'s line away (inert beneath it), and the next sealed 409 mounts the reopen dialog\'s alert afresh', async () => {
+    const { server, ada, draft, r } = await ready();
+    await openConfirm(server);
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // version 4, elsewhere
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-view-discard-refused')).toHaveTextContent(DISCARD_REFUSED_TEXT.conflict));
+    const first = screen.getByTestId('draft-view-discard-refused');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('draft-discard-open')));
+    await click('draft-discard-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    expect(screen.queryByTestId('draft-view-discard-refused')).toBeNull(); // the earlier refusal's line went with the new confirmation
+    server.editDraft(draft, ada, [{ description: 'Again', quantity: 2, unitPriceCents: 100 }]); // version 5, elsewhere again
+    await click('draft-discard-send');
+    await waitFor(() => expect(screen.getByTestId('draft-view-discard-refused')).toHaveTextContent(DISCARD_REFUSED_TEXT.conflict));
+    const second = screen.getByTestId('draft-view-discard-refused');
+    expect(second).toHaveAttribute('role', 'alert');
+    expect(second).not.toBe(first); // mounted afresh, so announced again
+    expect(confirm()).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('5'));
+    expect(server.discardPosts().map((x) => x.body)).toEqual([discardBody(TENANT_A, 3), discardBody(TENANT_A, 4)]);
+    expect(r.keys).toHaveLength(2);
+    expect(draft.status).toBeUndefined();
+  });
+
+  it('SID-136. DSC-14: closing an unresolved confirmation during a rate limit\'s wait (its Check again answered 429) closes both dialogs; page one, not read during the wait, keeps its rows marked last known with the wait and a Try again held back through it — nothing is sent, then or when the wait has passed', async () => {
+    const { server, draft, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    fakeClock();
+    server.retryAfter = '3';
+    server.discards.push(429);
+    fireEvent.click(screen.getByTestId('draft-discard-check'));
+    await until(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent('Too many requests. Wait 3 seconds.'));
+    expect(screen.getByTestId('draft-discard-check')).toBeDisabled();
+    const sent = server.sent.length;
+    fireEvent.click(screen.getByTestId('draft-discard-keep'));
+    await until(() => expect([confirm(), view()]).toEqual([null, null]));
+    expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'rate-limited');
+    expect(screen.getByTestId('drafts-list-state')).toHaveTextContent(pickerWaitText(3));
+    expect(screen.getByTestId('drafts-last-known')).toBeInTheDocument();
+    expect(rows().map((x) => x.getAttribute('data-id'))).toContain(draft.id);
+    expect(screen.getByTestId('drafts-list-retry')).toBeDisabled();
+    expect(document.body.textContent).not.toMatch(/cancel|discarded/i);
+    await advance(3_000);
+    await settle();
+    expect(screen.getByTestId('drafts-list-retry')).toBeEnabled();
+    expect(server.sent).toHaveLength(sent);
+    expect(server.discardPosts()).toHaveLength(2);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-137. DSC-21: during a rate limit\'s wait begun elsewhere (the edit\'s eligibility answered 429), a confirmation\'s Discard draft is held back and says why beside it — visibly, and as its description; nothing is sent', async () => {
+    const { server, r } = await ready();
+    server.retryAfter = '30';
+    server.editEligStatus.push(429);
+    await openDraft(server);
+    expect(screen.getByTestId('draft-view-edit-state')).toHaveAttribute('data-phase', 'rate-limited');
+    await click('draft-discard-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    const send = screen.getByTestId('draft-discard-send');
+    expect(send).toBeDisabled();
+    expect(send).toHaveAccessibleDescription(DISCARD_TEXT.sendWaiting);
+    const why = within(confirm()!).getByText(DISCARD_TEXT.sendWaiting);
+    expect(why.id).toBe('draft-discard-send-wait');
+    expect(why).not.toHaveClass('sr-only'); // shown beside it, not only to a screen reader
+    fireEvent.click(send);
+    await settle();
+    expect(server.discardPosts()).toEqual([]);
+    expect(r.keys).toEqual([]);
+  });
+
+  it('SID-138. DSC-21: after a stale version, focus the user moved to Edit draft while the reopen dialog settled stays there — the discard eligibility answering last takes focus only from an unmoved Close', async () => {
+    const { server, ada, draft } = await ready();
+    await openConfirm(server);
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // version 4, elsewhere
+    server.hold.discardElig = 1; // the re-read's discard eligibility answers last
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discardElig']));
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit')).toBeEnabled());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('draft-view-close')));
+    const edit = screen.getByTestId('draft-view-edit');
+    act(() => edit.focus());
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-open')).toBeInTheDocument());
+    await settle();
+    expect(document.activeElement).toBe(edit);
+  });
+
+  it('SID-139. DSC-19: when neither the edit\'s nor the discard\'s eligibility could be asked, their two Try again buttons have distinct accessible names, each starting with its visible words; the discard\'s keeps its description', async () => {
+    const { server } = await ready();
+    server.editEligStatus.push(503);
+    server.discardEligStatus.push(503);
+    await openDraft(server);
+    const dialog = screen.getByTestId('draft-view');
+    const edit = within(dialog).getByRole('button', { name: 'Try again: can this draft be edited' });
+    const discard = within(dialog).getByRole('button', { name: 'Try again: can this draft be discarded' });
+    expect(edit).toBe(screen.getByTestId('draft-view-edit-retry'));
+    expect(discard).toBe(screen.getByTestId('draft-discard-elig-again'));
+    for (const button of [edit, discard]) expect(button).toHaveTextContent('Try again');
+    expect(discard).toHaveAccessibleDescription(DISCARD_ELIGIBILITY_TEXT.unavailable);
+    expect(within(dialog).queryAllByRole('button', { name: 'Try again' })).toEqual([]);
+  });
+
+  it.each([
+    ['the chain\'s 409 write_conflict (another tenant now)', () => refusal(409, 'write_conflict'), 'tenant-changed', ''],
+    ['the chain\'s 422 (the key used for another request)', () => refusal(422, 'idempotency_key_reused'), 'key-reused', ''],
+    ['400 (a request the server does not accept)', () => refusal(400, 'invalid_request'), null, 'The server did not accept this check.'],
+    ['the chain\'s 409 request_in_progress', () => refusal(409, 'request_in_progress'), null, 'The server is still working on it. Check again in a moment.'],
+  ] as const)('SID-140. DSC-13: a Check again answered with %s: only an answer that decides the request ends the attempt, with its own alert — never "Draft discarded." — and any other leaves it unresolved with its reason and Check again offered; every POST is the same key and bytes', async (_what, answer, decided, note) => {
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503, answer());
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.discardPosts()).toHaveLength(2));
+    await waitFor(() => expect(attemptState()).not.toBe('checking'));
+    await settle();
+    if (decided !== null) {
+      expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_REFUSED_TEXT[decided]);
+      expect(screen.getByTestId('draft-discard-status')).toHaveAttribute('role', 'alert');
+      expect([screen.queryByTestId('draft-discard-attempt'), screen.queryByTestId('draft-discard-check')]).toEqual([null, null]);
+    } else {
+      expect(attemptState()).toBe('unresolved');
+      expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent(note);
+      expect(screen.getByTestId('draft-discard-check')).toBeEnabled();
+      expect(screen.queryByTestId('draft-discard-status')).toBeNull();
+    }
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    expect(notice()).toBeNull();
+    expect(new Set(server.discardPosts().map((x) => `${x.headers.get('idempotency-key')} ${x.body}`)).size).toBe(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it.each([
+    ['changed on the server (the sealed 409 write_conflict)', 'conflict'],
+    ['discarded elsewhere (the sealed 409 invalid_state)', 'not-open'],
+  ] as const)('SID-141. DSC-06, DSC-10, DSC-13: a Check again the server decides as a draft %s is never "Draft discarded.": a stale version reads the draft again and says so in the reopen dialog; a draft no longer open closes both dialogs and says so', async (_what, kind) => {
+    const { server, ada, draft, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    if (kind === 'conflict') server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]);
+    else { draft.status = 'discarded'; draft.version += 1; }
+    await click('draft-discard-check');
+    if (kind === 'conflict') {
+      await waitFor(() => expect(screen.getByTestId('draft-view-discard-refused')).toHaveTextContent(DISCARD_REFUSED_TEXT.conflict));
+      expect(confirm()).toBeNull();
+      await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('4'));
+    } else {
+      await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_REFUSED_TEXT['not-open']));
+      expect([confirm(), view()]).toEqual([null, null]);
+    }
+    await settle();
+    expect(document.body).not.toHaveTextContent(DISCARD_TEXT.discarded);
+    const [first, again] = server.discardPosts();
+    expect([again.body, again.headers.get('idempotency-key')]).toEqual([first.body, first.headers.get('idempotency-key')]);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-142. DSC-13, DSC-21: a POST refused 403 is a refusal of access ONLY when its one fresh session check confirms the same session — a first send whose check cannot answer says so (never "may not discard"), a Check again\'s 403 whose check cannot answer stays unresolved with that check\'s own note, and a first send whose check is rate-limited starts the wait and says so', async () => {
+    const { server, r } = await ready();
+    // A first send refused 403 whose fresh check cannot answer (503).
+    await openConfirm(server);
+    server.discardAllow.owner = false;
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    server.currentStatus.push(503); // the fresh check after the 403
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_TEXT.refusedUnchecked));
+    expect(screen.getByTestId('draft-discard-status')).toHaveAttribute('role', 'alert');
+    expect(document.body).not.toHaveTextContent(DISCARD_REFUSED_TEXT.denied);
+    expect(screen.queryByTestId('draft-discard-attempt')).toBeNull();
+    await click('draft-discard-keep');
+    await listReady();
+    // A Check again's 403 whose fresh check cannot answer: unresolved, with that check's own note.
+    server.discardAllow.owner = true;
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    server.discardAllow.owner = false;
+    server.hold.discard = 1;
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    server.currentStatus.push(503);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent(EDIT_TEXT.checkUnchecked));
+    expect(attemptState()).toBe('unresolved');
+    expect(screen.getByTestId('draft-discard-check')).toBeEnabled();
+    await click('draft-discard-keep');
+    await listReady();
+    // A first send refused 403 whose fresh check is rate-limited: the wait starts, and the alert says to wait.
+    server.discardAllow.owner = true;
+    await openConfirm(server);
+    server.discardAllow.owner = false;
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    server.retryAfter = '30';
+    server.currentStatus.push(429);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-status')).toHaveTextContent(DISCARD_REFUSED_TEXT['rate-limited']));
+    expect(document.body).not.toHaveTextContent(DISCARD_REFUSED_TEXT.denied);
+    await settle();
+    expect(server.discardPosts()).toHaveLength(4);
+    expect(r.keys).toHaveLength(3);
+  });
+
+  it('SID-143. DSC-13: while a Check again is out its attempt says "Checking the discard with the server…" in its status and offers no Check again; a Check again whose own session check is refused 429 sends nothing and says "Not checked." — the attempt stays unresolved', async () => {
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    server.hold.discard = 1;
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    expect(attemptState()).toBe('checking');
+    expect(within(screen.getByTestId('draft-discard-attempt')).getByRole('status')).toHaveTextContent(DISCARD_TEXT.checking);
+    expect(screen.queryByTestId('draft-discard-check')).toBeNull();
+    await release(server, 0, refusal(503, 'service_unavailable'));
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    server.hold.current = 1;
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    await release(server, 0, refusal(429, 'rate_limited'));
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent(/^Not checked\./));
+    expect(attemptState()).toBe('unresolved');
+    expect(server.discardPosts()).toHaveLength(2);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-144. DSC-13: a Check again that finds a rate limit\'s wait begun while its session check was out (the edit\'s eligibility answered 429 meanwhile) sends nothing and says "Not checked." with the wait; Check again is held back through it', async () => {
+    const { server, r } = await ready();
+    server.hold.editElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig']));
+    await waitFor(() => expect(screen.getByTestId('draft-discard-open')).toBeEnabled());
+    await click('draft-discard-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    server.discards.push(503);
+    await click('draft-discard-send');
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    server.hold.current = 1;
+    await click('draft-discard-check');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['editElig', 'current']));
+    await release(server, 0, refusal(429, 'rate_limited'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit-state')).toHaveAttribute('data-phase', 'rate-limited'));
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-discard-attempt-note')).toHaveTextContent(/^Not checked\. Too many requests\./));
+    expect(attemptState()).toBe('unresolved');
+    expect(screen.getByTestId('draft-discard-check')).toBeDisabled();
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-145. DSC-14: a late answer to an EARLIER confirmation\'s POST — closed while it was out — changes nothing in a NEW confirmation whose own POST is out: an answer settles only its own key, and the new attempt is settled by its own answer', async () => {
+    const { server, ada, draft, r } = await ready();
+    await openConfirm(server);
+    server.editDraft(draft, ada, [{ description: 'Elsewhere', quantity: 1, unitPriceCents: 100 }]); // version 4: the first POST does not discard it
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    await click('draft-discard-keep');
+    await listReady();
+    await settle();
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(rows().map((x) => x.getAttribute('data-id'))).toContain(draft.id);
+    await openConfirm(server);
+    expect(screen.getByTestId('draft-discard-identity')).toHaveTextContent('version 4');
+    server.hold.discard = 1;
+    await click('draft-discard-send');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard', 'discard']));
+    const sent = server.sent.length;
+    // The first POST's answer arrives now: a 200 that is valid for IT (version 3, plus one) — never for this attempt.
+    await release(server, 0, new Response(JSON.stringify({ draftId: draft.id, version: 4, status: 'discarded' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await settle();
+    expect(confirm()).toBeInTheDocument();
+    expect(attemptState()).toBe('sending');
+    expect(notice()).toBeNull();
+    expect(screen.queryByTestId('draft-view-discard-refused')).toBeNull();
+    expect(server.sent.slice(sent)).toEqual([]);
+    await release(server);
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+    const [earlier, fresh] = server.discardPosts();
+    expect(fresh.headers.get('idempotency-key')).not.toBe(earlier.headers.get('idempotency-key'));
+    expect([earlier.body, fresh.body]).toEqual([discardBody(TENANT_A, 3), discardBody(TENANT_A, 4)]);
+    expect(r.keys).toHaveLength(2);
+    expect([draft.status, draft.version]).toEqual(['discarded', 5]);
+  });
+
+  it('SID-146. DSC-21: two activations of Discard draft delivered before React commits the first (one task) are still ONE POST under ONE key: the press is held in a ref, not only in a render', async () => {
+    const { server, r } = await ready();
+    await openConfirm(server);
+    server.hold.discard = 1;
+    const send = screen.getByTestId('draft-discard-send');
+    await act(async () => { send.click(); send.click(); }); // both before React commits: the button not yet disabled
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['discard']));
+    await settle();
+    expect(server.discardPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    await release(server);
+    await waitFor(() => expect(notice()).toHaveTextContent(DISCARD_TEXT.discarded));
+  });
+
+  it('SID-147. DSC-07 (the shop\'s side of the reverse order): an editor opened before another session discarded the draft cannot save it — the sealed 409 invalid_state says "Not saved: this draft can no longer be edited." in an alert, never Saved and never unresolved; nothing is sent again or read back', async () => {
+    const { server, draft } = await ready();
+    await openDraft(server);
+    await click('draft-view-edit');
+    await waitFor(() => expect(screen.getByTestId('draft-edit')).toBeInTheDocument());
+    draft.status = 'discarded'; // another session discarded it
+    draft.version += 1;
+    fireEvent.change(screen.getAllByTestId('draft-edit-description')[0], { target: { value: 'Late line' } });
+    const mark = server.sent.length;
+    await click('draft-edit-save');
+    await waitFor(() => expect(screen.getByTestId('draft-edit-status')).toHaveTextContent(EDIT_REFUSED_TEXT['not-editable']));
+    expect(screen.getByTestId('draft-edit-status')).toHaveAttribute('role', 'alert');
+    expect(screen.queryByTestId('draft-edit-attempt')).toBeNull();
+    await settle();
+    expect(server.patches()).toHaveLength(1);
+    expect(screen.queryByTestId('draft-view-saved')).toBeNull();
+    expect(server.detailReads(STORE_1, draft.id).filter((x) => server.sent.indexOf(x) >= mark)).toEqual([]);
   });
 });

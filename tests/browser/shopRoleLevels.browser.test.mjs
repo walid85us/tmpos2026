@@ -356,6 +356,31 @@
 //          two: the detail read, that session read; the dialog says checking). At the switch the page cancels that read;
 //          released, nothing follows: no edit-eligibility GET is ever initiated or recorded, nothing after the logout, and
 //          nothing of A shows.
+// M7B-INVOICES-DISCARD-P1 — DISCARDING A SAVED DRAFT: POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard and GET
+// …/{id}/discard-eligibility (Invoices Manage), answered by the real entry over migration 033. Each title names the DSC
+// cases of doc 11 it covers.
+//   SDB-18 (DSC-01, DSC-15, DSC-21) the owner reopens a saved draft; the confirmation is an alertdialog named "Discard this
+//          draft?" (the browser's own accessibility tree) described by ONE element — what a discard does and the draft it
+//          names — with Keep draft focused and the reopen dialog inert beneath; Escape sends nothing and gives focus back to
+//          Discard draft…. Confirmed: ONE POST of exactly { expectedTenant, expectedVersion } under a v4 key, 200 version 2;
+//          "Draft discarded." in the status region outside the dialogs, focus on the section heading, page one read again
+//          without the draft; a direct read of it through the page's own server is 404 (the other draft's 200); the
+//          database holds it discarded at version 2 with its line, one store-scope discard audit naming it, one completion
+//          and no outbox row.
+//   SDB-19 (DSC-19) a sales_staff account whose Invoices level the owner set to Edit: Edit draft is offered, Discard draft…
+//          is not (its eligibility 403 forbidden after the one fresh session check) and nothing about it is said in the
+//          dialog; lowered to View, the reopen says ONE denial (the edit's status line), never a second; nothing is posted.
+//   SDB-20 (DSC-13, DSC-21) UNKNOWN OUTCOME: the discard commits and its answer is dropped at the front (st.lose): the
+//          confirmation stays unresolved with Check again, Discard draft gone, Keep draft now "Close" described by the close
+//          warning, never "Draft discarded."; a focus sends nothing; Check again sends the SAME key and byte-identical body
+//          under the same session token, answered 200 as the sealed replay: "Draft discarded."; one discard in the database.
+//   SDB-21 (DSC-14, DSC-21) CLOSING AN UNRESOLVED CONFIRMATION: Escape on it closes BOTH dialogs and sends nothing; page one
+//          is read again (the server had discarded the draft: it is no longer listed); no notice — neither "cancelled" nor
+//          "discarded" — and focus never left on the page body.
+//   SDB-22 (DSC-19, DSC-21) THE REOPEN DIALOG HOLDS STILL: with Edit draft offered and the discard-eligibility answer parked
+//          at the front, Close's box and the dialog's height are measured; once the answer is in they are unchanged —
+//          allowed (the owner: Discard draft… appears in the row's held space) and refused (a sales_staff account at
+//          Invoices Edit: 403, nothing shown) — and Close, then pressed, closes the dialog.
 // M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
 // guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
 // of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
@@ -579,8 +604,21 @@ async function teardownDatabase() {
             await sql`update public.audit_event set subject_invoice_draft_id = null where subject_invoice_draft_id = any(${drafts}::uuid[])`;
             await sql.unsafe(`alter table public.audit_event ${restore} trg_audit_event_reject_mutation`);
           }
+          // M7B-INVOICES-DISCARD-P1: migration 033's terminal guards (a discarded draft and its lines admit no delete) are lifted
+          // for the two deletes only and put back in exactly the mode they were found in — the discard suites' technique. An
+          // entry commit before 033 has neither.
+          const lifted = [];
+          for (const [rel, name] of [['tmpos_invoice_draft.invoice_draft', 'trg_invoice_draft_terminal'], ['tmpos_invoice_draft.invoice_draft_line', 'trg_invoice_draft_line_terminal']]) {
+            const [found] = await sql`select tgenabled as mode from pg_catalog.pg_trigger where tgrelid = ${rel}::regclass and tgname = ${name}`;
+            if (found === undefined) continue;
+            const back = { O: 'enable trigger', D: 'disable trigger', R: 'enable replica trigger', A: 'enable always trigger' }[found.mode];
+            assert.ok(back, `${name}'s mode is known: ${found.mode}`);
+            lifted.push([rel, name, back]);
+            await sql.unsafe(`alter table ${rel} disable trigger ${name}`);
+          }
           await sql`delete from tmpos_invoice_draft.invoice_draft_line where tenant_id = any(${TENANTS}::uuid[])`;
           await sql`delete from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[])`;
+          for (const [rel, name, back] of lifted) await sql.unsafe(`alter table ${rel} ${back} ${name}`);
           await sql`delete from tmpos_internal.outbox_event where event_type = 'invoice_draft.created'
             and (payload ->> 'storeId')::uuid in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`;
         });
@@ -1474,7 +1512,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-01', 'SCB-02', 'SCB-03', 'SCB-04', 'SCB-05', 'SCB-06', 'SCB-07', 'SCB-08', 'SCB-09', 'SCB-10', 'SCB-11', 'SCB-12',
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
-  'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17',
+  'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17', 'SDB-18', 'SDB-19', 'SDB-20', 'SDB-21', 'SDB-22',
   'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
 ]);
 const registered = new Set();
@@ -6280,6 +6318,387 @@ scenario('SDB-17', 'AC-15 SIGN-OUT BEFORE INITIATION (M7B-INVOICES-P1-R3) — A 
   assert.deepEqual(sentBy(page, isDraftCreate), [], 'no draft POST');
   await assertNoLeak(page);
 }, 180_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-DISCARD-P1 — discarding a saved draft (SDB-18..21). The literals are the shop's own texts.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const DISCARD_ACTION = 'store.invoice_draft.discard';
+const isDiscardPost = (store, id) => (r) => r.method === 'POST' && r.path === `${draftsPath(store)}/${id}/discard`;
+const isDiscardEligibility = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}/discard-eligibility`;
+/** ServerInvoiceDrafts.tsx DISCARD_TEXT.title, .explain, .closeWarning, .unresolved (its start) and .discarded. */
+const DISCARD_TITLE = 'Discard this draft?';
+const DISCARD_EXPLAIN = "It leaves the store's open drafts. It is not deleted, and it cannot be reopened here.";
+const DISCARD_CLOSE_WARNING = 'Closing stops tracking this discard; the server may have discarded the draft anyway.';
+const DISCARD_UNRESOLVED = 'Not confirmed yet: the server may have discarded this draft.';
+const DISCARDED = 'Draft discarded.';
+/** The exact POST body the shop must send (invoiceDraftsClient.ts draftDiscardBody: these keys in this order). */
+const discardBodyFor = (tenant, expectedVersion) => JSON.stringify({ expectedTenant: tenant, expectedVersion });
+
+/** One draft's stored status, version and line count, the tenant's discard audits ([scope, store, subject], oldest first) and every outbox row naming one of its stores. */
+async function discardState(tenant, draftId) {
+  const [r] = await owner`select
+    (select status from tmpos_invoice_draft.invoice_draft where draft_id = ${draftId}) as status,
+    (select version::int from tmpos_invoice_draft.invoice_draft where draft_id = ${draftId}) as version,
+    (select count(*) from tmpos_invoice_draft.invoice_draft_line where draft_id = ${draftId})::int as lines,
+    (select coalesce(jsonb_agg(jsonb_build_array(scope_type, store_id, subject_invoice_draft_id) order by occurred_at, event_id), '[]')
+       from public.audit_event where action_id = ${DISCARD_ACTION} and tenant_id = ${tenant}) as audits,
+    (select count(*) from tmpos_internal.outbox_event
+      where payload ->> 'storeId' in (select store_id::text from public.store where tenant_id = ${tenant}))::int as outbox`;
+  return r;
+}
+/** A tenant with one store, one server customer and `n` one-line drafts seeded there (newest first). */
+async function discardCase(label, n = 2) {
+  const { tenant, stores: [main], boss } = await draftShop(label, ['main']);
+  const [customer] = await seedCustomers(tenant, [`M7SDB ${label} Fern ${SUFFIX}`]);
+  const ids = await seedDrafts(tenant, main.id, customer.id, boss.id, n, `M7SDB ${label} seed`);
+  return { tenant, main, boss, customer, ids };
+}
+/** The owner's page with the store chosen and its seeded drafts listed. */
+async function ownerDrafts(c) {
+  const page = await recordWrites(await openPage());
+  await signIn(page, c.boss);
+  await openDrafts(page);
+  await pickStore(page, c.main.id);
+  await waitDraftRows(page, c.ids, 'the seeded drafts', c.customer.name);
+  return page;
+}
+/** Reopen `id`, wait for Discard draft… (offered only on the server's own discard eligibility), press it: the confirmation, Keep draft focused. */
+async function openConfirm(page, c, id) {
+  if (!(await has(page, 'draft-view'))) await reopenDraft(page, id, c.customer.name);
+  await page.waitFor(() => offered(page, 'draft-discard-open'), 30_000, 'Discard draft… is offered: the server\'s discard eligibility allowed it');
+  await page.click(by('draft-discard-open'));
+  await page.waitFor(`!!${q('draft-discard-confirm')}`, 15_000, 'the discard confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'draft-discard-keep', 15_000, 'Keep draft has the first focus');
+}
+/** Press Discard draft with its answer dropped at the front (the entry answered, and committed): the attempt held unresolved. */
+async function sendLost(page, c, id) {
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isDiscardPost(c.main.id, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-discard-send'));
+    await waitData(page, 'draft-discard-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+}
+/** The unresolved confirmation as shown: its attempt line, Check again, Discard draft, and the close control's text and description. */
+const unresolvedOf = (page) => page.evaluate(`(() => {
+  const keep = ${q('draft-discard-keep')};
+  return {
+    text: ${q('draft-discard-attempt')}?.querySelector('[role="status"]')?.textContent.trim() ?? null,
+    check: ${q('draft-discard-check')} !== null && ${q('draft-discard-check')}.disabled !== true,
+    send: !!${q('draft-discard-send')},
+    close: keep === null ? null : { text: keep.textContent.trim(), describedBy: document.getElementById(keep.getAttribute('aria-describedby') ?? '')?.textContent.trim() ?? null },
+  };
+})()`);
+/** What the live regions inside `id` say now (role status or alert, or aria-live), the silent ones left out. */
+const saidIn = (page, id) => page.evaluate(`[...(${q(id)}?.querySelectorAll('[role="status"], [role="alert"], [aria-live]') ?? [])].map((n) => n.textContent.trim()).filter((t) => t !== '')`);
+/**
+ * The reopen dialog's two eligibility reads since `from` settled: each answered and handed back, and each 403 followed by
+ * its one fresh session check (a fresh check always reads again, after any check in flight), answered; then two frames.
+ */
+async function eligibilitySettled(page, store, id, from) {
+  await page.waitFor(() => {
+    const reads = sentBy(page, (r) => isEditEligibility(store, id)(r) || isDiscardEligibility(store, id)(r), from);
+    if (reads.length < 2 || !reads.every((r) => r.handedBack === true)) return false;
+    // Each refusal, in the order answered, takes the first session read answered after it that no earlier one took.
+    const checks = sentBy(page, (r) => isSessionRead(r) && r.handedBack === true, from);
+    let taken = -1;
+    return reads.filter((r) => r.status === 403).sort((a, b) => a.doneAt - b.doneAt).every((refusal) => {
+      taken = checks.findIndex((s, i) => i > taken && s.at > refusal.doneAt);
+      return taken !== -1;
+    });
+  }, 30_000, 'both eligibility reads answered, each refusal followed by its own fresh session check');
+  await quiet(page, from);
+  await page.settle();
+}
+/** The reopen dialog's eligibility reads since `from`, as "<route end> <answer>", sorted. */
+const eligibilityReads = (page, store, id, from) => sentBy(page, (r) => isEditEligibility(store, id)(r) || isDiscardEligibility(store, id)(r), from)
+  .map((r) => `${r.path.split('/').at(-1)} ${answered(r)}`).sort();
+
+scenario('SDB-18', 'DSC-01 DSC-15 DSC-21 DISCARD, CONFIRMED — the owner reopens a saved draft and opens the confirmation: an alertdialog named "Discard this draft?" with ONE description (what a discard does and the draft it names), Keep draft focused, the reopen dialog inert beneath; Escape sends nothing and gives focus back to Discard draft…; confirmed: ONE POST of the exact body under a v4 key, 200 version 2; "Draft discarded." in the status region outside the dialogs, focus on the section heading, page one read again without the draft; a direct read of it through the page\'s own server is 404; the database holds it discarded at version 2 with one store-scope discard audit, one completion and no outbox row', async () => {
+  const c = await discardCase('d18');
+  const [gone, kept] = c.ids;
+  const page = await ownerDrafts(c);
+  const seeded = (await storedDrafts(c.tenant)).find((d) => d.id === gone);
+  const from = st.api.length;
+
+  // 1. The confirmation: its role, name and one description as the browser computes them; Keep draft focused.
+  await openConfirm(page, c, gone);
+  const identity = [c.customer.name, c.main.name, `created ${minuteOf(seeded.createdAt)}`, '1 line', `Draft subtotal ${usd(seeded.subtotalCents)}`, 'version 1', `draft ID ${gone}`].join(' · ');
+  const ax = (await page.axNodes({ role: 'alertdialog', name: DISCARD_TITLE })).map((n) => (n.description?.value ?? '').replace(/\s+/g, ' ').trim());
+  const shape = await page.evaluate(`(() => {
+    const d = ${q('draft-discard-confirm')};
+    const ids = (d.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean);
+    return {
+      role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'),
+      name: document.getElementById(d.getAttribute('aria-labelledby') ?? '')?.textContent.trim() ?? null,
+      descriptions: ids.length, controlsInDescription: ids.some((id) => document.getElementById(id)?.querySelector('button, a, input, select') != null),
+      viewInert: ${q('draft-view')}?.closest('[inert]') != null,
+      keep: ${q('draft-discard-keep')}?.textContent.trim() ?? null, send: ${q('draft-discard-send')}?.textContent.trim() ?? null,
+    };
+  })()`);
+  const eligibility = sentBy(page, isDiscardEligibility(c.main.id, gone), from);
+  record('SDB-18', { phase: 'confirmation', ax, shape, eligibility: eligibility.map(apiLine) });
+  assert.equal(ax.length, 1, 'ONE alertdialog named "Discard this draft?" in the browser\'s accessibility tree');
+  assert.ok(ax[0].startsWith(DISCARD_EXPLAIN) && ax[0].endsWith(identity) && ax[0].length <= DISCARD_EXPLAIN.length + 1 + identity.length,
+    `its description is what a discard does and the draft it names, nothing else: ${ax[0]}`);
+  assert.deepEqual(shape, { role: 'alertdialog', modal: 'true', name: DISCARD_TITLE, descriptions: 1, controlsInDescription: false, viewInert: true, keep: 'Keep draft', send: 'Discard draft' },
+    'a modal alertdialog, named by its title, described by ONE element holding no control, the reopen dialog inert beneath');
+  assert.deepEqual(eligibility.map(answered), ['200'], 'Discard draft… followed ONE discard-eligibility read, answered allowed');
+  assert.deepEqual([eligibility[0].replied.text, eligibility[0].query, eligibility[0].body], ['{"eligibility":"allowed"}', '', ''], 'the closed allowance; a read with no query or body');
+
+  // 2. Escape before anything is sent: the draft is kept, focus goes back to Discard draft… in the unchanged reopen dialog.
+  await page.press('Escape');
+  await page.waitFor(`!${q('draft-discard-confirm')}`, 15_000, 'Escape closed the confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'draft-discard-open', 15_000, 'focus back on Discard draft…');
+  await quiet(page, from);
+  const escaped = {
+    view: await has(page, 'draft-view'), inert: await page.evaluate(`${q('draft-view')}?.closest('[inert]') != null`),
+    posts: sentBy(page, (r) => r.method === 'POST' && r.path.endsWith('/discard')).length, stored: (await discardState(c.tenant, gone)).status,
+  };
+  assert.deepEqual(escaped, { view: true, inert: false, posts: 0, stored: 'draft' }, 'Escape sent nothing and kept the reopen dialog, live again');
+
+  // 3. Confirmed: one POST; "Draft discarded." outside the dialogs, focus on the heading, page one read again.
+  await openConfirm(page, c, gone);
+  const before = await counts();
+  const dBefore = await draftCounts(c.tenant);
+  const sBefore = await discardState(c.tenant, gone);
+  const at = st.api.length;
+  await page.click(by('draft-discard-send'));
+  await page.waitFor(`!${q('draft-discard-confirm')} && !${q('draft-view')} && ${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DISCARDED)}`,
+    30_000, 'discarded: both dialogs closed, the notice said');
+  await waitDraftRows(page, [kept], 'page one read again, without the discarded draft');
+  await quiet(page, at);
+  const posts = sentBy(page, isDiscardPost(c.main.id, gone));
+  const [post] = posts;
+  const reread = sentBy(page, isDraftList(c.main.id), at).filter((r) => r.at > post.doneAt);
+  const after = {
+    focus: await focusOf(page),
+    notice: await page.evaluate(`(() => { const n = ${q('drafts-notice')}; return n === null ? null : { text: n.textContent.trim(), role: n.getAttribute('role'), inDialog: n.closest('[role="dialog"], [role="alertdialog"]') !== null }; })()`),
+    dialogs: await page.evaluate(`document.querySelectorAll('[role="dialog"], [role="alertdialog"]').length`),
+  };
+  // A direct read of each draft through the page's own server, with the session token the POST carried.
+  const readOf = (id) => `fetch(${JSON.stringify(`${draftsPath(c.main.id)}/${id}`)}, { method: 'GET', credentials: 'include', mode: 'same-origin', cache: 'no-store', redirect: 'error',
+    headers: { Accept: 'application/json', ${JSON.stringify(SESSION_CSRF_HEADER)}: ${JSON.stringify(post.headers[SESSION_CSRF])} } })
+    .then(async (r) => ({ status: r.status, error: (await r.json().catch(() => ({}))).error ?? null }))`;
+  const direct = await page.evaluate(`Promise.all([${readOf(gone)}, ${readOf(kept)}])`);
+  const sAfter = await discardState(c.tenant, gone);
+  record('SDB-18', { phase: 'discarded', posts: posts.map(apiLine), reread: reread.map(apiLine), after, direct, sAfter });
+  assert.equal(posts.length, 1, `ONE POST: ${posts.map(apiLine).join('; ')}`);
+  assert.equal(post.query, '', 'nothing rides the query');
+  assert.equal(post.body, discardBodyFor(c.tenant, 1), 'exactly { expectedTenant, expectedVersion }: the store\'s tenant and the version the reopen read found');
+  assert.match(post.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.equal(post.headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the request-intent header');
+  assert.deepEqual(Object.keys(post.headers).filter((h) => /tenant|store|role|actor/i.test(h)), [], 'no selecting header');
+  assert.deepEqual([post.status, post.replied.headers['idempotent-replayed'], JSON.parse(post.replied.text)], [200, undefined, { draftId: gone, version: 2, status: 'discarded' }], 'the sealed 200, not a replay');
+  assert.ok(reread.length >= 1 && reread.every((r) => r.status === 200 && !r.replied.text.includes(gone)) && reread.at(-1).replied.text.includes(kept),
+    `page one read again after the 200, without the discarded draft: ${reread.map(apiLine).join('; ')}`);
+  assert.deepEqual(after, { focus: HEADING, notice: { text: DISCARDED, role: 'status', inDialog: false }, dialogs: 0 },
+    '"Draft discarded." in the status region outside any dialog, kept through the re-read; focus on the section heading');
+  assert.deepEqual(direct, [{ status: 404, error: 'not_found' }, { status: 200, error: null }], 'the discarded draft reads as not found; the other still reads');
+  assert.deepEqual(sAfter, { ...sBefore, status: 'discarded', version: 2, audits: [['store', c.main.id, gone]] },
+    'discarded at version 2, its line kept, ONE store-scope discard audit naming it, no outbox row');
+  assert.equal(sBefore.audits.length, 0, 'no discard audit before the press');
+  assert.deepEqual([(await discardState(c.tenant, kept)).status, (await discardState(c.tenant, kept)).version], ['draft', 1], 'the other draft untouched');
+  assert.deepEqual(minus(await draftCounts(c.tenant), dBefore), { D: 0, L: 0, A: 0, O: 0 }, 'no draft, line, create audit or event appears or goes');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, 'the discard: one completion, one idempotency record');
+  await assertDraftsNowhere([page], [gone, post.headers['idempotency-key'], post.body]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-19', 'DSC-19 DISCARD IS THE SERVER\'S DECISION — a sales_staff account whose Invoices level the owner set to Edit reopens a saved draft: Edit draft is offered (edit eligibility 200) but Discard draft… is not (discard eligibility 403 forbidden after its one fresh session check) and nothing about it is said in the dialog; lowered to View, the reopen says ONE denial (the edit\'s status line), never a second for the discard; nothing is posted or written', async () => {
+  const c = await discardCase('d19', 1);
+  const [id] = c.ids;
+  const staff = await actor('d19-staff', [grant(c.tenant, 'sales_staff'), storeGrant(c.tenant, c.main.id, 'sales_staff')], { role: 'sales_staff' });
+  const ownerSession = await directLogin(c.boss);
+  await setInvoicesLevel(ownerSession, 'sales_staff', 'edit', 0);
+  const page = await recordWrites(await openPage());
+  await signIn(page, staff);
+  await openDrafts(page);
+  await pickStore(page, c.main.id);
+  await waitDraftRows(page, [id], 'the sales account lists the draft', c.customer.name);
+  const sBefore = await discardState(c.tenant, id);
+  const before = await counts();
+  const dialog = async (from) => ({
+    edit: await offered(page, 'draft-view-edit'), discard: await has(page, 'draft-discard-open'), again: await has(page, 'draft-discard-elig-again'),
+    said: await saidIn(page, 'draft-view'), discardWords: await page.evaluate(`/discard/i.test(${q('draft-view')}?.innerText ?? '')`),
+    reads: eligibilityReads(page, c.main.id, id, from),
+  });
+
+  // 1. Invoices Edit: Edit, and no Discard draft… — nothing said about it.
+  const at = st.api.length;
+  await reopenDraft(page, id, c.customer.name);
+  await page.waitFor(() => offered(page, 'draft-view-edit'), 30_000, 'Edit draft is offered (Invoices Edit)');
+  await eligibilitySettled(page, c.main.id, id, at);
+  const atEdit = await dialog(at);
+  await closeView(page);
+
+  // 2. Lowered to View: ONE denial said, the edit's.
+  await setInvoicesLevel(ownerSession, 'sales_staff', 'view', 1);
+  const at2 = st.api.length;
+  await reopenDraft(page, id, c.customer.name);
+  await waitData(page, 'draft-view-edit-state', 'phase', 'denied');
+  await eligibilitySettled(page, c.main.id, id, at2);
+  const atView = await dialog(at2);
+  await closeView(page);
+  const posts = sentBy(page, (r) => r.method === 'POST' && r.path.endsWith('/discard'));
+  record('SDB-19', { atEdit, atView, posts: posts.map(apiLine) });
+  assert.deepEqual(atEdit, { edit: true, discard: false, again: false, said: [], discardWords: false, reads: ['discard-eligibility 403 forbidden', 'edit-eligibility 200'] },
+    'Invoices Edit: Edit offered, Discard draft… absent on the server\'s 403, and nothing about it said');
+  assert.deepEqual(atView, { edit: false, discard: false, again: false, said: [EDIT_DENIED], discardWords: false, reads: ['discard-eligibility 403 forbidden', 'edit-eligibility 403 forbidden'] },
+    'Invoices View: ONE denial announced (the edit\'s status line), not two');
+  assert.deepEqual(posts, [], 'no discard POST');
+  assert.deepEqual(await discardState(c.tenant, id), sBefore, 'nothing written: the draft open at version 1, no discard audit');
+  await assertDelta(before, { C: 0, A: 0, E: 1, U: 0, K: 1, L: 1 }, 'only the owner\'s one level edit in between');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-20', 'DSC-13 DSC-21 UNKNOWN DISCARD OUTCOME — the discard POST commits and its answer is dropped at the front: the confirmation stays, "Not confirmed yet", Check again offered, Discard draft gone and Keep draft now Close (described as only stopping tracking), never "Draft discarded."; a focus sends nothing; Check again sends exactly one more POST with the SAME key and byte-identical body under the same session token, answered 200 as the sealed replay: "Draft discarded.", page one read again without it; ONE discard in the database', async () => {
+  const c = await discardCase('d20');
+  const [gone, kept] = c.ids;
+  const page = await ownerDrafts(c);
+  await openConfirm(page, c, gone);
+  const before = await counts();
+  const posts = () => sentBy(page, isDiscardPost(c.main.id, gone));
+  await sendLost(page, c, gone);
+  const [first] = posts();
+  const lostPosts = posts().map((r) => `${r.status} ${r.lost ?? 'delivered'}`);
+  const committed = await discardState(c.tenant, gone);
+  const shown = await unresolvedOf(page);
+  const held = {
+    confirm: await has(page, 'draft-discard-confirm'), view: await has(page, 'draft-view'), notice: await has(page, 'drafts-notice'),
+    saidDiscarded: await page.evaluate(`document.body.innerText.includes(${JSON.stringify(DISCARDED)})`),
+    unresolved: shown.text?.startsWith(DISCARD_UNRESOLVED) === true, check: shown.check, send: shown.send, close: shown.close,
+  };
+  record('SDB-20', { phase: 'lost reply', lostPosts, shown, held, stored: [committed.status, committed.version, committed.audits.length] });
+  assert.deepEqual(lostPosts, ['200 response'], 'ONE POST: it committed, its answer lost at the front');
+  assert.deepEqual([committed.status, committed.version, committed.audits.length], ['discarded', 2, 1], 'committed: discarded at version 2, one audit');
+  assert.deepEqual(held, {
+    confirm: true, view: true, notice: false, saidDiscarded: false, unresolved: true, check: true, send: false, close: { text: 'Close', describedBy: DISCARD_CLOSE_WARNING },
+  }, 'held unresolved IN the confirmation: Check again, no Discard draft, Close described by the close warning; never "Draft discarded."');
+
+  // Nothing re-sends on its own: a window focus, held until the page's own session check has answered.
+  await focusAndSettle(page, 'focus');
+  assert.deepEqual([posts().length, await page.evaluate(`${q('draft-discard-attempt')}?.dataset.state ?? null`)], [1, 'unresolved'], 'a focus sends nothing; still unresolved');
+
+  // Check again: the SAME key and the SAME bytes, once; the sealed replay settles it.
+  const mid = await counts();
+  const again = st.api.length;
+  await page.click(by('draft-discard-check'));
+  await page.waitFor(`!${q('draft-discard-confirm')}`, 30_000, 'Check again settled the attempt: the confirmation closed');
+  await quiet(page, again);
+  const all = posts();
+  const second = all[1];
+  record('SDB-20', { phase: 'Check again', posts: all.map(apiLine), replayed: second?.replied?.headers['idempotent-replayed'] ?? null });
+  assert.equal(all.length, 2, `exactly one more POST, on the press: ${all.map(apiLine).join('; ')}`);
+  assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
+  assert.deepEqual([second.path, second.headers['idempotency-key'], second.body], [first.path, first.headers['idempotency-key'], first.body], 'the SAME draft, key and byte-identical body');
+  assert.equal(second.headers[SESSION_CSRF], first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
+  assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'], JSON.parse(second.replied.text)], [200, 'true', { draftId: gone, version: 2, status: 'discarded' }], 'answered as the sealed replay');
+  await page.waitFor(`!${q('draft-view')} && ${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DISCARDED)}`, 15_000, '"Draft discarded." once the replay was validated, both dialogs closed');
+  await waitDraftRows(page, [kept], 'page one read again, without the discarded draft');
+  assert.equal(await focusOf(page), HEADING, 'focus on the section heading');
+  const stored = await discardState(c.tenant, gone);
+  assert.deepEqual([stored.status, stored.version, stored.audits], ['discarded', 2, [['store', c.main.id, gone]]], 'still ONE discard: version 2, one audit');
+  await assertDelta(mid, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'the replay wrote nothing');
+  await assertDelta(before, { K: 1, L: 1 }, 'one completion and one idempotency record for the discard');
+  await assertDraftsNowhere([page], [gone, first.headers['idempotency-key'], first.body]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SDB-21', 'DSC-14 DSC-21 CLOSING AN UNRESOLVED DISCARD — the POST commits and its answer is lost; Escape on the unresolved confirmation (its close control named Close) closes BOTH dialogs and sends nothing; page one is read again (the server had discarded the draft: no longer listed); the page says neither "cancelled" nor "discarded" and focus is not left on the page body', async () => {
+  const c = await discardCase('d21');
+  const [gone, kept] = c.ids;
+  const page = await ownerDrafts(c);
+  await openConfirm(page, c, gone);
+  await sendLost(page, c, gone);
+  const shown = await unresolvedOf(page);
+  // The pressed Discard draft is gone: the dialog keeps focus inside itself, on its close control.
+  await page.waitFor(async () => (await focusOf(page)) === 'draft-discard-keep', 15_000, 'focus kept inside the confirmation, on Close');
+  const at = st.api.length;
+  await page.press('Escape');
+  await page.waitFor(`!${q('draft-discard-confirm')}`, 15_000, 'Escape closed the confirmation');
+  await page.settle();
+  const view = await has(page, 'draft-view');
+  assert.equal(view, false, 'closing an unresolved confirmation closes the reopen dialog too');
+  await waitDraftRows(page, [kept], 'page one read again: the server had discarded the draft');
+  await quiet(page, at);
+  await page.waitFor(async () => (await focusOf(page)) !== 'BODY', 5_000, 'focus is not left on the page body');
+  const reads = sentBy(page, isDraftList(c.main.id), at).map(answered);
+  const closed = {
+    notice: await has(page, 'drafts-notice'),
+    words: await page.evaluate(`(${q('drafts-section')}?.innerText ?? '').match(/cancel|discarded/gi) ?? []`),
+    dialogs: await page.evaluate(`document.querySelectorAll('[role="dialog"], [role="alertdialog"]').length`),
+    posts: sentBy(page, isDiscardPost(c.main.id, gone)).map((r) => `${r.status} ${r.lost ?? 'delivered'}`),
+    reread: reads.length > 0 && reads.every((s) => s === '200'),
+  };
+  const stored = await discardState(c.tenant, gone);
+  record('SDB-21', { shown, closed, reads, focus: await focusOf(page), stored: [stored.status, stored.version, stored.audits.length] });
+  assert.ok(shown.text?.startsWith(DISCARD_UNRESOLVED), `unresolved before the close: ${shown.text}`);
+  assert.deepEqual([shown.check, shown.send, shown.close], [true, false, { text: 'Close', describedBy: DISCARD_CLOSE_WARNING }], 'its close control is Close, described by the close warning');
+  assert.deepEqual(closed, { notice: false, words: [], dialogs: 0, posts: ['200 response'], reread: true },
+    'both dialogs closed, Escape sent nothing, page one read again, and nothing says cancelled or discarded');
+  assert.deepEqual([stored.status, stored.version, stored.audits.length], ['discarded', 2, 1], 'the server\'s discard stands: version 2, one audit');
+  await assertNoLeak(page);
+}, 240_000);
+
+/** The reopen dialog as laid out now: Close's box and the dialog panel's height. */
+const viewBox = (page) => page.evaluate(`(() => {
+  const r = ${q('draft-view-close')}.getBoundingClientRect();
+  return { close: { x: r.x, y: r.y, width: r.width, height: r.height }, panel: ${q('draft-view')}.getBoundingClientRect().height };
+})()`);
+/** Reopen `id` with its discard-eligibility answer parked at the front; answers the parked gate once Edit draft is offered and the dialog has settled. */
+async function reopenParked(page, store, id, customerName) {
+  const parked = gate((r) => r.frameId === page.frameId && isDiscardEligibility(store, id)(r), 'response');
+  await reopenDraft(page, id, customerName);
+  await page.waitFor(() => offered(page, 'draft-view-edit'), 30_000, 'Edit draft is offered');
+  const held = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(held, 'the discard-eligibility answer was parked at the front');
+  await page.settle();
+  return parked;
+}
+
+scenario('SDB-22', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL — with Edit draft offered and the discard-eligibility answer parked at the front, the reopen dialog\'s Close box (x, y, width, height) and the dialog\'s height are measured; once the answer is in they are exactly unchanged, both when the server allows Discard draft… (the owner: it appears) and when it refuses (a sales_staff account at Invoices Edit: 403, Discard draft… absent); Close, then pressed, closes the dialog', async () => {
+  const c = await discardCase('d22', 1);
+  const [id] = c.ids;
+
+  // 1. Allowed: the owner. Discard draft… appears without moving Close or growing the dialog.
+  const page = await ownerDrafts(c);
+  const parked = await reopenParked(page, c.main.id, id, c.customer.name);
+  const allowedBefore = { ...(await viewBox(page)), discard: await has(page, 'draft-discard-open') };
+  parked.release();
+  await page.waitFor(() => offered(page, 'draft-discard-open'), 30_000, 'Discard draft… is offered once the parked allowance is released');
+  await page.settle();
+  const allowedAfter = await viewBox(page);
+  record('SDB-22', { phase: 'allowed', before: allowedBefore, after: allowedAfter });
+  assert.equal(allowedBefore.discard, false, 'no Discard draft… while its eligibility is parked');
+  assert.deepEqual(allowedAfter, { close: allowedBefore.close, panel: allowedBefore.panel }, 'the allowance moved neither Close nor the dialog\'s height');
+  await closeView(page);
+
+  // 2. Refused: a sales_staff account at Invoices Edit (SDB-19's 403). Nothing appears and nothing moves.
+  const staff = await actor('d22-staff', [grant(c.tenant, 'sales_staff'), storeGrant(c.tenant, c.main.id, 'sales_staff')], { role: 'sales_staff' });
+  await setInvoicesLevel(await directLogin(c.boss), 'sales_staff', 'edit', 0);
+  const sales = await recordWrites(await openPage());
+  await signIn(sales, staff);
+  await openDrafts(sales);
+  await pickStore(sales, c.main.id);
+  await waitDraftRows(sales, [id], 'the sales account lists the draft', c.customer.name);
+  const at = st.api.length;
+  const refused = await reopenParked(sales, c.main.id, id, c.customer.name);
+  const refusedBefore = await viewBox(sales);
+  refused.release();
+  await eligibilitySettled(sales, c.main.id, id, at);
+  const refusedAfter = await viewBox(sales);
+  const reads = eligibilityReads(sales, c.main.id, id, at);
+  const discard = await has(sales, 'draft-discard-open');
+  record('SDB-22', { phase: 'refused', before: refusedBefore, after: refusedAfter, reads, discard });
+  assert.deepEqual(reads, ['discard-eligibility 403 forbidden', 'edit-eligibility 200'], 'Edit allowed, Discard refused by the server');
+  assert.equal(discard, false, 'no Discard draft… on the refusal');
+  assert.deepEqual(refusedAfter, refusedBefore, 'the refusal moved neither Close nor the dialog\'s height');
+  await closeView(sales);
+}, 240_000);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // M7B-INVOICES-P1-R2 — session-end cleanup (DA-200, DA-202, AC-07). The literals are the shop's own texts.

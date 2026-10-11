@@ -108,6 +108,26 @@
 //     answer arriving after that — the PATCH may still commit on the server under its old attempt — finds no attempt under
 //     its key and changes nothing: no "Saved", no read-back, no name. The token is never in the editor's state: it is the
 //     generation's (a ref), as for the reads.
+//   - DISCARDING A SAVED DRAFT (M7B-INVOICES-DISCARD-P1). The reopen dialog offers "Discard draft…" beside Edit ONLY on
+//     the server's own positive answer (GET …/{id}/discard-eligibility, decided by the discard's requirement), kept
+//     exactly as Edit's: its own state, request counter and controller, asked once the draft's own read answered at a
+//     writable store (and by its Try again), never on a timer, a focus or a reconnect. While it is asked, and when it is
+//     refused, nothing is shown or said for it (the edit's line is the dialog's one announced answer); when it could not
+//     be asked, one Try again says why. Discard draft… opens a confirmation (role=alertdialog) naming the draft from the
+//     reopen read — customer, store, created time, lines, subtotal, version and its ID — with "Keep draft" (focused; it and
+//     Escape close it, nothing sent) and "Discard draft": ONE POST per press, its key, exact body, store, draft, expected
+//     version and generation frozen first (the token in a ref, as the edit's); Discard draft is then gone (this dialog
+//     never mints a second key) and Keep draft reads "Close", which says it only stops tracking. "Draft discarded." is
+//     said only after the server's validated 200 (or its sealed replay): both dialogs close, the notice is said outside
+//     them, focus goes to the heading and page one is read again. A stale version reads the draft again in the reopen
+//     dialog and says so; a draft no longer open or no longer there closes both and says so; a 403 (after the reads' one
+//     fresh check) takes Discard draft… away; an answer that decides nothing leaves the attempt unresolved IN the
+//     confirmation, where only "Check again" re-sends — the same key and bytes, under the attempt's own token and
+//     generation, never during a wait, within the 23-hour cutoff. Closing it once Discard draft was pressed — its attempt
+//     held, or refused — closes the reopen dialog too and reads page one again (a later discard asks the server afresh),
+//     saying neither "cancelled" nor "discarded"; only one closed before that press returns to the reopen dialog. A new generation, a session end, a
+//     sign-out, a store change or a user change drops the attempt and both dialogs synchronously; a late answer changes
+//     nothing, and reopening never revives it.
 //   - The session token sits only in refs, the hold store, an open new-draft dialog's state and the picker's
 //     `sessionContextOf` pair (tenantSessionClient.ts lists the holders, and what a sign-out takes from each): never
 //     browser storage, a URL, the DOM or a log. No key or body reaches any of those either, and draft content only the
@@ -119,7 +139,9 @@
 //     scrolling (never from the picker over it; a line's Remove and Move up/down keep it with the lines themselves), focus
 //     returned on close. One of them at a time: the new draft never opens beside the reopen dialog or the editor, and the editor and the reopen dialog
 //     replace each other (Edit, a confirmed save) — a closing dialog then leaves focus to the one that opened (its return
-//     target is inert behind it). z-[180]: above the invoice dialogs (z-50) and below the picker it opens (z-[190]) and
+//     target is inert behind it). The ONE exception (M7B-INVOICES-DISCARD-P1): the discard confirmation stacks over the
+//     reopen dialog, which is inert beneath it; neither the new draft nor the editor opens while it is up.
+//     z-[180]: above the invoice dialogs (z-50) and below the picker it opens (z-[190]) and
 //     the shop's z-[200] layers.
 //   - Outside the dialogs focus never falls to <body> either (DA-199). The section tracks the control that last took
 //     focus in it (`trackFocus`); a render that removes or disables it while focus is still on it (or fell from it to
@@ -142,8 +164,8 @@ import { createPortal, flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { customers as customersClient, type CustomersClient } from './customersClient';
 import {
-  invoiceDrafts as draftsClient, draftBody, draftEditBody, formatCents, lineAmounts, MAX_CENTS, MAX_DRAFT_LINES, MAX_EXPECTED_VERSION, priceText,
-  type CreateDraftResult, type DraftBody, type DraftDetail, type DraftLineFields, type DraftSummary, type InvoiceDraftsClient, type StoreEntry,
+  invoiceDrafts as draftsClient, draftBody, draftDiscardBody, draftEditBody, formatCents, lineAmounts, MAX_CENTS, MAX_DRAFT_LINES, MAX_EXPECTED_VERSION, priceText,
+  type CreateDraftResult, type DiscardDraftResult, type DraftBody, type DraftDetail, type DraftLineFields, type DraftSummary, type InvoiceDraftsClient, type StoreEntry,
   type UpdateDraftResult, type UpdatedDraft,
 } from './invoiceDraftsClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
@@ -283,6 +305,46 @@ export const EDIT_REFUSED_TEXT: Readonly<Record<EditRefusal, string>> = Object.f
   invalid: REFUSED_TEXT.invalid,
   'rate-limited': 'Not saved: too many requests. Wait a moment, then save again.',
 });
+/** What the reopen dialog says about Discard draft… (M7B-INVOICES-DISCARD-P1): nothing while it is asked or refused — the edit's line is the dialog's one announced answer — and why its Try again is there when it could not be asked. */
+export const DISCARD_ELIGIBILITY_TEXT = Object.freeze({
+  checking: '',
+  denied: '',
+  unavailable: 'The server could not be asked right now whether this draft can be discarded.',
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+/** The discard confirmation's texts (M7B-INVOICES-DISCARD-P1). Never "discarded" before the server's 200. */
+export const DISCARD_TEXT = Object.freeze({
+  title: 'Discard this draft?',
+  explain: "It leaves the store's open drafts. It is not deleted, and it cannot be reopened here.",
+  closeWarning: 'Closing stops tracking this discard; the server may have discarded the draft anyway.',
+  sending: 'Discarding…',
+  checking: 'Checking the discard with the server…',
+  unresolved: 'Not confirmed yet: the server may have discarded this draft. "Check again" sends the same request; it never discards it twice.',
+  tooOld: "Not checked: it was sent too long ago. Close this, then look at the store's drafts to see what the server has.",
+  discarded: 'Draft discarded.',
+  sendWaiting: 'Too many requests: Discard draft comes back once the wait has passed.',
+  /** A draft at the largest version the server records (2^53-1): no discard can name it (expectedVersion ≤ 2^53-2). */
+  last: 'Not sent: this draft has reached the last version the server can record, so it cannot be discarded.',
+  /** A 403 whose one fresh session check could not answer: refused, but not said as a lack of access. */
+  refusedUnchecked: 'Not discarded: the server refused this request, and your session could not be checked right now. Close this, then open the draft again in a moment.',
+});
+
+type DiscardRefusal = 'conflict' | 'not-open' | 'not-found' | 'tenant-changed' | 'key-reused' | 'denied' | 'invalid' | 'rate-limited';
+/** What a discard attempt's decisive refusal says: this request did not discard the draft. */
+export const DISCARD_REFUSED_TEXT: Readonly<Record<DiscardRefusal, string>> = Object.freeze({
+  conflict: 'Not discarded: this draft changed since you opened it. Review it, then discard again if you still want to.',
+  'not-open': 'Not discarded: this draft is no longer open.',
+  'not-found': 'This draft is no longer available.',
+  'tenant-changed': "Not discarded: this store isn't part of the tenant this draft was for any more. Choose the store again.",
+  'key-reused': 'Not discarded: the server rejected this request.',
+  denied: 'Not discarded: this account may not discard drafts at this store.',
+  invalid: 'Not discarded: the server did not accept this request.',
+  'rate-limited': 'Not discarded: too many requests. Close this, then open the draft again once the wait has passed.',
+});
+/** The answers that decide a discard's Check again (M7B-INVOICES-DISCARD-P1): its 200, a sealed 409, or a refusal that recorded nothing because nothing ran. */
+const CHECK_DISCARD_DECIDES: ReadonlySet<DiscardDraftResult['kind']> = new Set(['discarded', 'conflict', 'not-open', 'tenant-changed', 'not-found', 'key-reused']);
+
 /** The answers that decide a Check again (the key was looked at): its 200, a sealed 409, or a refusal that recorded nothing because nothing ran. */
 const CHECK_DECIDES: ReadonlySet<UpdateDraftResult['kind']> = new Set(['saved', 'conflict', 'not-editable', 'tenant-changed', 'not-found', 'key-reused']);
 
@@ -294,6 +356,11 @@ export const customerFallbackText = (id: string): string => `Customer, ${idEndin
 export const lineCountText = (n: number): string => `${n} line${n === 1 ? '' : 's'}`;
 /** The DOM id of a listed draft's Open button. */
 const openIdOf = (id: string): string => `drafts-open-${id}`;
+/** The DOM ids of the reopen dialog's Discard draft… and Close (M7B-INVOICES-DISCARD-P1: where the confirmation hands focus back). */
+const DISCARD_OPEN_ID = 'draft-discard-open';
+const VIEW_CLOSE_ID = 'draft-view-close';
+/** Where the confirmation hands focus back when what had it before is gone: the reopen dialog's Discard draft…, else its Close — none once that dialog has gone too (its own return then decides). */
+const DISCARD_RETURN: RefObject<HTMLElement | null> = { get current() { return document.getElementById(DISCARD_OPEN_ID) ?? document.getElementById(VIEW_CLOSE_ID); } };
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The hold store: at most one attempt per user, in memory only (never browser storage); it outlives the section across
@@ -406,7 +473,7 @@ import.meta.hot?.dispose(unbindDraftHolds); // a hot reload replaces this module
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
 
 /** Why an answer left the attempt (a create's or an edit's) unresolved. Never "not saved": only a decisive answer for the same key says that. */
-function reasonOf(answer: CreateDraftResult | UpdateDraftResult): string {
+function reasonOf(answer: CreateDraftResult | UpdateDraftResult | DiscardDraftResult): string {
   switch (answer.kind) {
     case 'in-progress': return 'The server is still working on it. Check again in a moment.';
     case 'signed-out': return 'Sign-in needed: your server session ended. Reconnect, then check again.';
@@ -455,6 +522,10 @@ const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabl
 
 interface DialogFrameProps {
   readonly labelledBy: string;
+  /** 'alertdialog' for the discard confirmation (M7B-INVOICES-DISCARD-P1); every other dialog is a 'dialog'. */
+  readonly role?: 'dialog' | 'alertdialog';
+  /** The id of the ONE element that describes the dialog (aria-describedby), when it has one. */
+  readonly describedBy?: string;
   readonly testId: string;
   readonly busy?: boolean;
   readonly onClose: () => void;
@@ -465,7 +536,7 @@ interface DialogFrameProps {
   readonly children: ReactNode;
 }
 
-function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
+function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
   const overlay = useRef<HTMLDivElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
   const close = useRef(onClose);
@@ -555,9 +626,10 @@ function DialogFrame({ labelledBy, testId, busy = false, onClose, initialFocus, 
     >
       <div
         ref={dialog}
-        role="dialog"
+        role={role}
         aria-modal="true"
         aria-labelledby={labelledBy}
+        aria-describedby={describedBy}
         aria-busy={busy}
         data-testid={testId}
         tabIndex={-1}
@@ -622,6 +694,8 @@ interface ListState {
 interface ReopenState {
   readonly id: string; readonly storeId: string; readonly phase: Phase | 'not-found'; readonly text: string; readonly draft: DraftDetail | null;
   readonly saved: UpdatedDraft | null;
+  /** Why a discard of this draft did not go through (M7B-INVOICES-DISCARD-P1: a stale version, a 403), said as an alert here; '' for none. */
+  readonly refused: string;
 }
 /** `n`, `csrf` and `since`: the section's generation and `sessionEndsSoFar()` when the dialog opened (AC-07, the hand-over's checks). */
 interface NewDraftState {
@@ -639,7 +713,7 @@ interface EligState {
   readonly uid: string; readonly n: number; readonly csrf: string | null; readonly storeId: string; readonly draftId: string; readonly seq: number;
   readonly since: number; readonly phase: EligPhase; readonly text: string; readonly waitId: number;
 }
-/** One edit attempt (M7B-INVOICES-P2), frozen before it leaves: the exact body ('' once it may never be sent again), its target, and the generation (`n`) whose token it went with. */
+/** One edit attempt (M7B-INVOICES-P2) — and one discard attempt (M7B-INVOICES-DISCARD-P1), the same shape — frozen before it leaves: the exact body ('' once it may never be sent again), its target, and the generation (`n`) whose token it went with. */
 interface EditAttempt {
   readonly key: string; readonly body: string; readonly storeId: string; readonly draftId: string; readonly expectedVersion: number; readonly n: number;
   readonly sentAt: number; readonly sentWall: number;
@@ -657,6 +731,15 @@ interface EditorState {
   readonly base: DraftDetail; readonly customer: ServerCustomerReference | null; readonly attempt: EditAttempt | null;
   readonly status: { readonly alert: boolean; readonly text: string } | null;
   readonly conflict: { readonly phase: 'loading' | 'ready' | 'failed'; readonly text: string; readonly current: DraftDetail | null } | null;
+}
+/**
+ * The discard confirmation (M7B-INVOICES-DISCARD-P1), stacked over the reopen dialog: which open it is (`id`), the draft it
+ * names (the reopen read's detail: its version is what the discard expects) and its store, the generation it opened in,
+ * whether a key was minted in it (`pressed`: it never mints a second), its attempt and what it says.
+ */
+interface DiscardState {
+  readonly id: number; readonly store: StoreEntry; readonly draft: DraftDetail; readonly n: number; readonly pressed: boolean;
+  readonly attempt: EditAttempt | null; readonly status: { readonly alert: boolean; readonly text: string } | null;
 }
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
@@ -715,7 +798,9 @@ function DraftsSection({
   const [wait, setWait] = useState<number | null>(null);
   const [elig, setEligState] = useState<EligState>(() => ({ uid, n: 0, csrf: null, storeId: '', draftId: '', seq: 0, since: 0, phase: 'ended', text: '', waitId: 0 }));
   const [editElig, setEditEligState] = useState<EligState>(elig);
+  const [discardElig, setDiscardEligState] = useState<EligState>(elig);
   const [editor, setEditorState] = useState<EditorState | null>(null);
+  const [discard, setDiscardState] = useState<DiscardState | null>(null);
   const [, setNamesTick] = useState(0);
   const [, setTick] = useState(0);
   const held = useSyncExternalStore(holds.subscribe, () => holds.get(uid));
@@ -728,11 +813,14 @@ function DraftsSection({
   const reopenRef = useRef<ReopenState | null>(null);
   const eligRef = useRef<EligState>(elig);
   const editEligRef = useRef<EligState>(editElig);
+  const discardEligRef = useRef<EligState>(discardElig);
   const editorRef = useRef<EditorState | null>(null);
   const editorSeq = useRef(0); // which editor open is the latest: a continuation applies only to its own
-  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0, editElig: 0, review: 0 });
-  const ctl = useRef<Record<'stores' | 'list' | 'reopen' | 'names' | 'elig' | 'editElig' | 'review', AbortController | null>>(
-    { stores: null, list: null, reopen: null, names: null, elig: null, editElig: null, review: null },
+  const discardRef = useRef<DiscardState | null>(null);
+  const discardSeq = useRef(0); // which confirmation open is the latest
+  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0, editElig: 0, discardElig: 0, review: 0 });
+  const ctl = useRef<Record<'stores' | 'list' | 'reopen' | 'names' | 'elig' | 'editElig' | 'discardElig' | 'review', AbortController | null>>(
+    { stores: null, list: null, reopen: null, names: null, elig: null, editElig: null, discardElig: null, review: null },
   );
   const names = useRef<NameBook>(newBook(0));
   const waitRef = useRef(false);
@@ -749,6 +837,12 @@ function DraftsSection({
   // The session token the editor's attempt was sent with (by its key): in a ref only, as every token here; Check again
   // sends with it and with nothing else, and it goes with the attempt and with the editor.
   const editToken = useRef<{ readonly key: string; readonly csrf: string } | null>(null);
+  // M7B-INVOICES-DISCARD-P1: the same for the confirmation's discard attempt (by the confirmation's `id` and the attempt's key).
+  const discardBusy = useRef({ sending: 0, checking: 0 });
+  const discardToken = useRef<{ readonly key: string; readonly csrf: string } | null>(null);
+  // The draft whose reopen dialog takes focus back once it has settled, on Discard draft… when offered, else its Close
+  // (after the confirmation closed with nothing discarded): taken in a layout effect, before DialogFrame's own recovery.
+  const discardFocus = useRef<string | null>(null);
   const readBack = useRef<string | null>(null); // the created key whose read-back is running
   const newButton = useRef<HTMLButtonElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
@@ -778,6 +872,27 @@ function DraftsSection({
   const putReopen = (next: ReopenState | null): void => { reopenRef.current = next; setReopenState(next); };
   const putElig = (next: EligState): void => { eligRef.current = next; setEligState(next); };
   const putEditElig = (next: EligState): void => { editEligRef.current = next; setEditEligState(next); };
+  const putDiscardElig = (next: EligState): void => { discardEligRef.current = next; setDiscardEligState(next); };
+  const putDiscard = (next: DiscardState | null): void => {
+    discardRef.current = next;
+    if (next?.attempt?.key !== discardToken.current?.key) discardToken.current = null; // the token goes with its attempt
+    setDiscardState(next);
+  };
+  const patchDiscard = (next: Partial<DiscardState>): void => { if (discardRef.current !== null) putDiscard({ ...discardRef.current, ...next }); };
+  /**
+   * Drop the discard confirmation AND the reopen dialog under it AT ONCE (M7B-INVOICES-DISCARD-P1), for a session that is
+   * over or changed and for a store change: the attempt, its token and both dialogs go in a render committed here
+   * (flushSync), so a late answer finds nothing under its key. Nothing when no confirmation is up (the reopen dialog then
+   * follows its own rule). Called only outside React's render and commit, as dropEditor.
+   */
+  const dropDiscard = (): void => {
+    discardToken.current = null;
+    discardFocus.current = null;
+    if (discardRef.current === null) return;
+    discardRef.current = null;
+    reopenRef.current = null;
+    flushSync(() => { setDiscardState(null); setReopenState(null); });
+  };
   const putEditor = (next: EditorState | null): void => {
     editorRef.current = next;
     // The attempt's own token goes with its attempt (closed, settled or replaced): never sent for another.
@@ -799,12 +914,13 @@ function DraftsSection({
   };
   /**
    * The eligibility answer counts: asked under this user, this generation and token and the latest request — for New, at
-   * the store chosen now; for Edit (`edit`), at the reopen dialog's store and draft now.
+   * the store chosen now; for Edit (`editElig`) and Discard (`discardElig`, M7B-INVOICES-DISCARD-P1), at the reopen
+   * dialog's store and draft now.
    */
-  const current = (e: EligState, edit = false): boolean =>
-    e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && (edit
-      ? e.draftId !== '' && e.storeId === reopenRef.current?.storeId && e.draftId === reopenRef.current.id && e.seq === seq.current.editElig
-      : e.draftId === '' && e.storeId === storeRef.current && e.seq === seq.current.elig);
+  const current = (e: EligState, slot: 'elig' | 'editElig' | 'discardElig' = 'elig'): boolean =>
+    e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && e.seq === seq.current[slot] && (slot !== 'elig'
+      ? e.draftId !== '' && e.storeId === reopenRef.current?.storeId && e.draftId === reopenRef.current.id
+      : e.draftId === '' && e.storeId === storeRef.current);
   /** New server draft may be offered now: the server's `allowed`, for exactly the context there is now. */
   const allowedNow = (): boolean => eligRef.current.phase === 'allowed' && current(eligRef.current);
   const setBusy = (next: boolean): void => { busyRef.current = next; setBusyState(next); };
@@ -840,9 +956,11 @@ function DraftsSection({
 
   /** Cancel every read in flight; their answers are stale from here, and nothing is busy any more. */
   function abortReads(): void {
-    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'review'] as const) ctl.current[kind]?.abort();
+    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review'] as const) ctl.current[kind]?.abort();
     const s = seq.current;
-    seq.current = { stores: s.stores + 1, list: s.list + 1, reopen: s.reopen + 1, elig: s.elig + 1, editElig: s.editElig + 1, review: s.review + 1 };
+    seq.current = {
+      stores: s.stores + 1, list: s.list + 1, reopen: s.reopen + 1, elig: s.elig + 1, editElig: s.editElig + 1, discardElig: s.discardElig + 1, review: s.review + 1,
+    };
     busyBy.current += 1;
     setBusy(false);
   }
@@ -863,6 +981,7 @@ function DraftsSection({
     storeRef.current = '';
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
+    dropDiscard(); // the discard's attempt and both dialogs are the previous session's
     putReopen(null);
     dropEditor(); // the editor's working copy and attempt are the previous session's
     setNewDraft(null);
@@ -893,7 +1012,8 @@ function DraftsSection({
     storeRef.current = '';
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
-    if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null, saved: null });
+    dropDiscard(); // M7B-INVOICES-DISCARD-P1: a confirmation up takes the reopen dialog with it, before the line below
+    if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null, saved: null, refused: '' });
     // M7B-INVOICES-P2: unlike the reopen dialog, the editor closes — its working copy, customer and attempt go at once.
     dropEditor();
     // Nothing is fixed after a confirmed end: the Reconnect's token is a FIRST token, not a "connection changed".
@@ -1064,7 +1184,7 @@ function DraftsSection({
    * edit the server just confirmed (M7B-INVOICES-P2) — this is then its ONE read-back. Once it loads, the server is asked
    * whether Edit may be offered (a writable store only).
    */
-  async function readReopen(id: string, target: string, saved: UpdatedDraft | null = null): Promise<void> {
+  async function readReopen(id: string, target: string, saved: UpdatedDraft | null = null, refused = ''): Promise<void> {
     const mine = gen.current.n;
     const n = ++seq.current.reopen;
     ctl.current.reopen?.abort();
@@ -1073,7 +1193,7 @@ function DraftsSection({
     // M7B-INVOICES-P2: and no sign-out since it asked (as every new read here), now that it also reads a save back.
     const since = sessionEndsSoFar();
     const stale = (): boolean => !alive.current || mine !== gen.current.n || n !== seq.current.reopen || reopenRef.current?.id !== id || since !== sessionEndsSoFar();
-    const put = (phase: ReopenState['phase'], text: string, draft: DraftDetail | null = null): void => putReopen({ id, storeId: target, phase, text, draft, saved });
+    const put = (phase: ReopenState['phase'], text: string, draft: DraftDetail | null = null): void => putReopen({ id, storeId: target, phase, text, draft, saved, refused });
     put('loading', DRAFTS_TEXT.draftLoading);
     const s = await connect();
     if (stale()) return;
@@ -1088,6 +1208,7 @@ function DraftsSection({
     if (answer.kind === 'ok') {
       put('ready', '', answer.draft);
       void readEligibility(id);
+      void readEligibility(id, 'discardElig'); // M7B-INVOICES-DISCARD-P1: its own, in the same place
       // An edit that changed the draft changed its row (line count, subtotal): page one is read again, as after a create.
       if (saved?.changed === true && storeRef.current === target) void readDrafts('first');
       return resolveNames([answer.draft.customerId], s.csrf);
@@ -1110,11 +1231,12 @@ function DraftsSection({
    * and asks again), the same token is a refusal that stands. During a rate limit's wait nothing is asked.
    * M7B-INVOICES-P2: with a `draftId`, the same read for Edit in the reopen dialog (GET …/{id}/edit-eligibility, the
    * edit's own requirement) — its own state, request counter and controller, asked at the reopen dialog's store for its
-   * draft, and stale once that dialog shows another draft or none.
+   * draft, and stale once that dialog shows another draft or none. M7B-INVOICES-DISCARD-P1: with `discardElig`, the same
+   * for Discard draft… (GET …/{id}/discard-eligibility, the discard's own requirement), in its own slot.
    */
-  async function readEligibility(draftId = ''): Promise<void> {
+  async function readEligibility(draftId = '', which: 'editElig' | 'discardElig' = 'editElig'): Promise<void> {
     const edit = draftId !== '';
-    const slot = edit ? 'editElig' : 'elig';
+    const slot = edit ? which : 'elig';
     ctl.current[slot]?.abort();
     const n = ++seq.current[slot];
     const target = edit ? reopenRef.current?.storeId ?? '' : storeRef.current;
@@ -1123,9 +1245,10 @@ function DraftsSection({
     if (store === undefined || store.readOnly || csrf === null) return; // a read-only store keeps its own text and asks nothing
     const since = sessionEndsSoFar();
     const key = { uid, n: gen.current.n, csrf, storeId: target, draftId, seq: n, since };
-    const texts = edit ? EDIT_ELIGIBILITY_TEXT : ELIGIBILITY_TEXT;
+    const texts = slot === 'elig' ? ELIGIBILITY_TEXT : slot === 'editElig' ? EDIT_ELIGIBILITY_TEXT : DISCARD_ELIGIBILITY_TEXT;
     // `waitId`: the wait running once `text` is made (a rate limit's text starts or names it first).
-    const put = (phase: EligPhase, text = ''): void => (edit ? putEditElig : putElig)({ ...key, phase, text, waitId: waitSeq.current });
+    const put = (phase: EligPhase, text = ''): void =>
+      (slot === 'elig' ? putElig : slot === 'editElig' ? putEditElig : putDiscardElig)({ ...key, phase, text, waitId: waitSeq.current });
     const waitText = (seconds: number): string => pickerWaitText(startWait(seconds));
     if (waitRef.current) return put('rate-limited', pickerWaitText(waitLeft()));
     const controller = new AbortController();
@@ -1142,7 +1265,8 @@ function DraftsSection({
       return failure.seconds !== undefined ? put('rate-limited', waitText(failure.seconds)) : put('unavailable', texts.unavailable);
     }
     if (adopt(s.csrf)) return; // a new generation: its stores are read again, and the next choice asks again
-    const answer = await (edit ? drafts.editEligibility(target, draftId, s.csrf, controller.signal) : drafts.eligibility(target, s.csrf, controller.signal));
+    const answer = await (slot === 'elig' ? drafts.eligibility(target, s.csrf, controller.signal)
+      : slot === 'editElig' ? drafts.editEligibility(target, draftId, s.csrf, controller.signal) : drafts.discardEligibility(target, draftId, s.csrf, controller.signal));
     if (stale()) return;
     if (answer.kind === 'allowed') return put('allowed');
     if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
@@ -1190,6 +1314,7 @@ function DraftsSection({
 
   function chooseStore(id: string): void {
     if (busyRef.current && storesRef.current.phase === 'loading') return;
+    dropDiscard(); // M7B-INVOICES-DISCARD-P1: a store change drops a discard's attempt and both dialogs
     ctl.current.list?.abort();
     seq.current.list += 1;
     storeRef.current = id;
@@ -1342,7 +1467,7 @@ function DraftsSection({
     const r = reopenRef.current;
     const e = editEligRef.current;
     const csrf = gen.current.csrf;
-    if (r === null || r.draft === null || csrf === null || e.phase !== 'allowed' || !current(e, true) || editorRef.current !== null) return;
+    if (r === null || r.draft === null || csrf === null || e.phase !== 'allowed' || !current(e, 'editElig') || editorRef.current !== null || discardRef.current !== null) return;
     const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
     if (store === undefined || store.readOnly) return;
     const draft = r.draft;
@@ -1530,6 +1655,201 @@ function DraftsSection({
     return customer;
   }
 
+  // ---- discarding a saved draft (M7B-INVOICES-DISCARD-P1) ----
+
+  /**
+   * Discard draft…, from the reopen dialog: only on the server's `allowed` for exactly that dialog's store and draft under
+   * this generation (checked again at the press), at a writable store, with no editor or confirmation up. The
+   * confirmation names the draft the reopen read found; its version is what the discard will expect.
+   */
+  function openDiscard(): void {
+    const r = reopenRef.current;
+    const e = discardEligRef.current;
+    if (r === null || r.draft === null || gen.current.csrf === null || e.phase !== 'allowed' || !current(e, 'discardElig')) return;
+    if (editorRef.current !== null || discardRef.current !== null) return;
+    const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
+    if (store === undefined || store.readOnly) return;
+    discardFocus.current = null;
+    // An earlier refusal's line goes (inert beneath the confirmation): a later refusal mounts its alert afresh and is announced.
+    if (r.refused !== '') putReopen({ ...r, refused: '' });
+    putDiscard({ id: ++discardSeq.current, store, draft: r.draft, n: gen.current.n, pressed: false, attempt: null, status: null });
+  }
+
+  /**
+   * One explicit Discard draft: at most one POST, and none during a rate limit's wait. The session is checked first:
+   * another token starts a new generation (which drops both dialogs) and nothing is sent. The body is built from the
+   * store's tenant and the version the reopen read found, the key minted, and the attempt frozen in the confirmation
+   * BEFORE the request leaves; from then on this confirmation offers no Discard draft again (never a second key).
+   */
+  async function sendDiscard(): Promise<void> {
+    const d = discardRef.current;
+    if (d === null || d.pressed || discardBusy.current.sending === d.id || waitRef.current) return;
+    const standing = (): boolean => alive.current && discardRef.current?.id === d.id;
+    const say = (text: string): void => { if (standing()) patchDiscard({ status: { alert: true, text } }); };
+    const body = draftDiscardBody(d.store.tenantId, d.draft.version);
+    if (body === null) return say(DISCARD_TEXT.last);
+    discardBusy.current.sending = d.id;
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (!standing()) return;
+      if (since !== sessionEndsSoFar()) return say(`Not sent. ${DRAFTS_TEXT.ended}`);
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return say(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== d.n) return; // another session: its new generation dropped both dialogs
+      if (waitRef.current) return say(`Not sent. ${pickerWaitText(waitLeft())}`);
+      const key = nextKey();
+      const attempt: EditAttempt = {
+        key, body, storeId: d.store.id, draftId: d.draft.id, expectedVersion: d.draft.version, n: d.n,
+        sentAt: clock(), sentWall: wall(), state: 'sending', note: '',
+      };
+      discardToken.current = { key, csrf: s.csrf };
+      patchDiscard({ pressed: true, attempt, status: null });
+      const answer = await drafts.discardDraft(attempt.storeId, attempt.draftId, body, key, s.csrf);
+      await settleDiscard(key, answer, true, since, s.csrf);
+    } finally {
+      if (discardBusy.current.sending === d.id) discardBusy.current.sending = 0;
+    }
+  }
+
+  /**
+   * The draft is no longer open (a validated 200 — this attempt's, or its sealed replay — or a refusal saying it is not
+   * open or not there): both dialogs close at once, the notice is said outside them, the draft's row leaves the list it
+   * was listed in (so nothing returns focus to its Open), focus goes to the heading and page one is read again.
+   */
+  function endDiscard(a: EditAttempt, notice: string): void {
+    discardToken.current = null;
+    discardFocus.current = null;
+    discardRef.current = null;
+    reopenRef.current = null;
+    const was = listRef.current;
+    flushSync(() => {
+      setDiscardState(null);
+      setReopenState(null);
+      if (was.storeId === a.storeId) putList({ ...was, rows: was.rows.filter((row) => row.id !== a.draftId) });
+    });
+    heading.current?.focus();
+    setNotice(notice); // after the focus move: a change to the notice's standing live region, said after the heading
+    if (storeRef.current === a.storeId) void readDrafts('first');
+  }
+
+  /** The confirmation closes and the reopen dialog under it says why (`refused`); it takes focus back once it has settled. */
+  function backToReopen(draftId: string, refused: string): void {
+    putDiscard(null);
+    discardFocus.current = draftId;
+    const r = reopenRef.current;
+    if (r !== null && r.id === draftId) putReopen({ ...r, refused });
+  }
+
+  /**
+   * One discard answer, applied BY KEY to the open confirmation's attempt: nothing once it closed or another opened (a
+   * new generation, a session end, a sign-out, a store change, Close) or the section unmounted — the POST may still have
+   * committed, and nothing here says so. `first`: every answer of a first send but unknown and in-progress decides it; a
+   * Check again re-sends a key that may already have committed, so only CHECK_DISCARD_DECIDES do. A 429 starts the
+   * section's wait only while the session that sent it is still the section's (as afterCreate).
+   */
+  async function settleDiscard(key: string, answer: DiscardDraftResult, first: boolean, since: number, csrf: string): Promise<void> {
+    const mine = (): EditAttempt | null => {
+      const a = alive.current ? discardRef.current?.attempt ?? null : null;
+      return a !== null && a.key === key ? a : null;
+    };
+    const a = mine();
+    if (a === null) return;
+    if (answer.kind === 'rate-limited' && csrf === gen.current.csrf && since === sessionEndsSoFar()) startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'discarded') return endDiscard(a, DISCARD_TEXT.discarded);
+    if (answer.kind === 'not-open' || answer.kind === 'not-found') return endDiscard(a, DISCARD_REFUSED_TEXT[answer.kind]);
+    if (answer.kind === 'conflict') {
+      // Never rebased: the confirmation closes, the reopen dialog reads the draft ONCE and says why; a new press, a new key.
+      backToReopen(a.draftId, DISCARD_REFUSED_TEXT.conflict);
+      return void readReopen(a.draftId, a.storeId, null, DISCARD_REFUSED_TEXT.conflict);
+    }
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'denied') {
+      // The one fresh check, as the edit's: denied only for the same session (Discard draft… goes); a Check again's 403
+      // leaves the attempt unresolved; a check that could not answer says so.
+      const verdict = await denialOf(() => mine() === null);
+      const now = verdict === null ? null : mine();
+      if (verdict === null || now === null) return;
+      if (verdict === 'denied') {
+        if (!first) return patchDiscard({ attempt: { ...now, state: 'unresolved', note: reasonOf(answer) } });
+        const e = discardEligRef.current;
+        if (current(e, 'discardElig')) {
+          ctl.current.discardElig?.abort();
+          putDiscardElig({ ...e, seq: ++seq.current.discardElig, phase: 'denied', text: DISCARD_ELIGIBILITY_TEXT.denied });
+        }
+        return backToReopen(now.draftId, DISCARD_REFUSED_TEXT.denied);
+      }
+      const waits = verdict.kind === 'rate-limited'; // its wait has begun: Check again is held back through it
+      if (first) return patchDiscard({ attempt: null, status: { alert: true, text: waits ? DISCARD_REFUSED_TEXT['rate-limited'] : DISCARD_TEXT.refusedUnchecked } });
+      return patchDiscard({ attempt: { ...now, state: 'unresolved', note: waits ? verdict.text : EDIT_TEXT.checkUnchecked } });
+    }
+    const decisive = first ? answer.kind !== 'unknown' && answer.kind !== 'in-progress' : CHECK_DISCARD_DECIDES.has(answer.kind);
+    if (decisive) return patchDiscard({ attempt: null, status: { alert: true, text: DISCARD_REFUSED_TEXT[answer.kind as DiscardRefusal] } });
+    patchDiscard({ attempt: { ...(mine() ?? a), state: 'unresolved', note: reasonOf(answer) } });
+  }
+
+  /**
+   * "Check again" in the confirmation: the SAME key and the SAME bytes to the attempt's OWN store and draft, under the
+   * attempt's OWN token (discardToken) — only while the session check answers that very token and the generation it was
+   * sent in is still the section's, outside a rate limit's wait, within the cutoff judged again right before the POST.
+   */
+  async function checkDiscard(): Promise<void> {
+    const id = discardRef.current?.id ?? 0;
+    const a = discardRef.current?.attempt ?? null;
+    if (a === null || a.state !== 'unresolved' || a.body === '' || discardBusy.current.checking === id || waitRef.current) return;
+    const mine = (): EditAttempt | null => {
+      const now = alive.current ? discardRef.current?.attempt ?? null : null;
+      return now !== null && now.key === a.key ? now : null;
+    };
+    const mark = (next: Partial<EditAttempt>): void => { const now = mine(); if (now !== null) patchDiscard({ attempt: { ...now, ...next } }); };
+    if (expired(a)) return mark({ body: '' }); // too old: the confirmation now says so
+    discardBusy.current.checking = id;
+    mark({ state: 'checking', note: '' });
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (mine() === null) return;
+      if (since !== sessionEndsSoFar()) return mark({ state: 'unresolved', note: `Not checked. ${DRAFTS_TEXT.ended}` });
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return mark({ state: 'unresolved', note: `Not checked. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}` });
+      }
+      if (adopt(s.csrf) || gen.current.n !== a.n) return; // another session: NOTHING is sent, and its generation dropped both dialogs
+      if (waitRef.current) return mark({ state: 'unresolved', note: `Not checked. ${pickerWaitText(waitLeft())}` });
+      const latest = mine();
+      const token = discardToken.current;
+      if (latest === null || latest.body !== a.body || token === null || token.key !== a.key || token.csrf !== s.csrf) return mark({ state: 'unresolved' });
+      if (expired(latest)) return mark({ state: 'unresolved', body: '' });
+      const answer = await drafts.discardDraft(a.storeId, a.draftId, a.body, a.key, token.csrf);
+      await settleDiscard(a.key, answer, false, since, token.csrf);
+    } finally {
+      if (discardBusy.current.checking === id) discardBusy.current.checking = 0;
+    }
+  }
+
+  /**
+   * Keep draft, Close or Escape. Never pressed (nothing sent): only the confirmation closes, and the reopen dialog takes
+   * focus back. Pressed — an attempt out or unresolved, or refused: tracking stops and the reopen dialog closes too (the
+   * draft may no longer be open, and a later discard needs a fresh read and eligibility), and page one is read again;
+   * nothing says it was cancelled or discarded.
+   */
+  function closeDiscard(): void {
+    const d = discardRef.current;
+    if (d === null) return;
+    if (!d.pressed) return backToReopen(d.draft.id, reopenRef.current?.refused ?? '');
+    const target = d.store.id;
+    putDiscard(null);
+    putReopen(null);
+    if (storeRef.current !== target) return;
+    // During a rate limit's wait readDrafts reads nothing: the rows stay, marked last known, with the wait and Try again.
+    if (waitRef.current) return putList({ ...listRef.current, phase: 'rate-limited', text: pickerWaitText(waitLeft()), note: '', waitId: waitSeq.current });
+    void readDrafts('first');
+  }
+
   // A created attempt is read back ONCE (a GET, never a second POST), under the session it was sent with.
   useEffect(() => {
     if (held === undefined || held.state !== 'created' || held.draftId === null || readBack.current === held.key) return;
@@ -1587,6 +1907,22 @@ function DraftsSection({
     const at = document.activeElement;
     if ((at === null || at === document.body || at === keep.from) && section.current?.closest('[inert]') === null) (keep.to() ?? heading.current)?.focus();
   });
+  // M7B-INVOICES-DISCARD-P1: after a confirmation closed with nothing discarded, the reopen dialog under it takes focus
+  // back once it has settled (its read and the discard's eligibility answered): Discard draft… when it is offered again,
+  // else its Close. Before paint, and before DialogFrame's own recovery (a passive effect) could pick another control.
+  useLayoutEffect(() => {
+    const id = discardFocus.current;
+    if (id === null || discardRef.current !== null) return;
+    const r = reopenRef.current;
+    if (r === null || r.id !== id) { discardFocus.current = null; return; }
+    const e = discardEligRef.current;
+    if (r.phase === 'loading' || (r.draft !== null && current(e, 'discardElig') && e.phase === 'checking')) return;
+    discardFocus.current = null;
+    // A control the user moved to while the dialog settled keeps focus: only an unmoved Close or a lost focus is taken.
+    const at = document.activeElement;
+    if (at !== null && at !== document.body && at.id !== VIEW_CLOSE_ID) return;
+    (document.getElementById(DISCARD_OPEN_ID) ?? document.getElementById(VIEW_CLOSE_ID))?.focus();
+  });
   // A press anywhere but on the tracked control is the user moving on — a press on plain text leaves focus on <body> with
   // no focus event — so the tracking ends there, and a later render that removes that control takes no focus from where
   // the user left it. A press, not blur or focusout: a browser may fire those when the focused control is REMOVED, the
@@ -1622,7 +1958,7 @@ function DraftsSection({
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
       gen.current = { n: gen.current.n + 1, csrf: null };
-      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'review'] as const) ctl.current[kind]?.abort();
+      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review'] as const) ctl.current[kind]?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
     // A section serves one UID (see ServerInvoiceDrafts); the clients are fixed for its life.
@@ -1638,7 +1974,8 @@ function DraftsSection({
   // a read is harmless: Save confirms the session itself and sends nothing under another token.
   const newBlocked = live || waiting;
   const eligNow = current(elig) ? elig : null;
-  const editEligNow = current(editElig, true) ? editElig : null;
+  const editEligNow = current(editElig, 'editElig') ? editElig : null;
+  const discardEligNow = current(discardElig, 'discardElig') ? discardElig : null;
   // A rate limit's wait is said once: by the list's note when it names the SAME wait, else by the eligibility's.
   const sameWait = eligNow?.phase === 'rate-limited' && list.phase === 'rate-limited' && list.waitId === eligNow.waitId;
   const eligText = eligNow === null || eligNow.phase === 'denied' || sameWait ? '' : eligNow.text;
@@ -1671,7 +2008,9 @@ function DraftsSection({
           waiting={waiting}
         />
       )}
-      {notice !== '' && <p data-testid="drafts-notice" role="status" className="text-sm font-bold text-emerald-800">{notice}</p>}
+      {/* Always mounted, so a notice is a change to a live region that is already there and is announced; it is the notice
+          (`drafts-notice`) only while it says something. */}
+      <p data-testid={notice === '' ? undefined : 'drafts-notice'} role="status" className="text-sm font-bold text-emerald-800">{notice}</p>
 
       {open && (
         <div className="space-y-4">
@@ -1802,6 +2141,13 @@ function DraftsSection({
         <ReopenDialog
           state={reopen} customerText={customerText} store={stores.stores.find((s) => s.id === reopen.storeId) ?? null} onClose={() => putReopen(null)} returnFocus={heading}
           edit={editEligNow} waiting={waiting} onEdit={openEditor} onEditAgain={() => { void readEligibility(reopen.id); }}
+          discard={discardEligNow} onDiscard={openDiscard} onDiscardAgain={() => { void readEligibility(reopen.id, 'discardElig'); }}
+        />
+      )}
+      {discard !== null && (
+        <DiscardDialog
+          state={discard} customerText={customerText} expired={discard.attempt !== null && expired(discard.attempt)} waiting={waiting}
+          onSend={sendDiscard} onCheck={() => { void checkDiscard(); }} onClose={closeDiscard} returnFocus={DISCARD_RETURN}
         />
       )}
       {editor !== null && (
@@ -1898,11 +2244,13 @@ function savedText(saved: UpdatedDraft, state: ReopenState): string {
   return state.draft.version > saved.version ? `${said} ${EDIT_TEXT.later(state.draft.version)}` : said;
 }
 
-function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, waiting, onEdit, onEditAgain }: {
+function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, waiting, onEdit, onEditAgain, discard, onDiscard, onDiscardAgain }: {
   readonly state: ReopenState; readonly customerText: (id: string) => string; readonly store: StoreEntry | null;
   readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
   /** The server's answer about Edit for this draft now (M7B-INVOICES-P2), or null (none asked: a read-only store, or not current). */
   readonly edit: EligState | null; readonly waiting: boolean; readonly onEdit: () => void; readonly onEditAgain: () => void;
+  /** The server's answer about Discard for this draft now (M7B-INVOICES-DISCARD-P1), or null, as `edit`. */
+  readonly discard: EligState | null; readonly onDiscard: () => void; readonly onDiscardAgain: () => void;
 }) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const draft = state.draft;
@@ -1910,9 +2258,10 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
     <DialogFrame labelledBy="draft-view-title" testId="draft-view" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
       <div className="flex items-start justify-between gap-3">
         <h2 id="draft-view-title" className="text-xl font-black text-primary tracking-tight">Server draft</h2>
-        <button ref={closeButton} type="button" data-testid="draft-view-close" onClick={onClose} className={quiet}>Close</button>
+        <button ref={closeButton} type="button" id={VIEW_CLOSE_ID} data-testid="draft-view-close" onClick={onClose} className={quiet}>Close</button>
       </div>
       {state.saved !== null && <p data-testid="draft-view-saved" role="status" className="text-sm font-bold text-emerald-800">{savedText(state.saved, state)}</p>}
+      {state.refused !== '' && <p data-testid="draft-view-discard-refused" role="alert" className="text-sm font-bold text-rose-800">{state.refused}</p>}
       {state.phase !== 'ready' && (
         <p data-testid="draft-view-state" data-phase={state.phase} role={state.phase === 'loading' ? 'status' : 'alert'} className="text-sm font-bold text-slate-600">{state.text}</p>
       )}
@@ -1957,7 +2306,7 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
               {(edit.phase === 'unavailable' || edit.phase === 'rate-limited') && (
                 <button
                   type="button" data-testid="draft-view-edit-retry" disabled={waiting} aria-describedby={waiting ? 'draft-view-edit-wait' : undefined}
-                  onClick={onEditAgain} className={quiet}
+                  aria-label="Try again: can this draft be edited" onClick={onEditAgain} className={quiet}
                 >
                   Try again
                 </button>
@@ -1965,8 +2314,110 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
               {waiting && <span id="draft-view-edit-wait" className="sr-only">{EDIT_ELIGIBILITY_TEXT.waiting}</span>}
             </div>
           )}
+          {/* Discard only on the server's answer, and only at a writable store; asked or refused, nothing is shown or said. */}
+          {/* One control's height is held from the asking on, so an allowed or refused answer never moves the centered dialog's Close under the pointer. */}
+          {discard !== null && store !== null && !store.readOnly && (
+            <div className="flex flex-wrap items-center gap-3 min-h-[2.125rem]">
+              {discard.phase === 'allowed' && <button type="button" id={DISCARD_OPEN_ID} data-testid="draft-discard-open" onClick={onDiscard} className={quiet}>Discard draft…</button>}
+              {(discard.phase === 'unavailable' || discard.phase === 'rate-limited') && (
+                <>
+                  <button
+                    type="button" data-testid="draft-discard-elig-again" disabled={waiting} aria-label="Try again: can this draft be discarded"
+                    aria-describedby={['draft-discard-elig-why', waiting && 'draft-discard-elig-wait'].filter(Boolean).join(' ')} onClick={onDiscardAgain} className={quiet}
+                  >
+                    Try again
+                  </button>
+                  <span id="draft-discard-elig-why" data-testid="draft-discard-elig-why" className={hintClass}>{discard.text}</span>
+                  {waiting && <span id="draft-discard-elig-wait" className="sr-only">{DISCARD_ELIGIBILITY_TEXT.waiting}</span>}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
+    </DialogFrame>
+  );
+}
+
+/**
+ * The discard confirmation (M7B-INVOICES-DISCARD-P1): an alertdialog over the reopen dialog, named by its title and
+ * described by ONE element — what a discard does and the draft it names, from the reopen read (no contact detail, no
+ * reason field). "Keep draft" has the first focus; "Discard draft" sends (the section's sendDiscard) and is then gone for
+ * good, and "Keep draft" reads "Close", which says — while an attempt is held — that closing only stops tracking.
+ */
+function DiscardDialog({ state, customerText, expired, waiting, onSend, onCheck, onClose, returnFocus }: {
+  readonly state: DiscardState; readonly customerText: (id: string) => string; readonly expired: boolean; readonly waiting: boolean;
+  readonly onSend: () => Promise<void>; readonly onCheck: () => void; readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const [saving, setSaving] = useState(false);
+  const alive = useRef(false);
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  async function send(): Promise<void> {
+    if (saving || waiting) return;
+    setSaving(true);
+    try {
+      await onSend();
+    } finally {
+      if (alive.current) setSaving(false);
+    }
+  }
+  const { draft, attempt } = state;
+  const working = attempt !== null && attempt.state !== 'unresolved';
+  const old = attempt !== null && (expired || attempt.body === '');
+  const text = attempt === null ? '' : attempt.state === 'sending' ? DISCARD_TEXT.sending : attempt.state === 'checking' ? DISCARD_TEXT.checking : old ? DISCARD_TEXT.tooOld : DISCARD_TEXT.unresolved;
+  const identity = [
+    customerText(draft.customerId), storeLabel(state.store), `created ${createdText(draft.createdAt)}`, lineCountText(draft.lines.length),
+    `Draft subtotal ${formatCents(draft.subtotalCents)}`, `version ${draft.version}`, `draft ID ${draft.id}`,
+  ].join(' · ');
+  return (
+    <DialogFrame
+      role="alertdialog" labelledBy="draft-discard-title" describedBy="draft-discard-description" testId="draft-discard-confirm"
+      busy={saving || working} onClose={onClose} initialFocus={keep} returnFocus={returnFocus}
+    >
+      <h2 id="draft-discard-title" className="text-xl font-black text-primary tracking-tight">{DISCARD_TEXT.title}</h2>
+      <div id="draft-discard-description" data-testid="draft-discard-description" className="space-y-1">
+        <p className="text-sm font-medium text-slate-700">{DISCARD_TEXT.explain}</p>
+        <p data-testid="draft-discard-identity" className="text-sm font-bold text-primary break-words">{identity}</p>
+      </div>
+      {attempt !== null && (
+        <div data-testid="draft-discard-attempt" data-state={attempt.state} className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2">
+          <p role="status" className="text-sm font-bold text-amber-900">{text}</p>
+          {attempt.note !== '' && !working && <p data-testid="draft-discard-attempt-note" className="text-xs font-bold text-amber-900">{attempt.note}</p>}
+          {!working && !old && (
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" data-testid="draft-discard-check" disabled={waiting} aria-describedby={waiting ? 'draft-discard-check-wait' : undefined} onClick={onCheck} className={button}>
+                Check again
+              </button>
+              {waiting && <span id="draft-discard-check-wait" className={hintClass}>{HOLD_TEXT.waiting}</span>}
+            </div>
+          )}
+        </div>
+      )}
+      {state.status !== null && <p data-testid="draft-discard-status" role={state.status.alert ? 'alert' : 'status'} className="text-sm font-bold text-rose-800">{state.status.text}</p>}
+      <div className="flex flex-wrap justify-end items-center gap-3">
+        {attempt !== null && <span id="draft-discard-close-warning" data-testid="draft-discard-close-warning" className={hintClass}>{DISCARD_TEXT.closeWarning}</span>}
+        <button
+          ref={keep} type="button" data-testid="draft-discard-keep" aria-describedby={attempt !== null ? 'draft-discard-close-warning' : undefined}
+          onClick={onClose} className={quiet}
+        >
+          {state.pressed ? 'Close' : 'Keep draft'}
+        </button>
+        {!state.pressed && (
+          <>
+            {waiting && !saving && <span id="draft-discard-send-wait" className={hintClass}>{DISCARD_TEXT.sendWaiting}</span>}
+            <button
+              type="button" data-testid="draft-discard-send" disabled={saving || waiting} aria-describedby={waiting && !saving ? 'draft-discard-send-wait' : undefined}
+              onClick={() => { void send(); }} className={button}
+            >
+              Discard draft
+            </button>
+          </>
+        )}
+      </div>
     </DialogFrame>
   );
 }

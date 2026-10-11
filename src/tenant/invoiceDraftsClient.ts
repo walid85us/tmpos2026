@@ -7,6 +7,9 @@
 // create of one USD draft for one server customer). M7B-INVOICES-P2: GET …/invoice-drafts/{id}/edit-eligibility (whether
 // this session may edit drafts at that store now, decided by the edit's own requirement; it reads no draft) and PATCH
 // …/invoice-drafts/{id} (the idempotent edit: the draft's customer and its complete ordered lines, at the version read).
+// M7B-INVOICES-DISCARD-P1: GET …/invoice-drafts/{id}/discard-eligibility (whether this session may discard drafts at that
+// store now, decided by the discard's own requirement; it reads no draft) and POST …/invoice-drafts/{id}/discard (the
+// idempotent discard of one open draft at the version read: `{ expectedTenant, expectedVersion }`, nothing else).
 //
 //   - The server is the authority for everything: which stores this user may act at, who may list, reopen or save, which
 //     tenant a store belongs to, what a valid draft is and what was stored. A store id in a path is a REQUESTED target
@@ -40,6 +43,11 @@
 //     body expected), its 404 not_found `not-found` (one answer for a missing or foreign draft and a missing or foreign
 //     customer), its 422 idempotency_key_reused `key-reused` and its 409 request_in_progress `in-progress`; the other
 //     refusals are the create's. Everything else — a 5xx, any other 2xx, another body, no answer — is `unknown`.
+//   - A discard is `discarded` on a 200 ONLY whose body is exactly `{ draftId, version, status: "discarded" }` for the
+//     draft asked, at the expectedVersion the body SENT plus one. A sealed 409 write_conflict is `conflict` (the draft is
+//     not at that version) and a sealed 409 invalid_state `not-open` (it is no longer an open draft); the chain's 409
+//     write_conflict is `tenant-changed`, its 404 not_found `not-found`, its 422 idempotency_key_reused `key-reused` and its
+//     409 request_in_progress `in-progress`; the other refusals are the create's. Everything else is `unknown`.
 //   - The body of a create or an edit is the caller's exact string (built once by `draftBody` or `draftEditBody`, which
 //     share one line check): the server fingerprints the raw bytes, so this module never re-serializes it — and never
 //     sends one the server's planner would refuse (`invalid`, nothing sent).
@@ -55,7 +63,7 @@
 //     two unused bits are zero). Any other cursor is refused by the server with its 400.
 //   - A store id, a draft id or a cursor that is not in its grammar is never put into a request path.
 //   - Every request carries the session CSRF token the caller was just handed, in a header (the server answers a read
-//     only under the session that token belongs to); a create or an edit also carries the intent header and the
+//     only under the session that token belongs to); a create, an edit or a discard also carries the intent header and the
 //     Idempotency-Key.
 //     Nothing is put into a URL but the ids and the opaque cursor.
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials. No
@@ -73,6 +81,10 @@ export const draftPathOf = (storeId: string, draftId: string): string => `${draf
 export const eligibilityPathOf = (storeId: string): string => `${draftsPathOf(storeId)}/eligibility`;
 /** Whether this session may edit drafts at one store now (M7B-INVOICES-P2): only ever built from canonical ids. */
 export const editEligibilityPathOf = (storeId: string, draftId: string): string => `${draftPathOf(storeId, draftId)}/edit-eligibility`;
+/** Whether this session may discard drafts at one store now (M7B-INVOICES-DISCARD-P1): only ever built from canonical ids. */
+export const discardEligibilityPathOf = (storeId: string, draftId: string): string => `${draftPathOf(storeId, draftId)}/discard-eligibility`;
+/** The discard of one draft of one store (M7B-INVOICES-DISCARD-P1): only ever built from canonical ids. */
+export const discardPathOf = (storeId: string, draftId: string): string => `${draftPathOf(storeId, draftId)}/discard`;
 /** The largest version an edit may name (invoiceDrafts.ts: 2^53 - 2, so the version after it is still exact). */
 export const MAX_EXPECTED_VERSION = Number.MAX_SAFE_INTEGER - 1;
 
@@ -89,6 +101,8 @@ export const MAX_CENTS = BigInt(Number.MAX_SAFE_INTEGER);
  * restatement of the server's bound, checked on the exact bytes, never a reason a valid draft is refused.
  */
 export const DRAFT_BODY_MAX_BYTES = 65_536;
+/** The discard body's bound in UTF-8 bytes (invoiceDrafts.ts INVOICE_DRAFT_DISCARD_MAX_BODY_BYTES; more is the server's 413). */
+export const DISCARD_BODY_MAX_BYTES = 1_024;
 // A page of 50 summaries is a few KiB; a draft of 50 lines of 256 astral scalars, each escaped as two \uXXXX units, is
 // about 160,000 characters.
 const MAX_BODY_CHARS = 262_144;
@@ -187,6 +201,13 @@ export type UpdateDraftResult =
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
 
+/** A discard the server confirmed (M7B-INVOICES-DISCARD-P1): the draft's version after it. */
+export type DiscardDraftResult =
+  | { readonly kind: 'discarded'; readonly version: number; readonly replayed: boolean }
+  | { readonly kind: 'conflict' | 'not-open' | 'tenant-changed' | 'not-found' | 'key-reused' | 'in-progress' | 'denied' | 'signed-out' | 'invalid' }
+  | RateLimited
+  | { readonly kind: 'unknown'; readonly responded: boolean };
+
 // ---- the shop's own checks before a create or an edit (the server restates and decides) ----
 
 /** A description as the server would store it — trimmed, 1-256 scalars, the customer name rule — or null. */
@@ -263,6 +284,15 @@ export function draftBody(expectedTenant: string, customerId: string, lines: rea
 export function draftEditBody(expectedTenant: string, expectedVersion: number, customerId: string, lines: readonly DraftLineFields[]): DraftBody {
   const valid = isCustomerId(expectedTenant) && isCustomerId(customerId) && isCount(expectedVersion, 1, MAX_EXPECTED_VERSION);
   return bodyOf(lines, valid, (built) => ({ expectedTenant, expectedVersion, customerId, lines: built }));
+}
+
+/**
+ * The POST body of one discard (M7B-INVOICES-DISCARD-P1), built ONCE: exactly `{"expectedTenant":…,"expectedVersion":…}`
+ * in that order — the store's tenant as GET /api/v1/stores answered it and the version the detail read reported
+ * (1..2^53-2) — or null when the server's planner would refuse it (nothing is built, no key is minted).
+ */
+export function draftDiscardBody(expectedTenant: string, expectedVersion: number): string | null {
+  return isCustomerId(expectedTenant) && isCount(expectedVersion, 1, MAX_EXPECTED_VERSION) ? JSON.stringify({ expectedTenant, expectedVersion }) : null;
 }
 
 /** The one line check both bodies share; `shape` places the built lines in the body's own keys, in their fixed order. */
@@ -472,6 +502,23 @@ function sentOf(body: string, keys: readonly string[]): { readonly lineCount: nu
   }
 }
 
+/**
+ * What a discard body SENT (M7B-INVOICES-DISCARD-P1): its expectedVersion, read from the caller's own string; null when it
+ * is not one the planner takes — unreadable, over 1 KiB, not exactly expectedTenant and expectedVersion, a non-canonical
+ * tenant, a version outside 1..2^53-2 (-0 included).
+ */
+function discardSentOf(body: string): { readonly expectedVersion: number } | null {
+  try {
+    if (new TextEncoder().encode(body).length > DISCARD_BODY_MAX_BYTES) return null;
+    const parsed: unknown = JSON.parse(body);
+    if (!isPlain(parsed) || !hasKeys(parsed, ['expectedTenant', 'expectedVersion'])) return null;
+    const { expectedTenant, expectedVersion } = parsed;
+    return isCustomerId(expectedTenant) && isCount(expectedVersion, 1, MAX_EXPECTED_VERSION) ? { expectedVersion } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `{ draftId, version, changed }` exactly, for the draft asked; otherwise null. */
 function updatedOf(body: unknown, draftId: string): UpdatedDraft | null {
   if (!isPlain(body) || !hasKeys(body, ['draftId', 'version', 'changed'])) return null;
@@ -506,6 +553,10 @@ export interface InvoiceDraftsClient {
   editEligibility(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
   /** One edit attempt of `draftId` at `storeId`: `body` exactly as given, under `idempotencyKey`; a body or id the server would refuse is `invalid` and nothing is sent. Never rejects. */
   updateDraft(storeId: string, draftId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<UpdateDraftResult>;
+  /** Whether this session may discard drafts at `storeId` now (the draft id names the route only); a malformed id is `denied` and nothing is sent. Never rejects. */
+  discardEligibility(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
+  /** One discard attempt of `draftId` at `storeId`: `body` exactly as given, under `idempotencyKey`; a body or id the server would refuse is `invalid` and nothing is sent. Never rejects. */
+  discardDraft(storeId: string, draftId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<DiscardDraftResult>;
 }
 
 interface Answer {
@@ -620,7 +671,12 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     return eligibilityAt(editEligibilityPathOf(storeId, draftId), csrf, signal);
   }
 
-  /** Both eligibility reads: `allowed` only for the exact closed body; the reads' refusals; anything else `unavailable`. */
+  async function discardEligibility(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId) || !isCustomerId(draftId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
+    return eligibilityAt(discardEligibilityPathOf(storeId, draftId), csrf, signal);
+  }
+
+  /** The eligibility reads: `allowed` only for the exact closed body; the reads' refusals; anything else `unavailable`. */
   async function eligibilityAt(path: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
     const answer = await read(path, csrf, signal);
     if (answer === null) return Object.freeze({ kind: 'unavailable' });
@@ -718,7 +774,32 @@ export function createInvoiceDraftsClient(options: { fetch?: typeof fetch; timeo
     return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ listStores, listDrafts, getDraft, eligibility, createDraft, editEligibility, updateDraft });
+  async function discardDraft(storeId: string, draftId: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<DiscardDraftResult> {
+    const sent = discardSentOf(body);
+    if (!isCustomerId(storeId) || !isCustomerId(draftId) || sent === null) return Object.freeze({ kind: 'invalid' }); // nothing is sent
+    const answer = await mutate('POST', discardPathOf(storeId, draftId), body, idempotencyKey, csrf, signal);
+    if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
+    const { status, body: got } = answer;
+    const { sealed, chain } = shapes(answer);
+    if (status === 200) {
+      const replay = answer.header('idempotent-replayed'); // app.ts sendRecorded: absent, or exactly "true" on a replay
+      if (isPlain(got) && hasKeys(got, ['draftId', 'version', 'status']) && got.draftId === draftId && got.status === 'discarded'
+        && got.version === sent.expectedVersion + 1 && (replay === null || replay === 'true')) {
+        return Object.freeze({ kind: 'discarded', version: got.version, replayed: replay === 'true' });
+      }
+      return Object.freeze({ kind: 'unknown', responded: true }); // a 200 this client cannot name: only the key can say
+    }
+    // As the edit's: the sealed answers are the key's recorded completion; the chain's were rolled back and recorded nothing.
+    if (status === 409 && sealed('write_conflict')) return Object.freeze({ kind: 'conflict' });
+    if (status === 409 && sealed('invalid_state')) return Object.freeze({ kind: 'not-open' });
+    if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-changed' });
+    if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
+    if (status === 404 && chain('not_found')) return Object.freeze({ kind: 'not-found' });
+    if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });
+    return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
+  }
+
+  return Object.freeze({ listStores, listDrafts, getDraft, eligibility, createDraft, editEligibility, updateDraft, discardEligibility, discardDraft });
 }
 
 /** The shop's one invoice drafts client. */

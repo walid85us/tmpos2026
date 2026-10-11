@@ -6,14 +6,16 @@
 // would refuse to serve is accepted. M7B-INVOICES-P1-R2: the eligibility read (IDC-17, IDC-18) — `allowed` only for the
 // exact closed body, each refusal only in its envelope, everything else `unavailable`. M7B-INVOICES-P2: a detail's version is
 // any safe integer of 1 or more (IDC-05), the edit's body (IDC-19), its PATCH and every answer it may get (IDC-20..IDC-22) and
-// the edit eligibility (IDC-23). Ids are built at run time (secret scanning), special characters from code points, so
+// the edit eligibility (IDC-23). M7B-INVOICES-DISCARD-P1: the discard's paths and body (IDC-24), its POST and every
+// answer it may get (IDC-25, IDC-26), the bodies and ids it never sends (IDC-27) and the discard eligibility (IDC-28).
+// Ids are built at run time (secret scanning), special characters from code points, so
 // the test data stays ASCII.
 import { Buffer } from 'node:buffer';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, MAX_EXPECTED_VERSION, STORES_PATH, createInvoiceDraftsClient, draftBody, draftEditBody, draftPathOf, draftsPathOf,
-  editEligibilityPathOf, eligibilityPathOf, formatCents, isDraftBodyTooLarge, isDraftCreatedAt, normalizeDraftDescription, parsePriceCents, parseQuantity, priceText,
+  DISCARD_BODY_MAX_BYTES, DRAFT_BODY_MAX_BYTES, DRAFT_PAGE_LIMIT, MAX_CENTS, MAX_EXPECTED_VERSION, STORES_PATH, createInvoiceDraftsClient, discardEligibilityPathOf,
+  discardPathOf, draftBody, draftDiscardBody, draftEditBody, draftPathOf, draftsPathOf, editEligibilityPathOf, eligibilityPathOf, formatCents, isDraftBodyTooLarge, isDraftCreatedAt, normalizeDraftDescription, parsePriceCents, parseQuantity, priceText,
 } from './invoiceDraftsClient';
 import { normalizeCustomerName } from './customersClient';
 
@@ -681,4 +683,172 @@ test('IDC-23. edit eligibility: a GET of the draft\'s edit-eligibility path with
   assert.deepEqual(none.calls, []);
   // The creation eligibility's path is not the edit's: neither answer is read as the other.
   assert.notEqual(editEligibilityPathOf(STORE, DRAFT), eligibilityPathOf(STORE));
+});
+
+// ---- M7B-INVOICES-DISCARD-P1: the discard ----
+
+const DISCARD = draftDiscardBody(TENANT, 3);
+const discarded = (extra: Record<string, unknown> = {}) => ({ draftId: DRAFT, version: 4, status: 'discarded', ...extra });
+
+test('IDC-24. the discard\'s paths are the draft\'s path plus /discard and /discard-eligibility; its body is built once as exactly {"expectedTenant":…,"expectedVersion":…} in that order, or nothing for a tenant or version the server\'s planner refuses', () => {
+  assert.equal(discardPathOf(STORE, DRAFT), `${STORES_PATH}/${STORE}/invoice-drafts/${DRAFT}/discard`);
+  assert.equal(discardEligibilityPathOf(STORE, DRAFT), `${STORES_PATH}/${STORE}/invoice-drafts/${DRAFT}/discard-eligibility`);
+  assert.equal(discardPathOf(STORE, DRAFT), `${draftPathOf(STORE, DRAFT)}/discard`);
+  assert.notEqual(discardEligibilityPathOf(STORE, DRAFT), editEligibilityPathOf(STORE, DRAFT));
+  assert.equal(DISCARD, `{"expectedTenant":"${TENANT}","expectedVersion":3}`);
+  assert.equal(draftDiscardBody(TENANT, 1), `{"expectedTenant":"${TENANT}","expectedVersion":1}`);
+  assert.equal(draftDiscardBody(TENANT, MAX_EXPECTED_VERSION), `{"expectedTenant":"${TENANT}","expectedVersion":${MAX_EXPECTED_VERSION}}`);
+  for (const version of [0, -1, 1.5, MAX_EXPECTED_VERSION + 1, MAX, Number.NaN, Number.POSITIVE_INFINITY, -0]) {
+    assert.equal(draftDiscardBody(TENANT, version), null, String(version));
+  }
+  for (const tenant of [TENANT.toUpperCase(), 't1', '', ` ${TENANT}`, `${TENANT}x`]) assert.equal(draftDiscardBody(tenant, 3), null, tenant);
+  assert.equal(DISCARD_BODY_MAX_BYTES, 1024);
+});
+
+test('IDC-25. DSC-01, DSC-13: a discard is ONE POST of the discard path with the exact bytes and the intent, session and key headers; discarded ONLY on an exact 200 for that draft at the version the body SENT plus one; a replay says so', async () => {
+  if (DISCARD === null) return assert.fail('body');
+  const { calls, client } = scripted(json(200, discarded()));
+  assert.deepEqual(await client.discardDraft(STORE, DRAFT, DISCARD, KEY, CSRF), { kind: 'discarded', version: 4, replayed: false });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, discardPathOf(STORE, DRAFT)); // no query
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.body, DISCARD); // the very string: never re-serialized
+  const h = headersOf(calls[0]);
+  assert.deepEqual([...h.keys()].sort(), ['accept', 'content-type', 'idempotency-key', 'x-tmpos-csrf', 'x-tmpos-session-csrf']);
+  assert.equal(h.get('idempotency-key'), KEY);
+  assert.equal(h.get('x-tmpos-csrf'), '1');
+  assert.equal(h.get('x-tmpos-session-csrf'), CSRF);
+  assert.equal(h.get('content-type'), 'application/json');
+  assert.equal(h.get('accept'), 'application/json');
+  assert.deepEqual([calls[0].init.credentials, calls[0].init.mode, calls[0].init.cache, calls[0].init.redirect, calls[0].init.referrerPolicy], ['include', 'same-origin', 'no-store', 'error', 'no-referrer']);
+  const send = (res: Response | Error, body = DISCARD) => scripted(res).client.discardDraft(STORE, DRAFT, body, KEY, CSRF);
+  assert.deepEqual(await send(json(200, discarded(), { 'idempotent-replayed': 'true' })), { kind: 'discarded', version: 4, replayed: true });
+  // The version is read from the bytes the caller passed: the same 200 answers another body's version as unknown.
+  const at1 = draftDiscardBody(TENANT, 1)!;
+  assert.deepEqual(await send(json(200, discarded({ version: 2 })), at1), { kind: 'discarded', version: 2, replayed: false });
+  assert.deepEqual(await send(json(200, discarded()), at1), { kind: 'unknown', responded: true });
+  const unknown = { kind: 'unknown', responded: true };
+  for (const [body, headers] of [
+    [discarded({ version: 3 }), {}], [discarded({ version: 5 }), {}], [discarded({ version: '4' }), {}], [discarded({ version: 4.0000001 }), {}],
+    [discarded({ draftId: uuid(0xd42) }), {}], [discarded({ draftId: DRAFT.toUpperCase() }), {}], [discarded({ status: 'draft' }), {}], [discarded({ status: 'Discarded' }), {}],
+    [discarded({ extra: 1 }), {}], [{ draftId: DRAFT, version: 4 }, {}], [{ draft: discarded() }, {}], [discarded({ changed: true }), {}],
+    [discarded(), { 'idempotent-replayed': 'false' }], [discarded(), { 'idempotent-replayed': 'TRUE' }], [null, {}], [[discarded()], {}],
+  ] as Array<[unknown, Record<string, string>]>) {
+    assert.deepEqual(await send(json(200, body, headers)), unknown, JSON.stringify([body, headers]).slice(0, 160));
+  }
+  for (const status of [201, 202, 204]) {
+    assert.deepEqual(await send(status === 204 ? new Response(null, { status }) : json(status, discarded())), unknown, String(status));
+  }
+  assert.deepEqual(await send(new Response(JSON.stringify(discarded()), { status: 200, headers: { 'content-type': 'text/plain' } })), unknown); // not JSON
+});
+
+test('IDC-26. DSC-06, DSC-10, DSC-13: every other discard answer maps to one outcome, told apart by status AND error word AND shape: the sealed 409s (conflict, not-open; replayed ones too), the chain\'s 409s (tenant-changed, in-progress), its 404 and 422, the shared refusals; anything undecided is unknown — and each answer is ONE fetch: nothing is retried on its own, an outage, no answer or a timeout included', async () => {
+  if (DISCARD === null) return assert.fail('body');
+  // The script would serve a second answer too: a retry would be seen, never hidden by an unscripted fetch.
+  const send = async (res: Response | Error) => {
+    const { calls, client } = scripted(res, res);
+    const result = await client.discardDraft(STORE, DRAFT, DISCARD, KEY, CSRF);
+    assert.equal(calls.length, 1, 'one fetch per answer');
+    return result;
+  };
+  const unknown = { kind: 'unknown', responded: true };
+  const cases: Array<[Response | Error, unknown]> = [
+    [json(409, { error: 'write_conflict' }), { kind: 'conflict' }], // sealed: the draft is not at that version
+    [json(409, { error: 'invalid_state' }), { kind: 'not-open' }], // sealed: no longer an open draft
+    [json(409, { error: 'write_conflict' }, { 'idempotent-replayed': 'true' }), { kind: 'conflict' }], // a sealed answer replayed under its key
+    [json(409, { error: 'invalid_state' }, { 'idempotent-replayed': 'true' }), { kind: 'not-open' }],
+    [json(409, { error: 'write_conflict', requestId: 'r' }), { kind: 'tenant-changed' }], // the chain's: another tenant than expectedTenant
+    [json(409, { error: 'invalid_state', requestId: 'r' }), unknown], // never the chain's
+    [json(409, { error: 'request_in_progress', requestId: 'r' }), { kind: 'in-progress' }],
+    [json(409, { error: 'request_in_progress' }), unknown], // never sealed
+    [json(409, { error: 'write_conflict', detail: 'x' }), unknown], [json(409, { error: 'conflict' }), unknown],
+    [json(404, { error: 'not_found', requestId: 'r' }), { kind: 'not-found' }], // one answer for a missing or foreign draft
+    [json(404, { error: 'not_found' }), unknown], [json(404, { error: 'not_found', requestId: 'r', extra: 1 }), unknown],
+    [new Response('<html>', { status: 404, headers: { 'content-type': 'text/html' } }), unknown],
+    [json(422, { error: 'idempotency_key_reused', requestId: 'r' }), { kind: 'key-reused' }],
+    [json(422, { error: 'idempotency_key_reused' }), unknown], [json(422, { error: 'customer_not_found' }), unknown],
+    [json(401, { error: 'unauthenticated', requestId: 'r' }), { kind: 'signed-out' }],
+    [json(403, { error: 'forbidden', requestId: 'r' }), { kind: 'denied' }],
+    [json(400, { error: 'invalid_request', requestId: 'r' }), { kind: 'invalid' }],
+    [json(413, { error: 'content_too_large', requestId: 'r' }), { kind: 'invalid' }],
+    [json(415, { error: 'unsupported_media_type', requestId: 'r' }), { kind: 'invalid' }],
+    [json(429, { error: 'rate_limited', requestId: 'r' }, { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [json(429, { error: 'rate_limited', requestId: 'r' }), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    ...([[401, 'unauthenticated'], [403, 'forbidden'], [400, 'invalid_request'], [413, 'content_too_large'], [415, 'unsupported_media_type'], [429, 'rate_limited']] as Array<[number, string]>)
+      .map(([status, word]): [Response, unknown] => [json(status, { error: word }), unknown]), // sealed: never these
+    [json(403, { error: 'unauthenticated', requestId: 'r' }), unknown],
+    [json(503, { error: 'service_unavailable', requestId: 'r' }), unknown], [json(500, { error: 'internal_error', requestId: 'r' }), unknown],
+    [new Response('<html>', { status: 502, headers: { 'content-type': 'text/html' } }), unknown],
+    [new Error('offline'), { kind: 'unknown', responded: false }],
+  ];
+  for (const [res, expected] of cases) {
+    const label = res instanceof Response ? `${res.status} ${res.headers.get('content-type')}` : 'no answer';
+    assert.deepEqual(await send(res), expected, `${label} -> ${(expected as { kind: string }).kind}`);
+  }
+  // A timeout: the client's own deadline; the outcome is undecided.
+  let hung = 0;
+  const hang = (async (_input: RequestInfo | URL, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+    hung += 1;
+    init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  })) as typeof globalThis.fetch;
+  assert.deepEqual(await createInvoiceDraftsClient({ fetch: hang, timeoutMs: 5 }).discardDraft(STORE, DRAFT, DISCARD, KEY, CSRF), { kind: 'unknown', responded: false });
+  assert.equal(hung, 1, 'a timeout is not retried');
+  // An abort before the request: nothing is sent, the outcome is undecided.
+  const aborted = new AbortController();
+  aborted.abort();
+  const none = scripted();
+  assert.deepEqual(await none.client.discardDraft(STORE, DRAFT, DISCARD, KEY, CSRF, aborted.signal), { kind: 'unknown', responded: false });
+  assert.deepEqual(none.calls, []);
+});
+
+test('IDC-27. a discard sends nothing for a body or an id the server would refuse — an edit\'s or a create\'s body, a missing or extra key, a version outside 1..2^53-2, a non-canonical tenant, more than 1 KiB — and neither an edit nor a create sends a discard\'s body', async () => {
+  if (DISCARD === null || EDIT.kind !== 'ok' || BODY.kind !== 'ok') return assert.fail('body');
+  const { calls, client } = scripted();
+  const bodies = [
+    EDIT.body, BODY.body, JSON.stringify({ expectedTenant: TENANT }), JSON.stringify({ expectedVersion: 3 }), JSON.stringify({ expectedTenant: TENANT, expectedVersion: 3, reason: 'x' }),
+    ...[0, -1, 1.5, '3', null, true, MAX_EXPECTED_VERSION + 1, MAX].map((expectedVersion) => JSON.stringify({ expectedTenant: TENANT, expectedVersion })),
+    JSON.stringify({ expectedTenant: TENANT.toUpperCase(), expectedVersion: 3 }), JSON.stringify({ expectedTenant: 't1', expectedVersion: 3 }), JSON.stringify({ expectedTenant: null, expectedVersion: 3 }),
+    DISCARD.replace('"expectedVersion":3', '"expectedVersion":-0'), `[${DISCARD}]`, 'not json', '', 'null',
+    `${DISCARD}${' '.repeat(DISCARD_BODY_MAX_BYTES - DISCARD.length + 1)}`, // valid JSON, but over the server's 1 KiB
+  ];
+  for (const body of bodies) assert.deepEqual(await client.discardDraft(STORE, DRAFT, body, KEY, CSRF), { kind: 'invalid' }, body.slice(0, 100));
+  for (const [store, draft] of [['store-1', DRAFT], [STORE, 'd1'], [STORE, DRAFT.toUpperCase()], [STORE, `${DRAFT}/x`], [`${STORE}/..`, DRAFT], [STORE, '']]) {
+    assert.deepEqual(await client.discardDraft(store, draft, DISCARD, KEY, CSRF), { kind: 'invalid' }, `${store} ${draft}`);
+  }
+  assert.deepEqual(await client.updateDraft(STORE, DRAFT, DISCARD, KEY, CSRF), { kind: 'invalid' });
+  assert.deepEqual(await client.createDraft(STORE, DISCARD, KEY, CSRF), { kind: 'invalid' });
+  assert.deepEqual(calls, []);
+  // At exactly 1 KiB the body is still sent (its whitespace is the caller's own bytes), and the largest version an edit may name too.
+  const padded = `${DISCARD}${' '.repeat(DISCARD_BODY_MAX_BYTES - DISCARD.length)}`;
+  const sent = scripted(json(200, discarded()), json(200, discarded({ version: MAX })));
+  assert.equal((await sent.client.discardDraft(STORE, DRAFT, padded, KEY, CSRF)).kind, 'discarded');
+  assert.equal(sent.calls[0].init.body, padded);
+  assert.deepEqual(await sent.client.discardDraft(STORE, DRAFT, draftDiscardBody(TENANT, MAX_EXPECTED_VERSION)!, KEY, CSRF), { kind: 'discarded', version: MAX, replayed: false });
+});
+
+test('IDC-28. DSC-19: discard eligibility: a GET of the draft\'s discard-eligibility path with the session token only; allowed ONLY for the exact closed body; its refusals the reads\' (each only in its envelope); anything else unavailable; an id outside its grammar sends nothing', async () => {
+  const { calls, client } = scripted(json(200, { eligibility: 'allowed' }));
+  assert.deepEqual(await client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'allowed' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, discardEligibilityPathOf(STORE, DRAFT)); // no query
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.body, undefined);
+  const h = headersOf(calls[0]);
+  assert.deepEqual([...h.keys()].sort(), ['accept', 'x-tmpos-session-csrf']);
+  assert.equal(h.get('x-tmpos-session-csrf'), CSRF);
+  for (const body of [{ eligibility: 'allowed', draft: DRAFT }, {}, { eligibility: 'denied' }, { eligibility: true }, ['allowed'], null]) {
+    assert.deepEqual(await scripted(json(200, body)).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' }, JSON.stringify(body));
+  }
+  assert.deepEqual(await scripted(refused(401, 'unauthenticated')).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'signed-out' });
+  assert.deepEqual(await scripted(refused(403, 'forbidden')).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'denied' });
+  assert.deepEqual(await scripted(refused(429, 'rate_limited', { 'retry-after': '4' })).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'rate-limited', retryAfterSeconds: 4 });
+  for (const res of [refused(404, 'not_found'), refused(400, 'invalid_request'), refused(503, 'service_unavailable'), json(403, { error: 'forbidden' }), json(401, { error: 'unauthenticated' })]) {
+    assert.deepEqual(await scripted(res).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' }, String(res.status));
+  }
+  assert.deepEqual(await scripted(new Error('offline')).client.discardEligibility(STORE, DRAFT, CSRF), { kind: 'unavailable' });
+  const none = scripted();
+  for (const [store, draft] of [['store-1', DRAFT], [STORE, 'd1'], [STORE, DRAFT.toUpperCase()], [STORE, `${DRAFT}/discard-eligibility`], [STORE, '']]) {
+    assert.deepEqual(await none.client.discardEligibility(store, draft, CSRF), { kind: 'denied' }, `${store} ${draft}`);
+  }
+  assert.deepEqual(none.calls, []);
 });
