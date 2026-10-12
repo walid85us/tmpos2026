@@ -23,7 +23,7 @@ TM POS2026 is today a **client-authoritative React SPA** whose production artifa
 | 08 | [Production Gate & Risk Register](./08-production-gate-and-risk-register.md) | Single authoritative gate register (owner, milestone, evidence, pass/fail, severity) |
 | 09 | [Roadmap M0–M9](./09-roadmap-m0-m9.md) | Authoritative milestone roadmap + deferred/future reconciliation |
 | 10 | [Architecture Decision Records](./10-architecture-decision-records.md) | ADRs for the major structural choices |
-| 11 | [Invoice Draft Discard — Decision Pack](./11-m7b-invoice-draft-discard-decision-pack.md) | **PROPOSED / UNADOPTED** (M7B-INVOICES-D1-P1): owner decisions, route contract and planned tests for discarding a saved store invoice draft; nothing implemented |
+| 11 | [Invoice Draft Discard — Decision Pack](./11-m7b-invoice-draft-discard-decision-pack.md) | **ACCEPTED and IMPLEMENTED in code** (proposed in M7B-INVOICES-D1-P1; accepted by the owner 2026-10-11 and built in M7B-INVOICES-DISCARD-P1, [ADR-49](./10-architecture-decision-records.md)): owner decisions, route contract, planned tests and their map to the executed ones for discarding a saved store invoice draft; not deployed |
 
 ## Reading order
 
