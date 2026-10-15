@@ -2309,7 +2309,8 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
               </tbody>
             </table>
           </div>
-          <p data-testid="draft-view-subtotal" className="text-right text-base font-black text-primary break-words">Draft subtotal {formatCents(draft.subtotalCents)}</p>
+          {/* Below sm the type steps down: at 320 px the largest amount can be wider than the dialog in 16 px heavy type, and break-words would split it. */}
+          <p data-testid="draft-view-subtotal" className="text-right text-sm sm:text-base font-black text-primary break-words">Draft subtotal {formatCents(draft.subtotalCents)}</p>
           {/* Edit only on the server's answer; its other answers are said in one live region kept while it is asked. */}
           {edit !== null && (
             <div className="flex flex-wrap items-center gap-3">
