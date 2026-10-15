@@ -518,7 +518,8 @@ const quiet = `px-4 py-2 bg-white text-primary border border-slate-300 text-xs f
 const hintClass = 'text-[11px] font-medium text-slate-500';
 const inputClass = `w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white ${focusRing}`;
 const labelClass = 'block text-[10px] font-black text-slate-500 uppercase tracking-widest';
-const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]';
+// [tabindex="0"]: the reopen dialog's lines region (M7B-INVOICES-DISCARD-P1-R1), the only such element in these dialogs.
+const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]';
 
 interface DialogFrameProps {
   readonly labelledBy: string;
@@ -527,6 +528,13 @@ interface DialogFrameProps {
   /** The id of the ONE element that describes the dialog (aria-describedby), when it has one. */
   readonly describedBy?: string;
   readonly testId: string;
+  /**
+   * 'top' lays the dialog out from a fixed offset (5vh) below the viewport's top instead of centring it
+   * (M7B-INVOICES-DISCARD-P1-R1): content that arrives below its header after it opened — the reopen dialog's late
+   * eligibility answers, wrapped at a narrow width or an enlarged text size — then extends it downward and never moves
+   * its Close. A centred dialog moves its top by half of any growth. Every other dialog stays centred.
+   */
+  readonly anchor?: 'center' | 'top';
   readonly busy?: boolean;
   readonly onClose: () => void;
   /** Where focus goes when the dialog opens (the dialog itself when null). */
@@ -536,7 +544,7 @@ interface DialogFrameProps {
   readonly children: ReactNode;
 }
 
-function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
+function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
   const overlay = useRef<HTMLDivElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
   const close = useRef(onClose);
@@ -618,11 +626,12 @@ function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, busy = 
     else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
   }
 
+  // 'top': 5vh above and below, so the 90vh panel still fits whole and scrolls inside itself as a centred one does.
   return createPortal(
     <div
       ref={overlay}
       onMouseDown={(e) => { if (e.target === e.currentTarget) e.preventDefault(); }}
-      className="fixed inset-0 z-[180] flex items-center justify-center p-4 bg-slate-900/40"
+      className={`fixed inset-0 z-[180] flex justify-center bg-slate-900/40 ${anchor === 'top' ? 'items-start px-4 py-[5vh]' : 'items-center p-4'}`}
     >
       <div
         ref={dialog}
@@ -2255,7 +2264,7 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const draft = state.draft;
   return (
-    <DialogFrame labelledBy="draft-view-title" testId="draft-view" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
+    <DialogFrame labelledBy="draft-view-title" testId="draft-view" anchor="top" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
       <div className="flex items-start justify-between gap-3">
         <h2 id="draft-view-title" className="text-xl font-black text-primary tracking-tight">Server draft</h2>
         <button ref={closeButton} type="button" id={VIEW_CLOSE_ID} data-testid="draft-view-close" onClick={onClose} className={quiet}>Close</button>
@@ -2274,30 +2283,33 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
             <dt className={labelClass}>Status</dt><dd data-testid="draft-view-status" className="font-bold text-slate-700">Draft · USD</dd>
             <dt className={labelClass}>Version</dt><dd data-testid="draft-view-version" className="font-bold text-slate-700">{draft.version}</dd>
           </dl>
-          <table data-testid="draft-view-lines" className="w-full text-left text-sm border-collapse">
-            <caption className="sr-only">Draft lines</caption>
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th scope="col" className={labelClass}>#</th>
-                <th scope="col" className={labelClass}>Description</th>
-                <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
-                <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
-                <th scope="col" className={`${labelClass} text-right`}>Line total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {draft.lines.map((line) => (
-                <tr key={line.position} data-testid="draft-view-line" className="border-b border-slate-50">
-                  <td className="py-1 pr-2 text-slate-500">{line.position}</td>
-                  <td className="py-1 pr-2 font-bold text-slate-800 break-words">{line.description}</td>
-                  <td className="py-1 pr-2 text-right">{line.quantity}</td>
-                  <td className="py-1 pr-2 text-right">{formatCents(line.unitPriceCents)}</td>
-                  <td className="py-1 text-right font-bold">{formatCents(line.lineTotalCents)}</td>
+          {/* The lines table scrolls sideways inside its own named region, reached by Tab (the data-table reflow exception, which covers this table only; M7B-INVOICES-DISCARD-P1-R1): an amount never breaks. Measured (SDB-23): the largest amount the shop accepts ($90,071,992,547,409.91) twice in a row overflows the region at 600 and 320 CSS px and at 600 px with 24 px text, and fits at 1440 px; in those cells the dialog itself does not scroll sideways. Where the table fits, it is laid out as before. */}
+          <div role="region" aria-label="Draft lines" tabIndex={0} data-testid="draft-view-lines-scroll" className={`overflow-x-auto ${focusRing}`}>
+            <table data-testid="draft-view-lines" className="w-full text-left text-sm border-collapse">
+              <caption className="sr-only">Draft lines</caption>
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th scope="col" className={labelClass}>#</th>
+                  <th scope="col" className={labelClass}>Description</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Line total</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <p data-testid="draft-view-subtotal" className="text-right text-base font-black text-primary">Draft subtotal {formatCents(draft.subtotalCents)}</p>
+              </thead>
+              <tbody>
+                {draft.lines.map((line) => (
+                  <tr key={line.position} data-testid="draft-view-line" className="border-b border-slate-50">
+                    <td className="py-1 pr-2 text-slate-500">{line.position}</td>
+                    <td className="py-1 pr-2 font-bold text-slate-800 break-words">{line.description}</td>
+                    <td className="py-1 pr-2 text-right">{line.quantity}</td>
+                    <td className="py-1 pr-2 text-right">{formatCents(line.unitPriceCents)}</td>
+                    <td className="py-1 text-right font-bold">{formatCents(line.lineTotalCents)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p data-testid="draft-view-subtotal" className="text-right text-base font-black text-primary break-words">Draft subtotal {formatCents(draft.subtotalCents)}</p>
           {/* Edit only on the server's answer; its other answers are said in one live region kept while it is asked. */}
           {edit !== null && (
             <div className="flex flex-wrap items-center gap-3">
@@ -2315,7 +2327,8 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
             </div>
           )}
           {/* Discard only on the server's answer, and only at a writable store; asked or refused, nothing is shown or said. */}
-          {/* One control's height is held from the asking on, so an allowed or refused answer never moves the centered dialog's Close under the pointer. */}
+          {/* The dialog is laid out from the top (anchor="top", M7B-INVOICES-DISCARD-P1-R1), so whatever this row grows to — Try again and its hint, wrapped at a narrow width or enlarged text — extends the dialog downward and never moves Close, the header or Edit draft. */}
+          {/* One control's height is still held from the asking on, so an allowed answer (Discard draft…) or a denied one (403: nothing shown) does not change the dialog's height; an unavailable or rate-limited answer (Try again and its hint) can grow the row, which the top anchoring makes safe. */}
           {discard !== null && store !== null && !store.readOnly && (
             <div className="flex flex-wrap items-center gap-3 min-h-[2.125rem]">
               {discard.phase === 'allowed' && <button type="button" id={DISCARD_OPEN_ID} data-testid="draft-discard-open" onClick={onDiscard} className={quiet}>Discard draft…</button>}

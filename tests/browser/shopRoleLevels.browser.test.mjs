@@ -381,6 +381,31 @@
 //          at the front, Close's box and the dialog's height are measured; once the answer is in they are unchanged —
 //          allowed (the owner: Discard draft… appears in the row's held space) and refused (a sales_staff account at
 //          Invoices Edit: 403, nothing shown) — and Close, then pressed, closes the dialog.
+// M7B-INVOICES-DISCARD-P1-R1 — THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD ROW WRAPS.
+//   SDB-23 (DSC-19, DSC-21) at 1440, 600 and 320 CSS px and at a 24 px default text size (Chrome's font-size preference,
+//          at 600 px), each on a fresh page with the viewport fixed before the reopen: the discard-eligibility answer is
+//          parked, Close measured, then the answer lost at the front (st.lose: unavailable, Try again and its hint, which
+//          wraps where narrow). Asserted first, per cell: at 600 px, 320 px and the 24 px text size the answer wraps
+//          the discard row and grows it by more than 0.5 px, and at 1440 px it does not wrap. Close's box holds within
+//          0.5 px, the point that was its centre is still Close, and a raw mouse press at that point (not a re-aimed
+//          click) closes the dialog; the hint is whole, Try again is reached by Tab inside the dialog (after the lines'
+//          region), the dialog stays inside the viewport without scrolling sideways, its lines table fits the dialog's
+//          content or scrolls sideways inside its own named region, and no amount breaks (the page behind, wider than
+//          600 px at any width, is recorded only), and nothing is posted. The owner's allowed answer moves nothing at the
+//          same cells; Close and Escape return focus to the row's Open button. Then, in each cell, a second draft — one
+//          line at the largest unit price and line total the shop accepts (2^53-1 cents, "$90,071,992,547,409.91", read
+//          whole) under a long description of many words — is reopened with both answers in: its table fits at 1440 px
+//          and overflows elsewhere (asserted), where it scrolls inside the region, which Tab reaches and ArrowRight
+//          scrolls; the dialog is not scrolled sideways, also after Tab and ArrowRight, and no amount breaks (at 600 px this dialog outgrows
+//          90vh, so it is not used for the hold). The rows are opened from the keyboard (at 320 px the shop's sidebar
+//          lies over the list). Known and untested: an edit-eligibility answer landing AFTER
+//          the discard answer can still move the discard row (it lies below the edit row, which holds no height); Close,
+//          the header and Edit draft never move.
+//          Red on the P1 commit (bb7063a): the centred dialog grew under Close and moved it up by half the growth, the
+//          lines had no region of their own, and at 320 px (600 px too at the largest amounts) the table was wider than
+//          the dialog's content. A rate-limited answer is not produced here: the entry
+//          limits per IPv4 address and the front gives every request a fresh one, so a real 429 would need a new front
+//          hook; the unavailable text is the longer of the two, and jsdom's SID-116 holds the rate-limited one.
 // M7B-INVOICES-P1-R2 — SESSION-END CLEANUP (DA-200, DA-202, AC-07). A production sign-out unmounts the page (the route
 // guard), so a case that needs the old page still mounted uses SDB-08's window: another account signs in in a second tab
 // of the same browser, this tab starts A's logout and then awaits B's profile, which the harness holds.
@@ -1513,7 +1538,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SCB-13', 'SCB-14', 'SCB-15', 'SCB-16', 'SCB-17', 'SCB-18',
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
   'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17', 'SDB-18', 'SDB-19', 'SDB-20', 'SDB-21', 'SDB-22',
-  'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
+  'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -4929,19 +4954,21 @@ async function signInHere(page, who) {
 
 /**
  * `n` one-line drafts put in a store by the database owner (no session, audit, event, completion or idempotency record),
- * created one second apart: their ids in the list's order (newest first).
+ * created one second apart: their ids in the list's order (newest first). `lines[i]` ({ description, cents }, quantity
+ * 1), when given, is draft i's one line instead of the small numbered one.
  */
-async function seedDrafts(tenant, store, customerId, createdBy, n, label) {
+async function seedDrafts(tenant, store, customerId, createdBy, n, label, lines = []) {
   const ids = Array.from({ length: n }, () => randomUUID());
   await owner.begin(async (sql) => {
     for (const [i, id] of ids.entries()) {
-      const cents = 100 + i;
+      const line = lines[i] ?? null;
+      const cents = line?.cents ?? 100 + i;
       await sql`insert into tmpos_invoice_draft.invoice_draft
           (draft_id, tenant_id, store_id, customer_id, status, currency, version, line_count, subtotal_cents, created_at, created_by)
         values (${id}, ${tenant}, ${store}, ${customerId}, 'draft', 'USD', 1, 1, ${cents}, pg_catalog.now() - ${i + 1}::int * interval '1 second', ${createdBy})`;
       await sql`insert into tmpos_invoice_draft.invoice_draft_line
           (draft_id, tenant_id, store_id, position, description, quantity, unit_price_cents, line_total_cents)
-        values (${id}, ${tenant}, ${store}, 1, ${`${label} ${i + 1} ${SUFFIX}`}, 1, ${cents}, ${cents})`;
+        values (${id}, ${tenant}, ${store}, 1, ${line?.description ?? `${label} ${i + 1} ${SUFFIX}`}, 1, ${cents}, ${cents})`;
     }
   });
   return ids;
@@ -6320,7 +6347,7 @@ scenario('SDB-17', 'AC-15 SIGN-OUT BEFORE INITIATION (M7B-INVOICES-P1-R3) — A 
 }, 180_000);
 
 // ---------------------------------------------------------------------------------------------------------------------
-// M7B-INVOICES-DISCARD-P1 — discarding a saved draft (SDB-18..21). The literals are the shop's own texts.
+// M7B-INVOICES-DISCARD-P1 — discarding a saved draft (SDB-18..22; SDB-23: M7B-INVOICES-DISCARD-P1-R1). The literals are the shop's own texts.
 // ---------------------------------------------------------------------------------------------------------------------
 
 const DISCARD_ACTION = 'store.invoice_draft.discard';
@@ -6347,11 +6374,11 @@ async function discardState(tenant, draftId) {
       where payload ->> 'storeId' in (select store_id::text from public.store where tenant_id = ${tenant}))::int as outbox`;
   return r;
 }
-/** A tenant with one store, one server customer and `n` one-line drafts seeded there (newest first). */
-async function discardCase(label, n = 2) {
+/** A tenant with one store, one server customer and `n` one-line drafts seeded there (newest first; `lines` as seedDrafts). */
+async function discardCase(label, n = 2, lines = []) {
   const { tenant, stores: [main], boss } = await draftShop(label, ['main']);
   const [customer] = await seedCustomers(tenant, [`M7SDB ${label} Fern ${SUFFIX}`]);
-  const ids = await seedDrafts(tenant, main.id, customer.id, boss.id, n, `M7SDB ${label} seed`);
+  const ids = await seedDrafts(tenant, main.id, customer.id, boss.id, n, `M7SDB ${label} seed`, lines);
   return { tenant, main, boss, customer, ids };
 }
 /** The owner's page with the store chosen and its seeded drafts listed. */
@@ -6650,9 +6677,9 @@ const viewBox = (page) => page.evaluate(`(() => {
   return { close: { x: r.x, y: r.y, width: r.width, height: r.height }, panel: ${q('draft-view')}.getBoundingClientRect().height };
 })()`);
 /** Reopen `id` with its discard-eligibility answer parked at the front; answers the parked gate once Edit draft is offered and the dialog has settled. */
-async function reopenParked(page, store, id, customerName) {
+async function reopenParked(page, store, id, customerName, open = reopenDraft) {
   const parked = gate((r) => r.frameId === page.frameId && isDiscardEligibility(store, id)(r), 'response');
-  await reopenDraft(page, id, customerName);
+  await open(page, id, customerName);
   await page.waitFor(() => offered(page, 'draft-view-edit'), 30_000, 'Edit draft is offered');
   const held = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
   assert.ok(held, 'the discard-eligibility answer was parked at the front');
@@ -6698,6 +6725,236 @@ scenario('SDB-22', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL — with Edit dr
   assert.equal(discard, false, 'no Discard draft… on the refusal');
   assert.deepEqual(refusedAfter, refusedBefore, 'the refusal moved neither Close nor the dialog\'s height');
   await closeView(sales);
+}, 240_000);
+
+/** DISCARD_ELIGIBILITY_TEXT.unavailable: the discard row's hint when its eligibility could not be asked. */
+const DISCARD_UNAVAILABLE = 'The server could not be asked right now whether this draft can be discarded.';
+/** The one geometry tolerance (CSS px) SDB-23 allows Close's box: sub-pixel rounding only, never a moved control. */
+const HOLD_TOLERANCE = 0.5;
+/**
+ * SDB-23's cells (M7B-INVOICES-DISCARD-P1-R1): the viewport in CSS px (deviceScaleFactor 1, never a stand-in for
+ * text size) and Chrome's own default font size, or null for the browser's untouched default. D is today's desktop
+ * width (SDB-22's); N600 is under doc 11's "about 620 px" wrap; N320 is the 320 CSS-px reflow width (a 1280 px window at
+ * 400% browser zoom lays out at it); T600 enlarges the text through the browser's font-size preference (Page.setFontSizes,
+ * Settings › Font size), which scales every rem the dialog is built from. `wraps`: whether the unavailable answer must
+ * wrap the discard row there (asserted, so a cell cannot pass without the growth it exists to prove harmless).
+ * `overflows`: whether the lines table at the largest amounts is wider than the dialog's content there (asserted, so the
+ * region checks never go vacuous). The two are measured apart and happen to hold in the same cells.
+ */
+const HOLD_CELLS = Object.freeze([
+  { cell: 'D', width: 1440, font: null, wraps: false, overflows: false },
+  { cell: 'N600', width: 600, font: null, wraps: true, overflows: true },
+  { cell: 'N320', width: 320, font: null, wraps: true, overflows: true },
+  { cell: 'T600', width: 600, font: 24, wraps: true, overflows: true },
+]);
+/**
+ * SDB-23's second draft's line: the largest unit price and line total the shop accepts (2^53-1 cents, MAX_CENTS, at
+ * quantity 1: "$90,071,992,547,409.91", 22 characters with no break opportunity) and a long description of many words, so
+ * every cell measures the widest amounts a reopened draft can show, not only a $1.00 line.
+ */
+const HOLD_LINE = Object.freeze({
+  cents: Number.MAX_SAFE_INTEGER,
+  description: 'Quarterly maintenance of the walk-in refrigeration units at the main store, including replacement door gaskets, condenser coil cleaning, thermostat calibration and an emergency call-out on a public holiday',
+});
+/** The reopen dialog's geometry now: Close, Edit draft, the discard row and its parts, the panel and the page. */
+const holdBox = (page) => page.evaluate(`(() => {
+  const box = (n) => { if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
+  const panel = ${q('draft-view')}, row = ${q('draft-view-subtotal')}?.parentElement?.lastElementChild ?? null;
+  const again = ${q('draft-discard-elig-again')}, why = ${q('draft-discard-elig-why')};
+  // The lines table's own scroll container, when it has one (the data-table reflow exception): its box, overflow and name.
+  const scroller = ${q('draft-view-lines-scroll')};
+  return {
+    innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize,
+    docScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
+    close: box(${q('draft-view-close')}), edit: box(${q('draft-view-edit')}), row: box(row), again: box(again), why: box(why),
+    lines: { ...box(${q('draft-view-lines')}), scrollWidth: ${q('draft-view-lines')}?.scrollWidth ?? null },
+    scroller: scroller === null ? null : {
+      ...box(scroller), scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth, overflowX: getComputedStyle(scroller).overflowX,
+      role: scroller.getAttribute('role'), name: scroller.getAttribute('aria-label'), tabIndex: scroller.tabIndex,
+    },
+    // How many text lines each amount (unit price, line total) takes: an amount is never broken across lines.
+    amountLines: [...document.querySelectorAll(${JSON.stringify(`${by('draft-view-line')} td:nth-child(n+4)`)})].map((td) => {
+      const range = document.createRange(); range.selectNodeContents(td);
+      return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+    }),
+    // The subtotal paragraph (it may wrap between its label and its amount): its text and how many lines the amount takes.
+    subtotal: (() => {
+      const p = ${q('draft-view-subtotal')};
+      const node = p === null ? null : [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.includes('$')) ?? null;
+      if (node === null) return { text: p?.textContent.trim() ?? null, amountLines: null };
+      const range = document.createRange(); range.setStart(node, node.textContent.indexOf('$')); range.setEnd(node, node.textContent.length);
+      return { text: p.textContent.trim(), amountLines: new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size };
+    })(),
+    wrapped: again !== null && why !== null && why.getBoundingClientRect().top >= again.getBoundingClientRect().bottom - 1,
+    panel: { ...box(panel), scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth, scrollLeft: panel.scrollLeft },
+  };
+})()`);
+/**
+ * Open row `id` from the keyboard (its Open button focused, Enter): at 320 CSS px the shop's own sidebar lies over the
+ * drafts list (an unrelated screen, left as it is), so SDB-23 reaches the row the way a keyboard user does, in every cell.
+ */
+async function reopenByKey(page, id, customerName) {
+  await page.call(`${by('drafts-row')}[data-id="${id}"] ${by('drafts-open')}`, function () { this.focus(); });
+  await page.press('Enter');
+  await page.waitFor(`!!${q('draft-view-lines')} && ${q('draft-view-customer')}?.textContent.trim() === ${JSON.stringify(customerName)}`, 30_000, 'the reopened draft, its customer named');
+}
+/** What is under the viewport point (x, y): 'close' for the reopen dialog's Close, else the element's test id or tag. */
+const hitAt = (page, x, y) => page.evaluate(`(() => { const n = document.elementFromPoint(${x}, ${y}); return n?.closest(${JSON.stringify(by('draft-view-close'))}) ? 'close' : (n?.closest('[data-testid]')?.dataset.testid ?? n?.tagName ?? null); })()`);
+/** A real mouse press at a fixed viewport point: never re-aimed at where a control is now (page.click is). */
+async function pressAt(page, x, y) {
+  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased'])
+    await page.send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' ? 'none' : 'left', clickCount: type === 'mouseMoved' ? 0 : 1 });
+}
+/** How far `after` moved from `before` (each of x, y, width, height); Infinity when either is missing. */
+const moved = (before, after) => (before === null || after === null ? Infinity : Math.max(...['x', 'y', 'width', 'height'].map((k) => Math.abs(after[k] - before[k]))));
+
+scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD ROW WRAPS — at 1440, 600 and 320 CSS px and at an enlarged default text size (600 px, 24 px), each on a fresh page: with Edit draft offered and the discard-eligibility answer parked, Close\'s box is measured; the answer is then lost at the front (unavailable: Try again and its hint, wrapped where narrow); the row wraps and grows there (and does not wrap at 1440 px); Close\'s box is unchanged within 0.5 px, the point that was Close\'s centre is still Close and a real press there closes the dialog; the hint is whole, Try again reached by Tab inside the dialog, the dialog does not scroll sideways and no amount breaks, nothing is posted; the owner\'s allowed answer (Discard draft…) moves nothing either, and Close and Escape return focus to the row\'s Open button that opened the dialog; the dialog is still not scrolled sideways after Tab and the arrow keys; a second draft at the largest amounts the shop accepts, under a long description, reads $90,071,992,547,409.91 whole, and where it is wider than the dialog (600 and 320 px, enlarged text) scrolls sideways inside its own named region, reached by Tab and scrolled by the keyboard', async () => {
+  const c = await discardCase('d23', 2, [HOLD_LINE]);
+  const [large, id] = c.ids;
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  // Readable and reachable without sideways scrolling: the dialog inside the viewport and still sideways; the lines table
+  // fits the dialog's content or scrolls sideways inside its own container (the data-table reflow exception), which is
+  // then a named region reached by Tab — nothing clipped; and no amount is broken across lines.
+  // (The page behind — the Invoices screen — is wider than 600 px at any width; it is recorded, not judged: docScrollWidth.)
+  const fits = (where, b) => {
+    check(b.panel.x >= 0 && b.panel.x + b.panel.width <= b.clientWidth + HOLD_TOLERANCE, `${where}: the dialog lies outside the viewport ${JSON.stringify([b.panel.x, b.panel.width, b.clientWidth])}`);
+    check(b.panel.scrollWidth <= b.panel.clientWidth + HOLD_TOLERANCE, `${where}: the dialog overflows sideways (${b.panel.scrollWidth} > ${b.panel.clientWidth})`);
+    const holder = b.scroller ?? b.lines;
+    check(holder.x >= b.row.x - HOLD_TOLERANCE && holder.x + holder.width <= b.row.x + b.row.width + HOLD_TOLERANCE, `${where}: the lines table is wider than the dialog's content ${JSON.stringify([holder, b.row])}`);
+    if (b.scroller !== null && b.scroller.scrollWidth > b.scroller.clientWidth + HOLD_TOLERANCE)
+      check(['auto', 'scroll'].includes(b.scroller.overflowX) && b.scroller.role === 'region' && !!b.scroller.name && b.scroller.tabIndex === 0, `${where}: the lines table scrolls where no keyboard reaches it ${JSON.stringify(b.scroller)}`);
+    check(b.amountLines.length > 0 && b.amountLines.every((n) => n === 1), `${where}: an amount is broken across lines ${JSON.stringify(b.amountLines)}`);
+  };
+  // Re-measured after Tab and ArrowRight: focusing or scrolling the lines never scrolls the dialog itself sideways.
+  const stillSideways = async (page, where) => {
+    const b = await holdBox(page);
+    check(b.panel.scrollLeft === 0 && b.panel.scrollWidth <= b.panel.clientWidth + HOLD_TOLERANCE, `${where}: after Tab and the arrow keys the dialog scrolled or overflows sideways ${JSON.stringify(b.panel)}`);
+  };
+  // Focus goes back to the Open button that opened the dialog (its id is the row's own), not merely off the page body.
+  const backTo = async (page, opener, where) => {
+    const ok = await page.waitFor(async () => (await focusOf(page)) === opener, 5_000, where).then(() => true, () => false);
+    check(ok, `${where}: focus went back to ${await focusOf(page)}, not the opener ${opener}`);
+  };
+  try {
+    for (const { cell, width, font, wraps, overflows } of HOLD_CELLS) {
+      const page = await ownerDrafts(c);
+      const from = st.api.length;
+      // The viewport is changed once the list is in and before the reopen (a rotated or zoomed window), then held.
+      await page.setViewport(width, 1000);
+      if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+      await page.settle();
+      const setUp = await page.evaluate('({ innerWidth, rootFont: getComputedStyle(document.documentElement).fontSize })');
+      // Preconditions, asserted (a cell that did not take its configuration proves nothing).
+      assert.equal(setUp.innerWidth, width, `${cell}: the viewport is ${width} CSS px wide`);
+      assert.equal(setUp.rootFont, `${font ?? 16}px`, `${cell}: the root font size is the browser's ${font ?? 16} px default`);
+
+      // 1. Unavailable: the parked answer is lost at the front, so the page's read fails as a cut connection does.
+      const parked = await reopenParked(page, c.main.id, id, c.customer.name, reopenByKey);
+      const before = await holdBox(page);
+      let lost = 0;
+      st.lose = (rec, phase) => phase === 'response' && rec.frameId === page.frameId && isDiscardEligibility(c.main.id, id)(rec) && lost++ === 0;
+      try {
+        parked.release();
+        await page.waitFor(`!!${q('draft-discard-elig-why')}`, 30_000, `${cell}: the unavailable hint is shown`);
+      } finally {
+        st.lose = null;
+      }
+      await quiet(page, from);
+      await page.settle();
+      const after = await holdBox(page);
+      const x = before.close.x + before.close.width / 2, y = before.close.y + before.close.height / 2;
+      const hit = await hitAt(page, x, y);
+      const shown = { why: await textOf(page, 'draft-discard-elig-why'), again: await offered(page, 'draft-discard-elig-again'), focus: await focusOf(page) };
+      record('SDB-23', { cell, answer: 'unavailable', before, after, closeShift: after.close.y - before.close.y, rowGrew: after.row.height - before.row.height, panelGrew: after.panel.height - before.panel.height, hit, shown });
+      assert.ok(before.panel.scrollHeight <= before.panel.clientHeight + 1 && after.panel.scrollHeight <= after.panel.clientHeight + 1,
+        `${cell}: the dialog is not capped at 90vh (else it scrolls and nothing could move)`);
+      // Preconditions, asserted: where the cell is narrow or enlarged the answer wraps the discard row (the hint below Try
+      // again) and grows it, and at the desktop width it does not wrap — a cell never passes without what it measures.
+      assert.equal(after.wrapped, wraps, `${cell}: the unavailable answer ${wraps ? 'wraps' : 'does not wrap'} the discard row`);
+      if (wraps) assert.ok(after.row.height - before.row.height > HOLD_TOLERANCE, `${cell}: the discard row grew (${before.row.height} -> ${after.row.height})`);
+      check(moved(before.close, after.close) <= HOLD_TOLERANCE, `${cell}: Close moved ${JSON.stringify({ before: before.close, after: after.close })}`);
+      check(moved(before.edit, after.edit) <= HOLD_TOLERANCE, `${cell}: Edit draft moved ${JSON.stringify({ before: before.edit, after: after.edit })}`);
+      check(hit === 'close', `${cell}: the point that was Close's centre (${x}, ${y}) is now ${hit}`);
+      check(shown.why === DISCARD_UNAVAILABLE && shown.again === true, `${cell}: the hint whole and Try again offered: ${JSON.stringify(shown)}`);
+      check(shown.focus === 'draft-view-close', `${cell}: focus stayed on Close: ${shown.focus}`);
+      fits(cell, after);
+      check(after.why.x >= after.panel.x && after.why.x + after.why.width <= after.panel.x + after.panel.width + HOLD_TOLERANCE, `${cell}: the hint lies inside the dialog`);
+      // Tab from Close: the lines' region, Edit draft, Try again, then back round to Close (the dialog keeps focus).
+      const tabs = [];
+      for (let i = 0; i < 4; i += 1) { await page.press('Tab'); tabs.push(await focusOf(page)); }
+      check(JSON.stringify(tabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-elig-again', 'draft-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
+      await stillSideways(page, cell);
+      // The real press at the pre-answer point: it must close the dialog (a moved Close leaves it open).
+      await pressAt(page, x, y);
+      const closedByPress = await page.waitFor(`!${q('draft-view')}`, 5_000, 'closed').then(() => true, () => false);
+      check(closedByPress, `${cell}: a press at Close's pre-answer centre did not close the dialog`);
+      if (!closedByPress) await closeView(page);
+      await backTo(page, `drafts-open-${id}`, `${cell}: after Close`);
+
+      // 2. Allowed (SDB-22's case at this cell): Discard draft… appears in the held row and nothing moves.
+      const again = await reopenParked(page, c.main.id, id, c.customer.name, reopenByKey);
+      const allowedBefore = await holdBox(page);
+      again.release();
+      await page.waitFor(() => offered(page, 'draft-discard-open'), 30_000, `${cell}: Discard draft… is offered`);
+      await page.settle();
+      const allowedAfter = await holdBox(page);
+      record('SDB-23', { cell, answer: 'allowed', before: allowedBefore, after: allowedAfter });
+      check(moved(allowedBefore.close, allowedAfter.close) <= HOLD_TOLERANCE && Math.abs(allowedAfter.panel.height - allowedBefore.panel.height) <= HOLD_TOLERANCE,
+        `${cell}: the allowance moved Close or grew the dialog ${JSON.stringify({ before: [allowedBefore.close, allowedBefore.panel.height], after: [allowedAfter.close, allowedAfter.panel.height] })}`);
+      check(moved(allowedBefore.edit, allowedAfter.edit) <= HOLD_TOLERANCE && moved(allowedBefore.row, allowedAfter.row) <= HOLD_TOLERANCE,
+        `${cell}: the allowance moved Edit draft or the discard row ${JSON.stringify({ before: [allowedBefore.edit, allowedBefore.row], after: [allowedAfter.edit, allowedAfter.row] })}`);
+      check(allowedAfter.panel.scrollLeft === 0 && allowedAfter.panel.scrollWidth <= allowedAfter.panel.clientWidth + HOLD_TOLERANCE, `${cell}: with the allowance the dialog scrolls or overflows sideways ${JSON.stringify(allowedAfter.panel)}`);
+      await page.press('Escape');
+      await page.waitFor(`!${q('draft-view')}`, 5_000, `${cell}: Escape closed the reopen dialog`);
+      await backTo(page, `drafts-open-${id}`, `${cell}: after Escape`);
+
+      // 3. The largest amounts (the second draft, HOLD_LINE), both answers in: the table fits or scrolls inside its region,
+      //    which Tab reaches and ArrowRight scrolls when it overflows. Measured apart from steps 1 and 2: at 600 px its
+      //    dialog outgrows 90vh and scrolls inside itself, where a hold proves nothing (their precondition).
+      await reopenByKey(page, large, c.customer.name);
+      await page.waitFor(() => offered(page, 'draft-discard-open'), 30_000, `${cell}: Discard draft… is offered on the largest amounts`);
+      await page.settle();
+      const big = await holdBox(page);
+      // Precondition, asserted: the table at the largest amounts is wider than the dialog's content exactly where
+      // `overflows` (measured: fits at D; N600, N320, T600 overflow), whatever holds it — so the region checks below never go vacuous.
+      const overflowed = big.lines.width > (big.scroller?.clientWidth ?? big.row.width) + HOLD_TOLERANCE;
+      assert.equal(overflowed, overflows, `${cell} (largest amounts): the table ${overflows ? 'overflows' : 'fits'} the dialog's content ${JSON.stringify([big.lines.width, big.scroller?.clientWidth ?? null, big.row.width])}`);
+      const amounts = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${by('draft-view-line')} td:nth-child(n+4)`)})].map((td) => td.textContent.trim())`);
+      check(JSON.stringify(amounts) === JSON.stringify(['$90,071,992,547,409.91', '$90,071,992,547,409.91']), `${cell} (largest amounts): the unit price and line total read ${JSON.stringify(amounts)}`);
+      // The subtotal reads whole too, its amount on one line (the paragraph may wrap only between label and amount).
+      check(big.subtotal.text === 'Draft subtotal $90,071,992,547,409.91' && big.subtotal.amountLines === 1, `${cell} (largest amounts): the subtotal ${JSON.stringify(big.subtotal)}`);
+      if (overflows) check(big.scroller !== null && big.scroller.role === 'region' && big.scroller.name === 'Draft lines' && big.scroller.tabIndex === 0 && ['auto', 'scroll'].includes(big.scroller.overflowX) && big.scroller.scrollWidth > big.scroller.clientWidth + HOLD_TOLERANCE, `${cell} (largest amounts): the lines do not scroll inside a named region reached by Tab ${JSON.stringify(big.scroller)}`);
+      const bigTabs = [];
+      let scrolled = null;
+      for (let i = 0; i < 4; i += 1) {
+        await page.press('Tab');
+        bigTabs.push(await focusOf(page));
+        if (i === 0 && overflows) {
+          for (const type of ['rawKeyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 });
+          // Chrome may animate a keyboard scroll: wait (bounded) for it to start before reading how far it went.
+          await page.waitFor(`(${q('draft-view-lines-scroll')}?.scrollLeft ?? 0) > 0`, 5_000, 'the lines scrolled').catch(() => {});
+          scrolled = await page.evaluate(`${q('draft-view-lines-scroll')}?.scrollLeft ?? null`);
+        }
+      }
+      record('SDB-23', { cell, answer: 'largest', before: big, after: big, overflowed, amounts, subtotal: big.subtotal, scrolled, tabs: bigTabs });
+      fits(`${cell} (largest amounts)`, big);
+      check(JSON.stringify(bigTabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-open', 'draft-view-close']), `${cell} (largest amounts): Tab from Close went ${JSON.stringify(bigTabs)}`);
+      if (overflows) check(scrolled > 0, `${cell} (largest amounts): ArrowRight on the focused lines region did not scroll them (${scrolled})`);
+      await stillSideways(page, `${cell} (largest amounts)`);
+      await page.press('Escape');
+      await page.waitFor(`!${q('draft-view')}`, 5_000, `${cell}: Escape closed the largest amounts' dialog`);
+      await backTo(page, `drafts-open-${large}`, `${cell} (largest amounts): after Escape`);
+      for (const each of c.ids) assert.deepEqual(sentBy(page, isDiscardPost(c.main.id, each), from).map(apiLine), [], `${cell}: no discard was posted`);
+      await page.close();
+    }
+  } catch (error) {
+    // A hard assert or wait that throws mid-loop still reports the soft problems found before it.
+    if (problems.length > 0) throw new Error(`${error.message}\nand the problems found before it: ${JSON.stringify(problems, null, 2)}`, { cause: error });
+    throw error;
+  }
+  assert.deepEqual(problems, [], 'the reopen dialog held still and stayed usable in every cell');
+  for (const each of c.ids) assert.equal((await discardState(c.tenant, each)).status, 'draft', 'each draft is still a draft');
 }, 240_000);
 
 // ---------------------------------------------------------------------------------------------------------------------
