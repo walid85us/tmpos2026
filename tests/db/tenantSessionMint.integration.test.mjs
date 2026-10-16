@@ -409,7 +409,7 @@ test('M7M-01: 001-019 applied clean; 005-017 byte-identical to their pins; 018\'
 
   // (a)-(c), (e): the inventory and its attributes, read back from the catalog.
   const routines = await owner`select p.proname as name, p.prosecdef as definer, p.provolatile as volatility, p.proconfig as config,
-      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by 1), '{}')
+      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) collate "C"), '{}')
          from pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) g where g.grantee <> p.proowner) as grants
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_mint'::regnamespace order by p.proname`;
   const PINNED_PATH = ['search_path=pg_catalog, pg_temp'];

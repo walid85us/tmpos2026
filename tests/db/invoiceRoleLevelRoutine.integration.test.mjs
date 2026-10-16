@@ -458,7 +458,7 @@ test('M5IRL-02: the installed inventory, the two widened CHECKs, and the login\'
   const [{ me }] = await owner`select current_user as me`;
   const routines = await owner`select p.proname as name, p.prosecdef as definer, p.provolatile as volatility, p.proconfig as config,
       pg_catalog.pg_get_function_identity_arguments(p.oid) as args, p.proowner = (select oid from pg_catalog.pg_roles where rolname = current_user) as owned,
-      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by 1), '{}')
+      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) collate "C"), '{}')
          from pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) g where g.grantee <> p.proowner) as grants
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_role_invoice'::regnamespace order by p.proname`;
   const pinned = ['search_path=pg_catalog, pg_temp', 'row_security=off'];

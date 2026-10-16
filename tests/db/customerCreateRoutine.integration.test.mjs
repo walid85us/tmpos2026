@@ -319,7 +319,7 @@ test('M7CR-01: 001-019 applied clean; 019\'s postcondition holds over the applie
   // The routine as the catalog reads it back: one SECURITY DEFINER VOLATILE routine, pinned, EXECUTE to tmpos_app alone.
   const routines = await owner`select p.proname as name, p.prosecdef as definer, p.provolatile as volatility, p.proconfig as config,
       pg_catalog.pg_get_function_identity_arguments(p.oid) as args,
-      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by 1), '{}')
+      (select coalesce(array_agg(pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) order by pg_catalog.format('%s:%s:%s', g.grantee::regrole, g.privilege_type, g.is_grantable) collate "C"), '{}')
          from pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) g where g.grantee <> p.proowner) as grants
     from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_customer_write'::regnamespace order by p.proname`;
   assert.deepEqual(routines.map((r) => ({ ...r })), [{
