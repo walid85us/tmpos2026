@@ -200,7 +200,9 @@ export function assembleTransactions(
   const commands = required.flatMap((route) => ('command' in route ? [route.command.contract] : []));
   if (commands.some((contract) => {
     const matching = inventory.mutators.filter((mutator) => mutator.kind === contract.kind);
-    return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType;
+    // M7B-INVOICES-ISSUE-P1: and both opt into the issuing refusal pair, or neither (transactionKernel.ts's tenant rule, here too).
+    return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType
+      || (matching[0].issuingRefusals === true) !== (contract.issuingRefusals === true);
   })) blockers.push('command_mutator_unavailable');
   // M7B-INVOICES-P1 (design R4): each command route's requirement scope, its contract's DECLARED context scope and its
   // mutator's are one scope, and this root's store admits platform contexts alone — none defaulted: a contract or mutator

@@ -56,7 +56,9 @@ test('the vocabulary is the catalog\'s: the seven levels, every built-in tenant 
   const decidedDomains = [...new Set([...TENANT_ROUTE_PERMISSIONS.values()].filter((e) => !e.sensitive).map((e) => e.parent))];
   assert.deepEqual(decidedDomains, ['customers'], 'the one domain a route decides');
   assert.deepEqual([...ROLE_LEVEL_DOMAINS], [...decidedDomains, 'invoices'], 'the decided domain, then Invoices (configuration only)');
-  assert.ok(![...TENANT_ROUTE_PERMISSIONS.values()].some((e) => e.parent === 'invoices'), 'no invoice route permission exists to enforce it');
+  // M7B-INVOICES-ISSUE-P1: the owner-only edit_issuing_settings names Invoices as its parent but is decided by role, never by
+  // the level (m5CanonicalPermissions.test.ts proves an Invoices edit changes nothing for it) — so no LEVEL-decided one does.
+  assert.ok(![...TENANT_ROUTE_PERMISSIONS.values()].some((e) => !e.sensitive && e.parent === 'invoices'), 'no level-decided invoice route permission exists to enforce it');
   for (const domain of ROLE_LEVEL_DOMAINS) assert.ok(TENANT_PERMISSION_DOMAINS.includes(domain), domain);
   for (const list of [ROLE_LEVELS, EDITABLE_TENANT_ROLES, ROLE_LEVEL_DOMAINS]) assert.ok(Object.isFrozen(list));
 });

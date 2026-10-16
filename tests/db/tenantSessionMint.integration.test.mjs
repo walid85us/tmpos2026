@@ -18,8 +18,8 @@
 // create), replacing it with tmpos_role.m7a_customer_page_v3, so this file — 018's own behaviour — applies 001-019 only:
 // the migration file port the trusted executor reads hides every later file (tests/db/migrationsThrough.mjs). On a shared
 // service where a later migration is already applied, its own down file rolls it back first (with its ledger row) and it
-// is re-applied, with its exact ledger row, when this file ends. The startup preflight now requires 001-033, so M7M-02b
-// applies 020-033 through the same executor for its verdict and rolls them back again (newest first). The
+// is re-applied, with its exact ledger row, when this file ends. The startup preflight now requires 001-034, so M7M-02b
+// applies 020-034 through the same executor for its verdict and rolls them back again (newest first). The
 // customers this file seeds are written on 001-019, before 023 exists, so 023 adds them with no contact and no creation
 // time, and its rollback (which refuses while any customer holds either) finds none of this file's. page_v3's own proofs are
 // tests/db/tenantRoleLevelRoutine.integration.test.mjs's.
@@ -56,6 +56,12 @@ const UP_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`, 'utf8');
 const UP_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`, 'utf8');
 const UP_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.up.sql`, 'utf8');
 const UP_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.up.sql`, 'utf8');
+/** M7M-09b: 023-027 roll back beneath 017's down (023 and 024 alter its table) and are re-applied over it. */
+const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
+const DOWN_024 = readFileSync(`${MIG_DIR}/024_m7a_customer_edit.down.sql`, 'utf8');
+const DOWN_025 = readFileSync(`${MIG_DIR}/025_m7a_customer_search.down.sql`, 'utf8');
+const DOWN_026 = readFileSync(`${MIG_DIR}/026_m5_invoice_role_levels.down.sql`, 'utf8');
+const DOWN_027 = readFileSync(`${MIG_DIR}/027_m7b_store_access.down.sql`, 'utf8');
 const UP_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.up.sql`, 'utf8');
 const DOWN_028 = readFileSync(`${MIG_DIR}/028_m7b_invoice_drafts.down.sql`, 'utf8');
 const UP_029 = readFileSync(`${MIG_DIR}/029_m7b_invoice_draft_edit.up.sql`, 'utf8');
@@ -76,6 +82,8 @@ const DOWN_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_autho
 const UP_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.up.sql`, 'utf8');
 /** M7B-INVOICES-DISCARD-P1: 033 sits above 032 and rolls back first. */
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
+/** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033 and is applied with it. */
+const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
 /** 018's section 8 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_018 = UP_018.slice(UP_018.lastIndexOf('do $$'));
 const CREATE_011 = 'tmpos_session.m5_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint)';
@@ -172,7 +180,7 @@ const TENANTS = [];
 const KEYS = new Set();
 /** The issuer key row this suite found (undefined until read, then the bytes or null), restored at the end. */
 let keyBeforeSuite;
-/** The later migrations (020-033) this file rolled back to run on 001-019, re-applied at the end. */
+/** The later migrations (020-034) this file rolled back to run on 001-019, re-applied at the end. */
 let later = null;
 
 test.after(async () => {
@@ -180,7 +188,7 @@ test.after(async () => {
   if (KEYS.size > 0) await quietly(() => owner`delete from tmpos_mint.tenant_session where session_key = any(${[...KEYS]}::text[])`);
   if (UIDS.length > 0) await owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`;
   if (TENANTS.length > 0) await owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`;
-  // A failed M7M-02b may have left 020-033 applied: back to 019 first, then the service gets back the later migrations it had.
+  // A failed M7M-02b may have left 020-034 applied: back to 019 first, then the service gets back the later migrations it had.
   await quietly(() => rollBackAbove(owner, MIG_DIR, '019'));
   if (later !== null) await later.restore();
   if (keyBeforeSuite !== undefined) {
@@ -1067,10 +1075,13 @@ test('M7M-09b: 017 rolled back beneath 018 leaves the read raising for a live se
   assert.equal(live.outcome, 'created');
   const out = await rolledBack('isolation level read committed', async (tx) => {
     const v2 = (key) => tx`select o_outcome from tmpos_mint.m7a_customer_page_v2(${key}::text, null::uuid, 101::integer)`;
-    // The grants the preflight approves are the whole chain's (001-033): 020, 021, 022, 023, 024, 025, 026, 027, 028, 029, 030, 031 and 032 applied first, in this same
+    // The grants the preflight approves are the whole chain's (001-034): 020, 021, 022, 023, 024, 025, 026, 027, 028, 029, 030, 031 and 032 applied first, in this same
     // rolled-back transaction, so the only grant it can refuse below is 017's page re-granted (v2 is called as the owner). 028's
     // foreign key references 017's customer table, so 028 rolls back before 017's down and is re-applied after 017's re-apply;
-    // 033 (M7B-INVOICES-DISCARD-P1) is applied once, with that re-applied tail, so the chain the preflight judges is complete.
+    // 033 (M7B-INVOICES-DISCARD-P1) and 034 (M7B-INVOICES-ISSUE-P1) are applied once, with that re-applied tail, so the chain the
+    // preflight judges is complete. 023 and 024 alter 017's table (contact columns, row_version, which 034 requires), so 027-023
+    // also roll back, newest first, before 017's down and are re-applied over it; their applies refuse while tmpos_app can
+    // execute 017's page, so 018's revoke of it is repeated before them and 017's re-grant restored after 034.
     await tx.unsafe(UP_020).simple();
     await tx.unsafe(UP_021).simple();
     await tx.unsafe(UP_022).simple();
@@ -1090,28 +1101,57 @@ test('M7M-09b: 017 rolled back beneath 018 leaves the read raising for a live se
     await tx.unsafe(DOWN_029).simple();
     await tx.unsafe(DOWN_028).simple();
     await tx`delete from tmpos_customer.customer`;
+    await tx.unsafe(DOWN_027).simple();
+    await tx.unsafe(DOWN_026).simple();
+    await tx.unsafe(DOWN_025).simple();
+    await tx.unsafe(DOWN_024).simple();
+    await tx.unsafe(DOWN_023).simple();
     await tx.unsafe(DOWN_017).simple();
     // 017's rollback does not know about 018: tmpos_mint stays, and the read raises once it reaches 017's page.
     const beneath = await tx.savepoint((sp) => sp`select o_outcome from tmpos_mint.m7a_customer_page_v2(${live.key}::text, null::uuid, 101::integer)`)
       .then(() => null, (err) => err.code);
     const [{ o_outcome: unminted }] = await v2(newKey());
     await tx.unsafe(UP_017).simple();
+    // Measured on 017's re-apply itself, before the tail below withdraws and restores its grant.
+    const over = (await v2(live.key)).length;
+    const [{ regranted }] = await tx`select pg_catalog.has_function_privilege('tmpos_app', ${PAGE_017}, 'EXECUTE') as regranted`;
+    await tx.unsafe(`revoke execute on function ${PAGE_017} from tmpos_app`);
+    await tx.unsafe(UP_023).simple();
+    await tx.unsafe(UP_024).simple();
+    await tx.unsafe(UP_025).simple();
+    await tx.unsafe(UP_026).simple();
+    await tx.unsafe(UP_027).simple();
     await tx.unsafe(UP_028).simple();
     await tx.unsafe(UP_029).simple();
     await tx.unsafe(UP_030).simple();
     await tx.unsafe(UP_031).simple();
     await tx.unsafe(UP_032).simple();
     await tx.unsafe(UP_033).simple();
-    const over = (await v2(live.key)).length;
-    const [{ regranted }] = await tx`select pg_catalog.has_function_privilege('tmpos_app', ${PAGE_017}, 'EXECUTE') as regranted`;
+    await tx.unsafe(UP_034).simple();
+    await tx.unsafe(`grant execute on function ${PAGE_017} to tmpos_app`);
+    const { createPostgresStartupPreflight } = await import('../../server/persistence/postgresStartupPreflight.ts');
+    const preflightOn = (db) => createPostgresStartupPreflight({ client: { transaction: (_signal, _bounds, fn) => fn(db) } });
+    // The control, in a savepoint rolled back after it: with 017's page revoked again the same preflight refuses nothing, so
+    // the re-grant is the only unexpected grant. The rollback restores the grant and the owner's authorization.
+    const [{ me: ownerBefore }] = await tx`select current_user as me`;
+    const UNDO = new Error('m7m-09b: undo the control');
+    let control;
+    await tx.savepoint(async (sp) => {
+      await sp.unsafe(`revoke execute on function ${PAGE_017} from tmpos_app`);
+      await sp.unsafe(`set local session authorization ${RUNTIME_LOGIN}`);
+      control = await preflightOn(sp).runtimeLogin(signal());
+      throw UNDO;
+    }).catch((err) => { if (err !== UNDO) throw err; });
+    const [{ me: ownerAfter }] = await tx`select current_user as me`;
+    // The refused grant is really present: the preflight's refusal below is about it, not about a missing grant.
+    const [{ granted }] = await tx`select pg_catalog.has_function_privilege('tmpos_app', ${PAGE_017}, 'EXECUTE') as granted`;
     // The real preflight, run as the runtime login on this transaction's uncommitted state.
     await tx.unsafe(`set local session authorization ${RUNTIME_LOGIN}`);
-    const { createPostgresStartupPreflight } = await import('../../server/persistence/postgresStartupPreflight.ts');
-    const preflight = createPostgresStartupPreflight({ client: { transaction: (_signal, _bounds, fn) => fn(tx) } });
-    return { beneath, unminted, over, regranted, runtimeLogin: await preflight.runtimeLogin(signal()) };
+    const preflight = preflightOn(tx);
+    return { beneath, unminted, over, regranted, control, restored: ownerAfter === ownerBefore, granted, runtimeLogin: await preflight.runtimeLogin(signal()) };
   });
   assert.deepEqual(out.value, {
-    beneath: '3F000', unminted: 'denied', over: 0, regranted: true, runtimeLogin: ['role_privilege_unexpected'],
+    beneath: '3F000', unminted: 'denied', over: 0, regranted: true, control: [], restored: true, granted: true, runtimeLogin: ['role_privilege_unexpected'],
   }, JSON.stringify(out));
   await reads(live.key, T_A, SEED_A, 'rolled back: the live session reads as before');
 });
@@ -1282,12 +1322,12 @@ test('M7M-12: the standing digest is pinned to PostgreSQL\'s record and jsonb re
 });
 
 test('M7M-02b: the real startup preflight accepts the login after 018, and refused 017\'s grants (needs the preflight pins for 018)', async () => {
-  // The preflight now requires the whole chain, 001-033 (M7A-CUSTOMERS-P3-R1, -P4, -P6, -P7, -P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1): at this file's 019 it
-  // refuses exactly the missing 020-033 — their ledger rows and grants — and 019's create / 018's page_v2 grants 020 revokes.
+  // The preflight now requires the whole chain, 001-034 (M7A-CUSTOMERS-P3-R1, -P4, -P6, -P7, -P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1): at this file's 019 it
+  // refuses exactly the missing 020-034 — their ledger rows and grants — and 019's create / 018's page_v2 grants 020 revokes.
   const at019 = await runtimePreflight();
   assert.deepEqual(at019, { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
-    `at 019 the preflight refuses the missing 020-033: ${JSON.stringify(at019)}`);
-  // 020, 021, 022, 023, 024, 025, 026, 027, 028, 029, 030, 031, 032 and 033 applied through the same trusted executor (the full file port), judged, then rolled back to this file's chain.
+    `at 019 the preflight refuses the missing 020-034: ${JSON.stringify(at019)}`);
+  // 020, 021, 022, 023, 024, 025, 026, 027, 028, 029, 030, 031, 032, 033 and 034 applied through the same trusted executor (the full file port), judged, then rolled back to this file's chain.
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     const report = await runTrustedApply({
@@ -1300,9 +1340,9 @@ test('M7M-02b: the real startup preflight accepts the login after 018, and refus
   }
   try {
     assert.deepEqual(await runtimePreflight(), { runtimeLogin: [], migrationLedger: [] },
-      'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018 (and, since P3-R1, 019 and 020; since P4, 021 and 022; since P6, 023; since P7, 024; since P8, 025; since M5-INVOICES-AUTH-P1, 026; since M7B-INVOICES-P1, 027 and 028; since M7B-INVOICES-P2, 029; since M7B-INVOICES-P2-R1, 030; since M7B-INVOICES-P1-R3, 031; since M7B-INVOICES-P1-R4, 032; since M7B-INVOICES-DISCARD-P1, 033)');
+      'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018 (and, since P3-R1, 019 and 020; since P4, 021 and 022; since P6, 023; since P7, 024; since P8, 025; since M5-INVOICES-AUTH-P1, 026; since M7B-INVOICES-P1, 027 and 028; since M7B-INVOICES-P2, 029; since M7B-INVOICES-P2-R1, 030; since M7B-INVOICES-P1-R3, 031; since M7B-INVOICES-P1-R4, 032; since M7B-INVOICES-DISCARD-P1, 033; since M7B-INVOICES-ISSUE-P1, 034)');
   } finally {
-    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
+    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 034, 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
   }
   assert.ok(preflightAt017 !== null, 'M7M-09 captured the 017-era answer');
   // 018 rolled back: both categories. The codes name categories, not grants; which grants moved (011's create and 017's

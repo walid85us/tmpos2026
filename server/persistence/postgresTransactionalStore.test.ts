@@ -9,13 +9,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { PRECONDITION_UPDATE_KINDS, createPostgresTransactionalStore } from './postgresTransactionalStore.js';
+import { NOT_FOUND_CREATE_KINDS, PRECONDITION_UPDATE_KINDS, createPostgresTransactionalStore } from './postgresTransactionalStore.js';
 import type { AggregateMutator, PgStatement } from './postgresTransactionalStore.js';
 import { createSupervisedPgClient } from './supervisedPgClient.js';
 import type { DriverPool, SupervisedPgClient } from './supervisedPgClient.js';
 import { defineCommands, prepareCommand } from '../runtime/commandTransaction.js';
 import type { TransactionCommand } from '../runtime/commandTransaction.js';
-import { PRECONDITION_UPDATE_KINDS as APP_PRECONDITION_UPDATE_KINDS } from '../runtime/app.js';
+import { NOT_FOUND_CREATE_KINDS as APP_NOT_FOUND_CREATE_KINDS, PRECONDITION_UPDATE_KINDS as APP_PRECONDITION_UPDATE_KINDS } from '../runtime/app.js';
 import type { TrustedScope } from '../runtime/principals.js';
 import { createIdempotencyKeyring } from '../runtime/idempotency.js';
 import { TEST_IDEMPOTENCY_KEY } from '../runtime/idempotencyStore.testkit.js';
@@ -988,11 +988,12 @@ test('M7B-INVOICES-P2 (design §2): precondition_failed is admitted from the dra
   assert.deepEqual(await tenantStore(scripted(customer.command.lease), [updater]).transactions.commit(customer.command, live()), UNAVAILABLE);
 });
 
-test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1 (design §2): the update kinds the store admits precondition_failed from and app.ts\'s 409 mapping\'s kinds are one closed set — exactly the draft edit\'s and the draft discard\'s contract kinds; a drift in any of them fails here', () => {
-  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind];
+test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1 (design §2): the update kinds the store admits precondition_failed from and app.ts\'s 409 mapping\'s kinds are one closed set — exactly the draft edit\'s, the draft discard\'s and the invoice issue\'s contract kinds; a drift in any of them fails here', () => {
+  // The issue's contract (invoiceIssuing.ts INVOICE_ISSUE_CONTRACT, kind store.invoice.issue) is pinned by its kind here.
+  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue'];
   assert.deepEqual([...PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'the store\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'app.ts\'s');
-  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard'], 'the contracts\', as the audit action ids migrations 029 and 033 document');
+  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue'], 'the contracts\', as the audit action ids migrations 029, 033 and 034 document');
   assert.ok(Object.isFrozen(PRECONDITION_UPDATE_KINDS) && Object.isFrozen(APP_PRECONDITION_UPDATE_KINDS), 'frozen');
   for (const kind of ['store.invoice_draft.create', 'store.invoice_draft.reprice', 'tenant.customer.update', '']) {
     assert.equal(PRECONDITION_UPDATE_KINDS.includes(kind) || APP_PRECONDITION_UPDATE_KINDS.includes(kind), false, `closed: ${kind}`);
@@ -1061,5 +1062,237 @@ test('M7B-INVOICES-DISCARD-P1 DSC-06 DSC-10 (D-DIS-3): a draft discard\'s confli
       assert.ok(!client.texts.some((t) => t.includes(recorded)), `${answer}: no ${recorded}`);
     }
     assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], answer);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-ISSUE-P1 — the issue (an opted-in update, the audit triple) and the settings write (a create naming its store)
+// ---------------------------------------------------------------------------
+
+const ISSUE_INVOICE = 'efefefef-efef-4fef-8fef-efefefefefef';
+const ISSUE_CUSTOMER = 'abababab-abab-4bab-8bab-abababababab';
+const ID_STRING = Object.freeze({ type: 'string', maxLength: 36 } as const);
+const VERSION_INTEGER = Object.freeze({ type: 'integer', min: 1, max: Number.MAX_SAFE_INTEGER } as const);
+/** The issue's contract as the interface pins it (invoiceIssuing.ts): an opted-in store update of the draft, no event. */
+const ISSUE_CONTRACT_DEF = Object.freeze({
+  kind: 'store.invoice.issue', mode: 'update', aggregateType: 'invoice_draft', events: Object.freeze([]), contextScope: 'store', issuingRefusals: true,
+  changes: Object.freeze({ expectedTenant: ID_STRING, expectedSettingsVersion: VERSION_INTEGER, expectedCustomerVersion: VERSION_INTEGER, invoiceId: ID_STRING }),
+});
+/** The settings write's contract shape (issuingSettings.ts), reduced to the fields the store reads: a tenant create, no event. */
+const SETTINGS_CONTRACT_DEF = Object.freeze({
+  kind: 'tenant.issuing_settings.update', mode: 'create', aggregateType: 'store_issuing_settings_change', events: Object.freeze([]), contextScope: 'tenant',
+  changes: Object.freeze({ storeId: ID_STRING, expectedTenant: ID_STRING }),
+});
+const issuingCommands = defineCommands([ISSUE_CONTRACT_DEF, SETTINGS_CONTRACT_DEF], defineOutboxEvents([]));
+const issueMutator = (answer: unknown, over: Record<string, unknown> = {}): AggregateMutator => Object.freeze({
+  kind: 'store.invoice.issue', mode: 'update', aggregateType: 'invoice_draft', contextScope: 'store', issuingRefusals: true, auditSubjects: 'issued_invoice',
+  apply: async () => answer, ...over,
+}) as AggregateMutator;
+const settingsMutator = (answer: unknown, over: Record<string, unknown> = {}): AggregateMutator => Object.freeze({
+  kind: 'tenant.issuing_settings.update', mode: 'create', aggregateType: 'store_issuing_settings_change', contextScope: 'tenant', auditSubjects: 'store',
+  apply: async () => answer, ...over,
+}) as AggregateMutator;
+const APPLIED_ISSUE = Object.freeze({ outcome: 'applied', subjectCustomerId: ISSUE_CUSTOMER });
+
+/** An issue exactly as the runtime prepares one: the opted-in contract, at version 4, its invoice id `invoiceId`. */
+function issuing(invoiceId = ISSUE_INVOICE): TransactionCommand {
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue', audience: 'tenant', tenant: TENANT, store: STORE_ID, actor: TRUSTED.actor,
+    body: Buffer.from('{}'), target: EDITED,
+  });
+  const prepared = prepareCommand(issuingCommands.contract('store.invoice.issue') as never, defineOutboxEvents([]), {
+    aggregateId: EDITED, expectedVersion: 4, events: [],
+    changes: { expectedTenant: TENANT, expectedSettingsVersion: 2, expectedCustomerVersion: 3, invoiceId },
+    response: { status: 201, body: { invoice: { id: invoiceId, sourceDraftId: EDITED, status: 'issued' } }, headers: { location: `/api/v1/stores/${STORE_ID}/invoices/${invoiceId}` } },
+  }, {
+    scope: operation.scope, lease: digest(), newAggregateId: invoiceId, authorization: Object.freeze({ scope: 'store', permission: 'issue_invoices' }),
+    context: STORE_CONTEXT, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null, 'the issue is in contract');
+  return prepared.command;
+}
+/** A settings write exactly as the runtime prepares one: a tenant create naming `storeId`. */
+function configuring(storeId = STORE_ID): TransactionCommand {
+  const id = randomUUID();
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'PUT', path: '/api/v1/issuing-settings/{id}', audience: 'tenant', tenant: TENANT, store: null, actor: TRUSTED.actor, body: Buffer.from('{}'), target: STORE_ID,
+  });
+  const prepared = prepareCommand(issuingCommands.contract('tenant.issuing_settings.update') as never, defineOutboxEvents([]), {
+    aggregateId: id, expectedVersion: null, events: [], changes: { storeId, expectedTenant: TENANT },
+    response: { status: 200, body: { issuingSettings: { storeId, version: 1, configured: true } } },
+  }, {
+    scope: operation.scope, lease: digest(), newAggregateId: id, authorization: Object.freeze({ scope: 'tenant', permission: 'edit_issuing_settings' }),
+    context: TENANT_CONTEXT, authNotAfter: null, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null, 'the settings write is in contract');
+  return prepared.command;
+}
+
+test('M7B-INVOICES-ISSUE-P1: the mutator table admits issuingRefusals on an update alone, the issued-invoice subjects on a store-scope invoice_draft update alone and the store subject on a tenant-scope create alone — every other declaration is refused', () => {
+  const client = untouched().client;
+  const omitting = (key: string): AggregateMutator => Object.fromEntries(Object.entries(issueMutator('applied')).filter(([k]) => k !== key)) as never;
+  for (const mutator of [issueMutator('applied'), settingsMutator('applied'), omitting('auditSubjects'), omitting('issuingRefusals')]) {
+    assert.doesNotThrow(() => tenantStore(client, [mutator]), JSON.stringify(Object.keys(mutator)));
+  }
+  for (const [label, mutator] of [
+    ['issuingRefusals on a create', settingsMutator('applied', { issuingRefusals: true })],
+    ['issuingRefusals false', issueMutator('applied', { issuingRefusals: false })],
+    ['issuingRefusals as a word', issueMutator('applied', { issuingRefusals: 'yes' })],
+    ['issuingRefusals undefined', issueMutator('applied', { issuingRefusals: undefined })],
+    ['the issued-invoice subjects on a create', Object.freeze({ ...omitting('issuingRefusals'), mode: 'create' }) as AggregateMutator],
+    ['the issued-invoice subjects on another aggregate', issueMutator('applied', { aggregateType: 'customer' })],
+    ['the issued-invoice subjects at tenant scope', issueMutator('applied', { contextScope: 'tenant' })],
+    ['the store subject on an update', settingsMutator('applied', { mode: 'update' })],
+    ['the store subject at store scope', settingsMutator('applied', { contextScope: 'store' })],
+    ['an unknown subject word', settingsMutator('applied', { auditSubjects: 'tenant' })],
+    ['an undefined subject word', issueMutator('applied', { auditSubjects: undefined })],
+    ['a third declaration', issueMutator('applied', { sealedRefusal: 'customer_not_found' })],
+  ] as const) {
+    assert.throws(() => tenantStore(client, [mutator]), TypeError, label);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1 §10.9: an applied issue writes exactly ONE audit record through the triple statement — the draft, the command\'s own invoice id and the customer its mutator\'s verified answer names — no event, then its completion', async () => {
+  const c = issuing();
+  assert.deepEqual(Object.keys(c.rejected).sort(), ['amountOutOfRange', 'conflict', 'customerNotFound', 'invalidState', 'issuingNotConfigured']);
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [issueMutator(APPLIED_ISSUE)]).transactions.commit(c, live()), COMMITTED);
+  const at = (name: string): number => client.texts.findIndex((t) => t.includes(name));
+  assert.ok(at('m6_command_fence') < at('insert into public.audit_event') && at('insert into public.audit_event') < at('m6_idempotency_complete'), 'fence, audit, completion');
+  assert.equal(client.texts.filter((t) => t.includes('insert into public.audit_event')).length, 1, 'exactly one audit record');
+  assert.equal(client.texts.filter((t) => t.includes('m6_command_enqueue')).length, 0, 'no event');
+  const audit = client.texts[at('insert into public.audit_event')];
+  assert.match(audit, /metadata,\s*subject_invoice_draft_id,\s*subject_issued_invoice_id,\s*subject_customer_id\s*\)/, 'the triple statement');
+  assert.ok(!audit.includes('subject_tenant_id') && !audit.includes('subject_store_id'), 'no other subject column');
+  const bound = client.values[at('insert into public.audit_event')];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11]], [STORE_CONTEXT.actor, 'store', TENANT, STORE_ID, 'store.invoice.issue', 'issue_invoices']);
+  assert.deepEqual(bound.slice(-3), [EDITED, ISSUE_INVOICE, ISSUE_CUSTOMER], 'the draft, the issued invoice and the customer, in that order');
+  assert.deepEqual(client.values[at('m6_idempotency_complete')], [c.scope, c.lease, c.response]);
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+});
+
+test('M7B-INVOICES-ISSUE-P1: the object form is the issue mutator\'s only applied answer and no other mutator\'s — its bare word, a malformed customer and an object from any other mutator roll everything back', async () => {
+  const c = issuing();
+  for (const [label, answer] of [
+    ['the bare word', 'applied'],
+    ['a customer that is no uuid', { outcome: 'applied', subjectCustomerId: 'not-a-uuid' }],
+    ['an uppercase customer', { outcome: 'applied', subjectCustomerId: ISSUE_CUSTOMER.toUpperCase() }],
+    ['a missing customer', { outcome: 'applied' }],
+    ['an extra field', { ...APPLIED_ISSUE, subjectInvoiceId: ISSUE_INVOICE }],
+    ['another word in the object', { outcome: 'conflict', subjectCustomerId: ISSUE_CUSTOMER }],
+    ['a customer number', { outcome: 'applied', subjectCustomerId: 7 }],
+  ] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [issueMutator(answer)]).transactions.commit(c, live()), UNAVAILABLE, label);
+    for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event']) assert.ok(!client.texts.some((t) => t.includes(recorded)), `${label}: no ${recorded}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], label);
+  }
+  // The discard (no declared subjects) answering the object form is the fault too.
+  const d = discarding();
+  const client = scripted(d.lease);
+  assert.deepEqual(await tenantStore(client, [discardMutator(APPLIED_ISSUE as never)]).transactions.commit(d, live()), UNAVAILABLE);
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+});
+
+test('M7B-INVOICES-ISSUE-P1 §10.6: the issue\'s issuing_not_configured and amount_out_of_range COMMIT only their own sealed 409 — as conflict and invalid_state do; precondition_failed (its kind admitted) and not_found roll back; a mutator that did not opt in answering either word commits nothing', async () => {
+  const c = issuing();
+  for (const [answer, outcome, sealed] of [
+    ['issuing_not_configured', { outcome: 'issuing_not_configured' }, c.rejected.issuingNotConfigured],
+    ['amount_out_of_range', { outcome: 'amount_out_of_range' }, c.rejected.amountOutOfRange],
+    ['conflict', { outcome: 'conflict' }, c.rejected.conflict], ['invalid_state', { outcome: 'invalid_state' }, c.rejected.invalidState],
+  ] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [issueMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    assert.deepEqual(client.values[client.texts.findIndex((t) => t.includes('m6_idempotency_complete'))], [c.scope, c.lease, sealed], `${answer}: its own sealed completion`);
+    for (const absent of ['insert into public.audit_event', 'm6_command_enqueue']) assert.ok(!client.texts.some((t) => t.includes(absent)), `${answer}: no ${absent}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit'], answer);
+    // A completion that does not hold commits nothing.
+    const lost = scripted(c.lease, { completion: 'lease_lost' });
+    assert.deepEqual(await tenantStore(lost, [issueMutator(answer)]).transactions.commit(c, live()), UNAVAILABLE, `${answer}: lost`);
+    assert.deepEqual(lost.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], `${answer}: lost`);
+  }
+  assert.notEqual(c.rejected.issuingNotConfigured, c.rejected.amountOutOfRange, 'two distinct sealed refusals');
+  for (const [answer, outcome] of [['precondition_failed', { outcome: 'precondition_failed' }], ['not_found', { outcome: 'not_found' }], ['refused', UNAVAILABLE],
+    ['unchanged', UNAVAILABLE], ['customer_not_found', UNAVAILABLE], ['mismatch', UNAVAILABLE]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [issueMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event']) assert.ok(!client.texts.some((t) => t.includes(recorded)), `${answer}: no ${recorded}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], answer);
+  }
+  // The discard (not opted in) answering either word: rolled back, nothing recorded.
+  const d = discarding();
+  for (const answer of ['issuing_not_configured', 'amount_out_of_range']) {
+    const client = scripted(d.lease);
+    assert.deepEqual(await tenantStore(client, [discardMutator(answer)]).transactions.commit(d, live()), UNAVAILABLE, answer);
+    assert.ok(!client.texts.some((t) => t.includes('m6_idempotency_complete')), `${answer}: no completion`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], answer);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: an opted-in mutator\'s command carries exactly five sealed slots and every other command exactly three — a mismatch either way, a 422 slot on the issue, a missing 409 and a non-canonical invoice id are refused before any statement', async () => {
+  const { client, begins } = untouched();
+  const issue = issuing();
+  const d = discarding();
+  const { issuingNotConfigured: _a, amountOutOfRange: _b, ...three } = issue.rejected;
+  const store = tenantStore(client, [issueMutator(APPLIED_ISSUE), discardMutator('applied')]);
+  for (const [label, command] of [
+    ['the issue carrying three slots', { ...issue, rejected: three }],
+    ['the issue carrying a 422 slot', { ...issue, rejected: { ...issue.rejected, customerNotFound: issue.rejected.conflict } }],
+    ['the issue with no issuing_not_configured response', { ...issue, rejected: { ...issue.rejected, issuingNotConfigured: null } }],
+    ['the issue with an empty amount_out_of_range response', { ...issue, rejected: { ...issue.rejected, amountOutOfRange: '' } }],
+    ['the issue with an unsealed response', { ...issue, rejected: { ...issue.rejected, amountOutOfRange: 'a=b' } }],
+    ['the issue with a sixth slot', { ...issue, rejected: { ...issue.rejected, unpaid: issue.rejected.conflict } }],
+    ['the discard carrying five slots', { ...d, rejected: { ...d.rejected, issuingNotConfigured: d.rejected.conflict, amountOutOfRange: d.rejected.conflict } }],
+    ['an uppercase invoice id', issuing(ISSUE_INVOICE.toUpperCase())],
+    ['an invoice id that is no uuid', issuing('x'.repeat(36))],
+  ] as const) {
+    assert.deepEqual(await store.transactions.commit(command as never, live()), UNAVAILABLE, label);
+  }
+  assert.equal(begins(), 0, 'no transaction was opened');
+});
+
+test('M7B-INVOICES-ISSUE-P1 §10.9: an applied settings write is audited at TENANT scope through the store statement — subject_store_id alone, its validated change-set store — with no event', async () => {
+  const c = configuring();
+  assert.deepEqual(Object.keys(c.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], 'a create carries exactly three slots');
+  const client = scripted(c.lease);
+  assert.deepEqual(await tenantStore(client, [settingsMutator('applied')]).transactions.commit(c, live()), COMMITTED);
+  const at = (name: string): number => client.texts.findIndex((t) => t.includes(name));
+  const audit = client.texts[at('insert into public.audit_event')];
+  assert.match(audit, /metadata,\s*subject_store_id\s*\)/, 'the store statement');
+  for (const other of ['subject_tenant_id', 'subject_customer_id', 'subject_invoice_draft_id', 'subject_issued_invoice_id']) assert.ok(!audit.includes(other), `no ${other}`);
+  const bound = client.values[at('insert into public.audit_event')];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11], bound[bound.length - 1]],
+    [TENANT_CONTEXT.actor, 'tenant', TENANT, null, 'tenant.issuing_settings.update', 'edit_issuing_settings', STORE_ID]);
+  assert.equal(client.texts.filter((t) => t.includes('m6_command_enqueue')).length, 0, 'no event');
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+  // A change-set store that is not a canonical uuid is refused before any statement.
+  const { client: never, begins } = untouched();
+  assert.deepEqual(await tenantStore(never, [settingsMutator('applied')]).transactions.commit(configuring('cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd'.toUpperCase()), live()), UNAVAILABLE);
+  assert.equal(begins(), 0);
+});
+
+test('M7B-INVOICES-ISSUE-P1: not_found is admitted from the settings write\'s create kind alone — rolled back with nothing recorded — and from any other create is still the fault; its precondition rolls back and its conflict is sealed', async () => {
+  const c = configuring();
+  for (const [answer, outcome, recorded] of [['not_found', { outcome: 'not_found' }, false], ['precondition_failed', { outcome: 'precondition_failed' }, false],
+    ['conflict', { outcome: 'conflict' }, true], ['invalid_state', UNAVAILABLE, false], ['issuing_not_configured', UNAVAILABLE, false], ['customer_not_found', UNAVAILABLE, false]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [settingsMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    assert.equal(client.texts.some((t) => t.includes('m6_idempotency_complete')), recorded, `${answer}: completion ${recorded}`);
+    assert.ok(!client.texts.some((t) => t.includes('insert into public.audit_event')), `${answer}: no audit`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), [recorded ? 'commit' : 'rollback'], answer);
+  }
+  // The customer create (a tenant create of another kind) answering not_found is the fault.
+  const other = command(TENANT_CONTEXT);
+  const client = scripted(other.lease);
+  assert.deepEqual(await tenantStore(client, [Object.freeze({ ...TENANT_CREATE_MUTATOR, apply: async () => 'not_found' })]).transactions.commit(other, live()), UNAVAILABLE);
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback']);
+});
+
+test('M7B-INVOICES-ISSUE-P1: the create kinds the store admits not_found from and app.ts\'s 404 mapping\'s kinds are one closed set — exactly the settings write\'s', () => {
+  assert.deepEqual([...NOT_FOUND_CREATE_KINDS], ['tenant.issuing_settings.update'], 'the store\'s');
+  assert.deepEqual([...APP_NOT_FOUND_CREATE_KINDS], [...NOT_FOUND_CREATE_KINDS], 'app.ts\'s');
+  assert.ok(Object.isFrozen(NOT_FOUND_CREATE_KINDS) && Object.isFrozen(APP_NOT_FOUND_CREATE_KINDS), 'frozen');
+  for (const kind of ['store.invoice_draft.create', 'tenant.customer.create', 'tenant.role_levels.update', 'store.invoice.issue', '']) {
+    assert.equal(NOT_FOUND_CREATE_KINDS.includes(kind) || APP_NOT_FOUND_CREATE_KINDS.includes(kind), false, `closed: ${kind}`);
   }
 });

@@ -622,7 +622,7 @@ test('M7B: exactly the eight store templates register — the five GETs without 
   assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`)?.idempotency, 'required');
   const { command: _command, ...noCommand } = storeCreate();
   for (const [label, def] of [
-    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/invoices' })],
+    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/receipts' })],
     ['a bare store template', storeRead({ path: '/api/v1/stores/{storeId}' })],
     ['a store segment elsewhere', storeRead({ path: '/api/v1/customers/{storeId}/invoice-drafts' })],
     ['a deeper store template', storeRead({ path: `${DRAFT}/lines` })],
@@ -664,7 +664,7 @@ test('M7B: exactly the eight store templates register — the five GETs without 
     assert.notEqual(setupCode([def]), undefined, label);
   }
   for (const [label, def] of [
-    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/invoices' })],
+    ['another store suffix', storeRead({ path: '/api/v1/stores/{storeId}/receipts' })],
     ['a literal store below the prefix', storeRead({ path: `/api/v1/stores/${STORE}/invoice-drafts` })],
     ['a tenant-scope requirement', storeRead({ policy: SESSION('tenant', { scope: 'tenant', permission: 'view_customers' }) })],
     ['a PUT command on the list template', storeCreate({ method: 'PUT' })],
@@ -871,4 +871,121 @@ test('M7B: GET /api/v1/stores is the ONE closed authorization-free business rout
   // The directory path may still carry an ordinary authorized read shape; only the authorization-free shape is its own.
   assert.equal(setupCode([route({ path: '/api/v1/stores', policy: SESSION('tenant'), trustedContext: 'required', sessionBinding: 'required' })]), undefined);
   assert.equal(setupCode([directory(), directory()]), 'route_duplicate');
+});
+
+// --- M7B-INVOICES-ISSUE-P1: the issue's store templates, the issued invoices, and the tenant issuing-settings templates ------
+
+const STORE_ISSUE = { scope: 'store', permission: 'issue_invoices' };
+const STORE_VIEW_ISSUED = { scope: 'store', permission: 'view_issued_invoices' };
+const SETTINGS_KEY = { scope: 'tenant', permission: 'edit_issuing_settings' };
+const ISSUE = '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue';
+const ISSUE_ELIGIBILITY = '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility';
+const ISSUE_PREVIEW = '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview';
+const INVOICES = '/api/v1/stores/{storeId}/invoices';
+const INVOICE = '/api/v1/stores/{storeId}/invoices/{id}';
+const SETTINGS = '/api/v1/issuing-settings/{id}';
+const issueRoutes = () => [
+  storeCreate({ path: ISSUE, policy: SESSION('tenant', STORE_ISSUE), body: { kind: 'json', maxBytes: 1_024, required: true } }),
+  storeRead({ path: ISSUE_ELIGIBILITY, policy: SESSION('tenant', STORE_ISSUE) }), storeRead({ path: ISSUE_PREVIEW, policy: SESSION('tenant', STORE_ISSUE) }),
+  storeRead({ path: INVOICES, policy: SESSION('tenant', STORE_VIEW_ISSUED) }), storeRead({ path: INVOICE, policy: SESSION('tenant', STORE_VIEW_ISSUED) }),
+];
+const settingsRead = (over: Record<string, unknown> = {}): Record<string, unknown> => detail({ path: SETTINGS, policy: SESSION('tenant', SETTINGS_KEY), ...over });
+const settingsWrite = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+  patch({ method: 'PUT', path: SETTINGS, policy: SESSION('tenant', SETTINGS_KEY), recentAuth: 'required', ...over });
+const draftRoutes = () => [storeRead(), storeRead({ path: DRAFT }), storeRead({ path: ELIGIBILITY, policy: SESSION('tenant', STORE_CREATE) }), storeCreate(),
+  storeCreate({ method: 'PATCH', path: DRAFT, policy: SESSION('tenant', STORE_EDIT) }), storeRead({ path: EDIT_ELIGIBILITY, policy: SESSION('tenant', STORE_EDIT) }),
+  storeRead({ path: DISCARD_ELIGIBILITY, policy: SESSION('tenant', STORE_DISCARD) }), storeCreate({ path: DISCARD, policy: SESSION('tenant', STORE_DISCARD) })];
+
+test('M7B-INVOICES-ISSUE-P1: the five new store templates and the two issuing-settings templates register — the issue POST and the settings PUT as idempotency-required commands, every GET without a key; every other shape stays refused', () => {
+  const all = [...draftRoutes(), ...issueRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite(), directory()];
+  assert.equal(setupCode(all), undefined, 'thirteen store templates, five tenant templates and the store directory together');
+  const table = defineRoutes(all);
+  assert.equal(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`)?.idempotency, 'required');
+  assert.ok('command' in (table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`) as object), 'the issue is a command');
+  const put = table.lookup('PUT', `/api/v1/issuing-settings/${ID}`);
+  assert.ok(put !== undefined && 'command' in put && put.idempotency === 'required' && put.recentAuth === 'required', 'the settings PUT: a keyed command with a recent sign-in');
+  assert.equal(table.lookup('GET', `/api/v1/issuing-settings/${ID}`)?.recentAuth, 'none', 'the settings GET: no recent sign-in');
+  const { command: _command, ...noCommand } = settingsWrite();
+  for (const [label, def] of [
+    ['the issue as a GET read', storeRead({ path: ISSUE, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['the issue as a PATCH command', storeCreate({ method: 'PATCH', path: ISSUE, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['the issue POST without idempotency, as a handler', storeRead({ method: 'POST', path: ISSUE, policy: SESSION('tenant', STORE_ISSUE), body: { kind: 'json', maxBytes: 1_024, required: true }, sessionBinding: 'none' })],
+    ['the issue eligibility under a key', storeCreate({ method: 'GET', path: ISSUE_ELIGIBILITY, body: { kind: 'none' }, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a POST command on the issue eligibility', storeCreate({ path: ISSUE_ELIGIBILITY, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a POST command on the issue preview', storeCreate({ path: ISSUE_PREVIEW, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a POST command on the invoices list', storeCreate({ path: INVOICES, policy: SESSION('tenant', STORE_VIEW_ISSUED) })],
+    ['a PATCH command on an issued invoice', storeCreate({ method: 'PATCH', path: INVOICE, policy: SESSION('tenant', STORE_VIEW_ISSUED) })],
+    ['a DELETE on an issued invoice', storeRead({ method: 'DELETE', path: INVOICE, policy: SESSION('tenant', STORE_VIEW_ISSUED) })],
+    ['a deeper issued invoice template', storeRead({ path: `${INVOICE}/lines`, policy: SESSION('tenant', STORE_VIEW_ISSUED) })],
+    ['the issue word without the draft id', storeCreate({ path: `${DRAFTS}/issue`, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a deeper issue template', storeCreate({ path: `${ISSUE}/x`, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['the issued invoices under a tenant-scope requirement', storeRead({ path: INVOICES, policy: SESSION('tenant', SETTINGS_KEY) })],
+    ['the settings PUT without idempotency, as a handler', { ...noCommand, idempotency: 'none', handler }],
+    ['the settings PUT as a perform', { ...noCommand, perform: outcome }],
+    ['the settings GET under a key', required({ method: 'GET', path: SETTINGS, policy: SESSION('tenant', SETTINGS_KEY), trustedContext: 'required' })],
+    ...(['POST', 'PATCH', 'DELETE'] as const).map((method) => [`${method} as a command on the settings template`, settingsWrite({ method })] as const),
+    ['a settings suffix', settingsRead({ path: `${SETTINGS}/history` })],
+    ['a literal store below the settings prefix', settingsRead({ path: `/api/v1/issuing-settings/${ID}` })],
+    ['a literal word below the settings prefix', settingsRead({ path: '/api/v1/issuing-settings/current' })],
+    ['the settings template under a store-scope requirement', settingsRead({ policy: SESSION('tenant', STORE_ISSUE) })],
+    ['the settings template on the admin boundary', settingsRead({ path: '/admin/v1/issuing-settings/{id}', policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }) })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  for (const [label, def] of [
+    ['the issue as a PATCH command', storeCreate({ method: 'PATCH', path: ISSUE, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a POST command on the issue preview', storeCreate({ path: ISSUE_PREVIEW, policy: SESSION('tenant', STORE_ISSUE) })],
+    ['a PATCH command on an issued invoice', storeCreate({ method: 'PATCH', path: INVOICE, policy: SESSION('tenant', STORE_VIEW_ISSUED) })],
+    ['the settings PUT as a handler', { ...noCommand, idempotency: 'none', handler }],
+    ['POST as a command on the settings template', settingsWrite({ method: 'POST' })],
+    ['a literal store below the settings prefix', settingsRead({ path: `/api/v1/issuing-settings/${ID}` })],
+    ['the settings template under a store-scope requirement', settingsRead({ policy: SESSION('tenant', STORE_ISSUE) })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  assert.equal(setupCode([settingsWrite(), settingsWrite()]), 'route_duplicate');
+  assert.equal(setupCode([...issueRoutes(), ...issueRoutes()]), 'route_duplicate');
+});
+
+test('M7B-INVOICES-ISSUE-P1: lookup — /invoices and /invoice-drafts resolve unambiguously; the issue, its eligibility and its preview reach their template by the segment before their one literal last segment; the settings GET and PUT by their final segment; nothing else does', () => {
+  const table = defineRoutes([...draftRoutes(), ...issueRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  for (const segment of [ID, ID.toUpperCase(), '{id}', 'x', '..', '%2F', 'a'.repeat(128), 'issue', 'issue-preview', 'eligibility']) {
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}/issue`, 'POST'), ISSUE, `issue ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}/issue-eligibility`), ISSUE_ELIGIBILITY, `issue eligibility ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${segment}/issue-preview`), ISSUE_PREVIEW, `issue preview ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}`), INVOICE, `issued invoice ${segment}`);
+    assert.equal(hit(`/api/v1/issuing-settings/${segment}`), SETTINGS, `settings GET ${segment}`);
+    assert.equal(hit(`/api/v1/issuing-settings/${segment}`, 'PUT'), SETTINGS, `settings PUT ${segment}`);
+  }
+  // /invoices and /invoice-drafts are distinct literal segments: each list, and each {id}, is its own family's.
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoices`), INVOICES);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts`), DRAFTS);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}`), DRAFT);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${ID}`), INVOICE);
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}`)?.policy, SESSION('tenant', STORE_VIEW_ISSUED));
+  assert.deepEqual(table.lookup('POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`)?.policy, SESSION('tenant', STORE_ISSUE));
+  // A draft named like the new suffixes is still the draft template's; the earlier templates are unchanged beside them.
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/issue`), DRAFT, 'a GET of a draft named issue');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/issue-preview`), DRAFT, 'a GET of a draft named issue-preview');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`, 'POST'), DISCARD);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/eligibility`), ELIGIBILITY);
+  assert.equal(hit(`/api/v1/customers/${ID}`, 'PATCH'), '/api/v1/customers/{id}');
+  assert.equal(hit(`/api/v1/customers/${ID}/profile`), '/api/v1/customers/{id}/profile');
+  for (const [method, miss] of [
+    ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`], ['PUT', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue-preview`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue-eligibility`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue/`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue/x`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/Issue`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/issue`],
+    ['POST', `/api/v1/stores/${STORE}/invoices`], ['PATCH', `/api/v1/stores/${STORE}/invoices/${ID}`], ['DELETE', `/api/v1/stores/${STORE}/invoices/${ID}`],
+    ['GET', `/api/v1/stores/${STORE}/invoices/`], ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/`], ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/lines`],
+    ['GET', `/api/v1/stores/${STORE}/invoice`], ['GET', `/api/v1/stores/${STORE}/invoicesx`], ['GET', `/api/v1/stores/${STORE}/invoices/${'a'.repeat(129)}`],
+    ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue-preview/x`], ['GET', `/api/v1/stores/${STORE}/issue-preview`],
+    ['GET', '/api/v1/issuing-settings'], ['GET', '/api/v1/issuing-settings/'], ['GET', `/api/v1/issuing-settings/${ID}/`],
+    ['GET', `/api/v1/issuing-settings/${ID}/history`], ['POST', `/api/v1/issuing-settings/${ID}`], ['PATCH', `/api/v1/issuing-settings/${ID}`],
+    ['DELETE', `/api/v1/issuing-settings/${ID}`], ['put', `/api/v1/issuing-settings/${ID}`], ['GET', `/api/v1/issuing-settings/${'a'.repeat(129)}`],
+    ['GET', `/api/v1/stores/${STORE}/issuing-settings/${ID}`],
+  ] as const) {
+    assert.equal(hit(miss, method), undefined, `${method} ${miss}`);
+  }
 });

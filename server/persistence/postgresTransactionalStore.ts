@@ -65,6 +65,14 @@
 // (its action store.invoice_draft.discard, the discarded draft as subject_invoice_draft_id, metadata {}), its
 // 'precondition_failed' admitted beside the edit's (PRECONDITION_UPDATE_KINDS), and it enqueues NO event: its contract
 // declares none, so step 4 below writes nothing for it and no dummy event exists.
+// M7B-INVOICES-ISSUE-P1 (doc 12 §10.6-§10.9): the invoice ISSUE is a third invoice draft UPDATE, its kind admitted beside the
+// edit's and the discard's (PRECONDITION_UPDATE_KINDS). Its mutator declares `issuingRefusals`, so its command carries two more
+// sealed 409s — issuing_not_configured and amount_out_of_range — recorded as the completion, alone, exactly as invalid_state
+// is; and it declares `auditSubjects: 'issued_invoice'`, so its one audit record names the draft, the issued invoice (the
+// command's own validated invoiceId) and the customer — the one its routine locked, from the mutator's verified 'applied'
+// answer, never from the request — through the writer's one triple statement. The issuing-settings WRITE is a tenant CREATE
+// declaring `auditSubjects: 'store'`: its record names subject_store_id (its validated change-set store) alone, and its kind
+// alone may answer 'not_found' as a create (NOT_FOUND_CREATE_KINDS), rolled back exactly as an update's. Neither enqueues an event.
 //
 // Outcomes. Every precondition is a routine's answer, so no error is ever read as a business answer: no SQLSTATE and no
 // constraint maps to 'conflict', and a reused event ID is a fault. A refusal is rolled back and answered only once the
@@ -133,6 +141,20 @@ export interface AggregateMutator {
    * does treats its absence as a fault.
    */
   readonly apply: (sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority) => Promise<unknown>;
+  /**
+   * An UPDATE mutator may declare the issuing pair (M7B-INVOICES-ISSUE-P1): it may then answer 'issuing_not_configured' or
+   * 'amount_out_of_range' having written nothing, and the store records the command's matching sealed 409 as the completion
+   * and commits only it. Its commands carry exactly five sealed slots; every other mutator's carry exactly three.
+   */
+  readonly issuingRefusals?: true;
+  /**
+   * Which typed audit subjects a mutator's record names beyond its aggregate's (M7B-INVOICES-ISSUE-P1). 'issued_invoice' — an
+   * invoice_draft UPDATE at store scope: the record names the draft, the command's own `changes.invoiceId` and the customer
+   * the mutator answers, which it does as Readonly<{ outcome: 'applied'; subjectCustomerId: string }> instead of the bare
+   * 'applied' (any other answer shape from it is the fault). 'store' — a CREATE at tenant scope: the record names
+   * `changes.storeId` alone. No other mutator may answer the object form.
+   */
+  readonly auditSubjects?: 'issued_invoice' | 'store';
 }
 
 /**
@@ -217,6 +239,9 @@ const INVALID_STATE = answer('invalid_state');
 const UNCHANGED = answer('unchanged');
 /** A create's typed sealed refusal (M7B-INVOICES-P1): its sealed 422 recorded as the completion, nothing else written. */
 const CUSTOMER_NOT_FOUND = answer('customer_not_found');
+/** An issuing update's two typed sealed refusals (M7B-INVOICES-ISSUE-P1): each sealed 409 recorded as the completion alone. */
+const ISSUING_NOT_CONFIGURED = answer('issuing_not_configured');
+const AMOUNT_OUT_OF_RANGE = answer('amount_out_of_range');
 const COMPLETED = answer('completed');
 const LEASE_LOST = answer('lease_lost');
 const COMMITTED = answer('committed');
@@ -239,6 +264,10 @@ const DEAD_REASONS: readonly string[] = ['attempts_exhausted', 'envelope_invalid
 const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchanged', 'rejected', 'mutation', 'audit', 'events', 'context', 'authNotAfter', 'sessionKey'];
 /** The sealed responses for the deterministic post-authorization rejections (M5-GIAM-D1-P2-R1; M7B-INVOICES-P1's typed 422). */
 const REJECTED_FIELDS: readonly string[] = ['conflict', 'invalidState', 'customerNotFound'];
+/** An issuing update's sealed slots (M7B-INVOICES-ISSUE-P1): the three above and its two typed 409s, exactly. */
+const ISSUING_REJECTED_FIELDS: readonly string[] = [...REJECTED_FIELDS, 'issuingNotConfigured', 'amountOutOfRange'];
+/** Any uuid in PostgreSQL's canonical lowercase text form: a new audit subject's shape (M7B-INVOICES-ISSUE-P1). */
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
 const AUDIT_FIELDS: readonly string[] = ['action', 'permission', 'scope', 'tenant', 'store', 'actor', 'correlationId', 'reasonCode', 'reason'];
 /** A closed lowercase token naming what an audited action did; the runtime validated it before it got here. */
@@ -266,12 +295,18 @@ const CUSTOMER_AGGREGATE = 'customer';
  */
 const INVOICE_DRAFT_AGGREGATE = 'invoice_draft';
 /**
- * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly two: the draft edit's
- * (M7B-INVOICES-P2) and the draft discard's (M7B-INVOICES-DISCARD-P1), each when its expected tenant is not the store's —
- * rolled back exactly as a create's; any other update answering it is the fault (commit, step 2a'). Literals: the store
- * imports no route module; its test pins this set equal to app.ts's and to the two contracts' kinds.
+ * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly three: the draft edit's
+ * (M7B-INVOICES-P2), the draft discard's (M7B-INVOICES-DISCARD-P1) and the invoice issue's (M7B-INVOICES-ISSUE-P1), each when
+ * its expected tenant is not the store's — rolled back exactly as a create's; any other update answering it is the fault
+ * (commit, step 2a'). Literals: the store imports no route module; its test pins this set equal to app.ts's.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue']);
+/**
+ * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly one: the
+ * issuing-settings write, whose path store is missing, another tenant's or not writable — rolled back exactly as an update's
+ * not_found; any other create answering it is the fault. Literals; its test pins this set equal to app.ts's.
+ */
+export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze(['tenant.issuing_settings.update']);
 /** The context scopes each root's store admits (M7B-INVOICES-P1): a mutator's declared scope must be one of its root's. */
 const ADMITTED_SCOPES: Readonly<Record<'platform' | 'tenant', readonly CommandContextScope[]>> = Object.freeze({
   platform: Object.freeze(['platform'] as const), tenant: Object.freeze(['tenant', 'store'] as const),
@@ -473,8 +508,13 @@ interface EventDraft {
 }
 interface Command {
   readonly scope: string; readonly lease: string; readonly response: string; readonly unchanged: string | null;
-  /** The sealed refusal this transaction records as the completion when it determines that rejection, in it. */
-  readonly rejected: Readonly<{ conflict: string; invalidState: string | null; customerNotFound: string | null }>;
+  /**
+   * The sealed refusal this transaction records as the completion when it determines that rejection, in it. The issuing pair
+   * (M7B-INVOICES-ISSUE-P1) is null for every command whose mutator did not opt into it.
+   */
+  readonly rejected: Readonly<{
+    conflict: string; invalidState: string | null; customerNotFound: string | null; issuingNotConfigured: string | null; amountOutOfRange: string | null;
+  }>;
   readonly mutator: AggregateMutator; readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput;
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
   /** When this attempt's trusted authentication evidence goes stale, or null when its route required none. */
@@ -520,14 +560,28 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // command carries a conflict; only an update can be in a state that refuses its change, so a create
     // must carry no invalidState and an update must carry one — a command missing the response for the
     // rejection its own mode can reach would otherwise reach the commit and roll back there instead.
-    if (!isRecord(rawRejected) || !hasExactKeys(rawRejected, REJECTED_FIELDS)) return UNAVAILABLE;
+    // M7B-INVOICES-ISSUE-P1: an issuing update's command carries exactly five slots, every other exactly three — so a command
+    // whose slots do not match its mutator's declaration is refused here, either way.
+    const issuing = mutator.issuingRefusals === true;
+    if (!isRecord(rawRejected) || !hasExactKeys(rawRejected, issuing ? ISSUING_REJECTED_FIELDS : REJECTED_FIELDS)) return UNAVAILABLE;
     const { conflict, invalidState, customerNotFound } = rawRejected;
+    const issuingNotConfigured: unknown = issuing ? rawRejected.issuingNotConfigured : null;
+    const amountOutOfRange: unknown = issuing ? rawRejected.amountOutOfRange : null;
     if (!isSealed(conflict) || conflict.length === 0) return UNAVAILABLE;
     if (mutator.mode === 'update' ? !(isSealed(invalidState) && invalidState.length > 0) : invalidState !== null) return UNAVAILABLE;
     // The typed sealed 422 (M7B-INVOICES-P1): null, or sealed text on a create alone — an update never carries one.
     if (customerNotFound !== null && (mutator.mode !== 'create' || !isSealed(customerNotFound) || customerNotFound.length === 0)) return UNAVAILABLE;
+    // The issuing pair: both sealed text on an issuing update (an update by construction, mutatorOf), its 422 slot null.
+    if (issuing && (customerNotFound !== null || !isSealed(issuingNotConfigured) || issuingNotConfigured.length === 0
+      || !isSealed(amountOutOfRange) || amountOutOfRange.length === 0)) return UNAVAILABLE;
     const changes = changeRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
+    // The typed audit subjects a mutator declares (M7B-INVOICES-ISSUE-P1), from its command's checked change set alone: the
+    // issue's own invoice id, or the settings write's store. A value that is not a canonical uuid is no subject: refused here.
+    const issuedInvoice = mutator.auditSubjects === 'issued_invoice' ? changes.invoiceId : null;
+    const subjectStore = mutator.auditSubjects === 'store' ? changes.storeId : null;
+    if (issuedInvoice !== null && !(typeof issuedInvoice === 'string' && CANONICAL_UUID_RE.test(issuedInvoice))) return UNAVAILABLE;
+    if (subjectStore !== null && !(typeof subjectStore === 'string' && CANONICAL_UUID_RE.test(subjectStore))) return UNAVAILABLE;
     // The trusted context, read once. A command carries one or it does not; anything that is not a
     // trusted scope is not a context, and a context this store cannot revalidate is never committed.
     // Read once and COPIED, like every other value at this boundary: a getter that answered one way
@@ -626,6 +680,10 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       // in the context's tenant and store — the draft discard (M7B-INVOICES-DISCARD-P1) included, the draft it discarded. No
       // other aggregate names a draft.
       subjectInvoiceDraftId: mutator.aggregateType === INVOICE_DRAFT_AGGREGATE && (mutator.mode === 'create' || mutator.mode === 'update') ? aggregateId : null,
+      // M7B-INVOICES-ISSUE-P1 (migration 034): the issue names its issued invoice — the command's checked invoiceId — and,
+      // set at commit from its mutator's verified answer, its customer; the settings write names its store alone.
+      subjectIssuedInvoiceId: issuedInvoice as string | null,
+      subjectStoreId: subjectStore as string | null,
     };
     // The mutator is handed this copy — the values checked above, frozen — never the caller's live object.
     const checked: TransactionMutation = Object.freeze({
@@ -635,6 +693,7 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       scope, lease, response, unchanged: unchanged as string | null,
       rejected: Object.freeze({
         conflict: conflict as string, invalidState: (invalidState ?? null) as string | null, customerNotFound: (customerNotFound ?? null) as string | null,
+        issuingNotConfigured: issuingNotConfigured as string | null, amountOutOfRange: amountOutOfRange as string | null,
       }),
       mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
       authNotAfter: authNotAfter as number | null, sessionKey: sessionKey as string | null,
@@ -643,6 +702,16 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
   }
+}
+
+/**
+ * The customer an issued-invoice mutator's 'applied' answer names (M7B-INVOICES-ISSUE-P1): exactly { outcome: 'applied',
+ * subjectCustomerId: <canonical uuid> }, each field read once — or null for any other answer.
+ */
+function appliedCustomerOf(raw: unknown): string | null {
+  if (!isRecord(raw) || !hasExactKeys(raw, ['outcome', 'subjectCustomerId'])) return null;
+  const { outcome, subjectCustomerId } = raw;
+  return outcome === 'applied' && typeof subjectCustomerId === 'string' && CANONICAL_UUID_RE.test(subjectCustomerId) ? subjectCustomerId : null;
 }
 
 /** The command in the order the contract fixes: fence, mutation, audit, events, completion — then COMMIT. */
@@ -676,7 +745,14 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   // COPY, SET, DO, CALL, LOCK — is refused before the driver is asked'). The guarantee is therefore the
   // mutator's, stated in its contract above and held by both registered mutators, each of which decides
   // and writes inside one fixed definer routine. Recorded as DA-36.
-  const applied = await c.mutator.apply(sql, c.mutation, c.authority);
+  const answered: unknown = await c.mutator.apply(sql, c.mutation, c.authority);
+  // M7B-INVOICES-ISSUE-P1: an issued-invoice mutator answers 'applied' as an object naming the customer its routine locked —
+  // the audit record's customer subject, taken from nowhere else — and only so: its bare 'applied' is the fault. Every other
+  // mutator's answer is the bare word, so an object from one is the fault below ('applied' !== an object).
+  const issued = c.mutator.auditSubjects === 'issued_invoice';
+  const subjectCustomerId = issued ? appliedCustomerOf(answered) : null;
+  if (issued && answered === 'applied') return refuse(UNAVAILABLE);
+  const applied: unknown = subjectCustomerId !== null ? 'applied' : answered;
   // 2a. The aggregate is not at the version this request named (M5-GIAM-D1-P2-R1). The mutator wrote
   //     nothing, and still holds whatever row it read under the lease this transaction fenced at step 1
   //     and the authority it revalidated at step 1b — so the rejection is a decided property of the
@@ -717,7 +793,19 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
     if (c.rejected.customerNotFound === null) return refuse(UNAVAILABLE);
     return (await completed(sql, c.scope, c.lease, c.rejected.customerNotFound)) ? CUSTOMER_NOT_FOUND : refuse(UNAVAILABLE);
   }
-  if (c.mutator.mode === 'update' && applied === 'not_found') return refuse(NOT_FOUND);
+  // 2a'''. An issuing update's two typed sealed refusals (M7B-INVOICES-ISSUE-P1): the store has no issuing settings, or the
+  //     total or the number series is out of range — decided by the mutator's routine before writing anything (DA-36), so
+  //     its sealed 409 is recorded as the completion HERE and commits alone, exactly as invalid_state's below. Any other
+  //     mutator answering either word is the fault.
+  if (c.mutator.issuingRefusals === true && (applied === 'issuing_not_configured' || applied === 'amount_out_of_range')) {
+    const sealed = applied === 'issuing_not_configured' ? c.rejected.issuingNotConfigured : c.rejected.amountOutOfRange;
+    if (sealed === null) return refuse(UNAVAILABLE);
+    if (!(await completed(sql, c.scope, c.lease, sealed))) return refuse(UNAVAILABLE);
+    return applied === 'issuing_not_configured' ? ISSUING_NOT_CONFIGURED : AMOUNT_OUT_OF_RANGE;
+  }
+  // An update whose aggregate is absent, or (M7B-INVOICES-ISSUE-P1) a create of a kind in NOT_FOUND_CREATE_KINDS whose target
+  // is absent: rolled back, nothing recorded. Any other create answering it is the fault.
+  if (applied === 'not_found' && (c.mutator.mode === 'update' || NOT_FOUND_CREATE_KINDS.includes(c.mutator.kind))) return refuse(NOT_FOUND);
   // 2b. The aggregate is there at the expected version, but its current state does not admit this change —
   //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2).
   //     Sealed and recorded exactly as the conflict above, and for the same reason.
@@ -746,7 +834,8 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   }, {
     json: (value: unknown) => sql.json(value),
   });
-  await writeAuditEvent(c.audit, { executor });
+  // The issue's customer subject (M7B-INVOICES-ISSUE-P1) joins its record here, from the mutator's verified answer alone.
+  await writeAuditEvent(subjectCustomerId === null ? c.audit : { ...c.audit, subjectCustomerId }, { executor });
   if (!audited) return refuse(UNAVAILABLE);
   // 4. The events, each under the fence: pending, due now by the store's clock, stamped with the transaction's timestamp.
   for (const e of c.events) {
@@ -868,12 +957,24 @@ const MUTATOR_FIELDS: readonly string[] = ['kind', 'mode', 'aggregateType', 'app
 const MUTATOR_SCOPES: readonly string[] = ['platform', 'tenant', 'store'];
 
 function mutatorOf(raw: unknown): AggregateMutator {
-  // The five fields every mutator has — its declared context scope among them, required (M7B-INVOICES-P1, R4).
-  if (isRecord(raw) && hasExactKeys(raw, MUTATOR_FIELDS)) {
-    const { kind, mode, aggregateType, apply, contextScope } = raw;
+  // The five fields every mutator has — its declared context scope among them, required (M7B-INVOICES-P1, R4) — and at most
+  // the two M7B-INVOICES-ISSUE-P1 declarations, only when present.
+  const optional = isRecord(raw) ? ['issuingRefusals', 'auditSubjects'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
+  if (isRecord(raw) && hasExactKeys(raw, [...MUTATOR_FIELDS, ...optional])) {
+    const { kind, mode, aggregateType, apply, contextScope, issuingRefusals, auditSubjects } = raw;
+    // The issuing pair on an update alone, as exactly true; the issued-invoice subjects on a store-scope invoice_draft update
+    // alone; the store subject on a tenant-scope create alone.
+    const issuingValid = !optional.includes('issuingRefusals') || (issuingRefusals === true && mode === 'update');
+    const subjectsValid = !optional.includes('auditSubjects')
+      || (auditSubjects === 'issued_invoice' && mode === 'update' && aggregateType === INVOICE_DRAFT_AGGREGATE && contextScope === 'store')
+      || (auditSubjects === 'store' && mode === 'create' && contextScope === 'tenant');
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string' && AGGREGATE_TYPE_RE.test(aggregateType)
-      && typeof apply === 'function' && typeof contextScope === 'string' && MUTATOR_SCOPES.includes(contextScope)) {
-      return Object.freeze({ kind, mode, aggregateType, apply: apply as AggregateMutator['apply'], contextScope: contextScope as CommandContextScope });
+      && typeof apply === 'function' && typeof contextScope === 'string' && MUTATOR_SCOPES.includes(contextScope) && issuingValid && subjectsValid) {
+      return Object.freeze({
+        kind, mode, aggregateType, apply: apply as AggregateMutator['apply'], contextScope: contextScope as CommandContextScope,
+        ...(optional.includes('issuingRefusals') ? { issuingRefusals: true as const } : {}),
+        ...(optional.includes('auditSubjects') ? { auditSubjects: auditSubjects as 'issued_invoice' | 'store' } : {}),
+      });
     }
   }
   throw new TypeError('transactional store mutator invalid');

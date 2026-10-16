@@ -80,6 +80,13 @@
 //     The slot is minted here, from the runtime's fixed word (idempotency.ts refusalEnvelope), only for a contract that
 //     declares it; every other command carries null there, and a mutator of one that answers the word commits nothing.
 //
+// M7B-INVOICES-ISSUE-P1 — ONE MORE OPT-IN, FOR AN UPDATE: an UPDATE contract may declare `issuingRefusals: true` (the invoice
+// issue, doc 12 §10.6). Its command then carries two more sealed 409s, minted here from the runtime's own words —
+// `issuing_not_configured` and `amount_out_of_range` — as `rejected.issuingNotConfigured` and `rejected.amountOutOfRange`, and
+// its mutator may answer either word having written nothing: the store records that 409 as the completion and commits only
+// it, exactly as for invalid_state. Every other command's `rejected` keeps exactly its three keys, and a mutator of one that
+// answers either word commits nothing.
+//
 // The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
 // 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
 // attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
@@ -176,7 +183,21 @@ export interface CommandContract {
    * and the store records the runtime's sealed 422 as the completion. Absent on every other contract.
    */
   readonly sealedRefusal?: 'customer_not_found';
+  /**
+   * The pair of typed sealed 409s an UPDATE may opt into (M7B-INVOICES-ISSUE-P1): `issuing_not_configured` and
+   * `amount_out_of_range`, each recorded by the store as the completion when the mutator answers it before writing anything.
+   * Absent on every other contract; a create may not declare it.
+   */
+  readonly issuingRefusals?: true;
 }
+
+/**
+ * The sealed rejections every command carries — exactly three — or, for an issuing update (M7B-INVOICES-ISSUE-P1), exactly
+ * five: both typed 409s or neither, never one.
+ */
+export type RejectedSlots<T> =
+  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; issuingNotConfigured?: never; amountOutOfRange?: never }>
+  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; issuingNotConfigured: T; amountOutOfRange: T }>;
 
 export interface CommandRegistry {
   contract(kind: string): CommandContract | undefined;
@@ -255,8 +276,11 @@ export interface TransactionCommand {
    *
    * `customerNotFound` (M7B-INVOICES-P1) is the sealed 422 a CREATE contract that opts into it (`sealedRefusal`) may record
    * when its mutator answers 'customer_not_found' having written nothing; null for every other command.
+   *
+   * `issuingNotConfigured` and `amountOutOfRange` (M7B-INVOICES-ISSUE-P1) are present ONLY on an update whose contract opts
+   * into them (`issuingRefusals`), each a sealed 409; every other command carries exactly the three keys above.
    */
-  readonly rejected: Readonly<{ conflict: string; invalidState: string | null; customerNotFound: string | null }>;
+  readonly rejected: RejectedSlots<string>;
   readonly mutation: TransactionMutation;
   readonly audit: TransactionAudit;
   readonly events: readonly OutboxEventDraft[];
@@ -329,9 +353,10 @@ export interface PreparedCommand {
   readonly unchanged: ReplayEnvelope | null;
   /**
    * The deterministic rejections as the store recorded whichever it answered: sent once, then replayed for the rest of the
-   * retention. `customerNotFound` only for a create that opted into it (M7B-INVOICES-P1), null otherwise.
+   * retention. `customerNotFound` only for a create that opted into it (M7B-INVOICES-P1), null otherwise; the issuing pair only
+   * for an update that opted into it (M7B-INVOICES-ISSUE-P1), absent otherwise.
    */
-  readonly rejected: Readonly<{ conflict: ReplayEnvelope; invalidState: ReplayEnvelope | null; customerNotFound: ReplayEnvelope | null }>;
+  readonly rejected: RejectedSlots<ReplayEnvelope>;
 }
 
 /**
@@ -343,7 +368,10 @@ export interface PreparedCommand {
  *   - 'transaction_conflict' — the aggregate was not at the version named, the sealed 409 recorded;
  *   - 'transaction_invalid_state' — the state did not admit the change, the sealed 409 recorded;
  *   - 'transaction_customer_not_found' — a create that opted into it (M7B-INVOICES-P1) named a customer missing from its
- *     trusted tenant, or another tenant's, the sealed 422 recorded.
+ *     trusted tenant, or another tenant's, the sealed 422 recorded;
+ *   - 'transaction_issuing_not_configured' / 'transaction_amount_out_of_range' — an update that opted into them
+ *     (M7B-INVOICES-ISSUE-P1) found its store without issuing settings, or a total or number series out of range, the sealed
+ *     409 recorded.
  * The last two are M5-GIAM-D1-P2-R1: before it they rolled back and left the lease in progress, so the
  * key could later be replanned and could mutate. An adapter that cannot record the sealed refusal rolls
  * its transaction back and answers 'transaction_unavailable' instead, which changes nothing at all.
@@ -359,6 +387,8 @@ export type CommandRefusal =
   | 'transaction_not_found'
   | 'transaction_invalid_state'
   | 'transaction_customer_not_found'
+  | 'transaction_issuing_not_configured'
+  | 'transaction_amount_out_of_range'
   | 'transaction_unchanged'
   | 'transaction_unavailable'
   | 'transaction_timeout'
@@ -391,19 +421,21 @@ const CONTRACT_FIELDS: readonly string[] = ['kind', 'mode', 'aggregateType', 'ch
 const CONTEXT_SCOPES: readonly string[] = ['platform', 'tenant', 'store'];
 
 function parseCommandContract(raw: unknown, events: OutboxEventRegistry): CommandContract {
-  // The six fields every contract has — its context scope among them, required (M7B-INVOICES-P1, R4) — and at most the one
-  // opt-in, only when declared.
-  const optional = isRecord(raw) ? ['sealedRefusal'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
+  // The six fields every contract has — its context scope among them, required (M7B-INVOICES-P1, R4) — and at most the
+  // opt-ins, only when declared.
+  const optional = isRecord(raw) ? ['sealedRefusal', 'issuingRefusals'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
   if (isRecord(raw) && hasExactKeys(raw, [...CONTRACT_FIELDS, ...optional])) {
-    const { kind, mode, aggregateType, changes, events: refs, contextScope, sealedRefusal } = raw;
+    const { kind, mode, aggregateType, changes, events: refs, contextScope, sealedRefusal, issuingRefusals } = raw;
     const schema = parseChangeSchema(changes); // strings up to MAX_CHANGE_STRING_FIELD_LENGTH (M7A-CUSTOMERS-P3); rows (M7B)
     // The scope is one of the three, never absent, never undefined; a declared opt-in carries a valid value.
     const scopeValid = typeof contextScope === 'string' && CONTEXT_SCOPES.includes(contextScope);
     // Only a create may opt into the typed sealed refusal, and only the one word the runtime mints.
     const refusalValid = !optional.includes('sealedRefusal') || (sealedRefusal === 'customer_not_found' && mode === 'create');
+    // Only an update may opt into the issuing pair (M7B-INVOICES-ISSUE-P1), and only as exactly `true`.
+    const issuingValid = !optional.includes('issuingRefusals') || (issuingRefusals === true && mode === 'update');
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string'
       && AGGREGATE_TYPE_RE.test(aggregateType) && schema !== null && isPlainArray(refs) && refs.length <= MAX_EVENTS_PER_COMMAND
-      && scopeValid && refusalValid) {
+      && scopeValid && refusalValid && issuingValid) {
       const parsed: Readonly<{ type: string; version: number }>[] = [];
       for (const ref of refs) {
         const valid = eventRefOf(ref, aggregateType, events);
@@ -413,6 +445,7 @@ function parseCommandContract(raw: unknown, events: OutboxEventRegistry): Comman
       return Object.freeze({
         kind, mode, aggregateType, changes: schema, events: Object.freeze(parsed), contextScope: contextScope as CommandContextScope,
         ...(optional.includes('sealedRefusal') ? { sealedRefusal: 'customer_not_found' as const } : {}),
+        ...(optional.includes('issuingRefusals') ? { issuingRefusals: true as const } : {}),
       });
     }
   }
@@ -532,17 +565,29 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     const optedIn = !update && contract.sealedRefusal === 'customer_not_found';
     const customerNotFound = optedIn ? refusalEnvelope('customer_not_found') : null;
     if (conflict === null || (update && invalidState === null) || (optedIn && customerNotFound === null)) return null;
-    const rejected = Object.freeze({ conflict, invalidState, customerNotFound });
+    // An update that opted into the issuing pair (M7B-INVOICES-ISSUE-P1) seals both 409s too; every other command carries no
+    // such key at all, so its `rejected` is exactly the three slots above.
+    const issuing = update && contract.issuingRefusals === true;
+    const issuingNotConfigured = issuing ? refusalEnvelope('issuing_not_configured') : null;
+    const amountOutOfRange = issuing ? refusalEnvelope('amount_out_of_range') : null;
+    if (issuing && (issuingNotConfigured === null || amountOutOfRange === null)) return null;
+    const three = { conflict, invalidState, customerNotFound };
+    const rejected: RejectedSlots<ReplayEnvelope> = Object.freeze(issuing
+      ? { ...three, issuingNotConfigured: issuingNotConfigured as ReplayEnvelope, amountOutOfRange: amountOutOfRange as ReplayEnvelope }
+      : three);
+    const sealedThree = {
+      conflict: binding.seal(conflict),
+      invalidState: invalidState === null ? null : binding.seal(invalidState),
+      customerNotFound: customerNotFound === null ? null : binding.seal(customerNotFound),
+    };
     const command: TransactionCommand = Object.freeze({
       scope: binding.scope,
       lease: binding.lease,
       response: binding.seal(envelope),
       unchanged: unchanged === null ? null : binding.seal(unchanged),
-      rejected: Object.freeze({
-        conflict: binding.seal(conflict),
-        invalidState: invalidState === null ? null : binding.seal(invalidState),
-        customerNotFound: customerNotFound === null ? null : binding.seal(customerNotFound),
-      }),
+      rejected: Object.freeze(issuing
+        ? { ...sealedThree, issuingNotConfigured: binding.seal(issuingNotConfigured as ReplayEnvelope), amountOutOfRange: binding.seal(amountOutOfRange as ReplayEnvelope) }
+        : sealedThree),
       mutation: Object.freeze({
         kind: contract.kind, aggregateType: contract.aggregateType, aggregateId: id, expectedVersion: expectedVersion as number | null, changes: mutationChanges,
       }),
@@ -587,6 +632,8 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'not_found') return 'transaction_not_found';
     if (outcome === 'invalid_state') return 'transaction_invalid_state';
     if (outcome === 'customer_not_found') return 'transaction_customer_not_found';
+    if (outcome === 'issuing_not_configured') return 'transaction_issuing_not_configured';
+    if (outcome === 'amount_out_of_range') return 'transaction_amount_out_of_range';
     if (outcome === 'unchanged') return 'transaction_unchanged';
     return outcome === 'unavailable' ? 'transaction_unavailable' : 'transaction_outcome_invalid';
   } catch {

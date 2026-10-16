@@ -127,6 +127,10 @@ const UP_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_authori
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
 /** M7B-INVOICES-DISCARD-P1: 033 sits above 032 and is applied with it. */
 const UP_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.up.sql`, 'utf8');
+/** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033 and rolls back first. */
+const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-ISSUE-P1: 034 sits above 033 and is applied with it. */
+const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
 /** Migration 025's name search (M7A-CUSTOMERS-P8). */
 const SEARCH_025 = 'tmpos_customer_search.m7a_customer_search(text, uuid, text, uuid, integer)';
 const PROFILE_023 = 'tmpos_customer_contact.m7a_contact_profile(text, uuid, uuid)';
@@ -595,11 +599,11 @@ async function catalogSurface() {
 // M7C-01..02: the composition and migration 017 as applied
 // ---------------------------------------------------------------------------
 
-test('M7C-01: 001-033 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
+test('M7C-01: 001-034 applied clean; 005-017 byte-identical to their pins; the route is decidable and composed read-classified', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']
+    ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034']
       .map((v) => [v, false]));
   // 005-016 up checksums are postgresStartupPreflight.ts REQUIRED_MIGRATIONS; down checksums are the committed pins of
   // the earlier suites (tenantDirectory, migration-files-contract). 017's are M7A-CUSTOMERS-P1's; 018's are pinned by the
@@ -1411,7 +1415,7 @@ test('RB-04: customer detail needs its own session CSRF token; a foreign id with
 // wider domain CHECKs they no longer carried, a state only a later suite's rollback repaired. The catalog this test touches
 // — every routine, constraint, index, trigger, column, comment and ACL outside the system schemas — is compared before and
 // after: the suite leaves it exactly as it found it.
-test('M7C-14: 017 down refuses while a customer exists; under 018, 020-033 the rollback runs 033\'s, 032\'s, 031\'s, 030\'s, 029\'s, 028\'s, 027\'s, 026\'s, 025\'s, 024\'s, 023\'s, 022\'s, 021\'s, 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018, 020 to 025, then 026, 027, 028, 029, 030, 031, 032 and 033 leave a fresh apply\'s grants and the catalog exactly as it was found', async () => {
+test('M7C-14: 017 down refuses while a customer exists; under 018, 020-034 the rollback runs 034\'s, 033\'s, 032\'s, 031\'s, 030\'s, 029\'s, 028\'s, 027\'s, 026\'s, 025\'s, 024\'s, 023\'s, 022\'s, 021\'s, 020\'s then 018\'s down first, removes only its own objects, and re-applied 017, 018, 020 to 025, then 026, 027, 028, 029, 030, 031, 032, 033 and 034 leave a fresh apply\'s grants and the catalog exactly as it was found', async () => {
   const surfaceBefore = await catalogSurface();
   const down = (file, isolation) => owner.begin(isolation, (tx) => tx.unsafe(file).simple())
     .then(() => null, (err) => ({ code: err.code, message: String(err.message) }));
@@ -1428,7 +1432,8 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020-033 the r
     await owner`delete from tmpos_mint.issuer_key`;
     await owner`delete from tmpos_mint.tenant_session`;
     try {
-      assert.equal(await down(DOWN_033, 'isolation level read committed'), null, '033 rolls back first: no draft is discarded');
+      assert.equal(await down(DOWN_034, 'isolation level read committed'), null, '034 rolls back first: no invoice is issued');
+      assert.equal(await down(DOWN_033, 'isolation level read committed'), null, '033 rolls back next: no draft is discarded');
       assert.equal(await down(DOWN_032, 'isolation level read committed'), null, '032 rolls back next: it holds no data');
       assert.equal(await down(DOWN_031, 'isolation level read committed'), null, '031 rolls back next: it holds no data');
       assert.equal(await down(DOWN_030, 'isolation level read committed'), null, '030 rolls back next: it holds no data');
@@ -1472,7 +1477,7 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020-033 the r
       // Without its routine the listing is an outage, never a page.
       assertRefusal(await list(a), 503, 'service_unavailable', 'rolled back');
     } finally {
-      // 017, 018, 020, 021, 022, 023, 024, 025, then 026, 027, 028, 029, 030, 031, 032 and 033, together: never a committed moment with 017's grant,
+      // 017, 018, 020, 021, 022, 023, 024, 025, then 026, 027, 028, 029, 030, 031, 032, 033 and 034, together: never a committed moment with 017's grant,
       // 018's page_v2, 020's edit, 020's create or 023's profile read given back, nor 020 and 021 without 026's checks.
       // Then the key.
       await owner.begin(async (tx) => {
@@ -1492,6 +1497,7 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020-033 the r
         if ((await tx`select pg_catalog.to_regprocedure('tmpos_invoice_edit.m7b_invoice_draft_create_v2(text, uuid, uuid, uuid, uuid, jsonb, bigint)') is null as absent`)[0].absent) await tx.unsafe(UP_031).simple();
         if ((await tx`select pg_catalog.to_regprocedure('tmpos_invoice_edit.m7b_invoice_draft_create_v3(text, uuid, uuid, uuid, uuid, jsonb, bigint)') is null as absent`)[0].absent) await tx.unsafe(UP_032).simple();
         if ((await tx`select pg_catalog.to_regnamespace('tmpos_invoice_discard') is null as absent`)[0].absent) await tx.unsafe(UP_033).simple();
+        if ((await tx`select pg_catalog.to_regnamespace('tmpos_invoice_issue') is null as absent`)[0].absent) await tx.unsafe(UP_034).simple();
       });
       await installTestIssuerKey(owner, ISSUER_KEY);
     }
@@ -1515,7 +1521,7 @@ test('M7C-14: 017 down refuses while a customer exists; under 018, 020-033 the r
       app: false, app_v2: false, app_v3: true, app_set_020: false, app_get_022: true, app_create_020: false, app_create_023: true,
       app_profile_023: false, app_update_024: true, app_profile_024: true, app_search_025: true, app_select: false,
       acl_017: `{${me}=X/${me}}`, acl_v2: `{${me}=X/${me}}`, acl_011: `{${me}=X/${me}}`,
-    }, 'the grants a fresh 001-033 apply leaves: the login holds neither 017\'s page, 018\'s page_v2, 011\'s create, 020\'s edit, 020\'s create nor 023\'s profile read');
+    }, 'the grants a fresh 001-034 apply leaves: the login holds neither 017\'s page, 018\'s page_v2, 011\'s create, 020\'s edit, 020\'s create nor 023\'s profile read');
     // The session minted before the rollback lost its ledger row with it and reads nothing; a fresh sign-in reads again.
     assertRefusal(await list(a), 403, 'forbidden', 'a session minted before the rollback');
     assert.deepEqual(pageOf(await list(await signIn(A_OWNER)), 're-applied'), { customers: [], nextCursor: null }, 'the same runtime reads again');

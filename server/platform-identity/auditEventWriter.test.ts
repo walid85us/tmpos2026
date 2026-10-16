@@ -631,6 +631,8 @@ test('S3-W-20: a row under a session action id must match that event\'s fixed sh
     ['a subject tenant', { ...login, subjectTenantId: T1 }],
     ['a subject customer', { ...login, subjectCustomerId: T1 }],
     ['a subject invoice draft', { ...login, subjectInvoiceDraftId: T1 }],
+    ['a subject issued invoice', { ...login, subjectIssuedInvoiceId: T1 }],
+    ['a subject store', { ...login, subjectStoreId: T1 }],
     ['another scope', { ...login, scopeType: 'none' }],
     ['a tenant scope, itself consistent', { ...login, scopeType: 'tenant', tenantId: T1 }],
     ['advisory evidence', { ...login, evidenceLevel: 'dev_sidecar_log_advisory' }],
@@ -699,4 +701,92 @@ test('S3-W-21: the tenant session events are the administrative ones at scope no
   const r = recorder();
   await writeAuditEvent(login, { executor: r.executor });
   assert.equal(r.calls.length, 1, 'a well-formed tenant row is written');
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-ISSUE-P1 — the issue's triple and the settings write's store subject (migration 034)
+// ---------------------------------------------------------------------------
+
+const ISSUED = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const TRIPLE = Object.freeze({ subjectInvoiceDraftId: DRAFT, subjectIssuedInvoiceId: ISSUED, subjectCustomerId: CUSTOMER });
+
+test('M7B-INVOICES-ISSUE-P1: the issue\'s triple is ONE fixed statement — the draft, the issued invoice and the customer as the last three bound columns, in that order, at store scope', async () => {
+  const r = recorder();
+  await writeAuditEvent({ ...baseEvent(), actionId: 'store.invoice.issue', scopeType: 'store', tenantId: T1, storeId: STORE, ...TRIPLE }, { executor: r.executor });
+  assert.equal(r.calls.length, 1, 'one statement');
+  const { strings, values, sql } = r.calls[0];
+  assert.equal(values.length, 23);
+  assert.equal(strings.length, 24);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_invoice_draft_id,\s*subject_issued_invoice_id,\s*subject_customer_id\s*\)/);
+  assert.ok(!sql.includes('subject_tenant_id') && !sql.includes('subject_store_id'), 'no other subject column');
+  for (const id of [DRAFT, ISSUED, CUSTOMER]) assert.ok(!strings.join(' ').includes(id), 'bound as a value, never spliced');
+  assert.deepEqual([values[7], values[8], values[9]], ['store', T1, STORE]);
+  assert.deepEqual(values.slice(20), [DRAFT, ISSUED, CUSTOMER]);
+});
+
+test('M7B-INVOICES-ISSUE-P1: a store subject is its own statement, alone after metadata, at tenant scope; every earlier statement is unchanged', async () => {
+  const r = recorder();
+  await writeAuditEvent({ ...baseEvent(), actionId: 'tenant.issuing_settings.update', scopeType: 'tenant', tenantId: T1, storeId: null, subjectStoreId: STORE },
+    { executor: r.executor });
+  const { values, sql } = r.calls[0];
+  assert.equal(values.length, 21);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_store_id\s*\)/);
+  for (const other of ['subject_tenant_id', 'subject_customer_id', 'subject_invoice_draft_id', 'subject_issued_invoice_id']) assert.ok(!sql.includes(other), other);
+  assert.equal(values[20], STORE);
+  for (const absent of [undefined, null]) {
+    const without = recorder();
+    await writeAuditEvent({ ...baseEvent(), subjectStoreId: absent, subjectIssuedInvoiceId: absent }, { executor: without.executor });
+    assert.equal(without.calls[0].values.length, 20, `subjects ${String(absent)}: 20 values`);
+    assert.ok(!without.calls[0].sql.includes('subject_store_id') && !without.calls[0].sql.includes('subject_issued_invoice_id'), `${String(absent)}: not named`);
+    const draftOnly = recorder();
+    await writeAuditEvent({ ...baseEvent(), scopeType: 'store', tenantId: T1, storeId: STORE, subjectInvoiceDraftId: DRAFT, subjectIssuedInvoiceId: absent, subjectStoreId: absent },
+      { executor: draftOnly.executor });
+    assert.match(draftOnly.calls[0].sql.toLowerCase(), /metadata,\s*subject_invoice_draft_id\s*\)/, `${String(absent)}: the 028 statement`);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: at most one subject except exactly the triple — an issued invoice alone or in part of the triple, the triple beside a fourth subject, a store beside any other, and a malformed new subject are refused before any statement', async () => {
+  for (const [label, over] of [
+    ['an issued invoice alone', { subjectIssuedInvoiceId: ISSUED }],
+    ['an issued invoice with its draft only', { subjectIssuedInvoiceId: ISSUED, subjectInvoiceDraftId: DRAFT }],
+    ['an issued invoice with its customer only', { subjectIssuedInvoiceId: ISSUED, subjectCustomerId: CUSTOMER }],
+    ['a draft and a customer without the invoice', { subjectInvoiceDraftId: DRAFT, subjectCustomerId: CUSTOMER }],
+    ['the triple beside a tenant', { ...TRIPLE, subjectTenantId: T1 }],
+    ['the triple beside a store', { ...TRIPLE, subjectStoreId: STORE }],
+    ['a store beside a customer', { subjectStoreId: STORE, subjectCustomerId: CUSTOMER }],
+    ['a store beside a tenant', { subjectStoreId: STORE, subjectTenantId: T1 }],
+    ['a store beside a draft', { subjectStoreId: STORE, subjectInvoiceDraftId: DRAFT }],
+    ['an issued invoice that is no uuid', { ...TRIPLE, subjectIssuedInvoiceId: 'not-a-uuid' }],
+    ['an issued invoice number', { ...TRIPLE, subjectIssuedInvoiceId: 7 }],
+    ['a store that is no uuid', { subjectStoreId: `${STORE} ` }],
+    ['an empty store', { subjectStoreId: '' }],
+  ] as const) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), scopeType: 'store', tenantId: T1, storeId: STORE, ...over } as never, { executor: r.executor }),
+      AuditEventValidationError, label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: the triple is admitted only for store.invoice.issue at store scope, and a store subject only for tenant.issuing_settings.update at tenant scope — any other action or scope is refused before any statement', async () => {
+  const issue = { ...baseEvent(), actionId: 'store.invoice.issue', scopeType: 'store', tenantId: T1, storeId: STORE, ...TRIPLE } as const;
+  const settings = { ...baseEvent(), actionId: 'tenant.issuing_settings.update', scopeType: 'tenant', tenantId: T1, storeId: null, subjectStoreId: STORE } as const;
+  for (const [label, event] of [['the issue', issue], ['the settings write', settings]] as const) {
+    const r = recorder();
+    await writeAuditEvent(event, { executor: r.executor });
+    assert.equal(r.calls.length, 1, `${label}: admitted`);
+  }
+  for (const [label, event] of [
+    ['the triple on another action', { ...issue, actionId: 'store.invoice_draft.update' }],
+    ['the triple on the settings action', { ...issue, actionId: 'tenant.issuing_settings.update' }],
+    ['the triple at tenant scope', { ...issue, scopeType: 'tenant', storeId: null }],
+    ['a store subject on another action', { ...settings, actionId: 'tenant.display_name.update' }],
+    ['a store subject on the issue action', { ...settings, actionId: 'store.invoice.issue' }],
+    ['a store subject at store scope', { ...settings, scopeType: 'store', storeId: STORE }],
+  ] as const) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent(event as never, { executor: r.executor }),
+      (e: unknown) => e instanceof AuditEventValidationError && e.message === 'audit event subject is not admitted for its action and scope', label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
 });

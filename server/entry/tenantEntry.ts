@@ -14,7 +14,7 @@
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
 //    4. the runtime login — the same approved boundary the administrative entry judges;
-//    5. the migration ledger — exactly 001–033, clean, checksums pinned (each of 020-033 moves with its build);
+//    5. the migration ledger — exactly 001–034, clean, checksums pinned (each of 020-034 moves with its build);
 //    6. parameter logging — no setting the login's sessions run with would log a bound parameter, and a session store key
 //       is one (postgresStartupPreflight.ts evaluateParameterLogging);
 //    7. the composition — the session root (the tenant boundary alone, its route authorizer over the owner's durable role
@@ -31,8 +31,8 @@
 //       before it reads or writes anything), the tenant admission answers its probe, the limiter is ready, the
 //       customer reads answer their probe (the directory's routine, then the detail's — M7A-CUSTOMERS-P4 — then the
 //       profile's — M7A-CUSTOMERS-P6, over 024's versioned routine since -P7 — then the search's — -P8 — then the store
-//       directory's — M7B-INVOICES-P1, 027's — then the invoice drafts' two reads — M7B-INVOICES-P1, 028's — each refusing an
-//       absent key), and the idempotency store and the command port answer
+//       directory's — M7B-INVOICES-P1, 027's — then the invoice drafts' two reads — M7B-INVOICES-P1, 028's — then 034's four
+//       issuing reads — M7B-INVOICES-ISSUE-P1 — each refusing an absent key), and the idempotency store and the command port answer
 //       theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
@@ -68,8 +68,14 @@
 // decided under the discard's own requirement and writing no business row, and POST
 // /api/v1/stores/{storeId}/invoice-drafts/{id}/discard, a logical, terminal discard of that draft (idempotent, committed
 // through the tenant store with its audit record and its completion and NO outbox event; the draft id is the
-// fingerprint's target); each authorized only through the actor's own store grant at exactly that store — then the bounded
-// 404.
+// fingerprint's target); — M7B-INVOICES-ISSUE-P1 (docs/phase-4/12 §10) — GET and PUT /api/v1/issuing-settings/{id}, the
+// store owner's read and versioned write of a store's issuing settings (the tenant templates' second family; the write
+// idempotent, on a recent sign-in, committed through the tenant store with its audit record and NO outbox event), and five
+// STORE templates: GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility and …/issue-preview, whether an issue
+// would be authorized now and its reviewable snapshot, POST …/invoice-drafts/{id}/issue, the issue (idempotent, committed
+// through the tenant store with its audit record and NO outbox event; the draft id is the fingerprint's target), and GET
+// /api/v1/stores/{storeId}/invoices[/{id}], the store's issued invoices and one issued invoice, read-only; each store route
+// authorized only through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
 // 404 before the limiter is asked (app.ts `hosts`). X-Forwarded-Host is never read, so the real edge must route the tenant
@@ -128,6 +134,13 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'PATCH', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/discard', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/issuing-settings/{id}', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'PUT', path: '/api/v1/issuing-settings/{id}', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}', access: 'session', body: 'none', idempotency: 'none' },
 ].map((route) => Object.freeze(route)));
 
 /**

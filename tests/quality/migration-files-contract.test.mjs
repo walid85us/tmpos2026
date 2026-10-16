@@ -385,19 +385,33 @@ const PINNED = {
   // exact-[005] gate is unchanged and still refuses. Both 033 keys are assembled at run time, as 032's are.
   [`033_m7b_invoice_draft_${'discard'}.up.sql`]: 'ea4c3080da7523fe711e5bbac94af09e576a82e81f15194dd81442e06be1b130',
   [`033_m7b_invoice_draft_${'discard'}.down.sql`]: '310aaf2f9901aad57a9d82989e0b10304462e6e3f3625139fc26cd5b027f4842',
+  // Phase 4.0 M7B-INVOICES-ISSUE-P1 — issuing a saved store invoice draft. In its OWN schema tmpos_invoice_issue: four tables (the
+  // per-store issuing settings, the per-store number counter, the issued invoice and its lines; row security on, no policy, no
+  // runtime privilege), six SECURITY DEFINER routines granted to tmpos_app alone (the settings read and write, the issue preview
+  // and the issue, the issued-invoice page and get), the ENABLE ALWAYS guards that freeze an issued invoice and its lines, and a
+  // SQL-standard-body anchor whose recorded dependencies refuse 033's rollback while it is applied; 033's status CHECK widened to
+  // ('draft', 'discarded', 'issued') under its own name, trg_invoice_draft_terminal rebound under the same name to 034's function,
+  // and two nullable subject columns on public.audit_event. tmpos_app gains USAGE on the schema and EXECUTE on the six routines;
+  // no earlier grant is removed (001-033 byte for byte). Its rollback refuses while any issuing settings, number counter, issued
+  // invoice or issued draft exists and otherwise restores the 033-era contract exactly. Proved against disposable PostgreSQL
+  // only; applied to no managed, persistent or application database. D4 now names the contiguous chain through 034; the
+  // exact-[005] gate is unchanged and still refuses. Both 034 keys are assembled at run time, as 033's are.
+  // The two sha256 values pin the 034 bytes this stage commits.
+  [`034_m7b_invoice_${'issue'}.up.sql`]: '5f74386be2e10e1a4b9ed4b2941bf45f1bffe945a50fbe339d3e5ed4b057cec0',
+  [`034_m7b_invoice_${'issue'}.down.sql`]: '7cdf8f1bb697f86758fe5d2a0c64bfb547445a0f96d81a98ddfa0f7b774e6e1a',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the sixty-six expected files', () => {
+test('the migrations directory holds exactly the sixty-eight expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

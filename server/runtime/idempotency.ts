@@ -130,7 +130,9 @@ const MAX_ENVELOPE_BYTES = 2 * MAX_REPLAY_BODY_BYTES + 1_024;
 export const MAX_SEALED_LENGTH = Math.ceil(((IV_BYTES + MAX_ENVELOPE_BYTES + TAG_BYTES) * 4) / 3);
 
 // The error words only the runtime answers with: an operation's outcome may not borrow one.
-const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state', 'customer_not_found']);
+const RESERVED_ERRORS: ReadonlySet<string> = new Set([
+  'request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state', 'customer_not_found', 'issuing_not_configured', 'amount_out_of_range',
+]);
 /**
  * The deterministic post-authorization rejections a command seals as its own completion
  * (M5-GIAM-D1-P2-R1): the aggregate was not at the version the request named, or its current state does
@@ -142,8 +144,14 @@ const RESERVED_ERRORS: ReadonlySet<string> = new Set(['request_in_progress', 'id
  * `sealedRefusal`): `customer_not_found` — the draft named a customer missing from its trusted tenant, or another tenant's,
  * decided after authority was established and before anything was written. Each word has ONE fixed status, here: the two
  * conflicts 409, the typed refusal 422. A record read back carrying one of these words with any other status is no record.
+ *
+ * M7B-INVOICES-ISSUE-P1 adds two TYPED 409s, sealed only by an update contract that opts into them (commandTransaction.ts
+ * `issuingRefusals`): `issuing_not_configured` — the store has no issuing settings — and `amount_out_of_range` — the total,
+ * or the store's number series, is out of range — each decided inside the committing transaction before anything is written.
  */
-const SEALED_REFUSAL_STATUS: ReadonlyMap<string, number> = new Map([['write_conflict', 409], ['invalid_state', 409], ['customer_not_found', 422]]);
+const SEALED_REFUSAL_STATUS: ReadonlyMap<string, number> = new Map([
+  ['write_conflict', 409], ['invalid_state', 409], ['customer_not_found', 422], ['issuing_not_configured', 409], ['amount_out_of_range', 409],
+]);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
 const LOCATION_RE = /^\/(?!\/)(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$/;
@@ -335,8 +343,8 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
 /**
  * The runtime's OWN sealed refusal for a deterministic post-authorization rejection (M5-GIAM-D1-P2-R1):
  * a bounded response carrying exactly one refusal word and nothing else, at that word's one fixed status — 409 for the
- * two conflicts, 422 for M7B-INVOICES-P1's typed `customer_not_found` — or null for any word that is not one of the
- * three. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
+ * two conflicts, 422 for M7B-INVOICES-P1's typed `customer_not_found`, 409 for M7B-INVOICES-ISSUE-P1's typed
+ * `issuing_not_configured` and `amount_out_of_range` — or null for any word that is not one of the five. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
  * one — and this is the single place that mints it, from a fixed token this module owns: never from a
  * plan, a port, a handler or a request.
  *

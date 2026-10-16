@@ -93,7 +93,9 @@
 //                check, the trusted context's revalidation, the mutation, the completion, its audit
 //                record and its outbox events — through the transaction port under the runtime's own
 //                deadline (commandTransaction.ts), its response sent only once committed: a conflict
-//                -> 409, an update whose aggregate does not exist -> 404, an update whose changes
+//                -> 409, an update whose aggregate does not exist -> 404 (M7B-INVOICES-ISSUE-P1: so is a create of a
+//                kind in NOT_FOUND_CREATE_KINDS whose target is not there; an update that opted into the issuing pair
+//                sends its sealed 409 issuing_not_configured or amount_out_of_range as recorded), an update whose changes
 //                already hold -> the plan's unchanged 200, which the store recorded as the completion in
 //                the same transaction, and anything else -> 503 that assumes no rollback and
 //                releases nothing; any other route's handler exactly once, with the principal, the
@@ -514,12 +516,22 @@ const NO_BYTES = Buffer.alloc(0);
 
 /**
  * The UPDATE contracts whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by kind: a closed
- * set of exactly two (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
- * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT). Every other update's is the 503. The tenant
- * store admits the answer from the same kinds alone (postgresTransactionalStore.ts). Literals, as app.ts imports no route
- * module; postgresTransactionalStore.test.ts fails if this set, the store's or the contracts' kinds drift.
+ * set of exactly three (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
+ * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT; M7B-INVOICES-ISSUE-P1: the invoice issue's,
+ * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT). Every other update's is the 503. The tenant store admits the answer from the
+ * same kinds alone (postgresTransactionalStore.ts). Literals, as app.ts imports no route module;
+ * postgresTransactionalStore.test.ts fails if this set or the store's drifts.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue']);
+
+/**
+ * The CREATE contracts whose store-rolled-back 'not_found' is the unsealed 404 not_found, by kind (M7B-INVOICES-ISSUE-P1): a
+ * closed set of exactly one — the issuing-settings write (issuingSettings.ts), a create-mode command whose path names a store
+ * that may be missing, another tenant's or not writable — exactly as an update's not_found. Every other create's is the
+ * 503. The tenant store admits the answer from the same kinds alone (postgresTransactionalStore.ts); its test pins the two
+ * sets equal.
+ */
+export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze(['tenant.issuing_settings.update']);
 
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
 function forwardedForOf(req: Request): string | string[] | undefined {
@@ -964,6 +976,9 @@ export function createApp(deps: AppDeps): Express {
       // the request — so the target is the draft, never the suffix, the store or another segment; the table matched only a
       // path ending in exactly that suffix, and a malformed id is the same 400 at the same point. A template whose {id} is
       // final (the edit) reads the path's final segment exactly as before, so the edit's fingerprints are unchanged too.
+      // M7B-INVOICES-ISSUE-P1: the issue (POST …/invoice-drafts/{id}/issue) reads its draft the discard's way; the second
+      // non-store templated command, PUT /api/v1/issuing-settings/{id}, reads its final {id} — the store whose settings it
+      // writes, a selector among the trusted tenant's stores, never a grant — exactly as the customer edit reads its id.
       let targetId: string | null = null;
       let storeId: string | null = null;
       if ('command' in route && route.path.includes(STORE_SEGMENT)) {
@@ -1075,12 +1090,17 @@ export function createApp(deps: AppDeps): Express {
           // A precondition the request asserted no longer holds (M7A-CUSTOMERS-P4; DA-125): the store rolled everything back and
           // recorded nothing — no completion, unlike the sealed conflict above — so this 409 is the runtime's own, UNSEALED,
           // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback. Admitted from a
-          // create, and from the update contracts that assert a tenant — the draft edit (M7B-INVOICES-P2) and the draft
-          // discard (M7B-INVOICES-DISCARD-P1), by kind — and from no other update: there it committed nothing and is the 503 below.
+          // create, and from the update contracts that assert a tenant — the draft edit (M7B-INVOICES-P2), the draft
+          // discard (M7B-INVOICES-DISCARD-P1) and the invoice issue (M7B-INVOICES-ISSUE-P1), by kind — and from no other
+          // update: there it committed nothing and is the 503 below.
           if (refused === 'transaction_precondition_failed' && (contract.mode === 'create' || PRECONDITION_UPDATE_KINDS.includes(contract.kind))) {
             return refuse(req, res, 409, 'write_conflict', refused);
           }
-          if (refused === 'transaction_not_found' && contract.mode === 'update') return refuse(req, res, 404, 'not_found', refused);
+          // A missing aggregate rolled back: an update's, or (M7B-INVOICES-ISSUE-P1) a create of a kind in the closed set whose
+          // path names a target that is not there — the issuing settings' store. Any other create answering it is the 503.
+          if (refused === 'transaction_not_found' && (contract.mode === 'update' || NOT_FOUND_CREATE_KINDS.includes(contract.kind))) {
+            return refuse(req, res, 404, 'not_found', refused);
+          }
           // The aggregate exists at the expected version, but the change its contract asks for is not one
           // its current state allows — a lifecycle transition from the wrong state, or to the state it is
           // already in (M5-GIAM-D1-P2). Sealed exactly like a conflict; a create seals none, and an
@@ -1094,6 +1114,18 @@ export function createApp(deps: AppDeps): Express {
           // command answering it committed nothing and is the 503 below.
           if (refused === 'transaction_customer_not_found' && contract.mode === 'create' && prepared.rejected.customerNotFound !== null) {
             return sendRecorded(res, prepared.rejected.customerNotFound, false, refused);
+          }
+          // The typed sealed 409s an update opted into (M7B-INVOICES-ISSUE-P1): its mutator found the store without issuing
+          // settings, or the total or number series out of range, before writing anything, and the store recorded that exact 409
+          // as the completion — a decided answer every retry replays. Any other command answering either committed nothing and
+          // is the 503 below.
+          if (refused === 'transaction_issuing_not_configured' && contract.mode === 'update' && contract.issuingRefusals === true
+            && prepared.rejected.issuingNotConfigured !== undefined) {
+            return sendRecorded(res, prepared.rejected.issuingNotConfigured, false, refused);
+          }
+          if (refused === 'transaction_amount_out_of_range' && contract.mode === 'update' && contract.issuingRefusals === true
+            && prepared.rejected.amountOutOfRange !== undefined) {
+            return sendRecorded(res, prepared.rejected.amountOutOfRange, false, refused);
           }
           // Changes already in place: the store recorded the plan's unchanged response as the completion in the
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as

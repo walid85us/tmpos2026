@@ -210,6 +210,7 @@ function assertSessionShape(event: AuditEventWriteInput, shape: SessionAuditShap
   const matches = UUID_RE.test(event.requestId) && (event.traceId ?? null) === null && event.actorAuthProvider === null
     && (event.onBehalfOfInternalUserId ?? null) === null && (event.subjectTenantId ?? null) === null
     && (event.subjectCustomerId ?? null) === null && (event.subjectInvoiceDraftId ?? null) === null
+    && (event.subjectIssuedInvoiceId ?? null) === null && (event.subjectStoreId ?? null) === null
     && event.scopeType === scopeType && event.tenantId === null && event.storeId === null
     && event.requiredPermission === 'n_a' && event.decision === shape.decision && event.reasonCode === shape.reasonCode
     && event.humanReadableReason === shape.humanReadableReason && event.resultStatus === 'succeeded'
@@ -316,6 +317,21 @@ export interface AuditEventWriteInput {
    * Absent or null, the row is written exactly as before 028.
    */
   subjectInvoiceDraftId?: string | null;
+
+  /**
+   * The issued invoice the recorded action created (migration 034, M7B-INVOICES-ISSUE-P1): named ONLY in the issue's triple —
+   * beside its source draft (subjectInvoiceDraftId) and its customer (subjectCustomerId), all three non-null together, the one
+   * event that names more than one subject. Set only by the transactional store, from the command's runtime-generated invoice
+   * id and the customer its mutator's routine locked — never from request metadata.
+   */
+  subjectIssuedInvoiceId?: string | null;
+
+  /**
+   * The store the recorded action configured (migration 034, M7B-INVOICES-ISSUE-P1): the issuing-settings write names its
+   * store here, at tenant scope, and no other subject. Set only by the transactional store, from the command's validated
+   * change set — never from request metadata.
+   */
+  subjectStoreId?: string | null;
 }
 
 /** Non-sensitive validation error (carries a label only — never an input value). */
@@ -393,8 +409,26 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
   if (event.subjectInvoiceDraftId != null && !UUID_RE.test(event.subjectInvoiceDraftId)) {
     throw new AuditEventValidationError('audit event subjectInvoiceDraftId must be a UUID or null');
   }
-  if ([event.subjectTenantId, event.subjectCustomerId, event.subjectInvoiceDraftId].filter((subject) => subject != null).length > 1) {
+  if (event.subjectIssuedInvoiceId != null && !UUID_RE.test(event.subjectIssuedInvoiceId)) {
+    throw new AuditEventValidationError('audit event subjectIssuedInvoiceId must be a UUID or null');
+  }
+  if (event.subjectStoreId != null && !UUID_RE.test(event.subjectStoreId)) {
+    throw new AuditEventValidationError('audit event subjectStoreId must be a UUID or null');
+  }
+  // At most one subject, except exactly the issue's triple (M7B-INVOICES-ISSUE-P1): its draft, its issued invoice and its
+  // customer, all three named together and nothing else. An issued invoice is never named outside that triple.
+  const triple = event.subjectInvoiceDraftId != null && event.subjectIssuedInvoiceId != null && event.subjectCustomerId != null
+    && event.subjectTenantId == null && event.subjectStoreId == null;
+  const named = [event.subjectTenantId, event.subjectCustomerId, event.subjectInvoiceDraftId, event.subjectIssuedInvoiceId, event.subjectStoreId]
+    .filter((subject) => subject != null).length;
+  if ((named > 1 || event.subjectIssuedInvoiceId != null) && !triple) {
     throw new AuditEventValidationError('audit event names at most one subject');
+  }
+  // The triple is the invoice issue's alone, at store scope; a store subject is the issuing-settings write's alone, at
+  // tenant scope (the scope check below proves the tenant and store each scope requires).
+  if ((triple && (event.actionId !== 'store.invoice.issue' || event.scopeType !== 'store'))
+    || (event.subjectStoreId != null && (event.actionId !== 'tenant.issuing_settings.update' || event.scopeType !== 'tenant'))) {
+    throw new AuditEventValidationError('audit event subject is not admitted for its action and scope');
   }
 
   // Scope fields must be MUTUALLY consistent, not merely well-typed. Reaching the database
@@ -622,10 +656,116 @@ export async function writeAuditEvent(
   const eventId = randomUUID();
 
   // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
-  // Four fixed statements, never a fragment: subject_tenant_id (migration 009), subject_customer_id (migration 024) or
+  // Six fixed statements, never a fragment: subject_tenant_id (migration 009), subject_customer_id (migration 024) or
   // subject_invoice_draft_id (migration 028) is named only when the event names that subject, so every other caller's
   // statement — and every database before 009, 024 or 028 — is exactly as it was. Validation proved at most one subject is
-  // named.
+  // named, or exactly the issue's triple. M7B-INVOICES-ISSUE-P1 (migration 034) adds two more fixed statements: the triple
+  // (subject_invoice_draft_id, subject_issued_invoice_id, subject_customer_id), used for the invoice issue alone, and
+  // subject_store_id alone, for the issuing-settings write; every earlier statement is unchanged.
+  if (validated.subjectIssuedInvoiceId != null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_invoice_draft_id,
+        subject_issued_invoice_id,
+        subject_customer_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectInvoiceDraftId},
+        ${validated.subjectIssuedInvoiceId},
+        ${validated.subjectCustomerId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
+  if (validated.subjectStoreId != null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_store_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectStoreId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
   if (validated.subjectInvoiceDraftId != null) {
     await executor`
       insert into public.audit_event (

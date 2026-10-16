@@ -1,7 +1,7 @@
 // Phase 4.0 M7B-INVOICES-DISCARD-P1 — discarding a saved store invoice draft END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) serving POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard and GET
 // …/{id}/discard-eligibility over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory
-// (001-033), composed exactly as server/entry/tenantMain.ts composes it but for its construction. The route module
+// (001-034), composed exactly as server/entry/tenantMain.ts composes it but for its construction. The route module
 // (server/runtime/invoiceDrafts.ts), the chain's suffix-aware command target (app.ts), the store-scope authorizer and
 // revalidator, the tenant command transaction, the discard's mutator (server/persistence/postgresInvoiceDrafts.ts), migration
 // 033's discard routine (tmpos_invoice_discard.m7b_invoice_draft_discard: the Invoices level decided at Manage, again under
@@ -101,7 +101,7 @@
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Synthetic data only, every id
 // and key made at run time. Its discards leave DISCARDED drafts, which migration 033's down refuses (and drafts above version
-// 1 and audit subjects, which 029's and 028's refuse): on a shared service it runs after every step that rolls 033 or an
+// 1 and audit subjects, which 029's and 028's refuse): on a shared service it runs after every step that rolls 034, 033 or an
 // older migration back, and before it finishes it removes every draft and line of its tenants — the two terminal triggers
 // lifted inside ONE owner transaction and put back in the mode they were found in — with every Invoices role and version row
 // of its tenants, clears every audit subject naming one of its drafts and deletes its tenants' draft events, its sessions,
@@ -438,8 +438,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('029', '030', '031', '032', '033')`;
-  assert.equal(applied, 5, 'migrations 029-033 are applied: the guarded edit and save, and the discard with its open-only reads');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('029', '030', '031', '032', '033', '034')`;
+  assert.equal(applied, 6, 'migrations 029-034 are applied: the guarded edit and save, the discard with its open-only reads, and issuing (034, whose terminal-trigger function this suite\'s discards run through)');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);

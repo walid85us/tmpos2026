@@ -10,6 +10,7 @@ import {
   STORE_ROUTE_PERMISSIONS,
   TENANT_ROUTE_PERMISSIONS,
   assertStoreRoutePermissions,
+  assertTenantRoutePermissions,
   canonicalPermission,
   evaluateCanonicalPermission,
   isDecidablePermission,
@@ -357,13 +358,13 @@ test('edit_customers (M7A-CUSTOMERS-P7) is the Customers domain at Edit or above
   }
 });
 
-test('isDecidablePermission: every platform key, the four tenant route permissions at tenant scope and the four store route permissions at store scope — nothing else', () => {
+test('isDecidablePermission: every platform key, the five tenant route permissions at tenant scope and the six store route permissions at store scope — nothing else', () => {
   for (const sub of PLATFORM_SUB_PERMISSIONS) assert.equal(isDecidablePermission('platform', sub.id), true, sub.id);
-  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']) {
+  for (const key of ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices']) {
     assert.equal(isDecidablePermission('store', key), true, key);
     for (const scope of ['tenant', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${key}`);
   }
-  for (const key of ['view_customers', 'create_customers', 'edit_customers', 'edit_role_levels']) {
+  for (const key of ['view_customers', 'create_customers', 'edit_customers', 'edit_role_levels', 'edit_issuing_settings']) {
     assert.equal(isDecidablePermission('tenant', key), true, key);
     for (const scope of ['store', 'platform'] as const) assert.equal(isDecidablePermission(scope, key), false, `${scope}/${key}`);
   }
@@ -384,16 +385,21 @@ test('isDecidablePermission: every platform key, the four tenant route permissio
 });
 
 test('every level-decided tenant route permission names a core domain at View, Create or Edit, is not sensitive, and none shadows a sub-permission', () => {
-  assert.deepEqual([...TENANT_ROUTE_PERMISSIONS.keys()], ['view_customers', 'create_customers', 'edit_customers', 'edit_role_levels'],
-    'exactly the three customer routes the owner fixed (M7A-CUSTOMERS-P7: edit) and the owner-only role edit (M7A-CUSTOMERS-P3-R1)');
+  assert.deepEqual([...TENANT_ROUTE_PERMISSIONS.keys()], ['view_customers', 'create_customers', 'edit_customers', 'edit_role_levels', 'edit_issuing_settings'],
+    'exactly the three customer routes the owner fixed (M7A-CUSTOMERS-P7: edit), the owner-only role edit (M7A-CUSTOMERS-P3-R1) and the owner-only issuing settings (M7B-INVOICES-ISSUE-P1)');
   const subIds = new Set(TENANT_SUB_PERMISSIONS.map((s) => s.id));
   const THRESHOLD: Record<string, string> = { view_customers: 'view', create_customers: 'create', edit_customers: 'edit' };
   // The owner-only edit: sensitive, its parent and threshold descriptive (the owner rule decides it, never a level).
   const edit = TENANT_ROUTE_PERMISSIONS.get('edit_role_levels');
   assert.deepEqual(edit, { key: 'edit_role_levels', plane: 'tenant', parent: 'employees', sensitive: true, threshold: 'full' });
   assert.ok(Object.isFrozen(edit) && !subIds.has('edit_role_levels') && !CANONICAL_TENANT_PERMISSIONS.has('edit_role_levels'));
+  // M7B-INVOICES-ISSUE-P1: the second owner-only key, sensitive at Full; its parent a core domain the owner always materializes.
+  const settings = TENANT_ROUTE_PERMISSIONS.get('edit_issuing_settings');
+  assert.deepEqual(settings, { key: 'edit_issuing_settings', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'full' });
+  assert.ok(Object.isFrozen(settings) && !subIds.has('edit_issuing_settings') && !CANONICAL_TENANT_PERMISSIONS.has('edit_issuing_settings'));
+  assert.ok(TENANT_PERMISSION_DOMAINS.includes('invoices') && TENANT_DOMAIN_ENTITLEMENT.invoices === null, 'Invoices: a core domain, never plan-gated');
   for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
-    if (key === 'edit_role_levels') continue;
+    if (key === 'edit_role_levels' || key === 'edit_issuing_settings') continue;
     assert.deepEqual(entry, { key, plane: 'tenant', parent: 'customers', sensitive: false, threshold: THRESHOLD[key] });
     assert.ok(Object.isFrozen(entry), key);
     assert.ok(TENANT_PERMISSION_DOMAINS.includes(entry.parent), `${key}: its parent is a tenant domain`);
@@ -509,7 +515,13 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
       }
     }
   }
-  assert.ok(![...TENANT_ROUTE_PERMISSIONS.values()].some((e) => e.parent === 'invoices'), 'no invoice route permission: configuration only');
+  // No LEVEL-decided tenant route permission names Invoices: configuration only. The one that names it (M7B-INVOICES-ISSUE-P1)
+  // is the owner-only edit_issuing_settings, decided by role, never by the Invoices level — which changes nothing for it either.
+  assert.deepEqual([...TENANT_ROUTE_PERMISSIONS.values()].filter((e) => e.parent === 'invoices').map((e) => e.key), ['edit_issuing_settings']);
+  for (const roleId of TENANT_ROLE_IDS) for (const invoices of ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full']) {
+    assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: 'edit_issuing_settings', limitation: 'none', levels: { invoices } }),
+      roleId === 'store_owner' ? 'granted' : 'denied', `${roleId} invoices=${invoices}`);
+  }
   for (const levels of [{ invoices: 'Full' }, { invoices: null }, { invoices: '' }, { Invoices: 'view' }, { invoice: 'view' }, { customers: 'view', invoices: 'x' }, null, [], 'invoices']) {
     for (const roleId of TENANT_ROLE_IDS) {
       assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission: 'view_customers', limitation: 'none', levels }), 'denied', `${roleId} ${JSON.stringify(levels)}`);
@@ -525,8 +537,9 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-test('M7B: exactly four store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
-  assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()], ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts']);
+test('M7B: exactly six store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()],
+    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices']);
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
     { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
@@ -537,6 +550,11 @@ test('M7B: exactly four store route permissions, decided at store scope only, no
   // M7B-INVOICES-DISCARD-P1 (D-DIS-2): Invoices at Manage, and no corequisite.
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('discard_invoice_drafts'),
     { key: 'discard_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'manage' });
+  // M7B-INVOICES-ISSUE-P1 (doc 12 §10.2): the issue at Invoices Approve, the issued reads at Invoices View, each with Customers View.
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('issue_invoices'),
+    { key: 'issue_invoices', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_issued_invoices'),
+    { key: 'view_issued_invoices', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view', corequisite: { parent: 'customers', threshold: 'view' } });
   const subIds = new Set(TENANT_SUB_PERMISSIONS.map((sub) => sub.id));
   for (const [key, entry] of STORE_ROUTE_PERMISSIONS) {
     assert.ok(Object.isFrozen(entry) && (entry.corequisite === undefined || Object.isFrozen(entry.corequisite)), key);
@@ -700,4 +718,137 @@ test('M7B-INVOICES-DISCARD-P1 DSC-02 (D-DIS-2): discard_invoice_drafts is Invoic
     assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'discard_invoice_drafts', limitation: 'none', levels: {} }), 'denied', scope);
     assert.equal(canonicalPermission(scope, 'discard_invoice_drafts'), null, scope);
   }
+});
+
+// --- M7B-INVOICES-ISSUE-P1: issue_invoices at Invoices Approve, view_issued_invoices, and the owner-only issuing settings ----
+
+test('M7B-INVOICES-ISSUE-P1 (§10.2): the store guard admits Approve for exactly issue_invoices on Invoices with exactly a Customers View corequisite — any other key at Approve, that key at any other threshold, domain or corequisite, a sensitive entry, and Full anywhere are refused', () => {
+  assert.doesNotThrow(() => assertStoreRoutePermissions(STORE_ROUTE_PERMISSIONS), 'the shipped table loads');
+  const CUSTOMERS_VIEW = Object.freeze({ parent: 'customers', threshold: 'view' });
+  const entry = (key: string, threshold: string, over: Record<string, unknown> = {}) =>
+    Object.freeze({ key, plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold, corequisite: CUSTOMERS_VIEW, ...over });
+  const without = [...STORE_ROUTE_PERMISSIONS].filter(([key]) => key !== 'issue_invoices');
+  const table = (...extra: Array<[string, unknown]>) => new Map([...without, ...extra]) as never;
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table()), 'the table without the issue loads');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table(['issue_invoices', entry('issue_invoices', 'approve')])), 'the one Approve entry');
+  const { corequisite: _none, ...bare } = entry('issue_invoices', 'approve');
+  for (const [label, extra] of [
+    ['another key at Approve', ['approve_invoices', entry('approve_invoices', 'approve')]],
+    ['another key at Approve without a corequisite', ['approve_invoices', entry('approve_invoices', 'approve', { corequisite: undefined })]],
+    ['the issue at View', ['issue_invoices', entry('issue_invoices', 'view')]],
+    ['the issue at Create', ['issue_invoices', entry('issue_invoices', 'create')]],
+    ['the issue at Edit', ['issue_invoices', entry('issue_invoices', 'edit')]],
+    ['the issue at Manage', ['issue_invoices', entry('issue_invoices', 'manage')]],
+    ['the issue at Full', ['issue_invoices', entry('issue_invoices', 'full')]],
+    ['the issue with no threshold', ['issue_invoices', entry('issue_invoices', null as never)]],
+    ['the issue without its corequisite', ['issue_invoices', Object.freeze(bare)]],
+    ['the issue with a Customers Create corequisite', ['issue_invoices', entry('issue_invoices', 'approve', { corequisite: Object.freeze({ parent: 'customers', threshold: 'create' }) })]],
+    ['the issue with an Employees View corequisite', ['issue_invoices', entry('issue_invoices', 'approve', { corequisite: Object.freeze({ parent: 'employees', threshold: 'view' }) })]],
+    ['the issue on Customers', ['issue_invoices', entry('issue_invoices', 'approve', { parent: 'customers' })]],
+    ['the issue sensitive', ['issue_invoices', entry('issue_invoices', 'approve', { sensitive: true })]],
+    ['the issue under another entry key', ['issue_invoices', entry('view_issued_invoices', 'approve')]],
+    ['the discard at Approve', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'approve', { corequisite: undefined })]],
+    ['the issued reads at Approve', ['view_issued_invoices', entry('view_issued_invoices', 'approve')]],
+    ['another key at Full', ['purge_invoices', entry('purge_invoices', 'full')]],
+  ] as const) {
+    assert.throws(() => assertStoreRoutePermissions(table(extra as [string, unknown])),
+      /not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View/, label);
+  }
+  // The corequisite rule still holds for a View entry: Customers View on another domain, never on Invoices itself.
+  assert.throws(() => assertStoreRoutePermissions(table(['view_issued_invoices', entry('view_issued_invoices', 'view', { corequisite: Object.freeze({ parent: 'invoices', threshold: 'view' }) })])),
+    /corequisite is not View on another domain/);
+});
+
+test('M7B-INVOICES-ISSUE-P1 (§10.2): issue_invoices is Invoices at Approve or above AND Customers at View or above on every built-in role — Manage denies, Customers None denies, read-only never, the owner always', () => {
+  const decide = (roleId: string, levels: unknown = {}, limitation: 'none' | 'read_only' = 'none') =>
+    evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'issue_invoices', limitation, levels });
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r), decide(r, {}, 'read_only')]), [
+    ['store_owner', 'granted', 'denied'],
+    ['manager', 'granted', 'denied'],
+    ['technician', 'denied', 'denied'],
+    ['sales_staff', 'denied', 'denied'],
+  ], 'the owner and a default manager (Invoices Full) may issue; technician (View) and sales staff (Create) may not; read-only never');
+  const LEVELS = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+  for (const roleId of ['manager', 'technician', 'sales_staff']) {
+    for (const invoices of LEVELS) for (const customers of LEVELS) {
+      const expected = ['approve', 'full'].includes(invoices) && customers !== 'none' ? 'granted' : 'denied';
+      assert.equal(decide(roleId, { invoices, customers }), expected, `${roleId} invoices=${invoices} customers=${customers}`);
+      assert.equal(decide(roleId, { invoices, customers }, 'read_only'), 'denied', `${roleId} read_only invoices=${invoices} customers=${customers}`);
+    }
+  }
+  // Manage (the discard's threshold) alone does not issue; the role's name grants nothing.
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission: 'discard_invoice_drafts', limitation: 'none', levels: { invoices: 'manage' } }), 'granted');
+  assert.equal(decide('manager', { invoices: 'manage' }), 'denied');
+  assert.equal(decide('store_owner', { invoices: 'none', customers: 'none' }), 'granted', 'the owner is Full wherever it holds a store grant');
+  for (const levels of [null, [], 'x', { invoices: 'Approve' }, { invoice: 'full' }]) assert.equal(decide('manager', levels), 'denied', JSON.stringify(levels));
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission: 'issue_invoices', limitation: 'none' }), 'denied', 'no edits read');
+  for (const roleId of ['system_owner', 'cashier', '', 'Manager']) assert.equal(decide(roleId), 'denied', roleId);
+  for (const scope of ['tenant', 'platform'] as const) {
+    assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'issue_invoices', limitation: 'none', levels: {} }), 'denied', scope);
+    assert.equal(canonicalPermission(scope, 'issue_invoices'), null, scope);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1 (§10.2): view_issued_invoices is Invoices at View AND Customers at View — reachable read-only, denied without either', () => {
+  const decide = (roleId: string, levels: unknown = {}, limitation: 'none' | 'read_only' = 'none') =>
+    evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'view_issued_invoices', limitation, levels });
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r), decide(r, {}, 'read_only')]), [
+    ['store_owner', 'granted', 'granted'], ['manager', 'granted', 'granted'], ['technician', 'granted', 'granted'], ['sales_staff', 'granted', 'granted'],
+  ], 'every role holds Invoices and Customers at View by default; the read is reachable read-only');
+  for (const roleId of ['manager', 'technician', 'sales_staff']) {
+    assert.equal(decide(roleId, { invoices: 'none' }), 'denied', `${roleId}: Invoices None`);
+    assert.equal(decide(roleId, { customers: 'none' }), 'denied', `${roleId}: Customers None (the corequisite)`);
+    assert.equal(decide(roleId, { invoices: 'view', customers: 'view' }, 'read_only'), 'granted', `${roleId}: View and View read-only`);
+  }
+  for (const scope of ['tenant', 'platform'] as const) {
+    assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'view_issued_invoices', limitation: 'none', levels: {} }), 'denied', scope);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1 (§10.2, review b): edit_issuing_settings is the OWNER RULE exactly as edit_role_levels — the owner role at limitation none on readable edits, sensitive at Full, its parent always materialized for the owner', () => {
+  const decide = (permission: string, roleId: unknown, limitation: unknown = 'none', levels: unknown = {}, scope: unknown = 'tenant') =>
+    evaluateCanonicalPermission({ scope: scope as never, roleId: roleId as never, permission, limitation: limitation as never, levels });
+  // Every input decides the two owner-only keys identically.
+  const LEVELS = [{}, { invoices: 'none' }, { employees: 'none' }, { customers: 'full' }, { customers: 'bogus' }, null, undefined, []];
+  for (const roleId of [...TENANT_ROLE_IDS, ...PLATFORM_ROLE_IDS, 'owner', 'Store_Owner', null]) {
+    for (const limitation of ['none', 'read_only', 'limited']) for (const levels of LEVELS) for (const scope of ['tenant', 'store', 'platform']) {
+      assert.equal(decide('edit_issuing_settings', roleId, limitation, levels, scope), decide('edit_role_levels', roleId, limitation, levels, scope),
+        `${String(roleId)}/${limitation}/${JSON.stringify(levels)}/${scope}`);
+    }
+  }
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide('edit_issuing_settings', r), decide('edit_issuing_settings', r, 'read_only')]), [
+    ['store_owner', 'granted', 'denied'], ['manager', 'denied', 'denied'], ['technician', 'denied', 'denied'], ['sales_staff', 'denied', 'denied'],
+  ]);
+  // The owner rule's readability check reads the parent in the owner's materialized map: Invoices is always there.
+  assert.equal(materializeTenantPermissions('store_owner', {}, false, {}).invoices, 'full', 'the owner materializes Invoices (at Full)');
+  assert.equal(decide('edit_issuing_settings', 'manager', 'none', { invoices: 'full', customers: 'full', employees: 'full' }), 'denied', 'a widened manager is never the owner');
+  assert.equal(canonicalPermission('tenant', 'edit_issuing_settings')?.sensitive, true, 'sensitive: a command under it needs a recent-sign-in deadline');
+  for (const scope of ['store', 'platform'] as const) assert.equal(canonicalPermission(scope, 'edit_issuing_settings'), null, scope);
+});
+
+test('M7B-INVOICES-ISSUE-P1: the tenant guard admits exactly the two owner-only keys at sensitive Full; every other sensitive or above-Edit entry, and either owner-only key in any other shape, is refused', () => {
+  assert.doesNotThrow(() => assertTenantRoutePermissions(TENANT_ROUTE_PERMISSIONS), 'the shipped table loads');
+  const entry = (key: string, threshold: string, over: Record<string, unknown> = {}) =>
+    Object.freeze({ key, plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold, ...over });
+  const without = [...TENANT_ROUTE_PERMISSIONS].filter(([key]) => key !== 'edit_issuing_settings');
+  const table = (...extra: Array<[string, unknown]>) => new Map([...without, ...extra]) as never;
+  assert.doesNotThrow(() => assertTenantRoutePermissions(table()), 'the table without the settings key loads');
+  assert.doesNotThrow(() => assertTenantRoutePermissions(table(['edit_issuing_settings', entry('edit_issuing_settings', 'full')])), 'the owner-only entry');
+  for (const [label, extra, message] of [
+    ['the settings key not sensitive', ['edit_issuing_settings', entry('edit_issuing_settings', 'full', { sensitive: false })], /owner-only tenant route permission is not sensitive at Full/],
+    ['the settings key at Manage', ['edit_issuing_settings', entry('edit_issuing_settings', 'manage')], /owner-only tenant route permission is not sensitive at Full/],
+    ['the settings key under another entry key', ['edit_issuing_settings', entry('edit_role_levels', 'full')], /owner-only tenant route permission is not sensitive at Full/],
+    ['the settings key on a domain the materializer never answers', ['edit_issuing_settings', entry('edit_issuing_settings', 'full', { parent: 'issuing' })], /owner-only tenant route permission is not sensitive at Full on a tenant domain/],
+    ['the settings key on a platform feature', ['edit_issuing_settings', entry('edit_issuing_settings', 'full', { parent: 'command_center' })], /owner-only tenant route permission is not sensitive at Full on a tenant domain/],
+    ['the settings key with a corequisite', ['edit_issuing_settings', entry('edit_issuing_settings', 'full', { corequisite: Object.freeze({ parent: 'customers', threshold: 'view' }) })], /owner-only tenant route permission is not sensitive at Full/],
+    ['the settings key on the platform plane', ['edit_issuing_settings', entry('edit_issuing_settings', 'full', { plane: 'platform' })], /owner-only tenant route permission is not sensitive at Full/],
+    ['the role edit on a domain the materializer never answers', ['edit_role_levels', entry('edit_role_levels', 'full', { parent: 'roles' })], /owner-only tenant route permission is not sensitive at Full/],
+    ['a third sensitive key at Full', ['edit_store_settings', entry('edit_store_settings', 'full')], /not a non-sensitive View, Create or Edit threshold/],
+    ['a non-sensitive key at Full', ['edit_store_settings', entry('edit_store_settings', 'full', { sensitive: false })], /not a non-sensitive View, Create or Edit threshold/],
+    ['a non-sensitive key at Approve', ['approve_invoices', entry('approve_invoices', 'approve', { sensitive: false })], /not a non-sensitive View, Create or Edit threshold/],
+    ['a sensitive key at View', ['view_issuing_settings', entry('view_issuing_settings', 'view')], /not a non-sensitive View, Create or Edit threshold/],
+  ] as const) {
+    assert.throws(() => assertTenantRoutePermissions(table(extra as [string, unknown])), message, label);
+  }
+  assert.throws(() => assertTenantRoutePermissions(table(['reopen_invoice', entry('reopen_invoice', 'view', { sensitive: false })])), /collides with a tenant sub-permission/);
 });

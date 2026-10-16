@@ -309,7 +309,9 @@ export function composeReadTransactions<P>(
     const commands = writes.routes.flatMap((route) => (route.idempotency === 'required' && 'command' in route ? [route.command.contract] : []));
     if (commands.length !== writes.routes.length || commands.some((contract) => {
       const matching = writes.mutators.filter((mutator) => mutator.kind === contract.kind);
-      return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType;
+      // M7B-INVOICES-ISSUE-P1: and the sealed issuing pair opted into by both or by neither, never by one alone.
+      return matching.length !== 1 || matching[0].mode !== contract.mode || matching[0].aggregateType !== contract.aggregateType
+        || (matching[0].issuingRefusals === true) !== (contract.issuingRefusals === true);
     })) blockers.push('command_mutator_unavailable');
     // M7B-INVOICES-P1 (design R4): route scope = contract scope = mutator scope, one of the tenant root's {tenant, store} —
     // each scope as DECLARED, none defaulted: a contract or mutator without one (an untyped caller) is a mismatch.

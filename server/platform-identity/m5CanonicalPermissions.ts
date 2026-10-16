@@ -103,11 +103,23 @@
 // Decided exactly like the other three (the same materializer, canonical ordering, owner-edited levels and read_only rule,
 // which denies it: read_only caps at View), so Edit alone does not discard, Full (manager's default) does, and the owner
 // is Full wherever it holds a store grant; no key, default or ordering of the catalog changes.
+//
+// M7B-INVOICES-ISSUE-P1 UPDATE (docs/phase-4/12 §10.2) — TWO STORE KEYS AND A SECOND OWNER-ONLY TENANT KEY. issue_invoices, the
+// Invoices domain at Approve or above AND Customers at View or above on the same role, and view_issued_invoices, Invoices at
+// View AND Customers at View. The store guard is widened NARROWLY once more: the one entry admitted at Approve is exactly
+// issue_invoices on Invoices with exactly the Customers View corequisite — any other key at Approve, that key at any other
+// threshold or corequisite, and Full anywhere still refuse to load. edit_issuing_settings (GET and PUT
+// /api/v1/issuing-settings/{id}) is decided by the OWNER RULE exactly as edit_role_levels is: sensitive at Full, its parent a
+// domain the owner's materialized map always holds (Invoices), so the revalidator requires a recent-sign-in deadline for any
+// command under it, while a GET under it (recentAuth 'none') is decided exactly as GET /api/v1/roles/levels is. The tenant
+// guard admits exactly these two owner-only keys. No role-name shortcut beyond the adopted owner rule; no catalog default,
+// key or ordering changes.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
   PLATFORM_SUB_PERMISSIONS,
   TENANT_OWNER_ROLE_ID,
+  TENANT_PERMISSION_DOMAINS,
   TENANT_SUB_PERMISSIONS,
   isPermissionLevel,
   materializeTenantPermissions,
@@ -186,35 +198,53 @@ export const CANONICAL_TENANT_PERMISSIONS: ReadonlyMap<string, CanonicalPermissi
  *   * edit_customers   — PATCH /api/v1/customers/{id} (M7A-CUSTOMERS-P7): the Customers domain at Edit or above.
  *   * edit_role_levels — PUT /api/v1/roles/levels (M7A-CUSTOMERS-P3-R1): the OWNER RULE (header), sensitive. Its parent and
  *     threshold record where the product edits roles (Employees) and the level the owner holds there; neither is compared.
+ *   * edit_issuing_settings — GET and PUT /api/v1/issuing-settings/{id} (M7B-INVOICES-ISSUE-P1): the OWNER RULE, sensitive, as
+ *     edit_role_levels. Its parent, Invoices, is a domain the owner's materialized map always holds (the rule's readability
+ *     check); its threshold records the owner's level there and is not compared.
  */
 export const TENANT_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_customers', Object.freeze({ key: 'view_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'view' as const })],
   ['create_customers', Object.freeze({ key: 'create_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'create' as const })],
   ['edit_customers', Object.freeze({ key: 'edit_customers', plane: 'tenant' as const, parent: 'customers', sensitive: false, threshold: 'edit' as const })],
   ['edit_role_levels', Object.freeze({ key: 'edit_role_levels', plane: 'tenant' as const, parent: 'employees', sensitive: true, threshold: 'full' as const })],
+  ['edit_issuing_settings', Object.freeze({ key: 'edit_issuing_settings', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'full' as const })],
 ]));
 
-/** The tenant route permissions decided by the owner rule rather than a level: exactly edit_role_levels. */
-const OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['edit_role_levels']);
+/** The tenant route permissions decided by the owner rule rather than a level: exactly edit_role_levels and edit_issuing_settings. */
+const OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['edit_role_levels', 'edit_issuing_settings']);
 
 /**
  * The thresholds a tenant route permission may carry. THE READ_ONLY RULE: a read_only limitation grants a tenant route
  * permission only at threshold View — the materializer caps every domain at View, and evaluateCanonicalPermission
  * denies every threshold above View under read_only before anything is materialized — so a Create or Edit permission
  * is DENIED under read_only. A sensitive permission, or one above Edit, needs its own rule before it is added: the one
- * such rule is the owner rule, admitted here for exactly the sensitive, Full-threshold edit_role_levels and nothing else.
+ * such rule is the owner rule, admitted here for exactly the sensitive, Full-threshold edit_role_levels and (M7B-INVOICES-ISSUE-P1)
+ * edit_issuing_settings, and nothing else.
  */
 const TENANT_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
-for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
-  if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
-  if (OWNER_ONLY_ROUTE_PERMISSIONS.has(key)) {
-    if (!entry.sensitive || entry.threshold !== 'full') throw new Error('an owner-only tenant route permission is not sensitive at Full');
-    continue;
-  }
-  if (entry.sensitive || entry.threshold === null || !TENANT_ROUTE_THRESHOLDS.has(entry.threshold)) {
-    throw new Error('tenant route permission is not a non-sensitive View, Create or Edit threshold');
+/**
+ * The load-time guard over a tenant route permission table: throws unless every entry is a non-sensitive View, Create or Edit
+ * threshold, or is one of the two owner-only keys sensitive at Full on the tenant plane, with no corequisite, its parent a
+ * tenant domain — every one of which the materializer answers for a known role, so the owner rule's readability check
+ * (hasOwn(materialized, parent)) can pass. Exported (M7B-INVOICES-ISSUE-P1) so its refusals can be exercised; the module runs
+ * it on TENANT_ROUTE_PERMISSIONS below and refuses to load otherwise.
+ */
+export function assertTenantRoutePermissions(permissions: ReadonlyMap<string, CanonicalPermission>): void {
+  for (const [key, entry] of permissions) {
+    if (CANONICAL_TENANT_PERMISSIONS.has(key)) throw new Error('tenant route permission collides with a tenant sub-permission');
+    if (OWNER_ONLY_ROUTE_PERMISSIONS.has(key)) {
+      if (entry.key !== key || entry.plane !== 'tenant' || !entry.sensitive || entry.threshold !== 'full' || entry.corequisite !== undefined
+        || !TENANT_PERMISSION_DOMAINS.includes(entry.parent)) {
+        throw new Error('an owner-only tenant route permission is not sensitive at Full on a tenant domain');
+      }
+      continue;
+    }
+    if (entry.sensitive || entry.threshold === null || !TENANT_ROUTE_THRESHOLDS.has(entry.threshold)) {
+      throw new Error('tenant route permission is not a non-sensitive View, Create or Edit threshold');
+    }
   }
 }
+assertTenantRoutePermissions(TENANT_ROUTE_PERMISSIONS);
 
 /**
  * The STORE route permissions (M7B-INVOICES-P1): decided at STORE scope only, for a store-scope grant at exactly the
@@ -235,6 +265,11 @@ for (const [key, entry] of TENANT_ROUTE_PERMISSIONS) {
  *     eligibility GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility (M7B-INVOICES-DISCARD-P1): the
  *     Invoices domain at Manage or above, and nothing else (no Customers corequisite, no recent sign-in). Edit alone does not
  *     reach it; read-only never does (the read_only rule: View only).
+ *   * issue_invoices — POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue, its eligibility and its preview
+ *     (M7B-INVOICES-ISSUE-P1): the Invoices domain at Approve or above AND the Customers domain at View or above. Manage alone
+ *     does not reach it; read-only never does. The one entry admitted at Approve.
+ *   * view_issued_invoices — GET /api/v1/stores/{storeId}/invoices[/{id}] (M7B-INVOICES-ISSUE-P1): the Invoices domain at View
+ *     or above AND the Customers domain at View or above (an issued invoice names its customer).
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
@@ -244,26 +279,41 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
   })],
   ['edit_invoice_drafts', Object.freeze({ key: 'edit_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'edit' as const })],
   ['discard_invoice_drafts', Object.freeze({ key: 'discard_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'manage' as const })],
+  ['issue_invoices', Object.freeze({
+    key: 'issue_invoices', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'approve' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
+  ['view_issued_invoices', Object.freeze({
+    key: 'view_issued_invoices', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
 ]));
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
 /** The one store route permission admitted at Manage (M7B-INVOICES-DISCARD-P1): exactly this key, on Invoices, no corequisite. */
 const STORE_ROUTE_MANAGE_KEY = 'discard_invoice_drafts';
+/** The one store route permission admitted at Approve (M7B-INVOICES-ISSUE-P1): exactly this key, on Invoices, Customers View. */
+const STORE_ROUTE_APPROVE_KEY = 'issue_invoices';
 
 /**
  * The load-time guard over a store route permission table: throws unless every entry is non-sensitive at View, Create or
- * Edit, or is exactly the discard pair (key discard_invoice_drafts, parent invoices, threshold manage, no corequisite); any
- * other key at Manage, that key at any other threshold, and Approve or Full anywhere are refused. Exported so its refusals
- * can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
+ * Edit, or is exactly the discard pair (key discard_invoice_drafts, parent invoices, threshold manage, no corequisite), or
+ * exactly the issue entry (key issue_invoices, parent invoices, threshold approve, corequisite exactly Customers View); any
+ * other key at Manage or Approve, either key at any other threshold or corequisite, and Full anywhere are refused. Exported
+ * so its refusals can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
  */
 export function assertStoreRoutePermissions(permissions: ReadonlyMap<string, CanonicalPermission>): void {
   for (const [key, entry] of permissions) {
     if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
     const manage = key === STORE_ROUTE_MANAGE_KEY;
+    const approve = key === STORE_ROUTE_APPROVE_KEY;
     if (entry.sensitive || entry.threshold === null || (manage
       ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'manage' || entry.corequisite !== undefined
-      : !STORE_ROUTE_THRESHOLDS.has(entry.threshold))) {
-      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage');
+      : approve
+        ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'approve'
+          || entry.corequisite?.parent !== 'customers' || entry.corequisite.threshold !== 'view'
+        : !STORE_ROUTE_THRESHOLDS.has(entry.threshold))) {
+      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View');
     }
     const corequisite = entry.corequisite;
     if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {

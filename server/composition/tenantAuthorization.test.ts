@@ -633,6 +633,45 @@ test('M7TL-05 the revalidator decides edit_role_levels on a fresh authentication
     .revalidate('tx', technician, 'create_customers', null, KEY), true);
 });
 
+// --- edit_issuing_settings: the second owner-only key, decided exactly as edit_role_levels (M7B-INVOICES-ISSUE-P1) -------
+
+const SETTINGS_GET: RouteView = Object.freeze({ method: 'GET', path: '/api/v1/issuing-settings/{id}', audience: 'tenant' });
+const SETTINGS_PUT: RouteView = Object.freeze({ method: 'PUT', path: '/api/v1/issuing-settings/{id}', audience: 'tenant' });
+const EDIT_ISSUING_SETTINGS: AuthorizationRequirement = Object.freeze({ scope: 'tenant', permission: 'edit_issuing_settings' });
+
+test('M7B-INVOICES-ISSUE-P1 (review b, c): the route authorizer decides edit_issuing_settings by the OWNER RULE exactly as edit_role_levels — the GET (recentAuth none) as GET /api/v1/roles/levels, the PUT the same', async () => {
+  const ROLES_GET: RouteView = Object.freeze({ method: 'GET', path: '/api/v1/roles/levels', audience: 'tenant' });
+  for (const roleId of TENANT_ROLE_IDS) {
+    for (const [answer, levels] of [[admitted([grant({ roleId })]), {}], [admitted([grant({ roleId })]), { invoices: 'full', employees: 'full' }],
+      [admitted([grant({ roleId, tenantStatus: 'read_only' })]), {}], [admitted([grant({ roleId })], 'read_only'), {}], [admitted([grant({ roleId })]), { customers: 'bogus' }]] as const) {
+      const expected = grantedOf(await withLevels(stub(answer), levels).decide(EDIT_ROLE_LEVELS, ROLES_GET));
+      for (const route of [SETTINGS_GET, SETTINGS_PUT]) {
+        assert.equal(grantedOf(await withLevels(stub(answer), levels).decide(EDIT_ISSUING_SETTINGS, route)), expected, `${roleId} ${route.method} ${JSON.stringify(levels)}`);
+      }
+    }
+  }
+  assert.ok(grantedOf(await withLevels(stub(admitted([grant()])), {}).decide(EDIT_ISSUING_SETTINGS, SETTINGS_GET)), 'the owner reads the settings with no recent sign-in');
+  assert.equal(grantedOf(await withLevels(stub(admitted([grant({ roleId: 'manager' })])), { invoices: 'full' }).decide(EDIT_ISSUING_SETTINGS, SETTINGS_GET)), false, 'never a manager');
+  const storeOwner = withLevels(stub(admitted([grant({ scopeType: 'store', store: STORE, storeStatus: 'active' })])), {});
+  assert.equal(await storeOwner.decide({ scope: 'store', permission: 'edit_issuing_settings' }, STORE_ROUTE), false, 'names nothing at store scope');
+  assert.equal(grantedOf(await storeOwner.decide(EDIT_ISSUING_SETTINGS, SETTINGS_GET)), false, 'a store owner grant alone never satisfies it');
+});
+
+test('M7B-INVOICES-ISSUE-P1 (review c): the revalidator requires a recent-sign-in deadline for any command under edit_issuing_settings, judges it on the committing handle, and re-decides the owner — as for edit_role_levels', async () => {
+  const owner = { ...SCOPE, roleId: 'store_owner' };
+  for (const [label, deadline] of [['no deadline (a command declaring recentAuth none)', null], ['a zero deadline', 0], ['a fractional deadline', 1.5]] as const) {
+    const { revalidate, steps } = revalidator({ read: admitted([grant()]) });
+    assert.equal(await revalidate('tx', owner, 'edit_issuing_settings', deadline, KEY), false, label);
+    assert.deepEqual(steps, [], `${label}: refused before anything is read`);
+  }
+  const { revalidate, steps } = revalidator({ read: admitted([grant()]) });
+  assert.equal(await revalidate('tx', owner, 'edit_issuing_settings', 1_700_000_000_000, KEY), true);
+  assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'fresh', 'levels'], 'the clock after every lock');
+  assert.equal(await revalidator({ read: admitted([grant()]), fresh: false }).revalidate('tx', owner, 'edit_issuing_settings', 1_700_000_000_000, KEY), false, 'past its deadline');
+  assert.equal(await revalidator({ levels: { invoices: 'full' } }).revalidate('tx', SCOPE, 'edit_issuing_settings', 1_700_000_000_000, KEY), false, 'a manager');
+  assert.equal(await revalidator({ read: admitted([grant({ roleId: 'manager' })]) }).revalidate('tx', owner, 'edit_issuing_settings', 1_700_000_000_000, KEY), false, 're-roled since');
+});
+
 // --- edit_customers: the route decision and its revalidation (M7A-CUSTOMERS-P7) ----------------------------------------
 
 const UPDATE_ROUTE: RouteView = Object.freeze({ method: 'PATCH', path: '/api/v1/customers/{id}', audience: 'tenant' });

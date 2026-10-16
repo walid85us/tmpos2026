@@ -13,7 +13,7 @@ import { createApp, createBoundedServer, createReadinessState } from './app.js';
 import type { AppDeps } from './app.js';
 import { COMMAND_TRANSACTION_DEADLINE_MS, commitCommand, createCommandTransactions, defineCommands, prepareCommand } from './commandTransaction.js';
 import type { CommandContract, CommandTransactionPort, TransactionCommand } from './commandTransaction.js';
-import { IDEMPOTENCY_POLICY, createIdempotencyKeyring } from './idempotency.js';
+import { IDEMPOTENCY_POLICY, createIdempotencyKeyring, envelopeFromOutcome, refusalEnvelope } from './idempotency.js';
 import { TEST_IDEMPOTENCY_KEY, createMemoryIdempotencyStore } from './idempotencyStore.testkit.js';
 import { defineOutboxEvents } from './outbox.js';
 import { testRequestLimits } from './rateLimiter.testkit.js';
@@ -406,6 +406,8 @@ interface Harness { port: number; logs: string[]; plans: CommandContext[]; commi
 interface Setup {
   plan?: CommandPlanner; renamePlan?: CommandPlanner; port?: (inner: CommandTransactionPort, state: MemoryTransactionalState) => CommandTransactionPort; deadlineMs?: number;
   store?: (inner: ReturnType<typeof createMemoryIdempotencyStore>) => ReturnType<typeof createMemoryIdempotencyStore>;
+  /** More synthetic command routes beside the two (M7B-INVOICES-ISSUE-P1), each planned and recorded like them. */
+  extra?: readonly RouteDefinition[];
 }
 
 /** Serve synthetic command routes over one synthetic store, recording what crosses the port; always closes the server. */
@@ -422,6 +424,7 @@ async function withCommands(setup: Setup, fn: (h: Harness) => Promise<void>): Pr
   const routes: RouteDefinition[] = [
     { method: 'POST', path: '/v1/items', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_CREATE, plan: (ctx) => { plans.push(ctx); return planner(ctx); } } },
     { method: 'POST', path: '/v1/items/rename', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: TEST_RENAME, plan: (ctx) => { plans.push(ctx); return (setup.renamePlan ?? renamePlanner)(ctx); } } },
+    ...(setup.extra ?? []).map((r) => ('command' in r ? { ...r, command: { ...r.command, plan: (ctx: CommandContext) => { plans.push(ctx); return r.command.plan(ctx); } } } : r)),
   ];
   const readiness = createReadinessState();
   readiness.setReady();
@@ -889,4 +892,132 @@ test('M7B-INVOICES-P1 AC-05: customer_not_found is obeyed only as an exact answe
   assert.ok(prepared !== null && prepared.command.rejected.customerNotFound !== null);
   assert.deepEqual(keyring.unseal(prepared.command.rejected.customerNotFound, op), prepared.rejected.customerNotFound);
   assert.deepEqual(prepared.rejected.customerNotFound, { status: 422, contentType: 'application/json; charset=utf-8', headers: {}, body: '{"error":"customer_not_found"}' });
+});
+
+// --- M7B-INVOICES-ISSUE-P1: the issuing pair an update opts into, the issue's precondition and the settings create's 404 -----
+
+/** The rename, opted into the issuing pair under the issue's kind (synthetic: an item, its rename event). */
+const ISSUING_RENAME = Object.freeze({ ...TEST_RENAME, kind: 'store.invoice.issue', issuingRefusals: true as const });
+/** The create under the settings write's kind (synthetic). */
+const SETTINGS_CREATE = Object.freeze({ ...TEST_CREATE, kind: 'tenant.issuing_settings.update' });
+const issuingRoutes: RouteDefinition[] = [
+  { method: 'POST', path: '/v1/items/issue', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: ISSUING_RENAME, plan: renamePlanner } },
+  { method: 'POST', path: '/v1/items/settings', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: SETTINGS_CREATE, plan: createPlanner } },
+];
+/** A port that records the command's sealed issuing refusal `word` as the completion, in the one commit, as the store does. */
+const recordingIssuing = (word: 'issuing_not_configured' | 'amount_out_of_range') => (_inner: CommandTransactionPort, state: MemoryTransactionalState): CommandTransactionPort => ({
+  commit: (c) => {
+    const record = state.idempotency.records.get(c.scope);
+    const sealed = word === 'issuing_not_configured' ? c.rejected.issuingNotConfigured : c.rejected.amountOutOfRange;
+    if (record === undefined || record.lease !== c.lease || record.response !== null || sealed === undefined) return { outcome: 'unavailable' };
+    state.idempotency.records.set(c.scope, { ...record, response: sealed });
+    return { outcome: word };
+  },
+  probe: () => true,
+});
+
+test('M7B-INVOICES-ISSUE-P1: issuingRefusals registers on an update alone and only as exactly true; a contract that does not declare it keeps its fields', () => {
+  const registered = defineCommands([ISSUING_RENAME, TEST_RENAME, TEST_CREATE], events);
+  assert.deepEqual(Object.keys(registered.contract('store.invoice.issue') as object), ['kind', 'mode', 'aggregateType', 'changes', 'events', 'contextScope', 'issuingRefusals']);
+  assert.equal(registered.contract('store.invoice.issue')?.issuingRefusals, true);
+  assert.equal(Object.hasOwn(registered.contract(TEST_RENAME.kind) as object, 'issuingRefusals'), false, 'not declared, not present');
+  for (const [label, bad] of [
+    ['a create opting in', { ...TEST_CREATE, issuingRefusals: true }],
+    ['a create opting into both', { ...TEST_CREATE, sealedRefusal: 'customer_not_found', issuingRefusals: true }],
+    ['false', { ...TEST_RENAME, issuingRefusals: false }], ['a word', { ...TEST_RENAME, issuingRefusals: 'true' }], ['one', { ...TEST_RENAME, issuingRefusals: 1 }],
+    ['undefined', { ...TEST_RENAME, issuingRefusals: undefined }], ['an update with the create\'s 422', { ...TEST_RENAME, sealedRefusal: 'customer_not_found', issuingRefusals: true }],
+  ] as const) {
+    assert.throws(() => defineCommands([bad], events), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', label);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: an opted-in update seals the two typed 409s from the runtime\'s words; every other command\'s rejected keeps exactly its three keys', () => {
+  const opted = defineCommands([ISSUING_RENAME], events).contract('store.invoice.issue') as CommandContract;
+  const plan = { aggregateId: randomUUID(), expectedVersion: 1, changes: { name: 'n' }, events: [], response: { status: 200, body: { ok: true } } };
+  const b = binding();
+  const prepared = prepareCommand(opted, events, plan, b);
+  assert.ok(prepared !== null);
+  assert.deepEqual(Object.keys(prepared.command.rejected).sort(), ['amountOutOfRange', 'conflict', 'customerNotFound', 'invalidState', 'issuingNotConfigured']);
+  assert.deepEqual(Object.keys(prepared.rejected).sort(), ['amountOutOfRange', 'conflict', 'customerNotFound', 'invalidState', 'issuingNotConfigured']);
+  assert.equal(prepared.command.rejected.customerNotFound, null);
+  for (const [slot, word] of [['issuingNotConfigured', 'issuing_not_configured'], ['amountOutOfRange', 'amount_out_of_range']] as const) {
+    const envelope = { status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ error: word }) };
+    assert.deepEqual(prepared.rejected[slot], envelope, slot);
+    assert.deepEqual(keyring.unseal(prepared.command.rejected[slot] as string, op), envelope, `${slot}: sealed under the operation`);
+  }
+  for (const [label, contract, raw] of [['the plain rename', rename, plan], ['a create', create, createPlan(b.newAggregateId)]] as const) {
+    const plain = prepareCommand(contract, events, raw, b);
+    assert.ok(plain !== null, label);
+    assert.deepEqual(Object.keys(plain.command.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], `${label}: three keys, no new one`);
+    assert.deepEqual(Object.keys(plain.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], `${label}: three envelopes`);
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: the two words are obeyed only as exact answers, are reserved — an outcome may not spell them — and mint at 409 alone', async () => {
+  const command = commandOf();
+  const verdictOf = (answer: unknown): Promise<unknown> =>
+    commitCommand(createCommandTransactions({ port: { commit: () => answer, probe: () => true } }), command, 1_000);
+  assert.equal(await verdictOf({ outcome: 'issuing_not_configured' }), 'transaction_issuing_not_configured');
+  assert.equal(await verdictOf({ outcome: 'amount_out_of_range' }), 'transaction_amount_out_of_range');
+  for (const answer of [{ outcome: 'issuing_not_configured', status: 409 }, { outcome: 'ISSUING_NOT_CONFIGURED' }, { outcome: 'amount_out_of_range ' }, { outcome: 'not_configured' }]) {
+    assert.equal(await verdictOf(answer), 'transaction_outcome_invalid', JSON.stringify(answer));
+  }
+  for (const word of ['issuing_not_configured', 'amount_out_of_range']) {
+    assert.equal(envelopeFromOutcome({ status: 409, body: { error: word } }), null, `${word}: an outcome may not borrow it`);
+    assert.equal(envelopeFromOutcome({ status: 422, body: { error: word } }), null, `${word}: at any status`);
+    assert.deepEqual(refusalEnvelope(word), { status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ error: word }) });
+  }
+  assert.equal(refusalEnvelope('not_configured'), null);
+});
+
+test('M7B-INVOICES-ISSUE-P1 §10.6: an opted-in update\'s issuing_not_configured and amount_out_of_range are sent as recorded and replay; a contract that did not opt in answering either is a 503 that records nothing', async () => {
+  for (const word of ['issuing_not_configured', 'amount_out_of_range'] as const) {
+    await withCommands({ port: recordingIssuing(word), extra: issuingRoutes }, async ({ port, logs, plans }) => {
+      const key = randomUUID();
+      const body = renameBody();
+      const refused = await post(port, { key, path: '/v1/items/issue', body });
+      assert.deepEqual([refused.status, JSON.parse(refused.body)], [409, { error: word }], `${word}: the sealed body alone`);
+      assert.equal(refused.headers['idempotent-replayed'], undefined, 'the first answer is the decision');
+      const replay = await post(port, { key, path: '/v1/items/issue', body });
+      assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed']], [409, refused.body, 'true'], `${word}: replayed byte for byte`);
+      assert.equal(plans.length, 1, 'planned once');
+      assert.deepEqual((await reasons(logs, 2)), [`transaction_${word}`, 'idempotency_replayed']);
+    });
+    await withCommands({ port: answering(word), extra: issuingRoutes }, async ({ port, logs }) => {
+      const key = randomUUID();
+      const body = renameBody();
+      const renamed = await post(port, { key, path: '/v1/items/rename', body });
+      assert.deepEqual([renamed.status, errorOf(renamed)], [503, 'service_unavailable'], `${word}: not opted in`);
+      const waiting = await post(port, { key, path: '/v1/items/rename', body });
+      assert.deepEqual([waiting.status, errorOf(waiting)], [409, 'request_in_progress'], 'nothing recorded: the key waits out its lease');
+      const created = await post(port, { key: randomUUID(), path: '/v1/items/settings' });
+      assert.deepEqual([created.status, errorOf(created)], [503, 'service_unavailable'], `${word}: a create never answers it`);
+      assert.deepEqual((await reasons(logs, 3)).filter((r) => r === `transaction_${word}`).length, 2);
+    });
+  }
+});
+
+test('M7B-INVOICES-ISSUE-P1: the issue\'s kind answers precondition_failed with the UNSEALED 409; the settings create\'s kind answers not_found with the unsealed 404 — every other create\'s not_found stays the 503', async () => {
+  await withCommands({ port: answering('precondition_failed'), extra: issuingRoutes }, async ({ port, logs }) => {
+    const key = randomUUID();
+    const body = renameBody();
+    const refused = await post(port, { key, path: '/v1/items/issue', body });
+    assert.deepEqual([refused.status, errorOf(refused), Object.keys(JSON.parse(refused.body)).sort()], [409, 'write_conflict', ['error', 'requestId']]);
+    const retry = await post(port, { key, path: '/v1/items/issue', body });
+    assert.deepEqual([retry.status, errorOf(retry)], [409, 'request_in_progress'], 'nothing recorded');
+    const renamed = await post(port, { key: randomUUID(), path: '/v1/items/rename', body: renameBody() });
+    assert.deepEqual([renamed.status, errorOf(renamed)], [503, 'service_unavailable'], 'another update\'s precondition stays the 503');
+    assert.equal((await reasons(logs, 3))[0], 'transaction_precondition_failed');
+  });
+  await withCommands({ port: answering('not_found'), extra: issuingRoutes }, async ({ port, logs, state }) => {
+    const key = randomUUID();
+    const missing = await post(port, { key, path: '/v1/items/settings' });
+    assert.deepEqual([missing.status, errorOf(missing), Object.keys(JSON.parse(missing.body)).sort()], [404, 'not_found', ['error', 'requestId']]);
+    const waiting = await post(port, { key, path: '/v1/items/settings' });
+    assert.deepEqual([waiting.status, errorOf(waiting)], [409, 'request_in_progress'], 'nothing recorded: the key waits out its lease');
+    const created = await post(port, { key: randomUUID() });
+    assert.deepEqual([created.status, errorOf(created)], [503, 'service_unavailable'], 'any other create never answers 404');
+    assert.equal(inspectMemoryState(state).aggregates.length, 0);
+    assert.equal((await reasons(logs, 3))[0], 'transaction_not_found');
+  });
 });
