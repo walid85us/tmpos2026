@@ -77,6 +77,21 @@
 //   IDDH-17 (DSC-25 AC-07) a sealed 200, a sealed conflict and a sealed invalid_state under three keys: after the owner's
 //           PUT lowers the manager to Edit each same-key retry is the 403, a revoked session's the 401; after the PUT restores
 //           Full each replays its retained bytes; that draft's rows, audit records and completions never move.
+//   IDDH-19 (DSC-09; M7B-INVOICES-DISCARD-P1-R1) the 1 KiB body bound and the media type over real sockets, six subtests:
+//           (A) a valid discard commits through Node's client and through the hand framing; (B) a declared length over the
+//           bound is the 413 body_declared_too_large from the headers alone — with no body byte sent, with no session, with a
+//           cross-site Origin, with neither CSRF header, with text/plain, from an actor below Invoices Manage; (C) a chunked
+//           body with no Content-Length is read under the cap and past it is the 413 body_streamed_too_large — at the
+//           crossing, on a stream never finished, counted in bytes (a multibyte body under 1,024 characters but over 1,024
+//           bytes, never finished); after the session (none: the 401) and the authorizer (an actor below Invoices Manage: its
+//           403), before the key (none or malformed: still the 413), a coding beside chunked the 400, Content-Length beside it
+//           the parser's 400; (D) any type but application/json(;charset=utf-8) (with a cross-site Origin, with neither CSRF
+//           header, from an actor below Invoices Manage too), two Content-Type lines, none with a body (no session either)
+//           and any Content-Encoding are the 415; none and no body the 400 body_required; ;charset=UTF-8 and
+//           "; charset=utf-8" commit; (E) exactly 1,024 bytes commits declared and chunked, 1,025 is the 413 both ways; (F) a
+//           key refused at the bound stays fresh and then discards. Each app-layer refusal is { error, requestId } echoing
+//           nothing (C6's 400 is Node's own parser's, with no app body), the target draft as it was, NOTHING written and no
+//           idempotency record for its key; the request limiter's unit is spent and only recorded.
 //   IDDH-18 (DSC-22) no log line carries a description, a customer, a draft, a tenant or store id, a session key, a CSRF
 //           token or an Idempotency-Key — nor does the server log of a cluster this file started (run last).
 //
@@ -655,7 +670,8 @@ async function withEntry(fn) {
     }, typeof body === 'string' ? body : JSON.stringify(body), { localAddress: from });
   };
   const ctx = {
-    relay, port, lines, stop,
+    // `from`: the entry's loopback source address (the limiter's subject), for IDDH-19's hand-framed requests.
+    relay, port, from, lines, stop,
     read: (s, path, headers = {}) => send(port, 'GET', path,
       { host: TENANT_HOST, ...(s === null ? {} : { cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf }), ...headers }, undefined, { localAddress: from }),
     get: (s, store, id) => ctx.read(s, `/api/v1/stores/${store}/invoice-drafts/${id}`),
@@ -1998,6 +2014,347 @@ test('IDDH-17 (DSC-25 AC-07): a sealed 200, a sealed conflict and a sealed inval
     await replays('after the restore');
     assert.deepEqual({ id: await replayFootprint(id, keys), stale: await replayFootprint(stale, keys) }, settled, 'restored: still nothing moved');
     assert.equal((await counts([T])).A, 1, 'one discard audit record in all');
+  });
+});
+
+// ===========================================================================
+// IDDH-19: the body bound and the media type at the request boundary (raw sockets)
+// ===========================================================================
+
+/** A raw HTTP/1.1 answer's head and its Content-Length body, or null until both arrived (customerCreate's M7CC-07 parser). */
+function parseHttpHead(raw) {
+  const idx = raw.indexOf('\r\n\r\n');
+  if (idx === -1) return null;
+  const lines = raw.slice(0, idx).split('\r\n');
+  const m = /^HTTP\/\d\.\d (\d{3})/.exec(lines[0] ?? '');
+  if (m === null) return null;
+  const headers = {};
+  for (const l of lines.slice(1)) {
+    const at = l.indexOf(':');
+    if (at < 0) continue;
+    headers[l.slice(0, at).trim().toLowerCase()] = l.slice(at + 1).trim();
+  }
+  const bodyStart = idx + 4;
+  const len = Number(headers['content-length'] ?? '0');
+  if (raw.length - bodyStart < len) return null;
+  return { status: Number(m[1]), headers, body: raw.slice(bodyStart, bodyStart + len) };
+}
+/**
+ * One hand-framed request written in ONE piece over a fresh socket (M7CC-07's pattern): Node's client always frames a body it
+ * is handed whole with a Content-Length, and a client racing a close mid-upload can surface a reset instead of the answer.
+ * Settles once the head and its Content-Length body arrived, or { status: 0 } on an error, a close or the deadline.
+ */
+function rawRequest(port, text, { localAddress, timeoutMs = WAIT_MS } = {}) {
+  return new Promise((resolve) => {
+    const options = { port, host: '127.0.0.1' };
+    if (localAddress) options.localAddress = localAddress;
+    const socket = net.connect(options);
+    let raw = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(parseHttpHead(raw) ?? { status: 0, headers: {}, body: raw }), timeoutMs);
+    socket.on('connect', () => socket.write(text));
+    socket.on('data', (chunk) => {
+      raw += chunk.toString('latin1');
+      const parsed = parseHttpHead(raw);
+      if (parsed !== null) finish(parsed);
+    });
+    socket.on('error', () => finish({ status: 0, headers: {}, body: '' }));
+    socket.on('close', () => finish(parseHttpHead(raw) ?? { status: 0, headers: {}, body: raw }));
+  });
+}
+/**
+ * A hand-framed POST at `path` from the entry's own source address: the tenant Host, Origin and pre-session CSRF, the session's
+ * cookie and CSRF token (none for s === null), the Idempotency-Key when one is given (registered as a log canary and for the
+ * teardown), then `lines` (each ending CRLF) and `tail` as the body bytes. No Connection header is sent, so a Connection: close
+ * in the answer is the server's own. `csrf: false` leaves out both CSRF headers (the pre-session one and the session's).
+ */
+function rawUnsafe(ctx, s, path, lines, tail = '', key = null, { csrf = true } = {}) {
+  if (key !== null) {
+    SECRETS.add(key);
+    if (s !== null) USED_KEYS.push({ key, principal: s.principal });
+  }
+  const head = [`Host: ${TENANT_HOST}`, `Origin: ${TENANT_ORIGIN}`, 'Sec-Fetch-Site: same-origin', ...(csrf ? [`${CSRF_HEADER}: ${CSRF_HEADER_VALUE}`] : []),
+    ...(s === null ? [] : [`Cookie: ${s.cookie}`, ...(csrf ? [`${SESSION_CSRF_HEADER}: ${s.csrf}`] : [])]), ...(key === null ? [] : [`Idempotency-Key: ${key}`])];
+  return rawRequest(ctx.port, `POST ${path} HTTP/1.1\r\n${head.map((l) => `${l}\r\n`).join('')}${lines}\r\n${tail}`, { localAddress: ctx.from });
+}
+/**
+ * `text` hand-framed as chunks of `size` characters and the last chunk; no trailer. Each chunk-size field is that piece's
+ * UTF-8 byte length (rawRequest writes UTF-8), so a multibyte piece is framed by its bytes; for ASCII a character is a byte.
+ * With `finished` false the last chunk is left off: the body never ends (rawRequest never half-closes its socket).
+ */
+const chunked = (text, size, finished = true) => {
+  let out = '';
+  for (let i = 0; i < text.length; i += size) {
+    const piece = text.slice(i, i + size);
+    out += `${Buffer.byteLength(piece).toString(16)}\r\n${piece}\r\n`;
+  }
+  return finished ? `${out}0\r\n\r\n` : out;
+};
+/**
+ * The request limiter's buckets (every namespace): read as evidence only — every request here spends one unit of it. The
+ * figure is approximate (a window that rolls between two reads resets its consumed count), so it is recorded, never asserted.
+ */
+const limiterSpent = async () => (await owner`select coalesce(sum(consumed), 0)::int as n from tmpos_rate_limit.bucket`)[0].n;
+
+test('IDDH-19 (DSC-09, doc 11 §5 B; M7B-INVOICES-DISCARD-P1-R1): the discard body is bounded at exactly 1 KiB on the real entry over real sockets — a valid discard at exactly 1,024 bytes commits declared and chunked; one byte over and far over is the 413, judged from the declared length before Origin, both CSRF headers, the session and the authorizer, and on the bytes streamed — at the crossing, before the stream ends, in bytes not characters — after the session and the authorizer and before the key; an unsupported Content-Type (before Origin, both CSRF headers and the authorizer), a duplicated one, a missing one with a body (before the session) and any Content-Encoding are the 415; each app-layer refusal (not the HTTP parser 400 for Content-Length beside chunked) answers only { error, requestId }, moves no draft, writes no audit record, outbox row, idempotency record, lease or completion (the request limiter spends its unit), and leaves its key fresh', async (t) => {
+  const T = await newTenant('iddh19');
+  const S = await newStore(T, 'IDDH19 store');
+  const C = await newCustomer(T, 'iddh19');
+  const who = await actor('iddh19', [storeGrant(T, S, 'manager')]);
+  // The default technician holds Invoices below Manage: the authorizer's 403 (IDDH-02).
+  const tech = await actor('iddh19-tech', [storeGrant(T, S, 'technician')]);
+  const BOUND = 1024; // INVOICE_DRAFT_DISCARD_MAX_BODY_BYTES, pinned here as a literal
+  await withEntry(async (ctx) => {
+    const s = await signIn(ctx, who);
+    const sTech = await signIn(ctx, tech);
+    const draft = async (label) => seed(ctx, s, S, T, C, [line(described(`bound ${label}`), 1, 1)]);
+    const drafts = [];
+    for (const label of ['positive', 'positive raw', 'at the bound', 'at the bound chunked', 'charset variant', 'charset spaced', 'key reused', 'victim']) drafts.push(await draft(label));
+    const [pos, posRaw, bound, boundChunked, variant, spaced, reuse, victim] = drafts;
+    const victimState = await stateOf(victim);
+    const path = (id) => `/api/v1/stores/${S}/invoice-drafts/${id}/discard`;
+    // Every draft is at version 1, so one body serves each: whitespace is JSON (and adds no key), so padding it before its
+    // closing brace reaches any size exactly — the edit suite's padding-at-the-bound pattern.
+    const base = JSON.stringify(discardBody(T, 1));
+    const pad = (n) => `${base.slice(0, -1)}${' '.repeat(n - Buffer.byteLength(base))}}`;
+    const atBound = pad(BOUND);
+    const over = pad(BOUND + 1);
+    assert.equal(Buffer.byteLength(atBound), BOUND, 'the body at the bound');
+    assert.equal(Buffer.byteLength(over), BOUND + 1, 'one byte over');
+    assert.deepEqual(JSON.parse(atBound), discardBody(T, 1), 'the padded body is the plain discard body');
+    const LAYER = {
+      metadata: 'metadata (admitBody: headers only; driven here ahead of Origin, both CSRF headers, the session and the authorizer — its place after the limiter and before the key is app.ts\'s order, not driven here)',
+      read: 'bounded read (readBoundedBody: driven here after the session and the authorizer and before the key — its place after the session CSRF, the trusted context and the target is app.ts\'s order, not driven here)',
+      session: 'session (before the body is read)',
+      authorizer: 'the authorizer (after the session, before the body is read)',
+      parser: 'the HTTP parser (before the app: no app header, no log line)',
+    };
+
+    /**
+     * One refusal, judged whole: its status and exact public body { error, requestId } (a fresh correlator — no X-Request-Id
+     * is sent) echoing none of the body, the key, the session's cookie or CSRF token, or any id; the security headers; the one
+     * logged reason; the server's own Connection: close when a body was declared (raw requests only — Node's client sends
+     * its own); then nothing written for the case's tenant or anywhere (counts: drafts, discarded drafts, lines, discard audit
+     * records, draft outbox rows, this key's completions, and every audit record, outbox row, completion and open lease), no
+     * idempotency record at all for the key (no lease, no completion), and the target draft exactly as it was, xmin included.
+     * `target`/`targetState`: the draft the request names and its snapshot (the victim by default); `session`: whose key.
+     */
+    const refused = async (st, label, request, { status, error, reason, layer, key = null, close = false, target = victim, targetState = victimState, session = s }) => {
+      const keys = key === null ? [] : [{ key, principal: session.principal }];
+      const before = await counts([T], keys);
+      const spentBefore = await limiterSpent();
+      const started = Date.now();
+      const reply = await request();
+      const elapsedMs = Date.now() - started;
+      assertRefusal(reply, status, error, label);
+      const body = JSON.parse(reply.body);
+      assert.match(body.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, `${label}: a fresh correlator`);
+      assert.equal(reply.headers['x-request-id'], body.requestId, `${label}: the same correlator in the header`);
+      for (const value of [key, session.csrf, session.cookie.slice(session.cookie.indexOf('=') + 1), session.key, T, S, C, target, 'expectedTenant', 'expectedVersion'].filter((v) => v !== null)) {
+        assert.ok(!reply.body.includes(value), `${label}: the answer echoes nothing it was sent`);
+      }
+      assert.equal(ctx.reason(reply), reason, `${label}: the logged reason`);
+      if (close) assert.equal(reply.headers.connection, 'close', `${label}: the server closes over the unread body`);
+      assert.deepEqual(delta(await counts([T], keys), before), NOTHING, `${label}: nothing written`);
+      if (key !== null) assert.equal(await recordsOf(key, session.principal), 0, `${label}: no idempotency record — no lease, no completion`);
+      assert.deepEqual(await stateOf(target), targetState, `${label}: the draft as it was (status, version, customer, every column and line, xmin)`);
+      evidence(st, { case: label, status: reply.status, error: body.error, reason, layer, elapsedMs, limiterUnitsSpent: (await limiterSpent()) - spentBefore });
+      return reply;
+    };
+
+    await t.test('A: positive controls — a valid discard reaches the route and commits, through Node\'s client and through the raw framing the refusals use', async (st) => {
+      let key = randomUUID();
+      let before = await counts([T], [{ key, principal: who.principal }]);
+      discardedOf(await ctx.discard(s, S, pos, discardBody(T, 1), { key }), { draftId: pos, version: 2 }, 'A1 the plain discard');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), ONE_DISCARD, 'A1: one discard');
+      // The raw framing itself admits a valid request (a refusal below cannot pass because the framing is wrong).
+      key = randomUUID();
+      before = await counts([T], [{ key, principal: who.principal }]);
+      const body = JSON.stringify(discardBody(T, 1));
+      const reply = await rawUnsafe(ctx, s, path(posRaw), `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n`, body, key);
+      discardedOf(reply, { draftId: posRaw, version: 2 }, 'A2 the same discard hand-framed');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), ONE_DISCARD, 'A2: one discard');
+      evidence(st, { case: 'A', statuses: [200, reply.status] });
+    });
+
+    await t.test('B: a declared length over the bound is the 413 from the headers alone — before Origin, both CSRF headers, the session and the authorizer', async (st) => {
+      const far = pad(2 * BOUND);
+      let key = randomUUID();
+      await refused(st, 'B1 a 2,048-byte valid body, honestly declared', () => ctx.discard(s, S, victim, far, { key }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key });
+      key = randomUUID();
+      await refused(st, 'B2 Content-Length 1025 and no body byte sent: answered without waiting for the body',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nContent-Length: 1025\r\n', '', key),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key, close: true });
+      key = randomUUID();
+      await refused(st, 'B3 no session at all: still the 413, not the 401',
+        () => rawUnsafe(ctx, null, path(victim), `Content-Type: application/json\r\nContent-Length: ${far.length}\r\n`, far, key),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key, close: true });
+      key = randomUUID();
+      await refused(st, 'B4 a cross-site Origin: still the 413, not the 403', () => ctx.discard(s, S, victim, far, { key, headers: { origin: 'https://evil.test' } }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key });
+      key = randomUUID();
+      await refused(st, 'B6 neither CSRF header (the pre-session one nor the session\'s): still the 413, not the 403',
+        () => rawUnsafe(ctx, s, path(victim), `Content-Type: application/json\r\nContent-Length: ${far.length}\r\n`, far, key, { csrf: false }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key, close: true });
+      key = randomUUID();
+      await refused(st, 'B5 the length is judged before the media type: text/plain and 2,048 bytes is the 413',
+        () => ctx.discard(s, S, victim, far, { key, headers: { 'content-type': 'text/plain' } }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key });
+      key = randomUUID();
+      await refused(st, 'B7 the length is judged before the authorizer: an actor below Invoices Manage declaring 2,048 bytes is the 413, not the 403',
+        () => ctx.discard(sTech, S, victim, far, { key }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key, session: sTech });
+    });
+
+    await t.test('C: a chunked body with no Content-Length is admitted and read under the cap — past 1,024 decoded bytes (bytes, not characters) it is the 413 the bounded read settles at the crossing, after the session and the authorizer and before the key, answered within a deadline', async (st) => {
+      const stream = pad(4 * BOUND);
+      let key = randomUUID();
+      await refused(st, 'C1 4,096 bytes in 512-byte chunks (the cap crossed mid-stream)',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(stream, 512), key),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, key, close: true });
+      // The refusal comes at the crossing, not after the whole body: three 512-byte chunks (1,536 bytes, the cap crossed in the
+      // third) and no last chunk, the socket left open — only a read that refuses mid-stream answers before the deadline.
+      key = randomUUID();
+      await refused(st, 'C7 1,536 bytes in 512-byte chunks and no last chunk (the stream never ends): the 413 arrives within the deadline',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(pad(1536), 512, false), key),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, key, close: true });
+      key = randomUUID();
+      await refused(st, 'C8 the authorizer precedes the read: the same stream from an actor below Invoices Manage is the 403, not the 413',
+        () => rawUnsafe(ctx, sTech, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(stream, 512), key),
+        { status: 403, error: 'forbidden', reason: 'authz_denied', layer: LAYER.authorizer, key, close: true, session: sTech });
+      // The cap counts bytes, not characters: 600 two-byte characters in a JSON string put the body under 1,024 characters
+      // but over 1,024 bytes; left unfinished, only a read that counts bytes answers (a character count never reaches the cap).
+      const multibyte = `${base.slice(0, -1)},"note":"${'\u00e9'.repeat(600)}"}`;
+      assert.ok(multibyte.length < BOUND && Buffer.byteLength(multibyte) > BOUND, 'C9: under the bound in characters, over it in bytes');
+      key = randomUUID();
+      await refused(st, `C9 ${multibyte.length} characters and ${Buffer.byteLength(multibyte)} UTF-8 bytes in 256-character chunks framed by their bytes, no last chunk: the 413 within the deadline`,
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(multibyte, 256, false), key),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, key, close: true });
+      await refused(st, 'C2 the body is read before the key is judged: no Idempotency-Key at all is still the 413',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(stream, 512)),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, close: true });
+      await refused(st, 'C3 a malformed Idempotency-Key is still the 413',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\nIdempotency-Key: abc\r\n', chunked(stream, 512)),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, close: true });
+      key = randomUUID();
+      await refused(st, 'C4 the session precedes the read: the same stream with no session is the 401',
+        () => rawUnsafe(ctx, null, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(stream, 512), key),
+        { status: 401, error: 'unauthenticated', reason: 'session_missing', layer: LAYER.session, key, close: true });
+      key = randomUUID();
+      await refused(st, 'C5 a coding beside chunked is refused before any read (the framing is not loosened)',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: gzip, chunked\r\n', chunked(stream, 512), key),
+        { status: 400, error: 'invalid_request', reason: 'transfer_encoding_unsupported', layer: LAYER.metadata, key, close: true });
+      // Content-Length beside Transfer-Encoding never reaches the app: Node's strict parser answers its own bounded 400 (no
+      // app header, no log line), so only the status and the nothing-written evidence are asserted.
+      key = randomUUID();
+      const before = await counts([T], [{ key, principal: who.principal }]);
+      const parser = await rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n', chunked(stream, 512), key);
+      assert.equal(parser.status, 400, `C6 Content-Length and Transfer-Encoding together: ${parser.body}`);
+      assert.equal(parser.headers['x-request-id'], undefined, 'C6: answered before the app');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), NOTHING, 'C6: nothing written');
+      assert.equal(await recordsOf(key, who.principal), 0, 'C6: no idempotency record');
+      assert.deepEqual(await stateOf(victim), victimState, 'C6: the draft as it was');
+      evidence(st, { case: 'C6 Content-Length and Transfer-Encoding together', status: parser.status, layer: LAYER.parser });
+    });
+
+    await t.test('D: the media type — anything but application/json (optionally ;charset=utf-8, case-insensitive, a space allowed before it) is the 415 from the headers alone, before Origin, both CSRF headers, the session and the authorizer; an absent type with no body is the 400 body_required', async (st) => {
+      const valid = JSON.stringify(discardBody(T, 1));
+      const unsupported = { status: 415, error: 'unsupported_media_type', layer: LAYER.metadata };
+      for (const [label, type] of [
+        ['D1 text/plain', 'text/plain'],
+        ['D2 another charset', 'application/json; charset=latin1'],
+        ['D3 a quoted charset', 'application/json; charset="utf-8"'],
+        ['D4 an extra parameter', 'application/json; charset=utf-8; x=y'],
+        ['D5 a longer subtype', 'application/jsonx'],
+      ]) {
+        const key = randomUUID();
+        await refused(st, label, () => ctx.discard(s, S, victim, valid, { key, headers: { 'content-type': type } }), { ...unsupported, reason: 'media_type_unsupported', key });
+      }
+      let key = randomUUID();
+      await refused(st, 'D12 text/plain with a cross-site Origin: still the 415, not the 403',
+        () => ctx.discard(s, S, victim, valid, { key, headers: { 'content-type': 'text/plain', origin: 'https://evil.test' } }), { ...unsupported, reason: 'media_type_unsupported', key });
+      key = randomUUID();
+      await refused(st, 'D13 text/plain with a valid session and neither CSRF header: still the 415, not the 403',
+        () => rawUnsafe(ctx, s, path(victim), `Content-Type: text/plain\r\nContent-Length: ${valid.length}\r\n`, valid, key, { csrf: false }),
+        { ...unsupported, reason: 'media_type_unsupported', key, close: true });
+      key = randomUUID();
+      await refused(st, 'D14 text/plain from an actor below Invoices Manage: still the 415, not the 403',
+        () => ctx.discard(sTech, S, victim, valid, { key, headers: { 'content-type': 'text/plain' } }), { ...unsupported, reason: 'media_type_unsupported', key, session: sTech });
+      key = randomUUID();
+      await refused(st, 'D6 two Content-Type lines, both application/json',
+        () => rawUnsafe(ctx, s, path(victim), `Content-Type: application/json\r\nContent-Type: application/json\r\nContent-Length: ${valid.length}\r\n`, valid, key),
+        { ...unsupported, reason: 'media_type_unsupported', key, close: true });
+      key = randomUUID();
+      await refused(st, 'D7 no Content-Type line with a body',
+        () => rawUnsafe(ctx, s, path(victim), `Content-Length: ${valid.length}\r\n`, valid, key),
+        { ...unsupported, reason: 'media_type_missing', key, close: true });
+      key = randomUUID();
+      await refused(st, 'D8 no Content-Type and no session: still the 415, not the 401',
+        () => rawUnsafe(ctx, null, path(victim), `Content-Length: ${valid.length}\r\n`, valid, key),
+        { ...unsupported, reason: 'media_type_missing', key, close: true });
+      key = randomUUID();
+      await refused(st, 'D9 a Content-Encoding (gzip) over a plain JSON body', () => ctx.discard(s, S, victim, valid, { key, headers: { 'content-encoding': 'gzip' } }),
+        { ...unsupported, reason: 'content_encoding_unsupported', key });
+      key = randomUUID();
+      await refused(st, 'D10 no Content-Type and Content-Length 0: no body, so the 400 body_required (not a 415)',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Length: 0\r\n', '', key),
+        { status: 400, error: 'invalid_request', reason: 'body_required', layer: LAYER.metadata, key });
+      // The supported type's own variants — no space and an upper-case charset (D11), a space before the charset (D15) — are
+      // admitted, and each discard commits on its own draft.
+      key = randomUUID();
+      const before = await counts([T], [{ key, principal: who.principal }]);
+      discardedOf(await ctx.discard(s, S, variant, valid, { key, headers: { 'content-type': 'application/json;charset=UTF-8' } }), { draftId: variant, version: 2 }, 'D11 application/json;charset=UTF-8');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), ONE_DISCARD, 'D11: one discard');
+      key = randomUUID();
+      const beforeSpaced = await counts([T], [{ key, principal: who.principal }]);
+      discardedOf(await ctx.discard(s, S, spaced, valid, { key, headers: { 'content-type': 'application/json; charset=utf-8' } }), { draftId: spaced, version: 2 }, 'D15 application/json; charset=utf-8');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), beforeSpaced), ONE_DISCARD, 'D15: one discard');
+    });
+
+    await t.test('E: the exact boundary — a valid discard of exactly 1,024 bytes commits, declared and chunked; 1,025 bytes is the 413, declared and chunked, on its own key, nothing changed', async (st) => {
+      let key = randomUUID();
+      let before = await counts([T], [{ key, principal: who.principal }]);
+      discardedOf(await ctx.discard(s, S, bound, atBound, { key }), { draftId: bound, version: 2 }, 'E1 1,024 bytes declared');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), ONE_DISCARD, 'E1: one discard');
+      key = randomUUID();
+      before = await counts([T], [{ key, principal: who.principal }]);
+      const reply = await rawUnsafe(ctx, s, path(boundChunked), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(atBound, 256), key);
+      discardedOf(reply, { draftId: boundChunked, version: 2 }, 'E2 1,024 bytes chunked');
+      assert.deepEqual(delta(await counts([T], [{ key, principal: who.principal }]), before), ONE_DISCARD, 'E2: one discard');
+      key = randomUUID();
+      await refused(st, 'E3 1,025 bytes declared', () => ctx.discard(s, S, victim, over, { key }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key });
+      key = randomUUID();
+      await refused(st, 'E4 1,025 bytes chunked (256-byte chunks)',
+        () => rawUnsafe(ctx, s, path(victim), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(over, 256), key),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, key, close: true });
+    });
+
+    await t.test('F: a key refused at the boundary stays fresh — after a declared and a streamed 413 under it, the same key with a valid body discards (not a replay, not the 409 request_in_progress, not the 422)', async (st) => {
+      const key = randomUUID();
+      const keys = [{ key, principal: who.principal }];
+      const reuseState = await stateOf(reuse);
+      await refused(st, 'F1 declared 1,025 bytes under the key', () => ctx.discard(s, S, reuse, over, { key }),
+        { status: 413, error: 'content_too_large', reason: 'body_declared_too_large', layer: LAYER.metadata, key, target: reuse, targetState: reuseState });
+      await refused(st, 'F2 the same key, 1,025 bytes chunked',
+        () => rawUnsafe(ctx, s, path(reuse), 'Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n', chunked(over, 256), key),
+        { status: 413, error: 'content_too_large', reason: 'body_streamed_too_large', layer: LAYER.read, key, close: true, target: reuse, targetState: reuseState });
+      const before = await counts([T], keys);
+      discardedOf(await ctx.discard(s, S, reuse, discardBody(T, 1), { key }), { draftId: reuse, version: 2 }, 'F3 the same key, a valid body');
+      assert.deepEqual(delta(await counts([T], keys), before), ONE_DISCARD, 'F3: one discard, its completion under the key');
+      assert.equal(await recordsOf(key, who.principal), 1, 'F3: the key now holds exactly its completion');
+      assert.equal(await leaseOpen(key, who.principal), false, 'F3: and no open lease');
+    });
+
+    assert.deepEqual(await stateOf(victim), victimState, 'every refusal left the target draft as it was');
   });
 });
 
