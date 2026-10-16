@@ -533,7 +533,7 @@ async function catalogOf() {
     (select pg_catalog.string_agg(pg_catalog.format('%s %s %s %s', g.tgrelid::regclass, g.tgname, g.tgtype, g.tgenabled), ' | ' order by g.tgname)
        from pg_catalog.pg_trigger g where g.tgrelid in ('tmpos_invoice_draft.invoice_draft'::regclass, 'tmpos_invoice_draft.invoice_draft_line'::regclass)
         and not g.tgisinternal) as triggers,
-    (select pg_catalog.string_agg(pg_catalog.pg_get_indexdef(x.indexrelid), ' | ' order by 1)
+    (select pg_catalog.string_agg(pg_catalog.pg_get_indexdef(x.indexrelid), ' | ' order by pg_catalog.pg_get_indexdef(x.indexrelid))
        from pg_catalog.pg_index x where x.indrelid = 'tmpos_invoice_draft.invoice_draft'::regclass) as indexes,
     (select pg_catalog.string_agg(pg_catalog.format('%s %s %s %s %s %s', p.oid::regprocedure, pg_catalog.md5(coalesce(p.prosrc, '')),
          p.proacl, p.proconfig, p.provolatile, p.prosecdef), ' | ' order by p.oid::regprocedure::text)
