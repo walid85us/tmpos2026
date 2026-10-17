@@ -8180,8 +8180,9 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
  * SIS-09's cells: the viewport in CSS px (deviceScaleFactor 1) and Chrome's default font size (Page.setFontSizes, as
  * SDB-23 enlarges text), null for the browser's untouched 16 px. All on ONE page and sign-in (the account's login limit
  * is 5 per 5 minutes), the enlarged-text cell last. `overflows`: whether the lines table at the largest amounts is wider
- * than its region there (asserted, so the region checks never go vacuous; measured: it fits at D1440 and M768, and is
- * wider at N320, S320 and T768).
+ * than its region there (asserted where true, so the region checks never go vacuous; measured locally: it fits at D1440
+ * and M768 — CI's fonts make it a few pixels wider at D1440, so a cell marked false may overflow and must then scroll —
+ * and is wider at N320, S320 and T768).
  */
 const ISSUED_CELLS = Object.freeze([
   { cell: 'D1440', width: 1440, height: 900, font: null, overflows: false },
@@ -8363,7 +8364,9 @@ scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice is
     const seen = await totalSeen(page);
     const sideways = await page.evaluate(`(() => { const p = ${q('issued-view')}; return { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`);
     record('SIS-09', { cell, width, height, font: font ?? 16, box: b, overflowed, scrolled, tabs, seen, sideways, reads: sentBy(page, isIssuedRead, from).map(readLine) });
-    assert.equal(overflowed, overflows, `${cell}: the lines table ${overflows ? 'is wider than' : 'fits'} its region ${JSON.stringify([b.table?.width, b.scroller.clientWidth])}`);
+    // A cell that must overflow keeps the region's scroll path exercised; one measured to fit may still overflow by a few
+    // pixels under other fonts (CI: a 629 px table in a 607 px region at D1440), and then it must scroll like the rest (below).
+    if (overflows) assert.equal(overflowed, true, `${cell}: the lines table is not wider than its region ${JSON.stringify([b.table?.width, b.scroller.clientWidth])}`);
     check(b.panel.x >= -HOLD_TOLERANCE && b.panel.x + b.panel.width <= width + HOLD_TOLERANCE, `${cell}: the dialog lies outside the viewport ${JSON.stringify([b.panel.x, b.panel.width])}`);
     check(b.panel.scrollWidth <= b.panel.clientWidth + HOLD_TOLERANCE, `${cell}: the dialog overflows sideways (${b.panel.scrollWidth} > ${b.panel.clientWidth}): ${JSON.stringify(b.overflowers)}`);
     check(b.close.inView && b.close.hit && b.close.focused, `${cell}: Close is not in view, on top and focused first ${JSON.stringify(b.close)}`);
