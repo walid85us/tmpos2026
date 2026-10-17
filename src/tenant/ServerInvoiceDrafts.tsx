@@ -548,6 +548,7 @@ export interface DialogFrameProps {
 export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
   const overlay = useRef<HTMLDivElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const close = useRef(onClose);
   useLayoutEffect(() => { close.current = onClose; });
 
@@ -559,9 +560,13 @@ export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, 
     return () => { for (const node of made) node.removeAttribute('inert'); };
   }, []);
 
-  // Focus moves in on open and goes back on close: to what had it before, or to `returnFocus` when that is gone.
+  // Focus moves in on open and goes back on close: to what had it before, or to `returnFocus` when that is gone. What had
+  // it before is taken ONCE, from outside the dialog: StrictMode's second setup finds focus already in it (the ref keeps
+  // the first).
   useEffect(() => {
-    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const at = document.activeElement;
+    if (opener.current === null && at instanceof HTMLElement && !(dialog.current?.contains(at) ?? false)) opener.current = at;
+    const before = opener.current;
     (initialFocus?.current ?? dialog.current)?.focus();
     return () => {
       // After the commit that removed the dialog (and its inert marks): what had focus before, unless it is gone or

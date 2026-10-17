@@ -1,7 +1,19 @@
 // M7B-INVOICES-ISSUE-P2 — the Invoices page's "Issued invoices" section (docs/phase-4/12 §10, ADR-50), over
-// invoiceIssuingClient.ts: choose a store from the server's own list, then its owner's "Issuing settings" — the legal seller
-// name, the store name on invoices, the postal address, an optional tax registration ID and an explicit tax mode (an
-// exclusive rate, or no tax calculated) that every invoice issued at that store snapshots.
+// invoiceIssuingClient.ts: choose a store from the server's own list, then read its issued invoices (newest number first,
+// "Load more") and open one, and its owner's "Issuing settings" — the legal seller name, the store name on invoices, the
+// postal address, an optional tax registration ID and an explicit tax mode (an exclusive rate, or no tax calculated) that
+// every invoice issued at that store snapshots.
+//
+//   - The issued list (commit B): choosing a store is the explicit action that reads its first page (20, the drafts
+//     section's precedent); "Load more" sends the nextCursor this client decoded for THAT store under THAT generation only,
+//     and a store change, a new generation or a session end discards every page (a late page finds nothing to join). A row
+//     says the store's number, the customer's name as the invoice recorded it, the Total and the UTC issue time, and
+//     "Issued" — nothing about payment, and no send, print, void, edit or delete. Nothing is looked up in this browser's
+//     customers. A 403 gets the reads' ONE fresh check, then "You cannot view issued invoices at this store." (no loop).
+//   - Open reads ONE issued invoice in the exported IssuedInvoiceDialog: the version-1 snapshot (seller, customer, ordered
+//     lines, subtotal, the tax meaning, Total) exactly as the server answered it. The dialog owns its GET (one per open and
+//     per Try again, its own sequence and abort); the session work — the check, a 401, a 403's one fresh check, a 429's wait —
+//     is the owner's read function, so the drafts section can show the same document under its own generation.
 //
 //   - Separate from this browser's invoices: nothing here enters the local invoice list, its counters or any browser
 //     storage, and nothing read is ever looked up in or merged with local data.
@@ -9,9 +21,10 @@
 //     who may read or change them (the store owner) — its 403 is the answer that counts, after the reads' ONE fresh check
 //     (another token is a new generation, never a refusal). No role name, owner shortcut or local level decides anything.
 //     A read-only store's settings can be read, and no Save is offered there (the write would be the server's 404).
-//   - Nothing is read before "Show issued invoices", and the settings only when their panel is opened (or by its own
-//     Refresh, Try again or Load current version). The store is ALWAYS an explicit choice from GET /api/v1/stores: nothing
-//     is preselected and this browser's store labels are never mapped to it.
+//   - Nothing is read before "Show issued invoices"; the issued list when a store is chosen (or by its Try again and Load
+//     more), one invoice when its Open is pressed, and the settings only when their panel is opened (or by its own Refresh,
+//     Try again or Load current version). The store is ALWAYS an explicit choice from GET /api/v1/stores: nothing is
+//     preselected and this browser's store labels are never mapped to it.
 //   - A GENERATION is one store connection as this section knows it, exactly as the drafts section's: a counter and the
 //     session's CSRF token, in a ref. `connect()` (the session client's `ensure`) runs before every read and write: plain,
 //     `fresh` only for the one check after a 403, `reconnect` only from the Reconnect button. A different token starts a
@@ -43,20 +56,21 @@
 //     mounted) closes the panel synchronously: its values and any attempt — key, body, token — go with it, and an
 //     unconfirmed one leaves only a note that a change could not be confirmed. A late answer finds nothing under its key.
 //   - The session token sits only in refs (tenantSessionClient.ts lists the holders): never browser storage, a URL, the
-//     DOM or a log; no key or body reaches any of those either, and settings values only the DOM.
+//     DOM or a log; no key or body reaches any of those either, and settings values and issued invoices only the DOM.
 
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
-import { invoiceDrafts as draftsClient, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
+import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
-  invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues,
-  type InvoiceIssuingClient, type IssuingSettings, type IssuingSettingsErrors, type IssuingSettingsFields, type SaveSettingsResult, type SettingsValues,
+  invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText,
+  type InvoiceIssuingClient, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors, type IssuingSettingsFields,
+  type SaveSettingsResult, type SettingsValues,
 } from './invoiceIssuingClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
-import { button, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
+import { button, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
 
 const DEFAULT_WAIT_SECONDS = 60;
 
@@ -71,6 +85,27 @@ export const ISSUED_TEXT = Object.freeze({
   refused: 'The store server did not accept this sign-in. Reconnect, or sign out and sign in again.',
   unavailable: 'Issued invoices are unavailable right now.',
   connection: 'The store connection changed, so your stores were loaded again. Choose a store.',
+});
+
+export const LIST_TEXT = Object.freeze({
+  loading: 'Loading issued invoices from the server…',
+  empty: 'No issued invoices at this store yet.',
+  denied: 'You cannot view issued invoices at this store.',
+  unavailable: 'Issued invoices could not be loaded right now. Try again.',
+  reloaded: 'The list changed on the server, so it was loaded again from the start.',
+  renewed: 'You signed in again, so the list read before was cleared. Try again to load it.',
+  lastKnown: 'Last known list — could not refresh',
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+export const VIEW_TEXT = Object.freeze({
+  title: 'Issued invoice',
+  loading: 'Loading this invoice from the server…',
+  notFound: 'This invoice is not available.',
+  denied: LIST_TEXT.denied,
+  unavailable: 'This invoice could not be loaded right now. Try again.',
+  note: "Recorded when it was issued (snapshot version 1): later changes to the store's issuing settings or to the customer do not change it.",
+  waiting: LIST_TEXT.waiting,
 });
 
 export const SETTINGS_TEXT = Object.freeze({
@@ -206,7 +241,20 @@ interface SettingsPanel {
   readonly needsRead: boolean;
 }
 
+/** One store's issued list as read under one generation: its pages (rows in the server's order) and the cursor after them. */
+interface ListState {
+  readonly gen: number; readonly storeId: string;
+  readonly phase: 'idle' | 'loading' | 'ready' | 'denied' | 'rate-limited' | 'unavailable';
+  readonly text: string; readonly rows: readonly IssuedSummary[]; readonly next: string | null; readonly note: string;
+}
+/** The open issued-invoice dialog: which open it is, and what it reads. */
+interface ViewOpen { readonly id: number; readonly storeId: string; readonly invoiceId: string }
+
 const STORES_IDLE: StoresState = Object.freeze({ phase: 'idle', text: '', stores: [] });
+const listOf = (gen: number, storeId: string, phase: ListState['phase'] = 'idle', text = ''): ListState =>
+  Object.freeze({ gen, storeId, phase, text, rows: [], next: null, note: '' });
+const LIST_IDLE: ListState = listOf(0, '');
+const issuedOpenIdOf = (id: string): string => `issued-open-${id}`;
 const UNAVAILABLE: Failure = Object.freeze({ kind: 'unavailable', text: ISSUED_TEXT.unavailable });
 
 function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
@@ -231,6 +279,8 @@ function IssuedSection({
   const [panel, setPanelState] = useState<SettingsPanel | null>(null);
   const [password, setPassword] = useState('');
   const [focusInvalid, setFocusInvalid] = useState(0);
+  const [list, setListState] = useState<ListState>(LIST_IDLE);
+  const [view, setViewState] = useState<ViewOpen | null>(null);
 
   const gen = useRef<{ n: number; csrf: string | null }>({ n: 0, csrf: null }); // the token: refs only
   const alive = useRef(false);
@@ -238,8 +288,11 @@ function IssuedSection({
   const storeRef = useRef('');
   const panelRef = useRef<SettingsPanel | null>(null);
   const panelSeq = useRef(0); // which panel open is the latest
-  const seq = useRef({ stores: 0, settings: 0 });
-  const ctl = useRef<Record<'stores' | 'settings', AbortController | null>>({ stores: null, settings: null });
+  const listRef = useRef<ListState>(list);
+  const viewRef = useRef<ViewOpen | null>(null);
+  const viewSeq = useRef(0); // which dialog open is the latest
+  const seq = useRef({ stores: 0, settings: 0, list: 0 });
+  const ctl = useRef<Record<'stores' | 'settings' | 'list', AbortController | null>>({ stores: null, settings: null, list: null });
   const waitRef = useRef(false);
   const waitUntil = useRef(0);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -259,10 +312,13 @@ function IssuedSection({
   const saveButton = useRef<HTMLButtonElement | null>(null);
   const passwordRef = useRef<HTMLInputElement | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const loadMore = useRef<HTMLButtonElement | null>(null);
+  const listRetry = useRef<HTMLButtonElement | null>(null);
   // The section control that last took focus — and whether it was in the settings panel, judged while it is still attached —
   // and where focus goes if a render removes or disables it while it still has focus (the drafts section's DA-199 rule):
-  // the panel's title, else the heading. A press elsewhere ends the tracking.
-  const keepFocus = useRef<{ readonly from: Element; readonly inPanel: boolean } | null>(null);
+  // `to` when a change named a place (Load more's last page: its first row), else the panel's title, else the heading. A
+  // press elsewhere ends the tracking.
+  const keepFocus = useRef<{ readonly from: Element; readonly inPanel: boolean; readonly to?: () => HTMLElement | null } | null>(null);
 
   const clock = (): number => (now ?? (() => performance.now()))();
   const wall = (): number => (wallNow ?? (() => Date.now()))();
@@ -270,6 +326,9 @@ function IssuedSection({
   const connect = (mode?: 'fresh' | 'reconnect'): Promise<SessionResult> =>
     session.ensure(uid, () => identity.idToken(uid), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
   const putStores = (next: StoresState): void => { storesRef.current = next; setStoresState(next); };
+  const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
+  /** Close the issued-invoice dialog (its own read's late answer then finds nothing: it is unmounted). */
+  const closeView = (): void => { viewRef.current = null; setViewState(null); };
   const putPanel = (next: SettingsPanel | null): void => {
     panelRef.current = next;
     if (next?.attempt?.key !== attemptToken.current?.key) attemptToken.current = null; // the token goes with its attempt
@@ -329,7 +388,8 @@ function IssuedSection({
   function abortReads(): void {
     ctl.current.stores?.abort();
     ctl.current.settings?.abort();
-    seq.current = { stores: seq.current.stores + 1, settings: seq.current.settings + 1 };
+    ctl.current.list?.abort();
+    seq.current = { stores: seq.current.stores + 1, settings: seq.current.settings + 1, list: seq.current.list + 1 };
     busyBy.current += 1;
     setBusy(false);
   }
@@ -340,6 +400,8 @@ function IssuedSection({
     abortReads();
     clearWait();
     dropPanel();
+    closeView();
+    putList(LIST_IDLE);
     storeRef.current = '';
     setStoreIdState('');
     setChanged(true);
@@ -354,13 +416,19 @@ function IssuedSection({
   }
   /**
    * The user's own recent sign-in renewed the session (its new token): adopted as this section's without starting over —
-   * the same user, by an explicit action — but every read out under the old token is cancelled, and an attempt sent with it
+   * the same user, by an explicit action — but every read out under the old token is cancelled, the invoices read under it
+   * go (the settings panel, read by its own re-read, stays), and an attempt sent with it
    * can never be checked under this one (none is live when the sign-in group shows: a step-up acquires no key).
    */
   function renew(csrf: string): void {
     if (gen.current.csrf === csrf) return;
     gen.current = { n: gen.current.n + 1, csrf };
     abortReads();
+    // What was read under the old token goes (DESIGN §2): the open invoice, and the list's pages and cursor — the store stays
+    // chosen and the list says so, with Try again (page one under this token). Nothing is read on its own.
+    closeView();
+    const l = listRef.current;
+    if (l.storeId !== '') putList({ ...listOf(gen.current.n, l.storeId), phase: 'unavailable', text: LIST_TEXT.renewed });
   }
 
   /** A refusal of the session clears every view (Reconnect then). */
@@ -370,6 +438,8 @@ function IssuedSection({
     putStores({ phase: failure.kind, text: failure.text, stores: [] });
     storeRef.current = '';
     setStoreIdState('');
+    closeView();
+    putList(LIST_IDLE);
     dropPanel();
     if (failure.kind === 'signed-out') gen.current = { n: gen.current.n, csrf: null }; // the Reconnect's token is a FIRST token
   }
@@ -445,9 +515,151 @@ function IssuedSection({
     if (busyRef.current && storesRef.current.phase === 'loading') return;
     setNotice(''); // before the drop: a confirmed save that was not read back still says so
     dropPanel(); // a store change takes the panel, its values and any attempt with it
+    closeView();
+    // The previous store's pages go (a read still out for it is cancelled; its late page finds another store).
+    ctl.current.list?.abort();
+    seq.current.list += 1;
+    busyBy.current += 1;
+    setBusy(false);
     storeRef.current = id;
     setStoreIdState(id);
-    if (id !== '') setChanged(false);
+    putList(listOf(gen.current.n, id));
+    if (id === '') return;
+    setChanged(false);
+    // Choosing the store is the explicit action that reads its first page; during a wait nothing is read: the wait is said,
+    // with Try again (given back once it has passed).
+    if (waitRef.current) return putList({ ...listOf(gen.current.n, id), phase: 'rate-limited', text: pickerWaitText(waitLeft()) });
+    void readList('first');
+  }
+
+  // ---- the issued list ----
+
+  /**
+   * One page of the chosen store's issued invoices: 'first' (page one, replacing the rows) or 'more' (the page after the
+   * cursor this list holds — only for its own store and generation). An answer applies only under the generation, store and
+   * request that asked, with no sign-out since; a page never joins another store's rows.
+   */
+  async function readList(mode: 'first' | 'more', note = ''): Promise<void> {
+    const target = storeRef.current;
+    const was = listRef.current;
+    const cursor = mode === 'more' ? was.next : null;
+    if (target === '' || waitRef.current) return;
+    if (mode === 'more' && (cursor === null || was.storeId !== target || was.gen !== gen.current.n || was.phase !== 'ready')) return;
+    const mine = gen.current.n;
+    const n = ++seq.current.list;
+    ctl.current.list?.abort();
+    const controller = new AbortController();
+    ctl.current.list = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || mine !== gen.current.n || n !== seq.current.list || target !== storeRef.current || since !== sessionEndsSoFar();
+    const token = takeBusy();
+    if (mode === 'first') putList({ ...(was.storeId === target && was.gen === mine ? was : listOf(mine, target)), phase: 'loading', text: LIST_TEXT.loading, note });
+    // A failed Load more takes the button away: focus still on it goes to the list's Try again (else the heading).
+    const handOff = (): void => {
+      if (mode === 'more' && loadMore.current !== null && document.activeElement === loadMore.current) {
+        keepFocus.current = { from: loadMore.current, inPanel: false, to: () => listRetry.current };
+      }
+    };
+    // A failure keeps what was shown as last known (an outage, a wait); a refusal shows nothing.
+    const fail = (phase: 'unavailable' | 'rate-limited', text: string): void => { handOff(); putList({ ...listRef.current, phase, text, note: '' }); };
+    try {
+      const s = await connect();
+      if (stale()) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return failure.seconds !== undefined ? fail('rate-limited', pickerWaitText(startWait(failure.seconds))) : fail('unavailable', LIST_TEXT.unavailable);
+      }
+      if (adopt(s.csrf)) return; // a new generation: the list went with the old one
+      const answer = await issuing.listIssued(target, cursor, s.csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        const before = listRef.current;
+        // A page only continues the rows shown when none of its invoices or source drafts is shown already or comes twice in
+        // it, and its numbers stay strictly below the last one shown (the client checks one page alone). Anything else is a
+        // malformed answer: nothing joins and the cursor stays — the list is unavailable (rows kept as last known; Try again
+        // reads page one).
+        if (mode === 'more') {
+          const ids = new Set(before.rows.map((row) => row.id));
+          const sources = new Set(before.rows.map((row) => row.sourceDraftId));
+          let last = before.rows.length === 0 ? Number.POSITIVE_INFINITY : before.rows[before.rows.length - 1].number;
+          const joins = answer.invoices.every((row) => {
+            const ok = !ids.has(row.id) && !sources.has(row.sourceDraftId) && row.number < last;
+            ids.add(row.id);
+            sources.add(row.sourceDraftId);
+            last = row.number;
+            return ok;
+          });
+          if (!joins) return fail('unavailable', LIST_TEXT.unavailable);
+        }
+        // The last page takes Load more away: focus still on it goes to the first row this page brought (else the heading).
+        const first = mode === 'more' && answer.nextCursor === null ? answer.invoices[0] : undefined;
+        if (first !== undefined && loadMore.current !== null && document.activeElement === loadMore.current) {
+          keepFocus.current = { from: loadMore.current, inPanel: false, to: () => document.getElementById(issuedOpenIdOf(first.id)) };
+        }
+        return putList({
+          gen: mine, storeId: target, phase: 'ready', text: '', rows: mode === 'more' ? [...before.rows, ...answer.invoices] : answer.invoices, next: answer.nextCursor, note: mode === 'more' ? '' : before.note,
+        });
+      }
+      // A continuation that no longer names an invoice of this store: ONE reload from page one (which has no cursor).
+      if (answer.kind === 'bad-cursor') return mode === 'more' ? void readList('first', LIST_TEXT.reloaded) : fail('unavailable', LIST_TEXT.unavailable);
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+      if (answer.kind === 'denied') {
+        // The server refused this store's list: nothing read before stays on screen, whatever the one fresh check says next.
+        putList({ ...listOf(mine, target), phase: 'loading', text: LIST_TEXT.loading });
+        const verdict = await denialOf(stale);
+        if (verdict === null) return;
+        if (verdict === 'denied') return putList({ ...listOf(mine, target), phase: 'denied', text: LIST_TEXT.denied });
+        return fail(verdict.kind === 'rate-limited' ? 'rate-limited' : 'unavailable', verdict.kind === 'rate-limited' ? verdict.text : LIST_TEXT.unavailable);
+      }
+      if (answer.kind === 'rate-limited') return fail('rate-limited', pickerWaitText(startWait(answer.retryAfterSeconds)));
+      fail('unavailable', LIST_TEXT.unavailable);
+    } finally {
+      giveBusy(token);
+    }
+  }
+
+  // ---- one issued invoice ----
+
+  /** Open: the dialog reads the invoice itself; a new open replaces nothing (the page behind is inert while it is up). */
+  function openView(row: IssuedSummary): void {
+    if (viewRef.current !== null || listRef.current.storeId !== storeRef.current) return;
+    const next: ViewOpen = { id: ++viewSeq.current, storeId: storeRef.current, invoiceId: row.id };
+    viewRef.current = next;
+    setViewState(next);
+  }
+
+  /**
+   * The dialog's read, under this section's session: ONE session check, the invoice under that token, a 401 that ends the
+   * session, a 403's one fresh check, a 429's wait (during a wait nothing is sent). Null when the context that asked is
+   * gone — another generation, another store, a sign-out since, the dialog's open (`viewId`: reopening the same invoice is
+   * another open) closed or replaced, or its read cancelled — before any of its answers does anything.
+   */
+  async function readView(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<IssuedReadAnswer | null> {
+    if (waitRef.current) return { kind: 'rate-limited', text: pickerWaitText(waitLeft()) };
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || storeId !== storeRef.current || since !== sessionEndsSoFar()
+      || viewRef.current?.id !== viewId || viewRef.current.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const s = await connect();
+    if (stale()) return null;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') { failSession(failure); return null; }
+      return failure.seconds !== undefined ? { kind: 'rate-limited', text: pickerWaitText(startWait(failure.seconds)) } : { kind: 'unavailable' };
+    }
+    if (adopt(s.csrf)) return null; // a new generation closed the dialog
+    const answer = await issuing.getIssued(storeId, invoiceId, s.csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'ok' || answer.kind === 'not-found') return answer;
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+    if (answer.kind === 'denied') {
+      const verdict = await denialOf(stale);
+      if (verdict === null) return null;
+      return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
+    }
+    if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
+    return { kind: 'unavailable' };
   }
 
   // ---- the settings panel ----
@@ -797,7 +1009,7 @@ function IssuedSection({
     keepFocus.current = null;
     const at = document.activeElement;
     if (at !== null && at !== document.body && at !== keep.from) return;
-    (keep.inPanel && panelTitle.current?.isConnected === true ? panelTitle.current : heading.current)?.focus();
+    (keep.to?.() ?? (keep.inPanel && panelTitle.current?.isConnected === true ? panelTitle.current : heading.current))?.focus();
   });
   useEffect(() => {
     const moved = (e: Event): void => { if (keepFocus.current !== null && !(e.target instanceof Node && keepFocus.current.from.contains(e.target))) keepFocus.current = null; };
@@ -835,6 +1047,7 @@ function IssuedSection({
       attemptToken.current = null;
       ctl.current.stores?.abort();
       ctl.current.settings?.abort();
+      ctl.current.list?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
     // A section serves one UID (see ServerIssuedInvoices); the clients are fixed for its life.
@@ -844,6 +1057,12 @@ function IssuedSection({
   const signedOut = stores.phase === 'signed-out';
   const storesFailed = stores.phase === 'denied' || stores.phase === 'unavailable' || stores.phase === 'rate-limited' || signedOut;
   const chosen = stores.stores.find((store) => store.id === storeId) ?? null;
+  const listFailed = list.phase === 'denied' || list.phase === 'unavailable' || list.phase === 'rate-limited';
+  const storePicker = stores.phase === 'ready' && stores.stores.length > 0;
+  const listShown = chosen !== null && list.storeId === chosen.id;
+  // Why Load more and Try again wait: the section's rate-limit wait, or a list read still out.
+  const listHold = waiting ? 'issued-list-wait' : busy ? 'issued-list-busy' : undefined;
+  const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
   const track = (target: EventTarget | null): void => {
     if (target instanceof Element && section.current?.contains(target) === true) keepFocus.current = { from: target, inPanel: target.closest('[data-testid="issued-settings"]') !== null };
   };
@@ -876,8 +1095,9 @@ function IssuedSection({
               {signedOut ? 'Reconnect' : 'Try again'}
             </button>
           )}
-          {stores.phase === 'ready' && stores.stores.length > 0 && (
-            <div className="space-y-1">
+          {storePicker && (
+            // Before a store is chosen the select is the last thing shown: the empty list region below it adds no space.
+            <div className={`space-y-1 ${chosen === null ? 'mb-0' : ''}`}>
               <label htmlFor="issued-store" className={labelClass}>Store</label>
               <select id="issued-store" data-testid="issued-store" value={storeId} onChange={(e) => chooseStore(e.target.value)} className={`${inputClass} max-w-md`}>
                 <option value="">Choose a store…</option>
@@ -886,6 +1106,76 @@ function IssuedSection({
                 ))}
               </select>
               {storeId === '' && <p data-testid="issued-choose" className={hintClass}>{ISSUED_TEXT.chooseStore}</p>}
+            </div>
+          )}
+
+          {storePicker && (
+            // The list's live region is in place, empty, from the moment a store can be chosen: its first text ("Loading…")
+            // is a change to a region that exists — announced — not a region inserted together with its text.
+            <div data-testid="issued-list-area" className="space-y-3">
+              <p
+                data-testid="issued-list-state" data-phase={listShown ? list.phase : undefined} role={listShown && list.phase === 'denied' ? 'alert' : 'status'}
+                className={`text-sm font-bold text-slate-600 ${listShown ? 'min-h-[1rem]' : ''}`}
+              >
+                {listShown && list.text}
+                {listShown && lastKnown && <span data-testid="issued-last-known" className="block text-xs font-black uppercase tracking-widest text-amber-800">{LIST_TEXT.lastKnown}</span>}
+                {listShown && list.phase === 'ready' && list.rows.length === 0 && <span data-testid="issued-empty" className="block font-medium text-slate-600">{LIST_TEXT.empty}</span>}
+              </p>
+              {listShown && (
+                <>
+                  {list.note !== '' && <p data-testid="issued-list-note" role="status" className="text-sm font-bold text-amber-800">{list.note}</p>}
+                  {listFailed && (
+                    // aria-disabled, never disabled, during a read or a wait: it keeps focus, and says why it waits.
+                    <button
+                      ref={listRetry} type="button" data-testid="issued-list-retry" aria-disabled={busy || waiting} aria-describedby={listHold}
+                      onClick={() => { if (!busyRef.current && !waitRef.current) void readList('first'); }}
+                      className={`${button} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
+                    >
+                      Try again
+                    </button>
+                  )}
+                  {list.rows.length > 0 && (
+                    <ul data-testid="issued-list" aria-label="Issued invoices at this store" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
+                      {list.rows.map((row) => (
+                        <li key={row.id} data-testid="issued-row" data-id={row.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                          <div className="min-w-0 space-y-0.5">
+                            <p data-testid="issued-row-number" className="text-sm font-bold text-primary">Invoice {row.number}</p>
+                            <p id={`issued-row-${row.id}`} className={`${hintClass} break-words`}>
+                              <bdi data-testid="issued-row-customer">{row.customerName}</bdi>
+                              {' · '}<span data-testid="issued-row-total">Total <span className="whitespace-nowrap">{formatCents(row.totalCents)}</span></span>
+                              {' · '}<time data-testid="issued-row-issued" dateTime={row.issuedAt} className="whitespace-nowrap">{utcText(row.issuedAt)}</time>
+                              {' · '}<span data-testid="issued-row-status">Issued</span>
+                            </p>
+                          </div>
+                          <button
+                            type="button" id={issuedOpenIdOf(row.id)} data-testid="issued-open" aria-label={`Open invoice ${row.number}`} aria-describedby={`issued-row-${row.id}`}
+                            onClick={() => openView(row)} className={quiet}
+                          >
+                            Open
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {list.phase === 'ready' && list.next !== null && (
+                    // aria-disabled, never disabled: a browser moves focus off a disabled control, and Load more keeps it
+                    // through its own read (a press meanwhile does nothing).
+                    <button
+                      ref={loadMore}
+                      type="button"
+                      data-testid="issued-load-more"
+                      aria-disabled={busy || waiting}
+                      aria-describedby={listHold}
+                      onClick={() => { if (!busyRef.current && !waitRef.current) void readList('more'); }}
+                      className={`${quiet} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
+                    >
+                      Load more
+                    </button>
+                  )}
+                  {waiting && <span id="issued-list-wait" className="sr-only">{LIST_TEXT.waiting}</span>}
+                  {busy && !waiting && <span id="issued-list-busy" className="sr-only">{LIST_TEXT.loading}</span>}
+                </>
+              )}
             </div>
           )}
 
@@ -930,7 +1220,183 @@ function IssuedSection({
           )}
         </div>
       )}
+
+      {view !== null && (
+        <IssuedInvoiceDialog
+          key={view.id} storeId={view.storeId} invoiceId={view.invoiceId} read={(s, i, signal) => readView(view.id, s, i, signal)} waiting={waiting} onClose={closeView} returnFocus={heading}
+          current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
+        />
+      )}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// One issued invoice (exported: the drafts section shows the invoice it issued with the same dialog, under its own reads).
+
+/** What the owner's read answers the dialog: the invoice, or why there is none to show. */
+export type IssuedReadAnswer =
+  | { readonly kind: 'ok'; readonly invoice: IssuedInvoice }
+  | { readonly kind: 'not-found' | 'denied' | 'unavailable' }
+  | { readonly kind: 'rate-limited'; readonly text: string };
+
+export interface IssuedInvoiceDialogProps {
+  readonly storeId: string;
+  readonly invoiceId: string;
+  /**
+   * ONE read of the invoice under the owner's session and context — its session check, a 401, a 403's one fresh check, a
+   * 429's wait — or null when the context that asked is gone. The dialog calls it once when it opens and on its own Try
+   * again; never on a timer, a focus or a re-render.
+   */
+  readonly read: (storeId: string, invoiceId: string, signal: AbortSignal) => Promise<IssuedReadAnswer | null>;
+  /**
+   * Whether the context that opened the dialog still stands, asked ONCE when a read answers: an answer that arrives after
+   * that context is gone is not shown. A shown invoice is never asked about again — the owner unmounts the dialog itself
+   * (onClose, a new key) when its context ends: a token change, a session end or 401, a store change, a detach.
+   */
+  readonly current: () => boolean;
+  /** The owner's rate-limit wait is on: Try again waits for it. */
+  readonly waiting: boolean;
+  readonly onClose: () => void;
+  /** Where focus goes on close when the control that opened the dialog is gone (its row left the list). */
+  readonly returnFocus: RefObject<HTMLElement | null>;
+}
+
+type ViewState =
+  | { readonly phase: 'loading' | 'not-found' | 'denied' | 'unavailable' | 'rate-limited'; readonly text: string; readonly invoice: null }
+  | { readonly phase: 'ready'; readonly text: ''; readonly invoice: IssuedInvoice };
+const VIEW_LOADING: ViewState = Object.freeze({ phase: 'loading', text: VIEW_TEXT.loading, invoice: null });
+/** The first render: loading, with its status region in place but still empty — the loading text is then a change to it (announced). */
+const VIEW_OPENING: ViewState = Object.freeze({ phase: 'loading', text: '', invoice: null });
+
+/**
+ * The issued invoice as the server recorded it (snapshot version 1): number, "Issued", the UTC issue time, the seller, the
+ * customer, the ordered lines, Subtotal, the tax line — "Tax (8.875%)" and its amount, "Tax (0%)" for an explicit zero, or
+ * exactly "No tax calculated" — and the Total. Text is shown as text, each value isolated (<bdi>); amounts never break
+ * (whitespace-nowrap; text-sm below sm, SDB-23's rule) and the lines table scrolls sideways in its own named region. Laid
+ * out from the top (anchor="top"): an answer that grows the dialog never moves Close, which has the first focus. Escape and
+ * Close close it; focus goes back to the row's Open, or `returnFocus` when that row is gone.
+ */
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus }: IssuedInvoiceDialogProps) {
+  const closeButton = useRef<HTMLButtonElement | null>(null);
+  const [state, setState] = useState<ViewState>(VIEW_OPENING);
+  const alive = useRef(false);
+  const seq = useRef(0);
+  const ctl = useRef<AbortController | null>(null);
+  const owner = useRef({ read, current });
+  useLayoutEffect(() => { owner.current = { read, current }; });
+
+  // Never two reads at once: Try again is offered only once a read has ended, so the effect's cleanup is what cancels one.
+  async function load(): Promise<void> {
+    const n = ++seq.current;
+    const controller = new AbortController();
+    ctl.current = controller;
+    setState(VIEW_LOADING);
+    let answer: IssuedReadAnswer | null;
+    try { answer = await owner.current.read(storeId, invoiceId, controller.signal); } catch { answer = { kind: 'unavailable' }; }
+    if (!alive.current || n !== seq.current) return; // closed, or another read of this dialog took over
+    // A context that is gone shows nothing it read — and never leaves "Loading" for good: Try again asks under the owner's context now.
+    if (answer === null || !owner.current.current()) return setState({ phase: 'unavailable', text: VIEW_TEXT.unavailable, invoice: null });
+    if (answer.kind === 'ok') return setState({ phase: 'ready', text: '', invoice: answer.invoice });
+    if (answer.kind === 'rate-limited') return setState({ phase: 'rate-limited', text: answer.text, invoice: null });
+    setState({ phase: answer.kind, text: answer.kind === 'not-found' ? VIEW_TEXT.notFound : answer.kind === 'denied' ? VIEW_TEXT.denied : VIEW_TEXT.unavailable, invoice: null });
+  }
+
+  useEffect(() => {
+    alive.current = true;
+    // The one read of this open. Closing cancels it; so does StrictMode's first unmount — before its session check has
+    // answered, so the client sends nothing for it (an aborted signal never reaches fetch): one open, one GET.
+    void load();
+    return () => { alive.current = false; ctl.current?.abort(); };
+    // One dialog per open: its store and invoice are fixed for its life.
+  }, []);
+
+  const invoice = state.invoice;
+  const amounts = invoice?.amounts;
+  const money = (cents: number) => <span className="whitespace-nowrap">{formatCents(cents)}</span>;
+  return (
+    <DialogFrame labelledBy="issued-view-title" testId="issued-view" anchor="top" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
+      <div className="flex items-start justify-between gap-3">
+        <h2 id="issued-view-title" data-testid="issued-view-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">
+          {invoice === null ? VIEW_TEXT.title : `Invoice ${invoice.number}`}
+        </h2>
+        <button ref={closeButton} type="button" data-testid="issued-view-close" onClick={onClose} className={quiet}>Close</button>
+      </div>
+      {state.phase !== 'ready' && (
+        <p data-testid="issued-view-state" data-phase={state.phase} role={state.phase === 'loading' ? 'status' : 'alert'} className="text-sm font-bold text-slate-600">{state.text}</p>
+      )}
+      {(state.phase === 'unavailable' || state.phase === 'rate-limited') && (
+        <>
+          <button
+            type="button" data-testid="issued-view-retry" aria-disabled={waiting} aria-describedby={waiting ? 'issued-view-wait' : undefined}
+            aria-label="Try again: load this invoice" onClick={() => { if (!waiting) void load(); }}
+            className={`${quiet} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
+          >
+            Try again
+          </button>
+          {waiting && <span id="issued-view-wait" className="sr-only">{VIEW_TEXT.waiting}</span>}
+        </>
+      )}
+      {invoice !== null && amounts !== undefined && (
+        <div className="space-y-4">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">Issued</dd>
+            <dt className={labelClass}>Issued at</dt>
+            {/* The time may wrap at its spaces (never inside the date or the clock): at 320 px it is wider than its column (SIS-09). */}
+            <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-issued-at" dateTime={invoice.issuedAt}>{utcText(invoice.issuedAt)}</time></dd>
+          </dl>
+          {/* Stacked, never side by side: a long name or address wraps in its own block (break-words) at any width. */}
+          <section aria-labelledby="issued-view-seller-title" data-testid="issued-view-seller" className="space-y-0.5 text-sm">
+            <h3 id="issued-view-seller-title" className={labelClass}>Seller</h3>
+            <p data-testid="issued-view-seller-legal" className="font-bold text-primary break-words"><bdi>{invoice.seller.legalName}</bdi></p>
+            <p data-testid="issued-view-seller-store" className="text-slate-700 break-words"><bdi>{invoice.seller.storeName}</bdi></p>
+            <p data-testid="issued-view-seller-address" className="text-slate-700 break-words whitespace-pre-line"><bdi>{invoice.seller.postalAddress}</bdi></p>
+            {invoice.seller.taxRegistrationId !== null && (
+              <p data-testid="issued-view-seller-tax-id" className="text-slate-700 break-words">Tax registration ID <bdi>{invoice.seller.taxRegistrationId}</bdi></p>
+            )}
+          </section>
+          <section aria-labelledby="issued-view-customer-title" className="space-y-0.5 text-sm">
+            <h3 id="issued-view-customer-title" className={labelClass}>Customer</h3>
+            <p data-testid="issued-view-customer" className="font-bold text-primary break-words"><bdi>{invoice.customer.name}</bdi></p>
+          </section>
+          {/* The lines table scrolls sideways inside its own named region, reached by Tab (the data-table reflow exception, as the reopen dialog's): an amount never breaks. */}
+          <div role="region" aria-label="Invoice lines" tabIndex={0} data-testid="issued-view-lines-scroll" className={`overflow-x-auto ${focusRing}`}>
+            <table data-testid="issued-view-lines" className="w-full text-left text-sm border-collapse">
+              <caption className="sr-only">Invoice lines</caption>
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th scope="col" className={labelClass}>#</th>
+                  <th scope="col" className={labelClass}>Description</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
+                  <th scope="col" className={`${labelClass} text-right`}>Line total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invoice.lines.map((line) => (
+                  <tr key={line.position} data-testid="issued-view-line" className="border-b border-slate-50">
+                    <td className="py-1 pr-2 text-slate-500">{line.position}</td>
+                    <td className="py-1 pr-2 font-bold text-slate-800 break-words"><bdi>{line.description}</bdi></td>
+                    <td className="py-1 pr-2 text-right whitespace-nowrap">{line.quantity}</td>
+                    <td className="py-1 pr-2 text-right whitespace-nowrap">{formatCents(line.unitPriceCents)}</td>
+                    <td className="py-1 text-right font-bold whitespace-nowrap">{formatCents(line.lineTotalCents)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* Below sm the type steps down (SDB-23): at 320 px the largest amount in 16 px heavy type is wider than the dialog. */}
+          <div className="space-y-1 text-right text-sm sm:text-base">
+            <p data-testid="issued-view-subtotal" className="font-bold text-slate-700 break-words">Subtotal {money(amounts.subtotalCents)}</p>
+            <p data-testid="issued-view-tax" className="font-bold text-slate-700 break-words">
+              {amounts.tax.mode === 'none' ? amounts.tax.description : <>{amounts.tax.label} ({rateText(amounts.tax.rateMilliPercent)}) {money(amounts.tax.amountCents)}</>}
+            </p>
+            <p data-testid="issued-view-total" className="font-black text-primary break-words"><strong>Total</strong> {money(amounts.totalCents)}</p>
+          </div>
+          <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>
+        </div>
+      )}
+    </DialogFrame>
   );
 }
 

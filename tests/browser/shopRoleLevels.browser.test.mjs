@@ -466,6 +466,26 @@
 //          with the form locked, never "Saved"; a focus and a tab return send nothing; "Check again" sends the byte-identical
 //          body under the SAME key and session token, the entry replays the one completion (Idempotent-Replayed: true) and
 //          "Saved" follows ONE read-back: one settings version, ONE audit record, one idempotency record in all.
+//   SIS-06 (AC-09, AC-10) THE ISSUED LIST AND ONE INVOICE: three invoices issued through the entry's own routes (8.875 %, "No
+//          tax calculated", an explicit 0 %); choosing the store reads ONE first page (limit 20), newest number first, each
+//          row as the database holds it (number, customer as recorded in <bdi>, Total, UTC second, "Issued"); each Open is
+//          ONE GET whose dialog shows the stored snapshot (seller, customer, ordered lines, Subtotal, the tax line, Total,
+//          the note), Close focused first, focus back on the row's Open after Close and Escape; no customer looked up, no
+//          payment wording or send/print/void/edit/delete control, nothing but reads sent, nothing in the address or storage.
+//   SIS-07 (AC-09, AC-10) 23 invoices: page one is 20; Load more (from the keyboard) sends exactly the cursor page one answered,
+//          adds the last 3 with no row twice and hands focus to the first row it brought; a store change shows only that
+//          store's invoices and choosing the first again reads page one afresh; a Load more answer held across a store
+//          change never joins the other store's list.
+//   SIS-08 (AC-03, AC-09) stored levels decide: a manager at Invoices View + Customers View (set through the real PUT
+//          /api/v1/roles/levels) reads the list and the invoice; at Customers None the list is the 403, ONE fresh session
+//          check and "You cannot view issued invoices at this store." (no rows, no loop, no login); direct reads 403, then
+//          200 again at Customers View.
+//   SIS-09 (AC-10) bounded layout: the longest seller, customer, address and line texts and the largest total
+//          ($90,071,992,547,409.91) on ONE page at 1440x900, 768x1024, 320x640, 320x480 (16 px default) and 768x1024 at a
+//          24 px default text size: no sideways overflow of the dialog, Close in view and focused, every amount on one line,
+//          the Total whole once scrolled into view, the lines a named region reached by Tab that scrolls sideways where wider.
+//   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
+//   issue POST): this file inserts no issuing row.
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -1634,7 +1654,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
   'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17', 'SDB-18', 'SDB-19', 'SDB-20', 'SDB-21', 'SDB-22',
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
-  'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05',
+  'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -7820,4 +7840,549 @@ scenario('SIS-05', 'AC-02 LOST ANSWER, MANUAL RECOVERY — a settings PUT commit
   await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'one write in all: one completion, one audit');
   assert.equal(await has(page, 'issued-settings-attempt'), false, 'the attempt is settled');
   await assertNoLeak(page);
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-ISSUE-P2 (commit B) — the issued list and one issued invoice (SIS-06..09). Every invoice is issued through
+// the tenant entry's own routes by an owner session made outside the browser, as tests/db/invoiceIssueHttp.integration.test.mjs
+// issues them: the settings PUT, the customer POST, the draft POST, its issue preview and the issue POST with exactly the
+// preview's `expected` under a fresh key. This file writes no row of an issuing table. The literals are the shop's own
+// texts (ServerIssuedInvoices.tsx LIST_TEXT, VIEW_TEXT); the reads are GET /api/v1/stores/{id}/invoices[/{invoiceId}].
+// ---------------------------------------------------------------------------------------------------------------------
+
+const ISSUED_SAID = Object.freeze({
+  denied: 'You cannot view issued invoices at this store.',
+  note: "Recorded when it was issued (snapshot version 1): later changes to the store's issuing settings or to the customer do not change it.",
+});
+const issuedPath = (store) => `${STORES}/${store}/invoices`;
+const isIssuedList = (store) => (r) => r.method === 'GET' && r.path === issuedPath(store);
+/** Any issued-invoice read (a list page or one invoice) of any store. */
+const isIssuedRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices(?:\/|$)/.test(r.path);
+const readLine = (r) => `${r.path}${r.query} ${answered(r)}`;
+/** ServerIssuedInvoices.tsx utcText: a stored instant's UTC date and second, sliced. */
+const secondOf = (iso) => `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
+/** invoiceIssuingClient.ts rateText: thousandths of a percent as "8.875%", "0%". */
+const percentOf = (milli) => { const f = String(milli % 1000).padStart(3, '0').replace(/0+$/, ''); return `${Math.floor(milli / 1000)}${f === '' ? '' : `.${f}`}%`; };
+/** Words that name a payment state or an action the issued views must never offer. */
+const NOT_SAID = /\b(paid|unpaid|due|balance|payment|deposit|receivable|void|print|send|receipt|edit|delete)\b/i;
+
+/** The owner's settings written through the real PUT at the version its own read reports; the new version. */
+async function settingsVia(session, tenant, store, values) {
+  const read = await call('GET', `${ISSUING_SETTINGS}/${store}`, { session });
+  assert.equal(read.status, 200, `the owner's settings read: ${read.text}`);
+  const version = JSON.parse(read.text).issuingSettings.version;
+  const res = await call('PUT', `${ISSUING_SETTINGS}/${store}`, { session, key: randomUUID(), body: { expectedTenant: tenant, expectedVersion: version, ...values } });
+  assert.equal(res.status, 200, `the owner's settings PUT: ${res.text}`);
+  assert.equal(JSON.parse(res.text).issuingSettings.version, version + 1);
+  return version + 1;
+}
+/** A server customer made through the real POST /api/v1/customers: { id, name }. */
+async function customerVia(session, name) {
+  const res = await call('POST', CUSTOMERS, { session, key: randomUUID(), body: { name } });
+  assert.equal(res.status, 201, `the customer POST: ${res.text}`);
+  return JSON.parse(res.text).customer;
+}
+/**
+ * One invoice issued as the shop will issue it: the draft POST (201), its issue preview (200) and the issue POST of exactly
+ * the preview's `expected` under a fresh key (201, its Location naming the invoice). The invoice id.
+ */
+async function issueVia(session, tenant, store, customerId, lines) {
+  const saved = await call('POST', draftsPath(store), { session, key: randomUUID(), body: { expectedTenant: tenant, customerId, currency: 'USD', lines } });
+  assert.equal(saved.status, 201, `the draft POST: ${saved.text}`);
+  const draftId = JSON.parse(saved.text).draft.id;
+  const preview = await call('GET', `${draftsPath(store)}/${draftId}/issue-preview`, { session });
+  assert.equal(preview.status, 200, `the issue preview: ${preview.text}`);
+  const issued = await call('POST', `${draftsPath(store)}/${draftId}/issue`, { session, key: randomUUID(), body: JSON.parse(preview.text).preview.expected });
+  assert.equal(issued.status, 201, `the issue POST: ${issued.text}`);
+  const invoiceId = JSON.parse(issued.text).invoice.id;
+  assert.equal(issued.headers.location, `${issuedPath(store)}/${invoiceId}`, 'the 201 names the issued invoice');
+  return invoiceId;
+}
+/** The owner's PUT of a role's level in one domain through the real route, at the version its own read reports. */
+async function levelVia(session, roleId, domain, level) {
+  const read = await call('GET', domain === 'invoices' ? INVOICES_READ : ROLE_LEVELS, { session });
+  assert.equal(read.status, 200, read.text);
+  const { tenant, roles } = JSON.parse(read.text);
+  const expectedVersion = roles.find((r) => r.roleId === roleId).version;
+  const res = await call('PUT', ROLE_LEVELS, { session, key: randomUUID(), body: { roleId, domain, level, reason: REASON, expectedTenant: tenant, expectedVersion } });
+  assert.equal(res.status, 200, `the owner's PUT of ${roleId} ${domain} to ${level}: ${res.text}`);
+  assert.deepEqual(JSON.parse(res.text), { roleLevel: { roleId, domain, level, version: expectedVersion + 1 } });
+}
+
+/** A store's issued invoices as the database owner reads them, newest number first, each with its lines in order. */
+async function storedIssued(store) {
+  const rows = await owner`select invoice_id, number::text as number, customer_name, legal_name, store_name, postal_address, tax_registration_id,
+      tax_mode, tax_rate, subtotal_cents::text as subtotal, tax_cents::text as tax, total_cents::text as total,
+      to_char(issued_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as issued_at
+    from tmpos_invoice_issue.issued_invoice i where i.store_id = ${store} order by i.number desc`; // the column (a bare "number" would sort the text alias)
+  const lines = await owner`select invoice_id, position, description, quantity::text as quantity, unit_price_cents::text as price, line_total_cents::text as total
+    from tmpos_invoice_issue.issued_invoice_line where store_id = ${store} order by invoice_id, position`;
+  return Array.from(rows, (r) => ({
+    id: r.invoice_id, number: Number(r.number), customerName: r.customer_name, legalName: r.legal_name, storeName: r.store_name,
+    postalAddress: r.postal_address, taxRegistrationId: r.tax_registration_id, taxMode: r.tax_mode, taxRate: r.tax_rate,
+    subtotal: Number(r.subtotal), tax: r.tax === null ? null : Number(r.tax), total: Number(r.total), issuedAt: r.issued_at,
+    lines: Array.from(lines).filter((l) => l.invoice_id === r.invoice_id)
+      .map((l) => ({ position: l.position, description: l.description, quantity: Number(l.quantity), price: Number(l.price), total: Number(l.total) })),
+  }));
+}
+/** The row the list must show for a stored invoice. */
+const rowShown = (r) => ({ id: r.id, number: `Invoice ${r.number}`, customer: r.customerName, total: `Total ${usd(r.total)}`, at: r.issuedAt, time: secondOf(r.issuedAt), status: 'Issued' });
+/** The dialog the shop must show for a stored invoice (its tax line from the stored mode, rate and amount). */
+const viewShown = (r) => ({
+  title: `Invoice ${r.number}`, status: 'Issued', at: r.issuedAt, time: secondOf(r.issuedAt),
+  legal: r.legalName, store: r.storeName, address: r.postalAddress, preLine: 'pre-line', taxId: r.taxRegistrationId, customer: r.customerName,
+  lines: r.lines.map((l) => [String(l.position), l.description, String(l.quantity), usd(l.price), usd(l.total)]),
+  subtotal: `Subtotal ${usd(r.subtotal)}`, tax: r.taxMode === 'none' ? 'No tax calculated' : `Tax (${percentOf(r.taxRate)}) ${usd(r.tax)}`,
+  total: `Total ${usd(r.total)}`, note: ISSUED_SAID.note,
+});
+
+/** The issued list as shown, in order: each row's id, number, customer (isolated), Total, time (attribute and text) and status. */
+const issuedRowsOf = (page) => page.evaluate(`[...document.querySelectorAll(${JSON.stringify(by('issued-row'))})].map((li) => ({
+  id: li.dataset.id ?? null,
+  number: li.querySelector(${JSON.stringify(by('issued-row-number'))})?.textContent.trim() ?? null,
+  customer: li.querySelector('bdi${by('issued-row-customer')}')?.textContent ?? null,
+  total: li.querySelector(${JSON.stringify(by('issued-row-total'))})?.textContent.trim() ?? null,
+  at: li.querySelector('time${by('issued-row-issued')}')?.getAttribute('datetime') ?? null,
+  time: li.querySelector(${JSON.stringify(by('issued-row-issued'))})?.textContent.trim() ?? null,
+  status: li.querySelector(${JSON.stringify(by('issued-row-status'))})?.textContent.trim() ?? null,
+}))`);
+const issuedListPhase = (page) => page.evaluate(`${q('issued-list-state')}?.dataset.phase ?? null`);
+/** The list's read settled ('ready') with `n` rows. */
+async function waitIssuedRows(page, n, label) {
+  let seen;
+  await page.waitFor(async () => { seen = await issuedRowsOf(page); return seen.length === n && (await issuedListPhase(page)) === 'ready'; }, 30_000, label)
+    .catch((e) => { throw new Error(`${e.message}; rows shown: ${JSON.stringify(seen?.map((r) => r.number))}`); });
+  return seen;
+}
+/** The issued-invoice dialog as shown (each seller and customer value read from its <bdi>), and its whole text and controls. */
+const issuedViewOf = (page) => page.evaluate(`(() => {
+  const t = (id) => document.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  const bdi = (id) => document.querySelector('[data-testid="' + id + '"] bdi')?.textContent ?? null;
+  const v = document.querySelector('[data-testid="issued-view"]');
+  return {
+    title: t('issued-view-title'), status: t('issued-view-status'),
+    at: document.querySelector('time[data-testid="issued-view-issued-at"]')?.getAttribute('datetime') ?? null, time: t('issued-view-issued-at'),
+    legal: bdi('issued-view-seller-legal'), store: bdi('issued-view-seller-store'), address: bdi('issued-view-seller-address'),
+    preLine: (() => { const p = document.querySelector('[data-testid="issued-view-seller-address"]'); return p === null ? null : getComputedStyle(p).whiteSpace; })(),
+    taxId: bdi('issued-view-seller-tax-id'), customer: bdi('issued-view-customer'),
+    lines: [...document.querySelectorAll('[data-testid="issued-view-line"]')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
+    subtotal: t('issued-view-subtotal'), tax: t('issued-view-tax'), total: t('issued-view-total'), note: t('issued-view-note'),
+    shell: { role: v?.getAttribute('role') ?? null, modal: v?.getAttribute('aria-modal') ?? null, name: v === null ? null : document.getElementById(v.getAttribute('aria-labelledby'))?.textContent.trim() ?? null },
+    text: v?.innerText ?? '', buttons: v === null ? [] : [...v.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  };
+})()`);
+/** The list area's whole text and its controls. */
+const issuedAreaOf = (page) => page.evaluate(`(() => { const a = ${q('issued-list-area')}; return { text: a?.innerText ?? '', buttons: a === null ? [] : [...new Set([...a.querySelectorAll('button')].map((b) => b.textContent.trim()))] }; })()`);
+const openOf = (id) => `${by('issued-row')}[data-id="${id}"] ${by('issued-open')}`;
+/** Open row `id`'s invoice and wait until its dialog shows it (its title and Total). */
+async function openIssuedInvoice(page, id, number, { keyboard = false } = {}) {
+  if (keyboard) {
+    await page.call(openOf(id), function () { this.focus(); });
+    await page.press('Enter');
+  } else await page.click(openOf(id));
+  await page.waitFor(`${q('issued-view-title')}?.textContent.trim() === ${JSON.stringify(`Invoice ${number}`)} && !!${q('issued-view-total')}`, 30_000, `the dialog shows invoice ${number}`);
+}
+
+scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES AND AN EXPLICIT 0 % — three invoices issued through the entry\'s own routes (the settings at 8.875 %, then "No tax calculated" and no tax registration ID, then an explicit 0 %): choosing the store reads ONE first page (limit 20), newest number first, and each row says "Invoice {number}", the customer as recorded (in <bdi>), the Total and the UTC second exactly as the database holds them, and "Issued"; each Open is ONE GET of that invoice and its dialog (Close focused first) shows the snapshot the database holds — the seller (the address on its own lines), the customer, the ordered lines, Subtotal, "Tax (8.875%) $1.77" / "No tax calculated" with no amount / "Tax (0%) $0.00", Total and the snapshot note; Close and Escape give focus back to the row\'s Open; no customer is looked up, no payment wording and no send, print, void, edit or delete control, nothing but reads sent, nothing in the address, storage or logs', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i6', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i6 Ada Customer ${SUFFIX}`);
+  const seller = { legalName: `M7SIS i6 Seller LLC ${SUFFIX}`, storeName: `M7SIS i6 Main ${SUFFIX}`, postalAddress: `6 Main Street ${SUFFIX}\nSpringfield 01101`, taxRegistrationId: `TX6-${SUFFIX}` };
+  const plan = [
+    { tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 }, taxId: seller.taxRegistrationId, said: 'Tax (8.875%) $1.77', lines: [{ description: `M7SIS i6 Screen repair ${SUFFIX}`, quantity: 1, unitPriceCents: 1999 }] },
+    { tax: { mode: 'none' }, taxId: null, said: 'No tax calculated', lines: [{ description: `M7SIS i6 Battery ${SUFFIX}`, quantity: 2, unitPriceCents: 1250 }, { description: `M7SIS i6 Cable ${SUFFIX}`, quantity: 1, unitPriceCents: 99 }] },
+    { tax: { mode: 'exclusive_rate', rateMilliPercent: 0 }, taxId: seller.taxRegistrationId, said: 'Tax (0%) $0.00', lines: [{ description: `M7SIS i6 Labour ${SUFFIX}`, quantity: 3, unitPriceCents: 1500 }] },
+  ];
+  const ids = [];
+  for (const step of plan) {
+    await settingsVia(direct, tenant, main.id, { ...seller, taxRegistrationId: step.taxId, tax: step.tax });
+    ids.push(await issueVia(direct, tenant, main.id, customer.id, step.lines));
+  }
+  const stored = await storedIssued(main.id);
+  // Preconditions, from the database: numbers 3, 2, 1 with the amounts doc 12 §10.8 derives (1999 at 8.875 % -> 177).
+  assert.deepEqual(stored.map((r) => [r.id, r.number, r.subtotal, r.tax, r.total, r.taxMode, r.taxRate, r.taxRegistrationId]), [
+    [ids[2], 3, 4500, 0, 4500, 'exclusive_rate', 0, seller.taxRegistrationId], [ids[1], 2, 2599, null, 2599, 'none', null, null],
+    [ids[0], 1, 1999, 177, 2176, 'exclusive_rate', 8875, seller.taxRegistrationId],
+  ], 'three invoices as issued, newest number first');
+  assert.deepEqual(stored.map((r) => viewShown(r).tax), [plan[2].said, plan[1].said, plan[0].said], 'the tax lines the stored rows mean');
+
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openIssued(page);
+  const shown = st.api.length;
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 3, 'the three issued invoices listed');
+  await quiet(page, shown);
+  const rows = await issuedRowsOf(page);
+  const lists = sentBy(page, isIssuedList(main.id), shown);
+  record('SIS-06', { phase: 'list', lists: lists.map(readLine), rows: rows.map((r) => r.number) });
+  assert.deepEqual(lists.map((r) => `${r.query} ${answered(r)}`), ['?limit=20 200'], 'choosing the store reads ONE first page of 20');
+  assert.deepEqual(JSON.parse(lists[0].replied.text).invoices.map((i) => [i.id, i.number, i.customerName, i.totalCents, i.issuedAt]),
+    stored.map((r) => [r.id, r.number, r.customerName, r.total, r.issuedAt]), 'the page the entry answered is the database\'s');
+  assert.equal(JSON.parse(lists[0].replied.text).nextCursor, null);
+  assert.deepEqual(rows, stored.map(rowShown), 'each row as the database holds it: number, customer, Total, the UTC second, Issued');
+  assert.equal(await has(page, 'issued-load-more'), false, 'one page: no Load more');
+  const area = await issuedAreaOf(page);
+  assert.ok(!NOT_SAID.test(area.text), `the list names no payment state or action: ${area.text.match(NOT_SAID)?.[0]}`);
+  assert.deepEqual(area.buttons, ['Open'], 'each row offers Open, and nothing else');
+
+  for (const [i, row] of stored.entries()) {
+    const from = st.api.length;
+    const keyboard = i === stored.length - 1;
+    await openIssuedInvoice(page, row.id, row.number, { keyboard });
+    await quiet(page, from);
+    await page.settle();
+    const view = await issuedViewOf(page);
+    const focus = await focusOf(page);
+    record('SIS-06', { phase: 'open', number: row.number, reads: sentBy(page, isIssuedRead, from).map(readLine), focus, tax: view.tax, total: view.total });
+    assert.deepEqual(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(main.id)}/${row.id} 200`], `invoice ${row.number}: ONE GET of exactly that invoice`);
+    assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
+    const { text, buttons, shell, ...content } = view;
+    assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
+    assert.deepEqual(shell, { role: 'dialog', modal: 'true', name: `Invoice ${row.number}` }, 'a modal dialog named by its title');
+    assert.deepEqual(buttons, ['Close'], 'the dialog offers Close only');
+    assert.ok(!NOT_SAID.test(text), `invoice ${row.number}: no payment state or action named: ${text.match(NOT_SAID)?.[0]}`);
+    if (keyboard) await page.press('Escape');
+    else await page.click(by('issued-view-close'));
+    await page.waitFor(`!${q('issued-view')}`, 10_000, `invoice ${row.number}: the dialog closed`);
+    await page.waitFor(async () => (await focusOf(page)) === `issued-open-${row.id}`, 5_000, `invoice ${row.number}: focus back on its row's Open after ${keyboard ? 'Escape' : 'Close'}`);
+  }
+  assert.deepEqual(stored.map((r) => viewShown(r).tax), plan.map((p) => p.said).reverse());
+  assert.deepEqual(sentBy(page, isCustomersRead, shown).map(apiLine), [], 'no customer is looked up: the names are the invoices\' own');
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET', shown).map(apiLine), [], 'nothing but reads sent: no write to any /api/ route');
+  await assertDraftsNowhere([page], [...ids, customer.id, customer.name, seller.legalName, seller.taxRegistrationId]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-07', 'AC-09 AC-10 MORE THAN ONE PAGE, THEN A STORE CHANGE — 23 invoices issued through the entry at one store and one at another: choosing the first reads page one (20: numbers 23..4); Load more, pressed from the keyboard, sends exactly the nextCursor that page answered, adds 3..1 with no row twice (the numbers the database holds), goes away and leaves focus on the first row it brought; choosing the other store shows only its own invoice 1, and choosing this store again reads page one afresh (no cursor carried over); a Load more answer held at the front across a store change never joins the other store\'s list', async () => {
+  const { tenant, stores: [main, other], boss } = await draftShop('i7', ['main', 'other']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i7 Page Customer ${SUFFIX}`);
+  const seller = (label) => ({ legalName: `M7SIS i7 ${label} LLC ${SUFFIX}`, storeName: `M7SIS i7 ${label} ${SUFFIX}`, postalAddress: `7 ${label} Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  await settingsVia(direct, tenant, main.id, seller('Main'));
+  await settingsVia(direct, tenant, other.id, seller('Other'));
+  for (let n = 1; n <= 23; n += 1) await issueVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i7 line ${n} ${SUFFIX}`, quantity: 1, unitPriceCents: 100 + n }]);
+  await issueVia(direct, tenant, other.id, customer.id, [{ description: `M7SIS i7 other ${SUFFIX}`, quantity: 1, unitPriceCents: 777 }]);
+  const mainStored = await storedIssued(main.id);
+  const otherStored = await storedIssued(other.id);
+  assert.deepEqual(mainStored.map((r) => r.number), Array.from({ length: 23 }, (_, i) => 23 - i), 'preconditions: 23 invoices numbered 23..1');
+  assert.deepEqual(otherStored.map((r) => r.number), [1], 'the other store\'s own series');
+
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openIssued(page);
+  const from = st.api.length;
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 20, 'the first page');
+  assert.deepEqual(await issuedRowsOf(page), mainStored.slice(0, 20).map(rowShown), 'page one: 23..4');
+  await page.call(by('issued-load-more'), function () { this.focus(); });
+  const fromMore = st.api.length;
+  await page.press('Enter');
+  await waitIssuedRows(page, 23, 'all 23 after Load more');
+  await quiet(page, fromMore);
+  const lists = sentBy(page, isIssuedList(main.id), from);
+  const cursor = JSON.parse(lists[0].replied.text).nextCursor;
+  const rows = await issuedRowsOf(page);
+  record('SIS-07', { phase: 'load more', lists: lists.map((r) => `${r.query.replace(/cursor=[^&]+/, 'cursor=…')} ${answered(r)}`), rows: rows.length });
+  assert.match(String(cursor), /^[A-Za-z0-9_-]{23}$/, 'page one ends with a continuation');
+  assert.deepEqual(lists.map((r) => `${r.query} ${answered(r)}`), ['?limit=20 200', `?limit=20&cursor=${cursor} 200`], 'Load more sends exactly the cursor page one answered');
+  assert.equal(JSON.parse(lists[1].replied.text).nextCursor, null, 'the last page');
+  assert.deepEqual(rows, mainStored.map(rowShown), 'every invoice once, newest number first');
+  assert.equal(new Set(rows.map((r) => r.id)).size, 23, 'no row twice');
+  assert.equal(await has(page, 'issued-load-more'), false, 'Load more goes with the last page');
+  await page.waitFor(async () => (await focusOf(page)) === `issued-open-${mainStored[20].id}`, 5_000, 'focus on the first row Load more brought (invoice 3)');
+
+  const fromSwitch = st.api.length;
+  await pickIssuedStore(page, other.id);
+  await waitIssuedRows(page, 1, 'the other store\'s one invoice');
+  assert.deepEqual(await issuedRowsOf(page), otherStored.map(rowShown), 'only the other store\'s invoice 1');
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 20, 'this store\'s first page again');
+  await quiet(page, fromSwitch);
+  assert.deepEqual(sentBy(page, isIssuedRead, fromSwitch).map(readLine), [`${issuedPath(other.id)}?limit=20 200`, `${issuedPath(main.id)}?limit=20 200`],
+    'each choice reads its own page one: no cursor carried over');
+  assert.deepEqual(await issuedRowsOf(page), mainStored.slice(0, 20).map(rowShown), 'page one afresh, the earlier pages gone');
+
+  // A Load more whose answer is held at the front while the store changes: the late page never joins the other store's rows.
+  const held = gate((r) => r.frameId === page.frameId && isIssuedList(main.id)(r) && r.query.includes('cursor='), 'response');
+  const fromHeld = st.api.length;
+  await page.click(by('issued-load-more'));
+  await held.reached;
+  await pickIssuedStore(page, other.id);
+  await waitIssuedRows(page, 1, 'the other store listed while the old page is held');
+  held.release();
+  await quiet(page, fromHeld);
+  await page.settle();
+  const after = { rows: await issuedRowsOf(page), phase: await issuedListPhase(page), more: await has(page, 'issued-load-more') };
+  record('SIS-07', { phase: 'held page', reads: sentBy(page, isIssuedRead, fromHeld).map((r) => readLine(r).replace(/cursor=[^& ]+/, 'cursor=…')), rows: after.rows.length });
+  assert.deepEqual(after, { rows: otherStored.map(rowShown), phase: 'ready', more: false }, 'the late page of the first store changed nothing');
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET', from).map(apiLine), [], 'nothing but reads sent: no write to any /api/ route');
+}, 240_000);
+
+scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a manager whose stored Invoices and Customers levels are both View (set by the owner through the real PUT /api/v1/roles/levels) reads the store\'s list and opens its invoice; with Customers set to None, the page (reloaded) gets the server\'s 403, then ONE fresh session check and "You cannot view issued invoices at this store." — no rows, no Load more, no loop, no login; the manager\'s direct list and invoice reads are the 403 too, and 200 again once Customers is View', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i8', ['main']);
+  const manager = await actor('i8-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i8 Reader Customer ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SIS i8 Seller ${SUFFIX}`, storeName: `M7SIS i8 Main ${SUFFIX}`, postalAddress: `8 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  const invoiceId = await issueVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i8 Service ${SUFFIX}`, quantity: 1, unitPriceCents: 5000 }]);
+  await levelVia(direct, 'manager', 'invoices', 'view');
+  await levelVia(direct, 'manager', 'customers', 'view');
+  const levels = async () => ({ invoices: (await domainState(tenant, 'manager', 'invoices')).level, customers: (await domainState(tenant, 'manager', 'customers')).level });
+  assert.deepEqual(await levels(), { invoices: 'view', customers: 'view' }, 'preconditions: both stored at View');
+  const [stored] = await storedIssued(main.id);
+
+  const page = await openPage();
+  await signIn(page, manager);
+  await openIssued(page);
+  const from = st.api.length;
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the reader\'s list');
+  assert.deepEqual(await issuedRowsOf(page), [rowShown(stored)], 'Invoices View and Customers View read the list');
+  await openIssuedInvoice(page, invoiceId, 1);
+  const { text, buttons, shell, ...content } = await issuedViewOf(page);
+  assert.deepEqual(content, viewShown(stored), 'and the invoice');
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await quiet(page, from);
+  assert.deepEqual(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(main.id)}?limit=20 200`, `${issuedPath(main.id)}/${invoiceId} 200`]);
+
+  // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
+  await levelVia(direct, 'manager', 'customers', 'none');
+  assert.deepEqual(await levels(), { invoices: 'view', customers: 'none' });
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the reloaded Invoices page');
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  const refusedFrom = st.api.length;
+  await pickIssuedStore(page, main.id);
+  await waitData(page, 'issued-list-state', 'phase', 'denied');
+  await quiet(page, refusedFrom);
+  await page.settle();
+  const after = sentBy(page, () => true, refusedFrom);
+  const refusedAt = after.findIndex(isIssuedRead);
+  const shown = { text: await textOf(page, 'issued-list-state'), rows: (await issuedRowsOf(page)).length, more: await has(page, 'issued-load-more'), retry: await has(page, 'issued-list-retry') };
+  record('SIS-08', { after: after.map(apiLine), shown });
+  assert.deepEqual(after.filter(isIssuedRead).map(readLine), [`${issuedPath(main.id)}?limit=20 403 forbidden`], 'ONE list read, refused by the server');
+  assert.deepEqual(after.slice(refusedAt + 1).map((r) => `${r.method} ${r.path}`), ['GET /api/v1/session'], 'then exactly ONE fresh session check — no login, no second read');
+  assert.deepEqual(shown, { text: ISSUED_SAID.denied, rows: 0, more: false, retry: true }, 'the refusal said, nothing listed (Try again is one read again)');
+
+  // The manager's own direct reads follow the stored level too: 403 under Customers None, 200 once it is View again.
+  const m = await directLogin(manager);
+  const direct403 = [(await call('GET', `${issuedPath(main.id)}?limit=20`, { session: m })).status, (await call('GET', `${issuedPath(main.id)}/${invoiceId}`, { session: m })).status];
+  await levelVia(direct, 'manager', 'customers', 'view');
+  const direct200 = [(await call('GET', `${issuedPath(main.id)}?limit=20`, { session: m })).status, (await call('GET', `${issuedPath(main.id)}/${invoiceId}`, { session: m })).status];
+  record('SIS-08', { direct403, direct200 });
+  assert.deepEqual({ none: direct403, view: direct200 }, { none: [403, 403], view: [200, 200] }, 'the server decides on the stored level, per request');
+}, 240_000);
+
+/**
+ * SIS-09's cells: the viewport in CSS px (deviceScaleFactor 1) and Chrome's default font size (Page.setFontSizes, as
+ * SDB-23 enlarges text), null for the browser's untouched 16 px. All on ONE page and sign-in (the account's login limit
+ * is 5 per 5 minutes), the enlarged-text cell last. `overflows`: whether the lines table at the largest amounts is wider
+ * than its region there (asserted, so the region checks never go vacuous; measured: it fits at D1440 and M768, and is
+ * wider at N320, S320 and T768).
+ */
+const ISSUED_CELLS = Object.freeze([
+  { cell: 'D1440', width: 1440, height: 900, font: null, overflows: false },
+  { cell: 'M768', width: 768, height: 1024, font: null, overflows: false },
+  { cell: 'N320', width: 320, height: 640, font: null, overflows: true },
+  { cell: 'S320', width: 320, height: 480, font: null, overflows: true },
+  { cell: 'T768', width: 768, height: 1024, font: 24, overflows: true },
+]);
+/** Exactly `n` characters of numbered words of `stem` (ASCII, so characters are scalars), never ending in a space. */
+const wordsOf = (stem, n) => {
+  let s = '';
+  for (let i = 1; s.length < n; i += 1) s += `${s === '' ? '' : ' '}${stem}${i}`;
+  s = s.slice(0, n);
+  return s.endsWith(' ') ? `${s.slice(0, -1)}x` : s;
+};
+/** The issued dialog's geometry now: the panel, Close, the lines region and table, every amount and the viewport. */
+const issuedBox = (page) => page.evaluate(`(() => {
+  const box = (n) => { if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
+  const linesIn = (node) => { if (!node) return null; const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+  const panel = ${q('issued-view')}, close = ${q('issued-view-close')}, scroller = ${q('issued-view-lines-scroll')}, table = ${q('issued-view-lines')};
+  const c = close.getBoundingClientRect();
+  const hit = document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2);
+  return {
+    innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize, docScrollWidth: document.documentElement.scrollWidth,
+    panel: { ...box(panel), scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, scrollLeft: panel.scrollLeft },
+    close: { ...box(close), focused: document.activeElement === close, hit: hit !== null && close.contains(hit),
+      inView: c.left >= 0 && c.top >= 0 && c.right <= innerWidth && c.bottom <= innerHeight },
+    scroller: { ...box(scroller), scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth, overflowX: getComputedStyle(scroller).overflowX,
+      role: scroller.getAttribute('role'), name: scroller.getAttribute('aria-label'), tabIndex: scroller.tabIndex },
+    table: box(table),
+    // What reaches past the dialog's content box (outside the lines' own region): named by test id, else tag and classes.
+    overflowers: (() => {
+      const right = panel.getBoundingClientRect().left + panel.clientLeft + panel.clientWidth - parseFloat(getComputedStyle(panel).paddingRight);
+      return [...panel.querySelectorAll('*')].filter((n) => !scroller.contains(n) && n.getBoundingClientRect().right > right + 0.5)
+        .map((n) => ({ node: n.dataset?.testid ?? \`\${n.tagName.toLowerCase()}.\${String(n.className).split(' ').slice(0, 3).join('.')}\`, right: Math.round(n.getBoundingClientRect().right - right) })).slice(0, 8);
+    })(),
+    // Every amount on one line: the lines' unit prices and totals, and the Subtotal's and the Total's amounts.
+    amountLines: [...document.querySelectorAll(${JSON.stringify(`${by('issued-view-line')} td:nth-child(n+4)`)})].map(linesIn),
+    subtotal: { text: ${q('issued-view-subtotal')}?.textContent.trim() ?? null, amountLines: linesIn(${q('issued-view-subtotal')}?.lastElementChild) },
+    // The issue time may wrap at its spaces only: its date and its clock each on one line.
+    issuedAt: (() => {
+      const time = ${q('issued-view-issued-at')}, node = time?.firstChild ?? null;
+      const part = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+      return node === null ? null : { lines: linesIn(time), date: part(0, 10), clock: part(11, 19) };
+    })(),
+    total: { text: ${q('issued-view-total')}?.textContent.trim() ?? null, amount: ${q('issued-view-total')}?.lastElementChild?.textContent ?? null, amountLines: linesIn(${q('issued-view-total')}?.lastElementChild) },
+  };
+})()`);
+/** The Total's amount scrolled into view inside the dialog: whether all of it is inside the dialog and the viewport, on top. */
+const totalSeen = (page) => page.evaluate(`(() => {
+  const amount = ${q('issued-view-total')}?.lastElementChild ?? null, panel = ${q('issued-view')};
+  if (amount === null || panel === null) return null;
+  amount.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const a = amount.getBoundingClientRect(), d = panel.getBoundingClientRect();
+  const hit = document.elementFromPoint(a.left + a.width / 2, a.top + a.height / 2);
+  return {
+    inDialog: a.left >= d.left - 0.5 && a.right <= d.right + 0.5 && a.top >= d.top - 0.5 && a.bottom <= d.bottom + 0.5,
+    inView: a.left >= -0.5 && a.right <= innerWidth + 0.5 && a.top >= -0.5 && a.bottom <= innerHeight + 0.5,
+    onTop: hit !== null && amount.contains(hit), panelScrollLeft: panel.scrollLeft, panelScrollTop: panel.scrollTop,
+  };
+})()`);
+
+/**
+ * The issued row `id` now (SIS-09, before its dialog opens), measured with the section held (by this test only, then let go)
+ * to `column` CSS px — the viewport less two 16 px gutters — because the page itself is wider than a phone's viewport for an
+ * older reason (TenantLayout's main column grows to the demo invoices table's width), which would leave the section ~1028 px
+ * wide at 320 px: what reaches past the section's content box, the Total's amount in lines, the issue time's date and clock
+ * in lines, Open scrolled into view (on top, in the viewport) and the customer as shown — its text, and whether any of its
+ * boxes leaves the row's content box or is clipped (an ellipsis, or a box from the name up to the row that overflows).
+ */
+const issuedRowBox = (page, id, column) => page.evaluate(`(() => {
+  const li = document.querySelector(${JSON.stringify(`${by('issued-row')}[data-id="${id}"]`)}), section = ${q('issued-section')};
+  if (li === null || section === null) return null;
+  const was = section.style.maxWidth;
+  section.style.maxWidth = '${column}px';
+  try {
+    const linesIn = (node) => { if (!node) return null; const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+    // The section's content box, now and again after Open is scrolled into view (scrolling moves every box alike).
+    const content = () => { const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
+      return { left: s.left + section.clientLeft + parseFloat(cs.paddingLeft), right: s.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight), width: s.width }; };
+    const box = content();
+    const outside = [li, ...li.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 0.5 || r.left < box.left - 0.5; })
+      .map((n) => ({ node: n.dataset?.testid ?? n.tagName.toLowerCase(), left: Math.round(n.getBoundingClientRect().left - box.left), right: Math.round(n.getBoundingClientRect().right - box.right) })).slice(0, 8);
+    const time = li.querySelector(${JSON.stringify(by('issued-row-issued'))}), node = time?.firstChild ?? null;
+    const part = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+    const totalLines = linesIn(li.querySelector(${JSON.stringify(by('issued-row-total'))})?.lastElementChild);
+    const name = li.querySelector('bdi${by('issued-row-customer')}');
+    const customer = (() => {
+      if (name === null) return null;
+      const l = li.getBoundingClientRect(), cs = getComputedStyle(li);
+      const inner = { left: l.left + li.clientLeft + parseFloat(cs.paddingLeft), right: l.left + li.clientLeft + li.clientWidth - parseFloat(cs.paddingRight) };
+      const rects = [...name.getClientRects()];
+      const boxes = [];
+      for (let n = name; n !== null && n !== li.parentElement; n = n.parentElement) boxes.push(n);
+      return {
+        text: name.textContent, lines: new Set(rects.map((r) => Math.round(r.top))).size,
+        inRow: rects.length > 0 && rects.every((r) => r.left >= inner.left - 0.5 && r.right <= inner.right + 0.5 && r.top >= l.top - 0.5 && r.bottom <= l.bottom + 0.5),
+        clipped: boxes.filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || n.scrollWidth > n.clientWidth || (c.overflowY !== 'visible' && n.scrollHeight > n.clientHeight); })
+          .map((n) => n.dataset?.testid ?? n.tagName.toLowerCase()),
+      };
+    })();
+    const open = li.querySelector(${JSON.stringify(by('issued-open'))});
+    open.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const o = open.getBoundingClientRect(), after = content();
+    const hit = document.elementFromPoint(o.left + o.width / 2, o.top + o.height / 2);
+    return {
+      section: { left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width) }, outside, totalLines,
+      time: node === null ? null : { date: part(0, 10), clock: part(11, 19) },
+      open: { onTop: hit !== null && open.contains(hit), inView: o.left >= -0.5 && o.top >= -0.5 && o.right <= innerWidth + 0.5 && o.bottom <= innerHeight + 0.5, inSection: o.right <= after.right + 0.5 },
+      customer,
+    };
+  } finally {
+    section.style.maxWidth = was;
+  }
+})()`);
+
+scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened from the keyboard on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured with the section held by the test to the viewport less two 16 px gutters (288 px at 320 px: the page itself scrolls sideways at 320 px for an older reason, its main column grown by the demo invoices table), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i9', ['main']);
+  const direct = await directLogin(boss);
+  const values = {
+    legalName: wordsOf(`Seller${SUFFIX}w`, 200), storeName: wordsOf(`Store${SUFFIX}w`, 120),
+    postalAddress: Array.from({ length: 8 }, (_, i) => wordsOf(`Line${i + 1}w`, 120)).join('\n'),
+    taxRegistrationId: `TX${SUFFIX}${'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(2)}`.slice(0, 64), tax: { mode: 'none' },
+  };
+  // One 48-character unbroken word first (it can only wrap inside itself), then numbered words: 200 characters in all.
+  const customer = await customerVia(direct, `${'Customer'.repeat(5)}${SUFFIX} ${wordsOf('Named', 151)}`);
+  await settingsVia(direct, tenant, main.id, values);
+  const description = wordsOf(`Work${SUFFIX}d`, 256);
+  const invoiceId = await issueVia(direct, tenant, main.id, customer.id, [{ description, quantity: 1, unitPriceCents: Number.MAX_SAFE_INTEGER }]);
+  const [stored] = await storedIssued(main.id);
+  assert.deepEqual([stored.id, stored.total, stored.subtotal, stored.legalName.length, stored.storeName.length, stored.postalAddress.split('\n').map((l) => l.length), stored.taxRegistrationId.length, stored.customerName.length, stored.lines[0].description.length],
+    [invoiceId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 200, 120, Array(8).fill(120), 64, 200, 256], 'preconditions: the longest values and the largest total, as stored');
+
+  const page = await openPage();
+  await signIn(page, boss);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the one invoice listed');
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  const same = (a, b) => { try { assert.deepEqual(a, b); return true; } catch { return false; } };
+  for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    const setUp = await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })');
+    // Preconditions, asserted: a cell that did not take its configuration proves nothing.
+    assert.deepEqual(setUp, { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
+    const row = await issuedRowBox(page, invoiceId, width - 32);
+    record('SIS-09', { cell, phase: 'row', row });
+    check(row !== null, `${cell}: the row is not shown`);
+    if (row !== null) {
+      check(row.outside.length === 0, `${cell}: the row reaches past the section's content box ${JSON.stringify(row.outside)} (section ${JSON.stringify(row.section)})`);
+      check(row.totalLines === 1, `${cell}: the row's Total breaks (${row.totalLines} lines)`);
+      check(row.time !== null && row.time.date === 1 && row.time.clock === 1, `${cell}: the row's issue time breaks inside its date or clock ${JSON.stringify(row.time)}`);
+      check(row.open.onTop && row.open.inView && row.open.inSection, `${cell}: the row's Open is not in view, on top and inside the section ${JSON.stringify(row.open)} (section ${JSON.stringify(row.section)})`);
+      check(row.section.width <= width - 32, `${cell}: the section was not held to ${width - 32} px for the row ${JSON.stringify(row.section)}`);
+      check(row.customer !== null && row.customer.text === stored.customerName, `${cell}: the row does not show the customer as stored`);
+      check(row.customer !== null && row.customer.inRow && row.customer.clipped.length === 0, `${cell}: the row's customer is not shown whole inside the row ${JSON.stringify(row.customer && { lines: row.customer.lines, inRow: row.customer.inRow, clipped: row.customer.clipped })}`);
+    }
+    const from = st.api.length;
+    await openIssuedInvoice(page, invoiceId, 1, { keyboard: true });
+    await quiet(page, from);
+    await page.settle();
+    const b = await issuedBox(page);
+    const { text, buttons, shell, ...content } = await issuedViewOf(page);
+    const overflowed = b.scroller.scrollWidth > b.scroller.clientWidth + HOLD_TOLERANCE;
+    const tabs = [];
+    let scrolled = null;
+    for (let i = 0; i < 2; i += 1) {
+      await page.press('Tab');
+      tabs.push(await focusOf(page));
+      if (i === 0 && overflowed) {
+        for (const type of ['rawKeyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 });
+        await page.waitFor(`(${q('issued-view-lines-scroll')}?.scrollLeft ?? 0) > 0`, 5_000, 'the lines scrolled').catch(() => {});
+        scrolled = await page.evaluate(`${q('issued-view-lines-scroll')}?.scrollLeft ?? null`);
+      }
+    }
+    const seen = await totalSeen(page);
+    const sideways = await page.evaluate(`(() => { const p = ${q('issued-view')}; return { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`);
+    record('SIS-09', { cell, width, height, font: font ?? 16, box: b, overflowed, scrolled, tabs, seen, sideways, reads: sentBy(page, isIssuedRead, from).map(readLine) });
+    assert.equal(overflowed, overflows, `${cell}: the lines table ${overflows ? 'is wider than' : 'fits'} its region ${JSON.stringify([b.table?.width, b.scroller.clientWidth])}`);
+    check(b.panel.x >= -HOLD_TOLERANCE && b.panel.x + b.panel.width <= width + HOLD_TOLERANCE, `${cell}: the dialog lies outside the viewport ${JSON.stringify([b.panel.x, b.panel.width])}`);
+    check(b.panel.scrollWidth <= b.panel.clientWidth + HOLD_TOLERANCE, `${cell}: the dialog overflows sideways (${b.panel.scrollWidth} > ${b.panel.clientWidth}): ${JSON.stringify(b.overflowers)}`);
+    check(b.close.inView && b.close.hit && b.close.focused, `${cell}: Close is not in view, on top and focused first ${JSON.stringify(b.close)}`);
+    check(b.scroller.role === 'region' && b.scroller.name === 'Invoice lines' && b.scroller.tabIndex === 0 && ['auto', 'scroll'].includes(b.scroller.overflowX), `${cell}: the lines are not a named, focusable, scrollable region ${JSON.stringify(b.scroller)}`);
+    check(b.scroller.x >= b.panel.x - HOLD_TOLERANCE && b.scroller.x + b.scroller.width <= b.panel.x + b.panel.width + HOLD_TOLERANCE, `${cell}: the lines region is wider than the dialog ${JSON.stringify([b.scroller, b.panel])}`);
+    check(b.amountLines.length === 2 && b.amountLines.every((n) => n === 1), `${cell}: a line amount breaks ${JSON.stringify(b.amountLines)}`);
+    check(b.subtotal.text === 'Subtotal $90,071,992,547,409.91' && b.subtotal.amountLines === 1, `${cell}: the Subtotal ${JSON.stringify(b.subtotal)}`);
+    check(b.issuedAt !== null && b.issuedAt.date === 1 && b.issuedAt.clock === 1, `${cell}: the issue time breaks inside its date or clock ${JSON.stringify(b.issuedAt)}`);
+    check(b.total.text === 'Total $90,071,992,547,409.91' && b.total.amount === '$90,071,992,547,409.91' && b.total.amountLines === 1, `${cell}: the Total's digits ${JSON.stringify(b.total)}`);
+    check(seen !== null && seen.inDialog && seen.inView && seen.onTop, `${cell}: the Total's amount, scrolled into view, is not whole and on top ${JSON.stringify(seen)}`);
+    if (overflowed) check(scrolled > 0, `${cell}: ArrowRight on the focused lines region did not scroll them (${scrolled})`);
+    check(sideways.scrollLeft === 0 && sideways.scrollWidth <= sideways.clientWidth + HOLD_TOLERANCE, `${cell}: after Tab and the arrow keys the dialog scrolled or overflows sideways ${JSON.stringify(sideways)}`);
+    check(same(content, viewShown(stored)), `${cell}: the dialog does not show the stored invoice whole`);
+    check(same(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId} 200`]), `${cell}: not ONE GET per open`);
+    check(same(tabs, ['issued-view-lines-scroll', 'issued-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the dialog`);
+    const back = await page.waitFor(async () => (await focusOf(page)) === `issued-open-${invoiceId}`, 5_000, `${cell}: focus back`).then(() => true, () => false);
+    check(back, `${cell}: focus went back to ${await focusOf(page)}, not the row's Open`);
+  }
+  assert.deepEqual(problems, [], 'the issued dialog holds its bounds in every cell');
 }, 240_000);
