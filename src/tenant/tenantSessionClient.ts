@@ -7,7 +7,7 @@
 //     server verifies it and decides who this is. Nothing here knows or builds an issuer key, a proof or a database key.
 //   - The session CSRF token lives in this closure only (beside the UID it was issued for) — never in React state (one
 //     exception, below), storage, a URL, the DOM or a log — and is handed to the caller only to ride its next request (an
-//     unsafe one, or a session-bound read). Three more in-memory holders keep what they were handed, under the same rule
+//     unsafe one, or a session-bound read). Four more in-memory holders keep what they were handed, under the same rule
 //     (never storage, a URL, the DOM or a log); their refs and dialog state go with their page, which a sign-out unmounts
 //     (the route guard, AccessGuard.tsx; a DEV-only session excepted), and a reload drops everything:
 //       - The customer directory page (ServerCustomerDirectory.tsx, M7A-CUSTOMERS-P5), second: in refs, to compare it with
@@ -31,6 +31,10 @@
 //         on the same session (Check again) and to read a created one back only under that session. `onSessionEnd` takes it
 //         from every user's attempt (an unconfirmed one loses its body too, and is never sent again); otherwise it stays
 //         until the attempt is detached, read back or removed, or the page reloads.
+//       - The Invoices page's issued invoices section (ServerIssuedInvoices.tsx, M7B-INVOICES-ISSUE-P2), fifth: in refs, to
+//         compare it with the next one and send its reads, and beside the owner's issuing-settings write (by its key), to
+//         re-send an unresolved one on the same session (Check again) — until the section unmounts or, while it is mounted,
+//         hears `onSessionEnd`, which closes the settings panel and takes the write's key, body and token with it.
 //   - A sign-out is heard where it starts: `onSessionEnd` listeners run synchronously at the START of every `logout()`
 //     (and `reset()`), before anything is sent or awaited — so they run whatever the server answers. AccessContext.tsx
 //     starts that logout, without awaiting it, on every signed-out state and before another user's session is used; the

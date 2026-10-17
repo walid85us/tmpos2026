@@ -11,6 +11,7 @@ import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '.
 import { NO_CUSTOMER, localCustomerIdOf, localCustomerReference, usableDraftCustomer, type DraftCustomerReference, type ServerCustomerReference } from '../tenant/customerReference';
 import { SERVER_DRAFT_LIMIT_TEXT, ServerCustomerField, isLiveContext } from '../tenant/ServerCustomerPicker';
 import { NOT_SENT_TEXT, ServerInvoiceDrafts } from '../tenant/ServerInvoiceDrafts';
+import { ServerIssuedInvoices } from '../tenant/ServerIssuedInvoices';
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
@@ -833,6 +834,8 @@ export default function Invoices() {
 
       {/* M7B-INVOICES-P1 — store-owned drafts saved on the server: their own section, never in the list or counters above. */}
       <ServerInvoiceDrafts uid={uid} canViewCustomers={canViewServerCustomers} handoff={draftHandoff} onHandoffTaken={() => setDraftHandoff(null)} />
+      {/* M7B-INVOICES-ISSUE-P2 — issued invoices and each store's issuing settings, read from the server: their own section too. */}
+      <ServerIssuedInvoices uid={uid} />
 
       <AnimatePresence>
         {detailInvoice && !showPaymentModal && !showEditModal && !showEmailModal && !showSmsModal && !showOnlinePayModal && !showPrintModal && (

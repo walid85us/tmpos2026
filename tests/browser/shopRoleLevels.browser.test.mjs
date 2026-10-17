@@ -448,6 +448,24 @@
 //          also followed the Firebase sign-in). The fix's cases — a sign-out heard with no page mounted, a logout that never reached the
 //          server so the same session is found again, a late answer or a Check again around the sign-out — are
 //          jsdom-only (ServerCustomerDirectory.test.tsx SCD-177..186).
+//   SIS-01 (M7B-INVOICES-ISSUE-P2, AC-02) THE OWNER'S ISSUING SETTINGS: nothing about them is read before "Show issued
+//          invoices" or before the panel opens; an unconfigured store shows empty fields and no tax mode; Save sends ONE PUT
+//          of the exact body (the store's tenant, version 0, 8.875 % as 8875) under a v4 key, and "Saved" follows ONE
+//          read-back; the row (version 1, the values, a counter at 0) and ONE tenant-scope audit naming the store agree; a
+//          reload and the second entry read it back; then "No tax calculated" ({"mode":"none"}, version 2) and an explicit
+//          0 % (version 3, still an exclusive rate) each write once with one audit, and a reload shows 0 under Exclusive
+//          rate; no key, body or token in the address, storage or logs.
+//   SIS-02 (AC-03) a manager opening the settings is refused by the server (the owner rule) after ONE fresh session check:
+//          no form, no loop; its direct PUT is the 403 with nothing written.
+//   SIS-03 (AC-02) a stale sign-in: the PUT is the 403 step_up_required with nothing written; the inline group, an
+//          explicit sign-in (the reauthentication login), ONE re-read and "Press Save" — no PUT on its own; only the next
+//          Save writes, once.
+//   SIS-04 (AC-02, AC-08) no settings PUT from loading the page, opening the panel, typing, a window focus, a tab return,
+//          closing and reopening the panel or a reload: none sent, nothing written.
+//   SIS-05 (AC-02) LOST ANSWER: a settings PUT commits and its answer is dropped at the front (st.lose): "Not confirmed yet"
+//          with the form locked, never "Saved"; a focus and a tab return send nothing; "Check again" sends the byte-identical
+//          body under the SAME key and session token, the entry replays the one completion (Idempotent-Replayed: true) and
+//          "Saved" follows ONE read-back: one settings version, ONE audit record, one idempotency record in all.
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -461,7 +479,10 @@
 // limiter fingerprint and issuer key row it found, and drops its login. Since M7B-INVOICES-P1 it first removes its tenants'
 // drafts, lines and draft events and clears every audit subject naming one of its drafts (an owner transaction lifting
 // 002's append-only trigger, then restoring it — the HTTP draft suite's technique): their foreign keys hold its customers
-// (no CASCADE), and a draft or a draft audit subject left behind would make 028's rollback refuse (R8). What it leaves is
+// (no CASCADE), and a draft or a draft audit subject left behind would make 028's rollback refuse (R8). Since
+// M7B-INVOICES-ISSUE-P2 it first removes its tenants' issuing data — issued lines and invoices, invoice-number counters and
+// issuing settings (034's row guards lifted for those deletes only, then put back in the mode found), the issue and settings
+// audits, and every audit subject naming one of its issued invoices or stores — so nothing of it blocks 034's rollback. What it leaves is
 // what every suite leaves: its synthetically named identities, tenants, stores and grants, their audit records and
 // idempotency records.
 import { after, before, test } from 'node:test';
@@ -607,11 +628,66 @@ async function setupDatabase() {
   await installTestIssuerKey(owner, ISSUER_KEY);
 }
 
+const TRIGGER_MODE = Object.freeze({ O: 'enable trigger', D: 'disable trigger', R: 'enable replica trigger', A: 'enable always trigger' });
+/** Runs `fn()` inside `tx` with the named triggers lifted, each put back in exactly the mode it was found in before `tx` ends. */
+async function withTriggersLifted(tx, triggers, fn) {
+  const modes = [];
+  for (const [rel, name] of triggers) {
+    const [found] = await tx`select tgenabled as mode from pg_catalog.pg_trigger where tgrelid = ${rel}::regclass and tgname = ${name}`;
+    if (found === undefined) continue;
+    const restore = TRIGGER_MODE[found.mode];
+    assert.ok(restore, `${name}'s mode is known: ${found.mode}`);
+    modes.push([rel, name, restore]);
+    await tx.unsafe(`alter table ${rel} disable trigger ${name}`);
+  }
+  const value = await fn();
+  for (const [rel, name, restore] of modes) await tx.unsafe(`alter table ${rel} ${restore} ${name}`);
+  return value;
+}
+/** Literals (this file must load against the entry commit's tree): the issue's and the settings write's audit actions. */
+const ISSUE_ACTION = 'store.invoice.issue';
+const SETTINGS_ACTION = 'tenant.issuing_settings.update';
+/** Migration 034's row guards: issued rows, counters and settings admit no delete while they are enabled. */
+const ISSUE_TRIGGERS = [
+  ['tmpos_invoice_issue.issued_invoice_line', 'trg_issued_invoice_line_guard'],
+  ['tmpos_invoice_issue.issued_invoice', 'trg_issued_invoice_guard'],
+  ['tmpos_invoice_issue.store_invoice_counter', 'trg_store_invoice_counter_guard'],
+  ['tmpos_invoice_issue.store_issuing_settings', 'trg_store_issuing_settings_guard'],
+];
+/**
+ * M7B-INVOICES-ISSUE-P2: this file's tenants' issued lines and invoices, counters and settings, their issue and settings
+ * audits, and every audit subject naming one of their issued invoices or stores, in ONE owner transaction with the guards
+ * lifted only inside it (tests/db/invoiceIssueHttp.integration.test.mjs cleanIssuing; drafts and customers are the later
+ * steps'). Nothing when the database predates 034.
+ */
+async function cleanIssuing() {
+  const [{ present }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present`;
+  if (!present) return;
+  await owner.begin('isolation level read committed', async (sql) => {
+    await withTriggersLifted(sql, [['public.audit_event', 'trg_audit_event_reject_mutation']], async () => {
+      await sql`delete from public.audit_event where action_id in (${ISSUE_ACTION}, ${SETTINGS_ACTION}) and tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`update public.audit_event set subject_issued_invoice_id = null
+        where subject_issued_invoice_id in (select invoice_id from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[]))`;
+      await sql`update public.audit_event set subject_store_id = null
+        where subject_store_id in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`;
+    });
+    await withTriggersLifted(sql, ISSUE_TRIGGERS, async () => {
+      await sql`delete from tmpos_invoice_issue.issued_invoice_line where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_issue.store_invoice_counter where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_issue.store_issuing_settings where tenant_id = any(${TENANTS}::uuid[])`;
+    });
+  });
+}
+
 async function teardownDatabase() {
   const failures = [];
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
     if (TENANTS.length > 0) {
+      // M7B-INVOICES-ISSUE-P2: issuing data first (an issued invoice holds its draft and customer), in ONE owner transaction,
+      // each guard lifted only inside it and restored to the mode it was found in. An entry commit before 034 has none.
+      await step(cleanIssuing);
       // M7B-INVOICES-P1 (R8): drafts before the customers their foreign keys hold; their audit subjects cleared and their
       // events removed, so nothing of this file blocks 028's rollback (an entry commit before 028 has no such table).
       await step(async () => {
@@ -654,6 +730,25 @@ async function teardownDatabase() {
       });
       await step(() => owner`delete from tmpos_role.tenant_role_level where tenant_id = any(${TENANTS}::uuid[])`);
       await step(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
+      await step(async () => { // nothing of this file blocks 034's rollback, checked rather than assumed
+        const [{ present }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present`;
+        if (!present) return;
+        const [state] = await owner`select
+          (select count(*) from tmpos_invoice_issue.store_issuing_settings where tenant_id = any(${TENANTS}::uuid[]))::int as settings,
+          (select count(*) from tmpos_invoice_issue.store_invoice_counter where tenant_id = any(${TENANTS}::uuid[]))::int as counters,
+          (select count(*) from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[]))::int as invoices,
+          (select count(*) from tmpos_invoice_issue.issued_invoice_line where tenant_id = any(${TENANTS}::uuid[]))::int as issued_lines,
+          (select count(*) from public.audit_event where action_id in (${ISSUE_ACTION}, ${SETTINGS_ACTION}) and tenant_id = any(${TENANTS}::uuid[]))::int as audits,
+          (select count(*) from public.audit_event where (subject_issued_invoice_id is not null or subject_store_id is not null) and tenant_id = any(${TENANTS}::uuid[]))::int as subjects,
+          (select pg_catalog.string_agg(g.tgname::text || ':' || g.tgenabled::text, ',' order by g.tgname) from pg_catalog.pg_trigger g
+            where g.tgname in ('trg_issued_invoice_guard', 'trg_issued_invoice_line_guard', 'trg_store_invoice_counter_guard', 'trg_store_issuing_settings_guard')
+              and g.tgrelid in ('tmpos_invoice_issue.issued_invoice'::regclass, 'tmpos_invoice_issue.issued_invoice_line'::regclass,
+                'tmpos_invoice_issue.store_invoice_counter'::regclass, 'tmpos_invoice_issue.store_issuing_settings'::regclass)) as guards`;
+        assert.deepEqual({ ...state }, {
+          settings: 0, counters: 0, invoices: 0, issued_lines: 0, audits: 0, subjects: 0,
+          guards: 'trg_issued_invoice_guard:A,trg_issued_invoice_line_guard:A,trg_store_invoice_counter_guard:A,trg_store_issuing_settings_guard:A',
+        }, 'nothing of this file blocks 034\'s rollback, and every issuing guard is ALWAYS again');
+      });
       await step(async () => { // R8, checked rather than assumed
         const [{ present }] = await owner`select to_regclass('tmpos_invoice_draft.invoice_draft') is not null as present`;
         if (!present) return;
@@ -1539,6 +1634,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-01', 'SDB-02', 'SDB-03', 'SDB-04', 'SDB-05', 'SDB-06', 'SDB-07', 'SDB-08', 'SDB-09', 'SDB-10',
   'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17', 'SDB-18', 'SDB-19', 'SDB-20', 'SDB-21', 'SDB-22',
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
+  'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -4149,7 +4245,11 @@ const DRAFT_SAVED = 'Draft saved on the server.';
 const SAVED_EARLIER = 'A server draft was saved under an earlier connection.';
 const MICROS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const isStoresRead = (r) => r.method === 'GET' && r.path === STORES;
-const isDraftsRoute = (r) => r.path.startsWith(`${STORES}/`);
+/** The draft routes under a store (M7B-INVOICES-ISSUE-P2: never the issued-invoice READS under …/invoices — any other method
+ * there, and a draft's issue routes, still count). */
+const isDraftsRoute = (r) => r.path.startsWith(`${STORES}/`) && !(r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices(?:\/|$)/.test(r.path));
+/** Every issuing route (M7B-INVOICES-ISSUE-P2), any method: the settings, a draft's issue eligibility, preview and issue, the issued reads. */
+const isIssuingRoute = (r) => /^\/api\/v1\/(?:issuing-settings\/|stores\/[^/]+\/(?:invoices(?:\/|$)|invoice-drafts\/[^/]+\/issue(?:-eligibility|-preview)?$))/.test(r.path);
 const isDraftCreate = (r) => r.method === 'POST' && /^\/api\/v1\/stores\/[^/]+\/invoice-drafts$/.test(r.path);
 const isDraftList = (store) => (r) => r.method === 'GET' && r.path === draftsPath(store);
 /** The eligibility read of `store` (M7B-INVOICES-P1-R2: GET /api/v1/stores/{storeId}/invoice-drafts/eligibility). */
@@ -4240,6 +4340,7 @@ async function openDrafts(page) {
   await page.waitFor(`!!${q('drafts-show')}`, 30_000, 'the Server drafts section offers Show');
   await page.settle();
   const early = sentBy(page, (r) => isStoresRead(r) || isDraftsRoute(r), from).map(apiLine);
+  assert.deepEqual(sentBy(page, isIssuingRoute, from).map(apiLine), [], 'no issuing request — settings, issue or issued read — before "Show server drafts"');
   await page.click(by('drafts-show'));
   await waitData(page, 'drafts-stores-state', 'phase', 'ready');
   return early;
@@ -7338,5 +7439,385 @@ scenario('SSE-04', 'M7B-INVOICES-P2 REGRESSION GUARD (it passes on the entry com
   const [stored] = await named(tenant, renamed);
   assert.equal(stored?.id, id, 'the lost answer\'s edit committed');
   await assertDelta(before, { C: 1, A: 1, E: 0, U: 1, K: 2, L: 2 }, 'one create and one edit: one customer, one create and one update audit, two completions');
+  await assertNoLeak(page);
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-ISSUE-P2 — the owner's issuing settings (the Invoices page's "Issued invoices" section, SIS-01..04). The
+// literals are the shop's own texts (ServerIssuedInvoices.tsx SETTINGS_TEXT); the route is GET/PUT /api/v1/issuing-settings/{id}.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const ISSUING_SETTINGS = '/api/v1/issuing-settings';
+const isSettingsPut = (r) => r.method === 'PUT' && r.path.startsWith(`${ISSUING_SETTINGS}/`);
+const isSettingsRead = (r) => r.method === 'GET' && r.path.startsWith(`${ISSUING_SETTINGS}/`);
+const SETTINGS_SAID = Object.freeze({
+  saved: (n) => `Saved: version ${n} is on the server.`,
+  version: (n) => `Version ${n} on the server.`,
+  unconfigured: 'This store has no issuing settings yet. Invoices cannot be issued here until the store owner saves them.',
+  denied: 'Only the store owner can view or change issuing settings.',
+  stepUp: 'Not saved: confirm your sign-in to save this change.',
+  renewed: 'Signed in again. Press Save to save this change.',
+});
+
+/** A store's issuing settings row as the database owner reads it (null: none), with its invoice-number counter. */
+async function storedSettings(storeId) {
+  const [row] = await owner`select s.version::int as version, s.legal_name, s.store_name, s.postal_address, s.tax_registration_id, s.tax_mode, s.tax_rate,
+      c.last_number::int as counter
+    from tmpos_invoice_issue.store_issuing_settings s left join tmpos_invoice_issue.store_invoice_counter c on c.store_id = s.store_id
+    where s.store_id = ${storeId}`;
+  return row === undefined ? null : {
+    version: row.version, legalName: row.legal_name, storeName: row.store_name, postalAddress: row.postal_address, taxRegistrationId: row.tax_registration_id,
+    taxMode: row.tax_mode, taxRate: row.tax_rate, counter: row.counter,
+  };
+}
+/** One tenant's settings audits, oldest first: scope, subject store, reason code. */
+async function settingsAudits(tenant) {
+  const rows = await owner`select scope_type, store_id, subject_store_id, reason_code from public.audit_event
+    where action_id = ${SETTINGS_ACTION} and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => ({ scope: r.scope_type, store: r.store_id, subject: r.subject_store_id, reason: r.reason_code }));
+}
+
+/** The Invoices page by in-app navigation, then "Show issued invoices"; answers the settings requests sent BEFORE that press. */
+async function openIssued(page) {
+  const from = st.api.length;
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the Issued invoices section offers Show');
+  await page.settle();
+  const early = sentBy(page, (r) => isSettingsRead(r) || isSettingsPut(r), from).map(apiLine);
+  assert.deepEqual(sentBy(page, isIssuingRoute, from).map(apiLine), [], 'no issuing request — settings, issue or issued read — before "Show issued invoices"');
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  return early;
+}
+async function pickIssuedStore(page, id) {
+  await page.evaluate(`(() => { const s = ${q('issued-store')}; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await page.waitFor(`!!${q('issued-settings-open')}`, 15_000, 'the Issuing settings entry for the chosen store');
+}
+const panelPhaseOf = (page) => page.evaluate(`${q('issued-settings-state')}?.dataset.phase ?? null`);
+/** "Issuing settings": the panel opens and its one read answers. */
+async function openSettingsPanel(page) {
+  await page.click(by('issued-settings-open'));
+  await page.waitFor(async () => !['loading', null].includes(await panelPhaseOf(page)), 30_000, 'the settings panel\'s read answered');
+}
+/** Type over a field as a user does: click it, select all, type (a textarea's lines with Enter; the file's retype types one line). */
+async function retypeLines(page, id, text) {
+  await page.click(by(id));
+  await page.evaluate(`${q(id)}.select()`);
+  for (const [i, line] of text.split('\n').entries()) {
+    if (i > 0) await page.press('Enter');
+    if (line !== '') await page.type(line);
+  }
+  await page.waitFor(`${q(id)}?.value === ${JSON.stringify(text)}`, 10_000, `${id} reads what was typed`);
+}
+/** The form as shown: every field's value and which tax mode is chosen. */
+const settingsForm = (page) => page.evaluate(`({
+  legal: ${q('issued-settings-legal-name')}?.value ?? null, store: ${q('issued-settings-store-name')}?.value ?? null,
+  address: ${q('issued-settings-postal-address')}?.value ?? null, taxId: ${q('issued-settings-tax-id')}?.value ?? null,
+  rateChosen: ${q('issued-settings-tax-rate')}?.checked ?? null, noneChosen: ${q('issued-settings-tax-none')}?.checked ?? null,
+  rate: ${q('issued-settings-rate')}?.value ?? null, rateEnabled: ${q('issued-settings-rate')} ? !${q('issued-settings-rate')}.disabled : null,
+  version: ${q('issued-settings-version')}?.textContent.trim() ?? null,
+})`);
+const settingsStatus = (page) => textOf(page, 'issued-settings-status');
+async function saveSettingsAndWait(page, said, label) {
+  await page.click(by('issued-settings-save'));
+  await page.waitFor(async () => (await settingsStatus(page)) === said, 30_000, label);
+}
+/** The settings values the shop must send for `version`, in its fixed key order (invoiceIssuingClient.ts issuingSettingsBody). */
+const settingsBodyFor = (tenant, version, v) => JSON.stringify({
+  expectedTenant: tenant, expectedVersion: version, legalName: v.legalName, storeName: v.storeName, postalAddress: v.postalAddress,
+  taxRegistrationId: v.taxRegistrationId, tax: v.tax,
+});
+/** Records every settings PUT `page` sends from now on (let through): the "nothing is sent on its own" claims hold it. */
+function putGuard(page) {
+  const seen = [];
+  const guard = { phase: 'request', match: (r) => r.frameId === page.frameId && isSettingsPut(r), hit: (r) => { seen.push(apiLine(r)); st.gates.add(guard); }, released: Promise.resolve() };
+  st.gates.add(guard);
+  return { disarm: () => { st.gates.delete(guard); return seen; } };
+}
+
+scenario('SIS-01', 'AC-02 OWNER SETTINGS, READ-BACK, RELOAD — nothing about the settings is read before "Show issued invoices" or the panel; an unconfigured store shows empty fields and no tax mode; Save sends ONE PUT of the exact body (version 0, 8.875 % as 8875) under a v4 key, "Saved" after ONE read-back; the row, its counter and ONE tenant-scope audit naming the store agree; a reload and the second entry read it back; "No tax calculated" and an explicit 0 % each write once (versions 2 and 3, one audit each), 0 % still an exclusive rate after a reload; no key, body or token in the address, storage or logs', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i1', ['main']);
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  const early = await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await page.settle();
+  const beforePanel = sentBy(page, isSettingsRead).map(apiLine);
+  await openSettingsPanel(page);
+  const unconfigured = await settingsForm(page);
+  const firstRead = sentBy(page, isSettingsRead);
+  assert.deepEqual(early, [], 'nothing about the settings is read before "Show issued invoices"');
+  assert.deepEqual(beforePanel, [], 'choosing the store reads no settings');
+  assert.deepEqual(firstRead.map(answered), ['200'], 'ONE read when the panel opens');
+  assert.equal(firstRead[0].path, `${ISSUING_SETTINGS}/${main.id}`);
+  assert.equal(firstRead[0].query, '', 'nothing rides the query');
+  assert.deepEqual(JSON.parse(firstRead[0].replied.text), { issuingSettings: { storeId: main.id, version: 0, configured: false } });
+  assert.deepEqual(unconfigured, { legal: '', store: '', address: '', taxId: '', rateChosen: false, noneChosen: false, rate: '', rateEnabled: false, version: SETTINGS_SAID.unconfigured },
+    'an unconfigured store: empty fields, NO tax mode chosen, the rate disabled — nothing filled in from this browser');
+
+  // 1. The first version: an exclusive rate of 8.875 %.
+  const values = { legalName: `M7SIS i1 Seller LLC ${SUFFIX}`, storeName: `M7SIS i1 Main ${SUFFIX}`, postalAddress: `1 Main Street ${SUFFIX}\nSpringfield 01101`, taxRegistrationId: `TX-${SUFFIX}`, tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 } };
+  await retypeLines(page, 'issued-settings-legal-name', values.legalName);
+  await retypeLines(page, 'issued-settings-store-name', values.storeName);
+  await retypeLines(page, 'issued-settings-postal-address', values.postalAddress);
+  await retypeLines(page, 'issued-settings-tax-id', values.taxRegistrationId);
+  await page.click(by('issued-settings-tax-rate'));
+  await page.waitFor(`${q('issued-settings-rate')}?.disabled === false`, 10_000, 'the rate field is enabled under Exclusive rate');
+  await retypeLines(page, 'issued-settings-rate', '8.875');
+  const before = await counts();
+  const from = st.api.length;
+  await saveSettingsAndWait(page, SETTINGS_SAID.saved(1), 'saved and read back');
+  await quiet(page, from);
+  const puts = sentBy(page, isSettingsPut, from);
+  const readBack = sentBy(page, isSettingsRead, from);
+  const stored1 = await storedSettings(main.id);
+  const audits1 = await settingsAudits(tenant);
+  record('SIS-01', { phase: 'first', puts: puts.map(apiLine), readBack: readBack.map(answered), stored: stored1 !== null });
+  assert.equal(puts.length, 1, `ONE PUT: ${puts.map(apiLine).join('; ')}`);
+  const [put] = puts;
+  assert.equal(put.path, `${ISSUING_SETTINGS}/${main.id}`);
+  assert.equal(put.body, settingsBodyFor(tenant, 0, values), 'the exact body: the store\'s tenant, version 0, the values, 8.875 % as 8875');
+  assert.match(put.headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.equal(put.status, 200);
+  assert.deepEqual(JSON.parse(put.replied.text), { issuingSettings: { storeId: main.id, version: 1, configured: true, ...values } });
+  assert.deepEqual(readBack.map(answered), ['200'], 'ONE read-back');
+  assert.ok(readBack[0].at > put.doneAt, 'the read-back follows the 200');
+  assert.deepEqual(stored1, {
+    version: 1, legalName: values.legalName, storeName: values.storeName, postalAddress: values.postalAddress, taxRegistrationId: values.taxRegistrationId,
+    taxMode: 'exclusive_rate', taxRate: 8875, counter: 0,
+  }, 'the row as stored, and the store\'s invoice-number counter at 0');
+  assert.deepEqual(audits1, [{ scope: 'tenant', store: null, subject: main.id, reason: 'issuing_settings_tax_exclusive_rate' }], 'ONE tenant-scope audit naming the store');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'the first write');
+
+  // 2. A reload and the second entry: the server's settings, nothing remembered by the page.
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the reloaded Invoices page');
+  const afterReload = { panel: await has(page, 'issued-settings') };
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await openSettingsPanel(page);
+  const reloaded = await settingsForm(page);
+  assert.deepEqual(afterReload, { panel: false }, 'a fresh page: no panel until it is opened');
+  assert.deepEqual(reloaded, {
+    legal: values.legalName, store: values.storeName, address: values.postalAddress, taxId: values.taxRegistrationId, rateChosen: true, noneChosen: false, rate: '8.875', rateEnabled: true,
+    version: SETTINGS_SAID.version(1),
+  }, 'after a reload: version 1, the rate as its exact digits');
+  const other = viaSecond(await recordWrites(await openPage()));
+  await signIn(other, boss);
+  await openIssued(other);
+  await pickIssuedStore(other, main.id);
+  await openSettingsPanel(other);
+  assert.deepEqual(await settingsForm(other), reloaded, 'the same settings through the second entry');
+  assert.ok(sentBy(other, isSettingsRead).every((r) => r.via === 2 && r.status === 200));
+
+  // 3. "No tax calculated": exactly {"mode":"none"}; then an explicit 0 %, never "none".
+  const none = { ...values, tax: { mode: 'none' } };
+  const from2 = st.api.length;
+  await page.click(by('issued-settings-tax-none'));
+  await saveSettingsAndWait(page, SETTINGS_SAID.saved(2), 'no tax saved and read back');
+  await page.click(by('issued-settings-tax-rate'));
+  await page.waitFor(`${q('issued-settings-rate')}?.disabled === false`, 10_000, 'the rate field is enabled again');
+  await retypeLines(page, 'issued-settings-rate', '0');
+  await saveSettingsAndWait(page, SETTINGS_SAID.saved(3), 'an explicit 0 % saved and read back');
+  await quiet(page, from2);
+  const later = sentBy(page, isSettingsPut, from2);
+  assert.deepEqual(later.map((r) => r.body), [settingsBodyFor(tenant, 1, none), settingsBodyFor(tenant, 2, { ...values, tax: { mode: 'exclusive_rate', rateMilliPercent: 0 } })],
+    'one PUT each: {"mode":"none"} at version 1, then rateMilliPercent 0 at version 2');
+  assert.notEqual(later[0].headers['idempotency-key'], later[1].headers['idempotency-key'], 'a new key for each write');
+  assert.deepEqual(later.map(answered), ['200', '200']);
+  const stored3 = await storedSettings(main.id);
+  assert.deepEqual({ version: stored3.version, taxMode: stored3.taxMode, taxRate: stored3.taxRate }, { version: 3, taxMode: 'exclusive_rate', taxRate: 0 }, 'an explicit 0 is a rate');
+  assert.deepEqual((await settingsAudits(tenant)).map((a) => a.reason), ['issuing_settings_tax_exclusive_rate', 'issuing_settings_tax_none', 'issuing_settings_tax_exclusive_rate'], 'one audit per write');
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the reloaded Invoices page');
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await openSettingsPanel(page);
+  const zero = await settingsForm(page);
+  assert.deepEqual({ rateChosen: zero.rateChosen, noneChosen: zero.noneChosen, rate: zero.rate, version: zero.version }, { rateChosen: true, noneChosen: false, rate: '0', version: SETTINGS_SAID.version(3) },
+    'after a reload, 0 % under Exclusive rate — never collapsed into no tax');
+  await assertDraftsNowhere([page, other], [put.headers['idempotency-key'], ...later.map((r) => r.headers['idempotency-key']), put.body, values.legalName, values.taxRegistrationId]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-02', 'AC-03 OWNER ONLY — a manager opening the issuing settings is refused by the server after ONE fresh session check: the owner-only text, no form, no loop; its direct PUT is the 403 with nothing written', async () => {
+  const { tenant, stores: [main] } = await draftShop('i2', ['main']);
+  const manager = await actor('i2-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  const page = await openPage();
+  await signIn(page, manager);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  const from = st.api.length;
+  await openSettingsPanel(page);
+  await quiet(page, from);
+  await page.settle();
+  const shown = { phase: await panelPhaseOf(page), text: await textOf(page, 'issued-settings-state'), form: await has(page, 'issued-settings-legal-name'), save: await has(page, 'issued-settings-save') };
+  const after = sentBy(page, () => true, from);
+  const refusedAt = after.findIndex(isSettingsRead);
+  record('SIS-02', { shown, after: after.map(apiLine) });
+  assert.deepEqual(shown, { phase: 'denied', text: SETTINGS_SAID.denied, form: false, save: false }, 'the server\'s refusal, said as the owner rule');
+  assert.deepEqual(after.filter(isSettingsRead).map(answered), ['403 forbidden'], 'ONE read, refused');
+  assert.deepEqual(after.slice(refusedAt + 1).map((r) => `${r.method} ${r.path}`), ['GET /api/v1/session'], 'then exactly ONE fresh session check — no login, no second read');
+  await focusAndSettle(page);
+  assert.deepEqual(sentBy(page, isSettingsRead, from).length, 1, 'a focus asks no settings read');
+  // The manager's direct write: refused before any key; nothing written.
+  const session = await directLogin(manager);
+  const before2 = await counts();
+  const res = await call('PUT', `${ISSUING_SETTINGS}/${main.id}`, {
+    session, key: randomUUID(),
+    body: { expectedTenant: tenant, expectedVersion: 0, legalName: 'Manager LLC', storeName: 'Manager', postalAddress: '1 Road', taxRegistrationId: null, tax: { mode: 'none' } },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(JSON.parse(res.text).error, 'forbidden');
+  await assertDelta(before2, REFUSED, 'the manager\'s direct PUT');
+  assert.equal(await storedSettings(main.id), null);
+  assert.deepEqual(await settingsAudits(tenant), []);
+  assert.deepEqual(sentBy(page, isSettingsPut), [], 'the page sent no PUT');
+});
+
+scenario('SIS-03', 'AC-02 STEP-UP — a stale sign-in: Save is the 403 step_up_required with nothing written; the inline group (the password field focused), an explicit sign-in (the reauthentication login), ONE re-read and "Press Save" — no PUT on its own across a focus; only the next Save writes, once, under a new key', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i3', ['main']);
+  ACCOUNTS.get(boss.email).staleOnce = true;
+  const page = await openPage();
+  await signIn(page, boss);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await openSettingsPanel(page);
+  const values = { legalName: `M7SIS i3 Seller ${SUFFIX}`, storeName: `M7SIS i3 Main ${SUFFIX}`, postalAddress: `3 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } };
+  await retypeLines(page, 'issued-settings-legal-name', values.legalName);
+  await retypeLines(page, 'issued-settings-store-name', values.storeName);
+  await retypeLines(page, 'issued-settings-postal-address', values.postalAddress);
+  await page.click(by('issued-settings-tax-none'));
+  const before = await counts();
+  const from = st.api.length;
+  await saveSettingsAndWait(page, SETTINGS_SAID.stepUp, 'the step-up refusal said');
+  await page.waitFor(`!!${q('issued-settings-reauth-password')} && document.activeElement === ${q('issued-settings-reauth-password')}`, 10_000, 'the password field has focus');
+  assert.equal((await page.axNodes({ role: 'group', name: 'Confirm your sign-in to save this change' })).length, 1, 'the prompt is a labelled group');
+  assert.deepEqual(sentBy(page, isSettingsPut, from).map(answered), ['403 step_up_required']);
+  await assertDelta(before, NOTHING, 'the stale sign-in');
+  assert.equal(await storedSettings(main.id), null);
+  const guard = putGuard(page);
+  const signInAt = st.api.length;
+  await page.fill(by('issued-settings-reauth-password'), boss.password);
+  await page.click(by('issued-settings-reauth-confirm'));
+  await page.waitFor(async () => (await settingsStatus(page)) === SETTINGS_SAID.renewed, 20_000, 'signed in again, the settings re-read');
+  await quiet(page, signInAt);
+  await focusAndSettle(page);
+  const renewed = sentBy(page, () => true, signInAt);
+  const unprompted = guard.disarm();
+  record('SIS-03', { renewed: renewed.map(apiLine), unprompted });
+  assert.ok(renewed.some((r) => r.method === 'POST' && r.path === LOGIN && r.headers['x-tmpos-reauthenticate'] === '1' && r.status === 200), 'the session renewed by the explicit sign-in');
+  assert.deepEqual(renewed.filter(isSettingsRead).map(answered), ['200'], 'ONE re-read of the settings after it');
+  assert.deepEqual(unprompted, [], 'no PUT on its own after the sign-in, across a focus');
+  assert.deepEqual(await settingsForm(page).then((f) => f.legal), values.legalName, 'the edits are kept');
+  const from2 = st.api.length;
+  await saveSettingsAndWait(page, SETTINGS_SAID.saved(1), 'the explicit Save after the sign-in');
+  await quiet(page, from2);
+  const puts = sentBy(page, isSettingsPut, from);
+  assert.deepEqual(puts.map(answered), ['403 step_up_required', '200'], 'two PUTs in all: the refused one and the explicit Save');
+  assert.equal(puts[1].body, puts[0].body);
+  assert.equal(puts[1].body, settingsBodyFor(tenant, 0, values));
+  assert.notEqual(puts[1].headers['idempotency-key'], puts[0].headers['idempotency-key'], 'a new key (the refused one acquired nothing)');
+  assert.deepEqual((await storedSettings(main.id))?.version, 1);
+  assert.deepEqual((await settingsAudits(tenant)).map((a) => a.reason), ['issuing_settings_tax_none'], 'ONE audit');
+});
+
+scenario('SIS-04', 'AC-02/AC-08 NOTHING ON ITS OWN — no settings PUT from loading the page, opening the panel, typing, a window focus, a tab return, closing and reopening the panel, or a reload: none sent, nothing written', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i4', ['main']);
+  const page = await openPage();
+  await signIn(page, boss);
+  const guard = putGuard(page);
+  const before = await counts();
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await openSettingsPanel(page);
+  await retypeLines(page, 'issued-settings-legal-name', `M7SIS i4 Unsaved ${SUFFIX}`);
+  await page.click(by('issued-settings-tax-rate'));
+  await retypeLines(page, 'issued-settings-rate', '5');
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  await page.click(by('issued-settings-open')); // closed
+  await page.waitFor(`!${q('issued-settings')}`, 10_000, 'the panel closed');
+  await openSettingsPanel(page); // reopened: the server's values again
+  const reopened = await settingsForm(page);
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the reloaded Invoices page');
+  await page.settle();
+  const seen = guard.disarm();
+  record('SIS-04', { seen, reopened: reopened.legal });
+  assert.deepEqual(seen, [], 'no settings PUT was sent on its own');
+  assert.equal(reopened.legal, '', 'reopening shows the server\'s values, not what was typed');
+  assert.equal(await storedSettings(main.id), null, 'nothing written');
+  assert.deepEqual(await settingsAudits(tenant), []);
+  const delta = await deltaSince(before);
+  assert.deepEqual({ K: delta.K, L: delta.L }, { K: 0, L: 0 }, 'no idempotency record');
+});
+
+const SETTINGS_UNRESOLVED = 'Not confirmed yet: the server may have saved these settings.';
+
+scenario('SIS-05', 'AC-02 LOST ANSWER, MANUAL RECOVERY — a settings PUT commits and its answer is dropped at the front: "Not confirmed yet" with the form locked, never "Saved"; a focus and a tab return send nothing; Check again sends the byte-identical body under the SAME key and session token, the entry replays the one completion (Idempotent-Replayed: true) and "Saved" follows ONE read-back; one settings version, ONE audit record and one idempotency record in all', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i5', ['main']);
+  const page = await openPage();
+  await signIn(page, boss);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await openSettingsPanel(page);
+  const values = { legalName: `M7SIS i5 Seller ${SUFFIX}`, storeName: `M7SIS i5 Main ${SUFFIX}`, postalAddress: `5 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } };
+  await retypeLines(page, 'issued-settings-legal-name', values.legalName);
+  await retypeLines(page, 'issued-settings-store-name', values.storeName);
+  await retypeLines(page, 'issued-settings-postal-address', values.postalAddress);
+  await page.click(by('issued-settings-tax-none'));
+  const before = await counts();
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    // st.lose: the entry answered (and committed); that answer never reaches the page.
+    st.lose = (rec, phase) => phase === 'response' && isSettingsPut(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-settings-save'));
+    await waitData(page, 'issued-settings-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const afterLoss = {
+    puts: sentBy(page, isSettingsPut, from).map((r) => `${r.status} ${r.lost ?? 'delivered'}`), stored: (await storedSettings(main.id))?.version ?? null,
+    audits: (await settingsAudits(tenant)).length, card: await textOf(page, 'issued-settings-attempt'), status: await settingsStatus(page),
+    locked: await page.evaluate(`${q('issued-settings-legal-name')}?.matches(':disabled') ?? null`), // its fieldset is disabled
+  };
+  record('SIS-05', { phase: 'lost reply', ...afterLoss });
+  assert.deepEqual(afterLoss.puts, ['200 response'], 'ONE PUT: it committed, its answer lost at the front');
+  assert.deepEqual({ stored: afterLoss.stored, audits: afterLoss.audits }, { stored: 1, audits: 1 }, 'committed once: version 1, one audit');
+  assert.ok(afterLoss.card?.startsWith(SETTINGS_UNRESOLVED), `held, never saved: ${afterLoss.card}`);
+  assert.ok(!(afterLoss.status ?? '').startsWith('Saved:'), 'never "Saved" on an answer that did not arrive');
+  assert.equal(afterLoss.locked, true, 'the form is locked while the write is unresolved');
+
+  // Nothing re-sends on its own: a focus and a tab return, each held until the page's own session check has answered.
+  const guard = putGuard(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual(guard.disarm(), [], 'no PUT on its own while the write is unresolved');
+
+  // Check again: the same request, replayed by the entry from the one completion; then ONE read-back.
+  const from2 = st.api.length;
+  await page.click(by('issued-settings-check-again'));
+  await page.waitFor(async () => (await settingsStatus(page)) === SETTINGS_SAID.saved(1), 30_000, 'the replay saved and read back');
+  await quiet(page, from2);
+  const puts = sentBy(page, isSettingsPut, from);
+  const readBack = sentBy(page, isSettingsRead, from2);
+  record('SIS-05', { phase: 'check again', puts: puts.map(apiLine), replayed: puts[1]?.replied?.headers['idempotent-replayed'] ?? null, readBack: readBack.map(answered) });
+  assert.equal(puts.length, 2, `two PUTs in all: the lost one and Check again (${puts.map(apiLine).join('; ')})`);
+  assert.equal(puts[1].body, puts[0].body, 'the byte-identical body');
+  assert.equal(puts[0].body, settingsBodyFor(tenant, 0, values));
+  assert.equal(puts[1].headers['idempotency-key'], puts[0].headers['idempotency-key'], 'the SAME key');
+  assert.equal(puts[1].headers['x-tmpos-session-csrf'], puts[0].headers['x-tmpos-session-csrf'], 'under the session token it was sent with');
+  assert.equal(puts[1].status, 200);
+  assert.equal(puts[1].replied.headers['idempotent-replayed'], 'true', 'the entry replays the one completion');
+  assert.ok(puts[1].lost === undefined, 'the replay reached the page');
+  assert.deepEqual(readBack.map(answered), ['200'], 'ONE read-back');
+  assert.equal((await storedSettings(main.id))?.version, 1, 'still version 1: saved once');
+  assert.deepEqual((await settingsAudits(tenant)).map((a) => a.reason), ['issuing_settings_tax_none'], 'ONE audit record');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'one write in all: one completion, one audit');
+  assert.equal(await has(page, 'issued-settings-attempt'), false, 'the attempt is settled');
   await assertNoLeak(page);
 }, 240_000);

@@ -510,18 +510,19 @@ export function settleDraft(holds: DraftHoldStore, uid: string, key: string, ans
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The dialog frame shared by the reopen, the new draft and the editor dialogs.
+// The dialog frame shared by the reopen, the new draft and the editor dialogs (exported with the class constants for the
+// issued invoices section, M7B-INVOICES-ISSUE-P2: the same look, no change in behaviour).
 
-const focusRing = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700';
-const button = `px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
-const quiet = `px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
-const hintClass = 'text-[11px] font-medium text-slate-500';
-const inputClass = `w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white ${focusRing}`;
-const labelClass = 'block text-[10px] font-black text-slate-500 uppercase tracking-widest';
+export const focusRing = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700';
+export const button = `px-4 py-2 bg-primary text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
+export const quiet = `px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
+export const hintClass = 'text-[11px] font-medium text-slate-500';
+export const inputClass = `w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white ${focusRing}`;
+export const labelClass = 'block text-[10px] font-black text-slate-500 uppercase tracking-widest';
 // [tabindex="0"]: the reopen dialog's lines region (M7B-INVOICES-DISCARD-P1-R1), the only such element in these dialogs.
 const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]';
 
-interface DialogFrameProps {
+export interface DialogFrameProps {
   readonly labelledBy: string;
   /** 'alertdialog' for the discard confirmation (M7B-INVOICES-DISCARD-P1); every other dialog is a 'dialog'. */
   readonly role?: 'dialog' | 'alertdialog';
@@ -544,7 +545,7 @@ interface DialogFrameProps {
   readonly children: ReactNode;
 }
 
-function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
+export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
   const overlay = useRef<HTMLDivElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
   const close = useRef(onClose);
