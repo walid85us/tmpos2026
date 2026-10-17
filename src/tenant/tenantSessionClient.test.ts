@@ -669,12 +669,15 @@ test('TSC-32. onSessionEnd: every logout and reset tells each listener synchrono
   assert.equal(net.sent.length, 5);
 });
 
-test('TSC-33. the header names every in-memory holder of the token: the drafts section as the fourth (commit 15110e4), the issued invoices section as the fifth (M7B-INVOICES-ISSUE-P2), and every module that listens to onSessionEnd — since M7B-INVOICES-P1-R2 the directory too (DA-200)', () => {
+test('TSC-33. the header names every in-memory holder of the token: the drafts section as the fourth (commit 15110e4) — with its issue hold store, bound to onSessionEnd (M7B-INVOICES-ISSUE-P2 commit C) — the issued invoices section as the fifth (M7B-INVOICES-ISSUE-P2), and every module that listens to onSessionEnd — since M7B-INVOICES-P1-R2 the directory too (DA-200)', () => {
   const read = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
   const header = read('./tenantSessionClient.ts').split('\nexport const TENANT_SESSION_PATHS')[0];
   assert.match(header, /The Invoices page's server drafts section \(ServerInvoiceDrafts\.tsx, M7B-INVOICES-P1\), fourth/);
   assert.match(header, /in an open new-draft dialog's state, to send that dialog's save \(the one\s+\/\/\s+React-state exception\)/);
   assert.match(header, /The Invoices page's issued invoices section \(ServerIssuedInvoices\.tsx, M7B-INVOICES-ISSUE-P2\), fifth/);
+  // M7B-INVOICES-ISSUE-P2 (commit C): the drafts section's issue hold store, a token holder that listens from its module's load.
+  assert.match(header, /on each issue attempt too, in its module-level issue hold store \(one per user\)/);
+  assert.match(read('./ServerInvoiceDrafts.tsx'), /bindDraftHoldsToSessionEnd\(issueHolds\)/);
   for (const file of ['ServerInvoiceDrafts.tsx', 'ServerCustomerPicker.tsx', 'ServerCustomerDirectory.tsx', 'ServerIssuedInvoices.tsx']) {
     const listens = /\bonSessionEnd\(/.test(read(`./${file}`));
     assert.ok(header.includes(file), `${file} is a token holder the header must name`);

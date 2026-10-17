@@ -128,6 +128,32 @@
 //     saying neither "cancelled" nor "discarded"; only one closed before that press returns to the reopen dialog. A new generation, a session end, a
 //     sign-out, a store change or a user change drops the attempt and both dialogs synchronously; a late answer changes
 //     nothing, and reopening never revives it.
+//   - ISSUING A SAVED DRAFT (M7B-INVOICES-ISSUE-P2, docs/phase-4/12 §10, ADR-50). The reopen dialog asks the issue
+//     eligibility beside the edit's and the discard's (its own slot, a writable store only) and offers "Issue invoice…",
+//     in a row of its own whose height is held from the asking on, ONLY on the server's `allowed`; while it is asked and
+//     when it is refused nothing is shown for it, and when it could not be asked one Try again says why. Issue invoice…
+//     opens a confirmation (role=alertdialog, laid out from the top, "Keep draft" first and in its header) that reads the
+//     server's issue PREVIEW — never a POST — and shows only what that read answered: the seller, the store name and
+//     address, the customer, the ordered lines, Subtotal, the tax line or "No tax calculated", the Total (the exported
+//     InvoiceSnapshot of ServerIssuedInvoices.tsx), never a number or a time. The preview's `expected` is the issue body,
+//     serialized ONCE (issueBodyOf); "Issue invoice" is offered only while that preview is the one shown, and a review
+//     read again ("Review again", after a conflict) says it is the updated invoice. One press is ONE POST under ONE new
+//     key (a ref, not a render, holds a second activation back), sent only after the session, the generation, the
+//     eligibility, the preview and the user's other issue attempts are checked again; the attempt — its key, its exact
+//     body, its store, draft and store label, the token it went with and two send times, nothing of the invoice — is
+//     held BEFORE it leaves in a module-level issue hold store (one live attempt per user, in memory only), so closing
+//     the confirmation, reopening a draft, choosing another store or leaving the page never loses it. Once sent, "Keep
+//     draft" reads "Close" (closing does not cancel; Escape is Close then, and closes the reopen dialog too). A validated
+//     201 closes both dialogs, takes the row away and puts focus on the heading; the card outside them says "Issued.
+//     Loading the invoice…", reads the invoice ONCE (a GET, never another POST; "Load details again" when it fails) for
+//     "Issued as invoice {number} at {store}." with "View invoice" (the exported IssuedInvoiceDialog under this section's
+//     own reads) — and page one is read again. A sealed refusal is said in an alert that takes focus, each with its own
+//     next step (a conflict's Review again, a closed draft's Find issued invoice); an answer that decides nothing leaves it
+//     UNRESOLVED: only "Check again" re-sends — the SAME key and bytes to its own store and draft, under the token it was
+//     sent with, while max(monotonic, wall) since its FIRST send is under 23 hours, judged again just before — and "Find
+//     issued invoice" reads the store's issued invoices by that draft (`?sourceDraft=`, under the same token, at the
+//     attempt's own store): one found settles it, none found is never said as "not issued". A sign-out, a user change or
+//     a session-token change DETACHES the attempt (token and body cleared); nothing ever re-sends on its own.
 //   - The session token sits only in refs, the hold store, an open new-draft dialog's state and the picker's
 //     `sessionContextOf` pair (tenantSessionClient.ts lists the holders, and what a sign-out takes from each): never
 //     browser storage, a URL, the DOM or a log. No key or body reaches any of those either, and draft content only the
@@ -172,6 +198,8 @@ import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels'
 import { CHECK_CUTOFF_MS, createdText } from './ServerCustomerDirectory';
 import { ServerCustomerField, idEndingText, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
 import { serverCustomerReference, type ServerCustomerReference } from './customerReference';
+import { invoiceIssuing as issuingClient, issueBodyOf, type InvoiceIssuingClient, type IssuePreview, type IssueResult } from './invoiceIssuingClient';
+import { IssuedInvoiceDialog, InvoiceSnapshot, type IssuedReadAnswer } from './ServerIssuedInvoices';
 
 const DEFAULT_WAIT_SECONDS = 60;
 const NAME_READS_AT_ONCE = 3;
@@ -348,6 +376,82 @@ const CHECK_DISCARD_DECIDES: ReadonlySet<DiscardDraftResult['kind']> = new Set([
 /** The answers that decide a Check again (the key was looked at): its 200, a sealed 409, or a refusal that recorded nothing because nothing ran. */
 const CHECK_DECIDES: ReadonlySet<UpdateDraftResult['kind']> = new Set(['saved', 'conflict', 'not-editable', 'tenant-changed', 'not-found', 'key-reused']);
 
+/** What the reopen dialog says about Issue invoice… (M7B-INVOICES-ISSUE-P2): nothing while it is asked or refused, as the discard's. */
+export const ISSUE_ELIGIBILITY_TEXT = Object.freeze({
+  checking: '',
+  denied: '',
+  unavailable: 'The server could not be asked right now whether this draft can be issued.',
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+/** The issued sentence around its store's name, which the card isolates in a <bdi> (merchant text). */
+const issuedAround = (number: number): readonly [string, string] => [`Issued as invoice ${number} at `, '.'];
+/** The issue confirmation's and the attempt card's texts (M7B-INVOICES-ISSUE-P2). Never "issued" before the server's 201 or a read. */
+export const ISSUE_TEXT = Object.freeze({
+  open: 'Issue invoice…',
+  title: 'Issue this invoice?',
+  /** The one consequence sentence that describes the confirmation: no payment, no amount due, nothing undone. */
+  consequence: (total: string | null) =>
+    `This issues the store's next invoice number${total === null ? '' : ` for ${total}`}; it closes the draft and cannot be changed or undone in the product. Void is not available. It does not record a payment.`,
+  previewLoading: 'Loading the invoice to review from the server…',
+  previewUnavailable: 'The invoice to review could not be loaded right now. Try again.',
+  previewNotFound: 'This draft cannot be issued: it is no longer open at this store.',
+  previewLast: 'This draft has reached the last version the server can record, so it cannot be issued.',
+  previewNotConfigured: 'This store has no issuing settings yet, so nothing can be issued here. The store owner can set them up under Issued invoices → Issuing settings.',
+  previewOutOfRange: 'The total is above the largest amount the server can record, so this draft cannot be issued.',
+  previewDenied: 'This account may not issue invoices at this store.',
+  updated: 'This is the updated invoice. Check it, then press Issue invoice.',
+  closeWarning: 'Closing does not cancel: the server may still issue this invoice.',
+  sending: 'Issuing the invoice on the server…',
+  checking: 'Checking the issue with the server…',
+  finding: 'Looking for the issued invoice…',
+  unresolved: 'Not confirmed yet: the server may have issued this invoice. "Check again" sends the same request; it never issues it twice.',
+  tooOld: 'Too old to check again: it was sent too long ago. Find the issued invoice, or look in Issued invoices for this store.',
+  issuedLoading: 'Issued. Loading the invoice…',
+  issued: (number: number, store: string) => issuedAround(number).join(store),
+  issuedUnread: 'Issued. The invoice details did not load.',
+  /** The card's invoice read refused 403 after its one fresh check: the refusal stands (nothing to retry). */
+  issuedDenied: 'Issued. You cannot view issued invoices at this store, so the details cannot be shown here.',
+  issuedEarlier: 'An invoice was issued under an earlier connection. Look for it in Issued invoices.',
+  detached: 'This issue could not be confirmed: the store connection changed. Look in Issued invoices for this store before issuing the draft again.',
+  findNone: 'No issued invoice found for this draft yet. This does not mean it was not issued; check again or look in Issued invoices later.',
+  findDenied: 'You cannot view issued invoices at this store, so this cannot be checked here.',
+  findUnavailable: 'The issued invoices could not be checked right now. Try again.',
+  checkDenied: 'Access lost: the server refused this check, and that refusal stands.',
+  checkUnchecked: 'The server refused this check, and your session could not be checked right now.',
+  stopWarning: 'Stop tracking does not cancel the request: the server may still issue this invoice.',
+  pending: 'Not sent: an earlier issue is not confirmed yet. Check it again or stop tracking it first.',
+  /** The same block by a DETACHED earlier attempt, whose card offers only Dismiss. */
+  pendingDetached: 'Not sent: an earlier issue could not be confirmed under an earlier connection. Look for it in Issued invoices, then dismiss it first.',
+  notAllowed: 'Not sent: this account may not issue invoices at this store.',
+  sendWaiting: 'Too many requests: Issue invoice comes back once the wait has passed.',
+  /** Why Issue invoice is held back while its press's own session check is out (screen readers). */
+  sendChecking: 'Checking your session before sending…',
+  rateLimited: 'Not issued: too many requests. Wait, then press Issue invoice again.',
+  /** ISSUE_REFUSED_TEXT.unchecked as the attempt card says it: the card's control is Dismiss, not the dialog's Close (review D6). */
+  uncheckedCard: 'Not issued: the server refused this request, and your session could not be checked right now. Dismiss this, then open the draft again in a moment.',
+  /** Why a read button waits during a rate limit's wait (screen readers). */
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+export type IssueRefusal = 'not-configured' | 'conflict' | 'not-open' | 'out-of-range' | 'tenant-changed' | 'not-found' | 'invalid' | 'key-reused' | 'denied' | 'unchecked';
+/** What an issue attempt's decisive refusal says: this request did not issue the invoice. Never "rolled back". */
+export const ISSUE_REFUSED_TEXT: Readonly<Record<IssueRefusal, string>> = Object.freeze({
+  'not-configured': 'Not issued: this store has no issuing settings. The store owner can set them up under Issued invoices → Issuing settings; then review the invoice again.',
+  conflict: "Not issued: the draft, the store's issuing settings or the customer changed since this review.",
+  'not-open': 'Not issued: this draft is no longer open. It may have been issued or discarded elsewhere.',
+  'out-of-range': 'Not issued: the total is above the largest amount the server can record.',
+  'tenant-changed': "Not issued: this store isn't part of the tenant this draft was for any more. Choose the store again.",
+  'not-found': 'Not issued: this draft is no longer available at this store.',
+  invalid: 'Not issued: the server did not accept this request.',
+  'key-reused': 'Not issued: the server rejected this request.',
+  denied: 'Not issued: this account may not issue invoices at this store.',
+  /** A 403 whose one fresh session check could not answer: refused, but not said as a lack of access. */
+  unchecked: 'Not issued: the server refused this request, and your session could not be checked right now. Close this, then open the draft again in a moment.',
+});
+/** The answers that decide an issue's Check again (the key was looked at): its 201, a sealed 409, or a refusal that recorded nothing because nothing ran. */
+const CHECK_ISSUE_DECIDES: ReadonlySet<IssueResult['kind']> = new Set(['issued', 'not-open', 'not-configured', 'conflict', 'out-of-range', 'not-found', 'key-reused', 'tenant-changed']);
+
 /** A store as the user chooses it: its name, or the end of its id; never a browser store label. */
 export const storeLabel = (store: Pick<StoreEntry, 'id' | 'name'>): string =>
   store.name !== null && store.name.trim() !== '' ? store.name : `Store, ${idEndingText(store.id)}`;
@@ -361,6 +465,11 @@ const DISCARD_OPEN_ID = 'draft-discard-open';
 const VIEW_CLOSE_ID = 'draft-view-close';
 /** Where the confirmation hands focus back when what had it before is gone: the reopen dialog's Discard draft…, else its Close — none once that dialog has gone too (its own return then decides). */
 const DISCARD_RETURN: RefObject<HTMLElement | null> = { get current() { return document.getElementById(DISCARD_OPEN_ID) ?? document.getElementById(VIEW_CLOSE_ID); } };
+/** The reopen dialog's Issue invoice… (M7B-INVOICES-ISSUE-P2), and where the issue confirmation hands focus back, as DISCARD_RETURN. */
+const ISSUE_OPEN_ID = 'draft-issue-open';
+const ISSUE_RETURN: RefObject<HTMLElement | null> = { get current() { return document.getElementById(ISSUE_OPEN_ID) ?? document.getElementById(VIEW_CLOSE_ID); } };
+/** The attempt card's View invoice: where the issued dialog hands focus back when what had it before is gone (the heading once it is gone too). */
+const ISSUE_VIEW_ID = 'drafts-issue-view';
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The hold store: at most one attempt per user, in memory only (never browser storage); it outlives the section across
@@ -394,12 +503,15 @@ export interface HeldDraft {
 const LIVE: ReadonlySet<HeldDraft['state']> = new Set(['sending', 'unresolved', 'checking']);
 export const isLiveHold = (held: HeldDraft | undefined): held is HeldDraft => held !== undefined && LIVE.has(held.state);
 
-export interface DraftHoldStore {
-  get(uid: string): HeldDraft | undefined;
+/** What every hold store keeps of an attempt: its key, its exact body, the token it went with and its state. */
+interface HoldBase { readonly key: string; readonly body: string; readonly csrf: string | null; readonly state: string }
+
+export interface HoldStore<T extends HoldBase> {
+  get(uid: string): T | undefined;
   /** Hold `attempt` for `uid`; false (nothing held) while that user's earlier attempt is still live. A settled one is replaced. */
-  put(uid: string, attempt: HeldDraft): boolean;
+  put(uid: string, attempt: T): boolean;
   /** Change the attempt under `key`; false when the store's attempt is another (a stale continuation is a no-op). */
-  change(uid: string, key: string, next: Partial<Omit<HeldDraft, 'key'>>): boolean;
+  change(uid: string, key: string, next: Partial<Omit<T, 'key'>>): boolean;
   remove(uid: string, key: string): boolean;
   /**
    * Detach `uid`'s attempt: its token and its body go, so a live one can never be sent again, and a settled one (created,
@@ -410,26 +522,33 @@ export interface DraftHoldStore {
   detachOthers(uid: string | null): void;
   subscribe(listener: () => void): () => void;
 }
+export type DraftHoldStore = HoldStore<HeldDraft>;
 
 export function createDraftHoldStore(): DraftHoldStore {
-  const held = new Map<string, HeldDraft>();
+  return holdStoreOf<HeldDraft>(isLiveHold);
+}
+
+/** One hold store: at most one attempt per user, `live` telling which may not be replaced (M7B-INVOICES-ISSUE-P2: shared by the issue's). */
+function holdStoreOf<T extends HoldBase>(live: (held: T | undefined) => boolean): HoldStore<T> {
+  const held = new Map<string, T>();
   const listeners = new Set<() => void>();
   const tell = (): void => { for (const listener of [...listeners]) listener(); };
   const detachOne = (uid: string): boolean => {
     const current = held.get(uid);
     if (current === undefined || current.csrf === null) return false;
-    held.set(uid, Object.freeze({ ...current, csrf: null, body: '' }));
+    const next: T = { ...current, csrf: null, body: '' };
+    held.set(uid, Object.freeze(next));
     return true;
   };
   return Object.freeze({
     get: (uid: string) => held.get(uid),
-    put(uid: string, attempt: HeldDraft): boolean {
-      if (isLiveHold(held.get(uid))) return false;
+    put(uid: string, attempt: T): boolean {
+      if (live(held.get(uid))) return false;
       held.set(uid, Object.freeze({ ...attempt }));
       tell();
       return true;
     },
-    change(uid: string, key: string, next: Partial<Omit<HeldDraft, 'key'>>): boolean {
+    change(uid: string, key: string, next: Partial<Omit<T, 'key'>>): boolean {
       const current = held.get(uid);
       if (current === undefined || current.key !== key) return false;
       held.set(uid, Object.freeze({ ...current, ...next }));
@@ -461,7 +580,7 @@ export function createDraftHoldStore(): DraftHoldStore {
  * user's — an unconfirmed one its body too, so it can never be sent again (its key stays only to name it). Returns the
  * unbinding.
  */
-export function bindDraftHoldsToSessionEnd(holds: DraftHoldStore): () => void {
+export function bindDraftHoldsToSessionEnd(holds: Pick<HoldStore<HoldBase>, 'detachOthers'>): () => void {
   return onSessionEnd(() => holds.detachOthers(null));
 }
 
@@ -469,6 +588,83 @@ export function bindDraftHoldsToSessionEnd(holds: DraftHoldStore): () => void {
 const draftHolds: DraftHoldStore = createDraftHoldStore();
 const unbindDraftHolds = bindDraftHoldsToSessionEnd(draftHolds);
 import.meta.hot?.dispose(unbindDraftHolds); // a hot reload replaces this module: its listener goes with its store
+
+/**
+ * One issue attempt (M7B-INVOICES-ISSUE-P2), held BEFORE it leaves: only what Check again and Find need — never the
+ * invoice's seller, customer, lines or amounts. Detached (a user change, a sign-out, a token change) is `csrf` null.
+ */
+export interface HeldIssue {
+  readonly key: string;
+  /** The exact body string sent, never rebuilt; '' once it can never be sent again (detached, past the cutoff, settled). */
+  readonly body: string;
+  readonly storeId: string;
+  readonly draftId: string;
+  /** The store's label when it was sent: shown only while the attempt is still this session's. */
+  readonly storeLabel: string;
+  /** The session token it was sent with; null once detached. */
+  readonly csrf: string | null;
+  /** A monotonic and a wall-clock reading taken at the FIRST send: Check again never moves them. */
+  readonly sentAt: number;
+  readonly sentWall: number;
+  readonly state: 'sending' | 'unresolved' | 'checking' | 'issued' | 'refused';
+  /** Why the last answer left it unresolved, or what Find found ('' for none). */
+  readonly note: string;
+  /** The issued invoice (state issued), and its number once a read has shown it. */
+  readonly invoiceId: string | null;
+  readonly number: number | null;
+  /** The refusal that ended it (state refused); or, issued, its invoice's read refused for good ('denied', after its one fresh check: kept with the attempt, so a section mounted again reads nothing). */
+  readonly refusal: IssueRefusal | null;
+}
+export type IssueHoldStore = HoldStore<HeldIssue>;
+const LIVE_ISSUE: ReadonlySet<HeldIssue['state']> = new Set(['sending', 'unresolved', 'checking']);
+export const isLiveIssue = (held: HeldIssue | undefined): held is HeldIssue => held !== undefined && LIVE_ISSUE.has(held.state);
+/** What a new issue held back by the user's live attempt says: a detached one can only be dismissed. */
+const pendingTextOf = (held: HeldIssue | undefined): string => (held?.csrf === null ? ISSUE_TEXT.pendingDetached : ISSUE_TEXT.pending);
+export function createIssueHoldStore(): IssueHoldStore {
+  return holdStoreOf<HeldIssue>(isLiveIssue);
+}
+/** The shop's one issue hold store, scrubbed at every sign-out as the draft one. */
+const issueHolds: IssueHoldStore = createIssueHoldStore();
+const unbindIssueHolds = bindDraftHoldsToSessionEnd(issueHolds);
+import.meta.hot?.dispose(unbindIssueHolds);
+
+/** Why an issue answer left the attempt unresolved. Never "not issued": only a decisive answer for the same key says that. */
+function issueReasonOf(answer: IssueResult): string {
+  switch (answer.kind) {
+    case 'in-progress': return 'The server is still working on it. Check again in a moment.';
+    case 'signed-out': return 'Sign-in needed: your server session ended. Reconnect, then check again.';
+    case 'rate-limited': return `Too many requests. ${waitHint(answer.retryAfterSeconds)}`;
+    case 'invalid': return 'The server did not accept this check.';
+    case 'unknown': return answer.responded ? 'The server answered, but not with a result.' : 'No answer from the server.';
+    default: return 'The server answered, but not with a result.';
+  }
+}
+
+/**
+ * One issue answer, reconciled BY KEY in the hold store whatever dialog or section is (or is not) there now. `first` is
+ * the attempt's first send: a 201 issues it; a 401 or a 429 was refused before the key was acquired, so the attempt goes
+ * (a new press is a new key); every other answer but unknown and in-progress decides it. A Check again re-sends a key
+ * that may already have committed, so only CHECK_ISSUE_DECIDES do. A 403 is the section's to decide (its one fresh
+ * check), so it is never settled here.
+ */
+export function settleIssue(holds: IssueHoldStore, uid: string, key: string, answer: IssueResult, first: boolean): void {
+  const held = holds.get(uid);
+  if (held === undefined || held.key !== key || answer.kind === 'denied') return;
+  if (answer.kind === 'issued') {
+    holds.change(uid, key, { state: 'issued', invoiceId: answer.invoiceId, body: '', note: '' });
+    return;
+  }
+  if (first && (answer.kind === 'signed-out' || answer.kind === 'rate-limited')) {
+    holds.remove(uid, key);
+    return;
+  }
+  const decisive = first ? answer.kind !== 'unknown' && answer.kind !== 'in-progress' : CHECK_ISSUE_DECIDES.has(answer.kind);
+  if (decisive) {
+    holds.change(uid, key, { state: 'refused', refusal: answer.kind as IssueRefusal, body: '', note: '' });
+    return;
+  }
+  holds.change(uid, key, { state: 'unresolved', note: issueReasonOf(answer) });
+}
 
 const waitHint = (seconds: number): string => `Wait ${seconds} second${seconds === 1 ? '' : 's'}.`;
 
@@ -675,6 +871,9 @@ export interface ServerInvoiceDraftsProps {
   readonly customers?: CustomersClient;
   readonly identity?: Pick<ShopIdentity, 'idToken'>;
   readonly holds?: DraftHoldStore;
+  /** The issuing routes' client (M7B-INVOICES-ISSUE-P2: the issue eligibility, preview and POST, the issued reads). */
+  readonly issuing?: InvoiceIssuingClient;
+  readonly issueHolds?: IssueHoldStore;
   /** A monotonic clock in milliseconds (default `performance.now()`). */
   readonly now?: () => number;
   /** The wall clock in milliseconds (default `Date.now()`). */
@@ -686,10 +885,13 @@ export interface ServerInvoiceDraftsProps {
 /** One section per signed-in user (keyed by UID): nothing a previous user's reads answer ever reaches it. */
 export function ServerInvoiceDrafts(props: ServerInvoiceDraftsProps) {
   const holds = props.holds ?? draftHolds;
-  // A user change or a sign-out detaches every other user's attempt: it can never be sent again from here.
-  useEffect(() => { holds.detachOthers(props.uid); }, [holds, props.uid]);
+  const issues = props.issueHolds ?? issueHolds;
+  // A user change or a sign-out detaches every other user's attempt: it can never be sent again from here. In the same
+  // commit that ends the earlier user's section (a layout effect, review D1): a passive one runs after the browser may
+  // have delivered that section's late answer, which would then still settle its attempt.
+  useLayoutEffect(() => { holds.detachOthers(props.uid); issues.detachOthers(props.uid); }, [holds, issues, props.uid]);
   if (props.uid === null) return null;
-  return <DraftsSection key={props.uid} {...props} uid={props.uid} holds={holds} />;
+  return <DraftsSection key={props.uid} {...props} uid={props.uid} holds={holds} issueHolds={issues} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -756,6 +958,22 @@ interface DiscardState {
   readonly id: number; readonly store: StoreEntry; readonly draft: DraftDetail; readonly n: number; readonly pressed: boolean;
   readonly attempt: EditAttempt | null; readonly status: { readonly alert: boolean; readonly text: string } | null;
 }
+/**
+ * The issue confirmation (M7B-INVOICES-ISSUE-P2), stacked over the reopen dialog: which open it is (`id`), the draft and
+ * store it reviews, the generation it opened in, the preview read and the body built ONCE from its `expected` (`refused`:
+ * the preview read itself was refused, said in `text`), whether that preview replaced an earlier one (`updated`), the
+ * attempt it shows (`key`, in the issue hold store) and whether a key was ever minted in it (`pressed`).
+ */
+interface IssueState {
+  readonly id: number; readonly store: StoreEntry; readonly draftId: string; readonly n: number;
+  readonly phase: 'opening' | 'loading' | 'ready' | 'unavailable' | 'rate-limited' | 'refused';
+  readonly text: string;
+  readonly preview: IssuePreview | null; readonly body: string | null; readonly updated: boolean;
+  readonly key: string | null; readonly pressed: boolean;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+}
+/** The issued invoice opened from the attempt card's View invoice: which open it is, and what it reads. */
+interface IssuedViewOpen { readonly id: number; readonly storeId: string; readonly invoiceId: string }
 interface Failure { readonly kind: 'denied' | 'signed-out' | 'rate-limited' | 'unavailable'; readonly text: string; readonly seconds?: number }
 
 /** One generation's customer names: what was read (null: not readable), what is asked or queued, how many reads are out. */
@@ -798,7 +1016,7 @@ type SendOutcome = { readonly kind: 'sent'; readonly key: string; readonly creat
 function DraftsSection({
   uid, canViewCustomers, handoff, onHandoffTaken,
   session = tenantSession, drafts = draftsClient, customers = customersClient, identity = firebaseShopIdentity,
-  holds = draftHolds, now, wallNow, newKey,
+  holds = draftHolds, issuing = issuingClient, issueHolds: issues = issueHolds, now, wallNow, newKey,
 }: ServerInvoiceDraftsProps & { readonly uid: string; readonly holds: DraftHoldStore }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -816,9 +1034,17 @@ function DraftsSection({
   const [discardElig, setDiscardEligState] = useState<EligState>(elig);
   const [editor, setEditorState] = useState<EditorState | null>(null);
   const [discard, setDiscardState] = useState<DiscardState | null>(null);
+  const [issueElig, setIssueEligState] = useState<EligState>(elig);
+  const [issue, setIssueState] = useState<IssueState | null>(null);
+  const [issuedView, setIssuedViewState] = useState<IssuedViewOpen | null>(null);
+  // The attempt card's own reads (by the attempt's key): its invoice's detail ('failed' once it did not load; refused for
+  // good is the attempt's own `refusal`), a Find out.
+  const [detail, setDetail] = useState<{ readonly key: string; readonly phase: 'loading' | 'failed' } | null>(null);
+  const [finding, setFinding] = useState<string | null>(null);
   const [, setNamesTick] = useState(0);
   const [, setTick] = useState(0);
   const held = useSyncExternalStore(holds.subscribe, () => holds.get(uid));
+  const issueHeld = useSyncExternalStore(issues.subscribe, () => issues.get(uid));
 
   const gen = useRef<{ n: number; csrf: string | null }>({ n: 0, csrf: null }); // the token: refs, the hold store, the open dialog's state
   const alive = useRef(false);
@@ -833,9 +1059,20 @@ function DraftsSection({
   const editorSeq = useRef(0); // which editor open is the latest: a continuation applies only to its own
   const discardRef = useRef<DiscardState | null>(null);
   const discardSeq = useRef(0); // which confirmation open is the latest
-  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0, editElig: 0, discardElig: 0, review: 0 });
-  const ctl = useRef<Record<'stores' | 'list' | 'reopen' | 'names' | 'elig' | 'editElig' | 'discardElig' | 'review', AbortController | null>>(
-    { stores: null, list: null, reopen: null, names: null, elig: null, editElig: null, discardElig: null, review: null },
+  const issueEligRef = useRef<EligState>(issueElig);
+  const issueRef = useRef<IssueState | null>(null);
+  const issueSeq = useRef(0); // which issue confirmation open is the latest
+  const issuedViewRef = useRef<IssuedViewOpen | null>(null);
+  const issuedViewSeq = useRef(0);
+  // The confirmation (its `id`) whose Issue invoice press is out, from its session check on: a second activation sends nothing.
+  const issueSending = useRef(0);
+  // The attempt (by its key) whose Check again, and whose card read (its detail or a Find), is out: an attempt that
+  // replaced it is never held back by it.
+  const issueChecking = useRef<string | null>(null);
+  const issueReading = useRef<string | null>(null);
+  const seq = useRef({ stores: 0, list: 0, reopen: 0, elig: 0, editElig: 0, discardElig: 0, review: 0, issueElig: 0, preview: 0, attempt: 0 });
+  const ctl = useRef<Record<'stores' | 'list' | 'reopen' | 'names' | 'elig' | 'editElig' | 'discardElig' | 'review' | 'issueElig' | 'preview' | 'attempt', AbortController | null>>(
+    { stores: null, list: null, reopen: null, names: null, elig: null, editElig: null, discardElig: null, review: null, issueElig: null, preview: null, attempt: null },
   );
   const names = useRef<NameBook>(newBook(0));
   const waitRef = useRef(false);
@@ -894,6 +1131,27 @@ function DraftsSection({
     setDiscardState(next);
   };
   const patchDiscard = (next: Partial<DiscardState>): void => { if (discardRef.current !== null) putDiscard({ ...discardRef.current, ...next }); };
+  const putIssueElig = (next: EligState): void => { issueEligRef.current = next; setIssueEligState(next); };
+  const putIssue = (next: IssueState | null): void => { issueRef.current = next; setIssueState(next); };
+  /** Change the open issue confirmation when it is still the one `id` names (a closed or replaced one's continuation changes nothing). */
+  const patchIssue = (id: number, next: Partial<IssueState>): boolean => {
+    if (!alive.current || issueRef.current === null || issueRef.current.id !== id) return false;
+    putIssue({ ...issueRef.current, ...next });
+    return true;
+  };
+  /**
+   * Drop the issue confirmation AND the reopen dialog under it AT ONCE (M7B-INVOICES-ISSUE-P2), as dropDiscard: its
+   * preview read is cancelled; the attempt it showed stays in the issue hold store (its own rules decide it).
+   */
+  const dropIssue = (): void => {
+    ctl.current.preview?.abort();
+    seq.current.preview += 1;
+    if (issueRef.current === null) return;
+    issueRef.current = null;
+    reopenRef.current = null;
+    flushSync(() => { setIssueState(null); setReopenState(null); });
+  };
+  const closeIssuedView = (): void => { issuedViewRef.current = null; setIssuedViewState(null); };
   /**
    * Drop the discard confirmation AND the reopen dialog under it AT ONCE (M7B-INVOICES-DISCARD-P1), for a session that is
    * over or changed and for a store change: the attempt, its token and both dialogs go in a render committed here
@@ -932,7 +1190,7 @@ function DraftsSection({
    * the store chosen now; for Edit (`editElig`) and Discard (`discardElig`, M7B-INVOICES-DISCARD-P1), at the reopen
    * dialog's store and draft now.
    */
-  const current = (e: EligState, slot: 'elig' | 'editElig' | 'discardElig' = 'elig'): boolean =>
+  const current = (e: EligState, slot: 'elig' | 'editElig' | 'discardElig' | 'issueElig' = 'elig'): boolean =>
     e.uid === uid && e.n === gen.current.n && e.csrf === gen.current.csrf && e.seq === seq.current[slot] && (slot !== 'elig'
       ? e.draftId !== '' && e.storeId === reopenRef.current?.storeId && e.draftId === reopenRef.current.id
       : e.draftId === '' && e.storeId === storeRef.current);
@@ -949,6 +1207,8 @@ function DraftsSection({
   const giveBusy = (token: number): void => { if (alive.current && busyBy.current === token) setBusy(false); };
   const waitLeft = (): number => Math.max(1, Math.ceil((waitUntil.current - clock()) / 1000));
   const expired = (h: { readonly sentAt: number; readonly sentWall: number }): boolean => Math.max(clock() - h.sentAt, wall() - h.sentWall) >= CHECK_CUTOFF_MS;
+  /** The user's issue attempt under `key` while it is still this session's (not detached), else null. */
+  const issueOf = (key: string): HeldIssue | null => { const h = issues.get(uid); return h !== undefined && h.key === key && h.csrf !== null ? h : null; };
 
   function clearWait(): void {
     if (waitTimer.current !== null) clearTimeout(waitTimer.current);
@@ -971,19 +1231,26 @@ function DraftsSection({
 
   /** Cancel every read in flight; their answers are stale from here, and nothing is busy any more. */
   function abortReads(): void {
-    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review'] as const) ctl.current[kind]?.abort();
+    for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review', 'issueElig', 'preview', 'attempt'] as const) ctl.current[kind]?.abort();
     const s = seq.current;
     seq.current = {
       stores: s.stores + 1, list: s.list + 1, reopen: s.reopen + 1, elig: s.elig + 1, editElig: s.editElig + 1, discardElig: s.discardElig + 1, review: s.review + 1,
+      issueElig: s.issueElig + 1, preview: s.preview + 1, attempt: s.attempt + 1,
     };
     busyBy.current += 1;
     setBusy(false);
   }
 
-  /** A session token: detach the user's live attempt when it was sent under another (a session change, never a store choice). */
+  /**
+   * A session token: detach the user's live draft attempt when it was sent under another (a session change, never a store
+   * choice) — and the user's issue attempt, live or settled (M7B-INVOICES-ISSUE-P2: its invoice is read, and checked, only
+   * under the session it was sent with).
+   */
   function judgeHold(csrf: string): void {
     const h = holds.get(uid);
     if (isLiveHold(h) && h.csrf !== null && h.csrf !== csrf) holds.detach(uid);
+    const i = issues.get(uid);
+    if (i !== undefined && i.csrf !== null && i.csrf !== csrf) issues.detach(uid);
   }
 
   /** A new generation: everything read under the previous token goes, and the stores are read again. */
@@ -997,6 +1264,8 @@ function DraftsSection({
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
     dropDiscard(); // the discard's attempt and both dialogs are the previous session's
+    dropIssue(); // M7B-INVOICES-ISSUE-P2: the issue confirmation too (its attempt was judged above)
+    closeIssuedView();
     putReopen(null);
     dropEditor(); // the editor's working copy and attempt are the previous session's
     setNewDraft(null);
@@ -1028,6 +1297,10 @@ function DraftsSection({
     setStoreIdState('');
     putList(listOf(gen.current.n, ''));
     dropDiscard(); // M7B-INVOICES-DISCARD-P1: a confirmation up takes the reopen dialog with it, before the line below
+    dropIssue(); // M7B-INVOICES-ISSUE-P2: as the discard's
+    closeIssuedView();
+    // An issue attempt can never be checked or read under a session that ended: it is detached (said as such).
+    if (failure.kind === 'signed-out') issues.detach(uid);
     if (reopenRef.current !== null) putReopen({ ...reopenRef.current, phase: 'signed-out', text: failure.text, draft: null, saved: null, refused: '' });
     // M7B-INVOICES-P2: unlike the reopen dialog, the editor closes — its working copy, customer and attempt go at once.
     dropEditor();
@@ -1224,6 +1497,7 @@ function DraftsSection({
       put('ready', '', answer.draft);
       void readEligibility(id);
       void readEligibility(id, 'discardElig'); // M7B-INVOICES-DISCARD-P1: its own, in the same place
+      void readEligibility(id, 'issueElig'); // M7B-INVOICES-ISSUE-P2: and the issue's
       // An edit that changed the draft changed its row (line count, subtotal): page one is read again, as after a create.
       if (saved?.changed === true && storeRef.current === target) void readDrafts('first');
       return resolveNames([answer.draft.customerId], s.csrf);
@@ -1247,9 +1521,10 @@ function DraftsSection({
    * M7B-INVOICES-P2: with a `draftId`, the same read for Edit in the reopen dialog (GET …/{id}/edit-eligibility, the
    * edit's own requirement) — its own state, request counter and controller, asked at the reopen dialog's store for its
    * draft, and stale once that dialog shows another draft or none. M7B-INVOICES-DISCARD-P1: with `discardElig`, the same
-   * for Discard draft… (GET …/{id}/discard-eligibility, the discard's own requirement), in its own slot.
+   * for Discard draft… (GET …/{id}/discard-eligibility, the discard's own requirement), in its own slot. M7B-INVOICES-ISSUE-P2:
+   * with `issueElig`, the same for Issue invoice… (GET …/{id}/issue-eligibility, the issue's own requirement).
    */
-  async function readEligibility(draftId = '', which: 'editElig' | 'discardElig' = 'editElig'): Promise<void> {
+  async function readEligibility(draftId = '', which: 'editElig' | 'discardElig' | 'issueElig' = 'editElig'): Promise<void> {
     const edit = draftId !== '';
     const slot = edit ? which : 'elig';
     ctl.current[slot]?.abort();
@@ -1260,10 +1535,10 @@ function DraftsSection({
     if (store === undefined || store.readOnly || csrf === null) return; // a read-only store keeps its own text and asks nothing
     const since = sessionEndsSoFar();
     const key = { uid, n: gen.current.n, csrf, storeId: target, draftId, seq: n, since };
-    const texts = slot === 'elig' ? ELIGIBILITY_TEXT : slot === 'editElig' ? EDIT_ELIGIBILITY_TEXT : DISCARD_ELIGIBILITY_TEXT;
+    const texts = slot === 'elig' ? ELIGIBILITY_TEXT : slot === 'editElig' ? EDIT_ELIGIBILITY_TEXT : slot === 'discardElig' ? DISCARD_ELIGIBILITY_TEXT : ISSUE_ELIGIBILITY_TEXT;
     // `waitId`: the wait running once `text` is made (a rate limit's text starts or names it first).
     const put = (phase: EligPhase, text = ''): void =>
-      (slot === 'elig' ? putElig : slot === 'editElig' ? putEditElig : putDiscardElig)({ ...key, phase, text, waitId: waitSeq.current });
+      (slot === 'elig' ? putElig : slot === 'editElig' ? putEditElig : slot === 'discardElig' ? putDiscardElig : putIssueElig)({ ...key, phase, text, waitId: waitSeq.current });
     const waitText = (seconds: number): string => pickerWaitText(startWait(seconds));
     if (waitRef.current) return put('rate-limited', pickerWaitText(waitLeft()));
     const controller = new AbortController();
@@ -1281,7 +1556,8 @@ function DraftsSection({
     }
     if (adopt(s.csrf)) return; // a new generation: its stores are read again, and the next choice asks again
     const answer = await (slot === 'elig' ? drafts.eligibility(target, s.csrf, controller.signal)
-      : slot === 'editElig' ? drafts.editEligibility(target, draftId, s.csrf, controller.signal) : drafts.discardEligibility(target, draftId, s.csrf, controller.signal));
+      : slot === 'editElig' ? drafts.editEligibility(target, draftId, s.csrf, controller.signal)
+        : slot === 'discardElig' ? drafts.discardEligibility(target, draftId, s.csrf, controller.signal) : issuing.issueEligibility(target, draftId, s.csrf, controller.signal));
     if (stale()) return;
     if (answer.kind === 'allowed') return put('allowed');
     if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
@@ -1330,6 +1606,7 @@ function DraftsSection({
   function chooseStore(id: string): void {
     if (busyRef.current && storesRef.current.phase === 'loading') return;
     dropDiscard(); // M7B-INVOICES-DISCARD-P1: a store change drops a discard's attempt and both dialogs
+    dropIssue(); // M7B-INVOICES-ISSUE-P2: and the issue confirmation (its attempt keeps its own store)
     ctl.current.list?.abort();
     seq.current.list += 1;
     storeRef.current = id;
@@ -1482,7 +1759,7 @@ function DraftsSection({
     const r = reopenRef.current;
     const e = editEligRef.current;
     const csrf = gen.current.csrf;
-    if (r === null || r.draft === null || csrf === null || e.phase !== 'allowed' || !current(e, 'editElig') || editorRef.current !== null || discardRef.current !== null) return;
+    if (r === null || r.draft === null || csrf === null || e.phase !== 'allowed' || !current(e, 'editElig') || editorRef.current !== null || discardRef.current !== null || issueRef.current !== null) return;
     const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
     if (store === undefined || store.readOnly) return;
     const draft = r.draft;
@@ -1681,7 +1958,7 @@ function DraftsSection({
     const r = reopenRef.current;
     const e = discardEligRef.current;
     if (r === null || r.draft === null || gen.current.csrf === null || e.phase !== 'allowed' || !current(e, 'discardElig')) return;
-    if (editorRef.current !== null || discardRef.current !== null) return;
+    if (editorRef.current !== null || discardRef.current !== null || issueRef.current !== null) return;
     const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
     if (store === undefined || store.readOnly) return;
     discardFocus.current = null;
@@ -1865,6 +2142,441 @@ function DraftsSection({
     void readDrafts('first');
   }
 
+  // ---- issuing a saved draft (M7B-INVOICES-ISSUE-P2) ----
+
+  /** Page one of `storeId` again when it is the store chosen; during a wait the rows stay, marked last known, with the wait. */
+  function rereadDrafts(storeId: string): void {
+    if (storeRef.current !== storeId) return;
+    if (waitRef.current) return putList({ ...listRef.current, phase: 'rate-limited', text: pickerWaitText(waitLeft()), note: '', waitId: waitSeq.current });
+    void readDrafts('first');
+  }
+
+  /**
+   * Issue invoice…, from the reopen dialog: only on the server's `allowed` for exactly that dialog's store and draft under
+   * this generation (checked again at the press), at a writable store, with no editor or other confirmation up. The
+   * confirmation opens empty ('opening': its live regions are in place before any text) and reads the preview from an
+   * effect, once it is committed.
+   */
+  function openIssue(): void {
+    const r = reopenRef.current;
+    const e = issueEligRef.current;
+    if (r === null || r.draft === null || gen.current.csrf === null || e.phase !== 'allowed' || !current(e, 'issueElig')) return;
+    if (editorRef.current !== null || discardRef.current !== null || issueRef.current !== null) return;
+    const store = storesRef.current.stores.find((entry) => entry.id === r.storeId);
+    if (store === undefined || store.readOnly) return;
+    putIssue({
+      id: ++issueSeq.current, store, draftId: r.id, n: gen.current.n, phase: 'opening', text: '', preview: null, body: null, updated: false, key: null, pressed: false, status: null,
+    });
+  }
+
+  /**
+   * The confirmation's ONE preview read (and its Try again, and Review again's `updated` read): GET …/issue-preview, never a
+   * POST. A ready preview's `expected` becomes the body, serialized once; anything that replaces it (a read again) takes the
+   * body away first, so Issue invoice is offered only for the preview shown. Stale once that confirmation closed or was
+   * replaced, its read cancelled, another generation began or a sign-out began since it asked.
+   */
+  async function readPreview(updated = false): Promise<void> {
+    const d = issueRef.current;
+    if (d === null) return;
+    ctl.current.preview?.abort();
+    const n = ++seq.current.preview;
+    const controller = new AbortController();
+    ctl.current.preview = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || n !== seq.current.preview || issueRef.current?.id !== d.id || gen.current.n !== d.n
+      || since !== sessionEndsSoFar();
+    // `updated` is kept through loading, a failure and its Try again: the replacement is said as such once it is shown.
+    const put = (phase: IssueState['phase'], text: string, preview: IssuePreview | null = null, body: string | null = null): void =>
+      void patchIssue(d.id, { phase, text, preview, body, updated });
+    if (waitRef.current) return put('rate-limited', pickerWaitText(waitLeft()));
+    put('loading', ISSUE_TEXT.previewLoading);
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      return failure.seconds !== undefined ? put('rate-limited', pickerWaitText(startWait(failure.seconds))) : put('unavailable', ISSUE_TEXT.previewUnavailable);
+    }
+    if (adopt(s.csrf)) return; // a new generation dropped the confirmation
+    const answer = await issuing.issuePreview(d.store.id, d.draftId, d.store.tenantId, s.csrf, controller.signal);
+    if (stale()) return;
+    if (answer.kind === 'ok') {
+      const body = issueBodyOf(answer.preview.expected);
+      return body === null ? put('unavailable', ISSUE_TEXT.previewUnavailable) : put('ready', updated ? ISSUE_TEXT.updated : '', answer.preview, body);
+    }
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (answer.kind === 'not-found') return put('refused', ISSUE_TEXT.previewNotFound);
+    if (answer.kind === 'invalid-state') return put('refused', ISSUE_TEXT.previewLast);
+    if (answer.kind === 'not-configured') return put('refused', ISSUE_TEXT.previewNotConfigured);
+    if (answer.kind === 'out-of-range') return put('refused', ISSUE_TEXT.previewOutOfRange);
+    if (answer.kind === 'rate-limited') return put('rate-limited', pickerWaitText(startWait(answer.retryAfterSeconds)));
+    if (answer.kind === 'denied') {
+      const verdict = await denialOf(stale); // the reads' one fresh check: another token is a new generation
+      if (verdict === null) return;
+      if (verdict === 'denied') {
+        takeIssueAway(d.draftId);
+        return put('refused', ISSUE_TEXT.previewDenied);
+      }
+      return verdict.kind === 'rate-limited' ? put('rate-limited', verdict.text) : put('unavailable', ISSUE_TEXT.previewUnavailable);
+    }
+    put('unavailable', ISSUE_TEXT.previewUnavailable);
+  }
+  // The confirmation's first read, once it is committed with its regions empty (never in the render that mounts it).
+  const issueOpening = issue?.phase === 'opening' ? issue.id : 0;
+  useEffect(() => { if (issueOpening !== 0) void readPreview(); }, [issueOpening]);
+
+  /** A refusal of this session at `draftId`'s store stands: Issue invoice… goes from its reopen dialog (nothing is asked again on its own). */
+  function takeIssueAway(draftId: string): void {
+    const e = issueEligRef.current;
+    if (!current(e, 'issueElig') || e.draftId !== draftId) return;
+    ctl.current.issueElig?.abort();
+    putIssueElig({ ...e, seq: ++seq.current.issueElig, phase: 'denied', text: ISSUE_ELIGIBILITY_TEXT.denied });
+  }
+
+  /**
+   * One explicit Issue invoice: at most one POST, never during a wait, never while the user's earlier issue attempt is
+   * live, and only for the preview shown. The session is checked first — another token starts a new generation (which
+   * drops both dialogs) and nothing is sent — then the generation, the wait, the preview and the eligibility again; ONE
+   * key is minted and the attempt held BEFORE the request leaves. Its answer settles it by key.
+   */
+  async function sendIssue(): Promise<void> {
+    const d = issueRef.current;
+    if (d === null || d.key !== null || issueSending.current === d.id) return;
+    const say = (text: string): void => void patchIssue(d.id, { status: { alert: true, text } });
+    if (waitRef.current) return say(`Not sent. ${pickerWaitText(waitLeft())}`);
+    if (d.phase !== 'ready' || d.body === null) return;
+    if (isLiveIssue(issues.get(uid))) return say(pendingTextOf(issues.get(uid)));
+    issueSending.current = d.id; // a ref: a second activation in the same task sends nothing
+    patchIssue(d.id, { status: null });
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (!alive.current || issueRef.current?.id !== d.id) return;
+      if (since !== sessionEndsSoFar()) return say(`Not sent. ${DRAFTS_TEXT.ended}`);
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return say(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== d.n) return; // another session: its new generation dropped both dialogs
+      if (waitRef.current) return say(`Not sent. ${pickerWaitText(waitLeft())}`);
+      // Judged again on the confirmation as it is now: the same preview and body shown, nothing sent from it since.
+      const latest = issueRef.current;
+      if (latest === null || latest.id !== d.id || latest.phase !== 'ready' || latest.body !== d.body || latest.key !== null) return;
+      const e = issueEligRef.current;
+      if (e.phase !== 'allowed' || !current(e, 'issueElig') || e.draftId !== d.draftId) return say(ISSUE_TEXT.notAllowed);
+      const key = nextKey();
+      const attempt: HeldIssue = {
+        key, body: d.body, storeId: d.store.id, draftId: d.draftId, storeLabel: storeLabel(d.store), csrf: s.csrf, sentAt: clock(), sentWall: wall(),
+        state: 'sending', note: '', invoiceId: null, number: null, refusal: null,
+      };
+      if (!issues.put(uid, attempt)) return say(pendingTextOf(issues.get(uid)));
+      // The settled attempt it replaced takes its card read with it: cancelled, and its guard is let go.
+      ctl.current.attempt?.abort();
+      seq.current.attempt += 1;
+      issueReading.current = null;
+      patchIssue(d.id, { key, pressed: true, status: null });
+      const answer = await issuing.issue(attempt.storeId, attempt.draftId, attempt.body, key, s.csrf);
+      await settleIssueAnswer(key, answer, true, since, s.csrf);
+    } finally {
+      if (issueSending.current === d.id) issueSending.current = 0;
+    }
+  }
+
+  /**
+   * One issue answer (a first send's or a Check again's): settled BY KEY in the issue hold store (settleIssue), then what
+   * it means here while the section is mounted and the attempt is still this session's — a 429 starts the section's wait
+   * (only while the session that sent it is still the section's), a 403 gets the reads' ONE fresh check, a 401 ends the
+   * session (and detaches the attempt), a 201 closes the dialogs and reads the invoice.
+   */
+  async function settleIssueAnswer(key: string, answer: IssueResult, first: boolean, since: number, csrf: string): Promise<void> {
+    const sent = issues.get(uid);
+    if (sent?.key !== key) return;
+    // Detached since it was sent (a sign-out, another token, another user) or sent before a sign-out began: the late answer
+    // proves nothing in this context and changes nothing — the attempt stays the earlier connection's note, with Dismiss.
+    if (sent.csrf !== csrf || since !== sessionEndsSoFar()) { issues.detach(uid); return; }
+    if (answer.kind === 'rate-limited' && alive.current && csrf === gen.current.csrf && since === sessionEndsSoFar()) startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'denied') {
+      // A first send's 403 was refused before the key was acquired; a Check again's leaves the attempt unresolved. With no
+      // section to check it under, or a check that could not answer, it still settles (never left "sending"), and is
+      // never said as a lack of access it did not confirm. Detached meanwhile (another token found by the check, a
+      // sign-out), it stays the earlier connection's note, as above.
+      const unchecked = (): void => void issues.change(uid, key, first ? { state: 'refused', refusal: 'unchecked', body: '' } : { state: 'unresolved', note: ISSUE_TEXT.checkUnchecked });
+      if (!alive.current || issueOf(key) === null) return unchecked();
+      const verdict = await denialOf(() => issueOf(key) === null);
+      if (issues.get(uid)?.key !== key || issueOf(key) === null) return;
+      if (verdict === null) return unchecked();
+      const draftId = issueOf(key)?.draftId ?? '';
+      if (verdict === 'denied') takeIssueAway(draftId);
+      if (first) return void issues.change(uid, key, { state: 'refused', refusal: verdict === 'denied' ? 'denied' : 'unchecked', body: '' });
+      return void issues.change(uid, key, { state: 'unresolved', note: verdict === 'denied' ? ISSUE_TEXT.checkDenied : verdict.kind === 'rate-limited' ? verdict.text : ISSUE_TEXT.checkUnchecked });
+    }
+    settleIssue(issues, uid, key, answer, first);
+    if (!alive.current) return;
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+    if (first && answer.kind === 'rate-limited') {
+      // Refused before the key was acquired: nothing is held; a new press (a new key) once the wait has passed.
+      const d = issueRef.current;
+      if (d !== null && d.key === key) patchIssue(d.id, { key: null, status: { alert: true, text: ISSUE_TEXT.rateLimited } });
+      return;
+    }
+    const h = issueOf(key);
+    if (h === null) return;
+    if (h.state === 'issued') return issuedNow(h);
+    // The draft is no longer open: its row may be gone (page one again); the alert offers Find issued invoice.
+    if (h.state === 'refused' && h.refusal === 'not-open') rereadDrafts(h.storeId);
+  }
+
+  /**
+   * Issued (a validated 201, its replay, or Find): the confirmation and the reopen dialog of that draft close AT ONCE, its
+   * row leaves the list it was listed in, focus goes to the heading (the row's Open is gone), the invoice is read for its
+   * number (unless known) and page one is read again.
+   */
+  function issuedNow(h: HeldIssue): void {
+    const ours = issueRef.current?.key === h.key;
+    const open = reopenRef.current?.id === h.draftId;
+    if (ours) issueRef.current = null;
+    if (open || ours) reopenRef.current = null;
+    const was = listRef.current;
+    const read = h.number === null;
+    flushSync(() => {
+      if (ours) setIssueState(null);
+      if (open || ours) setReopenState(null);
+      if (was.storeId === h.storeId) putList({ ...was, rows: was.rows.filter((row) => row.id !== h.draftId) });
+      if (read) setDetail({ key: h.key, phase: 'loading' }); // the card's first words are "Loading", never a failure
+    });
+    if (ours || open) heading.current?.focus();
+    if (read) void loadIssued();
+    rereadDrafts(h.storeId);
+  }
+
+  /**
+   * The issued attempt's invoice, read ONCE for its number (a GET, never a POST) — and by "Load details again" — under
+   * the session it was sent with: another token detaches the attempt. Never on a timer, a focus or a mount.
+   */
+  async function loadIssued(): Promise<void> {
+    const h = issues.get(uid);
+    if (h === undefined || h.state !== 'issued' || h.invoiceId === null || h.csrf === null || h.number !== null || h.refusal !== null || issueReading.current === h.key) return;
+    const { key, storeId, invoiceId, csrf } = h;
+    if (waitRef.current) return setDetail({ key, phase: 'failed' }); // nothing is read during a wait: Load details again after it
+    issueReading.current = key;
+    ctl.current.attempt?.abort();
+    const n = ++seq.current.attempt;
+    const controller = new AbortController();
+    ctl.current.attempt = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || n !== seq.current.attempt || since !== sessionEndsSoFar() || issueOf(key) === null;
+    const fail = (): void => { if (!stale()) setDetail({ key, phase: 'failed' }); };
+    setDetail({ key, phase: 'loading' });
+    try {
+      const s = await connect();
+      if (stale()) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        if (failure.seconds !== undefined) startWait(failure.seconds);
+        return fail();
+      }
+      if (s.csrf !== csrf) { issues.detach(uid); adopt(s.csrf); return; } // another session: read under none
+      adopt(s.csrf);
+      const answer = await issuing.getIssued(storeId, invoiceId, csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        issues.change(uid, key, { number: answer.invoice.number });
+        return setDetail(null);
+      }
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+      if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+      if (answer.kind === 'denied') {
+        const verdict = await denialOf(stale);
+        if (verdict === null) return;
+        if (verdict === 'denied') { issues.change(uid, key, { refusal: 'denied' }); return setDetail(null); } // the refusal stands: nothing to read again
+      }
+      fail();
+    } finally {
+      if (issueReading.current === key) issueReading.current = null;
+    }
+  }
+
+  /**
+   * "Check again": the SAME key and the SAME bytes to the attempt's OWN store and draft, only under the token it was sent
+   * with, outside a wait, while max(monotonic, wall) since its FIRST send is under 23 hours — judged again right before
+   * the POST. Never on its own.
+   */
+  async function checkIssue(): Promise<void> {
+    const h = issues.get(uid);
+    if (h === undefined || h.state !== 'unresolved' || h.csrf === null || h.body === '' || issueChecking.current === h.key || issueReading.current === h.key || waitRef.current) return;
+    if (expired(h)) { issues.change(uid, h.key, { body: '' }); return; } // too old: the card now says so
+    const { key, body, csrf, storeId, draftId } = h;
+    issueChecking.current = key;
+    issues.change(uid, key, { state: 'checking', note: '' });
+    try {
+      const since = sessionEndsSoFar();
+      const s = await connect();
+      if (issues.get(uid)?.key !== key) return;
+      // A sign-out began while the session was confirmed: nothing is sent and no token is taken from that answer.
+      if (since !== sessionEndsSoFar()) return void issues.change(uid, key, { state: 'unresolved', note: `Not checked. ${DRAFTS_TEXT.ended}` });
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        issues.change(uid, key, { state: 'unresolved', note: `Not checked. ${failure.seconds !== undefined ? pickerWaitText(failure.seconds) : failure.text}` });
+        if (alive.current && failure.kind === 'signed-out') failSession(failure);
+        return;
+      }
+      if (s.csrf !== csrf) {
+        // Another session answers now: the attempt is detached for good, and NOTHING is sent.
+        issues.detach(uid);
+        issues.change(uid, key, { state: 'unresolved' });
+        if (alive.current) adopt(s.csrf);
+        return;
+      }
+      if (alive.current) adopt(s.csrf);
+      if (waitRef.current) return void issues.change(uid, key, { state: 'unresolved', note: `Not checked. ${pickerWaitText(waitLeft())}` });
+      const latest = issues.get(uid);
+      if (latest === undefined || latest.key !== key || latest.csrf !== csrf || latest.body !== body) return void issues.change(uid, key, { state: 'unresolved' });
+      if (expired(latest)) return void issues.change(uid, key, { state: 'unresolved', body: '' });
+      const answer = await issuing.issue(storeId, draftId, body, key, csrf);
+      await settleIssueAnswer(key, answer, false, since, csrf);
+    } finally {
+      if (issueChecking.current === key) issueChecking.current = null;
+    }
+  }
+
+  /**
+   * The 23-hour window closes on its own: past the cutoff — max(monotonic, wall) since the FIRST send — the unresolved
+   * attempt's held bytes go (the card then says it is too old). Judged by a timer, after every render and when the page
+   * is shown again; it only takes the bytes away and never sends anything.
+   */
+  function scrubIssue(): void {
+    const h = issues.get(uid);
+    if (h !== undefined && h.state === 'unresolved' && h.body !== '' && expired(h)) issues.change(uid, h.key, { body: '' });
+  }
+  useEffect(() => {
+    scrubIssue();
+    const h = issues.get(uid);
+    if (h === undefined || h.state !== 'unresolved' || h.body === '') return;
+    const left = CHECK_CUTOFF_MS - Math.max(clock() - h.sentAt, wall() - h.sentWall);
+    const timer = setTimeout(() => { scrubIssue(); setTick((n) => n + 1); }, Math.max(0, left)); // a render judges it again if early
+    return () => clearTimeout(timer);
+  });
+
+  /**
+   * "Find issued invoice": the store's issued invoices by this draft (GET …/invoices?sourceDraft=, the lookup alone) at
+   * the ATTEMPT's store, only under the token it was sent with. One found settles it as issued; none found is said as
+   * "not found yet" — never as not issued — and it stays as it was. Sends nothing else.
+   */
+  async function findIssue(): Promise<void> {
+    const h = issues.get(uid);
+    if (h === undefined || h.csrf === null || issueReading.current === h.key || waitRef.current) return;
+    if (h.state !== 'unresolved' && !(h.state === 'refused' && h.refusal === 'not-open')) return;
+    const { key, csrf, storeId, draftId } = h;
+    const say = (note: string): void => void issues.change(uid, key, { note });
+    issueReading.current = key;
+    ctl.current.attempt?.abort();
+    const n = ++seq.current.attempt;
+    const controller = new AbortController();
+    ctl.current.attempt = controller;
+    setFinding(key);
+    try {
+      const since = sessionEndsSoFar();
+      const stale = (): boolean => !alive.current || controller.signal.aborted || n !== seq.current.attempt || since !== sessionEndsSoFar() || issueOf(key) === null;
+      const s = await connect();
+      if (stale()) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return say(`Not checked. ${failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : failure.text}`);
+      }
+      if (s.csrf !== csrf) { issues.detach(uid); adopt(s.csrf); return; } // another session: nothing is read for it
+      adopt(s.csrf);
+      const answer = await issuing.findIssued(storeId, draftId, csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        if (answer.invoice === null) return say(ISSUE_TEXT.findNone);
+        issues.change(uid, key, { state: 'issued', invoiceId: answer.invoice.id, number: answer.invoice.number, body: '', note: '', refusal: null });
+        const now = issueOf(key);
+        return now === null ? undefined : issuedNow(now);
+      }
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
+      if (answer.kind === 'rate-limited') return say(pickerWaitText(startWait(answer.retryAfterSeconds)));
+      if (answer.kind === 'denied') {
+        const verdict = await denialOf(stale);
+        if (verdict === null) return;
+        return say(verdict === 'denied' ? ISSUE_TEXT.findDenied : verdict.kind === 'rate-limited' ? verdict.text : ISSUE_TEXT.findUnavailable);
+      }
+      say(ISSUE_TEXT.findUnavailable);
+    } finally {
+      if (issueReading.current === key) issueReading.current = null;
+      if (alive.current) setFinding((f) => (f === key ? null : f));
+    }
+  }
+
+  /** "Review again" after a conflict: the preview read afresh in the same confirmation; a press then mints a NEW key. */
+  function reviewIssue(): void {
+    const d = issueRef.current;
+    if (d === null || d.key === null) return;
+    patchIssue(d.id, { key: null, status: null });
+    void readPreview(true);
+  }
+
+  /**
+   * Keep draft, Close or Escape. Nothing sent from it: only the confirmation closes (the reopen dialog takes focus back on
+   * Issue invoice…). A key minted in it: tracking goes on outside (the card), the reopen dialog closes too (the draft may
+   * no longer be open) and page one is read again; nothing says it was cancelled or issued.
+   */
+  function closeIssue(): void {
+    const d = issueRef.current;
+    if (d === null) return;
+    ctl.current.preview?.abort();
+    seq.current.preview += 1;
+    putIssue(null);
+    if (!d.pressed) return;
+    putReopen(null);
+    rereadDrafts(d.store.id);
+  }
+
+  /** Stop tracking or Dismiss on the card: never while a request of the attempt is out — unless it is detached (its late answer changes nothing). */
+  function stopIssue(): void {
+    const h = issues.get(uid);
+    if (h === undefined || (h.csrf !== null && (h.state === 'sending' || h.state === 'checking')) || issueReading.current === h.key) return;
+    issues.remove(uid, h.key);
+    setDetail(null);
+  }
+
+  /** "View invoice": the issued invoice in the exported dialog, its read under this section's session. */
+  function viewIssued(): void {
+    const h = issues.get(uid);
+    if (h === undefined || h.state !== 'issued' || h.invoiceId === null || h.csrf === null || issuedViewRef.current !== null) return;
+    const next: IssuedViewOpen = { id: ++issuedViewSeq.current, storeId: h.storeId, invoiceId: h.invoiceId };
+    issuedViewRef.current = next;
+    setIssuedViewState(next);
+  }
+  /** The issued dialog's read (IssuedInvoiceDialog `read`): ServerIssuedInvoices.tsx readView's discipline under this section's generation. */
+  async function readIssuedView(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<IssuedReadAnswer | null> {
+    if (waitRef.current) return { kind: 'rate-limited', text: pickerWaitText(waitLeft()) };
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || since !== sessionEndsSoFar() || issuedViewRef.current?.id !== viewId;
+    const s = await connect();
+    if (stale()) return null;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') { failSession(failure); return null; }
+      return failure.seconds !== undefined ? { kind: 'rate-limited', text: pickerWaitText(startWait(failure.seconds)) } : { kind: 'unavailable' };
+    }
+    if (adopt(s.csrf)) return null; // a new generation closed the dialog
+    const answer = await issuing.getIssued(storeId, invoiceId, s.csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'ok' || answer.kind === 'not-found') return answer;
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended }); return null; }
+    if (answer.kind === 'denied') {
+      const verdict = await denialOf(stale);
+      if (verdict === null) return null;
+      return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
+    }
+    if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
+    return { kind: 'unavailable' };
+  }
+
   // A created attempt is read back ONCE (a GET, never a second POST), under the session it was sent with.
   useEffect(() => {
     if (held === undefined || held.state !== 'created' || held.draftId === null || readBack.current === held.key) return;
@@ -1951,7 +2663,7 @@ function DraftsSection({
     return () => document.removeEventListener('pointerdown', moved, true);
   }, []);
   useEffect(() => {
-    const check = (): void => checkSession();
+    const check = (): void => { scrubIssue(); checkSession(); };
     window.addEventListener('focus', check);
     document.addEventListener('visibilitychange', check);
     // A sign-out, heard where it starts (the session client's `onSessionEnd`), while this section is mounted — on a
@@ -1973,7 +2685,7 @@ function DraftsSection({
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
       gen.current = { n: gen.current.n + 1, csrf: null };
-      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review'] as const) ctl.current[kind]?.abort();
+      for (const kind of ['stores', 'list', 'reopen', 'names', 'elig', 'editElig', 'discardElig', 'review', 'issueElig', 'preview', 'attempt'] as const) ctl.current[kind]?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
     };
     // A section serves one UID (see ServerInvoiceDrafts); the clients are fixed for its life.
@@ -1991,6 +2703,7 @@ function DraftsSection({
   const eligNow = current(elig) ? elig : null;
   const editEligNow = current(editElig, 'editElig') ? editElig : null;
   const discardEligNow = current(discardElig, 'discardElig') ? discardElig : null;
+  const issueEligNow = current(issueElig, 'issueElig') ? issueElig : null;
   // A rate limit's wait is said once: by the list's note when it names the SAME wait, else by the eligibility's.
   const sameWait = eligNow?.phase === 'rate-limited' && list.phase === 'rate-limited' && list.waitId === eligNow.waitId;
   const eligText = eligNow === null || eligNow.phase === 'denied' || sameWait ? '' : eligNow.text;
@@ -2023,6 +2736,16 @@ function DraftsSection({
           waiting={waiting}
         />
       )}
+      {/* M7B-INVOICES-ISSUE-P2: the user's issue attempt outside the confirmation (its own card there while it shows it).
+          Its status line is always mounted, so what it says is a change to a live region that is already there. A press on
+          it hands focus to the heading first (its control goes), as the draft card's. */}
+      <IssueCard
+        held={issueHeld !== undefined && issue?.key !== issueHeld.key ? issueHeld : undefined}
+        expired={issueHeld !== undefined && expired(issueHeld)} waiting={waiting} detail={detail?.key === issueHeld?.key ? detail?.phase ?? null : null}
+        finding={finding !== null && finding === issueHeld?.key}
+        onCheck={() => { if (waitRef.current) return; heading.current?.focus(); void checkIssue(); }} onFind={() => { if (waitRef.current) return; heading.current?.focus(); void findIssue(); }}
+        onStop={() => { heading.current?.focus(); stopIssue(); }} onLoad={() => { if (waitRef.current) return; heading.current?.focus(); void loadIssued(); }} onView={viewIssued}
+      />
       {/* Always mounted, so a notice is a change to a live region that is already there and is announced; it is the notice
           (`drafts-notice`) only while it says something. */}
       <p data-testid={notice === '' ? undefined : 'drafts-notice'} role="status" className="text-sm font-bold text-emerald-800">{notice}</p>
@@ -2157,6 +2880,22 @@ function DraftsSection({
           state={reopen} customerText={customerText} store={stores.stores.find((s) => s.id === reopen.storeId) ?? null} onClose={() => putReopen(null)} returnFocus={heading}
           edit={editEligNow} waiting={waiting} onEdit={openEditor} onEditAgain={() => { void readEligibility(reopen.id); }}
           discard={discardEligNow} onDiscard={openDiscard} onDiscardAgain={() => { void readEligibility(reopen.id, 'discardElig'); }}
+          issue={issueEligNow} onIssue={openIssue} onIssueAgain={() => { void readEligibility(reopen.id, 'issueElig'); }}
+        />
+      )}
+      {issue !== null && (
+        <IssueDialog
+          state={issue} held={issue.key !== null && issueHeld?.key === issue.key ? issueHeld : undefined} expired={issueHeld !== undefined && expired(issueHeld)}
+          waiting={waiting} pending={isLiveIssue(issueHeld) ? pendingTextOf(issueHeld) : ''} finding={finding !== null && finding === issue.key}
+          onSend={sendIssue} onCheck={() => { void checkIssue(); }} onFind={() => { void findIssue(); }} onReview={reviewIssue}
+          onRetry={() => { void readPreview(issue.updated); }} onClose={closeIssue} returnFocus={ISSUE_RETURN}
+        />
+      )}
+      {issuedView !== null && (
+        <IssuedInvoiceDialog
+          key={issuedView.id} storeId={issuedView.storeId} invoiceId={issuedView.invoiceId} read={(s, i, signal) => readIssuedView(issuedView.id, s, i, signal)}
+          current={() => alive.current && issuedViewRef.current?.id === issuedView.id} waiting={waiting} onClose={closeIssuedView}
+          returnFocus={{ get current() { return document.getElementById(ISSUE_VIEW_ID) ?? heading.current; } }}
         />
       )}
       {discard !== null && (
@@ -2259,13 +2998,15 @@ function savedText(saved: UpdatedDraft, state: ReopenState): string {
   return state.draft.version > saved.version ? `${said} ${EDIT_TEXT.later(state.draft.version)}` : said;
 }
 
-function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, waiting, onEdit, onEditAgain, discard, onDiscard, onDiscardAgain }: {
+function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, waiting, onEdit, onEditAgain, discard, onDiscard, onDiscardAgain, issue, onIssue, onIssueAgain }: {
   readonly state: ReopenState; readonly customerText: (id: string) => string; readonly store: StoreEntry | null;
   readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
   /** The server's answer about Edit for this draft now (M7B-INVOICES-P2), or null (none asked: a read-only store, or not current). */
   readonly edit: EligState | null; readonly waiting: boolean; readonly onEdit: () => void; readonly onEditAgain: () => void;
   /** The server's answer about Discard for this draft now (M7B-INVOICES-DISCARD-P1), or null, as `edit`. */
   readonly discard: EligState | null; readonly onDiscard: () => void; readonly onDiscardAgain: () => void;
+  /** The server's answer about Issue for this draft now (M7B-INVOICES-ISSUE-P2), or null, as `discard`. */
+  readonly issue: EligState | null; readonly onIssue: () => void; readonly onIssueAgain: () => void;
 }) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const draft = state.draft;
@@ -2318,37 +3059,75 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
           {/* Below sm the type steps down: at 320 px the largest amount can be wider than the dialog in 16 px heavy type, and break-words would split it. */}
           <p data-testid="draft-view-subtotal" className="text-right text-sm sm:text-base font-black text-primary break-words">Draft subtotal {formatCents(draft.subtotalCents)}</p>
           {/* Edit only on the server's answer; its other answers are said in one live region kept while it is asked. */}
+          {/* M7B-INVOICES-ISSUE-P2 (review D5): its answer, whenever it lands, moves nothing below it (the discard's and the
+              issue's rows): the row holds the height of its tallest answer (that text and Try again) from the asking on, as
+              the discard row does (C8), through an invisible copy in the same grid cell. */}
           {edit !== null && (
-            <div className="flex flex-wrap items-center gap-3">
-              {edit.phase === 'allowed' && <button type="button" data-testid="draft-view-edit" onClick={onEdit} className={button}>Edit draft</button>}
-              <p data-testid="draft-view-edit-state" data-phase={edit.phase} role="status" className="text-sm font-bold text-slate-600">{edit.phase === 'allowed' ? '' : edit.text}</p>
-              {(edit.phase === 'unavailable' || edit.phase === 'rate-limited') && (
-                <button
-                  type="button" data-testid="draft-view-edit-retry" disabled={waiting} aria-describedby={waiting ? 'draft-view-edit-wait' : undefined}
-                  aria-label="Try again: can this draft be edited" onClick={onEditAgain} className={quiet}
-                >
-                  Try again
-                </button>
-              )}
-              {waiting && <span id="draft-view-edit-wait" className="sr-only">{EDIT_ELIGIBILITY_TEXT.waiting}</span>}
+            <div className="grid">
+              <div aria-hidden="true" className="invisible col-start-1 row-start-1 flex flex-wrap items-center gap-3">
+                <span data-reserve={EDIT_ELIGIBILITY_TEXT.unavailable} className="text-sm font-bold before:content-[attr(data-reserve)]" />
+                <span data-reserve="Try again" className={`${quiet} before:content-[attr(data-reserve)]`} />
+              </div>
+              <div className="col-start-1 row-start-1 flex flex-wrap content-start items-center gap-3">
+                {edit.phase === 'allowed' && <button type="button" data-testid="draft-view-edit" onClick={onEdit} className={button}>Edit draft</button>}
+                <p data-testid="draft-view-edit-state" data-phase={edit.phase} role="status" className="text-sm font-bold text-slate-600">{edit.phase === 'allowed' ? '' : edit.text}</p>
+                {(edit.phase === 'unavailable' || edit.phase === 'rate-limited') && (
+                  <button
+                    type="button" data-testid="draft-view-edit-retry" disabled={waiting} aria-describedby={waiting ? 'draft-view-edit-wait' : undefined}
+                    aria-label="Try again: can this draft be edited" onClick={onEditAgain} className={quiet}
+                  >
+                    Try again
+                  </button>
+                )}
+                {waiting && <span id="draft-view-edit-wait" className="sr-only">{EDIT_ELIGIBILITY_TEXT.waiting}</span>}
+              </div>
             </div>
           )}
           {/* Discard only on the server's answer, and only at a writable store; asked or refused, nothing is shown or said. */}
           {/* The dialog is laid out from the top (anchor="top", M7B-INVOICES-DISCARD-P1-R1), so whatever this row grows to — Try again and its hint, wrapped at a narrow width or enlarged text — extends the dialog downward and never moves Close, the header or Edit draft. */}
-          {/* One control's height is still held from the asking on, so an allowed answer (Discard draft…) or a denied one (403: nothing shown) does not change the dialog's height; an unavailable or rate-limited answer (Try again and its hint) can grow the row, which the top anchoring makes safe. */}
+          {/* One control's height is still held from the asking on, so an allowed answer (Discard draft…) or a denied one (403: nothing shown) does not change the dialog's height. */}
+          {/* M7B-INVOICES-ISSUE-P2 (review C8): nor does an unavailable or rate-limited one (Try again and its hint), which would
+              move Issue invoice… in the row below: the row holds the height of that tallest answer — wrapped at whatever width
+              and text size — from the asking on, through an invisible copy of it in the same grid cell (its text is generated
+              content, so the DOM says nothing more). */}
           {discard !== null && store !== null && !store.readOnly && (
-            <div className="flex flex-wrap items-center gap-3 min-h-[2.125rem]">
-              {discard.phase === 'allowed' && <button type="button" id={DISCARD_OPEN_ID} data-testid="draft-discard-open" onClick={onDiscard} className={quiet}>Discard draft…</button>}
-              {(discard.phase === 'unavailable' || discard.phase === 'rate-limited') && (
+            <div data-testid="draft-discard-row" className="grid">
+              <div aria-hidden="true" className="invisible col-start-1 row-start-1 flex flex-wrap items-center gap-3">
+                <span data-reserve="Try again" className={`${quiet} before:content-[attr(data-reserve)]`} />
+                <span data-reserve={DISCARD_ELIGIBILITY_TEXT.unavailable} className={`${hintClass} before:content-[attr(data-reserve)]`} />
+              </div>
+              <div className="col-start-1 row-start-1 flex flex-wrap content-start items-center gap-3 min-h-[2.125rem]">
+                {discard.phase === 'allowed' && <button type="button" id={DISCARD_OPEN_ID} data-testid="draft-discard-open" onClick={onDiscard} className={quiet}>Discard draft…</button>}
+                {(discard.phase === 'unavailable' || discard.phase === 'rate-limited') && (
+                  <>
+                    <button
+                      type="button" data-testid="draft-discard-elig-again" disabled={waiting} aria-label="Try again: can this draft be discarded"
+                      aria-describedby={['draft-discard-elig-why', waiting && 'draft-discard-elig-wait'].filter(Boolean).join(' ')} onClick={onDiscardAgain} className={quiet}
+                    >
+                      Try again
+                    </button>
+                    <span id="draft-discard-elig-why" data-testid="draft-discard-elig-why" className={hintClass}>{discard.text}</span>
+                    {waiting && <span id="draft-discard-elig-wait" className="sr-only">{DISCARD_ELIGIBILITY_TEXT.waiting}</span>}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          {/* M7B-INVOICES-ISSUE-P2: Issue invoice… in a row of its own below, on the server's answer only, held to one control's
+              height from the asking on (as the discard's): its answer, whenever it lands, moves nothing above it. */}
+          {issue !== null && store !== null && !store.readOnly && (
+            <div data-testid="draft-issue-row" className="flex flex-wrap items-center gap-3 min-h-[2.125rem]">
+              {issue.phase === 'allowed' && <button type="button" id={ISSUE_OPEN_ID} data-testid="draft-issue-open" onClick={onIssue} className={quiet}>{ISSUE_TEXT.open}</button>}
+              {(issue.phase === 'unavailable' || issue.phase === 'rate-limited') && (
                 <>
                   <button
-                    type="button" data-testid="draft-discard-elig-again" disabled={waiting} aria-label="Try again: can this draft be discarded"
-                    aria-describedby={['draft-discard-elig-why', waiting && 'draft-discard-elig-wait'].filter(Boolean).join(' ')} onClick={onDiscardAgain} className={quiet}
+                    type="button" data-testid="draft-issue-elig-again" disabled={waiting} aria-label="Try again: can this draft be issued"
+                    aria-describedby={['draft-issue-elig-why', waiting && 'draft-issue-elig-wait'].filter(Boolean).join(' ')} onClick={onIssueAgain} className={quiet}
                   >
                     Try again
                   </button>
-                  <span id="draft-discard-elig-why" data-testid="draft-discard-elig-why" className={hintClass}>{discard.text}</span>
-                  {waiting && <span id="draft-discard-elig-wait" className="sr-only">{DISCARD_ELIGIBILITY_TEXT.waiting}</span>}
+                  <span id="draft-issue-elig-why" data-testid="draft-issue-elig-why" className={hintClass}>{issue.text}</span>
+                  {waiting && <span id="draft-issue-elig-wait" className="sr-only">{ISSUE_ELIGIBILITY_TEXT.waiting}</span>}
                 </>
               )}
             </div>
@@ -2439,6 +3218,197 @@ function DiscardDialog({ state, customerText, expired, waiting, onSend, onCheck,
         )}
       </div>
     </DialogFrame>
+  );
+}
+
+const waitable = `aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`;
+
+/**
+ * The issue confirmation (M7B-INVOICES-ISSUE-P2): an alertdialog over the reopen dialog, laid out from the top, named by
+ * its title and described by ONE sentence — what issuing does (the Total once the preview has answered; no payment, no
+ * void). "Keep draft" (its header, the first focus) closes it with nothing sent; once a key was minted in it it reads
+ * "Close", which says — while the attempt is out or unresolved — that closing does not cancel. What it reviews is the
+ * server's preview only (InvoiceSnapshot). "Issue invoice" is there only while that preview is shown and nothing was sent
+ * from it since; a refusal of the attempt is an alert that takes focus.
+ */
+function IssueDialog({ state, held, expired, waiting, pending, finding, onSend, onCheck, onFind, onReview, onRetry, onClose, returnFocus }: {
+  readonly state: IssueState; readonly held: HeldIssue | undefined; readonly expired: boolean; readonly waiting: boolean;
+  /** While the user has a live issue attempt (this one's or an earlier one): why Issue invoice is held back ('' for none). */
+  readonly pending: string; readonly finding: boolean;
+  readonly onSend: () => Promise<void>; readonly onCheck: () => void; readonly onFind: () => void; readonly onReview: () => void; readonly onRetry: () => void;
+  readonly onClose: () => void; readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const refusedRef = useRef<HTMLParagraphElement | null>(null);
+  const previewRefusedRef = useRef<HTMLParagraphElement | null>(null);
+  const [saving, setSaving] = useState(false);
+  const alive = useRef(false);
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  async function send(): Promise<void> {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await onSend();
+    } finally {
+      if (alive.current) setSaving(false);
+    }
+  }
+  const { preview, phase } = state;
+  const attempt = held;
+  const working = attempt?.state === 'sending' || attempt?.state === 'checking';
+  const out = working || attempt?.state === 'unresolved';
+  const old = attempt?.state === 'unresolved' && (expired || attempt.body === '');
+  const attemptText = attempt === undefined ? '' : finding ? ISSUE_TEXT.finding : attempt.state === 'sending' ? ISSUE_TEXT.sending
+    : attempt.state === 'checking' ? ISSUE_TEXT.checking : attempt.state === 'unresolved' ? (old ? ISSUE_TEXT.tooOld : ISSUE_TEXT.unresolved) : '';
+  const refusal = attempt?.state === 'refused' ? ISSUE_REFUSED_TEXT[attempt.refusal ?? 'invalid'] : null;
+  // A refusal takes focus as it is said (doc 12 §5 H): its message, not a control.
+  useEffect(() => { if (refusal !== null) refusedRef.current?.focus(); }, [refusal, attempt?.key]);
+  // So does a refusal of the preview read (DESIGN §6).
+  useEffect(() => { if (phase === 'refused') previewRefusedRef.current?.focus(); }, [phase, state.text]);
+  const canIssue = state.key === null && phase === 'ready' && state.body !== null;
+  const why = saving ? 'draft-issue-send-saving' : waiting ? 'draft-issue-send-wait' : pending !== '' ? 'draft-issue-send-held' : undefined;
+  const note = attempt !== undefined && attempt.note !== '' && !working && !finding ? attempt.note : '';
+  return (
+    <DialogFrame
+      role="alertdialog" labelledBy="draft-issue-title" describedBy="draft-issue-description" testId="draft-issue-confirm" anchor="top"
+      busy={phase === 'loading' || saving || working || finding} onClose={onClose} initialFocus={keep} returnFocus={returnFocus}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h2 id="draft-issue-title" className="text-xl font-black text-primary tracking-tight">{ISSUE_TEXT.title}</h2>
+        <button ref={keep} type="button" data-testid="draft-issue-keep" aria-describedby={out ? 'draft-issue-close-warning' : undefined} onClick={onClose} className={quiet}>
+          {state.pressed ? 'Close' : 'Keep draft'}
+        </button>
+      </div>
+      <p id="draft-issue-description" data-testid="draft-issue-description" className="text-sm font-medium text-slate-700">
+        {ISSUE_TEXT.consequence(preview === null ? null : formatCents(preview.amounts.totalCents))}
+      </p>
+      {out && <p id="draft-issue-close-warning" data-testid="draft-issue-close-warning" className={hintClass}>{ISSUE_TEXT.closeWarning}</p>}
+      {/* Always mounted (empty on the first render): loading, an outage, a wait and "the updated invoice" are changes to it. */}
+      <p data-testid="draft-issue-preview-state" data-phase={phase} role="status" className="text-sm font-bold text-slate-600">{phase === 'refused' ? '' : state.text}</p>
+      {phase === 'refused' && <p ref={previewRefusedRef} tabIndex={-1} data-testid="draft-issue-preview-refused" role="alert" className={`text-sm font-bold text-rose-800 ${focusRing}`}>{state.text}</p>}
+      {(phase === 'unavailable' || phase === 'rate-limited') && (
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button" data-testid="draft-issue-preview-retry" aria-disabled={waiting} aria-describedby={waiting ? 'draft-issue-preview-wait' : undefined}
+            aria-label="Try again: load the invoice to review" onClick={() => { if (!waiting) onRetry(); }} className={`${quiet} ${waitable}`}
+          >
+            Try again
+          </button>
+          {waiting && <span id="draft-issue-preview-wait" className="sr-only">{ISSUE_TEXT.waiting}</span>}
+        </div>
+      )}
+      {preview !== null && (
+        <div data-testid="draft-issue-preview" className="space-y-4">
+          <InvoiceSnapshot prefix="draft-issue-preview" seller={preview.issuingSettings} customerName={preview.customer.name} lines={preview.draft.lines} amounts={preview.amounts} />
+        </div>
+      )}
+      {/* The attempt this confirmation sent: its status line is mounted (empty) from the start. */}
+      <div data-testid="draft-issue-attempt" data-state={attempt?.state ?? 'none'} className={attemptText !== '' || (note !== '' && attempt?.state !== 'refused') ? 'p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2' : 'mb-0'}>
+        <p data-testid="draft-issue-attempt-state" role="status" className="text-sm font-bold text-amber-900">{attemptText}</p>
+        {note !== '' && attempt?.state !== 'refused' && <p data-testid="draft-issue-attempt-note" className="text-xs font-bold text-amber-900">{note}</p>}
+        {attempt?.state === 'unresolved' && !finding && (
+          <div className="flex flex-wrap items-center gap-3">
+            {!old && (
+              <button type="button" data-testid="draft-issue-check" aria-disabled={waiting} aria-describedby={waiting ? 'draft-issue-check-wait' : undefined} onClick={onCheck} className={`${button} ${waitable}`}>
+                Check again
+              </button>
+            )}
+            <button type="button" data-testid="draft-issue-find" aria-disabled={waiting} aria-describedby={waiting ? 'draft-issue-check-wait' : undefined} onClick={onFind} className={`${quiet} ${waitable}`}>
+              Find issued invoice
+            </button>
+            {waiting && <span id="draft-issue-check-wait" className={hintClass}>{ISSUE_TEXT.waiting}</span>}
+          </div>
+        )}
+      </div>
+      {refusal !== null && (
+        <div className="space-y-2">
+          <p ref={refusedRef} tabIndex={-1} data-testid="draft-issue-refused" role="alert" className={`text-sm font-bold text-rose-800 ${focusRing}`}>{refusal}</p>
+          {note !== '' && <p data-testid="draft-issue-attempt-note" className="text-xs font-bold text-slate-700">{note}</p>}
+          {attempt?.refusal === 'conflict' && <button type="button" data-testid="draft-issue-review-again" onClick={onReview} className={quiet}>Review again</button>}
+          {attempt?.refusal === 'not-open' && !finding && (
+            <button type="button" data-testid="draft-issue-find" aria-disabled={waiting} aria-describedby={waiting ? 'draft-issue-find-wait' : undefined} onClick={onFind} className={`${quiet} ${waitable}`}>
+              Find issued invoice
+            </button>
+          )}
+          {attempt?.refusal === 'not-open' && waiting && <span id="draft-issue-find-wait" className="sr-only">{ISSUE_TEXT.waiting}</span>}
+        </div>
+      )}
+      {state.status !== null && <p data-testid="draft-issue-status" role={state.status.alert ? 'alert' : 'status'} className="text-sm font-bold text-rose-800">{state.status.text}</p>}
+      {canIssue && (
+        <div className="flex flex-wrap justify-end items-center gap-3">
+          {why === 'draft-issue-send-wait' && <span id={why} className={hintClass}>{ISSUE_TEXT.sendWaiting}</span>}
+          {why === 'draft-issue-send-held' && <span id={why} className={hintClass}>{pending}</span>}
+          {why === 'draft-issue-send-saving' && <span id={why} className="sr-only">{ISSUE_TEXT.sendChecking}</span>}
+          <button
+            type="button" data-testid="draft-issue-send" aria-disabled={saving || why !== undefined} aria-describedby={why}
+            onClick={() => { void send(); }} className={`${button} ${waitable}`}
+          >
+            Issue invoice
+          </button>
+        </div>
+      )}
+    </DialogFrame>
+  );
+}
+
+/**
+ * The user's issue attempt outside the confirmation (M7B-INVOICES-ISSUE-P2): what it is doing or why it is not confirmed,
+ * with Check again, Find issued invoice and Stop tracking; once issued, its number and store with View invoice (or Load
+ * details again when the read failed) and Dismiss; a refusal; or, detached, that it belongs to an earlier connection. Its
+ * status line is always mounted (empty and taking no space with no attempt).
+ */
+function IssueCard({ held, expired, waiting, detail, finding, onCheck, onFind, onStop, onLoad, onView }: {
+  readonly held: HeldIssue | undefined; readonly expired: boolean; readonly waiting: boolean; readonly detail: 'loading' | 'failed' | null; readonly finding: boolean;
+  readonly onCheck: () => void; readonly onFind: () => void; readonly onStop: () => void; readonly onLoad: () => void; readonly onView: () => void;
+}) {
+  const detached = held !== undefined && held.csrf === null;
+  const old = held?.state === 'unresolved' && (expired || held.body === '');
+  let text: ReactNode = '';
+  if (held !== undefined && held.state !== 'refused') {
+    if (detached) text = held.state === 'issued' ? ISSUE_TEXT.issuedEarlier : ISSUE_TEXT.detached;
+    else if (finding) text = ISSUE_TEXT.finding;
+    else if (held.state === 'sending') text = ISSUE_TEXT.sending;
+    else if (held.state === 'checking') text = ISSUE_TEXT.checking;
+    else if (held.state === 'issued') text = held.number !== null ? <>{issuedAround(held.number)[0]}<bdi>{held.storeLabel}</bdi>{issuedAround(held.number)[1]}</> : held.refusal === 'denied' ? ISSUE_TEXT.issuedDenied : detail === 'loading' ? ISSUE_TEXT.issuedLoading : ISSUE_TEXT.issuedUnread;
+    else text = old ? ISSUE_TEXT.tooOld : ISSUE_TEXT.unresolved;
+  }
+  const busy = held === undefined || (!detached && (finding || held.state === 'sending' || held.state === 'checking' || (held.state === 'issued' && detail === 'loading')));
+  const hold = waiting ? 'drafts-issue-wait' : undefined;
+  return (
+    <div
+      data-testid="drafts-issue-hold" data-state={held === undefined ? 'none' : detached ? 'detached' : held.state}
+      className={held === undefined ? 'mb-0' : 'p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2'}
+    >
+      <p data-testid="drafts-issue-hold-status" role="status" className="text-sm font-bold text-amber-900">{text}</p>
+      {held !== undefined && held.state === 'refused' && <p data-testid="drafts-issue-hold-refused" role="alert" className="text-sm font-bold text-rose-800">{held.refusal === 'unchecked' ? ISSUE_TEXT.uncheckedCard : ISSUE_REFUSED_TEXT[held.refusal ?? 'invalid']}</p>}
+      {held !== undefined && !detached && held.note !== '' && !busy && <p data-testid="drafts-issue-hold-note" className="text-xs font-bold text-amber-900">{held.note}</p>}
+      {held !== undefined && !busy && (
+        <div className="flex flex-wrap items-center gap-3">
+          {!detached && held.state === 'unresolved' && !old && (
+            <button type="button" data-testid="drafts-issue-check" aria-disabled={waiting} aria-describedby={hold} onClick={onCheck} className={`${button} ${waitable}`}>Check again</button>
+          )}
+          {!detached && (held.state === 'unresolved' || (held.state === 'refused' && held.refusal === 'not-open')) && (
+            <button type="button" data-testid="drafts-issue-find" aria-disabled={waiting} aria-describedby={hold} onClick={onFind} className={`${quiet} ${waitable}`}>Find issued invoice</button>
+          )}
+          {!detached && held.state === 'issued' && held.number !== null && <button type="button" id={ISSUE_VIEW_ID} data-testid="drafts-issue-view" onClick={onView} className={button}>View invoice</button>}
+          {!detached && held.state === 'issued' && held.number === null && held.refusal === null && (
+            <button type="button" data-testid="drafts-issue-load" aria-disabled={waiting} aria-describedby={hold} onClick={onLoad} className={`${quiet} ${waitable}`}>Load details again</button>
+          )}
+          {!detached && held.state === 'unresolved' ? (
+            <>
+              <button type="button" data-testid="drafts-issue-stop" aria-describedby="drafts-issue-stop-warning" onClick={onStop} className={quiet}>Stop tracking</button>
+              <span id="drafts-issue-stop-warning" className={hintClass}>{ISSUE_TEXT.stopWarning}</span>
+            </>
+          ) : (
+            <button type="button" data-testid="drafts-issue-dismiss" onClick={onStop} className={quiet}>Dismiss</button>
+          )}
+          {waiting && <span id="drafts-issue-wait" className="sr-only">{ISSUE_TEXT.waiting}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 

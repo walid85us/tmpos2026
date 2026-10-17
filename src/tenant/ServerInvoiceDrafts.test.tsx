@@ -29,16 +29,18 @@
 // the draft read, as migration 033's reads); each title names the DSC id(s) of doc 11 §7 it covers.
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
-import { StrictMode, type ReactNode } from 'react';
+import { StrictMode, useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
-  DISCARD_ELIGIBILITY_TEXT, DISCARD_REFUSED_TEXT, DISCARD_TEXT, DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
-  bindDraftHoldsToSessionEnd, createDraftHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type ServerInvoiceDraftsProps,
+  DISCARD_ELIGIBILITY_TEXT, DISCARD_REFUSED_TEXT, DISCARD_TEXT, DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT,
+  ISSUE_ELIGIBILITY_TEXT, ISSUE_REFUSED_TEXT, ISSUE_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
+  bindDraftHoldsToSessionEnd, createDraftHoldStore, createIssueHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type IssueHoldStore, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
+import { createInvoiceIssuingClient, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf } from './invoiceIssuingClient';
 import {
   STORES_PATH, createInvoiceDraftsClient, discardEligibilityPathOf, discardPathOf, draftPathOf, draftsPathOf, editEligibilityPathOf, eligibilityPathOf, type StoreEntry,
 } from './invoiceDraftsClient';
@@ -71,9 +73,18 @@ interface Sent { readonly method: string; readonly url: string; readonly headers
 /** `role`: the role the server holds for the user — the fake's `allow` table decides a draft save and its eligibility by it. */
 interface User { uid: string; tenant: string; view: boolean; role: string }
 interface Line { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number }
-/** `status`: 'discarded' once the server discarded it (M7B-INVOICES-DISCARD-P1): it then leaves the list and the draft read. */
-interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[]; version: number; status?: 'discarded' }
-type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig' | 'update' | 'editElig' | 'discard' | 'discardElig';
+/** `status`: 'discarded' once the server discarded it (M7B-INVOICES-DISCARD-P1), 'issued' once it issued it (M7B-INVOICES-ISSUE-P2): it then leaves the list and the draft read. */
+interface Draft { id: string; storeId: string; customerId: string; createdAt: string; subtotalCents: number; lines: Line[]; version: number; status?: 'discarded' | 'issued' }
+type Kind = 'stores' | 'list' | 'get' | 'names' | 'create' | 'customers' | 'current' | 'elig' | 'update' | 'editElig' | 'discard' | 'discardElig'
+  | 'issueElig' | 'preview' | 'issue' | 'find' | 'issued';
+/** M7B-INVOICES-ISSUE-P2: a store's issuing settings as the server holds them (version ≥ 1). */
+type TaxSetting = { mode: 'exclusive_rate'; rateMilliPercent: number } | { mode: 'none' };
+interface Settings { version: number; legalName: string; storeName: string; postalAddress: string; taxRegistrationId: string | null; tax: TaxSetting }
+/** One issued invoice as the server recorded it (snapshot version 1). */
+interface Invoice {
+  id: string; storeId: string; number: number; sourceDraftId: string; sourceVersion: number; customerId: string; customerName: string; customerVersion: number;
+  settingsVersion: number; seller: Omit<Settings, 'version' | 'tax'>; lines: Line[]; amounts: Record<string, unknown>; issuedAt: string;
+}
 type CreateScript = 'lose' | 'lose-before' | 503 | 429 | 'hold' | 'key-reused';
 /** M7B-INVOICES-P2: what the next PATCHes do — lose the answer after deciding (committed), lose the request, or answer this status (in the chain's envelope) instead. */
 type UpdateScript = 'lose' | 'lose-before' | number;
@@ -106,7 +117,7 @@ function fakeServer() {
     cookie: null as string | null,
     stores: { 'uid-a': [] as StoreEntry[], 'uid-b': [] as StoreEntry[] } as Record<string, StoreEntry[]>,
     drafts: [] as Draft[],
-    customers: new Map<string, { tenant: string; name: string }>(),
+    customers: new Map<string, { tenant: string; name: string; version?: number }>(),
     keys: new Map<string, { fingerprint: string; response: { status: number; body: unknown; location?: string } }>(),
     creates: [] as CreateScript[], // what the next creates do, in order (then normally)
     detailStatus: [] as number[], // what the next draft GETs answer instead (500, 404…), in order
@@ -131,7 +142,20 @@ function fakeServer() {
     nameInFlight: 0,
     nameMaxInFlight: 0,
     second: 100,
-    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0, update: 0, editElig: 0, discard: 0, discardElig: 0 } as Record<Kind, number>,
+    // M7B-INVOICES-ISSUE-P2: the server's per-role decision of an issue (Invoices Approve with Customers View: the owner,
+    // and a manager at its default Full) — the same table answers its eligibility and its preview; the issued reads
+    // (Invoices View with Customers View) by `viewIssuedAllow`. Settings, counters and invoices per store.
+    issueAllow: { owner: true, manager: true } as Record<string, boolean>,
+    viewIssuedAllow: { owner: true, manager: true } as Record<string, boolean>,
+    issueEligStatus: [] as Array<number | Response>, // what the next issue-eligibility GETs answer instead, in order
+    previewStatus: [] as Array<number | Response>, // what the next issue-preview GETs answer instead, in order
+    issues: [] as DiscardScript[], // what the next issue POSTs do (then normally)
+    findStatus: [] as Array<number | Response>, // what the next sourceDraft lookups answer instead
+    issuedStatus: [] as Array<number | Response>, // what the next issued-invoice GETs answer instead
+    settings: new Map<string, Settings>(),
+    counters: new Map<string, number>(),
+    invoices: [] as Invoice[],
+    hold: { stores: 0, list: 0, get: 0, names: 0, create: 0, customers: 0, current: 0, elig: 0, update: 0, editElig: 0, discard: 0, discardElig: 0, issueElig: 0, preview: 0, issue: 0, find: 0, issued: 0 } as Record<Kind, number>,
     held: [] as Array<{ kind: Kind; url: string; release: (late?: Response) => void }>,
     seedCustomer(tenant: string, name: string): string {
       const id = uuid(0xc00 + server.customers.size + 1);
@@ -159,6 +183,38 @@ function fakeServer() {
     discardPosts(): Sent[] { return server.sent.filter((r) => r.method === 'POST' && r.url.endsWith('/discard')); },
     /** The discard-eligibility reads sent. */
     discardEligReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/discard-eligibility')); },
+    /** M7B-INVOICES-ISSUE-P2: the issue POSTs, the issue-eligibility and preview reads, the issued reads (lookups and details) sent. */
+    issuePosts(): Sent[] { return server.sent.filter((r) => r.method === 'POST' && r.url.endsWith('/issue')); },
+    issueEligReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/issue-eligibility')); },
+    previewReads(): Sent[] { return server.sent.filter((r) => r.url.endsWith('/issue-preview')); },
+    issuedReads(): Sent[] { return server.sent.filter((r) => r.method === 'GET' && /^\/api\/v1\/stores\/[0-9a-f-]{36}\/invoices(?:[/?]|$)/.test(r.url)); },
+    mayIssue(user: User, storeId: string): boolean {
+      const grant = server.stores[user.uid]?.find((s) => s.id === storeId);
+      return grant !== undefined && !grant.readOnly && server.issueAllow[user.role] === true;
+    },
+    mayViewIssued(user: User, storeId: string): boolean {
+      return server.stores[user.uid]?.some((s) => s.id === storeId) === true && server.viewIssuedAllow[user.role] === true;
+    },
+    configure(storeId: string, over: Partial<Settings> = {}): Settings {
+      const was = server.settings.get(storeId);
+      const next: Settings = {
+        version: (was?.version ?? 0) + 1, legalName: 'Example Repairs LLC', storeName: 'Main Street Shop', postalAddress: '1 Main St\nSpringfield',
+        taxRegistrationId: 'TX-1', tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 }, ...over,
+      };
+      server.settings.set(storeId, next);
+      if (!server.counters.has(storeId)) server.counters.set(storeId, 0);
+      return next;
+    },
+    /** The amounts the server derives (doc 12 §10.8): tax (S × R + 50,000) / 100,000 in BigInt, or none. */
+    amountsOf(subtotal: number, tax: TaxSetting): { amounts: Record<string, unknown>; total: bigint } {
+      if (tax.mode === 'none') return { amounts: { currency: 'USD', subtotalCents: subtotal, tax: { mode: 'none', description: 'No tax calculated' }, totalCents: subtotal }, total: BigInt(subtotal) };
+      const amount = (BigInt(subtotal) * BigInt(tax.rateMilliPercent) + 50_000n) / 100_000n;
+      const total = BigInt(subtotal) + amount;
+      return { amounts: { currency: 'USD', subtotalCents: subtotal, tax: { mode: 'exclusive_rate', label: 'Tax', rateMilliPercent: tax.rateMilliPercent, amountCents: Number(amount) }, totalCents: Number(total) }, total };
+    },
+    summaryOfInvoice(i: Invoice) {
+      return { id: i.id, number: i.number, sourceDraftId: i.sourceDraftId, customerId: i.customerId, customerName: i.customerName, currency: 'USD', totalCents: i.amounts.totalCents, issuedAt: i.issuedAt, status: 'issued', snapshotVersion: 1 };
+    },
     mayDiscard(user: User, storeId: string): boolean {
       const grant = server.stores[user.uid]?.find((s) => s.id === storeId);
       return grant !== undefined && !grant.readOnly && server.discardAllow[user.role] === true;
@@ -300,7 +356,7 @@ function fakeServer() {
           const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId);
           if (draft === undefined) return refuse(404, 'not_found');
           const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, response: { status, body: sealed } }); return reply(status, sealed); };
-          if (draft.status === 'discarded') return seal(409, { error: 'invalid_state' }); // before the version (D-DIS-3)
+          if (draft.status !== undefined) return seal(409, { error: 'invalid_state' }); // before the version (D-DIS-3)
           if (draft.version !== parsed.expectedVersion) return seal(409, { error: 'write_conflict' });
           draft.status = 'discarded';
           draft.version += 1;
@@ -309,6 +365,124 @@ function fakeServer() {
         const decided = decide();
         if (script === 'lose') throw new TypeError('network'); // committed, but the answer is lost
         return server.maybeHold('discard', url, decided);
+      }
+      // M7B-INVOICES-ISSUE-P2: the issue routes (invoiceIssuing.ts as built): the eligibility reads no draft; the preview is
+      // an unsealed read (404 for a missing or no longer open draft, its three 409s in the database's order); the POST is
+      // keyed like the server's (the store, the DRAFT and the exact bytes) — a 201 (with its Location) and the sealed 409s
+      // replay under their key, the tenant precondition and a missing draft are unsealed.
+      const issueRoute = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts\/([0-9a-f-]{36})\/(issue-eligibility|issue-preview|issue)$/.exec(path);
+      if (issueRoute !== null) {
+        const [, storeId, draftId, what] = issueRoute;
+        if (what === 'issue-eligibility' && method === 'GET') {
+          const decided = gate() ?? (() => {
+            const scripted = server.issueEligStatus.shift();
+            if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+            return server.mayIssue(session!.user, storeId) ? reply(200, { eligibility: 'allowed' }) : refuse(403, 'forbidden');
+          })();
+          return server.maybeHold('issueElig', url, decided);
+        }
+        if (what === 'issue-preview' && method === 'GET') {
+          const decided = gate() ?? (() => {
+            const scripted = server.previewStatus.shift();
+            if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+            if (!server.mayIssue(session!.user, storeId)) return refuse(403, 'forbidden');
+            const grant = server.stores[session!.user.uid]!.find((x) => x.id === storeId)!;
+            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId && d.status === undefined);
+            if (draft === undefined) return refuse(404, 'not_found');
+            if (draft.version >= Number.MAX_SAFE_INTEGER) return refuse(409, 'invalid_state');
+            const settings = server.settings.get(storeId);
+            if (settings === undefined) return refuse(409, 'issuing_not_configured');
+            const { amounts, total } = server.amountsOf(draft.subtotalCents, settings.tax);
+            if (total > BigInt(Number.MAX_SAFE_INTEGER)) return refuse(409, 'amount_out_of_range');
+            const c = server.customers.get(draft.customerId)!;
+            const { version: sv, ...seller } = settings;
+            return reply(200, { preview: {
+              draft: { id: draft.id, version: draft.version, lines: draft.lines, subtotalCents: draft.subtotalCents },
+              customer: { id: draft.customerId, name: c.name, version: c.version ?? 1 },
+              issuingSettings: { version: sv, ...seller },
+              amounts,
+              expected: { expectedTenant: grant.tenantId, expectedVersion: draft.version, expectedSettingsVersion: sv, expectedCustomerVersion: c.version ?? 1 },
+            } });
+          })();
+          return server.maybeHold('preview', url, decided);
+        }
+        if (what === 'issue' && method === 'POST') {
+          const script = server.issues.shift();
+          if (script === 'lose-before') throw new TypeError('network');
+          if (typeof script === 'number') return refuse(script);
+          if (script instanceof Response) return script;
+          const refused = gate();
+          const decide = (): Response => {
+            if (refused !== null) return refused;
+            if (headers.get('x-tmpos-csrf') !== '1') return refuse(403, 'forbidden');
+            if (!server.mayIssue(session!.user, storeId)) return refuse(403, 'forbidden');
+            const grant = server.stores[session!.user.uid]!.find((x) => x.id === storeId)!;
+            const key = headers.get('idempotency-key') ?? '';
+            const fingerprint = `issue\n${storeId}\n${draftId}\n${body}`;
+            const known = server.keys.get(key);
+            if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+            if (known !== undefined) {
+              const r = known.response;
+              return reply(r.status, r.body, { 'idempotent-replayed': 'true', ...(r.location !== undefined ? { location: r.location } : {}) });
+            }
+            const parsed = JSON.parse(body ?? '{}') as { expectedTenant: string; expectedVersion: number; expectedSettingsVersion: number; expectedCustomerVersion: number };
+            if (parsed.expectedTenant !== grant.tenantId) return refuse(409, 'write_conflict'); // unsealed
+            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId);
+            if (draft === undefined) return refuse(404, 'not_found');
+            const seal = (status: number, sealed: unknown, location?: string): Response => {
+              server.keys.set(key, { fingerprint, response: { status, body: sealed, location } });
+              return reply(status, sealed, location === undefined ? {} : { location });
+            };
+            if (draft.status !== undefined) return seal(409, { error: 'invalid_state' });
+            const settings = server.settings.get(storeId);
+            if (settings === undefined) return seal(409, { error: 'issuing_not_configured' });
+            const c = server.customers.get(draft.customerId)!;
+            if (draft.version !== parsed.expectedVersion || settings.version !== parsed.expectedSettingsVersion || (c.version ?? 1) !== parsed.expectedCustomerVersion) {
+              return seal(409, { error: 'write_conflict' });
+            }
+            const { amounts, total } = server.amountsOf(draft.subtotalCents, settings.tax);
+            if (total > BigInt(Number.MAX_SAFE_INTEGER)) return seal(409, { error: 'amount_out_of_range' });
+            const number = (server.counters.get(storeId) ?? 0) + 1;
+            server.counters.set(storeId, number);
+            const { version: sv, tax: _tax, ...seller } = settings;
+            const invoice: Invoice = {
+              id: uuid(0xe00 + server.invoices.length + 1), storeId, number, sourceDraftId: draft.id, sourceVersion: draft.version, customerId: draft.customerId,
+              customerName: c.name, customerVersion: c.version ?? 1, settingsVersion: sv, seller, lines: draft.lines, amounts, issuedAt: at(server.second++, 654321),
+            };
+            server.invoices.push(invoice);
+            draft.status = 'issued';
+            draft.version += 1;
+            return seal(201, { invoice: { id: invoice.id, sourceDraftId: draft.id, status: 'issued' }, draft: { id: draft.id, version: draft.version, status: 'issued' } }, issuedInvoicePathOf(storeId, invoice.id));
+          };
+          const decided = decide();
+          if (script === 'lose') throw new TypeError('network'); // committed, but the answer is lost
+          return server.maybeHold('issue', url, decided);
+        }
+      }
+      const issuedRoute = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices(?:\/([0-9a-f-]{36}))?$/.exec(path);
+      if (issuedRoute !== null && method === 'GET') {
+        const [, storeId, invoiceId] = issuedRoute;
+        const query = url.includes('?') ? url.slice(url.indexOf('?') + 1) : null;
+        const kind: Kind = invoiceId === undefined ? 'find' : 'issued';
+        const decided = gate() ?? (() => {
+          const scripted = (invoiceId === undefined ? server.findStatus : server.issuedStatus).shift();
+          if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+          if (!server.mayViewIssued(session!.user, storeId)) return refuse(403, 'forbidden');
+          if (invoiceId !== undefined) {
+            if (query !== null) return refuse(400, 'invalid_request');
+            const i = server.invoices.find((x) => x.id === invoiceId && x.storeId === storeId);
+            if (i === undefined) return refuse(404, 'not_found');
+            return reply(200, { invoice: {
+              id: i.id, number: i.number, status: 'issued', snapshotVersion: 1, issuedAt: i.issuedAt, sourceDraft: { id: i.sourceDraftId, version: i.sourceVersion },
+              seller: i.seller, issuingSettingsVersion: i.settingsVersion, customer: { id: i.customerId, name: i.customerName, version: i.customerVersion }, lines: i.lines, amounts: i.amounts,
+            } });
+          }
+          const one = /^sourceDraft=([0-9a-f-]{36})$/.exec(query ?? ''); // the lookup mode alone: this fake knows no other
+          if (one === null) return refuse(400, 'invalid_request');
+          const found = server.invoices.filter((x) => x.storeId === storeId && x.sourceDraftId === one[1]);
+          return reply(200, { invoices: found.map((x) => server.summaryOfInvoice(x)), nextCursor: null });
+        })();
+        return server.maybeHold(kind, url, decided);
       }
       const storePath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoice-drafts(?:\/([0-9a-f-]{36}))?$/.exec(path);
       if (storePath !== null) {
@@ -328,7 +502,7 @@ function fakeServer() {
             const anchorId = cursor === null ? null : idOfCursor(cursor);
             const anchor = anchorId === null ? null : all.findIndex((d) => d.id === anchorId); // the anchor's lookup is status-blind
             if (cursor !== null && (anchor === null || anchor < 0)) return refuse(400, 'invalid_request');
-            const rest = (anchor === null ? all : all.slice(anchor + 1)).filter((d) => d.status !== 'discarded'); // open drafts only
+            const rest = (anchor === null ? all : all.slice(anchor + 1)).filter((d) => d.status === undefined); // open drafts only
             const page = rest.slice(0, limit);
             return reply(200, { drafts: page.map(summaryOf), nextCursor: rest.length > limit ? cursorOf(page[page.length - 1].id) : null });
           });
@@ -339,7 +513,7 @@ function fakeServer() {
             if (grant === undefined) return refuse(403, 'forbidden');
             const scripted = server.detailStatus.shift();
             if (scripted !== undefined) return refuse(scripted);
-            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId && d.status !== 'discarded'); // a discarded one: as a missing one
+            const draft = server.drafts.find((d) => d.id === draftId && d.storeId === storeId && d.status === undefined); // a discarded or issued one: as a missing one
             return draft === undefined ? refuse(404, 'not_found') : reply(200, detailOf(draft));
           });
         }
@@ -400,7 +574,7 @@ function fakeServer() {
             const c = server.customers.get(parsed.customerId);
             if (draft === undefined || c === undefined || c.tenant !== grant.tenantId) return refuse(404, 'not_found'); // one answer for both
             const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, response: { status, body: sealed } }); return reply(status, sealed); };
-            if (draft.status === 'discarded') return seal(409, { error: 'invalid_state' }); // M7B-INVOICES-DISCARD-P1: a stale editor
+            if (draft.status !== undefined) return seal(409, { error: 'invalid_state' }); // M7B-INVOICES-DISCARD-P1: a stale editor
             if (draft.version !== parsed.expectedVersion) return seal(409, { error: 'write_conflict' }); // a stale no-op too
             const lines = parsed.lines.map((l, i) => ({ position: i + 1, description: l.description, quantity: l.quantity, unitPriceCents: l.unitPriceCents, lineTotalCents: l.quantity * l.unitPriceCents }));
             const same = draft.customerId === parsed.customerId && JSON.stringify(draft.lines) === JSON.stringify(lines);
@@ -429,18 +603,19 @@ function seeded() {
   return { server, ada, bea };
 }
 
-interface Rig { holds: DraftHoldStore; keys: string[]; clock: { mono: number; wall: number }; props: (over?: Partial<ServerInvoiceDraftsProps>) => ServerInvoiceDraftsProps }
-function rig(server: Server, holds: DraftHoldStore = createDraftHoldStore()): Rig {
+interface Rig { holds: DraftHoldStore; issueHolds: IssueHoldStore; keys: string[]; clock: { mono: number; wall: number }; props: (over?: Partial<ServerInvoiceDraftsProps>) => ServerInvoiceDraftsProps }
+function rig(server: Server, holds: DraftHoldStore = createDraftHoldStore(), issueHolds: IssueHoldStore = createIssueHoldStore()): Rig {
   const keys: string[] = [];
   const clock = { mono: 1_000, wall: Date.UTC(2026, 9, 4, 12) };
   const session = createTenantSessionClient({ fetch: server.fetch });
   const drafts = createInvoiceDraftsClient({ fetch: server.fetch });
   const customers = createCustomersClient({ fetch: server.fetch });
+  const issuing = createInvoiceIssuingClient({ fetch: server.fetch });
   const identity = { idToken: async (uid: string) => (uid === 'uid-a' ? 'tok-a' : uid === 'uid-b' ? 'tok-b' : null) };
   return {
-    holds, keys, clock,
+    holds, issueHolds, keys, clock,
     props: (over = {}) => ({
-      uid: 'uid-a', canViewCustomers: true, handoff: null, onHandoffTaken: () => {}, session, drafts, customers, identity, holds,
+      uid: 'uid-a', canViewCustomers: true, handoff: null, onHandoffTaken: () => {}, session, drafts, customers, identity, holds, issuing, issueHolds,
       now: () => clock.mono, wallNow: () => clock.wall,
       newKey: () => { const k = ['5e1f0000', '1d2f', '4a6b', '9c8d', String(keys.length + 1).padStart(12, '0')].join('-'); keys.push(k); return k; },
       ...over,
@@ -692,7 +867,10 @@ describe('Server drafts — store choice, list and reopen (M7B-INVOICES-P1)', ()
     await waitFor(() => expect(within(view).getByTestId('draft-view-edit-state')).toHaveAttribute('data-phase', 'allowed'));
     // M7B-INVOICES-DISCARD-P1: and Discard draft… on the discard's own answer (the owner may discard); it only opens a confirmation.
     await waitFor(() => expect(within(view).getByTestId('draft-discard-open')).toBeInTheDocument());
-    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft', 'Discard draft…']);
+    // M7B-INVOICES-ISSUE-P2: and Issue invoice… on the issue's own answer (the owner may issue); it only opens a review — the
+    // view itself still names no number, issued state, payment, tax or discount.
+    await waitFor(() => expect(within(view).getByTestId('draft-issue-open')).toBeInTheDocument());
+    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft', 'Discard draft…', 'Issue invoice…']);
     expect(view.textContent).not.toMatch(/amount due|balance|invoice number|issued|payment|tax|discount/i);
     expect(server.sent.filter((s) => s.url === draftPathOf(STORE_1, draft.id))).toHaveLength(1);
     await user().keyboard('{Escape}');
@@ -2848,8 +3026,9 @@ describe('Server drafts — editing a saved draft (M7B-INVOICES-P2)', () => {
     expect(screen.queryByTestId('draft-view-edit-retry')).toBeNull();
     const after = server.sent.slice(before).map((x) => x.url);
     // The reopen's, the eligibility's and its ONE fresh check — and (M7B-INVOICES-DISCARD-P1) the discard eligibility's own
-    // ONE fresh check after its 403 (its session read is the edit eligibility's, asked at the same moment).
-    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(4);
+    // ONE fresh check after its 403 (its session read is the edit eligibility's, asked at the same moment) — and
+    // (M7B-INVOICES-ISSUE-P2) the issue eligibility's own ONE fresh check after its 403 (Create may not issue).
+    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(5);
     expect(after.filter((u) => u.endsWith('/edit-eligibility'))).toHaveLength(1);
     await click('draft-view-close');
     server.users['tok-a'].role = 'owner';
@@ -4038,8 +4217,9 @@ describe('Server drafts — discarding a saved draft (M7B-INVOICES-DISCARD-P1)',
     if (edits) expect(screen.getByTestId('draft-view-edit')).toBeEnabled();
     const after = server.sent.slice(before).map((x) => x.url);
     expect(after.filter((u) => u.endsWith('/discard-eligibility'))).toHaveLength(1);
-    // The reopen's session read, the two eligibilities' shared one, and ONE fresh check per 403.
-    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(edits ? 3 : 4);
+    // The reopen's session read, the eligibilities' shared one, and ONE fresh check per 403 — since M7B-INVOICES-ISSUE-P2 the
+    // issue eligibility's too (no role below Approve may issue).
+    expect(after.filter((u) => u === TENANT_SESSION_PATHS.current)).toHaveLength(edits ? 4 : 5);
     expect(server.discardPosts()).toEqual([]);
   });
 
@@ -4939,5 +5119,1280 @@ describe('Server drafts — discarding a saved draft (M7B-INVOICES-DISCARD-P1)',
     expect(server.patches()).toHaveLength(1);
     expect(screen.queryByTestId('draft-view-saved')).toBeNull();
     expect(server.detailReads(STORE_1, draft.id).filter((x) => server.sent.indexOf(x) >= mark)).toEqual([]);
+  });
+});
+
+describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () => {
+  const release = async (server: Server, i = 0, late?: Response) => { const [held] = server.held.splice(i, 1); await act(async () => { held.release(late); }); };
+  const confirm = () => screen.queryByTestId('draft-issue-confirm');
+  const view = () => screen.queryByTestId('draft-view');
+  const card = () => screen.getByTestId('drafts-issue-hold');
+  const cardState = () => card().getAttribute('data-state');
+  const cardText = () => screen.getByTestId('drafts-issue-hold-status').textContent;
+  const attemptState = () => screen.queryByTestId('draft-issue-attempt')?.getAttribute('data-state') ?? 'none';
+  const previewPhase = () => screen.queryByTestId('draft-issue-preview-state')?.getAttribute('data-phase') ?? 'none';
+  const heading = () => screen.getByRole('heading', { name: 'Server drafts' });
+  const issueBody = (tenant: string, version: number, settings: number, customer: number) =>
+    `{"expectedTenant":"${tenant}","expectedVersion":${version},"expectedSettingsVersion":${settings},"expectedCustomerVersion":${customer}}`;
+  /** A whole answer as the server writes it: a sealed refusal is exactly { error }, the chain's { error, requestId }. */
+  const answer = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } });
+  /** Open the listed draft at `index`; wait for its read, the three eligibilities' answers and the customer's name. */
+  async function openDraft(server: Server, index = 0) {
+    const asked = server.issueEligReads().length;
+    await user().click(within(rows()[index]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('draft-view-edit-state')).not.toHaveAttribute('data-phase', 'checking'));
+    await waitFor(() => expect(server.issueEligReads()).toHaveLength(asked + 1));
+    await settle();
+    await waitFor(() => expect(screen.getByTestId('draft-view-customer')).not.toHaveTextContent('ID ending'));
+  }
+  /** Open the draft, then its issue confirmation; wait until the preview has answered (first focus on Keep draft — or on the preview's refusal, which takes it: review C7). */
+  async function openIssue(server: Server, index = 0) {
+    await openDraft(server, index);
+    await click('draft-issue-open');
+    await waitFor(() => expect(confirm()).toBeInTheDocument());
+    await waitFor(() => expect([screen.getByTestId('draft-issue-keep'), screen.queryByTestId('draft-issue-preview-refused')]).toContain(document.activeElement));
+    await waitFor(() => expect(['opening', 'loading']).not.toContain(previewPhase()));
+  }
+  /** uid-a's draft at Main Street: Item 1 and Item 2, one each at $2.50, for Ada, at version 3; the store's settings at 8.875 %. */
+  async function ready(over: Partial<ServerInvoiceDraftsProps> = {}, settings: Partial<Settings> | null = {}, more: (server: Server, ada: string) => void = () => {}) {
+    const { server, ada, bea } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    draft.version = 3;
+    if (settings !== null) server.configure(STORE_1, settings);
+    more(server, ada);
+    const r = rig(server);
+    const props = r.props(over);
+    const page = render(<ServerInvoiceDrafts {...props} />);
+    await showAndChoose(STORE_1);
+    return { server, ada, bea, draft, r, props, page };
+  }
+  /** Press Issue invoice (as a user does). */
+  async function pressIssue() { await user().click(screen.getByTestId('draft-issue-send')); }
+  /** Another session issued `d` at its store (its invoice recorded, the draft closed): what this page's review does not know. */
+  function issueElsewhere(server: Server, d: Draft): void {
+    const settings = server.settings.get(d.storeId)!;
+    const number = (server.counters.get(d.storeId) ?? 0) + 1;
+    server.counters.set(d.storeId, number);
+    const c = server.customers.get(d.customerId)!;
+    const { version: sv, tax: _tax, ...seller } = settings;
+    server.invoices.push({
+      id: uuid(0xe00 + server.invoices.length + 1), storeId: d.storeId, number, sourceDraftId: d.id, sourceVersion: d.version, customerId: d.customerId, customerName: c.name,
+      customerVersion: c.version ?? 1, settingsVersion: sv, seller, lines: d.lines, amounts: server.amountsOf(d.subtotalCents, settings.tax).amounts, issuedAt: at(server.second++, 654321),
+    });
+    d.status = 'issued';
+    d.version += 1;
+  }
+
+  it('SID-148. AC-03 AC-04: Issue invoice… is offered ONLY on the server\'s own issue eligibility for exactly this draft, store and session — absent and unsaid while it is asked (its row already holds its height) and when it is refused; one issue-eligibility GET per open, carrying that session\'s token and nothing else; an outage offers one Try again named "Try again: can this draft be issued" (one GET per press); none at a read-only store; nothing is previewed or POSTed', async () => {
+    const { server, draft } = await ready();
+    const ro = server.seedDraft(STORE_RO, draft.customerId, at(6));
+    server.hold.issueElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issueElig']));
+    await waitFor(() => expect(screen.getByTestId('draft-discard-open')).toBeInTheDocument());
+    const dialog = screen.getByTestId('draft-view');
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull();
+    // Its row is there, below the discard's, holding one control's height from the asking on: its answer moves nothing above it.
+    const row = within(dialog).getByTestId('draft-issue-row');
+    expect(row).toHaveClass('min-h-[2.125rem]');
+    expect(row.textContent).toBe('');
+    expect(within(dialog).getByTestId('draft-discard-row').nextElementSibling).toBe(row);
+    expect(dialog.textContent).not.toMatch(/issue/i);
+    expect(within(dialog).queryAllByRole('status').map((x) => x.textContent)).toEqual(['']); // still the edit's live region only
+    const asked = server.issueEligReads();
+    expect(asked.map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${issueEligibilityPathOf(STORE_1, draft.id)}`]);
+    expect(asked[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect([asked[0].headers.get('x-tmpos-csrf'), asked[0].headers.get('idempotency-key'), asked[0].body]).toEqual([null, null, undefined]);
+    await release(server);
+    await waitFor(() => expect(screen.getByTestId('draft-issue-open')).toBeEnabled());
+    expect(row).toContainElement(screen.getByTestId('draft-issue-open'));
+    expect(screen.getByTestId('draft-issue-open')).toHaveTextContent(ISSUE_TEXT.open);
+    await click('draft-view-close');
+    // Refused (a role below Approve): nothing shown or said for it, after ONE fresh session check.
+    server.issueAllow.owner = false;
+    const mark = server.sent.length;
+    await openDraft(server);
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull();
+    expect(screen.queryByTestId('draft-issue-elig-again')).toBeNull();
+    expect(screen.getByTestId('draft-view').textContent).not.toMatch(/issue/i);
+    const after = server.sent.slice(mark);
+    const refusedAt = after.findIndex((x) => x.url.endsWith('/issue-eligibility'));
+    expect(after.slice(refusedAt + 1).filter((x) => x.url === TENANT_SESSION_PATHS.current).length).toBeGreaterThanOrEqual(1);
+    expect(after.filter((x) => x.url.endsWith('/issue-eligibility'))).toHaveLength(1); // never asked again on its own
+    await click('draft-view-close');
+    // An outage: one Try again, described by why, one GET per press; the server's allowance then offers Issue invoice….
+    server.issueAllow.owner = true;
+    server.issueEligStatus.push(503);
+    await openDraft(server);
+    const again = screen.getByTestId('draft-issue-elig-again');
+    expect(again).toHaveAccessibleName('Try again: can this draft be issued');
+    expect(again).toHaveAccessibleDescription(ISSUE_ELIGIBILITY_TEXT.unavailable);
+    const before = server.issueEligReads().length;
+    await click('draft-issue-elig-again');
+    await waitFor(() => expect(screen.getByTestId('draft-issue-open')).toBeEnabled());
+    expect(server.issueEligReads()).toHaveLength(before + 1);
+    await click('draft-view-close');
+    // A read-only store asks nothing and offers nothing.
+    fireEvent.change(storeSelect(), { target: { value: STORE_RO } });
+    await listReady();
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(screen.getByTestId('draft-view-version')).toHaveTextContent('1'));
+    await settle();
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull();
+    expect(server.issueEligReads().filter((x) => x.url.includes(ro.id))).toEqual([]);
+    expect([server.previewReads(), server.issuePosts()]).toEqual([[], []]);
+  });
+
+  it('SID-149. AC-04 ISS-23: the confirmation is an alertdialog named "Issue this invoice?", described by ONE consequence sentence (the Total the preview answered; "Void is not available."; no payment), first focus on Keep draft; opening it is ONE preview GET and no POST, and it shows only what that preview answered — the seller, the store name and address, the tax registration ID, the customer as the server holds it now (renamed since the reopen), the lines and version the server holds now (edited since), Subtotal, "Tax (8.875%)" and the Total — never a number or a time; Keep draft and Escape close it with nothing sent and give focus back to Issue invoice…; Tab stays inside', async () => {
+    const { server, ada, draft } = await ready();
+    await openDraft(server);
+    // Since the reopen read: the customer renamed and the draft edited elsewhere — the review must be the server's now.
+    server.customers.get(ada)!.name = 'Ada Renamed';
+    server.customers.get(ada)!.version = 2;
+    server.editDraft(draft, ada, [{ description: 'Screen repair', quantity: 1, unitPriceCents: 1999 }]); // version 4
+    const mark = server.sent.length;
+    await click('draft-issue-open');
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    const dialog = confirm()!;
+    expect(dialog).toHaveAttribute('role', 'alertdialog');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAccessibleName(ISSUE_TEXT.title);
+    expect(dialog.getAttribute('aria-describedby')!.split(' ')).toHaveLength(1);
+    expect(dialog).toHaveAccessibleDescription(ISSUE_TEXT.consequence('$21.76'));
+    expect(ISSUE_TEXT.consequence('$21.76')).toMatch(/Void is not available\. It does not record a payment\.$/);
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-keep'));
+    expect(screen.getByTestId('draft-issue-keep')).toHaveTextContent('Keep draft');
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${issuePreviewPathOf(STORE_1, draft.id)}`]);
+    expect(within(dialog).getByTestId('draft-issue-preview-seller-legal')).toHaveTextContent('Example Repairs LLC');
+    expect(within(dialog).getByTestId('draft-issue-preview-seller-store')).toHaveTextContent('Main Street Shop');
+    expect(within(dialog).getByTestId('draft-issue-preview-seller-address').textContent).toBe('1 Main St\nSpringfield');
+    expect(within(dialog).getByTestId('draft-issue-preview-seller-tax-id')).toHaveTextContent('Tax registration ID TX-1');
+    expect(within(dialog).getByTestId('draft-issue-preview-customer').querySelector('bdi')).toHaveTextContent('Ada Renamed');
+    expect(within(dialog).getAllByTestId('draft-issue-preview-line').map((tr) => [...(tr as HTMLTableRowElement).cells].map((td) => td.textContent))).toEqual([['1', 'Screen repair', '1', '$19.99', '$19.99']]);
+    expect(within(dialog).getByTestId('draft-issue-preview-subtotal')).toHaveTextContent('Subtotal $19.99');
+    expect(within(dialog).getByTestId('draft-issue-preview-tax')).toHaveTextContent('Tax (8.875%) $1.77');
+    expect(within(dialog).getByTestId('draft-issue-preview-total')).toHaveTextContent('Total $21.76');
+    expect(within(dialog).getByRole('region', { name: 'Invoice lines' })).toHaveAttribute('tabindex', '0');
+    expect(dialog.textContent).not.toMatch(/Invoice \d|UTC|paid|due|balance|deposit|receivable/i);
+    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Keep draft', 'Issue invoice']);
+    expect(screen.getByTestId('draft-view').closest('[inert]')).not.toBeNull();
+    await user().tab();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-preview-lines-scroll'));
+    await user().tab();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-send'));
+    await user().tab();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-keep')); // wraps inside
+    const sent = server.sent.length;
+    await user().keyboard('{Escape}');
+    await settle();
+    expect(confirm()).toBeNull();
+    expect(view()).toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-open'));
+    await click('draft-issue-open');
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    await click('draft-issue-keep');
+    await settle();
+    expect(confirm()).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-open'));
+    expect(server.sent.slice(sent).filter((x) => x.method !== 'GET')).toEqual([]);
+    expect(server.issuePosts()).toEqual([]);
+    expect(server.previewReads()).toHaveLength(2); // one per open
+  });
+
+  it.each([
+    ['"No tax calculated" (mode none)', { tax: { mode: 'none' } } as Partial<Settings>, 'No tax calculated', 'Total $5.00', '$5.00'],
+    ['an explicit 0 % (still an exclusive rate)', { tax: { mode: 'exclusive_rate', rateMilliPercent: 0 } } as Partial<Settings>, 'Tax (0%) $0.00', 'Total $5.00', '$5.00'],
+    ['8.875 %', {} as Partial<Settings>, 'Tax (8.875%) $0.44', 'Total $5.44', '$5.44'],
+  ] as const)('SID-150. AC-04: the review keeps the store\'s tax mode as the preview answered it — %s — never collapsing an explicit 0 % into "No tax calculated"', async (_label, settings, tax, total, said) => {
+    const { server } = await ready({}, settings);
+    await openIssue(server);
+    expect(screen.getByTestId('draft-issue-preview-tax').textContent).toBe(tax);
+    expect(screen.getByTestId('draft-issue-preview-total')).toHaveTextContent(total);
+    expect(confirm()).toHaveAccessibleDescription(ISSUE_TEXT.consequence(said));
+    expect(server.issuePosts()).toEqual([]);
+  });
+
+  it('SID-151. AC-05 ISS-23: ONE press is ONE POST of exactly the preview\'s `expected` (serialized once) under ONE fresh key, with the session and intent headers; from that press Issue invoice is gone and Keep draft reads "Close", described as not cancelling; nothing says issued before the 201 — then both dialogs close at once, the row goes, focus is on the heading (never <body>), and the card says "Issued. Loading the invoice…", reads the invoice ONCE (a GET) and says "Issued as invoice 1 at Main Street." with View invoice and Dismiss; page one is read again; View invoice shows the issued document (one GET) and its Close gives focus back to View invoice', async () => {
+    const { server, draft, r } = await ready();
+    await openIssue(server);
+    server.hold.issue = 1;
+    server.hold.issued = 1;
+    const send = screen.getByTestId('draft-issue-send');
+    const mark = server.sent.length;
+    await user().click(send);
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    expect(send.isConnected).toBe(false);
+    expect(attemptState()).toBe('sending');
+    expect(screen.getByTestId('draft-issue-attempt-state')).toHaveTextContent(ISSUE_TEXT.sending);
+    const keep = screen.getByTestId('draft-issue-keep');
+    expect(keep).toHaveTextContent('Close');
+    expect(keep).toHaveAccessibleDescription(ISSUE_TEXT.closeWarning);
+    expect(document.activeElement).toBe(keep); // the focus the press took away, recovered inside the dialog
+    expect(document.body).not.toHaveTextContent(/Issued/);
+    const posts = server.issuePosts();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe(issuePathOf(STORE_1, draft.id));
+    expect(posts[0].body).toBe(issueBody(TENANT_A, 3, 1, 1));
+    expect(posts[0].headers.get('idempotency-key')).toBe(r.keys[0]);
+    expect(posts[0].headers.get('x-tmpos-csrf')).toBe('1');
+    expect(posts[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect(posts[0].headers.get('content-type')).toBe('application/json');
+    expect(r.keys).toHaveLength(1);
+    expect(r.issueHolds.get('uid-a')).toMatchObject({ key: r.keys[0], body: posts[0].body, storeId: STORE_1, draftId: draft.id, state: 'sending' });
+    expect(Object.keys(r.issueHolds.get('uid-a')!).sort()).toEqual(['body', 'csrf', 'draftId', 'invoiceId', 'key', 'note', 'number', 'refusal', 'sentAt', 'sentWall', 'state', 'storeId', 'storeLabel']);
+    const status = screen.getByTestId('drafts-issue-hold-status');
+    const fell = watchBody();
+    await release(server); // the 201
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issuedLoading));
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(document.activeElement).toBe(heading());
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id);
+    expect(screen.getByTestId('drafts-issue-hold-status')).toBe(status); // written into the standing region
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issued']));
+    await release(server);
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    await listReady();
+    await settle();
+    fell.stop();
+    expect(fell.fell).toEqual([]);
+    expect(cardState()).toBe('issued');
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['View invoice', 'Dismiss']);
+    const after = server.sent.slice(mark);
+    expect(after.filter((x) => x.method === 'POST')).toHaveLength(1);
+    expect(after.filter((x) => x.url === issuedInvoicePathOf(STORE_1, server.invoices[0].id))).toHaveLength(1);
+    expect(after.filter((x) => x.method === 'GET' && x.url.startsWith(`${draftsPathOf(STORE_1)}?`))).toHaveLength(1); // page one again
+    expect([draft.status, draft.version, server.invoices[0].number]).toEqual(['issued', 4, 1]);
+    // View invoice: the exported issued dialog, its one GET under this section's session.
+    const reads = server.issuedReads().length;
+    await click('drafts-issue-view');
+    await waitFor(() => expect(screen.getByTestId('issued-view-title')).toHaveTextContent('Invoice 1'));
+    expect(screen.getByTestId('issued-view-total')).toHaveTextContent('Total $5.44');
+    expect(server.issuedReads()).toHaveLength(reads + 1);
+    await click('issued-view-close');
+    await settle();
+    expect(document.activeElement).toBe(screen.getByTestId('drafts-issue-view'));
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-152. AC-05 ISS-23: two activations of Issue invoice delivered before React commits the first (one task) are ONE POST under ONE key: the press is held in a ref', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.hold.issue = 1;
+    const send = screen.getByTestId('draft-issue-send');
+    await act(async () => { send.click(); send.click(); });
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    await release(server);
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-153. AC-05: a confirmed 201 whose invoice read fails says "Issued. The invoice details did not load." — never "not issued" — and "Load details again" sends ONE GET and never a POST; then the number is shown', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.issuedStatus.push(503);
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issuedUnread));
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Load details again', 'Dismiss']);
+    expect(server.issuePosts()).toHaveLength(1);
+    const reads = server.issuedReads().length;
+    await click('drafts-issue-load');
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    expect(server.issuedReads()).toHaveLength(reads + 1);
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it.each([
+    ['issuing_not_configured', 'not-configured'], ['amount_out_of_range', 'out-of-range'],
+  ] as const)('SID-154. AC-07 ISS-23: a sealed 409 %s is said in an alert that takes focus, ends the attempt (no Check again, no Review again) and offers no change of amount; nothing is sent again', async (word, kind) => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.issues.push(answer(409, { error: word }));
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT[kind]));
+    expect(screen.getByTestId('draft-issue-refused')).toHaveAttribute('role', 'alert');
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-refused'));
+    expect(screen.queryByTestId('draft-issue-check')).toBeNull();
+    expect(screen.queryByTestId('draft-issue-review-again')).toBeNull();
+    expect(screen.queryByTestId('draft-issue-send')).toBeNull();
+    expect(ISSUE_REFUSED_TEXT[kind]).not.toMatch(/rolled back|cancelled/i);
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-155. AC-07 ISS-23: a stale review (the settings changed after the preview) is the sealed 409 write_conflict — an alert with focus and "Review again"; the old body is never sent again under its key; Review again reads ONE new preview, says it is the updated invoice, and only a new press sends — a NEW key and the new versions', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.configure(STORE_1, { tax: { mode: 'none' } }); // version 2, elsewhere
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT.conflict));
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-refused'));
+    const previews = server.previewReads().length;
+    await click('draft-issue-review-again');
+    await waitFor(() => expect(screen.getByTestId('draft-issue-preview-state')).toHaveTextContent(ISSUE_TEXT.updated));
+    expect(server.previewReads()).toHaveLength(previews + 1);
+    expect(screen.getByTestId('draft-issue-preview-tax').textContent).toBe('No tax calculated');
+    expect(screen.queryByTestId('draft-issue-refused')).toBeNull();
+    expect(server.issuePosts()).toHaveLength(1); // nothing on its own
+    await pressIssue();
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    const [first, second] = server.issuePosts();
+    expect([first.body, second.body]).toEqual([issueBody(TENANT_A, 3, 1, 1), issueBody(TENANT_A, 3, 2, 1)]);
+    expect(second.headers.get('idempotency-key')).not.toBe(first.headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-156. AC-07: a draft no longer open (discarded elsewhere) is the sealed 409 invalid_state — "may have been issued or discarded elsewhere", page one read again, and "Find issued invoice" reads ONE sourceDraft lookup at the attempt\'s store: none found is said as not found yet, never as not issued; a draft issued elsewhere is found and settles the attempt as issued with its number', async () => {
+    let other: Draft | null = null;
+    const { server, draft } = await ready({}, {}, (s, ada) => { other = s.seedDraft(STORE_1, ada, at(7), 300, 1); });
+    await openIssue(server, 1); // the earlier draft (version 3)
+    draft.status = 'discarded';
+    draft.version += 1;
+    const mark = server.sent.length;
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT['not-open']));
+    await listReady();
+    expect(server.sent.slice(mark).filter((x) => x.method === 'GET' && x.url.startsWith(`${draftsPathOf(STORE_1)}?`))).toHaveLength(1);
+    await click('draft-issue-find');
+    await waitFor(() => expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent(ISSUE_TEXT.findNone));
+    const finds = server.issuedReads();
+    expect(finds.map((x) => x.url)).toEqual([`${issuedInvoicesPathOf(STORE_1)}?sourceDraft=${draft.id}`]);
+    expect(finds[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
+    expect(ISSUE_TEXT.findNone).toMatch(/does not mean it was not issued/);
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    // Another draft, issued by another session after this review: invalid_state, then Find finds it.
+    await openIssue(server, 0);
+    expect(screen.getByTestId('draft-issue-preview-subtotal')).toHaveTextContent('Subtotal $3.00');
+    issueElsewhere(server, other!);
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT['not-open']));
+    await click('draft-issue-find');
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(document.activeElement).toBe(heading());
+    expect(server.issuePosts()).toHaveLength(2);
+  });
+  it.each([
+    ['tenant-changed', () => answer(409, { error: 'write_conflict', requestId: 'req-synthetic' })],
+    ['not-found', () => answer(404, { error: 'not_found', requestId: 'req-synthetic' })],
+    ['invalid', () => answer(400, { error: 'invalid_request', requestId: 'req-synthetic' })],
+    ['key-reused', () => answer(422, { error: 'idempotency_key_reused', requestId: 'req-synthetic' })],
+  ] as const)('SID-157. AC-07: a first send refused %s (the chain\'s own envelope) ends the attempt with its own alert (focus on it, no Check again); closed, the card outside says the same with Dismiss, and nothing is ever sent again', async (kind, refusal) => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.issues.push(refusal());
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT[kind]));
+    expect(document.activeElement).toBe(screen.getByTestId('draft-issue-refused'));
+    expect(attemptState()).toBe('refused');
+    expect(screen.queryByTestId('draft-issue-check')).toBeNull();
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    expect(view()).toBeNull(); // a key was minted in it: the reopen dialog closes too
+    expect(cardState()).toBe('refused');
+    expect(screen.getByTestId('drafts-issue-hold-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT[kind]);
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    expect(document.activeElement).toBe(heading()); // never <body>
+  });
+
+  it('SID-158. AC-03 AC-07: a first send refused 403 gets ONE fresh session check, then "this account may not issue invoices" in an alert, and Issue invoice… goes from the reopen dialog (nothing is asked again on its own); a 403 whose fresh check cannot answer says so — never "may not issue" — and nothing more is sent', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.issues.push(403);
+    const mark = server.sent.length;
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT.denied));
+    const after = server.sent.slice(mark).map((x) => `${x.method} ${x.url}`);
+    const refusedAt = after.findIndex((x) => x.startsWith('POST'));
+    expect(after.slice(refusedAt + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // ONE fresh check, no login
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull(); // taken away from the reopen dialog beneath
+    expect(server.issueEligReads()).toHaveLength(1);
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    await openIssue(server);
+    // The send's own session check answers; the POST is held and answered 403, and its fresh check is the outage.
+    server.hold.issue = 1;
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.currentStatus.push(503);
+    await release(server, 0, refusal(403, 'forbidden'));
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT.unchecked));
+    expect(ISSUE_REFUSED_TEXT.unchecked).not.toMatch(/may not issue/);
+    await settle();
+    expect(server.issuePosts()).toHaveLength(2);
+  });
+
+  it('SID-159. AC-08: a first send answered 401 ends the session as any read\'s does — both dialogs go, nothing is held (the key acquired nothing), the stores say so and only Reconnect signs in; nothing is sent again', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.issues.push(401);
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(cardState()).toBe('none');
+    expect(screen.getByTestId('drafts-retry')).toHaveTextContent('Reconnect');
+    const logins = server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login).length;
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-160. AC-07: a first send answered 429 (refused before its key was acquired) holds nothing and starts the section\'s wait with its Retry-After — Issue invoice is back, held back and described why through all of it, a press then sends nothing; once it has passed, a NEW press is ONE POST under a NEW key', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.retryAfter = '5';
+    server.issues.push(429);
+    fakeClock();
+    fireEvent.click(screen.getByTestId('draft-issue-send'));
+    await until(() => expect(screen.getByTestId('draft-issue-status')).toHaveTextContent(ISSUE_TEXT.rateLimited));
+    expect(r.issueHolds.get('uid-a')).toBeUndefined();
+    const send = screen.getByTestId('draft-issue-send');
+    expect(send).toHaveAttribute('aria-disabled', 'true');
+    expect(send).toHaveAccessibleDescription(ISSUE_TEXT.sendWaiting);
+    expect(screen.getByTestId('drafts-new')).toBeDisabled(); // the wait is the section's: New server draft waits too
+    fireEvent.click(send);
+    await advance(4_900);
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+    await advance(200);
+    await settle();
+    expect(screen.getByTestId('draft-issue-send')).toHaveAttribute('aria-disabled', 'false');
+    expect(server.issuePosts()).toHaveLength(1); // nothing on its own when the wait ends
+    vi.useRealTimers();
+    await pressIssue();
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    const [first, second] = server.issuePosts();
+    expect(second.body).toBe(first.body);
+    expect(second.headers.get('idempotency-key')).not.toBe(first.headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+  });
+
+  it('SID-161. AC-06 ISS-19: a POST whose answer is lost after the server issued it stays UNRESOLVED — "Not confirmed yet", Check again and Find issued invoice, Close described as not cancelling; a focus, a tab return and an hour of timers send nothing; Escape is Close then (the attempt kept outside, the row read again); only Check again re-sends — the SAME key, the IDENTICAL bytes, the same session token — and its replayed 201 is issued: ONE invoice', async () => {
+    const { server, draft, r } = await ready();
+    await openIssue(server);
+    server.issues.push('lose');
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-issue-attempt-state')).toHaveTextContent(ISSUE_TEXT.unresolved);
+    expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('No answer from the server.');
+    expect(screen.getByTestId('draft-issue-keep')).toHaveAccessibleDescription(ISSUE_TEXT.closeWarning);
+    expect([screen.getByTestId('draft-issue-check'), screen.getByTestId('draft-issue-find')].map((b) => b.textContent)).toEqual(['Check again', 'Find issued invoice']);
+    expect(server.invoices).toHaveLength(1); // the server did issue it
+    fakeClock();
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(HOUR);
+    vi.useRealTimers();
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+    await user().keyboard('{Escape}');
+    await waitFor(() => expect(confirm()).toBeNull());
+    expect(view()).toBeNull();
+    await listReady();
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(draft.id);
+    expect(cardState()).toBe('unresolved');
+    expect(cardText()).toBe(ISSUE_TEXT.unresolved);
+    expect(document.activeElement).not.toBe(document.body);
+    await click('drafts-issue-check');
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    const [first, again] = server.issuePosts();
+    expect([again.url, again.body, again.headers.get('idempotency-key'), again.headers.get('x-tmpos-session-csrf')])
+      .toEqual([first.url, first.body, first.headers.get('idempotency-key'), first.headers.get('x-tmpos-session-csrf')]);
+    expect(r.keys).toHaveLength(1);
+    expect(server.invoices).toHaveLength(1);
+    expect(server.counters.get(STORE_1)).toBe(1);
+  });
+
+  it('SID-162. AC-07: a first send answered request_in_progress, and Check again answered request_in_progress and then 503, stay unresolved — each press ONE POST of the same key and bytes, nothing between them — until a Check again is issued', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    const inProgress = () => answer(409, { error: 'request_in_progress', requestId: 'req-synthetic' });
+    server.issues.push(inProgress(), inProgress(), 503);
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('The server is still working on it.'));
+    await click('draft-issue-check');
+    await waitFor(() => expect(server.issuePosts()).toHaveLength(2));
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('The server is still working on it.');
+    await click('draft-issue-check');
+    await waitFor(() => expect(server.issuePosts()).toHaveLength(3));
+    await waitFor(() => expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('The server answered, but not with a result.'));
+    await click('draft-issue-check');
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    expect(new Set(server.issuePosts().map((x) => `${x.headers.get('idempotency-key')} ${x.body}`)).size).toBe(1);
+    expect(server.issuePosts()).toHaveLength(4);
+    expect(r.keys).toHaveLength(1);
+  });
+
+  it('SID-163. AC-06: the 23-hour window counts from the FIRST send and a Check again never extends it — a check at 22 hours stays unresolved, and one more hour on the wall clock alone is past it: nothing is sent, the card says it is too old and keeps Find issued invoice; a cutoff passed while a Check again\'s own session check is out is judged again right before the POST and sends nothing', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.issues.push(503, 503);
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    r.clock.wall += 22 * HOUR;
+    await click('drafts-issue-check');
+    await waitFor(() => expect(server.issuePosts()).toHaveLength(2));
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    expect(cardText()).toBe(ISSUE_TEXT.unresolved);
+    r.clock.wall += HOUR; // 23 hours since the FIRST send, 1 since the check
+    await click('drafts-issue-check');
+    await settle();
+    expect(cardText()).toBe(ISSUE_TEXT.tooOld);
+    expect(screen.queryByTestId('drafts-issue-check')).toBeNull();
+    expect(screen.getByTestId('drafts-issue-find')).toBeInTheDocument();
+    expect(server.issuePosts()).toHaveLength(2);
+    expect(r.issueHolds.get('uid-a')?.body).toBe(''); // the body goes: it may never be sent again
+    // The monotonic arm, judged again after the session check: a new attempt, its Check again's session read held across the cutoff.
+    await click('drafts-issue-stop');
+    await listReady();
+    await openIssue(server);
+    server.issues.push(503);
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    r.clock.mono += 23 * HOUR - 1_000;
+    server.hold.current = 1;
+    await click('draft-issue-check');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    r.clock.mono += 2_000;
+    await release(server);
+    await settle();
+    expect(screen.getByTestId('draft-issue-attempt-state')).toHaveTextContent(ISSUE_TEXT.tooOld);
+    expect(server.issuePosts()).toHaveLength(3);
+  });
+
+  it('SID-164. AC-06 AC-09 ISS-19: Find issued invoice is ONE sourceDraft lookup (no limit, no cursor) at the ATTEMPT\'s store — even with another store chosen — under the token the attempt was sent with: none found keeps it unresolved and says so (never "not issued"); refused 403 after ONE fresh check it says the issued invoices cannot be viewed here; after another tab\'s session (a new token) it reads nothing and the attempt is detached', async () => {
+    const { server, draft } = await ready();
+    await openIssue(server);
+    server.issues.push('lose-before'); // it never reached the server
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    fireEvent.change(storeSelect(), { target: { value: STORE_2 } });
+    await listReady();
+    expect(cardState()).toBe('unresolved'); // a store choice neither detaches nor re-targets it
+    await click('drafts-issue-find');
+    await waitFor(() => expect(screen.getByTestId('drafts-issue-hold-note')).toHaveTextContent(ISSUE_TEXT.findNone));
+    expect(server.issuedReads().map((x) => x.url)).toEqual([`${issuedInvoicesPathOf(STORE_1)}?sourceDraft=${draft.id}`]);
+    expect(cardText()).toBe(ISSUE_TEXT.unresolved);
+    expect(document.activeElement).not.toBe(document.body);
+    server.viewIssuedAllow.owner = false;
+    const mark = server.sent.length;
+    await click('drafts-issue-find');
+    await waitFor(() => expect(screen.getByTestId('drafts-issue-hold-note')).toHaveTextContent(ISSUE_TEXT.findDenied));
+    const after = server.sent.slice(mark).map((x) => x.url);
+    expect(after.slice(after.findIndex((u) => u.includes('?sourceDraft=')) + 1)).toEqual([TENANT_SESSION_PATHS.current]);
+    server.viewIssuedAllow.owner = true;
+    server.otherTab('uid-a');
+    const reads = server.issuedReads().length;
+    await click('drafts-issue-find');
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    expect(cardText()).toBe(ISSUE_TEXT.detached);
+    expect(server.issuedReads()).toHaveLength(reads);
+    expect(screen.queryByTestId('drafts-issue-check')).toBeNull();
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-165. AC-08 ISS-19: a sign-out, another tab\'s session (a new token, seen on a focus) and a user change each DETACH an unresolved attempt — the card says it could not be confirmed, offers no Check again or Find, and nothing is sent again, after Reconnect either', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    for (const end of ['sign-out', 'other tab', 'user change'] as const) {
+      const { server, r, props, page } = await ready();
+      await openIssue(server);
+      server.issues.push('lose');
+      await pressIssue();
+      await waitFor(() => expect(attemptState()).toBe('unresolved'));
+      await click('draft-issue-keep');
+      await waitFor(() => expect(cardState()).toBe('unresolved'));
+      if (end === 'sign-out') await act(async () => { await props.session!.logout(); });
+      if (end === 'other tab') { server.otherTab('uid-a'); await act(async () => { window.dispatchEvent(new Event('focus')); }); }
+      if (end === 'user change') page.rerender(<ServerInvoiceDrafts {...props} uid="uid-b" />);
+      await settle();
+      expect(r.issueHolds.get('uid-a')).toMatchObject({ csrf: null, body: '' });
+      if (end !== 'user change') {
+        await waitFor(() => expect(cardState()).toBe('detached'));
+        expect(cardText()).toBe(ISSUE_TEXT.detached);
+        expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+      } else {
+        expect(cardState()).toBe('none'); // another user's section shows nothing of it
+      }
+      if (end === 'sign-out') { await click('drafts-retry'); await storesReady(); }
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      await settle();
+      expect(server.issuePosts()).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it('SID-166. AC-06 ISS-19: the unresolved attempt survives closing the confirmation, reopening a draft, another store and leaving the page (the section unmounted and mounted again with the same hold store): the card is back with Check again, which sends the SAME key and bytes under the same session — no login, no new key', async () => {
+    const { server, r, props, page } = await ready();
+    await openIssue(server);
+    server.issues.push('lose');
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    fireEvent.change(storeSelect(), { target: { value: STORE_2 } });
+    await listReady();
+    expect(cardState()).toBe('unresolved');
+    page.unmount();
+    render(<ServerInvoiceDrafts {...props} />);
+    expect(cardState()).toBe('unresolved');
+    expect(cardText()).toBe(ISSUE_TEXT.unresolved);
+    const logins = server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login).length;
+    await click('drafts-issue-check');
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    const [first, again] = server.issuePosts();
+    expect([again.body, again.headers.get('idempotency-key'), again.headers.get('x-tmpos-session-csrf')]).toEqual([first.body, first.headers.get('idempotency-key'), first.headers.get('x-tmpos-session-csrf')]);
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
+    expect(r.keys).toHaveLength(1);
+    expect(server.invoices).toHaveLength(1);
+  });
+
+  it('SID-167. AC-11 ISS-24: issuing writes no browser storage (local or session), logs nothing and leaves the address as it was; its key, body and token stay in memory — never in the DOM — through an unresolved attempt, Check again and the issued card; the sources reach neither', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    const href = window.location.href;
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.issues.push(503);
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    for (const secret of ['s'.repeat(40), r.keys[0], 'expectedSettingsVersion']) expect(document.body.innerHTML).not.toContain(secret);
+    await click('draft-issue-check');
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    for (const secret of ['s'.repeat(40), r.keys[0], 'expectedSettingsVersion']) expect(document.body.innerHTML).not.toContain(secret);
+    expect(setItem).not.toHaveBeenCalled();
+    expect([localStorage.length, sessionStorage.length]).toEqual([0, 0]);
+    for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(href);
+    for (const file of ['ServerInvoiceDrafts.tsx', 'ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts']) {
+      const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
+      expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)/);
+    }
+  });
+
+  it('SID-168. AC-04 AC-07: the preview\'s own answers — a draft no longer open (404), at the last version (409 invalid_state), a store without settings (409 issuing_not_configured), a total too large (409 amount_out_of_range) — are said in an alert with no Issue invoice; refused 403 it gets ONE fresh check and takes Issue invoice… away; an outage is a Try again (one GET per press) that reads the preview again; nothing is POSTed', async () => {
+    const cases: Array<[Response | number, string]> = [
+      [404, ISSUE_TEXT.previewNotFound],
+      [answer(409, { error: 'invalid_state', requestId: 'r-1' }), ISSUE_TEXT.previewLast],
+      [answer(409, { error: 'issuing_not_configured', requestId: 'r-1' }), ISSUE_TEXT.previewNotConfigured],
+      [answer(409, { error: 'amount_out_of_range', requestId: 'r-1' }), ISSUE_TEXT.previewOutOfRange],
+    ];
+    const { server } = await ready();
+    for (const [scripted, said] of cases) {
+      server.previewStatus.push(scripted);
+      await openIssue(server);
+      expect(screen.getByTestId('draft-issue-preview-refused')).toHaveTextContent(said);
+      expect(screen.getByTestId('draft-issue-preview-refused')).toHaveAttribute('role', 'alert');
+      expect(screen.queryByTestId('draft-issue-send')).toBeNull();
+      expect(screen.queryByTestId('draft-issue-preview')).toBeNull();
+      await click('draft-issue-keep');
+      await waitFor(() => expect(confirm()).toBeNull());
+      expect(view()).toBeInTheDocument(); // nothing was sent: only the confirmation closes
+      await click('draft-view-close');
+    }
+    server.previewStatus.push(403);
+    await openIssue(server);
+    expect(screen.getByTestId('draft-issue-preview-refused')).toHaveTextContent(ISSUE_TEXT.previewDenied);
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull();
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull(); // the refusal stands for this open
+    await click('draft-view-close');
+    server.previewStatus.push(503);
+    await openIssue(server);
+    expect(screen.getByTestId('draft-issue-preview-state')).toHaveTextContent(ISSUE_TEXT.previewUnavailable);
+    const retry = screen.getByTestId('draft-issue-preview-retry');
+    expect(retry).toHaveAccessibleName('Try again: load the invoice to review');
+    const previews = server.previewReads().length;
+    await click('draft-issue-preview-retry');
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    expect(server.previewReads()).toHaveLength(previews + 1);
+    expect(screen.getByTestId('draft-issue-send')).toBeInTheDocument();
+    expect(server.issuePosts()).toEqual([]);
+  });
+
+  it('SID-169. AC-08 AC-10: late answers move nothing — a preview answered after its confirmation closed shows nothing; an issue eligibility answered after its reopen dialog closed offers nothing; an issue POST answered after Close settles BY KEY in the card (issued, its number read) and closes nothing else', async () => {
+    const { server } = await ready();
+    await openDraft(server);
+    server.hold.preview = 1;
+    await click('draft-issue-open');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['preview']));
+    expect(screen.getByTestId('draft-issue-preview-state')).toHaveTextContent(ISSUE_TEXT.previewLoading);
+    expect(screen.queryByTestId('draft-issue-send')).toBeNull();
+    await click('draft-issue-keep');
+    await release(server);
+    await settle();
+    expect(confirm()).toBeNull();
+    expect(view()).toBeInTheDocument();
+    await click('draft-view-close');
+    server.hold.issueElig = 1;
+    await user().click(within(rows()[0]).getByTestId('drafts-open'));
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issueElig']));
+    await click('draft-view-close');
+    await release(server);
+    await settle();
+    expect(screen.queryByTestId('draft-issue-open')).toBeNull();
+    await openIssue(server);
+    server.hold.issue = 1;
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    await click('draft-issue-keep'); // Close: tracking goes on outside
+    await waitFor(() => expect(cardState()).toBe('sending'));
+    expect(cardText()).toBe(ISSUE_TEXT.sending);
+    await release(server);
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-170. AC-10 (a regression guard: the preview is read from the section\'s effect, which StrictMode does not repeat on a change): under StrictMode (setup, cleanup, setup in development) one open is ONE preview GET and one press ONE POST under one key', async () => {
+    const { server, ada } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    server.configure(STORE_1);
+    const r = rig(server);
+    render(<StrictMode><ServerInvoiceDrafts {...r.props()} /></StrictMode>);
+    await showAndChoose(STORE_1);
+    await user().click(within(rows()[0]).getByTestId('drafts-open')); // (no customer name under StrictMode's remount: not waited for)
+    await waitFor(() => expect(screen.getByTestId('draft-issue-open')).toBeInTheDocument());
+    await click('draft-issue-open');
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    expect(server.previewReads()).toHaveLength(1);
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    expect(server.issuedReads()).toHaveLength(1);
+    expect(draft.status).toBe('issued');
+  });
+
+  it('SID-171. AC-06: one live issue attempt per user — while one is unresolved, another draft\'s Issue invoice is held back and described why, and a press says "Not sent: an earlier issue is not confirmed yet…" with no key and no POST', async () => {
+    let second: Draft | null = null;
+    const { server, r } = await ready({}, {}, (s, ada) => { second = s.seedDraft(STORE_1, ada, at(9), 700, 1); });
+    await openIssue(server, 1); // the earlier draft
+    server.issues.push('lose-before');
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    await listReady();
+    await openIssue(server, 0); // the other draft
+    expect(screen.getByTestId('draft-issue-preview-subtotal')).toHaveTextContent('Subtotal $7.00');
+    const send = screen.getByTestId('draft-issue-send');
+    expect(send).toHaveAttribute('aria-disabled', 'true');
+    expect(send).toHaveAccessibleDescription(ISSUE_TEXT.pending);
+    await user().click(send);
+    await waitFor(() => expect(screen.getByTestId('draft-issue-status')).toHaveTextContent(ISSUE_TEXT.pending));
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    expect(second!.status).toBeUndefined();
+  });
+
+  it('SID-172. AC-07 AC-08: a Check again refused 403 gets ONE fresh check and stays unresolved — "Access lost: … that refusal stands"; one answered 429 stays unresolved with the wait, Check again held back and described why, nothing sent when it ends; one answered 401 ends the session and detaches the attempt', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.issues.push(503, 403, 429, 401);
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-check');
+    await waitFor(() => expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent(ISSUE_TEXT.checkDenied));
+    expect(attemptState()).toBe('unresolved');
+    server.retryAfter = '3';
+    fakeClock();
+    fireEvent.click(screen.getByTestId('draft-issue-check'));
+    await until(() => expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('Too many requests. Wait 3 seconds.'));
+    expect(screen.getByTestId('draft-issue-check')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByTestId('draft-issue-check')).toHaveAccessibleDescription(ISSUE_TEXT.waiting);
+    fireEvent.click(screen.getByTestId('draft-issue-check'));
+    await advance(3_000);
+    await settle();
+    expect(server.issuePosts()).toHaveLength(3);
+    expect(screen.getByTestId('draft-issue-check')).toHaveAttribute('aria-disabled', 'false');
+    vi.useRealTimers();
+    await click('draft-issue-check');
+    await waitFor(() => expect(screen.getByTestId('drafts-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(confirm()).toBeNull();
+    expect(cardState()).toBe('detached');
+    expect(server.issuePosts()).toHaveLength(4);
+  });
+
+  it('SID-173. AC-02 AC-08: no issue POST and no preview from mounting, a focus, a tab return, timers, reopening the draft, a refusal\'s fresh check, a session end or Reconnect — only the presses send', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, props } = await ready();
+    expect([server.previewReads(), server.issuePosts()]).toEqual([[], []]);
+    await openDraft(server);
+    fakeClock();
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(10 * 60_000);
+    vi.useRealTimers();
+    await settle();
+    expect(server.previewReads()).toEqual([]);
+    await click('draft-view-close');
+    server.previewStatus.push(403);
+    await openIssue(server);
+    await click('draft-issue-keep');
+    await click('draft-view-close');
+    await act(async () => { await props.session!.logout(); });
+    await click('drafts-retry');
+    await storesReady();
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    expect(server.previewReads()).toHaveLength(1);
+    expect(server.issuePosts()).toEqual([]);
+    expect(server.sent.filter((x) => x.method !== 'GET' && !x.url.startsWith('/api/v1/session'))).toEqual([]);
+  });
+  it('SID-174. AC-08 (jsdom-only callback ordering): a preview read closed and opened again is the old open\'s no more — its late 429 starts no wait and its late answer shows nothing; only the new open\'s answer is shown, and Issue invoice is for it', async () => {
+    const { server } = await ready();
+    await openDraft(server);
+    server.hold.preview = 2;
+    await click('draft-issue-open');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['preview']));
+    await click('draft-issue-keep');
+    await click('draft-issue-open');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['preview', 'preview']));
+    server.retryAfter = '30';
+    await release(server, 0, refusal(429, 'rate_limited')); // the closed open's late answer
+    await settle();
+    expect(previewPhase()).toBe('loading');
+    expect(screen.getByTestId('drafts-new')).toBeEnabled(); // no wait from it
+    await release(server); // the new open's
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    expect(screen.getByTestId('draft-issue-send')).toHaveAttribute('aria-disabled', 'false');
+    expect(server.previewReads()).toHaveLength(2);
+    expect(server.issuePosts()).toEqual([]);
+  });
+
+  it('SID-175. AC-07: a 201 this client cannot name — a Location that is not exactly the invoice\'s path at the store asked — is no issue: the attempt stays unresolved (nothing says issued, no number is read) and only Check again settles it, the SAME key and bytes', async () => {
+    const { server, draft, r } = await ready();
+    await openIssue(server);
+    const id = uuid(0xe99);
+    server.issues.push(answer(201, { invoice: { id, sourceDraftId: draft.id, status: 'issued' }, draft: { id: draft.id, version: 4, status: 'issued' } }, { location: `/api/v1/stores/${STORE_2}/invoices/${id}` }));
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    expect(screen.getByTestId('draft-issue-attempt-note')).toHaveTextContent('The server answered, but not with a result.');
+    expect(document.body).not.toHaveTextContent(/Issued/);
+    expect(server.issuedReads()).toEqual([]);
+    await click('draft-issue-check');
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    const [first, again] = server.issuePosts();
+    expect([again.body, again.headers.get('idempotency-key')]).toEqual([first.body, first.headers.get('idempotency-key')]);
+    expect(r.keys).toHaveLength(1);
+  });
+  it.each([
+    ['a 201 (the server issued it)', 'issued'],
+    ['a 403 (refused, nothing issued)', 'denied'],
+    ['a sealed 409 write_conflict (a stale review)', 'conflict'],
+  ] as const)('SID-176. AC-08 (jsdom-only callback ordering): a first send whose answer — %s — is still out when a sign-out DETACHES its attempt: the card is the earlier session\'s note ("could not be confirmed") with Dismiss, and Dismiss clears it WHILE the request is out; the late answer then recreates and changes nothing — never issued, refused or "unchecked" — and nothing is read, checked or sent for it; after Reconnect nothing is re-sent, or a new issue goes under a NEW key (review D3: Dismiss before the answer)', async (_what, late) => {
+    const { server, props, r } = await ready();
+    await openIssue(server);
+    if (late === 'denied') server.issueAllow.owner = false; // the server refuses this one (nothing issued)
+    if (late === 'conflict') server.configure(STORE_1, { tax: { mode: 'none' } }); // settings version 2, elsewhere: the review is stale
+    server.hold.issue = 1; // its answer held
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.issueAllow.owner = true;
+    await act(async () => { await props.session!.logout(); });
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    expect(cardText()).toBe(ISSUE_TEXT.detached);
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    expect(server.held.map((h) => h.kind)).toEqual(['issue']); // the request is still out
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    expect(r.issueHolds.get('uid-a')).toBeUndefined();
+    expect(document.activeElement).toBe(heading());
+    const mark = server.sent.length;
+    await release(server); // the late answer, after Dismiss
+    await settle();
+    expect(r.issueHolds.get('uid-a')).toBeUndefined(); // nothing recreated
+    expect(cardState()).toBe('none');
+    expect(screen.queryByTestId('drafts-issue-hold-refused')).toBeNull();
+    expect(server.sent.slice(mark)).toEqual([]); // no invoice read, no fresh check, no login, for a session that ended
+    await click('drafts-retry');
+    await storesReady();
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady();
+    if (late === 'issued') {
+      expect(rows()).toEqual([]); // the server issued it: nothing to issue again, and nothing is re-sent
+      expect([server.issuePosts().length, server.invoices.length, r.keys.length]).toEqual([1, 1, 1]);
+      return;
+    }
+    await openIssue(server);
+    await pressIssue();
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    expect(server.issuePosts()).toHaveLength(2);
+    expect(r.keys).toHaveLength(2);
+    expect(new Set(server.issuePosts().map((x) => x.headers.get('idempotency-key'))).size).toBe(2);
+  });
+  it('SID-177. AC-06 (review C2): the 23-hour window closes on its own with nothing pressed — at the cutoff (the later of the monotonic and wall clocks since the FIRST send) a timer takes the held body away and the card says it is too old, Find issued invoice kept and Check again gone, and nothing is sent; a page shown again past the cutoff (the wall clock jumped, no timer due yet) is judged the same, sending only its plain session check', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r } = await ready({}, {}, (s, ada) => { s.seedDraft(STORE_1, ada, at(7), 300, 1); });
+    await openIssue(server, 1);
+    server.hold.issue = 1;
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    r.clock.wall += 23 * HOUR - 1_000; // the wall arm alone, one second short of the cutoff, while the first send is out
+    fakeClock();
+    await release(server, 0, refusal(503, 'service_unavailable')); // no result: unresolved
+    await until(() => expect(attemptState()).toBe('unresolved'));
+    fireEvent.click(screen.getByTestId('draft-issue-keep'));
+    await until(() => expect(cardState()).toBe('unresolved'));
+    await until(() => expect(screen.getByTestId('drafts-list-state')).toHaveAttribute('data-phase', 'ready')); // Close's page one again
+    await settle();
+    expect(screen.getByTestId('drafts-issue-check')).toBeInTheDocument();
+    expect(r.issueHolds.get('uid-a')?.body).not.toBe('');
+    const mark = server.sent.length;
+    r.clock.wall += 1_000;
+    await advance(1_000);
+    await until(() => expect(cardText()).toBe(ISSUE_TEXT.tooOld));
+    expect(r.issueHolds.get('uid-a')?.body).toBe(''); // the bytes can never be sent again
+    expect(screen.queryByTestId('drafts-issue-check')).toBeNull();
+    expect(screen.getByTestId('drafts-issue-find')).toBeInTheDocument();
+    expect(server.sent.slice(mark)).toEqual([]); // the cutoff's timer sends nothing, not even a session read
+    vi.useRealTimers();
+    // A second attempt, and the wall clock jumps past its cutoff with no timer due: a tab return judges it.
+    await click('drafts-issue-stop');
+    await listReady();
+    await openIssue(server, 0);
+    server.issues.push('lose-before');
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    r.clock.wall += 23 * HOUR;
+    const shown = server.sent.length;
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.tooOld));
+    expect(r.issueHolds.get('uid-a')?.body).toBe('');
+    expect(screen.queryByTestId('drafts-issue-check')).toBeNull();
+    await settle();
+    expect(server.sent.slice(shown).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(server.issuePosts()).toHaveLength(2);
+  });
+  it('SID-178. AC-07 ISS-23 (review C3): a Review again whose replacement preview fails to load is still a review of the UPDATED invoice — its Try again shows the replacement with "This is the updated invoice…", nothing is sent on its own, and only a new press sends, under a NEW key and the new versions', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.configure(STORE_1, { tax: { mode: 'none' } }); // version 2, elsewhere
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT.conflict));
+    server.previewStatus.push(503);
+    await click('draft-issue-review-again');
+    await waitFor(() => expect(previewPhase()).toBe('unavailable'));
+    expect(screen.queryByTestId('draft-issue-send')).toBeNull();
+    await click('draft-issue-preview-retry');
+    await waitFor(() => expect(previewPhase()).toBe('ready'));
+    expect(screen.getByTestId('draft-issue-preview-state')).toHaveTextContent(ISSUE_TEXT.updated);
+    expect(screen.getByTestId('draft-issue-preview-tax').textContent).toBe('No tax calculated');
+    expect(server.issuePosts()).toHaveLength(1); // nothing on its own
+    await pressIssue();
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    const [first, second] = server.issuePosts();
+    expect([first.body, second.body]).toEqual([issueBody(TENANT_A, 3, 1, 1), issueBody(TENANT_A, 3, 2, 1)]);
+    expect(second.headers.get('idempotency-key')).not.toBe(first.headers.get('idempotency-key'));
+    expect(r.keys).toHaveLength(2);
+  });
+  it('SID-179. AC-10 (review C4): the issued dialog opened by a press that leaves no control focused (a pointer press in a browser that does not focus buttons) gives focus back, on Close, to the card\'s View invoice — its surviving trigger — never the heading', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, 'Main Street')));
+    await listReady();
+    await settle();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(screen.getByTestId('drafts-issue-view')); // no focus moves with it
+    await waitFor(() => expect(screen.getByTestId('issued-view-title')).toHaveTextContent('Invoice 1'));
+    await click('issued-view-close');
+    await settle();
+    expect(screen.queryByTestId('issued-view')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('drafts-issue-view'));
+  });
+  it('SID-180. AC-05 (review C5): an issued attempt\'s card read still out when a NEW attempt replaces it (another draft issued meanwhile) never holds the new card back — the new card reads ITS invoice (one GET) and says its number with View invoice and Dismiss; the old read\'s late answer changes nothing', async () => {
+    const { server } = await ready({}, {}, (s, ada) => { s.seedDraft(STORE_1, ada, at(7), 300, 1); });
+    await openIssue(server, 1);
+    server.hold.issued = 1; // the first invoice's read, held
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issued']));
+    expect(cardText()).toBe(ISSUE_TEXT.issuedLoading);
+    await listReady();
+    await openIssue(server, 0); // the other draft, while the first invoice's read is still out
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(2, 'Main Street')));
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['View invoice', 'Dismiss']);
+    expect(server.issuedReads().map((x) => x.url)).toEqual([issuedInvoicePathOf(STORE_1, server.invoices[0].id), issuedInvoicePathOf(STORE_1, server.invoices[1].id)]);
+    await release(server); // the first invoice's late answer
+    await settle();
+    expect(cardText()).toBe(ISSUE_TEXT.issued(2, 'Main Street'));
+    expect(server.issuePosts()).toHaveLength(2);
+  });
+  it('SID-181. AC-03 AC-05 (review C6): a confirmed 201 whose invoice read is refused 403 — its ONE fresh session check confirming the same session — says the issued invoices cannot be viewed here, never "did not load": the refusal stands (no Load details again, Dismiss only), and nothing more is read or sent', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.viewIssuedAllow.owner = false; // access narrowed between the 201 and its read
+    server.hold.issued = 1; // its answer held until page one's re-read (and that read's session check) is done
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issued']));
+    await listReady();
+    await settle();
+    expect(cardText()).toBe(ISSUE_TEXT.issuedLoading);
+    const mark = server.sent.length;
+    await release(server); // the 403
+    await waitFor(() => expect(cardText()).not.toBe(ISSUE_TEXT.issuedLoading));
+    await settle();
+    expect(screen.queryByTestId('drafts-issue-load')).toBeNull();
+    expect(cardText()).not.toBe(ISSUE_TEXT.issuedUnread);
+    expect(cardText()).toBe(ISSUE_TEXT.issuedDenied);
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    const reads = server.issuedReads();
+    expect(reads.map((x) => x.url)).toEqual([issuedInvoicePathOf(STORE_1, server.invoices[0].id)]);
+    // Its ONE fresh check (review D4), isolated from page one's re-read: after the refusal, exactly one session read and nothing else.
+    expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    const after = server.sent.length;
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(server.sent.slice(after).filter((x) => x.url !== TENANT_SESSION_PATHS.current)).toEqual([]); // never read again on its own
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+  it('SID-182. AC-10 (review C7): a preview the server refuses — a store without issuing settings, and a draft no longer open — is said in an alert that takes focus (the message itself, focusable by script only, with the focus ring), as a refused attempt is; Tab then stays inside the confirmation', async () => {
+    const { server } = await ready();
+    for (const [scripted, said] of [
+      [answer(409, { error: 'issuing_not_configured', requestId: 'r-1' }), ISSUE_TEXT.previewNotConfigured],
+      [404, ISSUE_TEXT.previewNotFound],
+    ] as Array<[Response | number, string]>) {
+      await openDraft(server);
+      server.previewStatus.push(scripted);
+      await click('draft-issue-open');
+      await waitFor(() => expect(screen.getByTestId('draft-issue-preview-refused')).toHaveTextContent(said));
+      const message = screen.getByTestId('draft-issue-preview-refused');
+      await waitFor(() => expect(document.activeElement).toBe(message));
+      expect(message).toHaveAttribute('role', 'alert');
+      expect(message).toHaveAttribute('tabindex', '-1');
+      ringed(message);
+      await user().tab();
+      expect(document.activeElement).toBe(screen.getByTestId('draft-issue-keep'));
+      await click('draft-issue-keep');
+      await waitFor(() => expect(confirm()).toBeNull());
+      await click('draft-view-close');
+    }
+    expect(server.issuePosts()).toEqual([]);
+  });
+  it('SID-183. AC-10 ISS-23 (review C9): the issued card names its store in an isolated run (<bdi>) inside its status sentence — a right-to-left store name with digits at its edge reorders nothing around it — and the sentence still reads "Issued as invoice 1 at {store}."', async () => {
+    const rtl = '24 متجر';
+    // In the server's order (code points): '2' sorts before 'Kiosk'.
+    const { server } = await ready({}, {}, (s) => { s.stores['uid-a'] = [store(STORE_1, rtl), store(STORE_RO, 'Kiosk', true), store(STORE_2, null)]; });
+    await openIssue(server);
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issued(1, rtl)));
+    const status = screen.getByTestId('drafts-issue-hold-status');
+    const isolated = [...status.querySelectorAll('bdi')];
+    expect(isolated.map((x) => x.textContent)).toEqual([rtl]);
+    expect(status.textContent).toBe(`Issued as invoice 1 at ${rtl}.`);
+  });
+  it('SID-184. AC-10 (review C10): while a press\'s own session check is out (before any key or POST), Issue invoice is held back and DESCRIBED why — "Checking your session before sending…" — and a second press sends nothing; then ONE POST', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.hold.current = 1; // the press's session check, held
+    const send = screen.getByTestId('draft-issue-send');
+    await user().click(send);
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    await waitFor(() => expect(send).toHaveAttribute('aria-disabled', 'true'));
+    expect(send.getAttribute('aria-describedby')).not.toBeNull();
+    expect(send).toHaveAccessibleDescription(ISSUE_TEXT.sendChecking);
+    expect(ISSUE_TEXT.sendChecking).toBe('Checking your session before sending…');
+    await user().click(send);
+    expect([server.issuePosts().length, r.keys.length]).toEqual([0, 0]);
+    await release(server);
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+  });
+  it('SID-185. AC-06 AC-08 (review C13): an earlier attempt DETACHED while unconfirmed (a sign-out) still holds back a new issue — the safe choice — and what is said is true: Issue invoice is described, and its press says, that the earlier issue could not be confirmed and must be dismissed first (the card offers only Dismiss), never "check it again or stop tracking it"; once dismissed, a press is ONE POST under a NEW key', async () => {
+    const { server, props, r } = await ready({}, {}, (s, ada) => { s.seedDraft(STORE_1, ada, at(9), 700, 1); });
+    await openIssue(server, 1); // the earlier draft
+    server.issues.push('lose-before');
+    await pressIssue();
+    await waitFor(() => expect(attemptState()).toBe('unresolved'));
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    await act(async () => { await props.session!.logout(); });
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    await click('drafts-retry');
+    await storesReady();
+    fireEvent.change(storeSelect(), { target: { value: STORE_1 } });
+    await listReady();
+    await eligSettled();
+    await openIssue(server, 0); // the other draft
+    const send = screen.getByTestId('draft-issue-send');
+    expect(send).toHaveAttribute('aria-disabled', 'true');
+    const described = document.getElementById(send.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+    expect(described).not.toMatch(/check it again|stop tracking/i);
+    expect(described).toBe(ISSUE_TEXT.pendingDetached);
+    expect(ISSUE_TEXT.pendingDetached).toMatch(/dismiss it first/);
+    await user().click(send);
+    await waitFor(() => expect(screen.getByTestId('draft-issue-status')).toHaveTextContent(ISSUE_TEXT.pendingDetached));
+    expect([server.issuePosts().length, r.keys.length]).toEqual([1, 1]);
+    await click('draft-issue-keep');
+    await waitFor(() => expect(confirm()).toBeNull());
+    await click('draft-view-close');
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    await openIssue(server, 0);
+    expect(screen.getByTestId('draft-issue-send')).toHaveAttribute('aria-disabled', 'false');
+    await pressIssue();
+    await waitFor(() => expect(cardState()).toBe('issued'));
+    expect([server.issuePosts().length, r.keys.length]).toEqual([2, 2]);
+  });
+  it('SID-186. AC-08 (review C14): a first send refused 403 whose ONE fresh session check finds another tab\'s session (a new token: the attempt DETACHED meanwhile) ends on the earlier connection\'s note — "could not be confirmed", with Dismiss — never "Not issued … your session could not be checked right now. Close this…", and nothing is signed in or sent again', async () => {
+    const { server, r } = await ready();
+    await openIssue(server);
+    server.issueAllow.owner = false; // the server refuses this one (nothing issued)
+    server.hold.issue = 1; // its answer held
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.issueAllow.owner = true;
+    server.otherTab('uid-a'); // what the 403's fresh check will find
+    const logins = server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login).length;
+    await release(server); // the 403
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    await settle();
+    expect(r.issueHolds.get('uid-a')).toMatchObject({ state: 'sending', refusal: null, csrf: null, body: '' });
+    expect(screen.queryByTestId('drafts-issue-hold-refused')).toBeNull();
+    expect(cardText()).toBe(ISSUE_TEXT.detached);
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    expect(server.sent.filter((x) => x.url === TENANT_SESSION_PATHS.login)).toHaveLength(logins);
+    expect(server.issuePosts()).toHaveLength(1);
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+  });
+  it.each([
+    ['a user change, then its 201 (the server issued it)', 'issued'],
+    ['a user change, then its 403 (refused, nothing issued)', 'denied'],
+    ['a user change, then its sealed 409 write_conflict', 'conflict'],
+    ['a token change (another tab\'s session, seen on a focus), then its 201', 'token'],
+  ] as const)('SID-187. AC-08 (review D1, jsdom-only commit ordering): a first send whose answer lands after %s changes nothing — also when it lands in the very commit that ended the earlier user\'s section, before that commit\'s passive effects run (a browser yields between them after a slow commit): the attempt stays the earlier connection\'s note with Dismiss, never issued, refused or "unchecked", and nothing is sent again', async (_what, late) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, ada } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(5), 250, 2);
+    draft.version = 3;
+    server.configure(STORE_1, {});
+    const r = rig(server);
+    const props = r.props();
+    const ctl: { setUid: (uid: string) => void; release: (() => void) | null; answered: boolean; answeredFirst: boolean | null } = { setUid: () => {}, release: null, answered: false, answeredFirst: null };
+    const issuing = props.issuing!;
+    // The issue's answer, noted when it reaches the section (the section's continuation runs right after it).
+    const watched = { ...issuing, issue: async (...args: Parameters<typeof issuing.issue>) => { const answer = await issuing.issue(...args); ctl.answered = true; return answer; } };
+    /** Another user's commit that outlasts the scheduler's frame, releasing the held answer in its layout phase. */
+    function SlowCommit({ uid }: { readonly uid: string }) {
+      if (uid !== 'uid-a') { const end = performance.now() + 20; while (performance.now() < end) { /* a slow render: React yields before the passive effects */ } }
+      useLayoutEffect(() => { if (uid !== 'uid-a') { const release = ctl.release; ctl.release = null; release?.(); } }, [uid]);
+      useEffect(() => { if (uid !== 'uid-a' && ctl.answeredFirst === null) ctl.answeredFirst = ctl.answered; }, [uid]);
+      return null;
+    }
+    function Page() {
+      const [uid, setUid] = useState('uid-a');
+      ctl.setUid = setUid;
+      return <><ServerInvoiceDrafts {...props} issuing={watched} uid={uid} /><SlowCommit uid={uid} /></>;
+    }
+    render(<Page />);
+    await showAndChoose(STORE_1);
+    await openIssue(server);
+    if (late === 'denied') server.issueAllow.owner = false; // the server refuses this one (nothing issued)
+    if (late === 'conflict') server.configure(STORE_1, { tax: { mode: 'none' } }); // settings version 2, elsewhere: the review is stale
+    server.hold.issue = 1; // its answer held
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.issueAllow.owner = true;
+    const [held] = server.held.splice(0, 1);
+    if (late === 'token') {
+      server.otherTab('uid-a');
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      await waitFor(() => expect(r.issueHolds.get('uid-a')?.csrf).toBeNull());
+      await act(async () => { held.release(); });
+      await settle();
+    } else {
+      // The user change is committed by React's own scheduler (outside act(), as in a browser), and the held answer is
+      // released inside that commit: it reaches the earlier user's section before the commit's passive effects.
+      const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const was = env.IS_REACT_ACT_ENVIRONMENT;
+      env.IS_REACT_ACT_ENVIRONMENT = false;
+      ctl.release = () => held.release();
+      try {
+        ctl.setUid('uid-b');
+        for (let i = 0; i < 100 && ctl.answeredFirst === null; i++) await new Promise((x) => realSetTimeout(x, 0));
+      } finally {
+        env.IS_REACT_ACT_ENVIRONMENT = was;
+      }
+      expect([ctl.release, ctl.answeredFirst]).toEqual([null, true]); // the precondition: released in that commit, answered before its passive effects
+      await settle();
+    }
+    expect(r.issueHolds.get('uid-a')).toMatchObject({ state: 'sending', invoiceId: null, number: null, refusal: null, csrf: null, body: '' });
+    if (late !== 'token') await act(async () => { ctl.setUid('uid-a'); }); // uid-a's section again (the same hold store)
+    await settle();
+    expect(cardState()).toBe('detached');
+    expect(cardText()).toBe(ISSUE_TEXT.detached);
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    expect([server.issuePosts().length, server.issuedReads().length, r.keys.length]).toEqual([1, 0, 1]);
+  });
+  it('SID-188. AC-03 AC-05 (review D2): a confirmed refusal of the issued invoice\'s read belongs to the ATTEMPT — after the section is left and mounted again (in-app navigation, the same hold store) the card still says the issued invoices cannot be viewed here, offers only Dismiss (no Load details again) and reads nothing on its own; Dismiss clears it', async () => {
+    const { server, props, page } = await ready();
+    await openIssue(server);
+    server.viewIssuedAllow.owner = false; // access narrowed between the 201 and its read
+    await pressIssue();
+    await waitFor(() => expect(cardText()).toBe(ISSUE_TEXT.issuedDenied));
+    await listReady();
+    await settle();
+    page.unmount();
+    const mark = server.sent.length;
+    render(<ServerInvoiceDrafts {...props} />);
+    await settle();
+    expect(cardState()).toBe('issued');
+    expect(cardText()).toBe(ISSUE_TEXT.issuedDenied);
+    expect(screen.queryByTestId('drafts-issue-load')).toBeNull();
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await settle();
+    expect(server.sent.slice(mark).filter((x) => x.url !== TENANT_SESSION_PATHS.current)).toEqual([]); // never read again on its own
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    expect([server.issuedReads().length, server.issuePosts().length]).toEqual([1, 1]);
+  });
+  it('SID-189. AC-08 (review D6): a first send refused 403 while its section is not mounted (the page left meanwhile: no fresh check) settles refused, unchecked — and the card, mounted again, tells the user to DISMISS it, the one control it offers, never "Close this"', async () => {
+    const { server, props, r, page } = await ready();
+    await openIssue(server);
+    server.issueAllow.owner = false; // the server refuses this one (nothing issued)
+    server.hold.issue = 1;
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.issueAllow.owner = true;
+    page.unmount();
+    await release(server); // the 403, with no section to check it under
+    await settle();
+    expect(r.issueHolds.get('uid-a')).toMatchObject({ state: 'refused', refusal: 'unchecked', body: '' });
+    render(<ServerInvoiceDrafts {...props} />);
+    expect(cardState()).toBe('refused');
+    const said = screen.getByTestId('drafts-issue-hold-refused').textContent;
+    expect(said).not.toMatch(/Close this/);
+    expect(said).toBe(ISSUE_TEXT.uncheckedCard);
+    expect(ISSUE_TEXT.uncheckedCard).toBe('Not issued: the server refused this request, and your session could not be checked right now. Dismiss this, then open the draft again in a moment.');
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
+    await click('drafts-issue-dismiss');
+    expect(cardState()).toBe('none');
+    expect(server.issuePosts()).toHaveLength(1);
   });
 });

@@ -64,8 +64,8 @@ import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
   invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText,
-  type InvoiceIssuingClient, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors, type IssuingSettingsFields,
-  type SaveSettingsResult, type SettingsValues,
+  type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
+  type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues,
 } from './invoiceIssuingClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
@@ -1312,8 +1312,6 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   }, []);
 
   const invoice = state.invoice;
-  const amounts = invoice?.amounts;
-  const money = (cents: number) => <span className="whitespace-nowrap">{formatCents(cents)}</span>;
   return (
     <DialogFrame labelledBy="issued-view-title" testId="issued-view" anchor="top" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
       <div className="flex items-start justify-between gap-3">
@@ -1337,7 +1335,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
           {waiting && <span id="issued-view-wait" className="sr-only">{VIEW_TEXT.waiting}</span>}
         </>
       )}
-      {invoice !== null && amounts !== undefined && (
+      {invoice !== null && (
         <div className="space-y-4">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
             <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">Issued</dd>
@@ -1345,58 +1343,75 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             {/* The time may wrap at its spaces (never inside the date or the clock): at 320 px it is wider than its column (SIS-09). */}
             <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-issued-at" dateTime={invoice.issuedAt}>{utcText(invoice.issuedAt)}</time></dd>
           </dl>
-          {/* Stacked, never side by side: a long name or address wraps in its own block (break-words) at any width. */}
-          <section aria-labelledby="issued-view-seller-title" data-testid="issued-view-seller" className="space-y-0.5 text-sm">
-            <h3 id="issued-view-seller-title" className={labelClass}>Seller</h3>
-            <p data-testid="issued-view-seller-legal" className="font-bold text-primary break-words"><bdi>{invoice.seller.legalName}</bdi></p>
-            <p data-testid="issued-view-seller-store" className="text-slate-700 break-words"><bdi>{invoice.seller.storeName}</bdi></p>
-            <p data-testid="issued-view-seller-address" className="text-slate-700 break-words whitespace-pre-line"><bdi>{invoice.seller.postalAddress}</bdi></p>
-            {invoice.seller.taxRegistrationId !== null && (
-              <p data-testid="issued-view-seller-tax-id" className="text-slate-700 break-words">Tax registration ID <bdi>{invoice.seller.taxRegistrationId}</bdi></p>
-            )}
-          </section>
-          <section aria-labelledby="issued-view-customer-title" className="space-y-0.5 text-sm">
-            <h3 id="issued-view-customer-title" className={labelClass}>Customer</h3>
-            <p data-testid="issued-view-customer" className="font-bold text-primary break-words"><bdi>{invoice.customer.name}</bdi></p>
-          </section>
-          {/* The lines table scrolls sideways inside its own named region, reached by Tab (the data-table reflow exception, as the reopen dialog's): an amount never breaks. */}
-          <div role="region" aria-label="Invoice lines" tabIndex={0} data-testid="issued-view-lines-scroll" className={`overflow-x-auto ${focusRing}`}>
-            <table data-testid="issued-view-lines" className="w-full text-left text-sm border-collapse">
-              <caption className="sr-only">Invoice lines</caption>
-              <thead>
-                <tr className="border-b border-slate-100">
-                  <th scope="col" className={labelClass}>#</th>
-                  <th scope="col" className={labelClass}>Description</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Line total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoice.lines.map((line) => (
-                  <tr key={line.position} data-testid="issued-view-line" className="border-b border-slate-50">
-                    <td className="py-1 pr-2 text-slate-500">{line.position}</td>
-                    <td className="py-1 pr-2 font-bold text-slate-800 break-words"><bdi>{line.description}</bdi></td>
-                    <td className="py-1 pr-2 text-right whitespace-nowrap">{line.quantity}</td>
-                    <td className="py-1 pr-2 text-right whitespace-nowrap">{formatCents(line.unitPriceCents)}</td>
-                    <td className="py-1 text-right font-bold whitespace-nowrap">{formatCents(line.lineTotalCents)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Below sm the type steps down (SDB-23): at 320 px the largest amount in 16 px heavy type is wider than the dialog. */}
-          <div className="space-y-1 text-right text-sm sm:text-base">
-            <p data-testid="issued-view-subtotal" className="font-bold text-slate-700 break-words">Subtotal {money(amounts.subtotalCents)}</p>
-            <p data-testid="issued-view-tax" className="font-bold text-slate-700 break-words">
-              {amounts.tax.mode === 'none' ? amounts.tax.description : <>{amounts.tax.label} ({rateText(amounts.tax.rateMilliPercent)}) {money(amounts.tax.amountCents)}</>}
-            </p>
-            <p data-testid="issued-view-total" className="font-black text-primary break-words"><strong>Total</strong> {money(amounts.totalCents)}</p>
-          </div>
+          <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
           <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>
         </div>
       )}
     </DialogFrame>
+  );
+}
+
+/**
+ * The parts of an invoice the issued dialog and the drafts section's issue review (M7B-INVOICES-ISSUE-P2, commit C) both
+ * show, exactly as the server answered them: the seller, the customer, the ordered lines in their own named scroll region,
+ * Subtotal, the tax line — "Tax (8.875%)" and its amount, "Tax (0%)" for an explicit zero, or exactly "No tax calculated" —
+ * and the Total. Never a number or a time (the review has none). `prefix` names the test ids and the headings' ids.
+ */
+export function InvoiceSnapshot({ prefix, seller, customerName, lines, amounts }: {
+  readonly prefix: string; readonly seller: Seller; readonly customerName: string; readonly lines: readonly InvoiceLine[]; readonly amounts: InvoiceAmounts;
+}) {
+  const money = (cents: number) => <span className="whitespace-nowrap">{formatCents(cents)}</span>;
+  return (
+    <>
+      {/* Stacked, never side by side: a long name or address wraps in its own block (break-words) at any width. */}
+      <section aria-labelledby={`${prefix}-seller-title`} data-testid={`${prefix}-seller`} className="space-y-0.5 text-sm">
+        <h3 id={`${prefix}-seller-title`} className={labelClass}>Seller</h3>
+        <p data-testid={`${prefix}-seller-legal`} className="font-bold text-primary break-words"><bdi>{seller.legalName}</bdi></p>
+        <p data-testid={`${prefix}-seller-store`} className="text-slate-700 break-words"><bdi>{seller.storeName}</bdi></p>
+        <p data-testid={`${prefix}-seller-address`} className="text-slate-700 break-words whitespace-pre-line"><bdi>{seller.postalAddress}</bdi></p>
+        {seller.taxRegistrationId !== null && (
+          <p data-testid={`${prefix}-seller-tax-id`} className="text-slate-700 break-words">Tax registration ID <bdi>{seller.taxRegistrationId}</bdi></p>
+        )}
+      </section>
+      <section aria-labelledby={`${prefix}-customer-title`} className="space-y-0.5 text-sm">
+        <h3 id={`${prefix}-customer-title`} className={labelClass}>Customer</h3>
+        <p data-testid={`${prefix}-customer`} className="font-bold text-primary break-words"><bdi>{customerName}</bdi></p>
+      </section>
+      {/* The lines table scrolls sideways inside its own named region, reached by Tab (the data-table reflow exception, as the reopen dialog's): an amount never breaks. */}
+      <div role="region" aria-label="Invoice lines" tabIndex={0} data-testid={`${prefix}-lines-scroll`} className={`overflow-x-auto ${focusRing}`}>
+        <table data-testid={`${prefix}-lines`} className="w-full text-left text-sm border-collapse">
+          <caption className="sr-only">Invoice lines</caption>
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th scope="col" className={labelClass}>#</th>
+              <th scope="col" className={labelClass}>Description</th>
+              <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
+              <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
+              <th scope="col" className={`${labelClass} text-right`}>Line total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((line) => (
+              <tr key={line.position} data-testid={`${prefix}-line`} className="border-b border-slate-50">
+                <td className="py-1 pr-2 text-slate-500">{line.position}</td>
+                <td className="py-1 pr-2 font-bold text-slate-800 break-words"><bdi>{line.description}</bdi></td>
+                <td className="py-1 pr-2 text-right whitespace-nowrap">{line.quantity}</td>
+                <td className="py-1 pr-2 text-right whitespace-nowrap">{formatCents(line.unitPriceCents)}</td>
+                <td className="py-1 text-right font-bold whitespace-nowrap">{formatCents(line.lineTotalCents)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {/* Below sm the type steps down (SDB-23): at 320 px the largest amount in 16 px heavy type is wider than the dialog. */}
+      <div className="space-y-1 text-right text-sm sm:text-base">
+        <p data-testid={`${prefix}-subtotal`} className="font-bold text-slate-700 break-words">Subtotal {money(amounts.subtotalCents)}</p>
+        <p data-testid={`${prefix}-tax`} className="font-bold text-slate-700 break-words">
+          {amounts.tax.mode === 'none' ? amounts.tax.description : <>{amounts.tax.label} ({rateText(amounts.tax.rateMilliPercent)}) {money(amounts.tax.amountCents)}</>}
+        </p>
+        <p data-testid={`${prefix}-total`} className="font-black text-primary break-words"><strong>Total</strong> {money(amounts.totalCents)}</p>
+      </div>
+    </>
   );
 }
 

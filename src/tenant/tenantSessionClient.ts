@@ -30,7 +30,11 @@
 //         also closes that dialog); and on each save attempt in its module-level hold store, to re-send an unresolved one
 //         on the same session (Check again) and to read a created one back only under that session. `onSessionEnd` takes it
 //         from every user's attempt (an unconfirmed one loses its body too, and is never sent again); otherwise it stays
-//         until the attempt is detached, read back or removed, or the page reloads.
+//         until the attempt is detached, read back or removed, or the page reloads. Since M7B-INVOICES-ISSUE-P2 the same
+//         section keeps it on each issue attempt too, in its module-level issue hold store (one per user), to re-send an
+//         unresolved issue on the same session (Check again) and to find or read the issued invoice only under it; that
+//         store hears `onSessionEnd` from its module's load in the same way (every user's issue attempt loses its token and
+//         its body), and a token change or a user change detaches it as well.
 //       - The Invoices page's issued invoices section (ServerIssuedInvoices.tsx, M7B-INVOICES-ISSUE-P2), fifth: in refs, to
 //         compare it with the next one and send its reads, and beside the owner's issuing-settings write (by its key), to
 //         re-send an unresolved one on the same session (Check again) — until the section unmounts or, while it is mounted,

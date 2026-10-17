@@ -386,7 +386,9 @@
 //          at 600 px), each on a fresh page with the viewport fixed before the reopen: the discard-eligibility answer is
 //          parked, Close measured, then the answer lost at the front (st.lose: unavailable, Try again and its hint, which
 //          wraps where narrow). Asserted first, per cell: at 600 px, 320 px and the 24 px text size the answer wraps
-//          the discard row and grows it by more than 0.5 px, and at 1440 px it does not wrap. Close's box holds within
+//          the discard row, and at 1440 px it does not wrap. Since M7B-INVOICES-ISSUE-P2 (review C8) the row holds the
+//          height of that tallest answer from the asking on, so it grows by no more than 0.5 px and Issue invoice… in the
+//          row below (the owner's issue eligibility answered first) holds within 0.5 px too. Close's box holds within
 //          0.5 px, the point that was its centre is still Close, and a raw mouse press at that point (not a re-aimed
 //          click) closes the dialog; the hint is whole, Try again is reached by Tab inside the dialog (after the lines'
 //          region), the dialog stays inside the viewport without scrolling sideways, its lines table fits the dialog's
@@ -398,9 +400,11 @@
 //          and overflows elsewhere (asserted), where it scrolls inside the region, which Tab reaches and ArrowRight
 //          scrolls; the dialog is not scrolled sideways, also after Tab and ArrowRight, and no amount breaks (at 600 px this dialog outgrows
 //          90vh, so it is not used for the hold). The rows are opened from the keyboard (at 320 px the shop's sidebar
-//          lies over the list). Known and untested: an edit-eligibility answer landing AFTER
-//          the discard answer can still move the discard row (it lies below the edit row, which holds no height); Close,
-//          the header and Edit draft never move.
+//          lies over the list). Last, in each cell (review D5), the edit-eligibility answer is parked while the
+//          discard's and the issue's answer first, then lands late — lost at the front (unavailable: its text and Try
+//          again) and allowed (Edit draft): since M7B-INVOICES-ISSUE-P2 the edit row holds the height of its tallest
+//          answer from the asking on, so the discard row, Issue invoice… and Close each hold within 0.5 px. Close, the
+//          header and Edit draft never move.
 //          Red on the P1 commit (bb7063a): the centred dialog grew under Close and moved it up by half the growth, the
 //          lines had no region of their own, and at 320 px (600 px too at the largest amounts) the table was wider than
 //          the dialog's content. A rate-limited answer is not produced here: the entry
@@ -484,8 +488,27 @@
 //          ($90,071,992,547,409.91) on ONE page at 1440x900, 768x1024, 320x640, 320x480 (16 px default) and 768x1024 at a
 //          24 px default text size: no sideways overflow of the dialog, Close in view and focused, every amount on one line,
 //          the Total whole once scrolled into view, the lines a named region reached by Tab that scrolls sideways where wider.
+//   SIS-10 (M7B-INVOICES-ISSUE-P2 commit C, AC-04, AC-05, ISS-23) EXPLICIT ISSUE IN BOTH TAX MODES AND AN EXPLICIT 0 %: the
+//          reopen dialog's Issue invoice… (on the server's issue eligibility), the confirmation showing the preview the entry
+//          answered (an alertdialog, Keep draft first, no number or time), ONE POST of exactly its `expected` under a fresh key,
+//          then the card's "Issued as invoice {n} at {store}." after ONE GET: the number, tax line and Total the database
+//          holds, and exactly ONE issue audit (at the store: draft, invoice, customer) and one completion per issue.
+//   SIS-11 (AC-05) a confirmed POST whose invoice read is lost at the front (st.lose, before the entry): "Issued. The invoice
+//          details did not load."; "Load details again" is ONE GET and no POST.
+//   SIS-12 (AC-06, ISS-19) a LOST BROWSER RESPONSE after a real committed issue (st.lose, after the entry answered): "Not
+//          confirmed yet"; a focus and a tab return send nothing; Escape is Close (the card keeps the attempt); Check again is
+//          the SAME key, bytes and session token, answered by the entry's replay: ONE invoice, ONE audit. It proves lost
+//          browser delivery only, not a lost database COMMIT acknowledgement (IIH-07 covers that).
+//   SIS-13 (AC-07) a stale review after a competing settings change: the sealed 409 write_conflict in an alert, nothing
+//          issued; Review again reads ONE new preview; only a new press sends, under a NEW key and the new version.
+//   SIS-14 (AC-03, AC-08) stored levels and session changes: Invoices Edit gets no Issue invoice…, Approve does; lowered to
+//          View while the review is open the POST is the 403 with ONE fresh check and nothing written; an unresolved attempt
+//          is detached by a session ended in the store (no login, no POST) and stays so after ONE Reconnect login.
+//   SIS-15 (AC-10, ISS-23) the confirmation's bounded layout and keyboard with the longest texts and the largest Total at
+//          1440x900, 768x1024, 320x640, 320x480 and 768x1024 at a 24 px default text size (Page.setFontSizes; not native
+//          zoom): Keep draft first, nothing sideways, every amount whole, the lines a named region, Tab and Escape.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
-//   issue POST): this file inserts no issuing row.
+//   issue POST — the browser's own, from SIS-10 on): this file inserts no issuing row.
 //   All run against the REAL tenant entry and the disposable database only: the file has no stand-in for any route.
 //
 // RUN (the SPA build runs Tailwind's scanner over the source root: point P3R2_SPA_SOURCE at a clean export, node_modules
@@ -1655,6 +1678,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-11', 'SDB-12', 'SDB-13', 'SDB-14', 'SDB-15', 'SDB-16', 'SDB-17', 'SDB-18', 'SDB-19', 'SDB-20', 'SDB-21', 'SDB-22',
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
+  'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -6808,6 +6832,21 @@ async function reopenParked(page, store, id, customerName, open = reopenDraft) {
   return parked;
 }
 
+/**
+ * Reopen `id` from the keyboard with its EDIT-eligibility answer parked at the front (SDB-23, review D5): the discard's and
+ * the issue's answers in first (Discard draft… and Issue invoice… offered), the edit row still saying it is checking.
+ */
+async function reopenEditParked(page, store, id, customerName) {
+  const parked = gate((r) => r.frameId === page.frameId && isEditEligibility(store, id)(r), 'response');
+  await reopenByKey(page, id, customerName);
+  const held = await Promise.race([parked.reached, delay(30_000).then(() => null)]);
+  assert.ok(held, 'the edit-eligibility answer was parked at the front');
+  await page.waitFor(() => offered(page, 'draft-discard-open'), 30_000, 'Discard draft… is offered');
+  await page.waitFor(() => offered(page, 'draft-issue-open'), 30_000, 'Issue invoice… is offered');
+  await page.settle();
+  return parked;
+}
+
 scenario('SDB-22', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL — with Edit draft offered and the discard-eligibility answer parked at the front, the reopen dialog\'s Close box (x, y, width, height) and the dialog\'s height are measured; once the answer is in they are exactly unchanged, both when the server allows Discard draft… (the owner: it appears) and when it refuses (a sales_staff account at Invoices Edit: 403, Discard draft… absent); Close, then pressed, closes the dialog', async () => {
   const c = await discardCase('d22', 1);
   const [id] = c.ids;
@@ -6850,6 +6889,9 @@ scenario('SDB-22', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL — with Edit dr
 
 /** DISCARD_ELIGIBILITY_TEXT.unavailable: the discard row's hint when its eligibility could not be asked. */
 const DISCARD_UNAVAILABLE = 'The server could not be asked right now whether this draft can be discarded.';
+/** EDIT_ELIGIBILITY_TEXT.checking and .unavailable: the edit row's live text while its eligibility is asked, and when it could not be. */
+const EDIT_CHECKING = 'Checking with the server whether this draft can be edited…';
+const EDIT_UNAVAILABLE = 'The server could not be asked right now whether this draft can be edited. Try again.';
 /** The one geometry tolerance (CSS px) SDB-23 allows Close's box: sub-pixel rounding only, never a moved control. */
 const HOLD_TOLERANCE = 0.5;
 /**
@@ -6860,13 +6902,16 @@ const HOLD_TOLERANCE = 0.5;
  * Settings › Font size), which scales every rem the dialog is built from. `wraps`: whether the unavailable answer must
  * wrap the discard row there (asserted, so a cell cannot pass without the growth it exists to prove harmless).
  * `overflows`: whether the lines table at the largest amounts is wider than the dialog's content there (asserted, so the
- * region checks never go vacuous). The two are measured apart and happen to hold in the same cells.
+ * region checks never go vacuous). The two are measured apart and happen to hold in the same cells. `height`: the
+ * window's height in CSS px — 1200 at T600 (review D5): with the edit and discard rows each holding their tallest
+ * answer's height, the reopen dialog in 24 px text is taller than 90% of a 1000 px window and would scroll inside
+ * itself, where a hold proves nothing (step 1's precondition).
  */
 const HOLD_CELLS = Object.freeze([
-  { cell: 'D', width: 1440, font: null, wraps: false, overflows: false },
-  { cell: 'N600', width: 600, font: null, wraps: true, overflows: true },
-  { cell: 'N320', width: 320, font: null, wraps: true, overflows: true },
-  { cell: 'T600', width: 600, font: 24, wraps: true, overflows: true },
+  { cell: 'D', width: 1440, height: 1000, font: null, wraps: false, overflows: false },
+  { cell: 'N600', width: 600, height: 1000, font: null, wraps: true, overflows: true },
+  { cell: 'N320', width: 320, height: 1000, font: null, wraps: true, overflows: true },
+  { cell: 'T600', width: 600, height: 1200, font: 24, wraps: true, overflows: true },
 ]);
 /**
  * SDB-23's second draft's line: the largest unit price and line total the shop accepts (2^53-1 cents, MAX_CENTS, at
@@ -6880,14 +6925,15 @@ const HOLD_LINE = Object.freeze({
 /** The reopen dialog's geometry now: Close, Edit draft, the discard row and its parts, the panel and the page. */
 const holdBox = (page) => page.evaluate(`(() => {
   const box = (n) => { if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
-  const panel = ${q('draft-view')}, row = ${q('draft-view-subtotal')}?.parentElement?.lastElementChild ?? null;
+  // The discard's row by its own test id: since M7B-INVOICES-ISSUE-P2 the issue's row (Issue invoice…) follows it.
+  const panel = ${q('draft-view')}, row = ${q('draft-discard-row')};
   const again = ${q('draft-discard-elig-again')}, why = ${q('draft-discard-elig-why')};
   // The lines table's own scroll container, when it has one (the data-table reflow exception): its box, overflow and name.
   const scroller = ${q('draft-view-lines-scroll')};
   return {
     innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize,
     docScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
-    close: box(${q('draft-view-close')}), edit: box(${q('draft-view-edit')}), row: box(row), again: box(again), why: box(why),
+    close: box(${q('draft-view-close')}), edit: box(${q('draft-view-edit')}), row: box(row), again: box(again), why: box(why), issue: box(${q('draft-issue-open')}),
     lines: { ...box(${q('draft-view-lines')}), scrollWidth: ${q('draft-view-lines')}?.scrollWidth ?? null },
     scroller: scroller === null ? null : {
       ...box(scroller), scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth, overflowX: getComputedStyle(scroller).overflowX,
@@ -6929,7 +6975,7 @@ async function pressAt(page, x, y) {
 /** How far `after` moved from `before` (each of x, y, width, height); Infinity when either is missing. */
 const moved = (before, after) => (before === null || after === null ? Infinity : Math.max(...['x', 'y', 'width', 'height'].map((k) => Math.abs(after[k] - before[k]))));
 
-scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD ROW WRAPS — at 1440, 600 and 320 CSS px and at an enlarged default text size (600 px, 24 px), each on a fresh page: with Edit draft offered and the discard-eligibility answer parked, Close\'s box is measured; the answer is then lost at the front (unavailable: Try again and its hint, wrapped where narrow); the row wraps and grows there (and does not wrap at 1440 px); Close\'s box is unchanged within 0.5 px, the point that was Close\'s centre is still Close and a real press there closes the dialog; the hint is whole, Try again reached by Tab inside the dialog, the dialog does not scroll sideways and no amount breaks, nothing is posted; the owner\'s allowed answer (Discard draft…) moves nothing either, and Close and Escape return focus to the row\'s Open button that opened the dialog; the dialog is still not scrolled sideways after Tab and the arrow keys; a second draft at the largest amounts the shop accepts, under a long description, reads $90,071,992,547,409.91 whole, and where it is wider than the dialog (600 and 320 px, enlarged text) scrolls sideways inside its own named region, reached by Tab and scrolled by the keyboard', async () => {
+scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD ROW WRAPS — at 1440, 600 and 320 CSS px and at an enlarged default text size (600 px, 24 px), each on a fresh page: with Edit draft offered and the discard-eligibility answer parked, Close\'s box is measured; the answer is then lost at the front (unavailable: Try again and its hint, wrapped where narrow); the row wraps there (and does not wrap at 1440 px) inside the height it holds from the asking on, so Issue invoice… in the row below (the owner\'s issue eligibility answered first) does not move either; Close\'s box is unchanged within 0.5 px, the point that was Close\'s centre is still Close and a real press there closes the dialog; the hint is whole, Try again reached by Tab inside the dialog, the dialog does not scroll sideways and no amount breaks, nothing is posted; the owner\'s allowed answer (Discard draft…) moves nothing either, and Close and Escape return focus to the row\'s Open button that opened the dialog; the dialog is still not scrolled sideways after Tab and the arrow keys; a second draft at the largest amounts the shop accepts, under a long description, reads $90,071,992,547,409.91 whole, and where it is wider than the dialog (600 and 320 px, enlarged text) scrolls sideways inside its own named region, reached by Tab and scrolled by the keyboard; and a LATE Edit answer (its eligibility parked while the discard\'s and the issue\'s are in) — lost (unavailable: its text and Try again) or allowed (Edit draft) — moves neither the discard row, Issue invoice… nor Close', async () => {
   const c = await discardCase('d23', 2, [HOLD_LINE]);
   const [large, id] = c.ids;
   const problems = [];
@@ -6958,11 +7004,11 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
     check(ok, `${where}: focus went back to ${await focusOf(page)}, not the opener ${opener}`);
   };
   try {
-    for (const { cell, width, font, wraps, overflows } of HOLD_CELLS) {
+    for (const { cell, width, height, font, wraps, overflows } of HOLD_CELLS) {
       const page = await ownerDrafts(c);
       const from = st.api.length;
       // The viewport is changed once the list is in and before the reopen (a rotated or zoomed window), then held.
-      await page.setViewport(width, 1000);
+      await page.setViewport(width, height);
       if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
       await page.settle();
       const setUp = await page.evaluate('({ innerWidth, rootFont: getComputedStyle(document.documentElement).fontSize })');
@@ -6972,6 +7018,9 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
 
       // 1. Unavailable: the parked answer is lost at the front, so the page's read fails as a cut connection does.
       const parked = await reopenParked(page, c.main.id, id, c.customer.name, reopenByKey);
+      // M7B-INVOICES-ISSUE-P2 (review C8): Issue invoice… is in its row below the discard's before the discard's late answer.
+      await page.waitFor(() => offered(page, 'draft-issue-open'), 30_000, `${cell}: Issue invoice… is offered`);
+      await page.settle();
       const before = await holdBox(page);
       let lost = 0;
       st.lose = (rec, phase) => phase === 'response' && rec.frameId === page.frameId && isDiscardEligibility(c.main.id, id)(rec) && lost++ === 0;
@@ -6993,7 +7042,10 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       // Preconditions, asserted: where the cell is narrow or enlarged the answer wraps the discard row (the hint below Try
       // again) and grows it, and at the desktop width it does not wrap — a cell never passes without what it measures.
       assert.equal(after.wrapped, wraps, `${cell}: the unavailable answer ${wraps ? 'wraps' : 'does not wrap'} the discard row`);
-      if (wraps) assert.ok(after.row.height - before.row.height > HOLD_TOLERANCE, `${cell}: the discard row grew (${before.row.height} -> ${after.row.height})`);
+      // The row holds the height of its tallest answer from the asking on (review C8): wrapped, it grows no further, so
+      // nothing below it moves either — Issue invoice… in the issue's row.
+      check(moved(before.row, after.row) <= HOLD_TOLERANCE, `${cell}: the discard row grew ${JSON.stringify({ before: before.row, after: after.row })}`);
+      check(moved(before.issue, after.issue) <= HOLD_TOLERANCE, `${cell}: Issue invoice… moved ${JSON.stringify({ before: before.issue, after: after.issue })}`);
       check(moved(before.close, after.close) <= HOLD_TOLERANCE, `${cell}: Close moved ${JSON.stringify({ before: before.close, after: after.close })}`);
       check(moved(before.edit, after.edit) <= HOLD_TOLERANCE, `${cell}: Edit draft moved ${JSON.stringify({ before: before.edit, after: after.edit })}`);
       check(hit === 'close', `${cell}: the point that was Close's centre (${x}, ${y}) is now ${hit}`);
@@ -7001,10 +7053,11 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       check(shown.focus === 'draft-view-close', `${cell}: focus stayed on Close: ${shown.focus}`);
       fits(cell, after);
       check(after.why.x >= after.panel.x && after.why.x + after.why.width <= after.panel.x + after.panel.width + HOLD_TOLERANCE, `${cell}: the hint lies inside the dialog`);
-      // Tab from Close: the lines' region, Edit draft, Try again, then back round to Close (the dialog keeps focus).
+      // Tab from Close: the lines' region, Edit draft, Try again, then (M7B-INVOICES-ISSUE-P2: a real new control, the owner's
+      // issue eligibility answered) Issue invoice… in its own row below, then back round to Close (the dialog keeps focus).
       const tabs = [];
-      for (let i = 0; i < 4; i += 1) { await page.press('Tab'); tabs.push(await focusOf(page)); }
-      check(JSON.stringify(tabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-elig-again', 'draft-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
+      for (let i = 0; i < 5; i += 1) { await page.press('Tab'); tabs.push(await focusOf(page)); }
+      check(JSON.stringify(tabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-elig-again', 'draft-issue-open', 'draft-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
       await stillSideways(page, cell);
       // The real press at the pre-answer point: it must close the dialog (a moved Close leaves it open).
       await pressAt(page, x, y);
@@ -7048,7 +7101,7 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       if (overflows) check(big.scroller !== null && big.scroller.role === 'region' && big.scroller.name === 'Draft lines' && big.scroller.tabIndex === 0 && ['auto', 'scroll'].includes(big.scroller.overflowX) && big.scroller.scrollWidth > big.scroller.clientWidth + HOLD_TOLERANCE, `${cell} (largest amounts): the lines do not scroll inside a named region reached by Tab ${JSON.stringify(big.scroller)}`);
       const bigTabs = [];
       let scrolled = null;
-      for (let i = 0; i < 4; i += 1) {
+      for (let i = 0; i < 5; i += 1) {
         await page.press('Tab');
         bigTabs.push(await focusOf(page));
         if (i === 0 && overflows) {
@@ -7060,12 +7113,42 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       }
       record('SDB-23', { cell, answer: 'largest', before: big, after: big, overflowed, amounts, subtotal: big.subtotal, scrolled, tabs: bigTabs });
       fits(`${cell} (largest amounts)`, big);
-      check(JSON.stringify(bigTabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-open', 'draft-view-close']), `${cell} (largest amounts): Tab from Close went ${JSON.stringify(bigTabs)}`);
+      check(JSON.stringify(bigTabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-open', 'draft-issue-open', 'draft-view-close']), `${cell} (largest amounts): Tab from Close went ${JSON.stringify(bigTabs)}`);
       if (overflows) check(scrolled > 0, `${cell} (largest amounts): ArrowRight on the focused lines region did not scroll them (${scrolled})`);
       await stillSideways(page, `${cell} (largest amounts)`);
       await page.press('Escape');
       await page.waitFor(`!${q('draft-view')}`, 5_000, `${cell}: Escape closed the largest amounts' dialog`);
       await backTo(page, `drafts-open-${large}`, `${cell} (largest amounts): after Escape`);
+
+      // 4. A late Edit answer (M7B-INVOICES-ISSUE-P2, review D5): the edit eligibility parked while the discard's and the
+      //    issue's are in, Close, the discard row and Issue invoice… measured; then it lands — lost at the front
+      //    (unavailable: its text and Try again, wrapped where narrow) or allowed (Edit draft) — and nothing below moves.
+      for (const answer of ['unavailable', 'allowed']) {
+        const editParked = await reopenEditParked(page, c.main.id, id, c.customer.name);
+        const editBefore = await holdBox(page);
+        const saidBefore = await textOf(page, 'draft-view-edit-state');
+        let editLost = 0;
+        if (answer === 'unavailable') st.lose = (rec, phase) => phase === 'response' && rec.frameId === page.frameId && isEditEligibility(c.main.id, id)(rec) && editLost++ === 0;
+        try {
+          editParked.release();
+          await page.waitFor(answer === 'unavailable' ? `!!${q('draft-view-edit-retry')}` : () => offered(page, 'draft-view-edit'), 30_000, `${cell}: the late Edit answer (${answer}) is shown`);
+        } finally {
+          st.lose = null;
+        }
+        await quiet(page, from);
+        await page.settle();
+        const editAfter = await holdBox(page);
+        const saidAfter = await textOf(page, 'draft-view-edit-state');
+        record('SDB-23', { cell, answer: `late edit ${answer}`, before: editBefore, after: editAfter, said: [saidBefore, saidAfter] });
+        // Preconditions, asserted: the edit row said it was checking while parked, and the answer landed as meant.
+        assert.equal(saidBefore, EDIT_CHECKING, `${cell}: the edit row says it is checking while its answer is parked`);
+        assert.equal(saidAfter, answer === 'unavailable' ? EDIT_UNAVAILABLE : '', `${cell}: the late Edit answer (${answer}) is said`);
+        check(moved(editBefore.row, editAfter.row) <= HOLD_TOLERANCE, `${cell}: a late Edit answer (${answer}) moved the discard row ${JSON.stringify({ before: editBefore.row, after: editAfter.row })}`);
+        check(moved(editBefore.issue, editAfter.issue) <= HOLD_TOLERANCE, `${cell}: a late Edit answer (${answer}) moved Issue invoice… ${JSON.stringify({ before: editBefore.issue, after: editAfter.issue })}`);
+        check(moved(editBefore.close, editAfter.close) <= HOLD_TOLERANCE, `${cell}: a late Edit answer (${answer}) moved Close ${JSON.stringify({ before: editBefore.close, after: editAfter.close })}`);
+        await page.press('Escape');
+        await page.waitFor(`!${q('draft-view')}`, 5_000, `${cell}: Escape closed the reopen dialog (late Edit ${answer})`);
+      }
       for (const each of c.ids) assert.deepEqual(sentBy(page, isDiscardPost(c.main.id, each), from).map(apiLine), [], `${cell}: no discard was posted`);
       await page.close();
     }
@@ -8198,11 +8281,13 @@ const wordsOf = (stem, n) => {
   s = s.slice(0, n);
   return s.endsWith(' ') ? `${s.slice(0, -1)}x` : s;
 };
-/** The issued dialog's geometry now: the panel, Close, the lines region and table, every amount and the viewport. */
-const issuedBox = (page) => page.evaluate(`(() => {
+/** The issued dialog's parts, by test id (M7B-INVOICES-ISSUE-P2 commit C: SIS-15 measures the issue confirmation with its own). */
+const ISSUED_BOX = Object.freeze({ panel: 'issued-view', close: 'issued-view-close', scroller: 'issued-view-lines-scroll', table: 'issued-view-lines', line: 'issued-view-line', subtotal: 'issued-view-subtotal', total: 'issued-view-total', time: 'issued-view-issued-at' });
+/** A dialog's geometry now (`ids`, as ISSUED_BOX): the panel, its first control, the lines region and table, every amount and the viewport. */
+const dialogBox = (page, ids) => page.evaluate(`(() => {
   const box = (n) => { if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
   const linesIn = (node) => { if (!node) return null; const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
-  const panel = ${q('issued-view')}, close = ${q('issued-view-close')}, scroller = ${q('issued-view-lines-scroll')}, table = ${q('issued-view-lines')};
+  const panel = ${q(ids.panel)}, close = ${q(ids.close)}, scroller = ${q(ids.scroller)}, table = ${q(ids.table)};
   const c = close.getBoundingClientRect();
   const hit = document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2);
   return {
@@ -8220,20 +8305,20 @@ const issuedBox = (page) => page.evaluate(`(() => {
         .map((n) => ({ node: n.dataset?.testid ?? \`\${n.tagName.toLowerCase()}.\${String(n.className).split(' ').slice(0, 3).join('.')}\`, right: Math.round(n.getBoundingClientRect().right - right) })).slice(0, 8);
     })(),
     // Every amount on one line: the lines' unit prices and totals, and the Subtotal's and the Total's amounts.
-    amountLines: [...document.querySelectorAll(${JSON.stringify(`${by('issued-view-line')} td:nth-child(n+4)`)})].map(linesIn),
-    subtotal: { text: ${q('issued-view-subtotal')}?.textContent.trim() ?? null, amountLines: linesIn(${q('issued-view-subtotal')}?.lastElementChild) },
+    amountLines: [...document.querySelectorAll(${JSON.stringify(`${by(ids.line)} td:nth-child(n+4)`)})].map(linesIn),
+    subtotal: { text: ${q(ids.subtotal)}?.textContent.trim() ?? null, amountLines: linesIn(${q(ids.subtotal)}?.lastElementChild) },
     // The issue time may wrap at its spaces only: its date and its clock each on one line.
     issuedAt: (() => {
-      const time = ${q('issued-view-issued-at')}, node = time?.firstChild ?? null;
+      const time = ${ids.time === undefined ? 'null' : q(ids.time)}, node = time?.firstChild ?? null;
       const part = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
       return node === null ? null : { lines: linesIn(time), date: part(0, 10), clock: part(11, 19) };
     })(),
-    total: { text: ${q('issued-view-total')}?.textContent.trim() ?? null, amount: ${q('issued-view-total')}?.lastElementChild?.textContent ?? null, amountLines: linesIn(${q('issued-view-total')}?.lastElementChild) },
+    total: { text: ${q(ids.total)}?.textContent.trim() ?? null, amount: ${q(ids.total)}?.lastElementChild?.textContent ?? null, amountLines: linesIn(${q(ids.total)}?.lastElementChild) },
   };
 })()`);
-/** The Total's amount scrolled into view inside the dialog: whether all of it is inside the dialog and the viewport, on top. */
-const totalSeen = (page) => page.evaluate(`(() => {
-  const amount = ${q('issued-view-total')}?.lastElementChild ?? null, panel = ${q('issued-view')};
+/** The Total's amount scrolled into view inside the dialog (`ids`, as ISSUED_BOX): whether all of it is inside the dialog and the viewport, on top. */
+const amountSeen = (page, ids) => page.evaluate(`(() => {
+  const amount = ${q(ids.total)}?.lastElementChild ?? null, panel = ${q(ids.panel)};
   if (amount === null || panel === null) return null;
   amount.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   const a = amount.getBoundingClientRect(), d = panel.getBoundingClientRect();
@@ -8244,6 +8329,8 @@ const totalSeen = (page) => page.evaluate(`(() => {
     onTop: hit !== null && amount.contains(hit), panelScrollLeft: panel.scrollLeft, panelScrollTop: panel.scrollTop,
   };
 })()`);
+const issuedBox = (page) => dialogBox(page, ISSUED_BOX);
+const totalSeen = (page) => amountSeen(page, ISSUED_BOX);
 
 /**
  * The issued row `id` now (SIS-09, before its dialog opens), measured with the section held (by this test only, then let go)
@@ -8388,4 +8475,460 @@ scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice is
     check(back, `${cell}: focus went back to ${await focusOf(page)}, not the row's Open`);
   }
   assert.deepEqual(problems, [], 'the issued dialog holds its bounds in every cell');
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-ISSUE-P2 (commit C) — issuing a saved draft from the Server drafts section (SIS-10..15): the reopen dialog's
+// Issue invoice…, offered on the server's own issue eligibility; the confirmation, which shows the server's issue preview;
+// ONE POST of exactly its `expected` under one key; the card outside the dialogs; Check again and Find issued invoice. Every
+// draft is saved through the entry's own draft POST and every setting through its settings PUT by an owner session made
+// outside the browser (as SIS-06..09): this file writes no row of an issuing or draft table. The literals are the shop's
+// own texts (ServerInvoiceDrafts.tsx ISSUE_TEXT, ISSUE_REFUSED_TEXT).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const isIssuePost = (store, id) => (r) => r.method === 'POST' && r.path === `${draftsPath(store)}/${id}/issue`;
+const isIssuePreview = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}/issue-preview`;
+const isIssueEligibility = (store, id) => (r) => r.method === 'GET' && r.path === `${draftsPath(store)}/${id}/issue-eligibility`;
+const isIssuedDetail = (store) => (r) => r.method === 'GET' && new RegExp(`^${issuedPath(store)}/[0-9a-f-]{36}$`).test(r.path);
+const ISSUE_SAID = Object.freeze({
+  title: 'Issue this invoice?',
+  consequence: (total) => `This issues the store's next invoice number for ${total}; it closes the draft and cannot be changed or undone in the product. Void is not available. It does not record a payment.`,
+  closeWarning: 'Closing does not cancel: the server may still issue this invoice.',
+  unresolved: 'Not confirmed yet: the server may have issued this invoice. "Check again" sends the same request; it never issues it twice.',
+  issued: (n, store) => `Issued as invoice ${n} at ${store}.`,
+  unread: 'Issued. The invoice details did not load.',
+  conflict: "Not issued: the draft, the store's issuing settings or the customer changed since this review.",
+  updated: 'This is the updated invoice. Check it, then press Issue invoice.',
+  denied: 'Not issued: this account may not issue invoices at this store.',
+  detached: 'This issue could not be confirmed: the store connection changed. Look in Issued invoices for this store before issuing the draft again.',
+});
+
+/** A draft saved through the entry's own draft POST by `session` (as the shop saves one): its id. */
+async function draftVia(session, tenant, store, customerId, lines) {
+  const saved = await call('POST', draftsPath(store), { session, key: randomUUID(), body: { expectedTenant: tenant, customerId, currency: 'USD', lines } });
+  assert.equal(saved.status, 201, `the draft POST: ${saved.text}`);
+  return JSON.parse(saved.text).draft.id;
+}
+/** One tenant's issue audits, oldest first: scope and store, and the draft, invoice, customer and store subject they name (IIH's triple). */
+async function issueAudits(tenant) {
+  const rows = await owner`select scope_type, store_id, subject_invoice_draft_id, subject_issued_invoice_id, subject_customer_id, subject_store_id from public.audit_event
+    where action_id = ${ISSUE_ACTION} and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => ({ scope: r.scope_type, store: r.store_id, draft: r.subject_invoice_draft_id, invoice: r.subject_issued_invoice_id, customer: r.subject_customer_id, subject: r.subject_store_id }));
+}
+const previewPhaseOf = (page) => page.evaluate(`${q('draft-issue-preview-state')}?.dataset.phase ?? null`);
+/** Reopen draft `id`, wait for Issue invoice… (the server's issue eligibility allowed it) and open the confirmation; the preview answered. */
+async function openIssueReview(page, id, customerName, { keyboard = false } = {}) {
+  if (!(await has(page, 'draft-view'))) await reopenDraft(page, id, customerName);
+  await page.waitFor(() => offered(page, 'draft-issue-open'), 30_000, 'Issue invoice… is offered: the server\'s issue eligibility allowed it');
+  if (keyboard) {
+    await page.call(by('draft-issue-open'), function () { this.focus(); });
+    await page.press('Enter');
+  } else await page.click(by('draft-issue-open'));
+  await page.waitFor(`!!${q('draft-issue-confirm')}`, 15_000, 'the issue confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'draft-issue-keep', 15_000, 'Keep draft has the first focus');
+  await page.waitFor(async () => !['opening', 'loading', null].includes(await previewPhaseOf(page)), 30_000, 'the preview answered');
+}
+/** The confirmation as shown: its name and description, the reviewed seller, customer, lines and amounts, and its controls. */
+const reviewOf = (page) => page.evaluate(`(() => {
+  const t = (id) => document.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  const bdi = (id) => document.querySelector('[data-testid="' + id + '"] bdi')?.textContent ?? null;
+  const d = document.querySelector('[data-testid="draft-issue-confirm"]');
+  return {
+    role: d?.getAttribute('role') ?? null, name: d === null ? null : document.getElementById(d.getAttribute('aria-labelledby'))?.textContent.trim() ?? null,
+    description: d === null ? null : document.getElementById(d.getAttribute('aria-describedby'))?.textContent.trim() ?? null,
+    legal: bdi('draft-issue-preview-seller-legal'), store: bdi('draft-issue-preview-seller-store'), address: bdi('draft-issue-preview-seller-address'),
+    taxId: bdi('draft-issue-preview-seller-tax-id'), customer: bdi('draft-issue-preview-customer'),
+    lines: [...document.querySelectorAll('[data-testid="draft-issue-preview-line"]')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
+    subtotal: t('draft-issue-preview-subtotal'), tax: t('draft-issue-preview-tax'), total: t('draft-issue-preview-total'),
+    text: d?.innerText ?? '', buttons: d === null ? [] : [...d.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  };
+})()`);
+/** The attempt card outside the dialogs: its state, its status line and its controls. */
+const issueCardOf = (page) => page.evaluate(`(() => {
+  const c = ${q('drafts-issue-hold')};
+  return { state: c?.dataset.state ?? null, text: ${q('drafts-issue-hold-status')}?.textContent.trim() ?? null, buttons: c === null ? [] : [...c.querySelectorAll('button')].map((b) => b.textContent.trim()) };
+})()`);
+const waitCardText = (page, text, label) => page.waitFor(async () => (await issueCardOf(page)).text === text, 30_000, label);
+/** The stored invoice the review must show and the card must name, as viewShown says it (its tax line and Total). */
+const reviewShown = (r) => ({ tax: viewShown(r).tax, total: viewShown(r).total, subtotal: viewShown(r).subtotal, lines: viewShown(r).lines });
+
+scenario('SIS-10', 'AC-04 AC-05 ISS-23 EXPLICIT ISSUE IN BOTH TAX MODES AND AN EXPLICIT 0 % — three drafts saved through the entry; for each, the store\'s settings set through the real PUT (8.875 %, then "No tax calculated", then an explicit 0 %): the reopen dialog offers Issue invoice… on the server\'s answer; the confirmation (an alertdialog, Keep draft focused first) shows the preview the entry answered — never a number or a time — and Issue invoice sends ONE POST of exactly the preview\'s `expected` under a fresh v4 key; then both dialogs close, focus is on the heading and the card says "Issued as invoice {n} at {store}." after ONE GET of that invoice; the number, the tax line and the Total shown equal the rows the database holds, and each issue wrote EXACTLY ONE issue audit (at the store, naming the draft, the invoice and the customer) and one completion', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i10', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i10 Ada Customer ${SUFFIX}`);
+  const seller = { legalName: `M7SIS i10 Seller LLC ${SUFFIX}`, storeName: `M7SIS i10 Main ${SUFFIX}`, postalAddress: `10 Main Street ${SUFFIX}\nSpringfield 01101`, taxRegistrationId: `TX10-${SUFFIX}` };
+  const plan = [
+    { tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 }, said: 'Tax (8.875%) $1.77', total: '$21.76', lines: [{ description: `M7SIS i10 Screen repair ${SUFFIX}`, quantity: 1, unitPriceCents: 1999 }] },
+    { tax: { mode: 'none' }, said: 'No tax calculated', total: '$25.99', lines: [{ description: `M7SIS i10 Battery ${SUFFIX}`, quantity: 2, unitPriceCents: 1250 }, { description: `M7SIS i10 Cable ${SUFFIX}`, quantity: 1, unitPriceCents: 99 }] },
+    { tax: { mode: 'exclusive_rate', rateMilliPercent: 0 }, said: 'Tax (0%) $0.00', total: '$45.00', lines: [{ description: `M7SIS i10 Labour ${SUFFIX}`, quantity: 3, unitPriceCents: 1500 }] },
+  ];
+  const ids = [];
+  for (const step of plan) ids.push(await draftVia(direct, tenant, main.id, customer.id, step.lines));
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [...ids].reverse(), 'the three saved drafts', customer.name);
+  const keys = [];
+  for (const [i, step] of plan.entries()) {
+    await settingsVia(direct, tenant, main.id, { ...seller, tax: step.tax });
+    const before = await counts();
+    const from = st.api.length;
+    await openIssueReview(page, ids[i], customer.name);
+    const review = await reviewOf(page);
+    const previews = sentBy(page, isIssuePreview(main.id, ids[i]), from);
+    assert.deepEqual(previews.map(answered), ['200'], `draft ${i + 1}: ONE preview read on open`);
+    assert.deepEqual(sentBy(page, isIssuePost(main.id, ids[i]), from), [], `draft ${i + 1}: no POST from opening the review`);
+    const expected = JSON.parse(previews[0].replied.text).preview.expected;
+    assert.deepEqual({ role: review.role, name: review.name, description: review.description, tax: review.tax, total: review.total, customer: review.customer, legal: review.legal },
+      { role: 'alertdialog', name: ISSUE_SAID.title, description: ISSUE_SAID.consequence(step.total), tax: step.said, total: `Total ${step.total}`, customer: customer.name, legal: seller.legalName },
+      `draft ${i + 1}: the review the preview answered`);
+    assert.ok(!/Invoice \d|UTC|\bpaid\b|\bdue\b|balance|deposit|receivable/i.test(review.text), `draft ${i + 1}: no number, time or payment state before issuing: ${review.text}`);
+    assert.deepEqual(review.buttons, ['Keep draft', 'Issue invoice']);
+    await page.click(by('draft-issue-send'));
+    await waitCardText(page, ISSUE_SAID.issued(i + 1, main.name), `draft ${i + 1}: issued and read back`);
+    await quiet(page, from);
+    await page.settle();
+    const posts = sentBy(page, isIssuePost(main.id, ids[i]), from);
+    const [stored] = await storedIssued(main.id);
+    const audits = await issueAudits(tenant);
+    record('SIS-10', { step: i + 1, posts: posts.map(apiLine), number: stored.number, tax: stored.taxMode, audits: audits.length });
+    assert.equal(posts.length, 1, `draft ${i + 1}: ONE POST: ${posts.map(apiLine).join('; ')}`);
+    assert.equal(posts[0].body, JSON.stringify(expected), `draft ${i + 1}: exactly the preview's expected, serialized once`);
+    assert.match(posts[0].headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+    keys.push(posts[0].headers['idempotency-key']);
+    assert.equal(posts[0].status, 201);
+    assert.equal(posts[0].replied.headers.location, `${issuedPath(main.id)}/${stored.id}`, 'the 201 names the invoice the database holds');
+    assert.deepEqual(sentBy(page, isIssuedDetail(main.id), from).map(readLine), [`${issuedPath(main.id)}/${stored.id} 200`], `draft ${i + 1}: ONE GET of that invoice for its number`);
+    assert.equal(await focusOf(page), 'drafts-title', 'focus on the heading: the row and both dialogs are gone');
+    assert.deepEqual([await has(page, 'draft-issue-confirm'), await has(page, 'draft-view')], [false, false]);
+    assert.deepEqual((await issueCardOf(page)).buttons, ['View invoice', 'Dismiss']);
+    assert.equal(stored.number, i + 1, 'the number shown is the database\'s');
+    assert.deepEqual(reviewShown(stored), { tax: step.said, total: `Total ${step.total}`, subtotal: review.subtotal, lines: review.lines }, `draft ${i + 1}: the stored invoice is the one reviewed`);
+    assert.equal(audits.length, i + 1, `draft ${i + 1}: exactly ONE issue audit for it`);
+    assert.deepEqual(audits[i], { scope: 'store', store: main.id, draft: ids[i], invoice: stored.id, customer: customer.id, subject: null }, 'at the store, naming the draft, the invoice and the customer');
+    await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, `draft ${i + 1}: one completion, one idempotency record`);
+    await page.click(by('drafts-issue-dismiss'));
+    await page.waitFor(async () => (await issueCardOf(page)).state === 'none', 10_000, 'the card dismissed');
+  }
+  const stored = await storedIssued(main.id);
+  assert.deepEqual(stored.map((r) => [r.number, r.taxMode, r.taxRate, r.tax, r.total]), [[3, 'exclusive_rate', 0, 0, 4500], [2, 'none', null, null, 2599], [1, 'exclusive_rate', 8875, 177, 2176]],
+    'both tax modes and an explicit 0 % as issued: 0 % is a rate, never "none"');
+  assert.equal(new Set(keys).size, 3, 'a new key per issue');
+  await waitDraftRows(page, [], 'every draft issued: none left open');
+  await assertDraftsNowhere([page], [...keys, ...ids, customer.id]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-11', 'AC-05 A CONFIRMED POST, THEN A FAILED DETAIL READ — the issue commits and its 201 reaches the page; the invoice read for its number is lost at the front (st.lose, before the entry): the card says "Issued. The invoice details did not load." — never "not issued" — and "Load details again" sends ONE GET of that invoice and NO POST; the number then shown is the database\'s; one invoice, one issue audit, one POST in all', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i11', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i11 Ada Customer ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SIS i11 Seller ${SUFFIX}`, storeName: `M7SIS i11 Main ${SUFFIX}`, postalAddress: `11 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  const id = await draftVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i11 Service ${SUFFIX}`, quantity: 1, unitPriceCents: 4200 }]);
+  const page = await openPage();
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [id], 'the saved draft', customer.name);
+  await openIssueReview(page, id, customer.name);
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isIssuedDetail(main.id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-issue-send'));
+    await waitCardText(page, ISSUE_SAID.unread, 'issued, its details not loaded');
+  } finally {
+    st.lose = null;
+  }
+  const afterLoss = { card: await issueCardOf(page), posts: sentBy(page, isIssuePost(main.id, id), from).map(answered), details: sentBy(page, isIssuedDetail(main.id), from).map((r) => `${r.status} ${r.lost ?? 'delivered'}`) };
+  record('SIS-11', { phase: 'lost read', ...afterLoss });
+  assert.deepEqual(afterLoss, { card: { state: 'issued', text: ISSUE_SAID.unread, buttons: ['Load details again', 'Dismiss'] }, posts: ['201'], details: ['0 request'] }, 'confirmed, the read lost: retry the read only');
+  await page.click(by('drafts-issue-load'));
+  const [stored] = await storedIssued(main.id);
+  await waitCardText(page, ISSUE_SAID.issued(stored.number, main.name), 'the read again shows the number');
+  await quiet(page, from);
+  const details = sentBy(page, isIssuedDetail(main.id), from);
+  record('SIS-11', { phase: 'read again', details: details.map(readLine), posts: sentBy(page, (r) => r.method === 'POST', from).map(apiLine) });
+  assert.deepEqual(details.map((r) => `${r.path} ${r.status}`), [`${issuedPath(main.id)}/${stored.id} 0`, `${issuedPath(main.id)}/${stored.id} 200`], 'the lost GET and ONE GET again, of that invoice');
+  assert.deepEqual(sentBy(page, (r) => r.method === 'POST' && !isLogin(r), from).map(apiLine), [sentBy(page, isIssuePost(main.id, id), from).map(apiLine)[0]], 'ONE POST in all: the read again sends none');
+  assert.equal((await storedIssued(main.id)).length, 1);
+  assert.equal((await issueAudits(tenant)).length, 1, 'one issue audit');
+}, 240_000);
+
+scenario('SIS-12', 'AC-06 ISS-19 A LOST BROWSER RESPONSE AFTER A REAL COMMITTED ISSUE — the POST reaches the entry and commits, and its 201 is dropped at the front (st.lose, after the entry answered): the confirmation says "Not confirmed yet", never issued; a window focus and a tab return send nothing; Escape is Close then and the attempt is kept in the card; "Check again" sends exactly one more POST with the SAME key, the byte-identical body and the same session token, answered as the entry\'s replay (Idempotent-Replayed: true) naming the invoice that landed; ONE invoice, ONE issue audit and one completion in all. This proves lost BROWSER delivery only — not a lost database COMMIT acknowledgement, which IIH-07 (tests/db/invoiceIssueHttp.integration.test.mjs) covers', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i12', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i12 Ada Customer ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SIS i12 Seller ${SUFFIX}`, storeName: `M7SIS i12 Main ${SUFFIX}`, postalAddress: `12 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'exclusive_rate', rateMilliPercent: 5000 } });
+  const id = await draftVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i12 Repair ${SUFFIX}`, quantity: 2, unitPriceCents: 1000 }]);
+  const page = await recordWrites(await openPage());
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [id], 'the saved draft', customer.name);
+  await openIssueReview(page, id, customer.name);
+  const before = await counts();
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isIssuePost(main.id, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('draft-issue-send'));
+    await waitData(page, 'draft-issue-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const committed = await storedIssued(main.id);
+  const afterLoss = {
+    posts: sentBy(page, isIssuePost(main.id, id), from).map((r) => `${r.status} ${r.lost ?? 'delivered'}`), invoices: committed.length, audits: (await issueAudits(tenant)).length,
+    said: await textOf(page, 'draft-issue-attempt-state'), close: await textOf(page, 'draft-issue-keep'), card: await textOf(page, 'drafts-issue-hold-status'),
+  };
+  record('SIS-12', { phase: 'lost reply', ...afterLoss });
+  assert.deepEqual(afterLoss, { posts: ['201 response'], invoices: 1, audits: 1, said: ISSUE_SAID.unresolved, close: 'Close', card: '' }, 'committed once, its answer lost at the front: "Not confirmed yet"');
+  const guard = { seen: [] };
+  const watch = { phase: 'request', match: (r) => r.frameId === page.frameId && r.method === 'POST' && !isLogin(r), hit: (r) => { guard.seen.push(apiLine(r)); st.gates.add(watch); }, released: Promise.resolve() };
+  st.gates.add(watch);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  await page.press('Escape'); // after sending, Escape is Close: the attempt stays in the card
+  await page.waitFor(`!${q('draft-issue-confirm')} && !${q('draft-view')}`, 10_000, 'Escape closed both dialogs');
+  await waitData(page, 'drafts-issue-hold', 'state', 'unresolved');
+  await page.settle();
+  st.gates.delete(watch);
+  assert.deepEqual(guard.seen, [], 'nothing re-sent on a focus, a tab return or Close');
+  await page.click(by('drafts-issue-check'));
+  await waitCardText(page, ISSUE_SAID.issued(committed[0].number, main.name), 'the replay is the issue, read back');
+  await quiet(page, from);
+  const posts = sentBy(page, isIssuePost(main.id, id), from);
+  record('SIS-12', { phase: 'check again', posts: posts.map(apiLine), replayed: posts[1]?.replied?.headers['idempotent-replayed'] ?? null });
+  assert.equal(posts.length, 2, `two POSTs in all: the lost one and Check again (${posts.map(apiLine).join('; ')})`);
+  assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
+  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.equal(posts[1].headers['x-tmpos-session-csrf'], posts[0].headers['x-tmpos-session-csrf'], 'under the session token it was sent with');
+  assert.equal(posts[1].status, 201);
+  assert.equal(posts[1].replied.headers['idempotent-replayed'], 'true', 'the entry replays the one completion');
+  assert.equal(posts[1].replied.headers.location, `${issuedPath(main.id)}/${committed[0].id}`, 'naming the invoice that landed');
+  assert.deepEqual((await storedIssued(main.id)).map((r) => r.id), [committed[0].id], 'ONE invoice');
+  assert.equal((await issueAudits(tenant)).length, 1, 'ONE issue audit');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1 }, 'one completion, one idempotency record');
+  await assertDraftsNowhere([page], [posts[0].headers['idempotency-key'], posts[0].body]);
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-13', 'AC-07 A STALE REVIEW — the confirmation shows the preview of settings version 1; meanwhile the owner changes the settings through the real PUT (version 2, "No tax calculated"): Issue invoice is the sealed 409 write_conflict, said in an alert that takes focus, with nothing issued (no invoice, no audit, the counter at 0); the old body is never sent again; "Review again" reads ONE new preview (the updated invoice said) and only a new press sends — a NEW key and the new settings version — and issues invoice 1 under the new settings', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i13', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i13 Ada Customer ${SUFFIX}`);
+  const seller = { legalName: `M7SIS i13 Seller ${SUFFIX}`, storeName: `M7SIS i13 Main ${SUFFIX}`, postalAddress: `13 Main Street ${SUFFIX}`, taxRegistrationId: null };
+  await settingsVia(direct, tenant, main.id, { ...seller, tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 } });
+  const id = await draftVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i13 Repair ${SUFFIX}`, quantity: 1, unitPriceCents: 1999 }]);
+  const page = await openPage();
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [id], 'the saved draft', customer.name);
+  await openIssueReview(page, id, customer.name);
+  assert.equal((await reviewOf(page)).tax, 'Tax (8.875%) $1.77');
+  await settingsVia(direct, tenant, main.id, { ...seller, tax: { mode: 'none' } }); // version 2, elsewhere
+  const from = st.api.length;
+  await page.click(by('draft-issue-send'));
+  await page.waitFor(async () => (await textOf(page, 'draft-issue-refused')) === ISSUE_SAID.conflict, 30_000, 'the conflict said');
+  const refused = { focus: await focusOf(page), invoices: (await storedIssued(main.id)).length, audits: (await issueAudits(tenant)).length, counter: (await storedSettings(main.id)).counter, review: await has(page, 'draft-issue-review-again') };
+  record('SIS-13', { phase: 'conflict', refused, posts: sentBy(page, isIssuePost(main.id, id), from).map(apiLine) });
+  assert.deepEqual(refused, { focus: 'draft-issue-refused', invoices: 0, audits: 0, counter: 0, review: true }, 'refused, nothing issued, focus on the alert');
+  await page.click(by('draft-issue-review-again'));
+  await page.waitFor(async () => (await textOf(page, 'draft-issue-preview-state')) === ISSUE_SAID.updated, 30_000, 'the updated invoice said');
+  assert.equal((await reviewOf(page)).tax, 'No tax calculated', 'the new preview');
+  assert.deepEqual(sentBy(page, isIssuePost(main.id, id), from).length, 1, 'nothing sent on its own after the review');
+  await page.click(by('draft-issue-send'));
+  await waitCardText(page, ISSUE_SAID.issued(1, main.name), 'issued under the new settings');
+  await quiet(page, from);
+  const posts = sentBy(page, isIssuePost(main.id, id), from);
+  const previews = sentBy(page, isIssuePreview(main.id, id), from);
+  record('SIS-13', { phase: 'reviewed', posts: posts.map(apiLine), previews: previews.map(answered) });
+  assert.deepEqual(posts.map(answered), ['409 write_conflict', '201']);
+  assert.notEqual(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'a NEW key');
+  assert.deepEqual(posts.map((r) => JSON.parse(r.body).expectedSettingsVersion), [1, 2], 'the old body at version 1, never again; the new at version 2');
+  assert.deepEqual(previews.map(answered), ['200'], 'Review again read ONE new preview');
+  const stored = await storedIssued(main.id);
+  assert.deepEqual(stored.map((r) => [r.number, r.taxMode]), [[1, 'none']], 'issued once, under the reviewed settings');
+  assert.equal((await issueAudits(tenant)).length, 1);
+}, 240_000);
+
+scenario('SIS-14', 'AC-03 AC-08 PERMISSION AND SESSION CHANGES, NO SIGN-IN OR RESEND ON ITS OWN — a manager whose stored Invoices level is Edit (Customers View) gets no Issue invoice… (the issue eligibility\'s 403, ONE fresh session check, nothing said); at Approve it is offered; with the review open the owner lowers Invoices to View: the POST is the 403, ONE fresh check, "this account may not issue" — nothing written, no login. Then the owner\'s unresolved attempt (its request lost before the entry) and the session ended in the store: a window focus finds the end and DETACHES the attempt (no Check again), sending no login and no POST; ONE Reconnect click is ONE login, the attempt stays detached and nothing is re-sent', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i14', ['main']);
+  const manager = await actor('i14-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SIS i14 Ada Customer ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SIS i14 Seller ${SUFFIX}`, storeName: `M7SIS i14 Main ${SUFFIX}`, postalAddress: `14 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  const id = await draftVia(direct, tenant, main.id, customer.id, [{ description: `M7SIS i14 Repair ${SUFFIX}`, quantity: 1, unitPriceCents: 2500 }]);
+  await levelVia(direct, 'manager', 'customers', 'view');
+  await levelVia(direct, 'manager', 'invoices', 'edit');
+  const page = await openPage();
+  await signIn(page, manager);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [id], 'the saved draft', customer.name);
+  const from = st.api.length;
+  await reopenDraft(page, id, customer.name);
+  await page.waitFor(() => sentBy(page, isIssueEligibility(main.id, id), from).every((r) => r.status !== null) && sentBy(page, isIssueEligibility(main.id, id), from).length === 1, 30_000, 'the issue eligibility answered');
+  await quiet(page, from);
+  await page.settle();
+  await focusAndSettle(page, 'focus');
+  const refusedAt = st.api.indexOf(sentBy(page, isIssueEligibility(main.id, id), from)[0]);
+  const edit = {
+    offered: await has(page, 'draft-issue-open'), retry: await has(page, 'draft-issue-elig-again'), said: await page.evaluate(`${q('draft-issue-row')}?.textContent ?? null`),
+    eligibility: sentBy(page, isIssueEligibility(main.id, id), from).map(answered), logins: sentBy(page, isLogin, from).length,
+    freshChecks: sentBy(page, isSessionRead, refusedAt + 1).length,
+  };
+  record('SIS-14', { phase: 'edit', ...edit, sent: sentBy(page, () => true, from).map(apiLine) });
+  // The session reads after it, EXACTLY: the issue eligibility's ONE fresh check, the discard eligibility's ONE (Edit may not
+  // discard either; both 403s are answered before any of them) and the focus's plain check — 3. A 403 taken as a refusal
+  // with no fresh check (review C11's mutant) gives 2; a second fresh check per 403 gives more.
+  assert.deepEqual(edit, { offered: false, retry: false, said: '', eligibility: ['403 forbidden'], logins: 0, freshChecks: 3 },
+    'Invoices Edit: no Issue invoice… and nothing said, the issue eligibility asked once (not again on a focus), no login');
+  await closeView(page);
+  await levelVia(direct, 'manager', 'invoices', 'approve');
+  await openIssueReview(page, id, customer.name);
+  await levelVia(direct, 'manager', 'invoices', 'view'); // lowered while the review is open
+  const before = await counts();
+  const sendFrom = st.api.length;
+  await page.click(by('draft-issue-send'));
+  await page.waitFor(async () => (await textOf(page, 'draft-issue-refused')) === ISSUE_SAID.denied, 30_000, 'the refusal said');
+  await quiet(page, sendFrom);
+  const sent = sentBy(page, () => true, sendFrom);
+  const postAt = sent.findIndex((r) => r.method === 'POST');
+  record('SIS-14', { phase: 'lowered', sent: sent.map(apiLine) });
+  assert.deepEqual(sent[postAt] && answered(sent[postAt]), '403 forbidden');
+  assert.deepEqual(sent.slice(postAt + 1).map((r) => `${r.method} ${r.path}`), ['GET /api/v1/session'], 'then ONE fresh session check — no login, no second POST');
+  await assertDelta(before, REFUSED, 'the refused issue');
+  assert.equal((await storedIssued(main.id)).length, 0);
+
+  // The owner: an unresolved attempt (its request never reached the entry), then the session ended in the store.
+  const ownerPage = await openPage();
+  await signIn(ownerPage, boss);
+  await openDrafts(ownerPage);
+  await pickStore(ownerPage, main.id);
+  await waitDraftRows(ownerPage, [id], 'the draft still open', customer.name);
+  await openIssueReview(ownerPage, id, customer.name);
+  const oFrom = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isIssuePost(main.id, id)(rec) && rec.frameId === ownerPage.frameId && lost++ === 0;
+    await ownerPage.click(by('draft-issue-send'));
+    await waitData(ownerPage, 'draft-issue-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await ownerPage.press('Escape');
+  await waitData(ownerPage, 'drafts-issue-hold', 'state', 'unresolved');
+  await endSessions(boss);
+  const endFrom = st.api.length;
+  await focusAndSettle(ownerPage, 'focus');
+  await waitData(ownerPage, 'drafts-issue-hold', 'state', 'detached');
+  const ended = { card: await issueCardOf(ownerPage), logins: sentBy(ownerPage, isLogin, endFrom).length, posts: sentBy(ownerPage, (r) => r.method === 'POST', endFrom).length };
+  record('SIS-14', { phase: 'session ended', ...ended });
+  assert.deepEqual(ended, { card: { state: 'detached', text: ISSUE_SAID.detached, buttons: ['Dismiss'] }, logins: 0, posts: 0 }, 'the end detaches the attempt: no Check again, no login, no POST');
+  const reFrom = st.api.length;
+  await ownerPage.click(by('drafts-retry'));
+  await waitData(ownerPage, 'drafts-stores-state', 'phase', 'ready');
+  await focusAndSettle(ownerPage, 'focus');
+  await quiet(ownerPage, reFrom);
+  const reconnected = { logins: sentBy(ownerPage, isLogin, reFrom).map(answered), posts: sentBy(ownerPage, (r) => r.method === 'POST' && !isLogin(r), reFrom).map(apiLine), card: (await issueCardOf(ownerPage)).state };
+  record('SIS-14', { phase: 'reconnected', ...reconnected });
+  assert.deepEqual(reconnected, { logins: ['200'], posts: [], card: 'detached' }, 'ONE login on Reconnect, the attempt still detached, nothing re-sent');
+  assert.deepEqual(sentBy(ownerPage, isIssuePost(main.id, id), oFrom).map((r) => r.lost ?? 'delivered'), ['request'], 'ONE POST in all, never re-sent');
+  assert.equal((await storedIssued(main.id)).length, 0, 'nothing was ever issued');
+}, 240_000);
+
+/**
+ * SIS-15's measurement of the issue confirmation (and the reopen dialog's Issue invoice… row): the panel, Keep draft, the
+ * lines region and table, every amount and what reaches past the dialog's content box. Both dialogs are viewport-sized
+ * overlays (DialogFrame: fixed, max-w-2xl, 90vh), so at 320 CSS px they ARE genuinely narrow — unlike the section in the
+ * page, whose main column the older demo invoices table widens (SIS-09).
+ */
+const ISSUE_BOX = Object.freeze({ panel: 'draft-issue-confirm', close: 'draft-issue-keep', scroller: 'draft-issue-preview-lines-scroll', table: 'draft-issue-preview-lines', line: 'draft-issue-preview-line', subtotal: 'draft-issue-preview-subtotal', total: 'draft-issue-preview-total' });
+
+scenario('SIS-15', 'AC-10 ISS-23 BOUNDED LAYOUT AND KEYBOARD OF THE ISSUE CONFIRMATION — a draft saved through the entry with a 256-character line at the largest price ($90,071,992,547,409.91, "No tax calculated" under the longest seller values the settings take, a 200-character customer): at 1440x900, 768x1024, 320x640, 320x480 CSS px (deviceScaleFactor 1, 16 px default) and 768x1024 with a 24 px default text size (Page.setFontSizes), the reopen dialog\'s Issue invoice… is in view and on top; opened from the keyboard, the confirmation (an alertdialog named "Issue this invoice?") has Keep draft focused first, in view and on top; it never overflows sideways nor lies outside the viewport; every amount is on one line and the Total\'s, scrolled into view, is whole; the lines are a named region reached by Tab that scrolls sideways where wider; Tab goes Keep draft → lines → Issue invoice → Keep draft; Escape closes it with nothing sent and gives focus back to Issue invoice…, and Escape again gives focus back to the row\'s Open; ONE preview GET per open, no POST', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('i15', ['main']);
+  const direct = await directLogin(boss);
+  const values = {
+    legalName: wordsOf(`Seller${SUFFIX}w`, 200), storeName: wordsOf(`Store${SUFFIX}w`, 120),
+    postalAddress: Array.from({ length: 8 }, (_, i) => wordsOf(`Line${i + 1}w`, 120)).join('\n'),
+    taxRegistrationId: `TX${SUFFIX}${'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(2)}`.slice(0, 64), tax: { mode: 'none' },
+  };
+  const customer = await customerVia(direct, `${'Customer'.repeat(5)}${SUFFIX} ${wordsOf('Named', 151)}`);
+  await settingsVia(direct, tenant, main.id, values);
+  const description = wordsOf(`Work${SUFFIX}d`, 256);
+  const id = await draftVia(direct, tenant, main.id, customer.id, [{ description, quantity: 1, unitPriceCents: Number.MAX_SAFE_INTEGER }]);
+  const page = await openPage();
+  await signIn(page, boss);
+  await openDrafts(page);
+  await pickStore(page, main.id);
+  await waitDraftRows(page, [id], 'the saved draft', customer.name);
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    const setUp = await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })');
+    assert.deepEqual(setUp, { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
+    const from = st.api.length;
+    await page.call(`${by('drafts-row')}[data-id="${id}"] ${by('drafts-open')}`, function () { this.focus(); });
+    await page.press('Enter');
+    await page.waitFor(`${q('draft-view-customer')}?.textContent.trim() === ${JSON.stringify(customer.name)}`, 30_000, `${cell}: the reopen dialog`);
+    await page.waitFor(() => offered(page, 'draft-issue-open'), 30_000, `${cell}: Issue invoice… offered`);
+    const opener = await page.evaluate(`(() => { const b = ${q('draft-issue-open')}; b.scrollIntoView({ block: 'nearest' }); const r = b.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && b.contains(hit) }; })()`);
+    check(opener.inView && opener.onTop, `${cell}: Issue invoice… is not in view and on top ${JSON.stringify(opener)}`);
+    await openIssueReview(page, id, customer.name, { keyboard: true });
+    await quiet(page, from);
+    await page.settle();
+    const b = await dialogBox(page, ISSUE_BOX);
+    const review = await reviewOf(page);
+    const overflowed = b.scroller.scrollWidth > b.scroller.clientWidth + HOLD_TOLERANCE;
+    const tabs = [];
+    let scrolled = null;
+    for (let i = 0; i < 3; i += 1) {
+      await page.press('Tab');
+      tabs.push(await focusOf(page));
+      if (i === 0 && overflowed) {
+        for (const type of ['rawKeyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 });
+        await page.waitFor(`(${q(ISSUE_BOX.scroller)}?.scrollLeft ?? 0) > 0`, 5_000, 'the lines scrolled').catch(() => {});
+        scrolled = await page.evaluate(`${q(ISSUE_BOX.scroller)}?.scrollLeft ?? null`);
+      }
+    }
+    const seen = await amountSeen(page, ISSUE_BOX);
+    const sideways = await page.evaluate(`(() => { const p = ${q(ISSUE_BOX.panel)}; return { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`);
+    record('SIS-15', { cell, width, height, font: font ?? 16, box: b, overflowed, scrolled, tabs, seen, sideways, opener, reads: sentBy(page, (r) => isIssuePreview(main.id, id)(r) || isIssuePost(main.id, id)(r), from).map(apiLine) });
+    // One-sided, as SIS-09 (a7d645d): a cell that must overflow keeps the region's scroll path exercised; one measured to fit
+    // may overflow by a few pixels under other fonts (CI), and then it must scroll like the rest (below).
+    if (overflows) assert.equal(overflowed, true, `${cell}: the lines table is not wider than its region ${JSON.stringify([b.table?.width, b.scroller.clientWidth])}`);
+    check(review.role === 'alertdialog' && review.name === ISSUE_SAID.title, `${cell}: not the named alertdialog ${JSON.stringify([review.role, review.name])}`);
+    check(b.panel.x >= -HOLD_TOLERANCE && b.panel.x + b.panel.width <= width + HOLD_TOLERANCE, `${cell}: the confirmation lies outside the viewport ${JSON.stringify([b.panel.x, b.panel.width])}`);
+    check(b.panel.scrollWidth <= b.panel.clientWidth + HOLD_TOLERANCE, `${cell}: the confirmation overflows sideways (${b.panel.scrollWidth} > ${b.panel.clientWidth}): ${JSON.stringify(b.overflowers)}`);
+    check(b.close.inView && b.close.hit && b.close.focused, `${cell}: Keep draft is not in view, on top and focused first ${JSON.stringify(b.close)}`);
+    check(b.scroller.role === 'region' && b.scroller.name === 'Invoice lines' && b.scroller.tabIndex === 0 && ['auto', 'scroll'].includes(b.scroller.overflowX), `${cell}: the lines are not a named, focusable, scrollable region ${JSON.stringify(b.scroller)}`);
+    check(b.amountLines.length === 2 && b.amountLines.every((n) => n === 1), `${cell}: a line amount breaks ${JSON.stringify(b.amountLines)}`);
+    check(b.subtotal.text === 'Subtotal $90,071,992,547,409.91' && b.subtotal.amountLines === 1, `${cell}: the Subtotal ${JSON.stringify(b.subtotal)}`);
+    check(b.total.text === 'Total $90,071,992,547,409.91' && b.total.amount === '$90,071,992,547,409.91' && b.total.amountLines === 1, `${cell}: the Total's digits ${JSON.stringify(b.total)}`);
+    check(seen !== null && seen.inDialog && seen.inView && seen.onTop, `${cell}: the Total's amount, scrolled into view, is not whole and on top ${JSON.stringify(seen)}`);
+    if (overflowed) check(scrolled > 0, `${cell}: ArrowRight on the focused lines region did not scroll them (${scrolled})`);
+    check(sideways.scrollLeft === 0 && sideways.scrollWidth <= sideways.clientWidth + HOLD_TOLERANCE, `${cell}: after Tab and the arrow keys the confirmation scrolled or overflows sideways ${JSON.stringify(sideways)}`);
+    check(review.description === ISSUE_SAID.consequence('$90,071,992,547,409.91') && review.customer === customer.name && review.legal === values.legalName && review.address === values.postalAddress
+      && review.lines.length === 1 && review.lines[0][1] === description, `${cell}: the review does not show the long values whole`);
+    check(JSON.stringify(tabs) === JSON.stringify([ISSUE_BOX.scroller, 'draft-issue-send', ISSUE_BOX.close]), `${cell}: Tab from Keep draft went ${JSON.stringify(tabs)}`);
+    await page.press('Escape');
+    await page.waitFor(`!${q(ISSUE_BOX.panel)}`, 5_000, `${cell}: Escape closed the confirmation`);
+    const back = await page.waitFor(async () => (await focusOf(page)) === 'draft-issue-open', 5_000, `${cell}: focus back`).then(() => true, () => false);
+    check(back, `${cell}: focus went back to ${await focusOf(page)}, not Issue invoice…`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('draft-view')}`, 5_000, `${cell}: Escape closed the reopen dialog`);
+    const row = await page.waitFor(async () => (await focusOf(page)) === `drafts-open-${id}`, 5_000, `${cell}: focus on the row`).then(() => true, () => false);
+    check(row, `${cell}: focus went back to ${await focusOf(page)}, not the row's Open`);
+    check(JSON.stringify(sentBy(page, (r) => isIssuePreview(main.id, id)(r) || isIssuePost(main.id, id)(r), from).map((r) => `${r.method} ${r.status}`)) === JSON.stringify(['GET 200']), `${cell}: not ONE preview GET and no POST`);
+  }
+  assert.deepEqual(problems, [], 'the issue confirmation holds its bounds in every cell');
+  assert.equal((await storedIssued(main.id)).length, 0, 'nothing issued');
 }, 240_000);
