@@ -8820,15 +8820,24 @@ scenario('SIS-14', 'AC-03 AC-08 PERMISSION AND SESSION CHANGES, NO SIGN-IN OR RE
   } finally {
     st.lose = null;
   }
+  const escFrom = st.api.length;
   await ownerPage.press('Escape');
   await waitData(ownerPage, 'drafts-issue-hold', 'state', 'unresolved');
+  // Escape's own reaction first: a pressed confirmation closes the reopen dialog and page one is read again (a session read,
+  // then the list). Ended while that read is out, the LIST's 401 finds the end before the focus can, and the focus then
+  // rightly sends nothing (the CI race this barrier closes): the end below is the focus's to find.
+  await ownerPage.waitFor(() => sentBy(ownerPage, isDraftList(main.id), escFrom).some((r) => r.status === 200), 30_000, 'page one read again after Escape');
+  await waitData(ownerPage, 'drafts-list-state', 'phase', 'ready');
+  await ownerPage.settle();
+  await quiet(ownerPage, escFrom); // after the rows: a name read the list's answer starts is answered too
   await endSessions(boss);
   const endFrom = st.api.length;
   await focusAndSettle(ownerPage, 'focus');
   await waitData(ownerPage, 'drafts-issue-hold', 'state', 'detached');
-  const ended = { card: await issueCardOf(ownerPage), logins: sentBy(ownerPage, isLogin, endFrom).length, posts: sentBy(ownerPage, (r) => r.method === 'POST', endFrom).length };
+  const ended = { card: await issueCardOf(ownerPage), logins: sentBy(ownerPage, isLogin, endFrom).length, posts: sentBy(ownerPage, (r) => r.method === 'POST', endFrom).length, found: sentBy(ownerPage, () => true, endFrom).map(apiLine) };
   record('SIS-14', { phase: 'session ended', ...ended });
-  assert.deepEqual(ended, { card: { state: 'detached', text: ISSUE_SAID.detached, buttons: ['Dismiss'] }, logins: 0, posts: 0 }, 'the end detaches the attempt: no Check again, no login, no POST');
+  assert.deepEqual(ended, { card: { state: 'detached', text: ISSUE_SAID.detached, buttons: ['Dismiss'] }, logins: 0, posts: 0, found: ['GET /api/v1/session -> 401 unauthenticated'] },
+    'the focus\'s ONE plain check finds the end and detaches the attempt: no Check again, no login, no POST, nothing else sent');
   const reFrom = st.api.length;
   await ownerPage.click(by('drafts-retry'));
   await waitData(ownerPage, 'drafts-stores-state', 'phase', 'ready');
