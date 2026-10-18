@@ -248,14 +248,14 @@ TM POS2026 is delivered in stages. "Done" means the work is complete and tested;
 - **Next:** putting this foundation to work in each shop area as it moves onto the platform.
 
 ### Next up
-1. **The first server-backed actions inside an individual shop.** Adding a customer, and the owner's per-role customer access, are built and not yet deployed. The owner's per-role invoice access setting is built too, and so are the first invoice steps on the server: drafts saved for a store, edited and discarded, checked against that setting.
+1. **The first server-backed actions inside an individual shop.** Adding a customer, and the owner's per-role customer access, are built and not yet deployed. The owner's per-role invoice access setting is built too, and so are the first invoice steps on the server: drafts saved for a store, edited and discarded, checked against that setting. Those drafts can now also be issued as numbered invoices once the owner has set the store's invoice details, and the issued invoices can be listed and opened. This is built and not yet deployed, and it records no payment.
 2. **Secure shop staff sign-in** connected to the server, matching what already exists for administrators.
 
 ### Stage 5: Shop data moves onto the platform *(Planned)*
 Each area of the shop app moves onto permanent, permission-checked, audited storage in turn. Each can be released and rolled back on its own:
 
 1. **Customers, staff and prospects**, the records everything else refers to.
-2. **Sales, invoices and payments**, including connecting a shop's own card-payment provider. Card details are designed to stay with that provider rather than be stored by TM POS2026. The first steps, invoice drafts saved for a store, edited and discarded, are built and not yet deployed.
+2. **Sales, invoices and payments**, including connecting a shop's own card-payment provider. Card details are designed to stay with that provider rather than be stored by TM POS2026. The first steps, invoice drafts saved for a store, edited, discarded and issued as numbered invoices, are built and not yet deployed. No payment is recorded yet.
 3. **Inventory and purchasing**, kept consistent with recorded sales so stock counts stay accurate.
 4. **Repairs, services, warranties and returns.**
 5. **Shipping**, for outbound and return shipments.
@@ -311,6 +311,11 @@ TM POS2026 has not had a public release, and it has no official version numbers 
 - [Backend] Signing out clears the customer and invoice-draft changes the browser was holding, and an answer that arrives after sign-out does not change what is shown. Not yet switched on.
 - [Backend] Request limiting behaves more carefully when the server is busy: a request is no longer started once its time to be checked has run out, and an answer that comes back too late is never treated as permission. A rare fault in the new server's request database connections, which could stop the server, is removed; older database code used elsewhere, which the new server does not use, still carries it. Not yet switched on.
 - [Backend] The remaining occasional failures of the request-limiting automated tests were traced to two kinds of safety refusal (one failure, which was not fully logged, only probably): when the server or its database is slow, a request is refused rather than let through, as designed. What slowed things down in those test runs is not known. The tests now record the timing and database activity behind each refusal, so a future failure can be looked into. Request limiting itself is unchanged. Not yet switched on.
+- [Backend] The store owner can set each store's invoice details: the legal seller name, the name shown on invoices, the postal address, an optional tax registration number, and how tax is handled, either at an exclusive rate entered as a percentage or with no tax calculated. The shop app says "Saved" only after the server confirms the new details. Not yet switched on.
+- [Backend] A team member with the right invoice and customer access can review a saved draft and issue it as a numbered invoice. Nothing is issued until the team member confirms in a dialog, and an issued invoice cannot be changed or undone in the product. Not yet switched on.
+- [Backend] If the answer to an invoice issue is lost, "Check again" sends the same request and cannot issue the invoice twice, for 23 hours after the first attempt; "Find issued invoice" looks for the invoice the draft produced. Not yet switched on.
+- [Backend] A store's issued invoices are listed newest number first. Each one opens to the details recorded when it was issued: the seller, the customer, the lines, the tax and the total. Later changes to the settings or the customer do not change it. Not yet switched on.
+- [Backend] Issuing does not record a payment or an amount due, and voiding an issued invoice is not available. The product does not yet check whether tax applies to a store's sales, or whether an invoice meets any jurisdiction's rules. Not yet switched on.
 
 ### v0.8: Server-checked permissions and business-account management
 *18–30 September 2026*
