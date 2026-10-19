@@ -399,19 +399,30 @@ const PINNED = {
   // The two sha256 values pin the 034 bytes this stage commits.
   [`034_m7b_invoice_${'issue'}.up.sql`]: '5f74386be2e10e1a4b9ed4b2941bf45f1bffe945a50fbe339d3e5ed4b057cec0',
   [`034_m7b_invoice_${'issue'}.down.sql`]: '7cdf8f1bb697f86758fe5d2a0c64bfb547445a0f96d81a98ddfa0f7b774e6e1a',
+  // Phase 4.0 M7B-INVOICES-VOID-P1 — voiding an issued store invoice. In its OWN schema tmpos_invoice_void: one append-only table
+  // (the void record, row security on, no policy, no runtime privilege, a composite foreign key onto 034's issued-invoice scope key),
+  // one SECURITY DEFINER void routine and two v2 issued-invoice reads granted to tmpos_app alone, the ENABLE ALWAYS guards that keep a
+  // void record whole, and a SQL-standard-body anchor naming the 034 functions it relies on; tmpos_app loses EXECUTE on 034's page and
+  // get (the v2 reads replace them). Its rollback refuses while any void record or void audit record exists and otherwise restores
+  // the 034-era grants exactly; 034's own rollback fails on the dependency while 035 is applied. Proved against disposable PostgreSQL
+  // only; applied to no managed, persistent or application database. D4 now names the contiguous chain through 035; the exact-[005]
+  // gate is unchanged and still refuses. Both 035 keys are assembled at run time, as 034's are.
+  // The two sha256 values pin the 035 bytes this stage commits.
+  [`035_m7b_invoice_${'void'}.up.sql`]: '84163190420381524dcf3865c50ff413dd8267b6b4c0cf2962f608aa92e84d0e',
+  [`035_m7b_invoice_${'void'}.down.sql`]: 'd5cadcd170a17098cab99fbcc0269be24b3b0d93ffb564618ae38e2238ee98b7',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the sixty-eight expected files', () => {
+test('the migrations directory holds exactly the seventy expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

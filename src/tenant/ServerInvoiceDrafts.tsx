@@ -146,7 +146,8 @@
 //     draft" reads "Close" (closing does not cancel; Escape is Close then, and closes the reopen dialog too). A validated
 //     201 closes both dialogs, takes the row away and puts focus on the heading; the card outside them says "Issued.
 //     Loading the invoice…", reads the invoice ONCE (a GET, never another POST; "Load details again" when it fails) for
-//     "Issued as invoice {number} at {store}." with "View invoice" (the exported IssuedInvoiceDialog under this section's
+//     "Issued as invoice {number} at {store}." (or "…at {store}; it has since been voided." when the read shows it voided:
+//     the issue still committed) with "View invoice" (the exported IssuedInvoiceDialog under this section's
 //     own reads) — and page one is read again. A sealed refusal is said in an alert that takes focus, each with its own
 //     next step (a conflict's Review again, a closed draft's Find issued invoice); an answer that decides nothing leaves it
 //     UNRESOLVED: only "Check again" re-sends — the SAME key and bytes to its own store and draft, under the token it was
@@ -384,8 +385,8 @@ export const ISSUE_ELIGIBILITY_TEXT = Object.freeze({
   waiting: 'Too many requests: this comes back once the wait has passed.',
 });
 
-/** The issued sentence around its store's name, which the card isolates in a <bdi> (merchant text). */
-const issuedAround = (number: number): readonly [string, string] => [`Issued as invoice ${number} at `, '.'];
+/** The issued sentence around its store's name, which the card isolates in a <bdi> (merchant text); a later void is the invoice's state now, not this attempt's outcome. */
+const issuedAround = (number: number, voided: boolean): readonly [string, string] => [`Issued as invoice ${number} at `, voided ? '; it has since been voided.' : '.'];
 /** The issue confirmation's and the attempt card's texts (M7B-INVOICES-ISSUE-P2). Never "issued" before the server's 201 or a read. */
 export const ISSUE_TEXT = Object.freeze({
   open: 'Issue invoice…',
@@ -408,7 +409,7 @@ export const ISSUE_TEXT = Object.freeze({
   unresolved: 'Not confirmed yet: the server may have issued this invoice. "Check again" sends the same request; it never issues it twice.',
   tooOld: 'Too old to check again: it was sent too long ago. Find the issued invoice, or look in Issued invoices for this store.',
   issuedLoading: 'Issued. Loading the invoice…',
-  issued: (number: number, store: string) => issuedAround(number).join(store),
+  issued: (number: number, store: string, voided = false) => issuedAround(number, voided).join(store),
   issuedUnread: 'Issued. The invoice details did not load.',
   /** The card's invoice read refused 403 after its one fresh check: the refusal stands (nothing to retry). */
   issuedDenied: 'Issued. You cannot view issued invoices at this store, so the details cannot be shown here.',
@@ -612,6 +613,8 @@ export interface HeldIssue {
   /** The issued invoice (state issued), and its number once a read has shown it. */
   readonly invoiceId: string | null;
   readonly number: number | null;
+  /** Whether the last read that showed the invoice said it is voided now (its current state, never this attempt's outcome). */
+  readonly voided: boolean;
   /** The refusal that ended it (state refused); or, issued, its invoice's read refused for good ('denied', after its one fresh check: kept with the attempt, so a section mounted again reads nothing). */
   readonly refusal: IssueRefusal | null;
 }
@@ -2268,7 +2271,7 @@ function DraftsSection({
       const key = nextKey();
       const attempt: HeldIssue = {
         key, body: d.body, storeId: d.store.id, draftId: d.draftId, storeLabel: storeLabel(d.store), csrf: s.csrf, sentAt: clock(), sentWall: wall(),
-        state: 'sending', note: '', invoiceId: null, number: null, refusal: null,
+        state: 'sending', note: '', invoiceId: null, number: null, voided: false, refusal: null,
       };
       if (!issues.put(uid, attempt)) return say(pendingTextOf(issues.get(uid)));
       // The settled attempt it replaced takes its card read with it: cancelled, and its guard is let go.
@@ -2382,7 +2385,7 @@ function DraftsSection({
       const answer = await issuing.getIssued(storeId, invoiceId, csrf, controller.signal);
       if (stale()) return;
       if (answer.kind === 'ok') {
-        issues.change(uid, key, { number: answer.invoice.number });
+        issues.change(uid, key, { number: answer.invoice.number, voided: answer.invoice.status === 'voided' });
         return setDetail(null);
       }
       if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: DRAFTS_TEXT.ended });
@@ -2492,7 +2495,7 @@ function DraftsSection({
       if (stale()) return;
       if (answer.kind === 'ok') {
         if (answer.invoice === null) return say(ISSUE_TEXT.findNone);
-        issues.change(uid, key, { state: 'issued', invoiceId: answer.invoice.id, number: answer.invoice.number, body: '', note: '', refusal: null });
+        issues.change(uid, key, { state: 'issued', invoiceId: answer.invoice.id, number: answer.invoice.number, voided: answer.invoice.status === 'voided', body: '', note: '', refusal: null });
         const now = issueOf(key);
         return now === null ? undefined : issuedNow(now);
       }
@@ -3372,7 +3375,7 @@ function IssueCard({ held, expired, waiting, detail, finding, onCheck, onFind, o
     else if (finding) text = ISSUE_TEXT.finding;
     else if (held.state === 'sending') text = ISSUE_TEXT.sending;
     else if (held.state === 'checking') text = ISSUE_TEXT.checking;
-    else if (held.state === 'issued') text = held.number !== null ? <>{issuedAround(held.number)[0]}<bdi>{held.storeLabel}</bdi>{issuedAround(held.number)[1]}</> : held.refusal === 'denied' ? ISSUE_TEXT.issuedDenied : detail === 'loading' ? ISSUE_TEXT.issuedLoading : ISSUE_TEXT.issuedUnread;
+    else if (held.state === 'issued') text = held.number !== null ? <>{issuedAround(held.number, held.voided)[0]}<bdi>{held.storeLabel}</bdi>{issuedAround(held.number, held.voided)[1]}</> : held.refusal === 'denied' ? ISSUE_TEXT.issuedDenied : detail === 'loading' ? ISSUE_TEXT.issuedLoading : ISSUE_TEXT.issuedUnread;
     else text = old ? ISSUE_TEXT.tooOld : ISSUE_TEXT.unresolved;
   }
   const busy = held === undefined || (!detached && (finding || held.state === 'sending' || held.state === 'checking' || (held.state === 'issued' && detail === 'loading')));

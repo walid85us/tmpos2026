@@ -73,6 +73,13 @@
 // answer, never from the request — through the writer's one triple statement. The issuing-settings WRITE is a tenant CREATE
 // declaring `auditSubjects: 'store'`: its record names subject_store_id (its validated change-set store) alone, and its kind
 // alone may answer 'not_found' as a create (NOT_FOUND_CREATE_KINDS), rolled back exactly as an update's. Neither enqueues an event.
+// M7B-INVOICES-VOID-P1 (migration 035): the invoice VOID is an UPDATE of an issued invoice (aggregate type issued_invoice) at
+// store scope, its kind admitted beside the other three (PRECONDITION_UPDATE_KINDS). Its mutator declares
+// `auditSubjects: 'voided_invoice'`, so its one audit record names subject_issued_invoice_id — the command's own checked
+// aggregate id, the invoice its routine locked — and NO other subject, through the writer's one issued-invoice-alone statement.
+// It answers only the bare words: the object form stays the issue's alone, and from it is the fault. The update vocabulary
+// (conflict, invalid_state and unchanged sealed; not_found and precondition_failed rolled back) applies as to every update.
+// It enqueues no event.
 //
 // Outcomes. Every precondition is a routine's answer, so no error is ever read as a business answer: no SQLSTATE and no
 // constraint maps to 'conflict', and a reused event ID is a fault. A refusal is rolled back and answered only once the
@@ -152,9 +159,11 @@ export interface AggregateMutator {
    * invoice_draft UPDATE at store scope: the record names the draft, the command's own `changes.invoiceId` and the customer
    * the mutator answers, which it does as Readonly<{ outcome: 'applied'; subjectCustomerId: string }> instead of the bare
    * 'applied' (any other answer shape from it is the fault). 'store' — a CREATE at tenant scope: the record names
-   * `changes.storeId` alone. No other mutator may answer the object form.
+   * `changes.storeId` alone. 'voided_invoice' (M7B-INVOICES-VOID-P1) — an issued_invoice UPDATE at store scope: the record
+   * names its aggregate id (the issued invoice) as subject_issued_invoice_id and no other subject, and the mutator answers the
+   * bare words. No other mutator may answer the object form.
    */
-  readonly auditSubjects?: 'issued_invoice' | 'store';
+  readonly auditSubjects?: 'issued_invoice' | 'store' | 'voided_invoice';
 }
 
 /**
@@ -294,13 +303,16 @@ const CUSTOMER_AGGREGATE = 'customer';
  * 028) and, since M7B-INVOICES-P2, the UPDATE the draft it edited (migration 029).
  */
 const INVOICE_DRAFT_AGGREGATE = 'invoice_draft';
+/** The aggregate type of an issued invoice (migration 034), the void's target (M7B-INVOICES-VOID-P1). */
+const ISSUED_INVOICE_AGGREGATE = 'issued_invoice';
 /**
- * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly three: the draft edit's
- * (M7B-INVOICES-P2), the draft discard's (M7B-INVOICES-DISCARD-P1) and the invoice issue's (M7B-INVOICES-ISSUE-P1), each when
- * its expected tenant is not the store's — rolled back exactly as a create's; any other update answering it is the fault
- * (commit, step 2a'). Literals: the store imports no route module; its test pins this set equal to app.ts's.
+ * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly four: the draft edit's
+ * (M7B-INVOICES-P2), the draft discard's (M7B-INVOICES-DISCARD-P1), the invoice issue's (M7B-INVOICES-ISSUE-P1) and the
+ * invoice void's (M7B-INVOICES-VOID-P1), each when its expected tenant is not the store's — rolled back exactly as a
+ * create's; any other update answering it is the fault (commit, step 2a'). Literals: the store imports no route module; its
+ * test pins this set equal to app.ts's.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void']);
 /**
  * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly one: the
  * issuing-settings write, whose path store is missing, another tenant's or not writable — rolled back exactly as an update's
@@ -577,8 +589,10 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     const changes = changeRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
     // The typed audit subjects a mutator declares (M7B-INVOICES-ISSUE-P1), from its command's checked change set alone: the
-    // issue's own invoice id, or the settings write's store. A value that is not a canonical uuid is no subject: refused here.
-    const issuedInvoice = mutator.auditSubjects === 'issued_invoice' ? changes.invoiceId : null;
+    // issue's own invoice id, or the settings write's store — or (M7B-INVOICES-VOID-P1) the void's checked aggregate id, the
+    // issued invoice it targets. A value that is not a canonical uuid is no subject: refused here.
+    const issuedInvoice = mutator.auditSubjects === 'issued_invoice' ? changes.invoiceId
+      : mutator.auditSubjects === 'voided_invoice' ? aggregateId : null;
     const subjectStore = mutator.auditSubjects === 'store' ? changes.storeId : null;
     if (issuedInvoice !== null && !(typeof issuedInvoice === 'string' && CANONICAL_UUID_RE.test(issuedInvoice))) return UNAVAILABLE;
     if (subjectStore !== null && !(typeof subjectStore === 'string' && CANONICAL_UUID_RE.test(subjectStore))) return UNAVAILABLE;
@@ -682,6 +696,8 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       subjectInvoiceDraftId: mutator.aggregateType === INVOICE_DRAFT_AGGREGATE && (mutator.mode === 'create' || mutator.mode === 'update') ? aggregateId : null,
       // M7B-INVOICES-ISSUE-P1 (migration 034): the issue names its issued invoice — the command's checked invoiceId — and,
       // set at commit from its mutator's verified answer, its customer; the settings write names its store alone.
+      // M7B-INVOICES-VOID-P1: the void names its issued invoice — its checked aggregate id — alone (its aggregate type is no
+      // tenant, customer or draft, so every other subject above is null).
       subjectIssuedInvoiceId: issuedInvoice as string | null,
       subjectStoreId: subjectStore as string | null,
     };
@@ -748,7 +764,8 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
   const answered: unknown = await c.mutator.apply(sql, c.mutation, c.authority);
   // M7B-INVOICES-ISSUE-P1: an issued-invoice mutator answers 'applied' as an object naming the customer its routine locked —
   // the audit record's customer subject, taken from nowhere else — and only so: its bare 'applied' is the fault. Every other
-  // mutator's answer is the bare word, so an object from one is the fault below ('applied' !== an object).
+  // mutator's answer is the bare word — the void's (M7B-INVOICES-VOID-P1) included — so an object from one is the fault below
+  // ('applied' !== an object).
   const issued = c.mutator.auditSubjects === 'issued_invoice';
   const subjectCustomerId = issued ? appliedCustomerOf(answered) : null;
   if (issued && answered === 'applied') return refuse(UNAVAILABLE);
@@ -963,17 +980,19 @@ function mutatorOf(raw: unknown): AggregateMutator {
   if (isRecord(raw) && hasExactKeys(raw, [...MUTATOR_FIELDS, ...optional])) {
     const { kind, mode, aggregateType, apply, contextScope, issuingRefusals, auditSubjects } = raw;
     // The issuing pair on an update alone, as exactly true; the issued-invoice subjects on a store-scope invoice_draft update
-    // alone; the store subject on a tenant-scope create alone.
+    // alone; the store subject on a tenant-scope create alone; (M7B-INVOICES-VOID-P1) the voided-invoice subject on a
+    // store-scope issued_invoice update alone.
     const issuingValid = !optional.includes('issuingRefusals') || (issuingRefusals === true && mode === 'update');
     const subjectsValid = !optional.includes('auditSubjects')
       || (auditSubjects === 'issued_invoice' && mode === 'update' && aggregateType === INVOICE_DRAFT_AGGREGATE && contextScope === 'store')
-      || (auditSubjects === 'store' && mode === 'create' && contextScope === 'tenant');
+      || (auditSubjects === 'store' && mode === 'create' && contextScope === 'tenant')
+      || (auditSubjects === 'voided_invoice' && mode === 'update' && aggregateType === ISSUED_INVOICE_AGGREGATE && contextScope === 'store');
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string' && AGGREGATE_TYPE_RE.test(aggregateType)
       && typeof apply === 'function' && typeof contextScope === 'string' && MUTATOR_SCOPES.includes(contextScope) && issuingValid && subjectsValid) {
       return Object.freeze({
         kind, mode, aggregateType, apply: apply as AggregateMutator['apply'], contextScope: contextScope as CommandContextScope,
         ...(optional.includes('issuingRefusals') ? { issuingRefusals: true as const } : {}),
-        ...(optional.includes('auditSubjects') ? { auditSubjects: auditSubjects as 'issued_invoice' | 'store' } : {}),
+        ...(optional.includes('auditSubjects') ? { auditSubjects: auditSubjects as 'issued_invoice' | 'store' | 'voided_invoice' } : {}),
       });
     }
   }

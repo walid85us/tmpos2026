@@ -1,8 +1,9 @@
 // Phase 4.0 M7b — the PostgreSQL side of issuing (M7B-INVOICES-ISSUE-P1; docs/phase-4/12 §10; G-IAM, G-ISOLATION, G-PERSIST,
 // G-AUDIT; migration 034, schema tmpos_invoice_issue): the issue's mutator, the issuing-settings write's mutator, and the
 // four reads' production adapters (server/runtime/invoiceIssuing.ts, server/runtime/issuingSettings.ts), each ONE fixed call
-// into one of 034's session-bound SECURITY DEFINER routines. Every value is a bound parameter, bigints as exact decimal
-// text; no table is named here.
+// into one of 034's session-bound SECURITY DEFINER routines — since M7B-INVOICES-VOID-P1 the issued page and get into 035's
+// v2 routines instead (schema tmpos_invoice_void; THE LIFECYCLE below). Every value is a bound parameter, bigints as exact
+// decimal text; no table is named here.
 //
 // THE ISSUE'S MUTATOR (INVOICE_ISSUE_MUTATOR: store.invoice.issue, mode update, context scope 'store', issuingRefusals,
 // audit subjects 'issued_invoice'). For POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue, inside the command's
@@ -42,8 +43,17 @@
 // assembled answer must pass the runtime's own validator. Anything else — and an abort, a timeout, a lost connection, a
 // driver error — is a THROW, an outage the route answers as a bounded 503, never a refusal. The routes validate again.
 //
-// READINESS (probeInvoiceIssuing, chained last into the tenant reads' probe). It asks the four reads for a random key no
-// session holds and requires each one's single 'denied' row with every other column null: the login's EXECUTE and USAGE.
+// THE LIFECYCLE (M7B-INVOICES-VOID-P1, migration 035). The issued page and get ask 035's v2 routines,
+// tmpos_invoice_void.m7b_issued_invoice_page_v2 and m7b_issued_invoice_get_v2: 034's answers row for row, plus o_status on a
+// page row and o_status, o_voided_at and o_reason_code on every line row of the get (all NULL on a refusal row). 035 revoked
+// the runtime's EXECUTE on 034's page and get, so a 034 statement here would be refused outright — never an answer that
+// conceals a void. The get's lifecycle is a header value: identical on every line row, or a fault. The runtime validator
+// judges the words, the void time against issuedAt and the code (invoiceIssuing.ts THE LIFECYCLE). The voiding actor is no
+// column of either routine. The void's own mutator is postgresInvoiceVoid.ts.
+//
+// READINESS (probeInvoiceIssuing, chained last into the tenant reads' probe). It asks the four reads — 034's settings read
+// and preview, and since M7B-INVOICES-VOID-P1 035's v2 page and get in place of 034's — for a random key no session holds and
+// requires each one's single 'denied' row with every other column null: the login's EXECUTE and USAGE.
 //
 // No driver error message, row value, key or body is ever logged. IT CONSTRUCTS NOTHING AND READS NOTHING at import: the
 // caller hands it the kernel the composition root already built.
@@ -349,8 +359,9 @@ export function invoiceIssuePreviewAnswerOf(rows: unknown, scope: TrustedScope, 
   return accepted(answer, invoiceIssuePreviewOf(answer, draftId));
 }
 
+/** 034's page columns, then (M7B-INVOICES-VOID-P1) 035's v2 lifecycle column. */
 const PAGE_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_source_draft_id', 'o_customer_id',
-  'o_customer_name', 'o_currency', 'o_total_cents', 'o_issued_at', 'o_snapshot_version'];
+  'o_customer_name', 'o_currency', 'o_total_cents', 'o_issued_at', 'o_snapshot_version', 'o_status'];
 
 const PAGE_QUERY_KEYS: readonly string[] = Object.freeze(['after', 'sourceDraft', 'limit']);
 
@@ -369,7 +380,7 @@ export function issuedInvoicePageAnswerOf(rows: unknown, scope: TrustedScope, qu
     return {
       id: row.o_invoice_id, number: amountOf(row.o_number, 1), sourceDraftId: row.o_source_draft_id, customerId: row.o_customer_id,
       customerName: row.o_customer_name, currency: row.o_currency, totalCents: amountOf(row.o_total_cents, 0), issuedAt: row.o_issued_at,
-      snapshotVersion: row.o_snapshot_version,
+      snapshotVersion: row.o_snapshot_version, status: row.o_status,
     };
   });
   const hasMore = invoices.length > query.limit;
@@ -383,7 +394,9 @@ const GET_HEADER: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id',
   'o_source_draft_id', 'o_source_draft_version', 'o_settings_version', 'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id',
   'o_customer_id', 'o_customer_name', 'o_customer_version', 'o_currency', 'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents',
   'o_total_cents'];
-const GET_COLUMNS: readonly string[] = [...GET_HEADER, ...LINE_COLUMNS];
+/** 035's v2 lifecycle columns (M7B-INVOICES-VOID-P1), after 034's: the same three values on every line row. */
+const GET_LIFECYCLE: readonly string[] = ['o_status', 'o_voided_at', 'o_reason_code'];
+const GET_COLUMNS: readonly string[] = [...GET_HEADER, ...LINE_COLUMNS, ...GET_LIFECYCLE];
 
 /** The get routine's rows as the port's answer; a throw for anything out of shape. */
 export function issuedInvoiceAnswerOf(rows: unknown, scope: TrustedScope, invoiceId: string): unknown {
@@ -392,7 +405,8 @@ export function issuedInvoiceAnswerOf(rows: unknown, scope: TrustedScope, invoic
   const first = all[0];
   if (first.o_outcome !== 'line') return refusalOf(all, GET_COLUMNS, ['denied', 'not_found']);
   if (first.o_tenant_id !== scope.tenant || first.o_store_id !== scope.store || first.o_invoice_id !== invoiceId) throw fault();
-  sameHeader(all, GET_HEADER);
+  // The lifecycle is the invoice's, not a line's: one value on every row (M7B-INVOICES-VOID-P1).
+  sameHeader(all, [...GET_HEADER, ...GET_LIFECYCLE]);
   if (intOf(first.o_line_count, 1, INVOICE_DRAFT_MAX_LINES) !== all.length) throw fault();
   const answer = {
     outcome: 'invoice',
@@ -410,6 +424,9 @@ export function issuedInvoiceAnswerOf(rows: unknown, scope: TrustedScope, invoic
       taxCents: first.o_tax_cents === null ? null : amountOf(first.o_tax_cents, 0),
       totalCents: amountOf(first.o_total_cents, 0),
       lines: linesOf(all),
+      status: first.o_status,
+      voidedAt: first.o_voided_at,
+      reasonCode: first.o_reason_code,
     },
   };
   return accepted(answer, issuedInvoiceOf(answer, invoiceId));
@@ -462,8 +479,8 @@ export function createPostgresInvoiceIssuing(deps: { readonly client: Supervised
       const query: IssuedInvoiceListQuery = Object.freeze({ after: after as string | null, sourceDraft: sourceDraft as string | null, limit });
       return client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => issuedInvoicePageAnswerOf(
         await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_number, o_source_draft_id, o_customer_id, o_customer_name, o_currency,
-            o_total_cents, o_issued_at, o_snapshot_version
-          from tmpos_invoice_issue.m7b_issued_invoice_page(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${after}::uuid,
+            o_total_cents, o_issued_at, o_snapshot_version, o_status
+          from tmpos_invoice_void.m7b_issued_invoice_page_v2(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${after}::uuid,
             ${sourceDraft}::uuid, ${limit + 1}::integer)`,
         scope, query,
       ));
@@ -476,8 +493,8 @@ export function createPostgresInvoiceIssuing(deps: { readonly client: Supervised
         await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_number, o_snapshot_version, o_issued_at, o_source_draft_id,
             o_source_draft_version, o_settings_version, o_legal_name, o_store_name, o_postal_address, o_tax_registration_id, o_customer_id,
             o_customer_name, o_customer_version, o_currency, o_line_count, o_subtotal_cents, o_tax_mode, o_tax_rate, o_tax_cents, o_total_cents,
-            o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents
-          from tmpos_invoice_issue.m7b_issued_invoice_get(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${invoiceId}::uuid)`,
+            o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents, o_status, o_voided_at, o_reason_code
+          from tmpos_invoice_void.m7b_issued_invoice_get_v2(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${invoiceId}::uuid)`,
         scope, invoiceId,
       ));
     },
@@ -488,7 +505,10 @@ export function createPostgresInvoiceIssuing(deps: { readonly client: Supervised
 const deniedOnly = (rows: unknown, columns: readonly string[]): boolean =>
   Array.isArray(rows) && rows.length === 1 && hasColumns(rows[0], columns) && rows[0].o_outcome === 'denied' && isRefusal(rows[0], columns);
 
-/** Readiness: true only for each of the four reads' one refusal of a random key no session holds; anything else is false. */
+/**
+ * Readiness: true only for each of the four reads' one refusal of a random key no session holds — 034's settings read and
+ * preview, 035's v2 page and get (M7B-INVOICES-VOID-P1) — in that order; anything else is false.
+ */
 export async function probeInvoiceIssuing(client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false;
   const absentKey = randomBytes(32).toString('base64url');
@@ -504,14 +524,14 @@ export async function probeInvoiceIssuing(client: SupervisedPgClient, signal: Ab
         from tmpos_invoice_issue.m7b_invoice_issue_preview(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${id}::uuid)`;
       if (!deniedOnly(preview, PREVIEW_COLUMNS)) return false;
       const page = await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_number, o_source_draft_id, o_customer_id, o_customer_name, o_currency,
-          o_total_cents, o_issued_at, o_snapshot_version
-        from tmpos_invoice_issue.m7b_issued_invoice_page(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${null}::uuid, ${null}::uuid, ${1}::integer)`;
+          o_total_cents, o_issued_at, o_snapshot_version, o_status
+        from tmpos_invoice_void.m7b_issued_invoice_page_v2(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${null}::uuid, ${null}::uuid, ${1}::integer)`;
       if (!deniedOnly(page, PAGE_COLUMNS)) return false;
       const got = await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_number, o_snapshot_version, o_issued_at, o_source_draft_id,
           o_source_draft_version, o_settings_version, o_legal_name, o_store_name, o_postal_address, o_tax_registration_id, o_customer_id,
           o_customer_name, o_customer_version, o_currency, o_line_count, o_subtotal_cents, o_tax_mode, o_tax_rate, o_tax_cents, o_total_cents,
-          o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents
-        from tmpos_invoice_issue.m7b_issued_invoice_get(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${id}::uuid)`;
+          o_position, o_description, o_quantity, o_unit_price_cents, o_line_total_cents, o_status, o_voided_at, o_reason_code
+        from tmpos_invoice_void.m7b_issued_invoice_get_v2(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${id}::uuid)`;
       return deniedOnly(got, GET_COLUMNS);
     });
   } catch {

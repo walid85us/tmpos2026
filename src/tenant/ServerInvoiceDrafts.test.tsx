@@ -84,6 +84,8 @@ interface Settings { version: number; legalName: string; storeName: string; post
 interface Invoice {
   id: string; storeId: string; number: number; sourceDraftId: string; sourceVersion: number; customerId: string; customerName: string; customerVersion: number;
   settingsVersion: number; seller: Omit<Settings, 'version' | 'tax'>; lines: Line[]; amounts: Record<string, unknown>; issuedAt: string;
+  /** M7B-INVOICES-VOID-P1: present once voided (elsewhere: the shop offers no void) — the rows' status "voided" and the detail's `void` member. */
+  void?: { voidedAt: string; reasonCode: string };
 }
 type CreateScript = 'lose' | 'lose-before' | 503 | 429 | 'hold' | 'key-reused';
 /** M7B-INVOICES-P2: what the next PATCHes do — lose the answer after deciding (committed), lose the request, or answer this status (in the chain's envelope) instead. */
@@ -213,7 +215,7 @@ function fakeServer() {
       return { amounts: { currency: 'USD', subtotalCents: subtotal, tax: { mode: 'exclusive_rate', label: 'Tax', rateMilliPercent: tax.rateMilliPercent, amountCents: Number(amount) }, totalCents: Number(total) }, total };
     },
     summaryOfInvoice(i: Invoice) {
-      return { id: i.id, number: i.number, sourceDraftId: i.sourceDraftId, customerId: i.customerId, customerName: i.customerName, currency: 'USD', totalCents: i.amounts.totalCents, issuedAt: i.issuedAt, status: 'issued', snapshotVersion: 1 };
+      return { id: i.id, number: i.number, sourceDraftId: i.sourceDraftId, customerId: i.customerId, customerName: i.customerName, currency: 'USD', totalCents: i.amounts.totalCents, issuedAt: i.issuedAt, status: i.void === undefined ? 'issued' : 'voided', snapshotVersion: 1 };
     },
     mayDiscard(user: User, storeId: string): boolean {
       const grant = server.stores[user.uid]?.find((s) => s.id === storeId);
@@ -473,8 +475,9 @@ function fakeServer() {
             const i = server.invoices.find((x) => x.id === invoiceId && x.storeId === storeId);
             if (i === undefined) return refuse(404, 'not_found');
             return reply(200, { invoice: {
-              id: i.id, number: i.number, status: 'issued', snapshotVersion: 1, issuedAt: i.issuedAt, sourceDraft: { id: i.sourceDraftId, version: i.sourceVersion },
+              id: i.id, number: i.number, status: i.void === undefined ? 'issued' : 'voided', snapshotVersion: 1, issuedAt: i.issuedAt, sourceDraft: { id: i.sourceDraftId, version: i.sourceVersion },
               seller: i.seller, issuingSettingsVersion: i.settingsVersion, customer: { id: i.customerId, name: i.customerName, version: i.customerVersion }, lines: i.lines, amounts: i.amounts,
+              ...(i.void === undefined ? {} : { void: i.void }),
             } });
           }
           const one = /^sourceDraft=([0-9a-f-]{36})$/.exec(query ?? ''); // the lookup mode alone: this fake knows no other
@@ -5341,7 +5344,7 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     expect(posts[0].headers.get('content-type')).toBe('application/json');
     expect(r.keys).toHaveLength(1);
     expect(r.issueHolds.get('uid-a')).toMatchObject({ key: r.keys[0], body: posts[0].body, storeId: STORE_1, draftId: draft.id, state: 'sending' });
-    expect(Object.keys(r.issueHolds.get('uid-a')!).sort()).toEqual(['body', 'csrf', 'draftId', 'invoiceId', 'key', 'note', 'number', 'refusal', 'sentAt', 'sentWall', 'state', 'storeId', 'storeLabel']);
+    expect(Object.keys(r.issueHolds.get('uid-a')!).sort()).toEqual(['body', 'csrf', 'draftId', 'invoiceId', 'key', 'note', 'number', 'refusal', 'sentAt', 'sentWall', 'state', 'storeId', 'storeLabel', 'voided']); // M7B-INVOICES-VOID-P1: + voided (what the last read showed), still nothing of the invoice
     const status = screen.getByTestId('drafts-issue-hold-status');
     const fell = watchBody();
     await release(server); // the 201
@@ -6394,5 +6397,60 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     await click('drafts-issue-dismiss');
     expect(cardState()).toBe('none');
     expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  // M7B-INVOICES-VOID-P1 — a later void does not undo the issue: an invoice found or read as voided still proves the issue
+  // committed. The card says it was issued as invoice N and has since been voided — the invoice's state now, not this
+  // attempt's outcome — offers no new issue, and only GETs are sent for it.
+  const VOIDED_TEXT = 'Issued as invoice 1 at Main Street; it has since been voided.';
+  const VOID_MEMBER = Object.freeze({ voidedAt: '2027-01-01T00:00:00.000001Z', reasonCode: 'duplicate' });
+
+  it('SID-190. AC-07: "Find issued invoice" finding the draft\'s invoice voided since says "Issued as invoice 1 at Main Street; it has since been voided." — never "not issued", no new issue offered — and View invoice shows it Voided with its reason; the find and the view are GETs only (no POST after the refused one)', async () => {
+    let other: Draft | null = null;
+    const { server } = await ready({}, {}, (s, ada) => { other = s.seedDraft(STORE_1, ada, at(7), 300, 1); });
+    await openIssue(server, 0);
+    issueElsewhere(server, other!);
+    server.invoices[0].void = { ...VOID_MEMBER }; // and voided there too
+    await pressIssue();
+    await waitFor(() => expect(screen.getByTestId('draft-issue-refused')).toHaveTextContent(ISSUE_REFUSED_TEXT['not-open']));
+    const mark = server.sent.length;
+    await click('draft-issue-find');
+    await waitFor(() => expect(cardText()).toBe(VOIDED_TEXT));
+    expect(ISSUE_TEXT.issued(1, 'Main Street', true)).toBe(VOIDED_TEXT);
+    expect(cardState()).toBe('issued');
+    expect(cardText()).not.toMatch(/not issued|nothing/i);
+    expect([confirm(), view()]).toEqual([null, null]);
+    expect(rows().map((x) => x.getAttribute('data-id'))).not.toContain(other!.id);
+    expect(screen.queryByTestId('draft-issue-send')).toBeNull();
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['View invoice', 'Dismiss']);
+    await click('drafts-issue-view');
+    await waitFor(() => expect(screen.getByTestId('issued-view-title')).toHaveTextContent('Invoice 1'));
+    expect(screen.getByTestId('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(screen.getByTestId('issued-view-voided-at')).toHaveTextContent('2027-01-01 00:00:00 UTC');
+    expect(screen.getByTestId('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/);
+    expect(screen.getByTestId('issued-view-total')).toHaveTextContent('Total $3.27');
+    const after = server.sent.slice(mark);
+    expect(after.filter((x) => x.method !== 'GET')).toEqual([]);
+    expect(after.filter((x) => /\/invoices(\?|\/)/.test(x.url)).map((x) => x.url)).toEqual([
+      `${issuedInvoicesPathOf(STORE_1)}?sourceDraft=${other!.id}`, issuedInvoicePathOf(STORE_1, server.invoices[0].id),
+    ]);
+    expect(server.issuePosts()).toHaveLength(1);
+  });
+
+  it('SID-191. AC-05: a 201 whose invoice is voided before the card\'s ONE read of it says "Issued as invoice 1 at Main Street; it has since been voided." with View invoice and Dismiss — the 201 still settles it issued; nothing is sent again', async () => {
+    const { server } = await ready();
+    await openIssue(server);
+    server.hold.issue = 1;
+    await pressIssue();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['issue']));
+    server.invoices[0].void = { ...VOID_MEMBER }; // committed, then voided elsewhere before the shop reads it
+    await release(server); // the 201
+    await waitFor(() => expect(cardText()).toBe(VOIDED_TEXT));
+    expect(cardState()).toBe('issued');
+    expect(within(card()).getAllByRole('button').map((b) => b.textContent)).toEqual(['View invoice', 'Dismiss']);
+    await listReady();
+    await settle();
+    expect(server.issuePosts()).toHaveLength(1);
+    expect(server.issuedReads().map((x) => x.url)).toEqual([issuedInvoicePathOf(STORE_1, server.invoices[0].id)]);
   });
 });

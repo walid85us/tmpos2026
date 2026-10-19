@@ -35,9 +35,17 @@
 //   IIR-16 (ISS-25, AC-02) the settings routine: authority, versions, concurrency, text refusals.
 //   IIR-17 (ISS-15, AC-04) the reads: order, cursors, the sourceDraft filter, authority, preview parity, no actor.
 //
+// THE CHAIN IT WAS WRITTEN FOR (M7B-INVOICES-VOID-P1). This file proves 034 as the head: 035 (the invoice void) revokes tmpos_app's
+// EXECUTE on 034's page and get, adds two internal foreign-key triggers to issued_invoice and makes 034's own down fail on the
+// dependency, so on a shared service where an earlier step applied 035 it is rolled back through its own committed down and
+// ledger row at setup (rollBackAbove, newest first) and put back, with its exact ledger row, by the teardown; the executor in
+// this file applies THROUGH 034 only. On a fresh cluster there is nothing above 034 and the restore does nothing. 035's own
+// behaviour (and its rollback, which refuses over a void record) is the void routine suite's.
+//
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates
 // and destroys. Every fixture is synthetic and randomly suffixed. It rolls 034 (and once 033) back and re-applies it, so on a
-// shared service it needs no issuing data and no discarded draft of another suite. It leaves 001-034 applied and recorded, every
+// shared service it needs no issuing data and no discarded draft of another suite. It leaves 001-034 applied and recorded (035 put
+// back above it when it found it), every
 // guard trigger ALWAYS, the issuer key row it found, and NO settings, counter, issued invoice, issued line, draft, audit record,
 // role row, session, mint-ledger row, fault trigger or login of its own.
 import test from 'node:test';
@@ -154,13 +162,13 @@ const SYNTHETIC_AUDITS = [];
 let issuerKeyBefore;
 let roleCheckDef = null;
 
-/** The trusted executor over the migration files (THROUGH `through` when named). */
-async function trustedApply(through) {
+/** The trusted executor over the migration files THROUGH `through` (034 when not named: 035 and later are hidden, this file proves 034 as the head). */
+async function trustedApply(through = '034') {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     const port = createNodeFsPort(MIG_DIR, MIG_REL);
     return await runTrustedApply({
-      fsPort: through === undefined ? port : portThrough(port, through), adapter: handle.adapter, ledger: handle.ledger,
+      fsPort: portThrough(port, through), adapter: handle.adapter, ledger: handle.ledger,
       connectionMode: 'session', credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 300_000,
     });
   } finally {
@@ -317,6 +325,8 @@ test.after(async () => {
         settings: 0, counters: 0, invoices: 0, lines: 0, drafts: 0, audits: 0, roles: 0, sessions: 0, role_check: true, no_fault: true, login: false,
       }, 'left as found: 034 applied and recorded, every guard ALWAYS, nothing of this suite\'s retained');
     });
+    // M7B-INVOICES-VOID-P1: a shared service's 035, rolled back at setup, is put back with its exact ledger row (nothing to do on a fresh cluster).
+    await step(() => above034.restore());
   } finally {
     await step(() => owner.end({ timeout: 5 }));
     if (cluster) cluster.stop();
@@ -325,7 +335,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: the whole chain (001-034), a real non-owner runtime login, the issuer key installed by the owner
+// setup: the chain through 034 (035 rolled back when present), a real non-owner runtime login, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -334,6 +344,9 @@ await owner.unsafe(`do $$ begin
 end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
+// 035 (when an earlier step of a shared service applied it) is rolled back through its own committed down and ledger row, and
+// restored by the teardown; on a fresh cluster there is nothing above 034 and the restore does nothing.
+const above034 = await rollBackAbove(owner, MIG_DIR, '034');
 const applyReport = await trustedApply();
 await owner.unsafe(`do $$ begin
   if exists (select 1 from pg_catalog.pg_roles where rolname = '${RUNTIME_LOGIN}') then execute 'drop owned by ${RUNTIME_LOGIN}'; end if;

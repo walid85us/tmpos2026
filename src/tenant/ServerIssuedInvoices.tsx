@@ -8,7 +8,7 @@
 //     section's precedent); "Load more" sends the nextCursor this client decoded for THAT store under THAT generation only,
 //     and a store change, a new generation or a session end discards every page (a late page finds nothing to join). A row
 //     says the store's number, the customer's name as the invoice recorded it, the Total and the UTC issue time, and
-//     "Issued" — nothing about payment, and no send, print, void, edit or delete. Nothing is looked up in this browser's
+//     "Issued" or "Voided" (its current state, M7B-INVOICES-VOID-P1) — nothing about payment, and no send, print, void, edit or delete. Nothing is looked up in this browser's
 //     customers. A 403 gets the reads' ONE fresh check, then "You cannot view issued invoices at this store." (no loop).
 //   - Open reads ONE issued invoice in the exported IssuedInvoiceDialog: the version-1 snapshot (seller, customer, ordered
 //     lines, subtotal, the tax meaning, Total) exactly as the server answered it. The dialog owns its GET (one per open and
@@ -63,9 +63,9 @@ import { flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
-  invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText,
+  INVOICE_VOID_REASONS, invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText,
   type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
-  type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues,
+  type IssuedStatus, type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues,
 } from './invoiceIssuingClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
@@ -73,6 +73,8 @@ import { pickerWaitText } from './ServerCustomerPicker';
 import { button, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
 
 const DEFAULT_WAIT_SECONDS = 60;
+/** An issued invoice's current state as the server's read says it (never which request made it so). */
+export const STATUS_TEXT: Readonly<Record<IssuedStatus, string>> = Object.freeze({ issued: 'Issued', voided: 'Voided' });
 
 export const ISSUED_TEXT = Object.freeze({
   intro: "Invoices issued on the server for one of your stores, and each store's issuing settings. They are kept apart from this browser's invoices.",
@@ -1143,8 +1145,8 @@ function IssuedSection({
                             <p id={`issued-row-${row.id}`} className={`${hintClass} break-words`}>
                               <bdi data-testid="issued-row-customer">{row.customerName}</bdi>
                               {' · '}<span data-testid="issued-row-total">Total <span className="whitespace-nowrap">{formatCents(row.totalCents)}</span></span>
-                              {' · '}<time data-testid="issued-row-issued" dateTime={row.issuedAt} className="whitespace-nowrap">{utcText(row.issuedAt)}</time>
-                              {' · '}<span data-testid="issued-row-status">Issued</span>
+                              {' · '}{row.status === 'voided' && 'Issued '}<time data-testid="issued-row-issued" dateTime={row.issuedAt} className="whitespace-nowrap">{utcText(row.issuedAt)}</time>
+                              {' · '}<span data-testid="issued-row-status">{STATUS_TEXT[row.status]}</span>
                             </p>
                           </div>
                           <button
@@ -1270,7 +1272,8 @@ const VIEW_LOADING: ViewState = Object.freeze({ phase: 'loading', text: VIEW_TEX
 const VIEW_OPENING: ViewState = Object.freeze({ phase: 'loading', text: '', invoice: null });
 
 /**
- * The issued invoice as the server recorded it (snapshot version 1): number, "Issued", the UTC issue time, the seller, the
+ * The issued invoice as the server recorded it (snapshot version 1): number, "Issued" or "Voided" (with the UTC void time
+ * and the reason's label), the UTC issue time, the seller, the
  * customer, the ordered lines, Subtotal, the tax line — "Tax (8.875%)" and its amount, "Tax (0%)" for an explicit zero, or
  * exactly "No tax calculated" — and the Total. Text is shown as text, each value isolated (<bdi>); amounts never break
  * (whitespace-nowrap; text-sm below sm, SDB-23's rule) and the lines table scrolls sideways in its own named region. Laid
@@ -1338,10 +1341,18 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
       {invoice !== null && (
         <div className="space-y-4">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-            <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">Issued</dd>
+            <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">{STATUS_TEXT[invoice.status]}</dd>
             <dt className={labelClass}>Issued at</dt>
             {/* The time may wrap at its spaces (never inside the date or the clock): at 320 px it is wider than its column (SIS-09). */}
             <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-issued-at" dateTime={invoice.issuedAt}>{utcText(invoice.issuedAt)}</time></dd>
+            {invoice.void !== null && (
+              <>
+                <dt className={labelClass}>Voided at</dt>
+                <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-voided-at" dateTime={invoice.void.voidedAt}>{utcText(invoice.void.voidedAt)}</time></dd>
+                <dt className={labelClass}>Reason</dt>
+                <dd data-testid="issued-view-void-reason" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_VOID_REASONS[invoice.void.reasonCode]}</dd>
+              </>
+            )}
           </dl>
           <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
           <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>

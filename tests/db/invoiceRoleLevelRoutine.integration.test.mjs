@@ -7,7 +7,7 @@
 // server-enforced. (M7B-INVOICES-P1 UPDATE: migration 028's invoice-draft routines now decide on this level; their proof is
 // tests/db/invoiceDraftRoutine.integration.test.mjs's and tests/db/invoiceDraftsHttp.integration.test.mjs's.)
 //
-// WHAT IS PROVEN. 001-034 applied clean, every ledger checksum the pinned one, 026's postcondition re-proven over the
+// WHAT IS PROVEN. 001-035 applied clean, every ledger checksum the pinned one, 026's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M5IRL-01); the installed inventory, the
 // two widened CHECKs and the login's effective privileges — EXECUTE on the two new routines and on 020's and 021's, nothing
 // on either table, nothing for the audit writer, anon, authenticated or PUBLIC (M5IRL-02); the defaults — every role reads
@@ -30,7 +30,7 @@
 // DISPOSABLE ONLY. The target is the harness's resolved target: a supplied CI service when one is bound, otherwise a
 // cluster this file creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every
 // fixture is synthetic and randomly suffixed, and every issuer key is random bytes made here. It leaves the shared service
-// as it found it: 026 (and 027, 028, 029, 030, 031, 032, 033 and 034) applied, the ledger 001-034, the issuer key row it found, no Invoices or Customers level, version,
+// as it found it: 026 (and 027, 028, 029, 030, 031, 032, 033 and 034) applied, the ledger 001-035, the issuer key row it found, no Invoices or Customers level, version,
 // session or customer row of its own, and its login dropped — every cleanup step runs even after another fails, these
 // postconditions are then asserted, and any failure fails the suite.
 import test from 'node:test';
@@ -66,8 +66,12 @@ const UP_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.up.sql`, '
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema) sits above 033 and is applied with it. */
 const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 sits above 034 and is applied with it. */
+const UP_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.up.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 sits above 033 and rolls back first. */
 const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 (invoice void, in its own schema tmpos_invoice_void) sits above 034 and rolls back first. */
+const DOWN_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.down.sql`, 'utf8');
 /** 031's routine, whose presence says 031 is applied (it stays installed, owner-only, once 032 is). */
 const CREATE_V2_031 = 'tmpos_invoice_edit.m7b_invoice_draft_create_v2(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
 /** 032's routine, whose presence says 032 is applied. */
@@ -76,6 +80,8 @@ const CREATE_V3_032 = 'tmpos_invoice_edit.m7b_invoice_draft_create_v3(text, uuid
 const SCHEMA_033 = 'tmpos_invoice_discard';
 /** 034's schema, whose presence says 034 is applied. */
 const SCHEMA_034 = 'tmpos_invoice_issue';
+/** M7B-INVOICES-VOID-P1: 035's schema; its absence is how this file tells that 035 is rolled back. */
+const SCHEMA_035 = 'tmpos_invoice_void';
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_026 = UP_026.slice(UP_026.lastIndexOf('do $$'));
 /**
@@ -186,6 +192,9 @@ test.after(async () => {
       if ((await owner`select pg_catalog.to_regnamespace(${SCHEMA_034}) is null as absent`)[0].absent) {
         await owner.begin((tx) => tx.unsafe(UP_034).simple());
       }
+      if ((await owner`select pg_catalog.to_regnamespace(${SCHEMA_035}) is null as absent`)[0].absent) {
+        await owner.begin((tx) => tx.unsafe(UP_035).simple());
+      }
     });
     // Version rows first, then levels (the rollbacks' order): of EVERY domain, so no Invoices row outlives this file and a
     // later suite's rollback of 026, 021 or 020 can run. Tenants stay, as every suite leaves its synthetic tenants.
@@ -228,7 +237,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-034), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-035), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -405,11 +414,11 @@ async function surface(db) {
 // M5IRL-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M5IRL-01: 001-034 applied clean, every checksum the pinned one; 026\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M5IRL-01: 001-035 applied clean, every checksum the pinned one; 026\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 34 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 35 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   const onDisk = (version) => {
     const [name] = readdirSync(MIG_DIR).filter((f) => f.startsWith(`${version}_`) && f.endsWith('.up.sql'));
@@ -749,7 +758,7 @@ test('M5IRL-08: 026 applied by the trusted executor over a 025 database (ledger 
   // Back to a real 025 database: 026's committed down file and its ledger row removed in one READ COMMITTED transaction
   // (no Invoices row exists, so the rollback runs). `restore` re-applies the file and re-inserts the exact row, for a failure.
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '025');
-  assert.deepEqual(undone, ['034', '033', '032', '031', '030', '029', '028', '027', '026'], 'only 026 (and 027, 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) was above 025');
+  assert.deepEqual(undone, ['035', '034', '033', '032', '031', '030', '029', '028', '027', '026'], 'only 026 (and 027, 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) was above 025');
   try {
     assert.deepEqual((await owner`select pg_catalog.to_regnamespace('tmpos_role_invoice') is null as gone`)[0].gone, true);
     assert.deepEqual((await owner`select version from public.schema_migrations order by version`).map((r) => r.version),
@@ -771,10 +780,10 @@ test('M5IRL-08: 026 applied by the trusted executor over a 025 database (ledger 
     assert.equal(before.levels[0].length, 2, 'A holds two Customers rows');
     // The upgrade as a deployment runs it: the trusted executor finds 026 pending and applies it, recording its ledger row.
     const upgrade = await trustedApply();
-    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['026', '027', '028', '029', '030', '031', '032', '033', '034']], JSON.stringify(upgrade).slice(0, 400));
+    assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['026', '027', '028', '029', '030', '031', '032', '033', '034', '035']], JSON.stringify(upgrade).slice(0, 400));
     const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
     assert.deepEqual(ledger.map((r) => [r.version, r.dirty, r.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, false, m.checksum]),
-      'the ledger is 001-034 again, 026 at its pinned checksum');
+      'the ledger is 001-035 again, 026 at its pinned checksum');
     assert.deepEqual({
       levels: [await storedRows(T_A), await storedRows(T_B)], versions: [await versionRows(T_A), await versionRows(T_B)],
       states: [await statesCus(T_A), await statesCus(T_B)],
@@ -854,7 +863,7 @@ test('M5IRL-09: 026 down refuses while an Invoices level row and its version, on
   // 032 (M7B-INVOICES-P1-R4: its routines in 030's schema and its Customers guard trigger on 020's table) before 031 and after it,
   // and 033 (M7B-INVOICES-DISCARD-P1: its rollback-order anchor refuses every older down while it is applied) before 032 and after it,
   // and 034 (M7B-INVOICES-ISSUE-P1: its anchor refuses 033's down while it is applied) before 033 and after it.
-  await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_034).simple());
+  await owner.begin('isolation level read committed', async (tx) => { await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); });
   await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_033).simple());
   await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_032).simple());
   await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_031).simple());
@@ -889,7 +898,7 @@ test('M5IRL-09: 026 down refuses while an Invoices level row and its version, on
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(UP_031).simple());
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(UP_032).simple());
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(UP_033).simple());
-    await owner.begin('isolation level read committed', (tx) => tx.unsafe(UP_034).simple());
+    await owner.begin('isolation level read committed', async (tx) => { await tx.unsafe(UP_034).simple(); await tx.unsafe(UP_035).simple(); });
   }
   // (e) re-applied: the same surface, the postcondition, and the edit works, its counter restarting at 0.
   await intact('re-applied');
@@ -897,5 +906,5 @@ test('M5IRL-09: 026 down refuses while an Invoices level row and its version, on
   assert.deepEqual(await setInv(ownerKey, 'manager', 'view', T_A, 0), [await applied(OWNER_A, 'view', 1)], 're-applied, the edit works');
   await resetState();
   const ledger = await owner`select version from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => r.version), Array.from({ length: 34 }, (_, i) => String(i + 1).padStart(3, '0')), 'the ledger is still 001-034');
+  assert.deepEqual(ledger.map((r) => r.version), Array.from({ length: 35 }, (_, i) => String(i + 1).padStart(3, '0')), 'the ledger is still 001-035');
 });

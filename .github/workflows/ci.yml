@@ -491,7 +491,8 @@ jobs:
       # 034's down and, through it, 033's, 032's and every older down refuse, so they run AFTER every step that rolls 034 or an
       # older migration back (right after the discard steps, the last ones that do), and each teardown removes what the suite wrote,
       # with the guards lifted only inside one owner transaction and put back in the mode they were found in. The routine suite
-      # rolls 034 back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-034 applied. Synthetic data
+      # rolls 034 back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-034 applied (M7B-INVOICES-VOID-P1: with
+      # 035 applied above it; the routine suite rolls a shared service's 035 back at setup and puts it back at the end). Synthetic data
       # and keys made at run time only. Same binding, no new service, no secret, no permission change.
       - name: Invoice issuing routine against disposable PostgreSQL (M7B-INVOICES-ISSUE-P1)
         env:
@@ -508,6 +509,28 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/issuingSettingsHttp.integration.test.mjs
+      # M7B-INVOICES-VOID-P1 — migration 035's invoice void as the runtime login (the postcondition and its refusals, the exact
+      # surface and grants, the void's authority at Invoices Approve with Customers View, the ordered locks, the sealed answers
+      # for a repeated, mismatched or already-void request, the v2 issued reads with their lifecycle columns, 035's down refused
+      # while a void record or a void audit record exists and otherwise rolled back, restored and re-applied, and 034's down
+      # failing on the dependency while 035 is applied), then the void end to end over real loopback HTTP on the tenant entry,
+      # against the SAME disposable service.
+      # Ordering rule: these suites leave VOID rows and void audit records, which 035's down refuses, so they run AFTER every
+      # step that rolls 035 or an older migration back (right after the issuing steps, and after every other step that does:
+      # the issuing routine suite rolls 035 back itself at setup), and each teardown removes what the suite wrote, with the
+      # guards lifted only inside one owner transaction and put back in the mode they were found in. The routine suite rolls
+      # 035 back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-035 applied. Synthetic data and
+      # keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Invoice void routine against disposable PostgreSQL (M7B-INVOICES-VOID-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceVoidRoutine.integration.test.mjs
+      - name: Invoice void over HTTP against the tenant entry and disposable PostgreSQL (M7B-INVOICES-VOID-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceVoidHttp.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

@@ -114,6 +114,17 @@
 // command under it, while a GET under it (recentAuth 'none') is decided exactly as GET /api/v1/roles/levels is. The tenant
 // guard admits exactly these two owner-only keys. No role-name shortcut beyond the adopted owner rule; no catalog default,
 // key or ordering changes.
+//
+// M7B-INVOICES-VOID-P1 UPDATE (D-VOID-2) — A SECOND APPROVE KEY, THE FIRST SENSITIVE STORE KEY. void_issued_invoices (POST
+// /api/v1/stores/{storeId}/invoices/{id}/void and its action-only eligibility read) is the Invoices domain at Approve or above
+// AND Customers at View or above on the same role, decided exactly as issue_invoices is (the same materializer, ordering,
+// owner-edited levels and read_only rule, which denies it). It is SENSITIVE: the revalidator (tenantAuthorization.ts) then
+// requires a recent-sign-in deadline for any command under it and judges it on the database's clock, while its eligibility
+// GET (recentAuth 'none') is decided by the chain on the levels alone, with no deadline — as edit_issuing_settings' GET is.
+// The store guard is widened NARROWLY once more: it admits exactly two Approve keys — issue_invoices non-sensitive, as
+// before, and void_issued_invoices sensitive, each on Invoices with exactly the Customers View corequisite — and `sensitive`
+// for void_issued_invoices ONLY; any other key at Approve, either key in any other shape, any other sensitive store entry, and
+// Full anywhere still refuse to load. No role-name shortcut (store_owner is Full by the materializer, not by name).
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -251,9 +262,10 @@ assertTenantRoutePermissions(TENANT_ROUTE_PERMISSIONS);
  * requested store (tenantAuthorization.ts). Each names one tenant DOMAIN and the level the store grant's role must hold on
  * it — its tenant's owner-edited level, the catalog default otherwise — and, where a draft also names a customer, a
  * corequisite domain the same role must hold. The module refuses to load unless each is non-sensitive at View, Create or
- * Edit — or is exactly discard_invoice_drafts at Invoices Manage with no corequisite, the one entry admitted above Edit
- * (M7B-INVOICES-DISCARD-P1, D-DIS-2) — shares no key with a sub-permission or a tenant route permission, and any corequisite
- * is View on a different domain (assertStoreRoutePermissions).
+ * Edit — or is exactly discard_invoice_drafts at Invoices Manage with no corequisite (M7B-INVOICES-DISCARD-P1, D-DIS-2), or one
+ * of the two Approve entries below (issue_invoices; void_issued_invoices, the one sensitive entry, M7B-INVOICES-VOID-P1) —
+ * shares no key with a sub-permission or a tenant route permission, and any corequisite is View on a different domain
+ * (assertStoreRoutePermissions).
  *   * view_invoice_drafts    — GET /api/v1/stores/{storeId}/invoice-drafts[/{id}]: the Invoices domain at View or above.
  *   * create_invoice_drafts  — POST /api/v1/stores/{storeId}/invoice-drafts and, since M7B-INVOICES-P1-R2, its read-only
  *     creation eligibility GET /api/v1/stores/{storeId}/invoice-drafts/eligibility: the Invoices domain at Create or above
@@ -270,6 +282,11 @@ assertTenantRoutePermissions(TENANT_ROUTE_PERMISSIONS);
  *     does not reach it; read-only never does. The one entry admitted at Approve.
  *   * view_issued_invoices — GET /api/v1/stores/{storeId}/invoices[/{id}] (M7B-INVOICES-ISSUE-P1): the Invoices domain at View
  *     or above AND the Customers domain at View or above (an issued invoice names its customer).
+ *   * void_issued_invoices — POST /api/v1/stores/{storeId}/invoices/{id}/void and its action-only eligibility GET
+ *     /api/v1/stores/{storeId}/invoices/{id}/void-eligibility (M7B-INVOICES-VOID-P1, D-VOID-2): the Invoices domain at Approve
+ *     or above AND the Customers domain at View or above. SENSITIVE: a recent sign-in is required on the POST (its route
+ *     declares it; the revalidator requires and judges the deadline); the eligibility declares none. Manage alone does not
+ *     reach it; read-only never does. The second entry admitted at Approve, and the one sensitive store entry.
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
@@ -287,33 +304,43 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
     key: 'view_issued_invoices', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const,
     corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
   })],
+  ['void_issued_invoices', Object.freeze({
+    key: 'void_issued_invoices', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'approve' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
 ]));
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
 /** The one store route permission admitted at Manage (M7B-INVOICES-DISCARD-P1): exactly this key, on Invoices, no corequisite. */
 const STORE_ROUTE_MANAGE_KEY = 'discard_invoice_drafts';
-/** The one store route permission admitted at Approve (M7B-INVOICES-ISSUE-P1): exactly this key, on Invoices, Customers View. */
-const STORE_ROUTE_APPROVE_KEY = 'issue_invoices';
+/**
+ * The store route permissions admitted at Approve, each with the exact `sensitive` it must carry: issue_invoices
+ * (M7B-INVOICES-ISSUE-P1) non-sensitive and void_issued_invoices (M7B-INVOICES-VOID-P1) sensitive — each on Invoices with
+ * exactly Customers View. The second is the one store key admitted sensitive.
+ */
+const STORE_ROUTE_APPROVE_KEYS: ReadonlyMap<string, boolean> = new Map<string, boolean>([['issue_invoices', false], ['void_issued_invoices', true]]);
 
 /**
  * The load-time guard over a store route permission table: throws unless every entry is non-sensitive at View, Create or
  * Edit, or is exactly the discard pair (key discard_invoice_drafts, parent invoices, threshold manage, no corequisite), or
- * exactly the issue entry (key issue_invoices, parent invoices, threshold approve, corequisite exactly Customers View); any
- * other key at Manage or Approve, either key at any other threshold or corequisite, and Full anywhere are refused. Exported
- * so its refusals can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
+ * exactly the issue entry (key issue_invoices, parent invoices, threshold approve, corequisite exactly Customers View,
+ * non-sensitive), or exactly the void entry (key void_issued_invoices, the same shape, sensitive); any other key at Manage or
+ * Approve, any key in any other threshold, corequisite or sensitivity, and Full anywhere are refused. Exported so its
+ * refusals can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
  */
 export function assertStoreRoutePermissions(permissions: ReadonlyMap<string, CanonicalPermission>): void {
   for (const [key, entry] of permissions) {
     if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
     const manage = key === STORE_ROUTE_MANAGE_KEY;
-    const approve = key === STORE_ROUTE_APPROVE_KEY;
-    if (entry.sensitive || entry.threshold === null || (manage
+    // The sensitivity an Approve key must carry exactly, or undefined for every other key (which must be non-sensitive).
+    const approveSensitive = STORE_ROUTE_APPROVE_KEYS.get(key);
+    if (entry.sensitive !== (approveSensitive ?? false) || entry.threshold === null || (manage
       ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'manage' || entry.corequisite !== undefined
-      : approve
+      : approveSensitive !== undefined
         ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'approve'
           || entry.corequisite?.parent !== 'customers' || entry.corequisite.threshold !== 'view'
         : !STORE_ROUTE_THRESHOLDS.has(entry.threshold))) {
-      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View');
+      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View, nor void_issued_invoices sensitive at Invoices Approve with Customers View');
     }
     const corequisite = entry.corequisite;
     if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {

@@ -747,7 +747,7 @@ test('M7B-INVOICES-ISSUE-P1: a store subject is its own statement, alone after m
 
 test('M7B-INVOICES-ISSUE-P1: at most one subject except exactly the triple — an issued invoice alone or in part of the triple, the triple beside a fourth subject, a store beside any other, and a malformed new subject are refused before any statement', async () => {
   for (const [label, over] of [
-    ['an issued invoice alone', { subjectIssuedInvoiceId: ISSUED }],
+    ['an issued invoice alone on another action (M7B-INVOICES-VOID-P1: the void\'s alone)', { subjectIssuedInvoiceId: ISSUED }],
     ['an issued invoice with its draft only', { subjectIssuedInvoiceId: ISSUED, subjectInvoiceDraftId: DRAFT }],
     ['an issued invoice with its customer only', { subjectIssuedInvoiceId: ISSUED, subjectCustomerId: CUSTOMER }],
     ['a draft and a customer without the invoice', { subjectInvoiceDraftId: DRAFT, subjectCustomerId: CUSTOMER }],
@@ -789,4 +789,84 @@ test('M7B-INVOICES-ISSUE-P1: the triple is admitted only for store.invoice.issue
       (e: unknown) => e instanceof AuditEventValidationError && e.message === 'audit event subject is not admitted for its action and scope', label);
     assert.equal(r.calls.length, 0, `${label}: nothing sent`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-VOID-P1 — the void's issued invoice ALONE (migration 035)
+// ---------------------------------------------------------------------------
+
+const VOIDED = Object.freeze({ ...baseEvent(), actionId: 'store.invoice.void', requiredPermission: 'void_issued_invoices', scopeType: 'store', tenantId: T1, storeId: STORE, subjectIssuedInvoiceId: ISSUED }) as AuditEventWriteInput;
+
+test('M7B-INVOICES-VOID-P1: the void\'s issued invoice alone is ONE fixed statement — subject_issued_invoice_id alone after metadata, at store scope; the triple\'s statement and every earlier one are unchanged', async () => {
+  const r = recorder();
+  await writeAuditEvent(VOIDED, { executor: r.executor });
+  assert.equal(r.calls.length, 1, 'one statement');
+  const { strings, values, sql } = r.calls[0];
+  assert.equal(values.length, 21);
+  assert.equal(strings.length, 22);
+  assert.match(sql.toLowerCase(), /metadata,\s*subject_issued_invoice_id\s*\)/);
+  for (const other of ['subject_tenant_id', 'subject_customer_id', 'subject_invoice_draft_id', 'subject_store_id']) assert.ok(!sql.includes(other), `no ${other}`);
+  assert.ok(!strings.join(' ').includes(ISSUED), 'bound as a value, never spliced');
+  assert.deepEqual([values[7], values[8], values[9], values[10], values[11]], ['store', T1, STORE, 'store.invoice.void', 'void_issued_invoices']);
+  assert.equal(values[20], ISSUED);
+  // Explicit nulls for every other subject choose the same statement.
+  const nulls = recorder();
+  await writeAuditEvent({ ...VOIDED, subjectTenantId: null, subjectCustomerId: null, subjectInvoiceDraftId: null, subjectStoreId: null }, { executor: nulls.executor });
+  assert.equal(nulls.calls[0].sql, sql, 'the same fixed text');
+  // The issue's triple still takes its own statement.
+  const issue = recorder();
+  await writeAuditEvent({ ...baseEvent(), actionId: 'store.invoice.issue', scopeType: 'store', tenantId: T1, storeId: STORE, ...TRIPLE }, { executor: issue.executor });
+  assert.match(issue.calls[0].sql.toLowerCase(), /metadata,\s*subject_invoice_draft_id,\s*subject_issued_invoice_id,\s*subject_customer_id\s*\)/);
+  assert.notEqual(issue.calls[0].sql, sql);
+});
+
+test('M7B-INVOICES-VOID-P1: an issued invoice alone is admitted only for store.invoice.void at store scope; beside any other subject, on any other action or scope, or malformed, it is refused before any statement — and the void\'s action names no triple', async () => {
+  for (const [label, event, message] of [
+    ['on the issue action', { ...VOIDED, actionId: 'store.invoice.issue' }, 'audit event subject is not admitted for its action and scope'],
+    ['on the draft discard action', { ...VOIDED, actionId: 'store.invoice_draft.discard' }, 'audit event subject is not admitted for its action and scope'],
+    ['on a near action', { ...VOIDED, actionId: 'store.invoice.voided' }, 'audit event subject is not admitted for its action and scope'],
+    ['at tenant scope', { ...VOIDED, scopeType: 'tenant', storeId: null }, 'audit event subject is not admitted for its action and scope'],
+    ['at platform scope', { ...VOIDED, scopeType: 'platform', tenantId: null, storeId: null }, 'audit event subject is not admitted for its action and scope'],
+    ['beside a draft', { ...VOIDED, subjectInvoiceDraftId: DRAFT }, 'audit event names at most one subject'],
+    ['beside a customer', { ...VOIDED, subjectCustomerId: CUSTOMER }, 'audit event names at most one subject'],
+    ['beside a tenant', { ...VOIDED, subjectTenantId: T1 }, 'audit event names at most one subject'],
+    ['beside a store', { ...VOIDED, subjectStoreId: STORE }, 'audit event names at most one subject'],
+    ['the full triple on the void action', { ...VOIDED, ...TRIPLE }, 'audit event subject is not admitted for its action and scope'],
+    ['an invoice that is no uuid', { ...VOIDED, subjectIssuedInvoiceId: `${ISSUED} ` }, 'audit event subjectIssuedInvoiceId must be a UUID or null'],
+    ['an invoice number', { ...VOIDED, subjectIssuedInvoiceId: 7 }, 'audit event subjectIssuedInvoiceId must be a UUID or null'],
+  ] as const) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent(event as never, { executor: r.executor }),
+      (e: unknown) => e instanceof AuditEventValidationError && e.message === message, label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
+  // R-SEC-07: the void's action names exactly its issued invoice alone — with no subject, or with any single OTHER subject in
+  // its place, it is refused before any statement.
+  for (const [label, over] of [
+    ['no subject at all', { subjectIssuedInvoiceId: null }],
+    ['no subject (absent)', { subjectIssuedInvoiceId: undefined }],
+    ['a draft in its place', { subjectIssuedInvoiceId: null, subjectInvoiceDraftId: DRAFT }],
+    ['a customer in its place', { subjectIssuedInvoiceId: null, subjectCustomerId: CUSTOMER }],
+    ['a tenant in its place', { subjectIssuedInvoiceId: null, subjectTenantId: T1 }],
+  ] as const) {
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...VOIDED, ...over } as never, { executor: r.executor }),
+      (e: unknown) => e instanceof AuditEventValidationError && e.message === 'audit event subject is not admitted for its action and scope', label);
+    assert.equal(r.calls.length, 0, `${label}: nothing sent`);
+  }
+});
+
+test('M7B-INVOICES-VOID-P1 (R-SEC-07): dispatch matches the triple FIRST, then the issued invoice alone — a void row never reaches the triple statement, and an issue row never the alone one', async () => {
+  const voided = recorder();
+  await writeAuditEvent(VOIDED, { executor: voided.executor });
+  const issued = recorder();
+  await writeAuditEvent({ ...baseEvent(), actionId: 'store.invoice.issue', scopeType: 'store', tenantId: T1, storeId: STORE, ...TRIPLE }, { executor: issued.executor });
+  assert.ok(!voided.calls[0].sql.includes('subject_invoice_draft_id') && !voided.calls[0].sql.includes('subject_customer_id'),
+    'the void: no draft or customer column, so no NULL is ever bound into the triple');
+  assert.equal(voided.calls[0].values.filter((v) => v === null).length, issued.calls[0].values.filter((v) => v === null).length,
+    'the same nulls as the issue\'s row beyond its subjects: none bound for an absent subject');
+  assert.match(issued.calls[0].sql.toLowerCase(), /subject_invoice_draft_id,\s*subject_issued_invoice_id,\s*subject_customer_id\s*\)/);
+  assert.ok(!/metadata,\s*subject_issued_invoice_id\s*\)/.test(issued.calls[0].sql.toLowerCase()), 'the issue never takes the alone statement');
+  assert.deepEqual(issued.calls[0].values.slice(-3), [DRAFT, ISSUED, CUSTOMER]);
+  assert.deepEqual(voided.calls[0].values.slice(-1), [ISSUED]);
 });

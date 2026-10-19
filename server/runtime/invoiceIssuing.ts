@@ -58,14 +58,28 @@
 // only; the routine re-reads that anchor inside the trusted tenant and store, and an unknown or foreign one is the same
 // 400 as a malformed one. An unknown, other-store, open or discarded source draft is the same empty page. Answer {
 // "invoices": [ { "id", "number", "sourceDraftId", "customerId", "customerName", "currency", "totalCents", "issuedAt",
-// "status": "issued", "snapshotVersion": 1 } ], "nextCursor" }, nextCursor only behind a full page. Detail: { "invoice": {
-// "id", "number", "status": "issued", "snapshotVersion": 1, "issuedAt", "sourceDraft": { "id", "version" }, "seller": {
-// "legalName", "storeName", "postalAddress", "taxRegistrationId" }, "issuingSettingsVersion", "customer": { "id", "name",
-// "version" }, "lines", "amounts" } }; a missing and a foreign id are the same 404. Every row is validated (the amount
-// equations, the tax by mode, snapshot version 1, ordering, no duplicates); no read returns the issuing actor (the port has
-// no such column), a customer phone or email, or anything labelled due, paid, unpaid or balance. issuedAt is the
-// database's UTC time with microseconds. Every read is session-bound and hands its routine the session key; none writes
+// "status" ("issued" or "voided", THE LIFECYCLE), "snapshotVersion": 1 } ], "nextCursor" }, nextCursor only behind a full
+// page. Detail: { "invoice": { "id", "number", "status", "snapshotVersion": 1, "issuedAt", "sourceDraft": { "id", "version"
+// }, "seller": { "legalName", "storeName", "postalAddress", "taxRegistrationId" }, "issuingSettingsVersion", "customer": {
+// "id", "name", "version" }, "lines", "amounts"[, "void"] } }; a missing and a foreign id are the same 404. Every row is
+// validated (the amount equations, the tax by mode, snapshot version 1, ordering, no duplicates); no read returns the
+// issuing actor (the port has no such column), a customer phone or email, or anything labelled due, paid, unpaid or balance.
+// issuedAt is the database's UTC time with microseconds. Every read is session-bound and hands its routine the session key; none writes
 // an audit record. Chain-wide headers mark every answer no-store.
+//
+// THE LIFECYCLE (M7B-INVOICES-VOID-P1, D-VOID-3; migration 035). A voided invoice stays in the list, the detail and
+// `?sourceDraft=` (unconditionally: the recovery filter finds an invoice voided or not), at the same number, order and
+// cursor, its snapshot unchanged (snapshotVersion stays 1: the lifecycle is a separate field, not a snapshot version). The
+// two issued reads now ask 035's v2 routines (schema tmpos_invoice_void), which answer 034's rows plus the lifecycle; 035
+// revoked the runtime's EXECUTE on 034's page and get, so no approved caller can read a path that conceals a void. A list
+// row's "status" is the row's own: "issued" or "voided" (the ten keys unchanged). The detail's "status" likewise, and a
+// voided detail's "invoice" has exactly ONE more member, serialized LAST (after "amounts"): "void": { "voidedAt" (issuedAt's
+// exact encoding, never before issuedAt), "reasonCode" (invoiceVoid.ts INVOICE_VOID_REASON_CODES) }, in that key order — an
+// issued detail has none, so every never-voided answer is byte for byte the 034 answer. The port's lifecycle is validated
+// exactly (issued: no void time or code; voided: both, the time well-formed and not before issuedAt, the code in the closed
+// list); anything else is the bounded 503. No read returns the voiding actor, and none adds a query parameter or filter.
+// The issue's 201 and its "status": "issued" are unchanged — true of the issue; a later read shows the current lifecycle.
+// "Voided" settles the invoice's current state, not which request caused it; "Issued" never settles a void still in flight.
 //
 // AMOUNTS (§10.8). tax = floor((S x R + 50,000) / 100,000) for a subtotal S in cents and a rate R in thousandths of a
 // percent, in BigInt only (S x R can pass 2^63); total = S + tax, at most 2^53 - 1. Under 'none' there is no rate and no
@@ -91,6 +105,8 @@ import {
   COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_DIRECTORY_PATH, STORE_SEGMENT, pathIdBeforeSuffixOf, pathIdOf, storeTargetOf,
 } from './routes.js';
 import type { AuthorizationRequirement, CommandContext, CommandPlan, RouteContext, RouteDefinition, RouteHandler } from './routes.js';
+import { INVOICE_VOIDED_STATUS, isInvoiceVoidReasonCode } from './invoiceVoid.js';
+import type { InvoiceVoidReasonCode } from './invoiceVoid.js';
 
 /** The issue command's last segment, after the draft id. */
 const ISSUE_SUFFIX = '/issue';
@@ -326,6 +342,9 @@ export interface InvoiceIssuePreview {
   readonly amounts: InvoiceAmounts;
 }
 
+/** An issued invoice's lifecycle (M7B-INVOICES-VOID-P1): issued, or voided once and for good. */
+export type IssuedInvoiceStatus = typeof ISSUED_INVOICE_STATUS | typeof INVOICE_VOIDED_STATUS;
+
 /** One issued invoice as the list shows it. */
 export interface IssuedInvoiceSummary {
   readonly id: string;
@@ -336,6 +355,7 @@ export interface IssuedInvoiceSummary {
   readonly currency: string;
   readonly totalCents: number;
   readonly issuedAt: string;
+  readonly status: IssuedInvoiceStatus;
 }
 
 /** One issued invoice as the detail shows it. */
@@ -343,6 +363,9 @@ export interface IssuedInvoice {
   readonly id: string;
   readonly number: number;
   readonly issuedAt: string;
+  readonly status: IssuedInvoiceStatus;
+  /** The void record's time and code: present exactly when voided (M7B-INVOICES-VOID-P1). */
+  readonly void: Readonly<{ voidedAt: string; reasonCode: InvoiceVoidReasonCode }> | null;
   readonly sourceDraft: Readonly<{ id: string; version: number }>;
   readonly seller: SellerValues;
   readonly issuingSettingsVersion: number;
@@ -359,15 +382,17 @@ export interface IssuedInvoiceListQuery {
 }
 
 /**
- * The port to migration 034's three session-bound issuing reads, each handed the trusted STORE scope (its tenant and store
- * are the routine's expected ones), the presenting session's key (a SQL parameter it never logs, echoes or stores) and the
- * request's validated values. Answers are untrusted input, expected to be
+ * The port to the three session-bound issuing reads — migration 034's preview, and since M7B-INVOICES-VOID-P1 035's v2 page
+ * and get — each handed the trusted STORE scope (its tenant and store are the routine's expected ones), the presenting
+ * session's key (a SQL parameter it never logs, echoes or stores) and the request's validated values. Answers are untrusted
+ * input, expected to be
  *   preview: { outcome: 'preview', preview: { draft: { id, version, subtotalCents, lines }, customer: { id, name, version },
  *            issuingSettings: { version, legalName, storeName, postalAddress, taxRegistrationId, tax }, currency, taxCents
  *            (null under 'none'), totalCents } } | { outcome: 'denied' | 'not_found' | 'invalid_state' | 'issuing_not_configured' | 'amount_out_of_range' };
  *   page:    { outcome: 'page', invoices: (IssuedInvoiceSummary & { snapshotVersion })[], hasMore } | { outcome: 'denied' | 'cursor_unknown' };
  *   invoice: { outcome: 'invoice', invoice: { id, number, snapshotVersion, issuedAt, sourceDraft, seller, issuingSettingsVersion,
- *            customer, currency, subtotalCents, tax, taxCents, totalCents, lines } } | { outcome: 'denied' | 'not_found' }.
+ *            customer, currency, subtotalCents, tax, taxCents, totalCents, lines, status, voidedAt, reasonCode } }
+ *            | { outcome: 'denied' | 'not_found' } (voidedAt and reasonCode null while issued).
  * A throw is an outage.
  */
 export interface InvoiceIssueReadPort {
@@ -492,7 +517,10 @@ export function parseIssuedInvoiceListQuery(target: string): IssuedInvoiceListQu
   return Object.freeze({ after, sourceDraft: null, limit: limit ?? ISSUED_INVOICE_DEFAULT_LIMIT });
 }
 
-const SUMMARY_KEYS: readonly string[] = ['id', 'number', 'sourceDraftId', 'customerId', 'customerName', 'currency', 'totalCents', 'issuedAt', 'snapshotVersion'];
+const SUMMARY_KEYS: readonly string[] = ['id', 'number', 'sourceDraftId', 'customerId', 'customerName', 'currency', 'totalCents', 'issuedAt', 'snapshotVersion',
+  'status'];
+/** Whether `v` is one of the two lifecycle words. */
+const isStatus = (v: unknown): v is IssuedInvoiceStatus => v === ISSUED_INVOICE_STATUS || v === INVOICE_VOIDED_STATUS;
 const PAGE_KEYS: readonly string[] = ['outcome', 'invoices', 'hasMore'];
 
 type PageAnswer = { readonly invoices: readonly IssuedInvoiceSummary[]; readonly hasMore: boolean } | 'denied' | 'cursor_unknown';
@@ -519,16 +547,16 @@ export function issuedInvoicePageOf(raw: unknown, query: IssuedInvoiceListQuery)
     for (let i = 0; i < count; i++) {
       const entry: unknown = invoices[i];
       if (!isPlain(entry) || !hasExactly(entry, SUMMARY_KEYS)) return null;
-      const { id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt, snapshotVersion } = entry;
+      const { id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt, snapshotVersion, status } = entry;
       if (!isUuid(id) || seen.has(id) || id === query.after || !isAmount(number, 1) || !isUuid(sourceDraftId) || sources.has(sourceDraftId) || !isUuid(customerId)) return null;
       if (query.sourceDraft !== null && sourceDraftId !== query.sourceDraft) return null;
       if (!isStorableName(customerName) || currency !== INVOICE_DRAFT_CURRENCY || !isAmount(totalCents, 0) || !isDraftCreatedAt(issuedAt)
-        || snapshotVersion !== ISSUED_INVOICE_SNAPSHOT_VERSION) return null;
+        || snapshotVersion !== ISSUED_INVOICE_SNAPSHOT_VERSION || !isStatus(status)) return null;
       const before = out[out.length - 1];
       if (before !== undefined && before.number <= number) return null; // newest number first, no number twice
       seen.add(id);
       sources.add(sourceDraftId);
-      out.push(Object.freeze({ id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt }));
+      out.push(Object.freeze({ id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt, status }));
     }
     return Object.freeze({ invoices: Object.freeze(out), hasMore });
   } catch {
@@ -537,11 +565,25 @@ export function issuedInvoicePageOf(raw: unknown, query: IssuedInvoiceListQuery)
 }
 
 const INVOICE_KEYS: readonly string[] = ['id', 'number', 'snapshotVersion', 'issuedAt', 'sourceDraft', 'seller', 'issuingSettingsVersion', 'customer',
-  'currency', 'subtotalCents', 'tax', 'taxCents', 'totalCents', 'lines'];
+  'currency', 'subtotalCents', 'tax', 'taxCents', 'totalCents', 'lines', 'status', 'voidedAt', 'reasonCode'];
+
+type Lifecycle = Readonly<{ status: IssuedInvoiceStatus; void: IssuedInvoice['void'] }>;
+
+/**
+ * The lifecycle values as a lifecycle, or null (header: THE LIFECYCLE): issued with no void time and no code, or voided
+ * with both — the time in issuedAt's exact encoding and not before it (one fixed-width encoding, so the text order is the
+ * time order), the code one of the six. Any other combination is out of shape.
+ */
+function lifecycleOf(status: unknown, voidedAt: unknown, reasonCode: unknown, issuedAt: string): Lifecycle | null {
+  if (status === ISSUED_INVOICE_STATUS) return voidedAt === null && reasonCode === null ? Object.freeze({ status, void: null }) : null;
+  if (status !== INVOICE_VOIDED_STATUS || !isDraftCreatedAt(voidedAt) || voidedAt < issuedAt || !isInvoiceVoidReasonCode(reasonCode)) return null;
+  return Object.freeze({ status, void: Object.freeze({ voidedAt, reasonCode }) });
+}
 
 /**
  * The port's answer as a validated issued invoice, 'not_found' or 'denied' — or null for anything out of shape: the invoice
- * asked for, snapshot version 1, USD, the lines and amounts exactly as THE PREVIEW requires, the tax by mode. Never throws.
+ * asked for, snapshot version 1, USD, the lines and amounts exactly as THE PREVIEW requires, the tax by mode, the lifecycle
+ * exactly as THE LIFECYCLE requires. Never throws.
  */
 export function issuedInvoiceOf(raw: unknown, invoiceId: string): IssuedInvoice | 'not_found' | 'denied' | null {
   try {
@@ -566,8 +608,11 @@ export function issuedInvoiceOf(raw: unknown, invoiceId: string): IssuedInvoice 
     if (seller === null || customer === null || tax === null || lines === null) return null;
     const amounts = issueAmountsOf(subtotalCents, tax);
     if (amounts === 'amount_out_of_range' || !amountsAgree(amounts, taxCents, totalCents)) return null;
+    const lifecycle = lifecycleOf(invoice.status, invoice.voidedAt, invoice.reasonCode, issuedAt);
+    if (lifecycle === null) return null;
     return Object.freeze({
-      id, number, issuedAt, sourceDraft: Object.freeze({ id: draftId, version: draftVersion }), seller, issuingSettingsVersion, customer, lines, amounts,
+      id, number, issuedAt, status: lifecycle.status, void: lifecycle.void, sourceDraft: Object.freeze({ id: draftId, version: draftVersion }), seller,
+      issuingSettingsVersion, customer, lines, amounts,
     });
   } catch {
     return null; // a throwing getter or proxy trap is never an invoice
@@ -704,7 +749,7 @@ export function createIssuedInvoiceListRoute(ports: InvoiceIssuePorts, options: 
     res.status(200).json({
       invoices: page.invoices.map((i) => ({
         id: i.id, number: i.number, sourceDraftId: i.sourceDraftId, customerId: i.customerId, customerName: i.customerName, currency: i.currency,
-        totalCents: i.totalCents, issuedAt: i.issuedAt, status: ISSUED_INVOICE_STATUS, snapshotVersion: ISSUED_INVOICE_SNAPSHOT_VERSION,
+        totalCents: i.totalCents, issuedAt: i.issuedAt, status: i.status, snapshotVersion: ISSUED_INVOICE_SNAPSHOT_VERSION,
       })),
       nextCursor: page.hasMore && last !== undefined ? encodeIssuedInvoiceCursor(last.id) : null,
     });
@@ -735,13 +780,16 @@ export function createIssuedInvoiceDetailRoute(ports: InvoiceIssuePorts, options
     const { seller, customer } = answer;
     res.status(200).json({
       invoice: {
-        id: answer.id, number: answer.number, status: ISSUED_INVOICE_STATUS, snapshotVersion: ISSUED_INVOICE_SNAPSHOT_VERSION, issuedAt: answer.issuedAt,
+        id: answer.id, number: answer.number, status: answer.status, snapshotVersion: ISSUED_INVOICE_SNAPSHOT_VERSION, issuedAt: answer.issuedAt,
         sourceDraft: { id: answer.sourceDraft.id, version: answer.sourceDraft.version },
         seller: { legalName: seller.legalName, storeName: seller.storeName, postalAddress: seller.postalAddress, taxRegistrationId: seller.taxRegistrationId },
         issuingSettingsVersion: answer.issuingSettingsVersion,
         customer: { id: customer.id, name: customer.name, version: customer.version },
         lines: linesBody(answer.lines),
         amounts: amountsBody(answer.amounts),
+        // The one more member, LAST and only when voided: a never-voided answer is the 034 answer byte for byte (header: THE
+        // LIFECYCLE).
+        ...(answer.void === null ? {} : { void: { voidedAt: answer.void.voidedAt, reasonCode: answer.void.reasonCode } }),
       },
     });
   });

@@ -652,6 +652,14 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     'tests/db/invoiceIssueRoutine.integration.test.mjs',
     'tests/db/invoiceIssueHttp.integration.test.mjs',
     'tests/db/issuingSettingsHttp.integration.test.mjs',
+    // M7B-INVOICES-VOID-P1: the invoice-void proofs (migration 035's void record, void routine, v2 issued-invoice reads, guards and
+    // rollback order, and the HTTP void) stand up every migration in the directory — the routine proof also rolls 035 back through
+    // its down file, finds 034's down failing on the dependency while 035 is applied, and re-applies 035 — through the SAME trusted
+    // executor, validating their target with the same assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning;
+    // the containment property above is untouched. The issuing routine suite (above) now applies the chain only through 034 and
+    // restores a shared service's 035 through migrationsThrough.mjs; it imports the same executor as before.
+    'tests/db/invoiceVoidRoutine.integration.test.mjs',
+    'tests/db/invoiceVoidHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

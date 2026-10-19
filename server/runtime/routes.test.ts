@@ -989,3 +989,100 @@ test('M7B-INVOICES-ISSUE-P1: lookup — /invoices and /invoice-drafts resolve un
     assert.equal(hit(miss, method), undefined, `${method} ${miss}`);
   }
 });
+
+// --- M7B-INVOICES-VOID-P1: the void and its eligibility under /invoices/{id} -----------------------------------------------
+
+const STORE_VOID = { scope: 'store', permission: 'void_issued_invoices' };
+const VOID = '/api/v1/stores/{storeId}/invoices/{id}/void';
+const VOID_ELIGIBILITY = '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility';
+const voidRoutes = () => [
+  storeCreate({ path: VOID, policy: SESSION('tenant', STORE_VOID), body: { kind: 'json', maxBytes: 1_024, required: true }, recentAuth: 'required' }),
+  storeRead({ path: VOID_ELIGIBILITY, policy: SESSION('tenant', STORE_VOID) }),
+];
+
+test('M7B-INVOICES-VOID-P1: the two new store templates register — the void POST as an idempotency-required command with a recent sign-in, its eligibility GET without a key or a recent sign-in; fifteen store templates in all; every other shape stays refused', () => {
+  const all = [...draftRoutes(), ...issueRoutes(), ...voidRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite(), directory()];
+  assert.equal(setupCode(all), undefined, 'fifteen store templates, five tenant templates and the store directory together');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}')).length, 15, 'fifteen store templates');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}') && def.idempotency === 'required').length, 5, 'five of them commands');
+  const table = defineRoutes(all);
+  const post = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/void`);
+  assert.ok(post !== undefined && 'command' in post && post.idempotency === 'required' && post.trustedContext === 'required' && post.recentAuth === 'required',
+    'the void: a keyed command under a trusted context and a recent sign-in');
+  assert.deepEqual(post.body, { kind: 'json', maxBytes: 1_024, required: true });
+  const eligibility = table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility`);
+  assert.ok(eligibility !== undefined && 'handler' in eligibility && eligibility.idempotency === 'none' && eligibility.recentAuth === 'none', 'the eligibility: a plain read');
+  for (const [label, def] of [
+    ['the void as a GET read', storeRead({ path: VOID, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void as a PATCH command', storeCreate({ method: 'PATCH', path: VOID, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void as a PUT command', storeCreate({ method: 'PUT', path: VOID, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void as a DELETE', storeRead({ method: 'DELETE', path: VOID, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void POST without idempotency, as a handler', storeRead({ method: 'POST', path: VOID, policy: SESSION('tenant', STORE_VOID), body: { kind: 'json', maxBytes: 1_024, required: true } })],
+    ['the void as a perform', (() => { const { command: _c, ...rest } = storeCreate({ path: VOID, policy: SESSION('tenant', STORE_VOID) }); return { ...rest, perform: outcome }; })()],
+    ['the void eligibility under a key', storeCreate({ method: 'GET', path: VOID_ELIGIBILITY, body: { kind: 'none' }, policy: SESSION('tenant', STORE_VOID) })],
+    ['a POST command on the void eligibility', storeCreate({ path: VOID_ELIGIBILITY, policy: SESSION('tenant', STORE_VOID) })],
+    ['a POST command on an issued invoice', storeCreate({ path: INVOICE, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void word without the invoice id', storeCreate({ path: `${INVOICES}/void`, policy: SESSION('tenant', STORE_VOID) })],
+    ['a deeper void template', storeCreate({ path: `${VOID}/x`, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void under the drafts', storeCreate({ path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/void', policy: SESSION('tenant', STORE_VOID) })],
+    ['an unvoid', storeCreate({ path: `${INVOICE}/unvoid`, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void under a tenant-scope requirement', storeCreate({ path: VOID, policy: SESSION('tenant', SETTINGS_KEY) })],
+    ['the void on the admin boundary', storeCreate({ path: VOID, policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }) })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  for (const [label, def] of [
+    ['the void as a PATCH command', storeCreate({ method: 'PATCH', path: VOID, policy: SESSION('tenant', STORE_VOID) })],
+    ['a POST command on an issued invoice', storeCreate({ path: INVOICE, policy: SESSION('tenant', STORE_VOID) })],
+    ['a POST command on the void eligibility', storeCreate({ path: VOID_ELIGIBILITY, policy: SESSION('tenant', STORE_VOID) })],
+    ['the void under a tenant-scope requirement', storeCreate({ path: VOID, policy: SESSION('tenant', SETTINGS_KEY) })],
+  ] as const) {
+    assert.equal(setupCode([def]), 'route_path_invalid', label);
+  }
+  assert.equal(setupCode([...voidRoutes(), ...voidRoutes()]), 'route_duplicate');
+});
+
+test('M7B-INVOICES-VOID-P1: lookup — GET …/invoices/{id}, GET …/invoices/{id}/void-eligibility and POST …/invoices/{id}/void resolve unambiguously; no template shadows another; a GET of …/void is not the detail; the void\'s target id is the segment before its own /void suffix', () => {
+  const table = defineRoutes([...draftRoutes(), ...issueRoutes(), ...voidRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  for (const segment of [ID, ID.toUpperCase(), '{id}', 'x', '..', '%2F', 'a'.repeat(128), 'void', 'void-eligibility', 'issue', 'eligibility']) {
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}`), INVOICE, `detail ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/void-eligibility`), VOID_ELIGIBILITY, `void eligibility ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/void`, 'POST'), VOID, `void ${segment}`);
+  }
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}`)?.policy, SESSION('tenant', STORE_VIEW_ISSUED), 'the detail keeps its own requirement');
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility`)?.policy, SESSION('tenant', STORE_VOID));
+  assert.deepEqual(table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/void`)?.policy, SESSION('tenant', STORE_VOID));
+  // An invoice whose id segment spells a suffix is still the detail's (the issue's precedent for drafts named like its suffixes).
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoices/void`), INVOICE, 'a GET of an invoice named void');
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoices/void-eligibility`), INVOICE, 'a GET of an invoice named void-eligibility');
+  // The earlier templates are unchanged beside the new ones.
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoices`), INVOICES);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}/issue`, 'POST'), ISSUE);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}/discard`, 'POST'), DISCARD);
+  assert.equal(hit(`/api/v1/stores/${STORE}/invoice-drafts/${ID}`), DRAFT);
+  for (const [method, miss] of [
+    ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/void`], ['PUT', `/api/v1/stores/${STORE}/invoices/${ID}/void`],
+    ['PATCH', `/api/v1/stores/${STORE}/invoices/${ID}/void`], ['DELETE', `/api/v1/stores/${STORE}/invoices/${ID}/void`],
+    ['post', `/api/v1/stores/${STORE}/invoices/${ID}/void`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility`], ['POST', `/api/v1/stores/${STORE}/invoices/void`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/void/`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/void/x`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/Void`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/unvoid`],
+    ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/void`], ['GET', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/void-eligibility`],
+    ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility/`], ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility/x`],
+    ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/Void-Eligibility`], ['POST', `/api/v1/stores/${STORE}/invoices/${'a'.repeat(129)}/void`],
+    ['POST', `/api/v1/stores/${STORE}/void`], ['GET', `/api/v1/stores/${STORE}/void-eligibility`],
+  ] as const) {
+    assert.equal(hit(miss, method), undefined, `${method} ${miss}`);
+  }
+  // The chain's target for the void (app.ts): the {id} directly before the MATCHED ROUTE's own declared suffix, taken from
+  // the template — the invoice, never '/void', the store or another segment; a malformed id is null (the 400).
+  const suffix = VOID.slice(VOID.indexOf('/{id}') + '/{id}'.length);
+  assert.equal(suffix, '/void');
+  assert.equal(pathIdBeforeSuffixOf(`/api/v1/stores/${STORE}/invoices/${ID}/void`, suffix), ID, 'the invoice id');
+  assert.equal(storeTargetOf(`/api/v1/stores/${STORE}/invoices/${ID}/void`), STORE, 'the store selector, separately');
+  for (const malformed of [ID.toUpperCase(), 'x', 'void', STORE.slice(1), `${ID}x`]) {
+    assert.equal(pathIdBeforeSuffixOf(`/api/v1/stores/${STORE}/invoices/${malformed}/void`, suffix), null, `malformed ${malformed}`);
+  }
+  assert.equal(pathIdBeforeSuffixOf(`/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility`, suffix), null, 'the eligibility path is not the void\'s');
+});

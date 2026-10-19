@@ -63,7 +63,7 @@
 // M7B-INVOICES-ISSUE-P1: this file proves 033 on the chain it was written for. Migration 034 widens the status CHECK, rebinds
 // trg_invoice_draft_terminal to its own function and anchors 033's down, so 033's own postcondition, trigger functions, messages
 // and rollback do not hold above it. The chain is therefore applied only THROUGH 033 (migrationsThrough.mjs, as the older suites
-// do): a shared service's 034 is rolled back first (it refuses over issued data, and none exists where this step runs) and put
+// do): a shared service's 034 (and 035 above it, M7B-INVOICES-VOID-P1) is rolled back first (it refuses over issued data, and none exists where this step runs) and put
 // back, with its exact ledger row, by the teardown. 034 itself is proved by invoiceIssueRoutine and invoiceIssueHttp, and the
 // discard over the full chain by invoiceDraftDiscardHttp.
 //
@@ -237,7 +237,7 @@ test.after(async () => {
       }
     });
     await step(cleanDrafts);
-    // M7B-INVOICES-ISSUE-P1: a shared service's 034, rolled back at setup, is put back with its exact ledger row (nothing to do on a fresh cluster).
+    // M7B-INVOICES-ISSUE-P1: a shared service's 034 (and 035), rolled back at setup, is put back with its exact ledger row (nothing to do on a fresh cluster).
     await step(() => above033.restore());
     if (UIDS.length > 0) {
       await step(async () => {
@@ -292,7 +292,7 @@ await owner.unsafe(`do $$ begin
 end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
-// 034 (when an earlier step of a shared service applied it) is rolled back through its own committed down and ledger row, newest
+// 034 and 035 (when an earlier step of a shared service applied them) are rolled back through their own committed downs and ledger rows, newest
 // first, and restored by the teardown; on a fresh cluster there is nothing above 033 and the restore does nothing.
 const above033 = await rollBackAbove(owner, MIG_DIR, '033');
 const applyReport = await trustedApply();

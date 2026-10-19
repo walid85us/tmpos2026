@@ -516,13 +516,14 @@ const NO_BYTES = Buffer.alloc(0);
 
 /**
  * The UPDATE contracts whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by kind: a closed
- * set of exactly three (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
+ * set of exactly four (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
  * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT; M7B-INVOICES-ISSUE-P1: the invoice issue's,
- * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT). Every other update's is the 503. The tenant store admits the answer from the
- * same kinds alone (postgresTransactionalStore.ts). Literals, as app.ts imports no route module;
- * postgresTransactionalStore.test.ts fails if this set or the store's drifts.
+ * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT; M7B-INVOICES-VOID-P1: the invoice void's, invoiceVoid.ts INVOICE_VOID_CONTRACT).
+ * Every other update's is the 503. The tenant store admits the answer from the same kinds alone
+ * (postgresTransactionalStore.ts). Literals, as app.ts imports no route module; postgresTransactionalStore.test.ts fails if
+ * this set or the store's drifts.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void']);
 
 /**
  * The CREATE contracts whose store-rolled-back 'not_found' is the unsealed 404 not_found, by kind (M7B-INVOICES-ISSUE-P1): a
@@ -979,6 +980,8 @@ export function createApp(deps: AppDeps): Express {
       // M7B-INVOICES-ISSUE-P1: the issue (POST …/invoice-drafts/{id}/issue) reads its draft the discard's way; the second
       // non-store templated command, PUT /api/v1/issuing-settings/{id}, reads its final {id} — the store whose settings it
       // writes, a selector among the trusted tenant's stores, never a grant — exactly as the customer edit reads its id.
+      // M7B-INVOICES-VOID-P1: the void (POST …/invoices/{id}/void) reads its issued invoice the discard's and the issue's way —
+      // the {id} directly before the matched template's own `/void` — after the same store check; no new branch.
       let targetId: string | null = null;
       let storeId: string | null = null;
       if ('command' in route && route.path.includes(STORE_SEGMENT)) {
@@ -1091,7 +1094,8 @@ export function createApp(deps: AppDeps): Express {
           // recorded nothing — no completion, unlike the sealed conflict above — so this 409 is the runtime's own, UNSEALED,
           // in the chain's { error, requestId } shape, and the lease waits out its time like any other rollback. Admitted from a
           // create, and from the update contracts that assert a tenant — the draft edit (M7B-INVOICES-P2), the draft
-          // discard (M7B-INVOICES-DISCARD-P1) and the invoice issue (M7B-INVOICES-ISSUE-P1), by kind — and from no other
+          // discard (M7B-INVOICES-DISCARD-P1), the invoice issue (M7B-INVOICES-ISSUE-P1) and the invoice void
+          // (M7B-INVOICES-VOID-P1), by kind — and from no other
           // update: there it committed nothing and is the 503 below.
           if (refused === 'transaction_precondition_failed' && (contract.mode === 'create' || PRECONDITION_UPDATE_KINDS.includes(contract.kind))) {
             return refuse(req, res, 409, 'write_conflict', refused);

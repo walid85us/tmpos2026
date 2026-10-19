@@ -1,7 +1,7 @@
 // Phase 4.0 M7B-INVOICES-DISCARD-P1 — discarding a saved store invoice draft END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) serving POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard and GET
 // …/{id}/discard-eligibility over REAL loopback HTTP and a disposable PostgreSQL holding every migration in the directory
-// (001-034), composed exactly as server/entry/tenantMain.ts composes it but for its construction. The route module
+// (001-035), composed exactly as server/entry/tenantMain.ts composes it but for its construction. The route module
 // (server/runtime/invoiceDrafts.ts), the chain's suffix-aware command target (app.ts), the store-scope authorizer and
 // revalidator, the tenant command transaction, the discard's mutator (server/persistence/postgresInvoiceDrafts.ts), migration
 // 033's discard routine (tmpos_invoice_discard.m7b_invoice_draft_discard: the Invoices level decided at Manage, again under

@@ -3,6 +3,9 @@
 // again on the database clock after the routine); what the four reads hand their routines and what they refuse to read
 // back as an answer; and the readiness probe. The routines themselves are proved against a real cluster by the database
 // suites of this stage.
+// M7B-INVOICES-VOID-P1: the issued page and get read 035's v2 routines (schema tmpos_invoice_void) with their lifecycle
+// columns — a page row's o_status, the get's o_status, o_voided_at and o_reason_code identical on every line row — and the
+// probe asks those two in place of 034's (ISS-P13).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -282,11 +285,11 @@ test('ISS-P08 the preview\'s rows: one header on every line row, positions 1..n,
 });
 
 const PAGE_COLS = ['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_source_draft_id', 'o_customer_id', 'o_customer_name', 'o_currency', 'o_total_cents',
-  'o_issued_at', 'o_snapshot_version'];
+  'o_issued_at', 'o_snapshot_version', 'o_status'];
 const I = (i: number): string => `${(0x40000000 - i).toString(16)}-0000-4000-8000-${(700_000 - i).toString(16).padStart(12, '0')}`;
 const pageRow = (i: number, over: Record<string, unknown> = {}) => ({
   o_outcome: 'invoice', o_tenant_id: TENANT, o_store_id: STORE, o_invoice_id: I(i), o_number: String(100 - i), o_source_draft_id: randomUUID(), o_customer_id: CUSTOMER,
-  o_customer_name: 'Dana Customer', o_currency: 'USD', o_total_cents: '2176', o_issued_at: AT, o_snapshot_version: 1, ...over,
+  o_customer_name: 'Dana Customer', o_currency: 'USD', o_total_cents: '2176', o_issued_at: AT, o_snapshot_version: 1, o_status: 'issued', ...over,
 });
 
 test('ISS-P09 the issued page\'s rows: the look-ahead judged then dropped, hasMore only from it; refusals; the filter alone; anything else a fault', () => {
@@ -315,12 +318,13 @@ test('ISS-P09 the issued page\'s rows: the look-ahead judged then dropped, hasMo
 const GET_HEADER_COLS = ['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_snapshot_version', 'o_issued_at', 'o_source_draft_id', 'o_source_draft_version',
   'o_settings_version', 'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_customer_id', 'o_customer_name', 'o_customer_version', 'o_currency',
   'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents', 'o_total_cents'];
+const LIFECYCLE_COLS = ['o_status', 'o_voided_at', 'o_reason_code'];
 const getRow = (position: number, over: Record<string, unknown> = {}) => ({
   o_outcome: 'line', o_tenant_id: TENANT, o_store_id: STORE, o_invoice_id: INVOICE, o_number: '7', o_snapshot_version: 1, o_issued_at: AT, o_source_draft_id: DRAFT,
   o_source_draft_version: '2', o_settings_version: '3', o_legal_name: 'Acme Repairs LLC', o_store_name: 'Acme Downtown', o_postal_address: '1 Main St', o_tax_registration_id: null,
   o_customer_id: CUSTOMER, o_customer_name: 'Dana Customer', o_customer_version: '4', o_currency: 'USD', o_line_count: 1, o_subtotal_cents: '1999', o_tax_mode: 'exclusive_rate',
   o_tax_rate: 8875, o_tax_cents: '177', o_total_cents: '2176', o_position: position, o_description: 'Screen', o_quantity: '1', o_unit_price_cents: '1999',
-  o_line_total_cents: '1999', ...over,
+  o_line_total_cents: '1999', o_status: 'issued', o_voided_at: null, o_reason_code: null, ...over,
 });
 
 test('ISS-P10 the issued get\'s rows: the snapshot as one header, its lines, the stored amounts the runtime derives; refusals; anything else a fault', () => {
@@ -330,9 +334,10 @@ test('ISS-P10 the issued get\'s rows: the snapshot as one header, its lines, the
     seller: { legalName: 'Acme Repairs LLC', storeName: 'Acme Downtown', postalAddress: '1 Main St', taxRegistrationId: null }, issuingSettingsVersion: 3,
     customer: { id: CUSTOMER, name: 'Dana Customer', version: 4 }, currency: 'USD', subtotalCents: 1999, tax: { mode: 'exclusive_rate', rateMilliPercent: 8875 },
     taxCents: 177, totalCents: 2176, lines: [{ position: 1, description: 'Screen', quantity: 1, unitPriceCents: 1999, lineTotalCents: 1999 }],
+    status: 'issued', voidedAt: null, reasonCode: null,
   });
   for (const word of ['denied', 'not_found']) {
-    assert.deepEqual(issuedInvoiceAnswerOf([{ o_outcome: word, ...nulls([...GET_HEADER_COLS, ...LINE_COLS]) }], STORE_SCOPE, INVOICE), { outcome: word });
+    assert.deepEqual(issuedInvoiceAnswerOf([{ o_outcome: word, ...nulls([...GET_HEADER_COLS, ...LINE_COLS, ...LIFECYCLE_COLS]) }], STORE_SCOPE, INVOICE), { outcome: word });
   }
   const faults: Array<[string, unknown]> = [
     ['another invoice', [getRow(1, { o_invoice_id: randomUUID() })]], ['another tenant', [getRow(1, { o_tenant_id: randomUUID() })]],
@@ -378,8 +383,9 @@ test('ISS-P11 the adapters: one statement each in one short read with the drafts
   ]);
   assert.match(k.statements[0].text, /from tmpos_invoice_issue\.m7b_issuing_settings_get\(\?::text, \?::uuid, \?::uuid\)$/);
   assert.match(k.statements[1].text, /from tmpos_invoice_issue\.m7b_invoice_issue_preview\(\?::text, \?::uuid, \?::uuid, \?::uuid\)$/);
-  assert.match(k.statements[2].text, /from tmpos_invoice_issue\.m7b_issued_invoice_page\(\?::text, \?::uuid, \?::uuid, \?::uuid,\s+\?::uuid, \?::integer\)$/);
-  assert.match(k.statements[4].text, /from tmpos_invoice_issue\.m7b_issued_invoice_get\(\?::text, \?::uuid, \?::uuid, \?::uuid\)$/);
+  assert.match(k.statements[2].text, /, o_snapshot_version, o_status\s+from tmpos_invoice_void\.m7b_issued_invoice_page_v2\(\?::text, \?::uuid, \?::uuid, \?::uuid,\s+\?::uuid, \?::integer\)$/);
+  assert.match(k.statements[4].text, /, o_line_total_cents, o_status, o_voided_at, o_reason_code\s+from tmpos_invoice_void\.m7b_issued_invoice_get_v2\(\?::text, \?::uuid, \?::uuid, \?::uuid\)$/);
+  assert.ok(!k.statements.some((st) => /tmpos_invoice_issue\.m7b_issued_invoice_(page|get)\(/.test(st.text)), 'never 034\'s page or get: 035 revoked them');
   assert.ok(k.bounds.every((b) => b === INVOICE_DRAFT_READ_BOUNDS), 'the drafts\' read bounds');
   k.statements.length = 0;
   const refused: Array<[string, () => unknown]> = [
@@ -416,16 +422,17 @@ test('ISS-P11b the page read copies its query once: an extra key, or a getter wh
 test('ISS-P12 readiness: the four reads\' one refusal of an absent key, in order, each all-null; anything else, or a throw, is false', async () => {
   const deniedFor = (text: string): unknown => {
     const cols = text.includes('m7b_issuing_settings_get') ? SETTINGS_COLS : text.includes('m7b_invoice_issue_preview') ? [...PREVIEW_HEADER_COLS, ...LINE_COLS]
-      : text.includes('m7b_issued_invoice_page') ? PAGE_COLS : [...GET_HEADER_COLS, ...LINE_COLS];
+      : text.includes('m7b_issued_invoice_page') ? PAGE_COLS : [...GET_HEADER_COLS, ...LINE_COLS, ...LIFECYCLE_COLS];
     return [{ o_outcome: 'denied', ...nulls(cols) }];
   };
   const ready = kernel(deniedFor);
   assert.equal(await probeInvoiceIssuing(ready.client, live()), true);
-  assert.deepEqual(ready.statements.map((s) => /m7b_\w+/.exec(s.text)?.[0]),
-    ['m7b_issuing_settings_get', 'm7b_invoice_issue_preview', 'm7b_issued_invoice_page', 'm7b_issued_invoice_get']);
+  assert.deepEqual(ready.statements.map((s) => /from (tmpos_\w+\.m7b_\w+)\(/.exec(s.text)?.[1]),
+    ['tmpos_invoice_issue.m7b_issuing_settings_get', 'tmpos_invoice_issue.m7b_invoice_issue_preview', 'tmpos_invoice_void.m7b_issued_invoice_page_v2',
+      'tmpos_invoice_void.m7b_issued_invoice_get_v2'], '034\'s settings read and preview, then 035\'s v2 page and get (M7B-INVOICES-VOID-P1)');
   assert.ok(ready.statements.every((s) => typeof s.values[0] === 'string' && /^[A-Za-z0-9_-]{43}$/.test(s.values[0] as string)), 'a random key of the session-key shape');
   assert.deepEqual(ready.statements[2].values.slice(3), [null, null, 1]);
-  const notFound = kernel((text) => (text.includes('m7b_issued_invoice_get') ? [{ o_outcome: 'not_found', ...nulls([...GET_HEADER_COLS, ...LINE_COLS]) }] : deniedFor(text)));
+  const notFound = kernel((text) => (text.includes('m7b_issued_invoice_get') ? [{ o_outcome: 'not_found', ...nulls([...GET_HEADER_COLS, ...LINE_COLS, ...LIFECYCLE_COLS]) }] : deniedFor(text)));
   assert.equal(await probeInvoiceIssuing(notFound.client, live()), false);
   const shortCircuit = kernel((text) => (text.includes('m7b_issuing_settings_get') ? [] : deniedFor(text)));
   assert.equal(await probeInvoiceIssuing(shortCircuit.client, live()), false);
@@ -435,4 +442,50 @@ test('ISS-P12 readiness: the four reads\' one refusal of an absent key, in order
   const aborted = new AbortController();
   aborted.abort();
   assert.equal(await probeInvoiceIssuing(ready.client, aborted.signal), false);
+});
+
+const VOIDED_AT = '2026-10-18T14:05:06.654321Z';
+
+test('ISS-P13 (M7B-INVOICES-VOID-P1) the v2 rows\' lifecycle: a voided page row and a voided get read through; the get\'s lifecycle identical on every line row; a refusal naming a lifecycle value, a 034-shaped row without the lifecycle columns, or a lifecycle the runtime refuses, a fault; the probe\'s v2 refusals all-null', async () => {
+  const page = issuedInvoicePageAnswerOf([pageRow(1, { o_status: 'voided' }), pageRow(2)], STORE_SCOPE, { after: null, sourceDraft: null, limit: 2 }) as { invoices: Array<{ status: string }> };
+  assert.deepEqual(page.invoices.map((i) => i.status), ['voided', 'issued']);
+  const voided = { o_status: 'voided', o_voided_at: VOIDED_AT, o_reason_code: 'duplicate' };
+  const two = (over: Record<string, unknown>, second: Record<string, unknown> = over) => [
+    getRow(1, { o_line_count: 2, o_subtotal_cents: '2000', o_tax_cents: '178', o_total_cents: '2178', o_unit_price_cents: '1000', o_line_total_cents: '1000', ...over }),
+    getRow(2, { o_line_count: 2, o_subtotal_cents: '2000', o_tax_cents: '178', o_total_cents: '2178', o_unit_price_cents: '1000', o_line_total_cents: '1000', ...second }),
+  ];
+  const got = issuedInvoiceAnswerOf(two(voided), STORE_SCOPE, INVOICE) as { invoice: Record<string, unknown> };
+  assert.deepEqual([got.invoice.status, got.invoice.voidedAt, got.invoice.reasonCode], ['voided', VOIDED_AT, 'duplicate']);
+  assert.ok(issuedInvoiceAnswerOf(two({}), STORE_SCOPE, INVOICE), 'two issued line rows');
+  const getFaults: Array<[string, unknown]> = [
+    ['the status differing between line rows', two(voided, { ...voided, o_status: 'issued' })],
+    ['the void time differing between line rows', two(voided, { ...voided, o_voided_at: '2026-10-18T14:05:06.654322Z' })],
+    ['the code differing between line rows', two(voided, { ...voided, o_reason_code: 'other' })],
+    ['issued with a void time', [getRow(1, { o_voided_at: VOIDED_AT })]], ['voided without a code', [getRow(1, { ...voided, o_reason_code: null })]],
+    ['voided before the issue', [getRow(1, { ...voided, o_voided_at: '2026-10-16T09:30:00.123455Z' })]], ['an unknown status', [getRow(1, { o_status: 'void' })]],
+    ['an unknown code', [getRow(1, { ...voided, o_reason_code: 'refund' })]], ['a null status on a line row', [getRow(1, { o_status: null })]],
+    ['a 034-shaped row (no lifecycle columns)', [Object.fromEntries(Object.entries(getRow(1)).filter(([k]) => !LIFECYCLE_COLS.includes(k)))]],
+    ['a voiding actor column', [{ ...getRow(1, voided), o_voided_by: ACTOR }]],
+    ['a refusal naming a status', [{ o_outcome: 'not_found', ...nulls([...GET_HEADER_COLS, ...LINE_COLS, ...LIFECYCLE_COLS]), o_status: 'issued' }]],
+  ];
+  for (const [label, rows] of getFaults) assert.throws(() => issuedInvoiceAnswerOf(rows, STORE_SCOPE, INVOICE), /invoice issuing answer invalid/, label);
+  const q = { after: null, sourceDraft: null, limit: 2 };
+  const pageFaults: Array<[string, unknown]> = [
+    ['an unknown status', [pageRow(1, { o_status: 'void' })]], ['a null status on a data row', [pageRow(1, { o_status: null })]],
+    ['a 034-shaped row (no o_status)', [Object.fromEntries(Object.entries(pageRow(1)).filter(([k]) => k !== 'o_status'))]],
+    ['a void time on a page row', [{ ...pageRow(1), o_voided_at: VOIDED_AT }]],
+    ['a refusal naming a status', [{ o_outcome: 'denied', ...nulls(PAGE_COLS), o_status: 'issued' }]],
+    ['one bad row beside a good one', [pageRow(1), pageRow(2, { o_status: 'Voided' })]],
+  ];
+  for (const [label, rows] of pageFaults) assert.throws(() => issuedInvoicePageAnswerOf(rows, STORE_SCOPE, q), /invoice issuing answer invalid/, label);
+  // The probe: a v2 refusal naming a lifecycle value is not ready.
+  const deniedFor = (text: string): unknown => {
+    const cols = text.includes('m7b_issuing_settings_get') ? SETTINGS_COLS : text.includes('m7b_invoice_issue_preview') ? [...PREVIEW_HEADER_COLS, ...LINE_COLS]
+      : text.includes('m7b_issued_invoice_page') ? PAGE_COLS : [...GET_HEADER_COLS, ...LINE_COLS, ...LIFECYCLE_COLS];
+    return [{ o_outcome: 'denied', ...nulls(cols) }];
+  };
+  const lifecycleOnRefusal = kernel((text) => (text.includes('m7b_issued_invoice_page_v2') ? [{ o_outcome: 'denied', ...nulls(PAGE_COLS), o_status: 'issued' }] : deniedFor(text)));
+  assert.equal(await probeInvoiceIssuing(lifecycleOnRefusal.client, live()), false);
+  const shape034 = kernel((text) => (text.includes('m7b_issued_invoice_get_v2') ? [{ o_outcome: 'denied', ...nulls([...GET_HEADER_COLS, ...LINE_COLS]) }] : deniedFor(text)));
+  assert.equal(await probeInvoiceIssuing(shape034.client, live()), false, 'a get refusal without the lifecycle columns');
 });

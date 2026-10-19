@@ -89,6 +89,8 @@ const DOWN_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_autho
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033: it rolls back first. */
 const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 (invoice void, in its own schema tmpos_invoice_void) sits above 034 and rolls back first. */
+const DOWN_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_025 = UP_025.slice(UP_025.lastIndexOf('do $$'));
 const SEARCH = 'tmpos_customer_search.m7a_customer_search(text, uuid, text, uuid, integer)';
@@ -169,9 +171,9 @@ test.after(async () => {
   if (UIDS.length > 0) await swallow(() => owner`delete from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`);
   // Every customer this file made, edited or not: a later suite's rollback of 024 refuses while any customer is edited.
   if (TENANTS.length > 0) await swallow(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 025, 026, 027, 028, 029, 030, 031, 032, 033 and 034 applied, whatever failed above: the executor applies them if not.
+  // The shared service is left with 025, 026, 027, 028, 029, 030, 031, 032, 033, 034 and 035 applied, whatever failed above: the executor applies them if not.
   await swallow(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '034') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '035') as applied`;
     if (!applied) await trustedApply();
   });
   if (issuerKeyBefore !== undefined) {
@@ -387,9 +389,9 @@ const applyReport = await trustedApply();
 test('M7CS-01: 025 applied by the trusted executor over a populated 001-024, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough024.outcome, 'complete', JSON.stringify(applyThrough024).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['025', '026', '027', '028', '029', '030', '031', '032', '033', '034'], `025 applied over the populated 001-024 chain, and 026, 027, 028, 029, 030, 031, 032, 033 and 034 above it (M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1) (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035'], `025 applied over the populated 001-024 chain, and 026, 027, 028, 029, 030, 031, 032, 033 and 034 above it (M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1) (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 34 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 35 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[24].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/025_m7a_customer_search.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_025).simple())).code, undefined, 'the postcondition holds as applied');
@@ -491,7 +493,7 @@ test('M7CS-02: no row rewritten; the routine is a pinned STABLE SECURITY DEFINER
 
 test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte-identical; refused while a 001-024 read is withdrawn or once applied away; committed, the P8 preflight refuses the 024 database and the executor re-applies 025 over the same rows', async () => {
   const down = await rolledBack(RC, async (tx) => {
-    await tx.unsafe(DOWN_034).simple();
+    await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple();
     await tx.unsafe(DOWN_033).simple();
     await tx.unsafe(DOWN_032).simple();
     await tx.unsafe(DOWN_031).simple();
@@ -521,7 +523,7 @@ test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte
   }
   // Committed: the ledger's own row with it (rollBackAbove), then the trusted executor applies it again.
   const later = await rollBackAbove(owner, MIG_DIR, '024');
-  assert.deepEqual(later.rolledBack, ['034', '033', '032', '031', '030', '029', '028', '027', '026', '025'], 'newest first: 034 above 033 above 032 above 031 above 030 above 029 above 028 above 027 above 026 above 025');
+  assert.deepEqual(later.rolledBack, ['035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025'], 'newest first: 034 above 033 above 032 above 031 above 030 above 029 above 028 above 027 above 026 above 025');
   try {
     assert.deepEqual(await surface(owner), SURFACE_024, 'committed: the 001-024 surface');
     assert.deepEqual(await rowsOf(UPGRADED), ROWS_024, 'committed: every customer row byte-identical, the edited one included');
@@ -530,7 +532,7 @@ test('M7CS-03: 025\'s down leaves exactly the 001-024 surface and every row byte
   } finally {
     const reapplied = await trustedApply();
     assert.equal(reapplied.outcome, 'complete', JSON.stringify(reapplied).slice(0, 400));
-    assert.deepEqual(reapplied.applied, ['025', '026', '027', '028', '029', '030', '031', '032', '033', '034']);
+    assert.deepEqual(reapplied.applied, ['025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035']);
   }
   assert.deepEqual(await rowsOf(UPGRADED), ROWS_024, 're-applied: every row byte-identical');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_025).simple())).code, undefined, 're-applied: the postcondition holds');

@@ -1330,6 +1330,8 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/stores/{storeId}/invoices', 'session', 'tenant', 'required', 'required', 'none'],
     ['GET', '/api/v1/stores/{storeId}/invoices/{id}', 'session', 'tenant', 'required', 'required', 'none'],
+    // M7B-INVOICES-VOID-P1: the void's action-only eligibility, a session-bound store-scope read appended after the issued detail.
+    ['GET', '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
@@ -1342,13 +1344,15 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     // M7B-INVOICES-ISSUE-P1: the owner's settings write (tenant scope) and the issue (store scope), last.
     ['PUT', '/api/v1/issuing-settings/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['POST', '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue', 'session', 'tenant', 'none', 'required', 'required'],
+    // M7B-INVOICES-VOID-P1: the void (store scope), last.
+    ['POST', '/api/v1/stores/{storeId}/invoices/{id}/void', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
   assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
     'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
     'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility',
     'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'GET /api/v1/issuing-settings/{id}',
     'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview',
-    'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}'],
+    'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}', 'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
     ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
@@ -1356,11 +1360,11 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility',
       'GET /api/v1/issuing-settings/{id}', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview', 'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}',
-      'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts',
+      'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts',
       'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard', 'PUT /api/v1/issuing-settings/{id}',
-      'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue']);
+      'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue', 'POST /api/v1/stores/{storeId}/invoices/{id}/void']);
   assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
-  assert.deepEqual([6, 7, 8, 19, 9, 20, 10, 21].map((i) => ttx.routes[i].policy), [
+  assert.deepEqual([6, 7, 8, 20, 9, 21, 10, 22].map((i) => ttx.routes[i].policy), [
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
@@ -1372,7 +1376,7 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   ], 'the draft routes require the STORE route permissions — each eligibility read exactly its command\'s');
   // M7B-INVOICES-ISSUE-P1: the settings read and write under the owner-only TENANT permission; the issue, its eligibility and
   // its preview under issue_invoices; the issued reads under view_issued_invoices.
-  assert.deepEqual([11, 22, 12, 13, 23, 14, 15].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth]), [
+  assert.deepEqual([11, 23, 12, 13, 24, 14, 15].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth]), [
     ['GET /api/v1/issuing-settings/{id}', { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'edit_issuing_settings' } }, 'none'],
     ['PUT /api/v1/issuing-settings/{id}', { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'edit_issuing_settings' } }, 'required'],
     ['GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'issue_invoices' } }, 'none'],
@@ -1381,7 +1385,16 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET /api/v1/stores/{storeId}/invoices', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_issued_invoices' } }, 'none'],
     ['GET /api/v1/stores/{storeId}/invoices/{id}', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_issued_invoices' } }, 'none'],
   ]);
-  assert.deepEqual([8, 19, 9, 20, 10, 21].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
+  // M7B-INVOICES-VOID-P1 (R-SEC-03): the void's eligibility and the void under void_issued_invoices — no recent sign-in on the
+  // eligibility, a recent sign-in required on the POST.
+  assert.deepEqual([16, 25].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth, ttx.routes[i].body]), [
+    ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'void_issued_invoices' } }, 'none',
+      { kind: 'none' }],
+    ['POST /api/v1/stores/{storeId}/invoices/{id}/void', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'void_issued_invoices' } }, 'required',
+      { kind: 'json', maxBytes: 1024, required: true }],
+  ]);
+  assert.equal(ttx.routes.length, 26, 'seventeen reads and nine commands');
+  assert.deepEqual([8, 20, 9, 21, 10, 22].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
     ['GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard']);
@@ -1545,12 +1558,13 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   const previewDenied = nulls(['o_tenant_id', 'o_store_id', 'o_draft_id', 'o_draft_version', 'o_customer_id', 'o_customer_name', 'o_customer_version', 'o_settings_version',
     'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_tax_mode', 'o_tax_rate', 'o_currency', 'o_line_count', 'o_subtotal_cents', 'o_tax_cents',
     'o_total_cents', 'o_position', 'o_description', 'o_quantity', 'o_unit_price_cents', 'o_line_total_cents']);
+  // M7B-INVOICES-VOID-P1: the page and get are 035's v2 routines, with their lifecycle columns.
   const issuedPageDenied = nulls(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_source_draft_id', 'o_customer_id', 'o_customer_name', 'o_currency',
-    'o_total_cents', 'o_issued_at', 'o_snapshot_version']);
+    'o_total_cents', 'o_issued_at', 'o_snapshot_version', 'o_status']);
   const issuedGetDenied = nulls(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_snapshot_version', 'o_issued_at', 'o_source_draft_id', 'o_source_draft_version',
     'o_settings_version', 'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_customer_id', 'o_customer_name', 'o_customer_version', 'o_currency',
     'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents', 'o_total_cents', 'o_position', 'o_description', 'o_quantity', 'o_unit_price_cents',
-    'o_line_total_cents']);
+    'o_line_total_cents', 'o_status', 'o_voided_at', 'o_reason_code']);
   let issuedGot: unknown = issuedGetDenied;
   let minted: unknown = [{ outcome: 'invalid' }];
   const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
@@ -1585,9 +1599,9 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
       : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : /tmpos_invoice_discard\.m7b_invoice_draft_page_v2\(/.test(st.text) ? 'draft_page'
         : /tmpos_invoice_discard\.m7b_invoice_draft_get_v2\(/.test(st.text) ? 'draft_get'
           : /tmpos_invoice_issue\.m7b_issuing_settings_get\(/.test(st.text) ? 'settings' : /tmpos_invoice_issue\.m7b_invoice_issue_preview\(/.test(st.text) ? 'preview'
-            : /tmpos_invoice_issue\.m7b_issued_invoice_page\(/.test(st.text) ? 'issued_page' : /tmpos_invoice_issue\.m7b_issued_invoice_get\(/.test(st.text) ? 'issued_get' : 'other'));
+            : /tmpos_invoice_void\.m7b_issued_invoice_page_v2\(/.test(st.text) ? 'issued_page' : /tmpos_invoice_void\.m7b_issued_invoice_get_v2\(/.test(st.text) ? 'issued_get' : 'other'));
   assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get'],
-    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then the drafts\' two reads (M7B-INVOICES-P1; 033\'s open-only page_v2 and get_v2 since M7B-INVOICES-DISCARD-P1), then 034\'s four issuing reads (M7B-INVOICES-ISSUE-P1)');
+    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then the drafts\' two reads (M7B-INVOICES-P1; 033\'s open-only page_v2 and get_v2 since M7B-INVOICES-DISCARD-P1), then the four issuing reads (M7B-INVOICES-ISSUE-P1; 035\'s v2 page and get since M7B-INVOICES-VOID-P1)');
   // M7B-INVOICES-ISSUE-P1: the issuing reads are asked last, and the issued get answering anything else is not ready.
   issuedGot = [{ ...issuedGetDenied[0], o_outcome: 'not_found' }];
   kernel.statements.length = 0;

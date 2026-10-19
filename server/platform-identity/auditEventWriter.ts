@@ -36,6 +36,12 @@
 //   (no console output): it never prints the UID, email, DB URL, project ref, or any
 //   secret.
 //
+// SUBJECTS (binding): an event names at most one typed subject column, through one FIXED statement per shape (never a
+//   fragment), with two closed exceptions: the invoice issue's triple (draft, issued invoice, customer; migration 034) at
+//   store scope, and — M7B-INVOICES-VOID-P1 (migration 035) — the invoice void's issued invoice ALONE, admitted only for
+//   action store.invoice.void at store scope and written by its own statement. Anywhere else an issued-invoice subject is
+//   refused before any statement is sent.
+//
 // ISOLATION (binding): server-side only — NEVER imported by src/ (the client
 // bundle). Imports NO Express, NO frontend, NO sessionResolve, NO runtime route
 // wiring. It is NOT wired into /auth/session/resolve (authorization stays null
@@ -319,10 +325,12 @@ export interface AuditEventWriteInput {
   subjectInvoiceDraftId?: string | null;
 
   /**
-   * The issued invoice the recorded action created (migration 034, M7B-INVOICES-ISSUE-P1): named ONLY in the issue's triple —
+   * The issued invoice the recorded action created (migration 034, M7B-INVOICES-ISSUE-P1): named in the issue's triple —
    * beside its source draft (subjectInvoiceDraftId) and its customer (subjectCustomerId), all three non-null together, the one
    * event that names more than one subject. Set only by the transactional store, from the command's runtime-generated invoice
-   * id and the customer its mutator's routine locked — never from request metadata.
+   * id and the customer its mutator's routine locked — never from request metadata. M7B-INVOICES-VOID-P1: or the issued
+   * invoice the recorded action VOIDED, named ALONE, for action store.invoice.void at store scope only — set only by the
+   * transactional store, from the void command's checked aggregate id.
    */
   subjectIssuedInvoiceId?: string | null;
 
@@ -416,17 +424,23 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
     throw new AuditEventValidationError('audit event subjectStoreId must be a UUID or null');
   }
   // At most one subject, except exactly the issue's triple (M7B-INVOICES-ISSUE-P1): its draft, its issued invoice and its
-  // customer, all three named together and nothing else. An issued invoice is never named outside that triple.
+  // customer, all three named together and nothing else. An issued invoice is never named outside that triple — save ALONE
+  // by the invoice void (M7B-INVOICES-VOID-P1), every other subject null.
   const triple = event.subjectInvoiceDraftId != null && event.subjectIssuedInvoiceId != null && event.subjectCustomerId != null
     && event.subjectTenantId == null && event.subjectStoreId == null;
   const named = [event.subjectTenantId, event.subjectCustomerId, event.subjectInvoiceDraftId, event.subjectIssuedInvoiceId, event.subjectStoreId]
     .filter((subject) => subject != null).length;
-  if ((named > 1 || event.subjectIssuedInvoiceId != null) && !triple) {
+  const voided = event.subjectIssuedInvoiceId != null && named === 1;
+  if ((named > 1 || event.subjectIssuedInvoiceId != null) && !triple && !voided) {
     throw new AuditEventValidationError('audit event names at most one subject');
   }
-  // The triple is the invoice issue's alone, at store scope; a store subject is the issuing-settings write's alone, at
-  // tenant scope (the scope check below proves the tenant and store each scope requires).
+  // The triple is the invoice issue's alone, at store scope; the issued invoice alone is the invoice void's alone, at store
+  // scope; a store subject is the issuing-settings write's alone, at tenant scope (the scope check below proves the tenant
+  // and store each scope requires).
   if ((triple && (event.actionId !== 'store.invoice.issue' || event.scopeType !== 'store'))
+    || (voided && (event.actionId !== 'store.invoice.void' || event.scopeType !== 'store'))
+    // The void's action names exactly its issued invoice alone (R-SEC-07): no other subject, and never none.
+    || (event.actionId === 'store.invoice.void' && !voided)
     || (event.subjectStoreId != null && (event.actionId !== 'tenant.issuing_settings.update' || event.scopeType !== 'tenant'))) {
     throw new AuditEventValidationError('audit event subject is not admitted for its action and scope');
   }
@@ -656,13 +670,15 @@ export async function writeAuditEvent(
   const eventId = randomUUID();
 
   // Schema-qualified: the caller's search path is never relied on (the transactional store pins pg_catalog, pg_temp).
-  // Six fixed statements, never a fragment: subject_tenant_id (migration 009), subject_customer_id (migration 024) or
+  // Seven fixed statements, never a fragment: subject_tenant_id (migration 009), subject_customer_id (migration 024) or
   // subject_invoice_draft_id (migration 028) is named only when the event names that subject, so every other caller's
   // statement — and every database before 009, 024 or 028 — is exactly as it was. Validation proved at most one subject is
   // named, or exactly the issue's triple. M7B-INVOICES-ISSUE-P1 (migration 034) adds two more fixed statements: the triple
   // (subject_invoice_draft_id, subject_issued_invoice_id, subject_customer_id), used for the invoice issue alone, and
-  // subject_store_id alone, for the issuing-settings write; every earlier statement is unchanged.
-  if (validated.subjectIssuedInvoiceId != null) {
+  // subject_store_id alone, for the issuing-settings write; every earlier statement is unchanged. M7B-INVOICES-VOID-P1 adds one
+  // more: subject_issued_invoice_id alone, for the invoice void alone; validation proved an issued invoice is named only in
+  // the triple or alone: the triple's statement is matched FIRST (all three named), then the void's (the invoice alone).
+  if (validated.subjectIssuedInvoiceId != null && validated.subjectInvoiceDraftId != null && validated.subjectCustomerId != null) {
     await executor`
       insert into public.audit_event (
         event_id,
@@ -716,6 +732,60 @@ export async function writeAuditEvent(
     `;
     return { eventId, requestId: validated.requestId };
   }
+  // The void's issued invoice alone (M7B-INVOICES-VOID-P1), matched only after the triple: every other subject null.
+  if (validated.subjectIssuedInvoiceId != null && validated.subjectInvoiceDraftId == null && validated.subjectCustomerId == null
+    && validated.subjectTenantId == null && validated.subjectStoreId == null) {
+    await executor`
+      insert into public.audit_event (
+        event_id,
+        audit_version,
+        request_id,
+        trace_id,
+        actor_internal_user_id,
+        actor_auth_provider,
+        on_behalf_of_internal_user_id,
+        scope_type,
+        tenant_id,
+        store_id,
+        action_id,
+        required_permission,
+        decision,
+        reason_code,
+        human_readable_reason,
+        result_status,
+        source_of_truth,
+        evaluated_by,
+        evidence_level,
+        metadata,
+        subject_issued_invoice_id
+      ) values (
+        ${eventId},
+        ${AUDIT_CONTRACT_VERSION},
+        ${validated.requestId},
+        ${validated.traceId ?? null},
+        ${validated.actorInternalUserId},
+        ${validated.actorAuthProvider},
+        ${validated.onBehalfOfInternalUserId ?? null},
+        ${validated.scopeType},
+        ${validated.tenantId},
+        ${validated.storeId},
+        ${validated.actionId},
+        ${validated.requiredPermission},
+        ${validated.decision},
+        ${validated.reasonCode},
+        ${validated.humanReadableReason},
+        ${validated.resultStatus},
+        ${validated.sourceOfTruth},
+        ${validated.evaluatedBy},
+        ${validated.evidenceLevel},
+        ${executor.json(metadata)},
+        ${validated.subjectIssuedInvoiceId}
+      )
+    `;
+    return { eventId, requestId: validated.requestId };
+  }
+  // Unreachable after validation; never let an issued invoice fall through to a statement that does not name it.
+  if (validated.subjectIssuedInvoiceId != null) throw new AuditEventValidationError('audit event names at most one subject');
   if (validated.subjectStoreId != null) {
     await executor`
       insert into public.audit_event (

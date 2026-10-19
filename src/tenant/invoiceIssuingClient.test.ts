@@ -12,13 +12,14 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ISSUE_BODY_MAX_BYTES, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf,
+  INVOICE_VOID_REASONS, ISSUE_BODY_MAX_BYTES, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf,
   issuedInvoicePathOf, issuedInvoicesPathOf, issuingSettingsBody, issuingSettingsPathOf, normalizePostalAddress, parseRatePercent, rateDigits, rateText,
   sameSettingsValues, utcText, type IssuingSettingsFields,
 } from './invoiceIssuingClient';
 import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
 import { invoiceTaxOf, issueAmountsOf } from '../../server/runtime/invoiceIssuing';
+import { INVOICE_VOID_REASON_CODES, INVOICE_VOID_REASON_LABELS } from '../../server/runtime/invoiceVoid';
 
 const cp = (code: number): string => String.fromCodePoint(code);
 const unit = (code: number): string => String.fromCharCode(code);
@@ -591,6 +592,7 @@ test('IIC-16. the issued list: newest number first, no id or source draft twice,
   assert.equal(first.kind === 'ok' && first.invoices.length, ISSUED_PAGE_LIMIT);
   assert.deepEqual(first.kind === 'ok' && first.invoices[0], {
     id: uuid(0x1000), number: 100, sourceDraftId: uuid(0xd000), customerId: CUSTOMER, customerName: 'Ada Customer', currency: 'USD', totalCents: 2176, issuedAt: ISSUED_AT,
+    status: 'issued', // M7B-INVOICES-VOID-P1: the lifecycle is now part of the decoded summary
   });
   const after = await ok.client.listIssued(STORE, next, CSRF);
   assert.equal(after.kind === 'ok' && after.nextCursor, null);
@@ -757,4 +759,85 @@ test('IIC-22. the tax rounds half a cent UP exactly as the server does (invoiceI
     }
   }
   assert.equal(swept, subtotals.length * rates.length);
+});
+
+// M7B-INVOICES-VOID-P1 — the lifecycle on the two existing reads: list rows and the lookup carry `issued` or `voided` (keys
+// unchanged); a detail is issued with NO `void` key, or voided with exactly `void: { voidedAt, reasonCode }`. Everything else
+// is still unavailable, and one bad row still sinks the whole page.
+const VOIDED_AT = '2026-10-17T08:00:00.000001Z';
+const voidedDetail = (voidMember: unknown = { voidedAt: VOIDED_AT, reasonCode: 'wrong_customer' }, over: Record<string, unknown> = {}) =>
+  detailBody({ status: 'voided', void: voidMember, ...over });
+
+test('IIC-23. the issued list and the sourceDraft lookup accept status "voided" exactly as "issued" (same ten keys) and say which; any other status, or one bad row on a mixed page, is unavailable', async () => {
+  const mixed = [summary(0, 9), summary(1, 8, { status: 'voided' }), summary(2, 7)];
+  const mine = summary(3, 6, { sourceDraftId: DRAFT, status: 'voided' });
+  const ok = scripted(json(200, { invoices: mixed, nextCursor: null }), json(200, { invoices: [mine], nextCursor: null }));
+  const page = await ok.client.listIssued(STORE, null, CSRF);
+  assert.deepEqual(page.kind === 'ok' && page.invoices.map((row) => [row.number, row.status]), [[9, 'issued'], [8, 'voided'], [7, 'issued']]);
+  const found = await ok.client.findIssued(STORE, DRAFT, CSRF);
+  assert.deepEqual(found.kind === 'ok' && found.invoice, {
+    id: mine.id, number: 6, sourceDraftId: DRAFT, customerId: CUSTOMER, customerName: 'Ada Customer', currency: 'USD', totalCents: 2176, issuedAt: ISSUED_AT, status: 'voided',
+  });
+  const bad: unknown[] = [
+    { invoices: [summary(0, 9), summary(1, 8, { status: 'void' }), summary(2, 7)], nextCursor: null },
+    { invoices: [summary(0, 9), summary(1, 8, { status: 'Voided' }), summary(2, 7)], nextCursor: null },
+    { invoices: [summary(0, 9, { status: 'voided', void: { voidedAt: VOIDED_AT, reasonCode: 'other' } })], nextCursor: null }, // a row never carries the void
+    { invoices: [summary(0, 9, { status: 'voided', voidedAt: VOIDED_AT })], nextCursor: null },
+    { invoices: [summary(0, 9, { status: null })], nextCursor: null },
+  ];
+  const { calls, client } = scripted(...bad.map((b) => json(200, b)), json(200, { invoices: [{ ...mine, status: 'refunded' }], nextCursor: null }));
+  for (let i = 0; i < bad.length; i++) assert.deepEqual(await client.listIssued(STORE, null, CSRF), { kind: 'unavailable' }, `case ${i}`);
+  assert.deepEqual(await client.findIssued(STORE, DRAFT, CSRF), { kind: 'unavailable' });
+  assert.equal(calls.length, bad.length + 1);
+});
+
+test('IIC-24. the issued invoice\'s lifecycle: issued has void null and no `void` key; voided has exactly { voidedAt, reasonCode } (issuedAt\'s form, not before it, one of the six codes); every other combination is unavailable', async () => {
+  const codes = Object.keys(INVOICE_VOID_REASONS);
+  assert.deepEqual(codes, ['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']);
+  assert.deepEqual(Object.values(INVOICE_VOID_REASONS), ['Issued by mistake', 'Wrong customer', 'Wrong lines or amounts', 'Wrong seller details', 'Duplicate of another invoice', 'Other reason']);
+  const accepted = [...codes.map((code) => voidedDetail({ voidedAt: VOIDED_AT, reasonCode: code })), voidedDetail({ voidedAt: ISSUED_AT, reasonCode: 'other' })];
+  const ok = scripted(json(200, detailBody()), ...accepted.map((body) => json(200, body)));
+  const issued = await ok.client.getIssued(STORE, INVOICE, CSRF);
+  assert.deepEqual(issued.kind === 'ok' && [issued.invoice.status, issued.invoice.void], ['issued', null]);
+  for (const [i, code] of [...codes, 'other'].entries()) {
+    const got = await ok.client.getIssued(STORE, INVOICE, CSRF);
+    assert.deepEqual(got.kind === 'ok' && [got.invoice.status, got.invoice.void], ['voided', { voidedAt: i < codes.length ? VOIDED_AT : ISSUED_AT, reasonCode: code }], code);
+    assert.equal(got.kind === 'ok' && got.invoice.number, 7); // the snapshot is unchanged beside it
+  }
+  const bad: unknown[] = [
+    detailBody({ void: { voidedAt: VOIDED_AT, reasonCode: 'other' } }), // issued with a void key
+    detailBody({ void: null }), // issued with an empty one
+    detailBody({ status: 'voided' }), // voided without it
+    voidedDetail(null),
+    voidedDetail({ voidedAt: VOIDED_AT }),
+    voidedDetail({ reasonCode: 'other' }),
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'other', actor: 'uid-a' }), // an extra key in void
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'other', note: 'x' }),
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'Other reason' }), // a label is not a code
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'invoice_void_other' }), // the audit's form is not the wire's
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'refunded' }),
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 'toString' }), // an inherited name is not one of the six
+    voidedDetail({ voidedAt: VOIDED_AT, reasonCode: 1 }),
+    voidedDetail({ voidedAt: '2026-10-17T08:00:00.000Z', reasonCode: 'other' }), // not issuedAt's encoding
+    voidedDetail({ voidedAt: '2026-10-17 08:00:00', reasonCode: 'other' }),
+    voidedDetail({ voidedAt: '2026-02-30T08:00:00.000000Z', reasonCode: 'other' }), // no such instant
+    voidedDetail({ voidedAt: '2026-10-16T21:45:00.123455Z', reasonCode: 'other' }), // a microsecond before the issue
+    voidedDetail({ voidedAt: '2025-12-31T23:59:59.999999Z', reasonCode: 'other' }),
+    voidedDetail({ voidedAt: null, reasonCode: 'other' }),
+    voidedDetail([VOIDED_AT, 'other']),
+    voidedDetail(undefined, { status: 'void' }),
+    voidedDetail(undefined, { status: 'issued' }), // the void member under the issued status
+    voidedDetail(undefined, { snapshotVersion: 2 }), // the lifecycle is not a snapshot version
+    voidedDetail(undefined, { voidedAt: VOIDED_AT }), // a second lifecycle member at the top
+    { ...voidedDetail(), more: 1 },
+  ];
+  const { calls, client } = scripted(...bad.map((b) => json(200, b)));
+  for (let i = 0; i < bad.length; i++) assert.deepEqual(await client.getIssued(STORE, INVOICE, CSRF), { kind: 'unavailable' }, `case ${i}`);
+  assert.equal(calls.length, bad.length);
+});
+
+test('IIC-25. the shop\'s six void reasons are the server\'s (server/runtime/invoiceVoid.ts): the same codes in INVOICE_VOID_REASON_CODES\'s order, and each the same label as INVOICE_VOID_REASON_LABELS, in that order', () => {
+  assert.deepEqual(Object.keys(INVOICE_VOID_REASONS), [...INVOICE_VOID_REASON_CODES]);
+  assert.deepEqual(Object.keys(INVOICE_VOID_REASON_LABELS), [...INVOICE_VOID_REASON_CODES]);
+  assert.deepEqual(Object.entries(INVOICE_VOID_REASONS), Object.entries(INVOICE_VOID_REASON_LABELS));
 });

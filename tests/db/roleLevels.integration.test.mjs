@@ -1,6 +1,6 @@
 // M7A-CUSTOMERS-P3-R1 — AN OWNER'S ROLE EDIT REACHES EVERY CUSTOMER DECISION, END TO END: the tenant entry
 // (server/entry/tenantEntry.ts, startTenantEntry) over REAL loopback HTTP and a disposable PostgreSQL holding migrations
-// 001-034, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
+// 001-035, composed exactly as server/entry/tenantMain.ts composes it but for its construction.
 //
 // M7A-CUSTOMERS-P4 UPDATE (DA-125; migration 021). The edit is conditional: its body is six fields, the four of the edit and
 // the tenant and version the owner reviewed (expectedTenant, expectedVersion), and it writes only while both still hold.
@@ -50,7 +50,7 @@
 //            for a create holding the role row FOR SHARE; the create commits (201), the edit is refused on the database clock
 //            after the routine answered (503, level unchanged, no edit audit record, no completion, its lease kept: 409 for
 //            the same key within it); M7RLH-09b the same shape with the deadline far off commits both (201, 200);
-//   M7RLH-C1 the compiled tenant artifact serves exactly its twenty-nine routes (the customer detail read since P4, the profile read
+//   M7RLH-C1 the compiled tenant artifact serves exactly its thirty-one routes (the customer detail read since P4, the profile read
 //            since P6, the customer edit since P7, the Invoices read-back since M5-INVOICES-AUTH-P1, the store directory and the three invoice-draft routes since
 //            M7B-INVOICES-P1, the drafts' creation eligibility since M7B-INVOICES-P1-R2, the draft edit and its edit eligibility
 //            since M7B-INVOICES-P2, the draft discard and its discard eligibility since M7B-INVOICES-DISCARD-P1, the issuing-settings read and
@@ -336,7 +336,7 @@ function databaseClientOver(relay, kernelModule = { createSupervisedPgClient, MA
 }
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-034 here; 001-019 on the entry commit), the runtime login, the three keys,
+// setup: every migration in the directory (001-035 here; 001-019 on the entry commit), the runtime login, the three keys,
 // and the owner's proof schema
 // ---------------------------------------------------------------------------
 
@@ -922,15 +922,15 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
 /**
- * The tenant artifact's twenty-nine intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
+ * The tenant artifact's thirty-one intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
  * read; P6: the profile read; P7: the customer edit; M5-INVOICES-AUTH-P1: the Invoices read-back; M7B-INVOICES-P1: the store
  * directory and the invoice drafts' list, read and save; M7B-INVOICES-P1-R2: the drafts' creation eligibility;
  * M7B-INVOICES-P2: the draft edit and its edit eligibility; M7B-INVOICES-DISCARD-P1: the draft discard and its discard eligibility;
  * M7B-INVOICES-ISSUE-P1: the issuing-settings read and write, the draft's issue eligibility, preview and issue, and the issued-invoice
- * list and read).
+ * list and read; M7B-INVOICES-VOID-P1: the invoice void's eligibility read and the void itself).
  */
-const TENANT_TWENTY_NINE = Object.freeze([
-  // The seven M7B-INVOICES-ISSUE-P1 rows sit in canonical() sort order (the comparison sorts both sides, so the order here is not a shipping-order claim).
+const TENANT_THIRTY_ONE = Object.freeze([
+  // The seven M7B-INVOICES-ISSUE-P1 rows and the two M7B-INVOICES-VOID-P1 rows sit in canonical() sort order (the comparison sorts both sides, so the order here is not a shipping-order claim).
   'GET /api/v1/customers session none none',
   'GET /api/v1/customers/{id} session none none',
   'GET /api/v1/customers/{id}/profile session none none',
@@ -948,6 +948,7 @@ const TENANT_TWENTY_NINE = Object.freeze([
   'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview session none none',
   'GET /api/v1/stores/{storeId}/invoices session none none',
   'GET /api/v1/stores/{storeId}/invoices/{id} session none none',
+  'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility session none none',
   'GET /health public none none',
   'GET /readiness public none none',
   'PATCH /api/v1/customers/{id} session json required',
@@ -958,6 +959,7 @@ const TENANT_TWENTY_NINE = Object.freeze([
   'POST /api/v1/stores/{storeId}/invoice-drafts session json required',
   'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard session json required',
   'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue session json required',
+  'POST /api/v1/stores/{storeId}/invoices/{id}/void session json required',
   'PUT /api/v1/issuing-settings/{id} session json required',
   'PUT /api/v1/roles/levels session json required',
 ]);
@@ -1892,8 +1894,8 @@ test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write
 // M7RLH-C1: the COMPILED tenant entry
 // ===========================================================================
 
-test('M7RLH-C1: the compiled tenant entry serves exactly its twenty-nine routes — the owner\'s PUT, its read-back and the Invoices read-back among them — applies an owner\'s edit, reads it back, reads the Invoices defaults back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_TWENTY_NINE], 'the source tenant inventory');
+test('M7RLH-C1: the compiled tenant entry serves exactly its thirty-one routes — the owner\'s PUT, its read-back and the Invoices read-back among them — applies an owner\'s edit, reads it back, reads the Invoices defaults back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_THIRTY_ONE], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1919,13 +1921,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its twenty-nine routes 
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_TWENTY_NINE], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_THIRTY_ONE], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_TWENTY_NINE], 'the compiled entry serves exactly the twenty-nine');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_THIRTY_ONE], 'the compiled entry serves exactly the thirty-one');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');

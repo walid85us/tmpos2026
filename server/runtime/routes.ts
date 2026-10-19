@@ -65,6 +65,10 @@
 // `/invoice-drafts` are distinct literal segments, matched exactly. It also adds the tenant templates GET and PUT
 // /api/v1/issuing-settings/{id} (its {id} a store of the trusted tenant, selected, never granted), the PUT a second templated
 // command beside the customer edit — five tenant templates, two of them commands.
+// M7B-INVOICES-VOID-P1 adds POST /api/v1/stores/{storeId}/invoices/{id}/void (a fifth store command, the first under
+// `/invoices`, read like the discard and the issue: its target is the {id} before the matched route's own `/void` suffix) and
+// its action-only eligibility GET …/invoices/{id}/void-eligibility — fifteen store templates, five of them commands. The
+// detail GET …/invoices/{id} is unchanged: a GET of …/invoices/{id}/void is no route, and a POST of …/invoices/{id} none.
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -439,8 +443,9 @@ export const STORE_SEGMENT = '/{storeId}';
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
 /**
  * The ONLY store-templated routes, as `METHOD path` (M7B-INVOICES-P1; the eligibility read since M7B-INVOICES-P1-R2; the edit
- * and its eligibility read since M7B-INVOICES-P2; the discard and its eligibility read since M7B-INVOICES-DISCARD-P1): any
- * other {storeId} template is refused.
+ * and its eligibility read since M7B-INVOICES-P2; the discard and its eligibility read since M7B-INVOICES-DISCARD-P1; the
+ * issue's three and the issued invoices' two since M7B-INVOICES-ISSUE-P1; the void and its eligibility read since
+ * M7B-INVOICES-VOID-P1): any other {storeId} template is refused.
  */
 const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`,
@@ -456,15 +461,20 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/issue-preview`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}`,
+  // M7B-INVOICES-VOID-P1: the void's action-only eligibility and the void itself.
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void-eligibility`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void`,
 ]);
 /**
  * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit,
- * (M7B-INVOICES-DISCARD-P1) the draft discard and (M7B-INVOICES-ISSUE-P1) the invoice issue.
+ * (M7B-INVOICES-DISCARD-P1) the draft discard, (M7B-INVOICES-ISSUE-P1) the invoice issue and (M7B-INVOICES-VOID-P1) the
+ * invoice void.
  */
 const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/discard`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/issue`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -573,8 +583,8 @@ function parseBody(raw: unknown, method: string): BodyPolicy {
  * response never replays in another's context, and the tenant store re-proves both inside the committing
  * transaction while holding the presenting session — which a Bearer-authenticated tenant route does not
  * have, and a `perform` never reaches. A store-scoped route may require one only as a store command decided
- * (M7B-INVOICES-P1, M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1): a tenant-session `command` on the closed store POST, PATCH
- * or discard POST template, whose
+ * (M7B-INVOICES-P1, M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1, M7B-INVOICES-VOID-P1): a tenant-session
+ * `command` on a template of the closed IDEMPOTENT_STORE_TEMPLATED_ROUTES set, whose
  * fingerprint binds the trusted tenant, store and actor the same way; every other store-scoped route may not.
  */
 function parseIdempotency(raw: unknown, method: string, path: string, policy: RoutePolicy, command: boolean): IdempotencyPolicy {
@@ -680,7 +690,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly thirteen declared strings (M7B-INVOICES-ISSUE-P1), so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly fifteen declared strings (M7B-INVOICES-VOID-P1), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);

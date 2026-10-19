@@ -1,6 +1,6 @@
 // Phase 4.0 M7B-INVOICES-ISSUE-P1 — a store's issuing settings END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) serving GET and PUT /api/v1/issuing-settings/{storeId} over REAL loopback HTTP and a disposable
-// PostgreSQL holding every migration in the directory (001-034), composed exactly as server/entry/tenantMain.ts composes it
+// PostgreSQL holding every migration in the directory (001-035), composed exactly as server/entry/tenantMain.ts composes it
 // but for its construction. The route module (server/runtime/issuingSettings.ts), the owner-only tenant authorizer and
 // revalidator (edit_issuing_settings, recent sign-in on the write), the tenant command transaction, the write's mutator and the
 // read's adapter (server/persistence/postgresInvoiceIssuing.ts), migration 034's routines (m7b_issuing_settings_get/_set), the
@@ -257,11 +257,12 @@ async function teardown() {
             'tmpos_invoice_issue.store_issuing_settings'::regclass, 'tmpos_invoice_issue.store_invoice_counter'::regclass,
             'tmpos_invoice_issue.issued_invoice'::regclass, 'tmpos_invoice_issue.issued_invoice_line'::regclass)
             and not g.tgisinternal and g.tgenabled <> 'A') as not_always,
-        (select count(*) from public.schema_migrations where version = '034')::int as at034`;
+        (select count(*) from public.schema_migrations where version = '034')::int as at034,
+        (select count(*) from public.schema_migrations where version = '035')::int as at035`;
       assert.deepEqual({ ...state }, {
         settings: 0, counters: 0, issued: 0, issued_lines: 0, issued_drafts: 0, store_or_invoice_subjects: 0, settings_or_issue_audits: 0,
-        drafts: 0, anchors: 0, customers: 0, not_always: null, at034: 1,
-      }, 'the database is at 034 with nothing that blocks its rollback, and every guard is ALWAYS again');
+        drafts: 0, anchors: 0, customers: 0, not_always: null, at034: 1, at035: 1,
+      }, 'the database is at 035 with nothing that blocks 034\'s or 035\'s rollback, and every guard is ALWAYS again');
     });
   } finally {
     await step(() => probe.end({ timeout: 5 }));
@@ -337,8 +338,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version = '034'`;
-  assert.equal(applied, 1, 'migration 034 (issuing) is applied');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('034', '035')`;
+  assert.equal(applied, 2, 'migrations 034 (issuing) and 035 (void) are applied');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);

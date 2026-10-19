@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 29 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 31 frozen tenant routes', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -242,8 +242,11 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 29 frozen tenant routes', ()
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}', access: 'session', body: 'none', idempotency: 'none' },
+    // M7B-INVOICES-VOID-P1: the void's action-only eligibility, read-only, and the idempotent void, after the issued detail.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/void', access: 'session', body: 'json', idempotency: 'required' },
   ]);
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 29);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 31);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });
@@ -393,17 +396,18 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   storeDirectoryProbe: [{ o_outcome: 'denied', o_store_id: null, o_tenant_id: null, o_store_name: null, o_read_only: null }],
   invoiceDraftPageProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_store_id: null, o_draft_id: null, o_customer_id: null, o_status: null, o_currency: null, o_line_count: null, o_subtotal_cents: null, o_created_at: null }],
   invoiceDraftGetProbe: [{ o_outcome: 'denied', o_tenant_id: null, o_store_id: null, o_draft_id: null, o_customer_id: null, o_status: null, o_currency: null, o_version: null, o_created_at: null, o_line_count: null, o_subtotal_cents: null, o_position: null, o_description: null, o_quantity: null, o_unit_price_cents: null, o_line_total_cents: null }],
-  // M7B-INVOICES-ISSUE-P1: 034's four issuing reads, each one 'denied' row with every other column null.
+  // M7B-INVOICES-ISSUE-P1: the four issuing reads, each one 'denied' row with every other column null — since
+  // M7B-INVOICES-VOID-P1 the page and get are 035's v2 routines, with their lifecycle columns.
   issuingSettingsProbe: [denied(['o_tenant_id', 'o_store_id', 'o_version', 'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_tax_mode', 'o_tax_rate'])],
   issuePreviewProbe: [denied(['o_tenant_id', 'o_store_id', 'o_draft_id', 'o_draft_version', 'o_customer_id', 'o_customer_name', 'o_customer_version', 'o_settings_version',
     'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_tax_mode', 'o_tax_rate', 'o_currency', 'o_line_count', 'o_subtotal_cents',
     'o_tax_cents', 'o_total_cents', 'o_position', 'o_description', 'o_quantity', 'o_unit_price_cents', 'o_line_total_cents'])],
   issuedPageProbe: [denied(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_source_draft_id', 'o_customer_id', 'o_customer_name', 'o_currency',
-    'o_total_cents', 'o_issued_at', 'o_snapshot_version'])],
+    'o_total_cents', 'o_issued_at', 'o_snapshot_version', 'o_status'])],
   issuedGetProbe: [denied(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_number', 'o_snapshot_version', 'o_issued_at', 'o_source_draft_id', 'o_source_draft_version',
     'o_settings_version', 'o_legal_name', 'o_store_name', 'o_postal_address', 'o_tax_registration_id', 'o_customer_id', 'o_customer_name', 'o_customer_version',
     'o_currency', 'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents', 'o_total_cents', 'o_position', 'o_description', 'o_quantity',
-    'o_unit_price_cents', 'o_line_total_cents'])],
+    'o_unit_price_cents', 'o_line_total_cents', 'o_status', 'o_voided_at', 'o_reason_code'])],
   storeProbe: [{ ok: true }],
 });
 
@@ -587,11 +591,14 @@ test('M7TU-14 dependency_unready: the session store, the session mint, the tenan
   await assertRefused({ invoiceDraftGetProbe: [[{ ...GOLDEN.invoiceDraftGetProbe[0], o_outcome: 'not_found' }]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ invoiceDraftGetProbe: [[GOLDEN.invoiceDraftPageProbe[0]]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ invoiceDraftGetProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
-  // M7B-INVOICES-ISSUE-P1: 034's four issuing reads are the seventh part of the same reads probe.
+  // M7B-INVOICES-ISSUE-P1: the four issuing reads are the seventh part of the same reads probe (035's v2 page and get since
+  // M7B-INVOICES-VOID-P1: a 034-shaped page refusal, without the lifecycle column, is not ready).
   await assertRefused({ issuingSettingsProbe: [[{ ...GOLDEN.issuingSettingsProbe[0], o_outcome: 'not_found' }]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ issuePreviewProbe: [[]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ issuedPageProbe: [[GOLDEN.invoiceDraftPageProbe[0]]] }, 'dependency_unready', ['customer_directory']);
   await assertRefused({ issuedGetProbe: ['reject'] }, 'dependency_unready', ['customer_directory']);
+  await assertRefused({ issuedPageProbe: [[Object.fromEntries(Object.entries(GOLDEN.issuedPageProbe[0]).filter(([k]) => k !== 'o_status'))]] }, 'dependency_unready',
+    ['customer_directory']);
   // M7A-CUSTOMERS-P3: the idempotency store is asked first, then the command port; both are 006's probe.
   await assertRefused({ storeProbe: [[{ ok: false }]] }, 'dependency_unready', ['idempotency_store']);
   await assertRefused({ storeProbe: ['reject'] }, 'dependency_unready', ['idempotency_store']);

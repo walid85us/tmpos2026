@@ -3,7 +3,7 @@
 // login, and GET /api/v1/stores through the REAL tenant entry over loopback HTTP.
 //
 // WHAT IS PROVEN.
-//   STA-01 001-034 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
+//   STA-01 001-035 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
 //          and refusing every widening it names (tmpos_app made a member of the owner among them); a second apply refused,
 //          and an apply over a chain missing 026's routine, 016's admission read or 002's membership table refused.
 //   STA-02 the inventory and ACL: one STABLE plpgsql SECURITY DEFINER routine pinned to pg_catalog, pg_temp with
@@ -43,7 +43,7 @@
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic
 // and randomly suffixed; every key is random bytes made here. It leaves the shared service with 027 and 028 applied, the
-// ledger 001-034, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its
+// ledger 001-035, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its
 // login dropped; its synthetically named identities, tenants, stores and memberships stay, as every suite's do. It writes no
 // invoice draft; STA-08 rolls 028 back with 027 (refused while a draft exists), so on a shared service it runs before every
 // step that stores one.
@@ -88,6 +88,8 @@ const DOWN_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_autho
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033 and rolls back first. */
 const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 (invoice void, in its own schema tmpos_invoice_void) sits above 034 and rolls back first. */
+const DOWN_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_027 = UP_027.slice(UP_027.lastIndexOf('do $$'));
 const DIRECTORY = 'tmpos_store_access.m7b_store_directory(text)';
@@ -174,7 +176,7 @@ test.after(async () => {
     await step(async () => {
       if ((await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent
         || (await owner`select pg_catalog.to_regnamespace('tmpos_invoice_draft') is null as absent`)[0].absent
-        || !(await owner`select exists (select 1 from public.schema_migrations where version = '034') as applied`)[0].applied) {
+        || !(await owner`select exists (select 1 from public.schema_migrations where version = '035') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -219,9 +221,10 @@ test.after(async () => {
           exists (select 1 from public.schema_migrations where version = '032') as ledger_032,
           exists (select 1 from public.schema_migrations where version = '033') as ledger_033,
           exists (select 1 from public.schema_migrations where version = '034') as ledger_034,
+          exists (select 1 from public.schema_migrations where version = '035') as ledger_035,
           (select count(*) from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[]))::int as sessions,
           exists (select 1 from pg_catalog.pg_roles where rolname = ${RUNTIME_LOGIN}) as login`;
-      assert.deepEqual({ ...state }, { schema_027: true, ledger_027: true, schema_028: true, ledger_028: true, ledger_029: true, ledger_030: true, ledger_031: true, ledger_032: true, ledger_033: true, ledger_034: true, sessions: 0, login: false },
+      assert.deepEqual({ ...state }, { schema_027: true, ledger_027: true, schema_028: true, ledger_028: true, ledger_029: true, ledger_030: true, ledger_031: true, ledger_032: true, ledger_033: true, ledger_034: true, ledger_035: true, sessions: 0, login: false },
         'left as found: 027 and 028 applied and recorded, no session of this suite, the probe login dropped');
     });
   } finally {
@@ -232,7 +235,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-034), a real non-owner runtime login, the keys installed by the owner
+// setup: every migration in the directory (001-035), a real non-owner runtime login, the keys installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -397,10 +400,10 @@ async function preflightVerdict() {
 // STA-01..02: the migration, the inventory and the ACL
 // ---------------------------------------------------------------------------
 
-test('STA-01: 001-034 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('STA-01: 001-035 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 34 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 35 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'every ledger checksum is the pinned one');
   assert.equal(ledger[26].checksum, createHash('sha256').update(UP_027).digest('hex'), '027\'s checksum is its up bytes');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_027).simple())).code, undefined, 'the applied state satisfies the postcondition');
@@ -442,7 +445,7 @@ test('STA-01: 001-034 applied clean, every checksum the pinned one; 027\'s postc
       /migration 027 refused: the session table, the mint ledger, the issuer key, 016's admission or 002's tables are missing/],
   ]) {
     const out = await rolledBack(RC, async (tx) => {
-      await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(remove); await tx.unsafe(UP_027).simple();
+      await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(remove); await tx.unsafe(UP_027).simple();
     });
     assert.equal(out.code, '55000', `${label}: ${JSON.stringify(out)}`);
     assert.match(out.message, pattern, label);
@@ -672,7 +675,7 @@ test('STA-08: 027\'s down refuses while not applied or while an invoice draft ob
     ['028\'s schema with its two tables', 'create schema tmpos_invoice_draft; create table tmpos_invoice_draft.invoice_draft (draft_id uuid); create table tmpos_invoice_draft.invoice_draft_line (draft_id uuid)'],
     ['the audit subject column', 'alter table public.audit_event add column subject_invoice_draft_id uuid'],
   ]) {
-    const out = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(fake).simple(); await tx.unsafe(DOWN_027).simple(); });
+    const out = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(fake).simple(); await tx.unsafe(DOWN_027).simple(); });
     assert.equal(out.code, '55000', `${label}: refused (${JSON.stringify(out)})`);
     assert.match(out.message, /migration 027 rollback refused: an invoice draft object of migration 028 exists/, label);
   }
@@ -683,7 +686,7 @@ test('STA-08: 027\'s down refuses while not applied or while an invoice draft ob
     ['both table names in an unrelated schema', 'create schema sta_unrelated; create table sta_unrelated.invoice_draft (draft_id uuid); create table sta_unrelated.invoice_draft_line (draft_id uuid)'],
   ]) {
     const out = await rolledBack(RC, async (tx) => {
-      await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple();
+      await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple();
       await tx.unsafe(DOWN_028).simple();
       await tx.unsafe(unrelated).simple();
       await tx.unsafe(DOWN_027).simple();
@@ -692,14 +695,14 @@ test('STA-08: 027\'s down refuses while not applied or while an invoice draft ob
     assert.deepEqual(out, { value: true }, `${label}: rolled back, not refused (${JSON.stringify(out)})`);
   }
   assert.ok(!(await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as absent`)[0].absent, 'each refusal left 027 in place');
-  const twice = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(DOWN_027).simple(); });
+  const twice = await rolledBack(RC, async (tx) => { await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(DOWN_031).simple(); await tx.unsafe(DOWN_030).simple(); await tx.unsafe(DOWN_029).simple(); await tx.unsafe(DOWN_028).simple(); await tx.unsafe(DOWN_027).simple(); await tx.unsafe(DOWN_027).simple(); });
   assert.equal(twice.code, '55000');
   assert.match(twice.message, /migration 027 is not applied/);
   // The executor's own path: the down file and the ledger row, then restored.
-  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-034 runtime is accepted');
+  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-035 runtime is accepted');
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '026');
   try {
-    assert.deepEqual(undone, ['034', '033', '032', '031', '030', '029', '028', '027'], 'only 027 (and 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) sits above 026');
+    assert.deepEqual(undone, ['035', '034', '033', '032', '031', '030', '029', '028', '027'], 'only 027 (and 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) sits above 026');
     const [state] = await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as gone,
       (select max(version) from public.schema_migrations) as newest`;
     assert.deepEqual({ ...state }, { gone: true, newest: '026' });

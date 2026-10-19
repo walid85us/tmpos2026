@@ -101,7 +101,7 @@
 //          028's routine are refused (42501); create_v3's and create_v2's attributes and comments; the complete ACLs (v3: the
 //          owner's and tmpos_app's EXECUTE, owner-granted, non-grantable; v2, 028's and 032's trigger function: the owner's
 //          alone); the schema's five functions; 032's postcondition holds, 031's refuses until 032 is rolled back above it; the
-//          real preflight accepts the 001-034 database; 030's rollback on it (034 and 033 rolled back first, in the same transaction: their anchors
+//          real preflight accepts the 001-035 database; 030's rollback on it (034 and 033 rolled back first, in the same transaction: their anchors
 //          refuses every older down) is REFUSED with 2BP01 and changes nothing; STATIC:
 //          create_v2 is 028's with exactly three changes, create_v3 is create_v2 with exactly the two design changes (the method
 //          is stated in the case), 032's trigger function is 030's with the domain 'customers', and v3's key precedes both
@@ -111,7 +111,7 @@
 //          two idempotency records (a sealed completion and an open lease): with 032 applied, 031's down REFUSED (55000) and
 //          030's REFUSED (2BP01), nothing changed (034, M7B-INVOICES-ISSUE-P1, and 033, M7B-INVOICES-DISCARD-P1, rolled back first in each transaction: their anchors
 //          refuse every older down); 032's down (after 034's and 033's) waits for an in-flight save and setter; 032's, 033's and 034's downs by the
-//          executor's down path -> the exact 031-era surface, every row identical, the 001-034 preflight refusing, the login on
+//          executor's down path -> the exact 031-era surface, every row identical, the 001-035 preflight refusing, the login on
 //          create_v2 again; a second 032 down refused; 032's up refused when applied and when 030's trigger is disabled, an
 //          extra trigger sits on the level table or create_v2's ACL is widened; the up waits for an in-flight save and setter;
 //          at that 031-era state 031's own down waits for an in-flight create_v2 save, an Invoices setter and an Invoices setter
@@ -154,6 +154,8 @@ const DOWN_032 = readFileSync(`${MIG_DIR}/032_m7b_invoice_create_customers_autho
 const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033: it rolls back first and is applied with it. */
 const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 (invoice void, in its own schema tmpos_invoice_void) sits above 034 and rolls back first. */
+const DOWN_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.down.sql`, 'utf8');
 /** Each up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_030 = UP_030.slice(UP_030.lastIndexOf('do $$'));
 const POSTCONDITION_031 = UP_031.slice(UP_031.lastIndexOf('do $$'));
@@ -293,9 +295,9 @@ test.after(async () => {
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
   try {
     await step(removeSynthetic);
-    // A failed ICA-10 + CCA-12 may have left 034, 033, 032, 031 and 030 rolled back: the executor applies them again.
+    // A failed ICA-10 + CCA-12 may have left 035, 034, 033, 032, 031 and 030 rolled back: the executor applies them again.
     await step(async () => {
-      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '034') as applied`)[0].applied) {
+      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '035') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -330,6 +332,8 @@ test.after(async () => {
           exists (select 1 from public.schema_migrations where version = '033') as ledger_033,
           pg_catalog.to_regnamespace('tmpos_invoice_issue') is not null as schema_034,
           exists (select 1 from public.schema_migrations where version = '034') as ledger_034,
+          pg_catalog.to_regnamespace('tmpos_invoice_void') is not null as schema_035,
+          exists (select 1 from public.schema_migrations where version = '035') as ledger_035,
           (select pg_catalog.string_agg(g.tgname::text || ':' || g.tgenabled::text, ',' order by g.tgname::text collate "C") from pg_catalog.pg_trigger g
             where g.tgrelid = 'tmpos_role.tenant_role_level'::regclass and not g.tgisinternal) as triggers,
           (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[]))::int as drafts,
@@ -340,10 +344,10 @@ test.after(async () => {
           (select count(*) from tmpos_internal.outbox_event where event_id = any(${SYNTHETIC.events}::uuid[]))::int as events,
           (select count(*) from tmpos_internal.idempotency_record where scope = any(${SYNTHETIC.scopes}::text[]))::int as records,
           exists (select 1 from pg_catalog.pg_roles where rolname = ${RUNTIME_LOGIN}) as login`;
-      assert.deepEqual({ ...state }, { routine_031: true, ledger_031: true, routine_032: true, ledger_032: true, schema_033: true, ledger_033: true, schema_034: true, ledger_034: true,
+      assert.deepEqual({ ...state }, { routine_031: true, ledger_031: true, routine_032: true, ledger_032: true, schema_033: true, ledger_033: true, schema_034: true, ledger_034: true, schema_035: true, ledger_035: true,
         triggers: `${CUSTOMERS_TRIGGER}:A,trg_tenant_role_level_invoice_guard:A,trg_tenant_role_level_version_advance:A`,
         drafts: 0, subjects: 0, anchors: 0, sessions: 0, audits: 0, events: 0, records: 0, login: false },
-        'left as found: 031, 032, 033 and 034 applied and recorded, the level table\'s three triggers ENABLE ALWAYS, nothing of this suite\'s retained');
+        'left as found: 031, 032, 033, 034 and 035 applied and recorded, the level table\'s three triggers ENABLE ALWAYS, nothing of this suite\'s retained');
     });
   } finally {
     await step(() => owner.end({ timeout: 5 }));
@@ -353,7 +357,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-034), a real non-owner runtime login, the issuer key installed by the owner
+// setup: every migration in the directory (001-035), a real non-owner runtime login, the issuer key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -1769,12 +1773,12 @@ test('ICA-11 + CCA-11 (AC-14 / AC-11, N): the runtime login executes create_v3 a
     assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_032).simple())).code, undefined, '032\'s own postcondition holds over the applied chain');
     const on032 = await rolledBack((tx) => tx.unsafe(POSTCONDITION_031).simple());
     evidence(st, { case: 'CCA-11 031 postcondition over 032', on032 });
-    assert.equal(on032.code, '55000', `031's postcondition refuses over 001-034: its exact inventory sees 032's objects (${JSON.stringify(on032)})`);
-    assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(POSTCONDITION_031).simple(); })).code, undefined,
+    assert.equal(on032.code, '55000', `031's postcondition refuses over 001-035: its exact inventory sees 032's objects (${JSON.stringify(on032)})`);
+    assert.equal((await rolledBack(async (tx) => { await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple(); await tx.unsafe(DOWN_033).simple(); await tx.unsafe(DOWN_032).simple(); await tx.unsafe(POSTCONDITION_031).simple(); })).code, undefined,
       '031\'s postcondition holds once 034, 033 and 032 are rolled back above it (rolled back)');
-    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'the real preflight accepts the 001-034 database');
+    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'the real preflight accepts the 001-035 database');
   });
-  await t.test('030\'s rollback on the 001-034 database with 034 and 033 rolled back first (their anchors refuse every older down), run as rollBackAbove runs a down (its file and ledger row in one transaction), is REFUSED (2BP01); the catalog and the ledger unchanged', async (st) => {
+  await t.test('030\'s rollback on the 001-035 database with 034 and 033 rolled back first (their anchors refuse every older down), run as rollBackAbove runs a down (its file and ledger row in one transaction), is REFUSED (2BP01); the catalog and the ledger unchanged', async (st) => {
     const before = { surface: await surface(), ledger: await ledgerRows() };
     assert.equal(before.surface.functions.length, 5, 'tmpos_invoice_edit holds v2, the Invoices guard, create_v2, create_v3 and the Customers guard');
     // The executor's down path for ONE version (tests/db/migrationsThrough.mjs rollBackAbove, the path IDE-21 uses for 030): the
@@ -1782,7 +1786,7 @@ test('ICA-11 + CCA-11 (AC-14 / AC-11, N): the runtime login executes create_v3 a
     // (034's down and then 033's first, in the same transaction: while 034 is applied its anchor refuses 033's down, and while 033 is applied its
     // anchor refuses every older down at the first drop).
     const refused = await errorOf(owner.begin(RC, async (tx) => {
-      await tx.unsafe(DOWN_034).simple();
+      await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple();
       await tx.unsafe(DOWN_033).simple();
       await tx.unsafe(DOWN_030).simple();
       await tx`delete from public.schema_migrations where version = '030'`;
@@ -1797,7 +1801,7 @@ test('ICA-11 + CCA-11 (AC-14 / AC-11, N): the runtime login executes create_v3 a
     }
     assert.deepEqual(await surface(), before.surface, 'unchanged: the triggers, v2, the guard functions, create_v2, create_v3, the schema and every grant');
     assert.deepEqual(await ledgerRows(), before.ledger, 'unchanged: the ledger, 030\'s row included');
-    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-034 runtime still accepts it');
+    assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-035 runtime still accepts it');
   });
   await t.test('static: create_v2\'s code is 028\'s with exactly the three changes; create_v3\'s is create_v2\'s with exactly the two design changes; 032\'s trigger function is 030\'s with the domain customers; v3\'s key precedes both level reads, which precede the customer_not_found answer, with no level or version row locked and no role row written', async () => {
     const proSrc = async (sig) => (await owner`select p.prosrc as src from pg_catalog.pg_proc p where p.oid = ${sig}::regprocedure`)[0].src;
@@ -2120,7 +2124,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
       ['030', DOWN_030, '2BP01', /^cannot drop schema tmpos_invoice_edit because other objects depend on it$/],
     ]) {
       const refused = await errorOf(owner.begin(RC, async (tx) => {
-        await tx.unsafe(DOWN_034).simple();
+        await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple();
         await tx.unsafe(DOWN_033).simple();
         await tx.unsafe(down).simple();
         await tx`delete from public.schema_migrations where version = ${version}`;
@@ -2138,7 +2142,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     let inside = null;
     await behindInFlight('034\'s, 033\'s and 032\'s downs', [['an in-flight save (create_v3)', inFlightSave()], ['an in-flight REAL Customers setter', inFlightCustomersSetter]],
       async (tx) => {
-        await tx.unsafe(DOWN_034).simple();
+        await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple();
         await tx.unsafe(DOWN_033).simple();
         await tx.unsafe(DOWN_032).simple();
         inside = { surface: await surface(tx), rows: await rowsOf([u.T], tx) };
@@ -2152,14 +2156,14 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     let restored032 = false;
     let rows1;
     try {
-      assert.deepEqual(undone032, ['034', '033', '032'], 'only 034, 033 and 032 sit above 031');
+      assert.deepEqual(undone032, ['035', '034', '033', '032'], 'only 034, 033 and 032 sit above 031');
       assert.deepEqual(await rowsOf([u.T]), rows0, 'every draft, line, level, version, audit, outbox and idempotency row identical');
       assert.deepEqual(await surface(), surface031(with032), 'the exact 031-era surface: create_v3, 032\'s trigger function and trigger gone; create_v2\'s EXECUTE tmpos_app\'s again; 030\'s and 031\'s functions (bodies, ACLs, attributes, comments), the schema, the two triggers and 028\'s save as they were');
       assert.deepEqual([await isGone(CREATE_V3), await isGone(CUSTOMERS_GUARD)], [true, true], 'create_v3 and the Customers guard gone');
       assert.deepEqual((await surface()).triggers.map((g) => g.enabled), ['A', 'A'], 'both remaining triggers ENABLE ALWAYS');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_031).simple())).code, undefined, '031\'s own postcondition holds again');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
-        'the 001-034 runtime refuses what is left: create_v3\'s, 033\'s and 034\'s routines\' EXECUTE missing, create_v2\'s and 028\'s page\'s and get\'s not approved, 032, 033 and 034 not recorded');
+        'the 001-035 runtime refuses what is left: create_v3\'s, 033\'s and 034\'s routines\' EXECUTE missing, create_v2\'s and 028\'s page\'s and get\'s not approved, 032, 033 and 034 not recorded');
       const gone = await errorOf(create(u.kManager, u.S, u.T, u.C1));
       assert.equal(gone?.code, '42883', `create_v3 no longer exists (${JSON.stringify(gone)})`);
       const atV2 = await save(u.manager, u.kManager, u.S, u.T, u.C2, [line('Saved at 031', 1, 1)], { fn: CREATE_FN_V2 });
@@ -2208,11 +2212,11 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
 
       // 5. THE UPGRADE 031 -> 034 by the trusted executor: no row changes, the same surface the first apply left.
       const upgrade = await trustedApply();
-      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['032', '033', '034']], JSON.stringify(upgrade).slice(0, 300));
+      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['032', '033', '034', '035']], JSON.stringify(upgrade).slice(0, 300));
       restored032 = true;
       assert.deepEqual(await rowsOf([u.T]), rows1, 'every draft, line, level, version, audit, outbox and idempotency row identical across the upgrade');
       assert.deepEqual(await surface(), with032, 'the same schema, functions (bodies, grants, attributes, comments), triggers and 028 ACL as the first apply left');
-      assert.deepEqual((await ledgerRows()).map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-034 again');
+      assert.deepEqual((await ledgerRows()).map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-035 again');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_032).simple())).code, undefined, '032\'s postcondition holds again');
       assert.equal((await errorOf(create(u.kManager, u.S, u.T, u.C1, LINES, { fn: CREATE_FN_V2 })))?.code, '42501', 'create_v2 closed to the login again');
@@ -2229,14 +2233,14 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '030');
     let restored = false;
     try {
-      assert.deepEqual(undone, ['034', '033', '032', '031'], '034 rolls back first, then 033, then 032, then 031');
+      assert.deepEqual(undone, ['035', '034', '033', '032', '031'], '034 rolls back first, then 033, then 032, then 031');
       assert.deepEqual(await rowsOf([u.T]), rows2, 'every draft, line, level, version, audit, outbox and idempotency row identical');
       assert.deepEqual(await surface(), surface030(with031), 'the exact 030-era surface: create_v2 and create_v3 gone; tmpos_invoice_edit exactly 030\'s two functions (bodies, ACLs, attributes, comments), its ACL and comment; the two triggers; 028\'s save the owner\'s and tmpos_app\'s again');
       assert.deepEqual([await isGone(CREATE_V2), await isGone(CREATE_V3)], [true, true], 'create_v2 and create_v3 gone');
       assert.deepEqual((await surface()).triggers.map((g) => g.enabled), ['A', 'A'], 'both triggers ENABLE ALWAYS');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_030).simple())).code, undefined, '030\'s own postcondition holds again');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] },
-        'the 001-034 runtime refuses what is left: create_v3\'s, 033\'s and 034\'s routines\' EXECUTE missing, 028\'s create\'s, page\'s and get\'s not approved, 031, 032, 033 and 034 not recorded');
+        'the 001-035 runtime refuses what is left: create_v3\'s, 033\'s and 034\'s routines\' EXECUTE missing, 028\'s create\'s, page\'s and get\'s not approved, 031, 032, 033 and 034 not recorded');
       const gone = await errorOf(create(u.kManager, u.S, u.T, u.C1));
       assert.equal(gone?.code, '42883', `create_v3 no longer exists (${JSON.stringify(gone)})`);
       const at030 = await save(u.manager, u.kManager, u.S, u.T, u.C2, [line('Saved at 030', 1, 1)], { fn: CREATE_FN_028 });
@@ -2268,26 +2272,26 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
         (tx) => tx.unsafe(UP_031).simple());
       assert.deepEqual([await isGone(CREATE_V2), await isGone(CREATE_V3)], [true, true], 'every proof rolled back: still no create_v2 or create_v3');
 
-      // 4. THE UPGRADE 030 -> 034 by the trusted executor: no row changes, the same surface the first apply left.
+      // 4. THE UPGRADE 030 -> 035 by the trusted executor: no row changes, the same surface the first apply left.
       const upgrade = await trustedApply();
-      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['031', '032', '033', '034']], JSON.stringify(upgrade).slice(0, 300));
+      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['031', '032', '033', '034', '035']], JSON.stringify(upgrade).slice(0, 300));
       restored = true;
       assert.deepEqual(await rowsOf([u.T]), rows3, 'every draft, line, level, version, audit, outbox and idempotency row identical across the upgrade');
       assert.deepEqual(await surface(), with032, 'the same schema, functions (bodies, grants, attributes, comments), triggers and 028 ACL as the first apply left');
       const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
-      assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-034 again');
-      assert.equal(ledger.at(-1).version, '034');
+      assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-035 again');
+      assert.equal(ledger.at(-1).version, '035');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_032).simple())).code, undefined, '032\'s postcondition holds again');
       assert.equal((await errorOf(create(u.kManager, u.S, u.T, u.C1, LINES, { fn: CREATE_FN_028 })))?.code, '42501', '028\'s save closed to the login again');
       await save(u.manager, u.kManager, u.S, u.T, u.C1, [line('Saved at 032 again', 1, 1)]);
 
-      // 5. THE DOWN of 034, 033, 032 and 031 again waits for an in-flight save (create_v3), an in-flight setter, and a setter queued on the
+      // 5. THE DOWN of 035, 034, 033, 032 and 031 again waits for an in-flight save (create_v3), an in-flight setter, and a setter queued on the
       //    key behind a held save, and finishes — no deadlock (rolled back each time: all stay applied). Inside it: the
       //    030-era surface and every row identical.
       const rowsBeforeDown = await rowsOf([u.T]);
       const downBoth = async (tx) => {
-        await tx.unsafe(DOWN_034).simple();
+        await tx.unsafe(DOWN_035).simple(); await tx.unsafe(DOWN_034).simple();
         await tx.unsafe(DOWN_033).simple();
         await tx.unsafe(DOWN_032).simple();
         await tx.unsafe(DOWN_031).simple();
@@ -2299,7 +2303,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
       await behindAConvoy('034\'s, 033\'s, 032\'s and 031\'s downs', inFlightSave(), () => running(runtime, (tx) => setCustomers(wOwn.key, 'manager', 'view', w.T, 0, tx)), downBoth);
       assert.deepEqual(await rowsOf([u.T]), rowsBeforeDown, 'every down rolled back: every row of the cycle\'s tenant identical');
       assert.deepEqual(await surface(), with032, 'every down rolled back: 031, 032, 033 and 034 as they were');
-      assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-034 runtime accepts it');
+      assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'and the 001-035 runtime accepts it');
     } finally {
       if (!restored) await restore();
     }
@@ -2309,17 +2313,17 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     const { rolledBack: undoneAll, restore: restoreAll } = await rollBackAbove(owner, MIG_DIR, '029');
     let restoredAll = false;
     try {
-      assert.deepEqual(undoneAll, ['034', '033', '032', '031', '030'], '034, then 033, then 032, then 031, then 030');
+      assert.deepEqual(undoneAll, ['035', '034', '033', '032', '031', '030'], '034, then 033, then 032, then 031, then 030');
       assert.deepEqual(await rowsOf([u.T]), rows4, 'every draft (edited ones included), line, level, version, audit, outbox and idempotency row identical with 030 rolled back too');
       assert.equal((await owner`select pg_catalog.to_regnamespace('tmpos_invoice_edit') is null as gone`)[0].gone, true, '030\'s schema gone');
       assert.deepEqual((await owner`select g.tgname::text as name from pg_catalog.pg_trigger g where g.tgrelid = 'tmpos_role.tenant_role_level'::regclass and not g.tgisinternal`).map((r) => r.name),
         ['trg_tenant_role_level_version_advance'], 'only 021\'s trigger remains on the level table');
       const reapply = await trustedApply();
-      assert.deepEqual([reapply.outcome, reapply.applied], ['complete', ['030', '031', '032', '033', '034']], JSON.stringify(reapply).slice(0, 300));
+      assert.deepEqual([reapply.outcome, reapply.applied], ['complete', ['030', '031', '032', '033', '034', '035']], JSON.stringify(reapply).slice(0, 300));
       restoredAll = true;
       assert.deepEqual(await rowsOf([u.T]), rows4, 'every row identical across the re-apply');
       assert.deepEqual(await surface(), with032, 'the same surface as the first apply');
-      assert.deepEqual((await ledgerRows()).map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-034 again');
+      assert.deepEqual((await ledgerRows()).map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-035 again');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_032).simple())).code, undefined, '032\'s postcondition holds');
       await save(u.manager, u.kManager, u.S, u.T, u.C1, [line('Saved after the re-apply', 1, 1)]);

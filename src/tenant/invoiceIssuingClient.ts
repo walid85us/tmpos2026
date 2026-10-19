@@ -10,7 +10,7 @@
 //     amounts, the number and what was stored. This client reports what the server answered and decides nothing.
 //   - An answer is untrusted: only a JSON body that matches the contract EXACTLY is a result — no extra key anywhere,
 //     every id canonical, every version, number and amount a safe integer in its range (never -0), snapshotVersion 1,
-//     status "issued", USD, the tax in exactly one of its two shapes, the lines in position order with each total its
+//     status "issued" or "voided" (a voided detail with exactly its `void` member, M7B-INVOICES-VOID-P1), USD, the tax in exactly one of its two shapes, the lines in position order with each total its
 //     own BigInt product, the subtotal their sum, the tax (S × R + 50,000) / 100,000 in BigInt and the total S plus it
 //     (S alone with no tax), every seller value equal to its own normalized form, an issuedAt in the UTC microsecond form.
 //     A read's answer must also name what was asked (the store, the draft, the invoice, the tenant passed in). Anything
@@ -63,6 +63,20 @@ export const ISSUE_BODY_MAX_BYTES = 1_024;
 export const ISSUED_PAGE_LIMIT = 20; // the server's default page; its maximum is 50
 export const TAX_LABEL = 'Tax';
 export const NO_TAX_DESCRIPTION = 'No tax calculated';
+
+/** The six void reason codes and their labels (docs/phase-4 contract §2, this order) — the shop's own copy: src/ never imports server/. */
+export const INVOICE_VOID_REASONS = Object.freeze({
+  issued_in_error: 'Issued by mistake',
+  wrong_customer: 'Wrong customer',
+  wrong_lines_or_amounts: 'Wrong lines or amounts',
+  wrong_seller_details: 'Wrong seller details',
+  duplicate: 'Duplicate of another invoice',
+  other: 'Other reason',
+} as const);
+export type InvoiceVoidReasonCode = keyof typeof INVOICE_VOID_REASONS;
+const isVoidReasonCode = (value: unknown): value is InvoiceVoidReasonCode => typeof value === 'string' && Object.prototype.hasOwnProperty.call(INVOICE_VOID_REASONS, value);
+/** The lifecycle a read reports: its current state only — never which request made it so. */
+export type IssuedStatus = 'issued' | 'voided';
 const MAX = Number.MAX_SAFE_INTEGER;
 const MAX_BIG = BigInt(MAX);
 const CUSTOMER_NAME_MAX_CHARACTERS = 200; // customerDirectory.ts isStorableName: a longer name is never served
@@ -112,10 +126,12 @@ export interface IssuePreview {
 }
 export interface IssuedSummary {
   readonly id: string; readonly number: number; readonly sourceDraftId: string; readonly customerId: string; readonly customerName: string;
-  readonly currency: 'USD'; readonly totalCents: number; readonly issuedAt: string;
+  readonly currency: 'USD'; readonly totalCents: number; readonly issuedAt: string; readonly status: IssuedStatus;
 }
 export interface IssuedInvoice {
-  readonly id: string; readonly number: number; readonly issuedAt: string;
+  readonly id: string; readonly number: number; readonly issuedAt: string; readonly status: IssuedStatus;
+  /** Null exactly when issued (the wire has no `void` key then); the void's time (issuedAt's form) and reason when voided. */
+  readonly void: { readonly voidedAt: string; readonly reasonCode: InvoiceVoidReasonCode } | null;
   readonly sourceDraft: { readonly id: string; readonly version: number };
   readonly seller: Seller; readonly issuingSettingsVersion: number; readonly customer: SnapshotCustomer;
   readonly lines: readonly InvoiceLine[]; readonly amounts: InvoiceAmounts;
@@ -379,8 +395,8 @@ function summaryOf(value: unknown): IssuedSummary | null {
   if (!isPlain(value) || !hasKeys(value, SUMMARY_KEYS)) return null;
   const { id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt, status, snapshotVersion } = value;
   if (!isCustomerId(id) || !isCount(number, 1, MAX) || !isCustomerId(sourceDraftId) || !isCustomerId(customerId) || !isStorableName(customerName)) return null;
-  if (currency !== 'USD' || !isCents(totalCents) || !isDraftCreatedAt(issuedAt) || status !== 'issued' || snapshotVersion !== 1) return null;
-  return Object.freeze({ id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt });
+  if (currency !== 'USD' || !isCents(totalCents) || !isDraftCreatedAt(issuedAt) || (status !== 'issued' && status !== 'voided') || snapshotVersion !== 1) return null;
+  return Object.freeze({ id, number, sourceDraftId, customerId, customerName, currency, totalCents, issuedAt, status });
 }
 
 /** The continuation the server writes for a page ending at `invoiceId` (invoiceIssuing.ts encodeIssuedInvoiceCursor). */
@@ -416,13 +432,25 @@ function pageOf(body: unknown, limit: number, cursor: string | null, draftId: st
 
 const INVOICE_KEYS: readonly string[] = ['id', 'number', 'status', 'snapshotVersion', 'issuedAt', 'sourceDraft', 'seller', 'issuingSettingsVersion', 'customer', 'lines', 'amounts'];
 
-/** `{ invoice: … }` exactly, for the invoice asked: snapshot version 1, issued, its lines and amounts their own arithmetic; otherwise null. */
+/**
+ * `{ invoice: … }` exactly, for the invoice asked: snapshot version 1, its lines and amounts their own arithmetic; issued
+ * with no `void` key, or voided with exactly one more, `void: { voidedAt, reasonCode }` (issuedAt's form, not before it;
+ * one of the six codes); otherwise null.
+ */
 function invoiceOf(body: unknown, invoiceId: string): IssuedInvoice | null {
   if (!isPlain(body) || !hasKeys(body, ['invoice'])) return null;
   const v = body.invoice;
-  if (!isPlain(v) || !hasKeys(v, INVOICE_KEYS) || v.id !== invoiceId || v.status !== 'issued' || v.snapshotVersion !== 1) return null;
+  const voided = isPlain(v) && v.status === 'voided';
+  if (!isPlain(v) || !hasKeys(v, voided ? [...INVOICE_KEYS, 'void'] : INVOICE_KEYS) || v.id !== invoiceId || (v.status !== 'issued' && !voided) || v.snapshotVersion !== 1) return null;
   const { number, issuedAt, sourceDraft, seller: rawSeller, issuingSettingsVersion, amounts: rawAmounts } = v;
   if (!isCount(number, 1, MAX) || !isDraftCreatedAt(issuedAt) || !isCount(issuingSettingsVersion, 1, MAX)) return null;
+  let lifecycle: IssuedInvoice['void'] = null;
+  if (voided) {
+    const raw = v.void;
+    // Same fixed-width UTC form on both sides, so the string order is the time order.
+    if (!isPlain(raw) || !hasKeys(raw, ['voidedAt', 'reasonCode']) || !isDraftCreatedAt(raw.voidedAt) || raw.voidedAt < issuedAt || !isVoidReasonCode(raw.reasonCode)) return null;
+    lifecycle = Object.freeze({ voidedAt: raw.voidedAt, reasonCode: raw.reasonCode });
+  }
   if (!isPlain(sourceDraft) || !hasKeys(sourceDraft, ['id', 'version']) || !isCustomerId(sourceDraft.id) || !isCount(sourceDraft.version, 1, MAX_EXPECTED_VERSION)) return null;
   if (!isPlain(rawSeller) || !hasKeys(rawSeller, ['legalName', 'storeName', 'postalAddress', 'taxRegistrationId']) || !isPlain(rawAmounts)) return null;
   const subtotal = rawAmounts.subtotalCents;
@@ -433,7 +461,7 @@ function invoiceOf(body: unknown, invoiceId: string): IssuedInvoice | null {
   const amounts = amountsOf(rawAmounts, subtotal);
   if (seller === null || customer === null || lines === null || amounts === null) return null;
   return Object.freeze({
-    id: invoiceId, number, issuedAt, sourceDraft: Object.freeze({ id: sourceDraft.id, version: sourceDraft.version }), seller, issuingSettingsVersion, customer, lines, amounts,
+    id: invoiceId, number, issuedAt, status: voided ? 'voided' : 'issued', void: lifecycle, sourceDraft: Object.freeze({ id: sourceDraft.id, version: sourceDraft.version }), seller, issuingSettingsVersion, customer, lines, amounts,
   });
 }
 

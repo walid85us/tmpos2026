@@ -5,7 +5,7 @@
 // alone, with no runtime in front of it; the HTTP route over it, its audit, idempotency and step-up, and the runtime's
 // comparison of each answer with its trusted context, are tests/db/roleLevels.integration.test.mjs's.
 //
-// WHAT IS PROVEN. 001-034 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
+// WHAT IS PROVEN. 001-035 applied clean, every ledger checksum the pinned one, 021's postcondition re-proven over the
 // applied state and refusing every widening it names, and a second apply refused (M7RV-01); the installed inventory and
 // the login's effective privileges: EXECUTE on the two new routines and on 020's levels read, create and page_v3, NONE on
 // 020's unconditional edit (has_function_privilege, and 42501 when called), nothing on the version table (M7RV-02); the
@@ -83,8 +83,12 @@ const DOWN_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.down.sql
 const UP_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.up.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 (invoice issuing, in its own schema tmpos_invoice_issue) sits above 033 and rolls back first. */
 const DOWN_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.down.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 (invoice void, in its own schema tmpos_invoice_void) sits above 034 and rolls back first. */
+const DOWN_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.down.sql`, 'utf8');
 /** M7B-INVOICES-ISSUE-P1: 034 sits above 033 and is applied with it. */
 const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
+/** M7B-INVOICES-VOID-P1: 035 sits above 034 and is applied with it. */
+const UP_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.up.sql`, 'utf8');
 /** 031's routine, whose presence says 031 is applied (it stays installed, owner-only, once 032 is). */
 const CREATE_V2_031 = 'tmpos_invoice_edit.m7b_invoice_draft_create_v2(text, uuid, uuid, uuid, uuid, jsonb, bigint)';
 /** 032's routine, whose presence says 032 is applied. */
@@ -199,7 +203,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-034), a real non-owner runtime login, the key installed by the owner
+// setup: every migration in the directory (001-035), a real non-owner runtime login, the key installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -321,10 +325,15 @@ const setV2 = async (key, role, level, tenant, version, db = runtime, domain = '
  * M7B-INVOICES-DISCARD-P1's 033 (the draft discard, in its own schema, with a status CHECK and two triggers on 028's tables, and a
  * rollback-order anchor that refuses every older down while it is applied) sits above 032. M7B-INVOICES-ISSUE-P1's 034 (invoice
  * issuing, in its own schema, with a widened status CHECK, a rebound terminal trigger and an anchor that refuses 033's down while it
- * is applied) sits above 033: it rolls back first and is re-applied last.
+ * is applied) sits above 033: it rolls back before it and is re-applied after it. M7B-INVOICES-VOID-P1's 035 (invoice void, in its own
+ * schema, with a foreign key onto 034's scope key and an anchor naming 034's functions; 034's down refuses while it is applied) sits
+ * above 034: it rolls back first and is re-applied last.
  */
 const down023 = async () => {
   await owner`update tmpos_customer.customer set phone = null, email = null, created_at = null where tenant_id = any(${TENANTS}::uuid[])`;
+  if (!(await owner`select pg_catalog.to_regnamespace('tmpos_invoice_void') is null as absent`)[0].absent) {
+    await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_035).simple());
+  }
   if (!(await owner`select pg_catalog.to_regnamespace('tmpos_invoice_issue') is null as absent`)[0].absent) {
     await owner.begin('isolation level read committed', (tx) => tx.unsafe(DOWN_034).simple());
   }
@@ -397,6 +406,9 @@ const up023IfAbsent = async () => {
   if ((await owner`select pg_catalog.to_regnamespace('tmpos_invoice_issue') is null as absent`)[0].absent) {
     await owner.begin((tx) => tx.unsafe(UP_034).simple());
   }
+  if ((await owner`select pg_catalog.to_regnamespace('tmpos_invoice_void') is null as absent`)[0].absent) {
+    await owner.begin((tx) => tx.unsafe(UP_035).simple());
+  }
 };
 /** 021's read-back, as the runtime login. */
 const statesOf = async (tenant) => (await runtime`select tmpos_role_edit.m7a_role_level_states(${tenant}::uuid) as states`)[0].states;
@@ -467,11 +479,11 @@ const onRoleRow = (locks) => locks.length > 0 && locks.every((l) => l.locktype =
 // M7RV-01..02: the migration, the inventory and the login's privileges
 // ---------------------------------------------------------------------------
 
-test('M7RV-01: 001-034 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('M7RV-01: 001-035 applied clean, every checksum the pinned one; 021\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => [r.version, r.dirty]),
-    Array.from({ length: 34 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+    Array.from({ length: 35 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   // 001-020 byte-identical: the ledger, the startup pins and the files on disk agree (the pins are bound to the committed
   // bytes by tests/quality/migration-files-contract.test.mjs).
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');

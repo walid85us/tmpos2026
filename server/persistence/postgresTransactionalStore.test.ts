@@ -988,12 +988,14 @@ test('M7B-INVOICES-P2 (design §2): precondition_failed is admitted from the dra
   assert.deepEqual(await tenantStore(scripted(customer.command.lease), [updater]).transactions.commit(customer.command, live()), UNAVAILABLE);
 });
 
-test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1 (design §2): the update kinds the store admits precondition_failed from and app.ts\'s 409 mapping\'s kinds are one closed set — exactly the draft edit\'s, the draft discard\'s and the invoice issue\'s contract kinds; a drift in any of them fails here', () => {
-  // The issue's contract (invoiceIssuing.ts INVOICE_ISSUE_CONTRACT, kind store.invoice.issue) is pinned by its kind here.
-  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue'];
+test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1, M7B-INVOICES-VOID-P1 (design §2): the update kinds the store admits precondition_failed from and app.ts\'s 409 mapping\'s kinds are one closed set — exactly the draft edit\'s, the draft discard\'s, the invoice issue\'s and the invoice void\'s contract kinds; a drift in any of them fails here', () => {
+  // The issue's contract (invoiceIssuing.ts INVOICE_ISSUE_CONTRACT, kind store.invoice.issue) and the void's (invoiceVoid.ts
+  // INVOICE_VOID_CONTRACT, kind store.invoice.void) are pinned by their kinds here.
+  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue', 'store.invoice.void'];
   assert.deepEqual([...PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'the store\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'app.ts\'s');
-  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue'], 'the contracts\', as the audit action ids migrations 029, 033 and 034 document');
+  assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS], [...PRECONDITION_UPDATE_KINDS], 'the two copies, in one order');
+  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void'], 'the contracts\', as the audit action ids migrations 029, 033, 034 and 035 document');
   assert.ok(Object.isFrozen(PRECONDITION_UPDATE_KINDS) && Object.isFrozen(APP_PRECONDITION_UPDATE_KINDS), 'frozen');
   for (const kind of ['store.invoice_draft.create', 'store.invoice_draft.reprice', 'tenant.customer.update', '']) {
     assert.equal(PRECONDITION_UPDATE_KINDS.includes(kind) || APP_PRECONDITION_UPDATE_KINDS.includes(kind), false, `closed: ${kind}`);
@@ -1295,4 +1297,119 @@ test('M7B-INVOICES-ISSUE-P1: the create kinds the store admits not_found from an
   for (const kind of ['store.invoice_draft.create', 'tenant.customer.create', 'tenant.role_levels.update', 'store.invoice.issue', '']) {
     assert.equal(NOT_FOUND_CREATE_KINDS.includes(kind) || APP_NOT_FOUND_CREATE_KINDS.includes(kind), false, `closed: ${kind}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// M7B-INVOICES-VOID-P1 — the void: an issued_invoice update at store scope, audited with its invoice ALONE
+// ---------------------------------------------------------------------------
+
+const VOID_TARGET = 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd';
+/** The void's contract as the interface pins it (invoiceVoid.ts INVOICE_VOID_CONTRACT): a store update of the issued invoice, no event. */
+const VOID_CONTRACT_DEF = Object.freeze({
+  kind: 'store.invoice.void', mode: 'update', aggregateType: 'issued_invoice', events: Object.freeze([]), contextScope: 'store',
+  changes: Object.freeze({ expectedTenant: ID_STRING, reasonCode: Object.freeze({ type: 'enum', values: Object.freeze(['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']) }) }),
+});
+const voidCommands = defineCommands([VOID_CONTRACT_DEF], defineOutboxEvents([]));
+const voidMutator = (answer: unknown, over: Record<string, unknown> = {}): AggregateMutator => Object.freeze({
+  kind: 'store.invoice.void', mode: 'update', aggregateType: 'issued_invoice', contextScope: 'store', auditSubjects: 'voided_invoice',
+  apply: async () => answer, ...over,
+}) as AggregateMutator;
+
+/** A void exactly as the runtime prepares one: the contract at version 1, its target `invoiceId`, a recent-sign-in deadline. */
+function voiding(invoiceId = VOID_TARGET): TransactionCommand {
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/void', audience: 'tenant', tenant: TENANT, store: STORE_ID, actor: TRUSTED.actor,
+    body: Buffer.from('{}'), target: invoiceId,
+  });
+  const prepared = prepareCommand(voidCommands.contract('store.invoice.void') as never, defineOutboxEvents([]), {
+    aggregateId: invoiceId, expectedVersion: 1, events: [], changes: { expectedTenant: TENANT, reasonCode: 'duplicate' },
+    response: { status: 200, body: { invoice: { id: invoiceId, status: 'voided' } } },
+    audit: { reasonCode: 'invoice_void_duplicate', reason: 'Issued invoice voided. Reason: Duplicate of another invoice.' },
+  }, {
+    scope: operation.scope, lease: digest(), newAggregateId: randomUUID(), authorization: Object.freeze({ scope: 'store', permission: 'void_issued_invoices' }),
+    context: STORE_CONTEXT, authNotAfter: 1_700_000_000_000, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null, 'the void is in contract');
+  return prepared.command;
+}
+
+test('M7B-INVOICES-VOID-P1: the mutator table admits the voided-invoice subject on a store-scope issued_invoice update alone — on a create, another aggregate type or another scope it is refused', () => {
+  const client = untouched().client;
+  assert.doesNotThrow(() => tenantStore(client, [voidMutator('applied')]), 'the void mutator');
+  for (const [label, mutator] of [
+    ['on a create', voidMutator('applied', { mode: 'create' })],
+    ['on an invoice_draft update', voidMutator('applied', { aggregateType: 'invoice_draft' })],
+    ['on a customer update', voidMutator('applied', { aggregateType: 'customer' })],
+    ['at tenant scope', voidMutator('applied', { contextScope: 'tenant' })],
+    ['at platform scope', voidMutator('applied', { contextScope: 'platform' })],
+    ['the issued-invoice word on the void\'s aggregate', voidMutator('applied', { auditSubjects: 'issued_invoice' })],
+    ['the store word on the void\'s aggregate', voidMutator('applied', { auditSubjects: 'store' })],
+    ['a near word', voidMutator('applied', { auditSubjects: 'voided_invoices' })],
+  ] as const) {
+    assert.throws(() => tenantStore(client, [mutator]), TypeError, label);
+  }
+});
+
+test('M7B-INVOICES-VOID-P1: an applied void writes exactly ONE audit record naming its issued invoice ALONE — the checked aggregate id, no draft, customer, tenant or store subject — no event, then its completion; the revalidator is handed the deadline', async () => {
+  const c = voiding();
+  assert.deepEqual(Object.keys(c.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], 'an update carries exactly three slots');
+  const client = scripted(c.lease);
+  const seen: unknown[] = [];
+  const store = createPostgresTransactionalStore({
+    client: client as never, mutators: [voidMutator('applied')], contextScope: 'tenant',
+    revalidate: async (_sql, scope, permission, authNotAfter, key) => { seen.push([scope.scope, permission, authNotAfter, key]); return true; },
+  });
+  assert.deepEqual(await store.transactions.commit(c, live()), COMMITTED);
+  assert.deepEqual(seen, [['store', 'void_issued_invoices', 1_700_000_000_000, SESSION_KEY]], 'the sensitive key\'s deadline reaches the revalidator');
+  const at = (name: string): number => client.texts.findIndex((t) => t.includes(name));
+  assert.ok(at('m6_command_fence') < at('insert into public.audit_event') && at('insert into public.audit_event') < at('m6_idempotency_complete'), 'fence, audit, completion');
+  assert.equal(client.texts.filter((t) => t.includes('insert into public.audit_event')).length, 1, 'exactly one audit record');
+  assert.equal(client.texts.filter((t) => t.includes('m6_command_enqueue')).length, 0, 'no event');
+  const audit = client.texts[at('insert into public.audit_event')];
+  assert.match(audit, /metadata,\s*subject_issued_invoice_id\s*\)/, 'the issued-invoice-alone statement');
+  for (const other of ['subject_tenant_id', 'subject_customer_id', 'subject_invoice_draft_id', 'subject_store_id']) assert.ok(!audit.includes(other), `no ${other}`);
+  const bound = client.values[at('insert into public.audit_event')];
+  assert.deepEqual([bound[4], bound[7], bound[8], bound[9], bound[10], bound[11]], [STORE_CONTEXT.actor, 'store', TENANT, STORE_ID, 'store.invoice.void', 'void_issued_invoices']);
+  assert.deepEqual([bound[13], bound[14]], ['invoice_void_duplicate', 'Issued invoice voided. Reason: Duplicate of another invoice.'], 'the annex pair');
+  assert.equal(bound[bound.length - 1], VOID_TARGET, 'the invoice, from the checked aggregate id');
+  assert.deepEqual(client.values[at('m6_idempotency_complete')], [c.scope, c.lease, c.response]);
+  assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit']);
+});
+
+test('M7B-INVOICES-VOID-P1: the void answers bare words only — the object form from it is the fault; the update vocabulary applies (conflict and invalid_state sealed; not_found and precondition_failed rolled back; anything else unavailable)', async () => {
+  const c = voiding();
+  for (const [label, answer] of [
+    ['the issue\'s object form', { outcome: 'applied', subjectCustomerId: ISSUE_CUSTOMER }],
+    ['an object naming the invoice', { outcome: 'applied', subjectIssuedInvoiceId: VOID_TARGET }],
+    ['a bare object', { outcome: 'applied' }],
+  ] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [voidMutator(answer)]).transactions.commit(c, live()), UNAVAILABLE, label);
+    for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event']) assert.ok(!client.texts.some((t) => t.includes(recorded)), `${label}: no ${recorded}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], label);
+  }
+  for (const [answer, outcome, sealed] of [['conflict', { outcome: 'conflict' }, c.rejected.conflict], ['invalid_state', { outcome: 'invalid_state' }, c.rejected.invalidState]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [voidMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    assert.deepEqual(client.values[client.texts.findIndex((t) => t.includes('m6_idempotency_complete'))], [c.scope, c.lease, sealed], `${answer}: its own sealed completion`);
+    assert.ok(!client.texts.some((t) => t.includes('insert into public.audit_event')), `${answer}: no audit`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['commit'], answer);
+  }
+  for (const [answer, outcome] of [['not_found', { outcome: 'not_found' }], ['precondition_failed', { outcome: 'precondition_failed' }], ['refused', UNAVAILABLE],
+    ['mismatch', UNAVAILABLE], ['unchanged', UNAVAILABLE], ['issuing_not_configured', UNAVAILABLE], ['customer_not_found', UNAVAILABLE]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [voidMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    for (const recorded of ['m6_idempotency_complete', 'insert into public.audit_event']) assert.ok(!client.texts.some((t) => t.includes(recorded)), `${answer}: no ${recorded}`);
+    assert.deepEqual(client.texts.filter((t) => t === 'commit' || t === 'rollback'), ['rollback'], answer);
+  }
+});
+
+test('M7B-INVOICES-VOID-P1: a void whose aggregate id is not a canonical uuid names no subject — refused before any statement', async () => {
+  const { client, begins } = untouched();
+  const store = tenantStore(client, [voidMutator('applied')]);
+  const c = voiding();
+  for (const [label, aggregateId] of [['uppercase', VOID_TARGET.toUpperCase()], ['no uuid', 'x'.repeat(36)]] as const) {
+    assert.deepEqual(await store.transactions.commit({ ...c, aggregateId } as never, live()), UNAVAILABLE, label);
+  }
+  assert.equal(begins(), 0, 'no transaction was opened');
 });

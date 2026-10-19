@@ -43,6 +43,8 @@ type LineWire = { position: number; description: string; quantity: number; unitP
 interface Issued {
   id: string; number: number; sourceDraftId: string; customerId: string; customerName: string; issuedAt: string;
   seller: { legalName: string; storeName: string; postalAddress: string; taxRegistrationId: string | null }; lines: LineWire[]; tax: TaxWire;
+  /** M7B-INVOICES-VOID-P1: present once voided (the detail's `void` member, the rows' status "voided"); absent, the 034 answer byte for byte. */
+  void?: { voidedAt: string; reasonCode: string };
 }
 /** What the next PUTs do: lose the answer after deciding (committed), lose the request, answer a status in the chain's envelope, or a whole answer. */
 type PutScript = 'lose' | 'lose-before' | number | Response;
@@ -227,12 +229,13 @@ function amountsFor(subtotal: number, tax: TaxWire) {
 const subtotalOf = (i: Issued): number => i.lines.reduce((n, l) => n + l.lineTotalCents, 0);
 const summaryOf = (i: Issued) => ({
   id: i.id, number: i.number, sourceDraftId: i.sourceDraftId, customerId: i.customerId, customerName: i.customerName, currency: 'USD',
-  totalCents: amountsFor(subtotalOf(i), i.tax).totalCents, issuedAt: i.issuedAt, status: 'issued', snapshotVersion: 1,
+  totalCents: amountsFor(subtotalOf(i), i.tax).totalCents, issuedAt: i.issuedAt, status: i.void === undefined ? 'issued' : 'voided', snapshotVersion: 1,
 });
 const detailOf = (i: Issued) => ({
   invoice: {
-    id: i.id, number: i.number, status: 'issued', snapshotVersion: 1, issuedAt: i.issuedAt, sourceDraft: { id: i.sourceDraftId, version: 1 },
+    id: i.id, number: i.number, status: i.void === undefined ? 'issued' : 'voided', snapshotVersion: 1, issuedAt: i.issuedAt, sourceDraft: { id: i.sourceDraftId, version: 1 },
     seller: i.seller, issuingSettingsVersion: 1, customer: { id: i.customerId, name: i.customerName, version: 1 }, lines: i.lines, amounts: amountsFor(subtotalOf(i), i.tax),
+    ...(i.void === undefined ? {} : { void: i.void }),
   },
 });
 const line = (position: number, description: string, quantity: number, unitPriceCents: number): LineWire => ({ position, description, quantity, unitPriceCents, lineTotalCents: quantity * unitPriceCents });
@@ -2335,5 +2338,83 @@ describe('Issued invoices — review fixes: continuations, late answers, refusal
     expect(tid('issued-list-state')).toHaveTextContent(LIST_TEXT.renewed);
     await waitFor(() => expect(document.activeElement).not.toBe(document.body));
     expect(server.puts_()).toHaveLength(1);
+  });
+
+  // M7B-INVOICES-VOID-P1 — the lifecycle on the existing reads: a voided invoice keeps its number, customer, Total and issue
+  // time, labelled "Voided" where "Issued" stood; its detail adds the void time (UTC, the issue time's form) and the reason's
+  // label beside the unchanged snapshot. Nothing offers a void, and an issued invoice reads exactly as before.
+  const VOIDED = Object.freeze({ voidedAt: '2026-10-17T08:30:05.000001Z', reasonCode: 'wrong_lines_or_amounts' });
+
+  it('SII-69. a voided invoice stays in the list in its number\'s place, with its customer, Total and issue time — read "Issued <time>", the word outside the <time>, so the one time on the row is never taken for the void\'s — labelled "Voided" where an issued one says "Issued" (in its Open\'s description too); an issued row reads exactly as before; the P1 word scan and button set hold for it', async () => {
+    const server = seeded();
+    issueAt(server, STORE_1, 3, (n) => (n === 2 ? { void: { ...VOIDED } } : {}));
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    expect(screen.getAllByTestId('issued-row-number').map((p) => p.textContent)).toEqual(['Invoice 3', 'Invoice 2', 'Invoice 1']);
+    expect(screen.getAllByTestId('issued-row-status').map((p) => p.textContent)).toEqual(['Issued', 'Voided', 'Issued']);
+    expect(openButton(2)).toHaveAccessibleDescription('Ada Customer · Total $21.76 · Issued 2026-10-16 21:00:02 UTC · Voided');
+    expect(openButton(3)).toHaveAccessibleDescription('Ada Customer · Total $21.76 · 2026-10-16 21:00:03 UTC · Issued');
+    const [three, two, one] = screen.getAllByTestId('issued-row-issued');
+    expect([three, two, one].map((t) => t.textContent)).toEqual(['2026-10-16 21:00:03 UTC', '2026-10-16 21:00:02 UTC', '2026-10-16 21:00:01 UTC']);
+    expect(two.previousSibling?.textContent).toBe('Issued '); // the prefix is text beside the <time>, never inside it
+    for (const issued of [three, one]) expect(issued.previousSibling?.textContent).toBe(' · '); // an issued row: no prefix, as before
+    expect(within(tid('issued-list')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Open', 'Open', 'Open']);
+    expect(tid('issued-section').textContent).not.toMatch(FORBIDDEN);
+    expect(within(tid('issued-section')).getAllByRole('button').map((b) => b.textContent).filter((t) => t !== 'Open')).toEqual(['Issuing settings']);
+    expect(server.writes()).toEqual([]);
+  });
+
+  it('SII-70. a voided invoice\'s detail says "Voided", the void time in UTC and "Reason" with its label, beside the unchanged snapshot (its "Issued at", seller, customer, lines and Total); an issued one shows no void line, and nothing but reads is sent', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 2, (n) => (n === 2 ? { void: { ...VOIDED } } : {}));
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await user().click(openButton(2));
+    await viewReady(2);
+    const dialog = screen.getByRole('dialog', { name: 'Invoice 2' });
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(tid('issued-view-issued-at')).toHaveTextContent('2026-10-16 21:00:02 UTC');
+    const voidedAt = tid('issued-view-voided-at');
+    expect(voidedAt.tagName).toBe('TIME');
+    expect(voidedAt).toHaveAttribute('datetime', VOIDED.voidedAt);
+    expect(voidedAt).toHaveTextContent(/^2026-10-17 08:30:05 UTC$/);
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong lines or amounts$/);
+    expect([...dialog.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at', 'Voided at', 'Reason']);
+    expect(tid('issued-view-customer')).toHaveTextContent('Ada Customer');
+    expect(tid('issued-view-total')).toHaveTextContent('Total $21.76');
+    expect(tid('issued-view-note')).toHaveTextContent(VIEW_TEXT.note);
+    expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
+    expect(dialog.textContent).not.toMatch(FORBIDDEN);
+    expect(tid('issued-section').textContent).not.toMatch(FORBIDDEN);
+    expect(within(tid('issued-section')).getAllByRole('button').map((b) => b.textContent).filter((t) => t !== 'Open')).toEqual(['Issuing settings']);
+    await user().click(tid('issued-view-close'));
+    await user().click(openButton(1));
+    await viewReady(1);
+    expect(tid('issued-view-status')).toHaveTextContent(/^Issued$/);
+    expect(screen.queryByTestId('issued-view-voided-at')).toBeNull();
+    expect(screen.queryByTestId('issued-view-void-reason')).toBeNull();
+    expect([...screen.getByRole('dialog', { name: 'Invoice 1' }).querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at']);
+    expect(server.details()).toEqual([`${STORES_PATH}/${STORE_1}/invoices/${made[1].id}`, `${STORES_PATH}/${STORE_1}/invoices/${made[0].id}`]);
+    expect(server.writes()).toEqual([]);
+  });
+
+  it('SII-71. a lifecycle the shop cannot name is never shown as issued: a voided row or detail whose void is malformed (an unknown reason, a void before the issue) leaves the list, or the dialog, unavailable', async () => {
+    const server = seeded();
+    issueAt(server, STORE_1, 2, (n) => (n === 2 ? { void: { voidedAt: '2026-10-16T21:00:01.000000Z', reasonCode: 'wrong_customer' } } : {}));
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady(); // the rows carry no void member: the list cannot see the bad time
+    expect(screen.getAllByTestId('issued-row-status').map((p) => p.textContent)).toEqual(['Voided', 'Issued']);
+    await user().click(openButton(2));
+    await waitFor(() => expect(viewPhase()).toBe('unavailable'));
+    expect(screen.queryByTestId('issued-view-status')).toBeNull();
+    await user().click(tid('issued-view-close'));
+    server.issued.get(STORE_1)![1] = { ...server.issued.get(STORE_1)![1], void: { voidedAt: VOIDED.voidedAt, reasonCode: 'refunded' } };
+    await user().click(openButton(2));
+    await waitFor(() => expect(viewPhase()).toBe('unavailable'));
+    expect(screen.queryByTestId('issued-view-status')).toBeNull();
+    expect(server.writes()).toEqual([]);
   });
 });

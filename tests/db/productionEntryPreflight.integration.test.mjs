@@ -361,7 +361,7 @@ function get(port, path, headers = {}) {
 // M6PF-01..03: the intended least-privilege login, and the entry it lets listen
 // ---------------------------------------------------------------------------
 
-test('M6PF-01: the least-privilege runtime login has no violations — APPROVED_ROLE_GRANTS matches a fresh 001-034 apply exactly, both directions', async () => {
+test('M6PF-01: the least-privilege runtime login has no violations — APPROVED_ROLE_GRANTS matches a fresh 001-035 apply exactly, both directions', async () => {
   assert.deepEqual(await runtimeLoginViolations(RUNTIME_LOGIN), []);
 });
 
@@ -505,13 +505,13 @@ const LEDGER_ENTRY_CASES = [
   // with store discovery (M7B-INVOICES-P1) it was 027; with the invoice drafts (M7B-INVOICES-P1) 028; with the draft edit
   // (M7B-INVOICES-P2) 029, with the Invoices authority guard (M7B-INVOICES-P2-R1) 030, and with the guarded draft save
   // (M7B-INVOICES-P1-R3) 031, and with the Customers authority of the guarded draft save (M7B-INVOICES-P1-R4) it was 032; with the
-  // draft discard (M7B-INVOICES-DISCARD-P1) it was 033; with invoice issuing (M7B-INVOICES-ISSUE-P1) it is 034 (its row is restored
-  // from the snapshot afterwards), and the fake next row is '035'.
-  { label: '17', name: 'missing 034', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '034'` },
+  // draft discard (M7B-INVOICES-DISCARD-P1) it was 033; with invoice issuing (M7B-INVOICES-ISSUE-P1) it was 034; with invoice void
+  // (M7B-INVOICES-VOID-P1) it is 035 (its row is restored from the snapshot afterwards), and the fake next row is '036'.
+  { label: '17', name: 'missing 035', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '035'` },
   { label: '18', name: 'a gap (010 removed)', code: 'migration_not_contiguous', mutate: () => owner`delete from public.schema_migrations where version = '010'` },
   { label: '19', name: 'dirty 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set dirty = true where version = '013'` },
   { label: '20', name: 'finished_at null on 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set finished_at = null where version = '013'` },
-  { label: '21', name: "an extra '035' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('035', ${'0'.repeat(64)}, false, now(), now())` },
+  { label: '21', name: "an extra '036' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('036', ${'0'.repeat(64)}, false, now(), now())` },
   { label: '22', name: 'a changed checksum on 015', code: 'migration_checksum_mismatch', mutate: () => owner`update public.schema_migrations set checksum = ${'f'.repeat(64)} where version = '015'` },
 ];
 for (const { label, name, code, mutate } of LEDGER_ENTRY_CASES) {

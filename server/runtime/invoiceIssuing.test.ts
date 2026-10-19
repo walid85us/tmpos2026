@@ -4,6 +4,9 @@
 // totals and the first overflowing ones); the preview's, the issued list's and the issued detail's strict answer validation,
 // the cursor and the query; and each read handler's outcomes. Synthetic ports only. The PostgreSQL side is proved in
 // server/persistence/postgresInvoiceIssuing.test.ts.
+// M7B-INVOICES-VOID-P1: the lifecycle on the issued reads — the page's and the detail's status and void values judged exactly
+// (ISS-R14), the voided detail's one more member serialized last, and every never-voided answer byte for byte the 034 answer
+// (ISS-R15).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -291,7 +294,7 @@ test('ISS-R10 the cursor (tag 0x04, canonical only) and the list query: limit an
 const I = (i: number): string => `${(0x50000000 - i).toString(16)}-0000-4000-8000-${(800_000 - i).toString(16).padStart(12, '0')}`;
 const SUMMARY = (i: number, over: Record<string, unknown> = {}) => ({
   id: I(i), number: 100 - i, sourceDraftId: randomUUID(), customerId: CUSTOMER, customerName: 'Dana Customer', currency: 'USD', totalCents: 2176, issuedAt: AT,
-  snapshotVersion: 1, ...over,
+  snapshotVersion: 1, status: 'issued', ...over,
 });
 const Q = (over: Partial<IssuedInvoiceListQuery> = {}): IssuedInvoiceListQuery => ({ after: null, sourceDraft: null, limit: 2, ...over });
 
@@ -328,7 +331,8 @@ const INVOICE_RAW = (over: Record<string, unknown> = {}) => ({
     id: INVOICE, number: 7, snapshotVersion: 1, issuedAt: AT, sourceDraft: { id: DRAFT, version: 2 },
     seller: { legalName: 'Acme Repairs LLC', storeName: 'Acme Downtown', postalAddress: '1 Main St\nSpringfield', taxRegistrationId: null },
     issuingSettingsVersion: 3, customer: { id: CUSTOMER, name: 'Dana Customer', version: 4 }, currency: 'USD', subtotalCents: 20, tax: rate(5000), taxCents: 1,
-    totalCents: 21, lines: [LINE(1, { quantity: 1, unitPriceCents: 10, lineTotalCents: 10 }), LINE(2, { quantity: 1, unitPriceCents: 10, lineTotalCents: 10 })], ...over,
+    totalCents: 21, lines: [LINE(1, { quantity: 1, unitPriceCents: 10, lineTotalCents: 10 }), LINE(2, { quantity: 1, unitPriceCents: 10, lineTotalCents: 10 })],
+    status: 'issued', voidedAt: null, reasonCode: null, ...over,
   },
 });
 
@@ -386,4 +390,91 @@ test('ISS-R13 the list and detail handlers: no actor, status "issued", snapshot 
   for (const [answer, status] of [[{ outcome: 'not_found' }, 404], [{ outcome: 'denied' }, 403], [INVOICE_RAW({ number: 0 }), 503]] as const) {
     assert.equal((await handle(createIssuedInvoiceDetailRoute({ invoiceIssuing: port({ invoice: answer }) }), `${url}/${INVOICE}`)).status, status);
   }
+});
+
+// --- 5. the lifecycle (M7B-INVOICES-VOID-P1) ---------------------------------------------------------------------------------
+
+const VOIDED_AT = '2026-10-18T14:05:06.654321Z';
+const VOIDED = { status: 'voided', voidedAt: VOIDED_AT, reasonCode: 'wrong_customer' };
+
+test('ISS-R14 the lifecycle, judged exactly: a page row is issued or voided; a detail is issued with no void time or code, or voided with both — the time well-formed and not before issuedAt, the code one of the six; every other combination, key or word is null', () => {
+  // The page: the row's own status, served as it is.
+  const page = issuedInvoicePageOf({ outcome: 'page', invoices: [SUMMARY(1, { status: 'voided' }), SUMMARY(2)], hasMore: false }, Q());
+  assert.ok(page !== null && typeof page === 'object');
+  assert.deepEqual(page.invoices.map((i) => i.status), ['voided', 'issued']);
+  const badPages: Array<[string, unknown]> = [
+    ['an unknown status', SUMMARY(1, { status: 'void' })], ['a capitalized status', SUMMARY(1, { status: 'Voided' })], ['a null status', SUMMARY(1, { status: null })],
+    ['no status', Object.fromEntries(Object.entries(SUMMARY(1)).filter(([k]) => k !== 'status'))], ['a void time on a list row', SUMMARY(1, { voidedAt: VOIDED_AT })],
+    ['a voiding actor', SUMMARY(1, { status: 'voided', voidedBy: randomUUID() })],
+  ];
+  for (const [label, row] of badPages) {
+    assert.equal(issuedInvoicePageOf({ outcome: 'page', invoices: [row], hasMore: false }, Q()), null, label);
+    assert.equal(issuedInvoicePageOf({ outcome: 'page', invoices: [SUMMARY(0), row], hasMore: false }, Q()), null, `${label}: one bad row spoils the page`);
+  }
+  // The detail.
+  const issued = issuedInvoiceOf(INVOICE_RAW(), INVOICE);
+  assert.ok(issued !== null && typeof issued === 'object');
+  assert.deepEqual([issued.status, issued.void], ['issued', null]);
+  const voided = issuedInvoiceOf(INVOICE_RAW(VOIDED), INVOICE);
+  assert.ok(voided !== null && typeof voided === 'object');
+  assert.deepEqual([voided.status, voided.void], ['voided', { voidedAt: VOIDED_AT, reasonCode: 'wrong_customer' }]);
+  assert.ok(issuedInvoiceOf(INVOICE_RAW({ ...VOIDED, voidedAt: AT }), INVOICE) !== null, 'voided in the issue\'s own microsecond');
+  for (const code of ['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']) {
+    assert.ok(issuedInvoiceOf(INVOICE_RAW({ ...VOIDED, reasonCode: code }), INVOICE) !== null, code);
+  }
+  const without = (key: string) => {
+    const raw = INVOICE_RAW(VOIDED);
+    return { ...raw, invoice: Object.fromEntries(Object.entries(raw.invoice).filter(([k]) => k !== key)) };
+  };
+  const bad: Array<[string, unknown]> = [
+    ['issued with a void time', INVOICE_RAW({ voidedAt: VOIDED_AT })], ['issued with a code', INVOICE_RAW({ reasonCode: 'other' })],
+    ['issued with both', INVOICE_RAW({ voidedAt: VOIDED_AT, reasonCode: 'other' })],
+    ['voided without a void time', INVOICE_RAW({ ...VOIDED, voidedAt: null })], ['voided without a code', INVOICE_RAW({ ...VOIDED, reasonCode: null })],
+    ['voided with neither', INVOICE_RAW({ status: 'voided' })],
+    ['voided one microsecond before the issue', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-16T09:30:00.123455Z' })],
+    ['voided a day before the issue', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-15T09:30:00.123456Z' })],
+    ['a millisecond void time', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-18T14:05:06.654Z' })], ['a void time without Z', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-18T14:05:06.654321' })],
+    ['a void time with an offset', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-18T14:05:06.654321+00:00' })],
+    ['a 25th hour', INVOICE_RAW({ ...VOIDED, voidedAt: '2026-10-18T25:05:06.654321Z' })], ['the 30th of February', INVOICE_RAW({ ...VOIDED, voidedAt: '2027-02-30T00:00:00.000000Z' })],
+    ['a numeric void time', INVOICE_RAW({ ...VOIDED, voidedAt: Date.parse('2026-10-18T14:05:06Z') })],
+    ['an unknown status', INVOICE_RAW({ status: 'void' })], ['a capitalized status', INVOICE_RAW({ ...VOIDED, status: 'Voided' })], ['a null status', INVOICE_RAW({ status: null })],
+    ['an unknown code', INVOICE_RAW({ ...VOIDED, reasonCode: 'refund' })], ['a label for a code', INVOICE_RAW({ ...VOIDED, reasonCode: 'Wrong customer' })],
+    ['the audit code for a code', INVOICE_RAW({ ...VOIDED, reasonCode: 'invoice_void_wrong_customer' })],
+    ['no status', without('status')], ['no void time key', without('voidedAt')], ['no code key', without('reasonCode')],
+    ['a voiding actor', INVOICE_RAW({ ...VOIDED, voidedBy: randomUUID() })], ['a nested void object', INVOICE_RAW({ ...VOIDED, void: { voidedAt: VOIDED_AT, reasonCode: 'other' } })],
+  ];
+  for (const [label, raw] of bad) assert.equal(issuedInvoiceOf(raw, INVOICE), null, label);
+});
+
+test('ISS-R15 (R-K6, R-SHOP-4): every never-voided answer is the 034 answer byte for byte; a voided list row says "voided" in the same ten keys; a voided detail has exactly one more member, "void", LAST after "amounts", { voidedAt, reasonCode } in that order — and never the voiding actor', async () => {
+  // The 034 answers' exact bytes for these fixtures, written out (the ten list keys, the detail's members in 034's order).
+  const [s1, s2] = [SUMMARY(1), SUMMARY(2)];
+  const listRow = (s: ReturnType<typeof SUMMARY>, status: string) => `{"id":"${s.id}","number":${s.number},"sourceDraftId":"${s.sourceDraftId}","customerId":"${CUSTOMER}",`
+    + `"customerName":"Dana Customer","currency":"USD","totalCents":2176,"issuedAt":"${AT}","status":"${status}","snapshotVersion":1}`;
+  const list034 = `{"invoices":[${listRow(s1, 'issued')},${listRow(s2, 'issued')}],"nextCursor":null}`;
+  const listed = await handle(createIssuedInvoiceListRoute({ invoiceIssuing: port({ page: { outcome: 'page', invoices: [s1, s2], hasMore: false } }) }), `/api/v1/stores/${STORE}/invoices`);
+  assert.equal(JSON.stringify(listed.body), list034, 'a never-voided page: byte for byte');
+  const mixed = await handle(createIssuedInvoiceListRoute({ invoiceIssuing: port({ page: { outcome: 'page', invoices: [{ ...s1, status: 'voided' }, s2], hasMore: false } }) }),
+    `/api/v1/stores/${STORE}/invoices`);
+  assert.equal(JSON.stringify(mixed.body), `{"invoices":[${listRow(s1, 'voided')},${listRow(s2, 'issued')}],"nextCursor":null}`, 'only the voided row\'s status differs');
+  const body034 = `{"id":"${INVOICE}","number":7,"status":"issued","snapshotVersion":1,"issuedAt":"${AT}","sourceDraft":{"id":"${DRAFT}","version":2},`
+    + '"seller":{"legalName":"Acme Repairs LLC","storeName":"Acme Downtown","postalAddress":"1 Main St\\nSpringfield","taxRegistrationId":null},"issuingSettingsVersion":3,'
+    + `"customer":{"id":"${CUSTOMER}","name":"Dana Customer","version":4},"lines":[{"position":1,"description":"Line 1","quantity":1,"unitPriceCents":10,"lineTotalCents":10},`
+    + '{"position":2,"description":"Line 2","quantity":1,"unitPriceCents":10,"lineTotalCents":10}],'
+    + '"amounts":{"currency":"USD","subtotalCents":20,"tax":{"mode":"exclusive_rate","label":"Tax","rateMilliPercent":5000,"amountCents":1},"totalCents":21}}';
+  const url = `/api/v1/stores/${STORE}/invoices/${INVOICE}`;
+  const issued = await handle(createIssuedInvoiceDetailRoute({ invoiceIssuing: port({ invoice: INVOICE_RAW() }) }), url);
+  assert.equal(JSON.stringify(issued.body), `{"invoice":${body034}}`, 'a never-voided detail: byte for byte, no void member');
+  const none = await handle(createIssuedInvoiceDetailRoute({ invoiceIssuing: port({ invoice: INVOICE_RAW({ tax: { mode: 'none' }, taxCents: null, totalCents: 20 }) }) }), url);
+  assert.ok(!('void' in (none.body as { invoice: Record<string, unknown> }).invoice), 'no void member under no tax either');
+  const voided = await handle(createIssuedInvoiceDetailRoute({ invoiceIssuing: port({ invoice: INVOICE_RAW(VOIDED) }) }), url);
+  assert.equal(voided.status, 200);
+  const voidedBody = `${body034.replace('"status":"issued"', '"status":"voided"').slice(0, -1)},"void":{"voidedAt":"${VOIDED_AT}","reasonCode":"wrong_customer"}}`;
+  assert.equal(JSON.stringify(voided.body), `{"invoice":${voidedBody}}`, 'the voided detail\'s exact bytes: the void member last');
+  assert.deepEqual(Object.keys(voided.body as object), ['invoice'], 'the body stays exactly { invoice }');
+  assert.deepEqual(Object.keys((voided.body as { invoice: Record<string, unknown> }).invoice).slice(-2), ['amounts', 'void']);
+  assert.ok(!/voidedBy|voided_by|actor/i.test(JSON.stringify(voided.body)), 'never the voiding actor');
+  // The issue's 201 is unchanged: "issued" is true of the issue, whatever a later read shows.
+  const p = plan(issueBody()) as { response: { body: { invoice: { status: string }; draft: { status: string } } } };
+  assert.deepEqual([p.response.body.invoice.status, p.response.body.draft.status], ['issued', 'issued']);
 });

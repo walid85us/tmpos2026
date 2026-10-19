@@ -1035,3 +1035,98 @@ test('M7B-RV-02 every lost store authority is false — a key the store scope do
     assert.deepEqual(steps.map(([step]) => step), expected, `${label}: steps`);
   }
 });
+
+// --- M7B-INVOICES-VOID-P1: void_issued_invoices, a SENSITIVE store key — the chain decides it on levels, the revalidator also on a deadline
+
+const VOID_ISSUED: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'void_issued_invoices' });
+const VOID_POST: RouteView = Object.freeze({ method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/void', audience: 'tenant', storeTarget: STORE });
+const VOID_ELIGIBILITY: RouteView = Object.freeze({ method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', audience: 'tenant', storeTarget: STORE });
+
+test('M7B-INVOICES-VOID-P1 (D-VOID-2) the route authorizer decides void_issued_invoices on the STORE grant\'s role at its tenant\'s levels — Approve AND Customers View pass, Manage or Approve without Customers View fail, the owner passes — and decides the eligibility GET exactly as the POST: it takes no deadline at all', async () => {
+  const LEVELS = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+  for (const roleId of TENANT_ROLE_IDS) {
+    for (const invoices of LEVELS) for (const customers of LEVELS) {
+      const levels = { invoices, customers };
+      const expected = roleId === 'store_owner' || (['approve', 'full'].includes(invoices) && customers !== 'none');
+      for (const route of [VOID_POST, VOID_ELIGIBILITY]) {
+        assert.equal(grantedOf(await withLevels(stub(admitted([storeGrantOf(roleId)])), levels).decide(VOID_ISSUED, route)), expected,
+          `${roleId} ${route.method} ${JSON.stringify(levels)}`);
+      }
+    }
+  }
+  const manager = await withLevels(stub(admitted([storeGrantOf('manager')])), {}).decide(VOID_ISSUED, VOID_ELIGIBILITY);
+  assert.deepEqual((manager as { context: unknown }).context, {
+    actor: ACTOR, securityVersion: 'sv1', scope: 'store', tenant: TENANT, store: STORE, membershipId: MEMBERSHIP, roleId: 'manager', limitation: 'none',
+  }, 'a manager at its default (Invoices Full): the selected store scope');
+  for (const [label, answer] of [
+    ['a read-only store', admitted([storeGrantOf('store_owner', { storeStatus: 'read_only' })])],
+    ['a read-only account', admitted([storeGrantOf('store_owner')], 'read_only')],
+    ['a tenant grant only (no inheritance)', admitted([grant()])],
+    ['a grant at another store', admitted([storeGrantOf('store_owner', { store: '77777777-7777-4777-8777-777777777777' })])],
+  ] as const) {
+    for (const route of [VOID_POST, VOID_ELIGIBILITY]) assert.equal(grantedOf(await withLevels(stub(answer), {}).decide(VOID_ISSUED, route)), false, `${label} ${route.method}`);
+  }
+  assert.equal(grantedOf(await withLevels(stub(admitted([grant()])), {}).decide({ scope: 'tenant', permission: 'void_issued_invoices' })), false, 'names nothing at tenant scope');
+});
+
+test('M7B-INVOICES-VOID-P1 (D-VOID-2) the revalidator requires a recent-sign-in deadline for void_issued_invoices (sensitive), judges it on the committing handle after every lock, and re-decides the role\'s CURRENT levels', async () => {
+  const DEADLINE = 1_700_000_000_000;
+  for (const [label, deadline] of [['no deadline (a command declaring recentAuth none)', null], ['a zero deadline', 0], ['a negative deadline', -1],
+    ['a fractional deadline', 1.5], ['an unsafe deadline', Number.MAX_SAFE_INTEGER + 1], ['a string deadline', String(DEADLINE)]] as const) {
+    const { revalidate, steps } = revalidator({ read: storeRead() });
+    assert.equal(await revalidate('tx', STORE_SCOPE, 'void_issued_invoices', deadline as never, KEY), false, label);
+    assert.deepEqual(steps, [], `${label}: refused before anything is read`);
+  }
+  const { revalidate, steps } = revalidator({ read: storeRead() });
+  assert.equal(await revalidate('tx', STORE_SCOPE, 'void_issued_invoices', DEADLINE, KEY), true, 'a manager at its default (Full), fresh');
+  assert.deepEqual(steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'fresh', 'levels'], 'the clock after every lock');
+  assert.deepEqual(steps.find(([step]) => step === 'fresh')?.slice(1), ['tx', DEADLINE], 'the deadline, on the committing handle (the database clock)');
+  const stale = revalidator({ read: storeRead(), fresh: false });
+  assert.equal(await stale.revalidate('tx', STORE_SCOPE, 'void_issued_invoices', DEADLINE, KEY), false, 'past its deadline by the database clock');
+  assert.deepEqual(stale.steps.map(([step]) => step), ['peek', 'hold', 'session', 'read', 'fresh'], 'refused at the clock, the levels never read');
+  await assert.rejects(revalidator({ read: storeRead(), fresh: new Error('clock') }).revalidate('tx', STORE_SCOPE, 'void_issued_invoices', DEADLINE, KEY), /clock/, 'a clock fault is an outage');
+  for (const level of ['approve', 'full']) {
+    assert.equal(await revalidator({ read: storeRead(), levels: { invoices: level, customers: 'view' } }).revalidate('tx', STORE_SCOPE, 'void_issued_invoices', DEADLINE, KEY), true, level);
+  }
+  const owner = { ...STORE_SCOPE, roleId: 'store_owner' };
+  assert.equal(await revalidator({ read: admitted([storeGrantOf('store_owner')]), levels: { invoices: 'none', customers: 'none' } })
+    .revalidate('tx', owner, 'void_issued_invoices', DEADLINE, KEY), true, 'the owner is never narrowed');
+  for (const [label, over, scope] of [
+    ['a manager narrowed to Invoices Manage', { read: storeRead(), levels: { invoices: 'manage' } }, STORE_SCOPE],
+    ['a manager at Approve without Customers View', { read: storeRead(), levels: { invoices: 'approve', customers: 'none' } }, STORE_SCOPE],
+    ['a technician at its default (View)', { read: admitted([storeGrantOf('technician')]) }, { ...STORE_SCOPE, roleId: 'technician' }],
+    ['sales staff at its default (Create)', { read: admitted([storeGrantOf('sales_staff')]) }, { ...STORE_SCOPE, roleId: 'sales_staff' }],
+    ['a store turned read-only', { read: storeRead({ storeStatus: 'read_only' }) }, STORE_SCOPE],
+    ['a read-only store scope', {}, { ...STORE_SCOPE, limitation: 'read_only' }],
+    ['re-roled since', { read: admitted([storeGrantOf('technician')]) }, STORE_SCOPE],
+  ] as const) {
+    assert.equal(await revalidator(over as never).revalidate('tx', scope as TrustedScope, 'void_issued_invoices', DEADLINE, KEY), false, label);
+  }
+  // The issue (non-sensitive, the same levels) still refuses a deadline: neither kind commits under the other's evidence.
+  assert.equal(await revalidator({ read: storeRead() }).revalidate('tx', STORE_SCOPE, 'issue_invoices', DEADLINE, KEY), false, 'a deadline on the issue');
+  assert.equal(await revalidator({ read: storeRead() }).revalidate('tx', STORE_SCOPE, 'issue_invoices', null, KEY), true, 'the issue without one');
+});
+
+test('M7B-INVOICES-VOID-P1 R-SEC-03: at store scope void_issued_invoices refuses authNotAfter === null, and issue_invoices still refuses a numeric authNotAfter — both before any read', async () => {
+  const voidWithout = revalidator({ read: storeRead() });
+  assert.equal(await voidWithout.revalidate('tx', STORE_SCOPE, 'void_issued_invoices', null, KEY), false, 'the void without a deadline');
+  assert.deepEqual(voidWithout.steps, [], 'refused before anything is read');
+  const issueWith = revalidator({ read: storeRead() });
+  assert.equal(await issueWith.revalidate('tx', STORE_SCOPE, 'issue_invoices', 1_700_000_000_000, KEY), false, 'the issue with a deadline');
+  assert.deepEqual(issueWith.steps, [], 'refused before anything is read');
+});
+
+test('M7B-INVOICES-VOID-P1: the eligibility GET under the sensitive store key (recentAuth none) is admitted by every startup check that reads it — registration and the production permission inventory — exactly as edit_issuing_settings\' GET is', async () => {
+  const { defineRoutes } = await import('../runtime/routes.js');
+  const { uncataloguedRoutePermissions } = await import('./transactionKernel.js');
+  const eligibility = {
+    method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', body: { kind: 'none' }, idempotency: 'none', trustedContext: 'required', recentAuth: 'none',
+    policy: { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'void_issued_invoices' } }, handler: () => {},
+  };
+  const settingsGet = { ...eligibility, path: '/api/v1/issuing-settings/{id}', policy: { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'edit_issuing_settings' } } };
+  const table = defineRoutes([eligibility, settingsGet]);
+  assert.equal(table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ACTOR}/void-eligibility`)?.recentAuth, 'none');
+  assert.deepEqual(uncataloguedRoutePermissions([eligibility, settingsGet] as never), [], 'decidable at its scope: no startup blocker');
+  // And the chain's authorizer grants it with no deadline in play (it takes none): a manager at its default.
+  assert.ok(grantedOf(await withLevels(stub(admitted([storeGrantOf('manager')])), {}).decide(VOID_ISSUED, VOID_ELIGIBILITY)));
+});

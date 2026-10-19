@@ -537,9 +537,13 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-test('M7B: exactly six store route permissions, decided at store scope only, non-sensitive, none shadowing a tenant key', () => {
+test('M7B: exactly seven store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1), none shadowing a tenant key', () => {
   assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()],
-    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices']);
+    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices']);
+  // M7B-INVOICES-VOID-P1 (D-VOID-2): the void at Invoices Approve with Customers View, the one sensitive store entry.
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('void_issued_invoices'),
+    { key: 'void_issued_invoices', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS].filter(([, entry]) => entry.sensitive).map(([key]) => key), ['void_issued_invoices'], 'the one sensitive store entry');
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
     { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
@@ -851,4 +855,86 @@ test('M7B-INVOICES-ISSUE-P1: the tenant guard admits exactly the two owner-only 
     assert.throws(() => assertTenantRoutePermissions(table(extra as [string, unknown])), message, label);
   }
   assert.throws(() => assertTenantRoutePermissions(table(['reopen_invoice', entry('reopen_invoice', 'view', { sensitive: false })])), /collides with a tenant sub-permission/);
+});
+
+// --- M7B-INVOICES-VOID-P1: void_issued_invoices, the second Approve key and the one sensitive store key ---------------------
+
+test('M7B-INVOICES-VOID-P1 (D-VOID-2): the store guard admits exactly two Approve keys — issue_invoices non-sensitive, void_issued_invoices sensitive, each on Invoices with exactly Customers View — and `sensitive` for the void alone; every other shape is refused', () => {
+  assert.doesNotThrow(() => assertStoreRoutePermissions(STORE_ROUTE_PERMISSIONS), 'the shipped table loads');
+  const CUSTOMERS_VIEW = Object.freeze({ parent: 'customers', threshold: 'view' });
+  const entry = (key: string, threshold: string, over: Record<string, unknown> = {}) =>
+    Object.freeze({ key, plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold, corequisite: CUSTOMERS_VIEW, ...over });
+  const without = [...STORE_ROUTE_PERMISSIONS].filter(([key]) => key !== 'void_issued_invoices');
+  const table = (...extra: Array<[string, unknown]>) => new Map([...without, ...extra]) as never;
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table()), 'the table without the void loads');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table(['void_issued_invoices', entry('void_issued_invoices', 'approve')])), 'the void entry, exactly');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(new Map(STORE_ROUTE_PERMISSIONS) as never), 'both Approve keys together');
+  const { corequisite: _none, ...bare } = entry('void_issued_invoices', 'approve');
+  const nonSensitive = (key: string, threshold: string, over: Record<string, unknown> = {}) => entry(key, threshold, { sensitive: false, ...over });
+  for (const [label, extra] of [
+    ['the void non-sensitive', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { sensitive: false })]],
+    ['the void sensitive as a word', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { sensitive: 'true' })]],
+    ['the void sensitive as 1', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { sensitive: 1 })]],
+    ['the void at View', ['void_issued_invoices', entry('void_issued_invoices', 'view')]],
+    ['the void at Edit', ['void_issued_invoices', entry('void_issued_invoices', 'edit')]],
+    ['the void at Manage', ['void_issued_invoices', entry('void_issued_invoices', 'manage')]],
+    ['the void at Full', ['void_issued_invoices', entry('void_issued_invoices', 'full')]],
+    ['the void with no threshold', ['void_issued_invoices', entry('void_issued_invoices', null as never)]],
+    ['the void without its corequisite', ['void_issued_invoices', Object.freeze(bare)]],
+    ['the void with a Customers Create corequisite', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { corequisite: Object.freeze({ parent: 'customers', threshold: 'create' }) })]],
+    ['the void with an Employees View corequisite', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { corequisite: Object.freeze({ parent: 'employees', threshold: 'view' }) })]],
+    ['the void on Customers', ['void_issued_invoices', entry('void_issued_invoices', 'approve', { parent: 'customers' })]],
+    ['the void under another entry key', ['void_issued_invoices', entry('issue_invoices', 'approve')]],
+    ['the issue sensitive', ['issue_invoices', entry('issue_invoices', 'approve')]],
+    ['another key sensitive at Approve', ['refund_invoices', entry('refund_invoices', 'approve')]],
+    ['another key non-sensitive at Approve', ['refund_invoices', nonSensitive('refund_invoices', 'approve')]],
+    ['another key sensitive at View', ['audit_invoices', entry('audit_invoices', 'view', { corequisite: undefined })]],
+    ['the issued reads sensitive', ['view_issued_invoices', entry('view_issued_invoices', 'view')]],
+    ['the discard sensitive', ['discard_invoice_drafts', entry('discard_invoice_drafts', 'manage', { corequisite: undefined })]],
+    ['the draft read sensitive', ['view_invoice_drafts', entry('view_invoice_drafts', 'view', { corequisite: undefined })]],
+    ['the void key at Manage without a corequisite', ['void_issued_invoices', entry('void_issued_invoices', 'manage', { corequisite: undefined })]],
+    ['another key sensitive at Full', ['purge_invoices', entry('purge_invoices', 'full')]],
+  ] as const) {
+    assert.throws(() => assertStoreRoutePermissions(table(extra as [string, unknown])),
+      /nor void_issued_invoices sensitive at Invoices Approve with Customers View/, label);
+  }
+  // The issue's own guard is unchanged beside it: exactly non-sensitive, at Approve, with Customers View.
+  const issue = STORE_ROUTE_PERMISSIONS.get('issue_invoices');
+  assert.equal(issue?.sensitive, false);
+  assert.throws(() => assertStoreRoutePermissions(new Map([...STORE_ROUTE_PERMISSIONS, ['issue_invoices', Object.freeze({ ...issue, sensitive: true })]]) as never), /nor issue_invoices/);
+});
+
+test('M7B-INVOICES-VOID-P1 (D-VOID-2): void_issued_invoices is Invoices at Approve or above AND Customers at View or above on every built-in role — Manage denies, Customers None denies, read-only never, the owner always; it is sensitive and decided at store scope only', () => {
+  const decide = (roleId: string, levels: unknown = {}, limitation: 'none' | 'read_only' = 'none') =>
+    evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'void_issued_invoices', limitation, levels });
+  assert.deepEqual(TENANT_ROLE_IDS.map((r) => [r, decide(r), decide(r, {}, 'read_only')]), [
+    ['store_owner', 'granted', 'denied'],
+    ['manager', 'granted', 'denied'],
+    ['technician', 'denied', 'denied'],
+    ['sales_staff', 'denied', 'denied'],
+  ], 'the owner and a default manager (Invoices Full) may void; technician (View) and sales staff (Create) may not; read-only never');
+  const LEVELS = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+  for (const roleId of ['manager', 'technician', 'sales_staff']) {
+    for (const invoices of LEVELS) for (const customers of LEVELS) {
+      const expected = ['approve', 'full'].includes(invoices) && customers !== 'none' ? 'granted' : 'denied';
+      assert.equal(decide(roleId, { invoices, customers }), expected, `${roleId} invoices=${invoices} customers=${customers}`);
+      assert.equal(decide(roleId, { invoices, customers }, 'read_only'), 'denied', `${roleId} read_only invoices=${invoices} customers=${customers}`);
+      // Exactly the issue's cells: the two Approve keys decide alike.
+      assert.equal(decide(roleId, { invoices, customers }),
+        evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'issue_invoices', limitation: 'none', levels: { invoices, customers } }), `${roleId} = issue`);
+    }
+  }
+  assert.equal(decide('manager', { invoices: 'manage' }), 'denied', 'Manage (the discard\'s threshold) alone does not void');
+  assert.equal(decide('manager', { invoices: 'approve', customers: 'none' }), 'denied', 'Approve without Customers View');
+  assert.equal(decide('store_owner', { invoices: 'none', customers: 'none' }), 'granted', 'the owner is Full wherever it holds a store grant');
+  for (const levels of [null, [], 'x', { invoices: 'Approve' }, { invoice: 'full' }]) assert.equal(decide('manager', levels), 'denied', JSON.stringify(levels));
+  assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission: 'void_issued_invoices', limitation: 'none' }), 'denied', 'no edits read');
+  for (const roleId of ['system_owner', 'cashier', '', 'Manager', 'store_owner ']) assert.equal(decide(roleId), 'denied', roleId);
+  assert.equal(canonicalPermission('store', 'void_issued_invoices')?.sensitive, true, 'sensitive: a command under it needs a recent-sign-in deadline');
+  assert.equal(isDecidablePermission('store', 'void_issued_invoices'), true);
+  for (const scope of ['tenant', 'platform'] as const) {
+    assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'void_issued_invoices', limitation: 'none', levels: {} }), 'denied', scope);
+    assert.equal(canonicalPermission(scope, 'void_issued_invoices'), null, scope);
+    assert.equal(isDecidablePermission(scope, 'void_issued_invoices'), false, scope);
+  }
 });

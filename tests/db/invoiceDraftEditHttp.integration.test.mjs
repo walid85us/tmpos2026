@@ -1,6 +1,6 @@
 // Phase 4.0 M7B-INVOICES-P2 and P2-R1 — editing a saved store invoice draft END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) serving PATCH /api/v1/stores/{storeId}/invoice-drafts/{id} and GET …/{id}/edit-eligibility over REAL
-// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-034), composed exactly as
+// loopback HTTP and a disposable PostgreSQL holding every migration in the directory (001-035), composed exactly as
 // server/entry/tenantMain.ts composes it but for its construction. The route module (server/runtime/invoiceDrafts.ts), the
 // store-scope authorizer and revalidator, the tenant command transaction, the edit's mutator
 // (server/persistence/postgresInvoiceDrafts.ts), migration 030's edit routine (the guarded v2: the Invoices level held through
