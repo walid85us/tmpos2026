@@ -15,11 +15,11 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ISSUED_TEXT, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, type ServerIssuedInvoicesProps } from './ServerIssuedInvoices';
-import { createInvoiceIssuingClient, issuingSettingsPathOf, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
+import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_TEXT, type IssuedVoidCapability, type IssuedReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
+import { INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
-import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidRefusal } from './invoiceVoidHold';
+import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import type { ShopIdentity } from './ServerCustomerLevels';
 import { pickerWaitText } from './ServerCustomerPicker';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
@@ -37,7 +37,7 @@ const activeBody = (uid: string, csrfToken: string) => ({ status: 'active', csrf
 interface Sent { readonly method: string; readonly url: string; readonly headers: Headers; readonly body: string | undefined; readonly signal: AbortSignal | null }
 interface User { uid: string; tenant: string; role: 'owner' | 'manager' }
 type View = { storeId: string; version: number; configured: true; legalName: string; storeName: string; postalAddress: string; taxRegistrationId: string | null; tax: { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number } };
-type Kind = 'stores' | 'settings' | 'put' | 'current' | 'list' | 'detail';
+type Kind = 'stores' | 'settings' | 'put' | 'current' | 'list' | 'detail' | 'elig' | 'void';
 type TaxWire = { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number };
 type LineWire = { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number };
 /** One issued invoice as the fake stores it (commit B): what the list summarizes and the detail answers. */
@@ -83,7 +83,23 @@ function fakeServer() {
     loginStatus: [] as number[], // what the next logins answer instead (in the chain's envelope): nothing is signed in
     retryAfter: null as string | null,
     staleLogins: false, // a plain login's sign-in is older than the recent-auth window (a reauthentication's never is)
-    hold: { stores: 0, settings: 0, put: 0, current: 0, list: 0, detail: 0 } as Record<Kind, number>,
+    hold: { stores: 0, settings: 0, put: 0, current: 0, list: 0, detail: 0, elig: 0, void: 0 } as Record<Kind, number>,
+    // M7B-INVOICES-VOID-P2: the void command and its action-only eligibility, as P1's server answers them.
+    voids: [] as PutScript[], // what the next void POSTs do (as `puts`)
+    eligStatus: [] as Array<number | Response>, // what the next void-eligibility GETs answer instead
+    voidDenied: new Set<string>(), // users whose stored levels lack void_issued_invoices (Invoices Approve with Customers View)
+    voidAt: '2026-10-17T08:30:05.000001Z', // the database clock's void time
+    /** Void bodies whose keys were not exactly expectedTenant, reasonCode in that order (a throw here would read as transport loss). */
+    voidBodyViolations: [] as string[],
+    /** Whether `user` may void at `storeId` now: the stored levels (an owner's by default) and a writable store. */
+    mayVoid(user: User, storeId: string): boolean {
+      const entry = server.stores[user.uid]?.find((s) => s.id === storeId);
+      return entry !== undefined && !entry.readOnly && user.role === 'owner' && !server.voidDenied.has(user.uid);
+    },
+    /** The void POSTs that reached the fake, as sent. */
+    voidPosts(): Sent[] { return server.sent.filter((r) => r.method === 'POST' && /\/invoices\/[^/]+\/void$/.test(r.url)); },
+    /** The void-eligibility reads that reached the fake (paths). */
+    eligReads(): string[] { return server.sent.filter((r) => r.method === 'GET' && r.url.endsWith('/void-eligibility')).map((r) => r.url); },
     held: [] as Array<{ kind: Kind; url: string; release: (late?: Response) => void }>,
     puts_(): Sent[] { return server.sent.filter((r) => r.method === 'PUT'); },
     reads(storeId?: string): Sent[] { return server.sent.filter((r) => r.method === 'GET' && r.url.startsWith('/api/v1/issuing-settings/') && (storeId === undefined || r.url === issuingSettingsPathOf(storeId))); },
@@ -166,6 +182,53 @@ function fakeServer() {
           const page = all.slice(start, start + limit);
           return reply(200, { invoices: page.map(summaryOf), nextCursor: start + limit < all.length ? cursorOf(page[page.length - 1].id) : null });
         });
+      }
+      const eligPath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices\/([0-9a-f-]{36})\/void-eligibility$/.exec(url);
+      if (method === 'GET' && eligPath !== null) {
+        return server.maybeHold('elig', url, () => {
+          const refused = gate();
+          if (refused !== null) return refused;
+          const scripted = server.eligStatus.shift();
+          if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+          return server.mayVoid(session!.user, eligPath[1]) ? reply(200, { eligibility: 'allowed' }) : refuse(403, 'forbidden');
+        });
+      }
+      const voidPath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices\/([0-9a-f-]{36})\/void$/.exec(url);
+      if (method === 'POST' && voidPath !== null) {
+        const script = server.voids.shift();
+        if (script === 'lose-before') throw new TypeError('network');
+        if (typeof script === 'number') return refuse(script);
+        if (script instanceof Response) return script;
+        // P1's order (doc 13 §12.4): the session, CSRF and the route's authority, then the recent sign-in — all BEFORE the
+        // key — then the key (422 for other bytes, a replay of a sealed answer), the tenant precondition, the target, and
+        // the sealed outcome: one void record, or the sealed already-void.
+        const decide = (): Response => {
+          const refused = gate();
+          if (refused !== null) return refused;
+          if (headers.get('x-tmpos-csrf') !== '1') return refuse(403, 'forbidden');
+          const [, storeId, invoiceId] = voidPath;
+          if (!server.mayVoid(session!.user, storeId)) return refuse(403, 'forbidden');
+          if (!session!.fresh) return refuse(403, 'step_up_required'); // before any key: nothing acquired
+          const key = headers.get('idempotency-key') ?? '';
+          const fingerprint = `${session!.user.uid}\nvoid\n${storeId}\n${invoiceId}\n${body}`;
+          const known = server.keys.get(key);
+          if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+          if (known !== undefined) return reply(known.status, known.body, { 'idempotent-replayed': 'true' });
+          const parsed = JSON.parse(body ?? '{}') as Record<string, unknown>;
+          if (Object.keys(parsed).join(',') !== 'expectedTenant,reasonCode') server.voidBodyViolations.push(body ?? '');
+          const entry = server.stores[session!.user.uid]?.find((s) => s.id === storeId);
+          if (entry === undefined || parsed.expectedTenant !== entry.tenantId) return refuse(409, 'write_conflict');
+          const found = server.issued.get(storeId)?.find((i) => i.id === invoiceId);
+          if (found === undefined) return refuse(404, 'not_found');
+          const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, status, body: sealed }); return reply(status, sealed); };
+          if (found.void !== undefined) return seal(409, { error: 'invalid_state' });
+          found.void = { voidedAt: server.voidAt, reasonCode: parsed.reasonCode as string };
+          return seal(200, { invoice: { id: invoiceId, status: 'voided' } });
+        };
+        if (script === 'lose') { decide(); throw new TypeError('network'); } // committed, but the answer is lost
+        // Held, the request reaches the server only when released: a substituted late answer (a 401, a step-up) decided
+        // nothing there, and a plain release decides it then.
+        return server.maybeHold('void', url, decide);
       }
       const settingsPath = /^\/api\/v1\/issuing-settings\/([0-9a-f-]{36})$/.exec(url);
       if (settingsPath === null) return refuse(404);
@@ -263,7 +326,7 @@ function seeded() {
   return server;
 }
 
-interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
+interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
 function rig(server: Server): Rig {
   const keys: string[] = [];
   const reauth: Array<string | null> = [];
@@ -272,15 +335,17 @@ function rig(server: Server): Rig {
   const issuing = createInvoiceIssuingClient({ fetch: server.fetch });
   const drafts = createInvoiceDraftsClient({ fetch: server.fetch });
   const tokens: Record<string, string> = { 'uid-a': 'tok-a', 'uid-m': 'tok-m', 'uid-b': 'tok-b' };
+  // Each rig its own void hold on the rig's clocks (never the shop's singleton): a new store and a remount is a page load.
+  const holds = createVoidHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const identity: ShopIdentity = {
     idToken: async (uid) => tokens[uid] ?? null,
     reauthMethod: () => 'password',
     reauthenticate: async (uid, password) => { reauth.push(password); return password === 'correct horse' ? tokens[uid] ?? null : null; },
   };
   return {
-    keys, clock, reauth,
+    keys, clock, reauth, holds,
     props: (over = {}) => ({
-      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall,
+      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds,
       newKey: () => { const k = ['5e1f0000', '1d2f', '4a6b', '9c8d', String(keys.length + 1).padStart(12, '0')].join('-'); keys.push(k); return k; },
       ...over,
     }),
@@ -1512,6 +1577,18 @@ const heading = () => screen.getByRole('heading', { name: 'Issued invoices' });
 const listPath = (storeId: string, cursor?: string) => `${STORES_PATH}/${storeId}/invoices?limit=20${cursor === undefined ? '' : `&cursor=${cursor}`}`;
 /** Words the issued surfaces never use: no payment state, and none of the actions this stage does not offer. */
 const FORBIDDEN = /\b(paid|unpaid|due|balance|payment|deposit|receivable|void|print|send|receipt)\b/i;
+/**
+ * M7B-INVOICES-VOID-P2 supersession of FORBIDDEN (design §4 "Word scans", R19): voiding now exists, so the ONLY void
+ * wording a surface may carry is the exact void control and texts the shop defines (VOID_TEXT, VOID_REFUSED_TEXT, the
+ * confirmation's "Void invoice" and its numbered title, the card's heading). Those exact strings — and nothing else — are
+ * taken out before FORBIDDEN scans, so every other word, and any other "void", still fails it. FORBIDDEN is unchanged.
+ */
+// Review B1 F7: ONLY the strings FORBIDDEN would catch (a standalone "void") are taken out; every other text stays scanned.
+const VOID_SAID: readonly string[] = [
+  ...Object.values(VOID_TEXT as Readonly<Record<string, unknown>>).filter((t): t is string => typeof t === 'string'), ...Object.values(VOID_REFUSED_TEXT), 'Void invoice',
+].filter((t) => /\bvoid\b/i.test(t)).sort((a, b) => b.length - a.length);
+const unvoided = (text: string | null): string =>
+  VOID_SAID.reduce((t, said) => t.split(said).join(''), text ?? '').replace(/Void invoice \d+\?|Void of invoice \d+/g, '');
 const MAX = Number.MAX_SAFE_INTEGER;
 const MAX_TEXT = '$90,071,992,547,409.91';
 const cells = () => screen.getAllByTestId('issued-view-line').map((tr) => [...(tr as HTMLTableRowElement).cells].map((td) => td.textContent));
@@ -1746,8 +1823,13 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     expect(tid('issued-view-tax')).toHaveTextContent('Tax (8.875%) $16.51');
     expect(tid('issued-view-total')).toHaveTextContent('Total $202.50');
     expect(tid('issued-view-note')).toHaveTextContent(VIEW_TEXT.note);
-    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
-    expect(dialog.textContent).not.toMatch(FORBIDDEN);
+    // VOID-P2 supersession (was `['Close']`): an owner the server allows to void sees the one new control, "Void invoice…",
+    // in the reserved row under the header — still no other control (no send, print, edit or delete) and no payment word.
+    // The eligibility read answers beside the detail read: wait for it (review B1 F6).
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
+    expect(dialog.textContent).toContain(VOID_TEXT.open);
+    expect(unvoided(dialog.textContent)).not.toMatch(FORBIDDEN);
     expect(server.sent.filter((r) => r.url.startsWith('/api/v1/customers'))).toEqual([]);
     expect(server.writes()).toEqual([]);
   });
@@ -1794,7 +1876,7 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     expect(cells()).toEqual([['1', 'Line 3', '1', '$0.01', '$0.01']]);
   });
 
-  it('SII-54. Escape and Close close the dialog and give focus back to the row\'s Open; Tab stays inside it (Close, the lines region, Close); when that row is gone — the session ended while it was open — focus goes to the section heading, never the page body', async () => {
+  it('SII-54. Escape and Close close the dialog and give focus back to the row\'s Open; Tab stays inside it (Close, "Void invoice…" where it is offered — VOID-P2 —, the lines region, Close); when that row is gone — the session ended while it was open — focus goes to the section heading, never the page body', async () => {
     const server = seeded();
     issueAt(server, STORE_1, 2);
     const r = rig(server);
@@ -1803,6 +1885,11 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     await listReady();
     await user().click(openButton(1));
     await viewReady(1);
+    // VOID-P2 supersession (was Close, the lines region, Close): an invoice the owner may void has "Void invoice…" in the
+    // reserved row under the header, so the cycle is Close, Void invoice…, the lines region, Close — still contained.
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+    await user().tab();
+    expect(document.activeElement).toBe(tid('issued-view-void'));
     await user().tab();
     expect(document.activeElement).toBe(tid('issued-view-lines-scroll'));
     await user().tab();
@@ -1893,7 +1980,10 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     await waitFor(() => expect(viewPhase()).toBe('denied'));
     expect(tid('issued-view-state')).toHaveTextContent(VIEW_TEXT.denied);
     const refused = server.sent.map((x) => x.url).lastIndexOf(server.details().slice(-1)[0]);
-    expect(sentFrom(server, refused + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    // VOID-P2 supersession (was exactly the one session check): each open also sends its ONE void-eligibility GET beside
+    // the detail read (design §4 "Trigger"); it is not part of the 403's check, which is still ONE fresh session check.
+    expect(sentFrom(server, refused + 1).filter((line) => !line.endsWith('/void-eligibility'))).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(server.eligReads()).toEqual([1, 2].map(() => `${STORES_PATH}/${STORE_1}/invoices/${invoice(1).id}/void-eligibility`));
     expect(server.logins()).toHaveLength(logins);
     await close();
     server.detailStatus.push(503);
@@ -2031,7 +2121,7 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     expect(server.puts_()).toHaveLength(1);
   });
 
-  it('SII-60. AC-11: listing and opening invoices use no browser storage, history, address or log; no token in the DOM; the section and the dialog never name a payment state or offer send, print, void, edit or delete', async () => {
+  it('SII-60. AC-11: listing and opening invoices use no browser storage, history, address or log; no token in the DOM; the section and the dialog never name a payment state or offer send, print, edit or delete, and say "void" only in the exact void control (VOID-P2 supersession)', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
     const push = vi.spyOn(window.history, 'pushState');
     const replace = vi.spyOn(window.history, 'replaceState');
@@ -2048,8 +2138,11 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
       await user().click(openButton(n));
       await viewReady(n);
       const dialog = tid('issued-view');
-      expect(dialog.textContent).not.toMatch(FORBIDDEN);
-      expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
+      // VOID-P2 supersession (was FORBIDDEN on the whole text and `['Close']`): the exact void control is the only void
+      // wording and the only new control; every other word and control stays out.
+      await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+      expect(unvoided(dialog.textContent)).not.toMatch(FORBIDDEN);
+      expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
       await click('issued-view-close');
       await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
     }
@@ -2791,5 +2884,1776 @@ describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-
     // import.meta.hot is undefined under the test runner, so the module's own wiring is pinned in its source.
     expect(holdSource()).toContain('import.meta.hot?.dispose(() => { unbindVoidHolds(); voidHolds.dispose(); });');
     sendsNothing();
+  });
+});
+
+// M7B-INVOICES-VOID-P2 checkpoint B — voiding from the Issued section's dialog (doc 13 §5 G, §12; design §4, §5 and
+// R9–R23): the action and its gating, the review re-read, the confirmation, ONE send under ONE key held before it
+// leaves, every answer settled by key, the held card's Check again and Check invoice, detachment, the 23-hour cutoff,
+// the sign-in after a step-up, and what is never sent or kept. The REAL section, clients and hold over the fake server
+// (its void command decides like P1's: authority and the recent sign-in before the key, then the key, the tenant, the
+// target and the sealed outcome). Every assertion about a request is made on what the fake recorded.
+describe('Issued invoices — voiding an issued invoice: the action, the confirmation and recovery (M7B-INVOICES-VOID-P2 checkpoint B)', () => {
+  const box = () => screen.queryByTestId('issued-void-confirm');
+  const cardState = () => tid('issued-void-card').getAttribute('data-state');
+  const cardStatus = () => tid('issued-void-card-status').textContent ?? '';
+  const heldA = (r: Rig) => r.holds.get('uid-a');
+  const voidUrl = (storeId: string, invoiceId: string) => `${STORES_PATH}/${storeId}/invoices/${invoiceId}/void`;
+  const eligUrl = (storeId: string, invoiceId: string) => `${voidUrl(storeId, invoiceId)}-eligibility`;
+  const detailUrl = (storeId: string, invoiceId: string) => `${STORES_PATH}/${storeId}/invoices/${invoiceId}`;
+  const VBODY = (reason: string, tenant = TENANT_A) => `{"expectedTenant":"${tenant}","reasonCode":"${reason}"}`;
+  /** A sealed answer: exactly {error} (the chain's is {error, requestId}). */
+  const sealed = (status: number, error: string) => new Response(JSON.stringify({ error }), { status, headers: { 'content-type': 'application/json' } });
+  const json200 = (body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', ...headers } });
+  /** What was sent from `from` on, without the session's own requests, as "METHOD url". */
+  const apart = (server: Server, from = 0) => sentFrom(server, from).filter((line) => !line.includes(' /api/v1/session'));
+  const buttons = (testId: string) => within(tid(testId)).queryAllByRole('button').map((b) => b.textContent);
+  const radios = () => within(tid('issued-void-reasons')).getAllByRole('radio') as HTMLInputElement[];
+  const LABELS = ['Issued by mistake', 'Wrong customer', 'Wrong lines or amounts', 'Wrong seller details', 'Duplicate of another invoice', 'Other reason'];
+  const UNRESOLVED_2 = 'Void of invoice 2 at Main Street is not confirmed. The server may or may not have voided it.';
+
+  async function setup(over: Partial<ServerIssuedInvoicesProps> = {}, prepare: (server: Server) => void = () => {}) {
+    const server = seeded();
+    prepare(server);
+    const made = issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const page = render(<ServerIssuedInvoices {...r.props(over)} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    return { server, made, r, page };
+  }
+  async function openVoidable(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+  }
+  async function openConfirm(n: number) {
+    await openVoidable(n);
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+  }
+  async function pressWith(code: InvoiceVoidReasonCode) {
+    await user().click(tid(`issued-void-reason-${code}`));
+    await click('issued-void-send');
+  }
+  /** A first send whose request was lost before the server decided (nothing committed): unresolved, the confirmation still open. */
+  async function unresolvedOn(server: Server, r: Rig, n = 2, code: InvoiceVoidReasonCode = 'wrong_customer') {
+    await openConfirm(n);
+    server.voids.push('lose-before');
+    await pressWith(code);
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+  }
+  async function closeAll() {
+    if (box() !== null) await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    if (screen.queryByTestId('issued-view') !== null) await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+  }
+
+  it('SII-83. VOID-12 AC-02 R14: "Void invoice…" sits in a row under the dialog\'s header held from the open on, and shows only for the eligibility read\'s exact allowed AND an issued invoice; a voided invoice, a refusal (ONE fresh session check), an outage, a malformed allowed and a 401 leave nothing but the empty row — no retry control; nothing is read before a dialog opens, and each open reads the eligibility once', async () => {
+    const { server, made } = await setup();
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    expect(server.eligReads()).toEqual([]); // the list and a store choice read no eligibility
+    server.hold.elig = 1;
+    await user().click(openButton(3));
+    await viewReady(3);
+    const row = tid('issued-view-void-row');
+    // Layout round supersession (review B1 L-1; was `min-h-[2.125rem]` on the row and no child): the row's height is held
+    // by an invisible copy of the trigger in the same grid cell — present from the open on, aria-hidden, nothing focusable
+    // — and the real cell is empty while the answer is out. jsdom pins the structure only; the browser measures it.
+    const placeholder = within(row).getByTestId('issued-view-void-placeholder');
+    expect(placeholder).toHaveAttribute('aria-hidden', 'true');
+    expect(placeholder).toHaveClass('invisible');
+    expect(placeholder.querySelector('[data-reserve]')).toHaveAttribute('data-reserve', VOID_TEXT.open);
+    expect(row).not.toHaveClass('min-h-[2.125rem]');
+    expect(tid('issued-view-void-cell').children).toHaveLength(0);
+    expect(tid('issued-view-close').compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(row.compareDocumentPosition(tid('issued-view-status')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy(); // before the <dl>
+    server.held.shift()!.release();
+    await waitFor(() => expect(within(row).getByRole('button', { name: VOID_TEXT.open })).toHaveAttribute('aria-disabled', 'false'));
+    expect(tid('issued-view-void-row')).toBe(row); // the answer filled the reserved row: nothing moved
+    expect(tid('issued-view-void')).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(server.eligReads()).toEqual([eligUrl(STORE_1, made[2].id)]);
+    await closeAll();
+    // A voided invoice: the row is there and empty.
+    await user().click(openButton(2));
+    await viewReady(2);
+    await waitFor(() => expect(server.eligReads()).toHaveLength(2));
+    await settle();
+    expect(tid('issued-view-void-cell').children).toHaveLength(0); // L-1: the real cell is empty (the copy stays)
+    expect(buttons('issued-view')).toEqual(['Close']);
+    await closeAll();
+    // Not allowed (a refusal after its one fresh check), an outage, an allowed with an extra member: nothing but the row.
+    for (const answer of ['refused', 'outage', 'malformed'] as const) {
+      if (answer === 'refused') server.voidDenied.add('uid-a');
+      else server.eligStatus.push(answer === 'outage' ? 503 : json200({ eligibility: 'allowed', extra: true }));
+      const reads = server.eligReads().length;
+      await user().click(openButton(3));
+      await viewReady(3);
+      await waitFor(() => expect(server.eligReads()).toHaveLength(reads + 1));
+      await settle();
+      expect(tid('issued-view-void-cell').children, answer).toHaveLength(0); // L-1: the real cell is empty (the copy stays)
+      expect(buttons('issued-view'), answer).toEqual(['Close']);
+      if (answer === 'refused') {
+        const at = server.sent.map((x) => x.url).lastIndexOf(eligUrl(STORE_1, made[2].id));
+        expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // ONE fresh check, no loop
+      }
+      server.voidDenied.delete('uid-a');
+      await closeAll();
+    }
+    // A 401: the existing session-ended path (only Reconnect signs in again).
+    server.eligStatus.push(401);
+    await user().click(openButton(3));
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.queryByTestId('issued-view')).toBeNull();
+    expect(server.voidPosts()).toEqual([]);
+  });
+
+  it('SII-84. VOID-12: the drafts card\'s "View invoice" (the dialog with no void capability) never offers voiding and reads no eligibility — its output is the read-only dialog byte for byte: the Issued section\'s differs ONLY by its void area', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 1);
+    const session = createTenantSessionClient({ fetch: server.fetch });
+    const issuing = createInvoiceIssuingClient({ fetch: server.fetch });
+    const s = await session.ensure('uid-a', async () => 'tok-a');
+    if (s.kind !== 'ok') throw new Error('no session');
+    const got = await issuing.getIssued(STORE_1, made[0].id, s.csrf);
+    if (got.kind !== 'ok') throw new Error('no invoice');
+    const answer = { kind: 'ok' as const, invoice: got.invoice };
+    const base = { storeId: STORE_1, invoiceId: made[0].id, read: async () => answer, current: () => true, waiting: false, onClose: () => {}, returnFocus: { current: null } };
+    const mark = server.sent.length;
+    render(<IssuedInvoiceDialog {...base} />);
+    await viewReady(1);
+    await settle();
+    const plain = tid('issued-view').outerHTML;
+    expect(buttons('issued-view')).toEqual(['Close']);
+    expect(screen.queryByTestId('issued-view-void-area')).toBeNull();
+    expect(plain).not.toContain('issued-view-void');
+    cleanup();
+    const eligibility = vi.fn(async () => 'not' as const);
+    const voiding: IssuedVoidCapability = {
+      store: store(STORE_1, 'Main Street'), held: undefined, expired: false, cooling: false, finding: false, checkText: '', confirmedDenial: null, reauthMethod: () => 'password', signingIn: false, generation: () => 1,
+      eligibility, send: vi.fn(async () => null), check: vi.fn(), find: vi.fn(), signIn: vi.fn(async () => null),
+    };
+    render(<IssuedInvoiceDialog {...base} voiding={voiding} />);
+    await viewReady(1);
+    await waitFor(() => expect(eligibility).toHaveBeenCalledTimes(1));
+    await settle();
+    const withVoid = tid('issued-view').cloneNode(true) as HTMLElement;
+    withVoid.querySelector('[data-testid="issued-view-void-area"]')!.remove();
+    expect(withVoid.outerHTML).toBe(plain);
+    expect(server.sent.slice(mark).filter((x) => x.url.includes('/void'))).toEqual([]);
+  });
+
+  it('SII-85. VOID-13 AC-04 R10: "Void invoice…" re-reads the detail ONCE (a double press is one GET) while the invoice and the trigger stay, "Checking this invoice…"; the confirmation is an alertdialog named "Void invoice 2?" described by ONE element — the number, the store, the customer, the UTC issue time, the exact Total on its own line and what voiding means — with a required reason group in the pinned order, none chosen, no free text; Keep invoice has the first focus; Keep invoice and Escape close it with nothing sent and give focus back to "Void invoice…"', async () => {
+    const { server, made, r } = await setup();
+    await openVoidable(2);
+    const trigger = tid('issued-view-void');
+    const before = server.details().length;
+    server.hold.detail = 1;
+    await user().dblClick(trigger);
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(trigger).toHaveAttribute('aria-disabled', 'true');
+    expect(trigger).toHaveAccessibleDescription(VOID_TEXT.reviewing);
+    expect(tid('issued-view-void-status')).toHaveTextContent(VOID_TEXT.reviewing); // said in the live region too (review B1 F5)
+    expect(tid('issued-view-total')).toHaveTextContent('Total $21.76'); // the shown invoice stays during the review read
+    fireEvent.click(trigger);
+    await flush();
+    expect(server.details()).toHaveLength(before + 1);
+    server.held.shift()!.release();
+    await waitFor(() => expect(box()).not.toBeNull());
+    expect(server.details()).toHaveLength(before + 1);
+    const dialog = box()!;
+    expect(dialog).toHaveAttribute('role', 'alertdialog');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAccessibleName('Void invoice 2?');
+    expect(dialog.getAttribute('aria-describedby')!.split(' ')).toHaveLength(1);
+    const description = document.getElementById(dialog.getAttribute('aria-describedby')!)!;
+    expect(tid('issued-void-facts')).toHaveTextContent(/^Invoice 2 at Main Street, for Ada Customer, issued 2026-10-16 21:00:02 UTC\.$/);
+    expect(description).toContainElement(tid('issued-void-total'));
+    expect(tid('issued-void-total').textContent).toBe('Total $21.76');
+    expect(tid('issued-void-total')).toHaveClass('whitespace-nowrap');
+    expect(tid('issued-void-total-scroll')).toHaveAttribute('role', 'region');
+    expect(tid('issued-void-consequence').textContent).toBe(VOID_TEXT.consequence);
+    expect(dialog).toHaveAccessibleDescription(/Invoice 2 at Main Street, for Ada Customer, issued 2026-10-16 21:00:02 UTC\..*Total \$21\.76.*Voiding is final in the shop/);
+    for (const id of ['issued-void-store', 'issued-void-customer']) {
+      expect(tid(id).tagName, id).toBe('BDI');
+      expect(tid(id), id).toHaveClass('break-words');
+    }
+    expect(tid('issued-void-issued-at').tagName).toBe('TIME');
+    expect(tid('issued-void-issued-at')).toHaveAttribute('datetime', made[1].issuedAt);
+    // Layout round (review B1 L-2): the date and the clock are each one no-wrap token, so the time breaks only at spaces.
+    expect([...tid('issued-void-issued-at').querySelectorAll('span.whitespace-nowrap')].map((t) => t.textContent)).toEqual(['2026-10-16', '21:00:02']);
+    const group = within(dialog).getByRole('radiogroup', { name: VOID_TEXT.reasonLegend });
+    expect(group).toHaveAttribute('aria-required', 'true');
+    expect(group).toHaveAttribute('aria-invalid', 'false');
+    expect(radios().map((x) => x.value)).toEqual([...VOID_REASON_CODES]);
+    expect(radios().map((x) => x.value)).toEqual(['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']);
+    expect(radios().map((x) => x.closest('label')!.textContent)).toEqual(LABELS);
+    expect(radios().map((x) => x.checked)).toEqual([false, false, false, false, false, false]);
+    expect(new Set(radios().map((x) => x.name)).size).toBe(1);
+    expect(dialog.querySelectorAll('input:not([type="radio"]), textarea, select, input[type="hidden"]')).toHaveLength(0);
+    // The first focus is the dialog's effect (DialogFrame): waited for, not raced (it failed once under host load, layout round).
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-void-keep')));
+    expect(buttons('issued-void-confirm')).toEqual(['Keep invoice', 'Void invoice']);
+    await user().click(tid('issued-void-reason-wrong_customer'));
+    const mark = server.sent.length;
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-void')));
+    expect(tid('issued-view')).toBeInTheDocument(); // the issued dialog stays
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    expect(radios().map((x) => x.checked)).toEqual([false, false, false, false, false, false]); // a new review: nothing kept
+    await user().keyboard('{Escape}');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view')).toBeInTheDocument(); // Escape closes only the top dialog
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-void')));
+    await settle();
+    // Everything sent since the first review (review B1 tests 5: sentFrom, not `apart`): the second review's session check and read.
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${detailUrl(STORE_1, made[1].id)}`]);
+    expect([server.voidPosts(), r.keys, heldA(r)]).toEqual([[], [], undefined]);
+  });
+
+  it('SII-86. VOID-07 R10/R17: a review read that finds the invoice voided by now (another operator) shows the current detail — "Voided", its own recorded reason — says "This invoice is already voided." and opens no confirmation; the trigger goes and focus falls back to Close', async () => {
+    const { server, made } = await setup();
+    await openVoidable(2);
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' }; // voided elsewhere since the dialog read it
+    await click('issued-view-void');
+    await waitFor(() => expect(tid('issued-view-void-status')).toHaveTextContent(VOID_TEXT.alreadyVoided));
+    expect(box()).toBeNull();
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close')));
+    expect(server.voidPosts()).toEqual([]);
+  });
+
+  it('SII-87. VOID-13 AC-04 R16: with no reason "Void invoice" is aria-disabled (never disabled) and says "Choose a reason first."; pressing it sends nothing at all — no session check, no key — marks the group invalid, describes it by that text and moves focus to the first reason; choosing one clears it; "Other reason" has no text field', async () => {
+    const { server, r } = await setup();
+    await openConfirm(2);
+    const send = tid('issued-void-send');
+    expect(send).toHaveAttribute('aria-disabled', 'true');
+    expect(send).not.toBeDisabled();
+    expect(send).toHaveAccessibleDescription(VOID_TEXT.chooseReason);
+    const mark = server.sent.length;
+    await user().click(send);
+    const group = screen.getByRole('radiogroup', { name: VOID_TEXT.reasonLegend });
+    expect(group).toHaveAttribute('aria-invalid', 'true');
+    expect(group).toHaveAccessibleDescription(VOID_TEXT.chooseReason);
+    expect(tid('issued-void-reason-error')).toHaveTextContent(VOID_TEXT.chooseReason);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-void-reason-issued_in_error')));
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect(r.keys).toEqual([]);
+    await user().click(tid('issued-void-reason-other'));
+    expect(group).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.queryByTestId('issued-void-reason-error')).toBeNull();
+    expect(send).toHaveAttribute('aria-disabled', 'false');
+    expect(send).not.toHaveAttribute('aria-describedby');
+    expect(box()!.querySelectorAll('input:not([type="radio"]), textarea')).toHaveLength(0);
+  });
+
+  it('SII-88. VOID-08/09 AC-01 AC-05 AC-06: ONE press is ONE POST under ONE key — a double click and repeated Enter send nothing more; the exact body {"expectedTenant","reasonCode"} with no version field, the command headers, the attempt (key and exact bytes) HELD before the request leaves; the reasons lock and Keep invoice reads "Close" (closing does not cancel); the validated 200 closes the confirmation (focus to Close), the detail is read again — "Voided" with the RECORDED reason and time — page one is re-read (the invoice stays listed, Voided), the section and the card say so; one void record', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    let atSend: HeldVoid | undefined | 'not sent' = 'not sent';
+    const watched = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST' && String(input).endsWith('/void') && atSend === 'not sent') atSend = r.holds.get('uid-a');
+      return server.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    render(<ServerIssuedInvoices {...r.props({ issuing: createInvoiceIssuingClient({ fetch: watched }) })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await user().click(tid('issued-void-reason-wrong_customer'));
+    server.hold.current = 1; // the press's session check, held: "Void invoice" is still there for the repeats
+    server.hold.void = 1;
+    const mark = server.sent.length;
+    const send = tid('issued-void-send');
+    act(() => send.focus());
+    await user().keyboard('{Enter}{Enter}');
+    fireEvent.click(send);
+    await user().dblClick(send);
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    expect(document.activeElement).toBe(send);
+    expect(send).toHaveAttribute('aria-disabled', 'true');
+    expect(send).toHaveAccessibleDescription(VOID_TEXT.sendChecking);
+    expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.sendChecking); // said in the live region (review B1 F5)
+    expect(box()).toHaveAttribute('aria-busy', 'false'); // never aria-busy: its live region is not held back
+    expect(r.keys).toEqual([]); // no key before the session check has answered
+    server.held.shift()!.release();
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['void']));
+    await settle();
+    expect(server.voidPosts()).toHaveLength(1);
+    expect(r.keys).toHaveLength(1);
+    const post = server.voidPosts()[0];
+    expect(post.url).toBe(voidUrl(STORE_1, made[1].id));
+    expect(post.body).toBe(VBODY('wrong_customer'));
+    expect(post.body).not.toMatch(/version/i);
+    expect(post.headers.get('idempotency-key')).toBe(r.keys[0]);
+    expect(post.headers.get('x-tmpos-csrf')).toBe('1');
+    const csrf = server.sent.find((x) => x.url === listPath(STORE_1))!.headers.get('x-tmpos-session-csrf');
+    expect(post.headers.get('x-tmpos-session-csrf')).toBe(csrf);
+    expect(atSend).toEqual({
+      key: r.keys[0], body: VBODY('wrong_customer'), storeId: STORE_1, storeLabel: 'Main Street', invoiceId: made[1].id, number: 2, csrf,
+      sentAt: r.clock.mono, sentWall: r.clock.wall, state: 'sending', note: '', refusal: null, seen: null, seenReason: null, retryable: true,
+    });
+    expect(tid('issued-void-reasons')).toBeDisabled();
+    expect(screen.queryByTestId('issued-void-send')).toBeNull();
+    expect(tid('issued-void-keep')).toHaveTextContent(/^Close$/);
+    expect(tid('issued-void-keep')).toHaveAccessibleDescription(VOID_TEXT.closeWarning);
+    expect(buttons('issued-void-confirm')).toEqual(['Close']);
+    expect(tid('issued-void-confirm-status')).toHaveTextContent('Voiding invoice 2 at Main Street on the server…');
+    fireEvent.click(tid('issued-void-reason-other')); // locked: a UI edit cannot change the held payload
+    expect((tid('issued-void-reason-wrong_customer') as HTMLInputElement).checked).toBe(true);
+    expect(heldA(r)!.body).toBe(VBODY('wrong_customer'));
+    expect(tid('issued-void-confirm-alert').textContent).toBe(''); // the repeats were held back silently: no "Not sent" for them
+    server.held.shift()!.release();
+    await waitFor(() => expect(box()).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close')));
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/));
+    expect(tid('issued-view-void-status')).toHaveTextContent(VOID_TEXT.voided(2));
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong customer$/);
+    expect(tid('issued-view-voided-at')).toHaveAttribute('datetime', server.voidAt);
+    expect(tid('issued-view-total')).toHaveTextContent('Total $21.76'); // the original contents
+    await waitFor(() => expect(screen.getAllByTestId('issued-row-status').map((p) => p.textContent)).toEqual(['Issued', 'Voided', 'Issued']));
+    expect(screen.getAllByTestId('issued-row-number').map((p) => p.textContent)).toEqual(['Invoice 3', 'Invoice 2', 'Invoice 1']); // no number allocated, none removed
+    expect(tid('issued-notice')).toHaveTextContent(VOID_TEXT.voided(2));
+    expect(cardState()).toBe('voided');
+    expect(cardStatus()).toBe('Invoice 2 at Main Street was voided.');
+    expect(heldA(r)).toMatchObject({ state: 'voided', body: '' });
+    await settle();
+    expect(apart(server, mark).sort()).toEqual([`POST ${voidUrl(STORE_1, made[1].id)}`, `GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${listPath(STORE_1)}`].sort());
+    expect(made[1].void).toEqual({ voidedAt: server.voidAt, reasonCode: 'wrong_customer' });
+    expect(server.voidBodyViolations).toEqual([]);
+    await closeAll();
+    expect(buttons('issued-void-card')).toEqual(['Dismiss']);
+    await click('issued-void-dismiss');
+    expect(cardState()).toBe('none');
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-89. VOID-09 AC-06: a validated 200 whose detail read then fails says "Invoice 2 was voided. Its details could not be loaded." with "Load again", which sends ONLY the GET (never a second POST); the dialog then shows what the server records — its reason, never the one this attempt held', async () => {
+    const { server, made } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.detailStatus.push(503);
+    server.held.shift()!.release();
+    await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.voidedUnread(2)));
+    expect(box()).toBeNull();
+    // Review B1 F3 (was `/^Issued$/`): the validated 200 says it is voided, so the Status says Voided before any read
+    // does — but the void time and the reason come only from a read, never from the held attempt.
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(screen.queryByTestId('issued-view-voided-at')).toBeNull();
+    expect(screen.queryByTestId('issued-view-void-reason')).toBeNull();
+    made[1].void = { ...made[1].void!, reasonCode: 'duplicate' }; // what the server records is what a read shows
+    const mark = server.sent.length;
+    server.hold.detail = 1;
+    await click('issued-view-void-load');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['detail']));
+    // Through its own read Load again stays (aria-disabled, said why) and so does what it answers (review B1 react).
+    expect(tid('issued-view-void-load')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void-load')).toHaveAccessibleDescription(VIEW_TEXT.loading);
+    expect(document.activeElement).toBe(tid('issued-view-void-load'));
+    expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.voidedUnread(2));
+    server.held.shift()!.release();
+    await waitFor(() => expect(tid('issued-view-void-reason')).toBeInTheDocument());
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/);
+    expect(apart(server, mark)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`]);
+    expect(server.voidPosts()).toHaveLength(1);
+    expect(screen.queryByTestId('issued-view-void-load')).toBeNull();
+    expect(tid('issued-view-void-alert').textContent).toBe('');
+  });
+
+  const DECISIVE = [
+    { name: 'a sealed 409 invalid_state (already void)', answer: () => sealed(409, 'invalid_state'), refusal: 'already-void' as const, reread: true },
+    { name: 'a chain 404 (it may be the host\'s, R21)', answer: () => chain(404, 'not_found'), refusal: 'not-found' as const, reread: true },
+    { name: 'a sealed 409 write_conflict (the version)', answer: () => sealed(409, 'write_conflict'), refusal: 'version-conflict' as const, reread: true },
+    { name: 'a chain 409 write_conflict (the tenant)', answer: () => chain(409, 'write_conflict'), refusal: 'tenant-conflict' as const, reread: false },
+    { name: 'a 422 idempotency_key_reused', answer: () => chain(422, 'idempotency_key_reused'), refusal: 'key-reused' as const, reread: false },
+    { name: 'a 400 invalid_request', answer: () => chain(400, 'invalid_request'), refusal: 'invalid' as const, reread: false },
+  ];
+  it.each(DECISIVE)('SII-90. VOID-08 AC-07/08: a first send answered $name is decisive for its key — refused with that text, Close only, its bytes gone, never "voided"; a refusal that names the invoice reads its detail again (a GET); the card says the same', async ({ answer, refusal, reread }) => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.voids.push(answer());
+    const details = server.details().length;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_REFUSED_TEXT[refusal]));
+    expect(heldA(r)).toMatchObject({ state: 'refused', refusal, body: '' });
+    expect(buttons('issued-void-confirm')).toEqual(['Close']);
+    expect(tid('issued-void-keep')).not.toHaveAttribute('aria-describedby'); // decided: closing cancels nothing that is still out
+    if (reread) await waitFor(() => expect(server.details()).toHaveLength(details + 1));
+    await settle();
+    expect(server.details()).toHaveLength(details + (reread ? 1 : 0));
+    expect(server.voidPosts()).toHaveLength(1);
+    expect(tid('issued-view-void-status').textContent).not.toContain('voided.');
+    expect(screen.queryByText(VOID_TEXT.gone)).toBeNull(); // a 404 from the POST alone never says the invoice is gone
+    expect(cardState()).toBe('refused');
+    expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_REFUSED_TEXT[refusal]);
+    expect(made[1].void).toBeUndefined();
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(refusal === 'already-void' ? tid('issued-view-close') : tid('issued-view-void')));
+  });
+
+  const UNKNOWN = [
+    { name: 'the request lost (no answer)', script: 'lose-before' as const, note: VOID_NOTE_TEXT.noAnswer },
+    { name: 'a 503', script: () => chain(503, 'service_unavailable'), note: VOID_NOTE_TEXT.answered },
+    { name: 'a 200 for another invoice', script: () => json200({ invoice: { id: uuid(0x1a09), status: 'voided' } }), note: VOID_NOTE_TEXT.answered },
+    { name: 'a 200 replayed "false"', script: () => json200({ invoice: { id: uuid(0x1a02), status: 'voided' } }, { 'idempotent-replayed': 'false' }), note: VOID_NOTE_TEXT.answered },
+    { name: 'request_in_progress', script: () => chain(409, 'request_in_progress'), note: VOID_NOTE_TEXT.inProgress },
+  ];
+  it.each(UNKNOWN)('SII-91. VOID-08 AC-07: a first send answered by $name leaves the outcome unknown — the attempt unresolved with its key and exact bytes, its note; the confirmation says so with Close, Check again and Check invoice, and so does the card (with Dismiss, which only stops tracking it)', async ({ script, note }) => {
+    const { server, r } = await setup();
+    await openConfirm(2);
+    server.voids.push(typeof script === 'string' ? script : script());
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    expect(heldA(r)).toMatchObject({ key: r.keys[0], body: VBODY('wrong_customer'), note, retryable: true });
+    // In progress (no Retry-After): Check again waits a moment, said; every other answer gives it back at once.
+    expect(tid('issued-void-check')).toHaveAttribute('aria-disabled', note === VOID_NOTE_TEXT.inProgress ? 'true' : 'false');
+    expect(tid('issued-void-confirm-status')).toHaveTextContent(UNRESOLVED_2);
+    expect(tid('issued-void-confirm-note')).toHaveTextContent(note);
+    expect(buttons('issued-void-confirm')).toEqual(['Close', 'Check again', 'Check invoice']);
+    expect(tid('issued-void-keep')).toHaveAccessibleDescription(VOID_TEXT.closeWarning);
+    expect(cardStatus()).toBe(UNRESOLVED_2);
+    expect(buttons('issued-void-card')).toEqual(['Check again', 'Check invoice', 'Dismiss']);
+    expect(tid('issued-void-dismiss')).toHaveAccessibleDescription(VOID_TEXT.dismissWarning);
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-92. VOID-08 AC-07: a first send\'s 429 (decided before the key: nothing ran) drops the attempt and says "Not voided: too many requests…"; "Void invoice" waits with its reason until Retry-After has passed — the countdown only gives it back — and the next press is a NEW key', async () => {
+    const { server, r } = await setup();
+    server.retryAfter = '30';
+    await openConfirm(2);
+    await user().click(tid('issued-void-reason-duplicate'));
+    fakeClock();
+    server.voids.push(429);
+    fireEvent.click(tid('issued-void-send'));
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.rateLimited));
+    expect(heldA(r)).toBeUndefined();
+    expect(tid('issued-void-send')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-void-send')).toHaveAccessibleDescription(VOID_TEXT.sendWaiting);
+    expect((tid('issued-void-reason-duplicate') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(tid('issued-void-send')); // held back: nothing
+    await flush();
+    await advance(31_000);
+    await until(() => expect(tid('issued-void-send')).toHaveAttribute('aria-disabled', 'false'));
+    await flush();
+    expect(server.voidPosts()).toHaveLength(1); // the countdown sends nothing
+    fireEvent.click(tid('issued-void-send'));
+    await until(() => expect(heldA(r)?.state).toBe('voided'));
+    expect(server.voidPosts().map((x) => x.headers.get('idempotency-key'))).toEqual([r.keys[0], r.keys[1]]);
+    expect(r.keys[0]).not.toBe(r.keys[1]);
+  });
+
+  it('SII-93. VOID-12 AC-02: a narrowing while the confirmation is open (the server now refuses 403) gets ONE fresh session check, then "You can no longer void invoices at this store.": the action is taken away (focus falls back to Close), nothing is sent twice and nothing is voided; a reopen asks the server again and offers nothing', async () => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.voidDenied.add('uid-a'); // the owner's stored levels lost void_issued_invoices meanwhile
+    await pressWith('wrong_lines_or_amounts');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.noLongerAllowed));
+    const at = server.sent.findIndex((x) => x.method === 'POST' && x.url.endsWith('/void'));
+    expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(buttons('issued-void-confirm')).toEqual(['Close']);
+    expect(heldA(r)).toBeUndefined(); // decided before the key, said in the confirmation: nothing to track
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close')));
+    expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.noLongerAllowed);
+    expect(made[1].void).toBeUndefined();
+    await closeAll();
+    await user().click(openButton(2));
+    await viewReady(2);
+    await waitFor(() => expect(server.eligReads()).toHaveLength(2));
+    await settle();
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-94. VOID-08 AC-03 R22: a first send\'s 401 always ends the session (the dialogs and the list go; only Reconnect signs in): with its confirmation open the attempt is dropped; with it closed the card keeps "Not voided: your session had ended when it reached the server." (detached, no store named) — shown once Reconnect has begun a session, not beside the signed-out section — and nothing is re-sent', async () => {
+    const { server, r } = await setup();
+    await openConfirm(2);
+    server.voids.push(401);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect([box(), screen.queryByTestId('issued-view')]).toEqual([null, null]);
+    expect(heldA(r)).toBeUndefined();
+    expect(cardState()).toBe('none');
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    fireEvent.change(tid('issued-store'), { target: { value: STORE_1 } });
+    await listReady();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('issued-void-keep'); // closed while the POST is out
+    await waitFor(() => expect(box()).toBeNull());
+    server.held.shift()!.release(chain(401, 'unauthenticated'));
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(heldA(r)).toMatchObject({ state: 'refused', refusal: 'signed-out', csrf: null, body: '' });
+    expect(cardState()).toBe('none'); // R22: not beside the signed-out section (review B1 iam 4) …
+    await click('issued-retry');
+    await storesReady();
+    expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_REFUSED_TEXT['signed-out']); // … but after Reconnect
+    expect(VOID_REFUSED_TEXT['signed-out']).toBe('Not voided: your session had ended when it reached the server.'); // truth LOW-3
+    expect(tid('issued-void-card').textContent).not.toContain('Main Street');
+    expect(buttons('issued-void-card')).toEqual(['Dismiss']);
+    await settle();
+    expect(server.voidPosts()).toHaveLength(2);
+  });
+
+  it('SII-95. VOID-08 AC-07: after a lost answer (committed), "Check again" — inside the confirmation — re-sends the SAME key, the byte-identical body and the same session token to the same invoice; its sealed replay (Idempotent-Replayed) voids it: one void record, one key', async () => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.voids.push('lose'); // the server committed; the answer never arrived
+    await pressWith('other');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    expect(made[1].void).toEqual({ voidedAt: server.voidAt, reasonCode: 'other' });
+    await click('issued-void-confirm-check');
+    await waitFor(() => expect(box()).toBeNull());
+    const [first, again] = server.voidPosts();
+    expect(again.url).toBe(first.url);
+    expect(again.body).toBe(first.body);
+    for (const header of ['idempotency-key', 'x-tmpos-session-csrf', 'x-tmpos-csrf', 'content-type']) expect(again.headers.get(header), header).toBe(first.headers.get(header));
+    expect(r.keys).toHaveLength(1);
+    expect(heldA(r)).toMatchObject({ state: 'voided', body: '' });
+    await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/));
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Other reason$/);
+    expect(server.voidPosts()).toHaveLength(2);
+    expect(server.voidBodyViolations).toEqual([]);
+  });
+
+  it('SII-96. VOID-07 AC-08: "Check invoice" is ONE ordinary GET of the held invoice that settles nothing: "still shows as issued" leaves the attempt unresolved; once another operator voided it with ANOTHER reason it says "voided now" and the reason it records — never the held reason, never that this request did it — and the attempt stays unresolved; a Check again then gets the sealed already-void: not this request\'s void', async () => {
+    const { server, made, r } = await setup();
+    await unresolvedOn(server, r, 2, 'wrong_customer');
+    await closeAll();
+    let mark = server.sent.length;
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenIssued(2)));
+    expect(apart(server, mark)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`]);
+    expect(cardState()).toBe('unresolved');
+    expect(buttons('issued-void-card')).toEqual(['Check again', 'Check invoice', 'Dismiss']);
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' }; // another operator, another reason
+    mark = server.sent.length;
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenVoided(2)));
+    expect(tid('issued-void-card-seen-reason')).toHaveTextContent(VOID_TEXT.seenReason('Duplicate of another invoice'));
+    expect(apart(server, mark)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`]);
+    expect(cardState()).toBe('unresolved'); // the invoice's state now, not this attempt's outcome
+    expect(cardStatus()).toBe(UNRESOLVED_2);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', seen: 'voided', seenReason: 'duplicate', body: VBODY('wrong_customer') });
+    expect(tid('issued-section').textContent).not.toContain(INVOICE_VOID_REASONS.wrong_customer);
+    expect(document.body.textContent).not.toContain(INVOICE_VOID_REASONS.wrong_customer);
+    await click('issued-void-check');
+    await waitFor(() => expect(cardState()).toBe('refused'));
+    expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_REFUSED_TEXT['already-void']);
+    expect(cardStatus()).not.toContain('was voided');
+    expect(made[1].void).toEqual({ voidedAt: server.voidAt, reasonCode: 'duplicate' });
+  });
+
+  it('SII-97. VOID-07 AC-07/08: a Check invoice that fails proves nothing and says only that — an outage, a missing invoice, a refusal (after ONE fresh check) — the attempt stays unresolved; a Check again answered request_in_progress keeps the same key and bytes, and Check again waits a moment — the timer only gives it back', async () => {
+    const { server, r } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    for (const [status, text] of [[503, VOID_TEXT.checkFailed], [404, VOID_TEXT.checkMissing], [403, VOID_TEXT.checkDenied]] as const) {
+      server.detailStatus.push(status);
+      await click('issued-void-find');
+      await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(text));
+      expect(cardState(), String(status)).toBe('unresolved');
+      if (status === 403) { // ONE fresh session check after the refused read (review B1 tests 6)
+        const at = server.sent.map((x) => x.url).lastIndexOf(detailUrl(STORE_1, invoice(2).id));
+        expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+      }
+    }
+    fakeClock();
+    server.voids.push(chain(409, 'request_in_progress'));
+    fireEvent.click(tid('issued-void-check'));
+    await until(() => expect(tid('issued-void-card-note')).toHaveTextContent(VOID_NOTE_TEXT.inProgress));
+    expect(tid('issued-void-check')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-void-check')).toHaveAccessibleDescription(VOID_TEXT.coolDown);
+    fireEvent.click(tid('issued-void-check')); // waits: nothing
+    await flush();
+    expect(server.voidPosts()).toHaveLength(2);
+    await advance(5_000);
+    await until(() => expect(tid('issued-void-check')).toHaveAttribute('aria-disabled', 'false'));
+    await flush();
+    expect(server.voidPosts()).toHaveLength(2); // the countdown never sends
+    const [first, again] = server.voidPosts();
+    expect([again.body, again.headers.get('idempotency-key')]).toEqual([first.body, first.headers.get('idempotency-key')]);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', key: r.keys[0], body: VBODY('wrong_customer') });
+  });
+
+  it('SII-98. VOID-11 AC-09: a store change keeps the attempt scoped to ITS store and invoice — the card still names Main Street, and Check invoice and Check again go to the held store\'s paths, never the store chosen now; its later 200 re-reads no list and says nothing in the section while another store is chosen (R23)', async () => {
+    const { server, made, r } = await setup();
+    server.issued.set(STORE_2, [invoice(1, { id: uuid(0x2a01), customerName: 'Second store 1' })]);
+    await unresolvedOn(server, r);
+    await closeAll();
+    fireEvent.change(tid('issued-store'), { target: { value: STORE_2 } });
+    await listReady();
+    expect(customersShown()).toEqual(['Second store 1']);
+    expect(cardStatus()).toBe(UNRESOLVED_2);
+    let mark = server.sent.length;
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenIssued(2)));
+    expect(apart(server, mark)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`]);
+    mark = server.sent.length;
+    await click('issued-void-check');
+    await waitFor(() => expect(cardState()).toBe('voided'));
+    expect(cardStatus()).toBe('Invoice 2 at Main Street was voided.');
+    await settle();
+    expect(apart(server, mark)).toEqual([`POST ${voidUrl(STORE_1, made[1].id)}`]);
+    expect(server.voidPosts()[1].body).toBe(VBODY('wrong_customer'));
+    expect(screen.queryByTestId('issued-notice')).toBeNull();
+    expect(customersShown()).toEqual(['Second store 1']);
+    expect(server.voidBodyViolations).toEqual([]);
+  });
+
+  it('SII-99. VOID-11 AC-05 AC-09: the attempt outlives closing the confirmation and the dialog, a reopen and leaving the page (a remount over the same hold): the card is there at once; nothing is sent on mount, a focus, a tab return or timers; a new confirmation cannot send ("Another void is waiting to be confirmed."); Check again after the remount is the same key, bytes and token', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r, page } = await setup();
+    await unresolvedOn(server, r);
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view')).toBeInTheDocument(); // closing the confirmation keeps the dialog
+    await closeAll();
+    expect(cardState()).toBe('unresolved');
+    await openConfirm(3);
+    await user().click(tid('issued-void-reason-other'));
+    expect(tid('issued-void-send')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-void-send')).toHaveAccessibleDescription(VOID_TEXT.pending);
+    await click('issued-void-send');
+    await settle();
+    expect(server.voidPosts()).toHaveLength(1);
+    await closeAll();
+    page.unmount();
+    const mark = server.sent.length;
+    render(<ServerIssuedInvoices {...r.props()} />);
+    expect(cardState()).toBe('unresolved');
+    expect(cardStatus()).toBe(UNRESOLVED_2);
+    await focusEvents();
+    fakeClock();
+    await advance(65_000);
+    vi.useRealTimers();
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([]); // review B1 tests 5: nothing at all, not even a session check
+    await click('issued-void-check');
+    await waitFor(() => expect(server.voidPosts()).toHaveLength(2));
+    const [first, again] = server.voidPosts();
+    for (const header of ['idempotency-key', 'x-tmpos-session-csrf']) expect(again.headers.get(header), header).toBe(first.headers.get(header));
+    expect([again.url, again.body]).toEqual([first.url, first.body]);
+    await waitFor(() => expect(cardState()).toBe('voided'));
+    expect(r.keys).toHaveLength(1);
+    expect(server.voidBodyViolations).toEqual([]);
+  });
+
+  it.each(['another tab\'s token', 'a sign-out', 'a user change'] as const)('SII-100. VOID-11 AC-03 AC-09 R12: %s DETACHES an unconfirmed void for good — its token and bytes go; the card says it could not be confirmed, names no store and offers only Check invoice and Dismiss (never Check again); signing in again, Reconnect or changing back revives nothing and sends nothing', async (arm) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r, page } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    if (arm === 'another tab\'s token') {
+      server.otherTab('uid-a');
+      await focusEvents();
+    } else if (arm === 'a sign-out') {
+      await act(async () => { await r.props().session!.logout(); });
+    } else {
+      page.rerender(<ServerIssuedInvoices {...r.props({ uid: 'uid-b' })} />);
+      await settle();
+      expect(cardState()).toBe('none'); // another user sees nothing of it
+      page.rerender(<ServerIssuedInvoices {...r.props()} />);
+    }
+    await waitFor(() => expect(heldA(r)).toMatchObject({ csrf: null, body: '', state: 'unresolved', key: r.keys[0] }));
+    expect(cardState()).toBe('detached');
+    expect(cardStatus()).toBe(VOID_TEXT.detached);
+    expect(tid('issued-void-card').textContent).not.toContain('Main Street');
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+    if (screen.queryByTestId('issued-retry') !== null) { await click('issued-retry'); await storesReady(); }
+    else if (screen.queryByTestId('issued-show') !== null) { await click('issued-show'); await storesReady(); }
+    await settle();
+    expect(heldA(r)).toMatchObject({ csrf: null, body: '' });
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-101. VOID-11 AC-09 R4: a late answer for an attempt detached while its POST was out changes nothing but the detach — a late 200 never says "voided" there, re-reads nothing and settles nothing; Check invoice (a new authorized read under the new session) then shows the state now, without attribution', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('uid-a');
+    await focusEvents(); // another token: a new generation (the dialogs go) and the attempt detached
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(heldA(r)).toMatchObject({ csrf: null, body: '', state: 'sending' });
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']); // detached: Dismiss even while sending (R8)
+    const mark = server.sent.length;
+    server.held.shift()!.release(); // its 200 (committed)
+    await settle();
+    expect(heldA(r)).toMatchObject({ csrf: null, state: 'sending' });
+    expect(cardStatus()).toBe(VOID_TEXT.detached);
+    expect(screen.queryByTestId('issued-notice')).toBeNull();
+    expect(sentFrom(server, mark)).toEqual([]); // review B1 tests 5: nothing at all for the late 200
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenVoided(2)));
+    expect(server.detailRequests().at(-1)!.headers.get('x-tmpos-session-csrf')).not.toBe(server.voidPosts()[0].headers.get('x-tmpos-session-csrf'));
+    expect(cardState()).toBe('detached');
+    expect(made[1].void?.reasonCode).toBe('wrong_customer');
+  });
+
+  it('SII-102. VOID-11 AC-09: the 23-hour window counts from the FIRST send by the larger of monotonic and wall time and never moves: a Check again at 22 hours goes, past 23 hours the card says it can no longer be checked again and the bytes go (a tab return scrubs them even when the timer was held back); judged again after the session check (monotonic), and at the press when timers were delayed — nothing is ever sent past it', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    {
+      const { server, r } = await setup();
+      await unresolvedOn(server, r);
+      await closeAll();
+      r.clock.wall += 22 * HOUR;
+      server.voids.push('lose-before');
+      await click('issued-void-check');
+      await waitFor(() => expect(server.voidPosts()).toHaveLength(2));
+      await waitFor(() => expect(cardState()).toBe('unresolved'));
+      r.clock.wall += HOUR; // 23 hours after the FIRST send (the check at 22 hours moved nothing)
+      await focusEvents();
+      await waitFor(() => expect(heldA(r)!.body).toBe(''));
+      expect(cardStatus()).toBe('Void of invoice 2 at Main Street is not confirmed, and it was sent too long ago to check again here. Use Check invoice to see the invoice\'s current state.');
+      expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+      expect(server.voidPosts()).toHaveLength(2);
+      cleanup();
+    }
+    {
+      const { server, r } = await setup();
+      await unresolvedOn(server, r);
+      await closeAll();
+      r.clock.mono += 23 * HOUR - 1_000;
+      server.hold.current = 1;
+      await click('issued-void-check');
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+      r.clock.mono += 2_000; // crossed while the session check was out
+      server.held.shift()!.release();
+      await waitFor(() => expect(heldA(r)!.body).toBe(''));
+      await settle();
+      expect(server.voidPosts()).toHaveLength(1);
+      expect(heldA(r)!.state).toBe('unresolved');
+      cleanup();
+    }
+    {
+      fakeClock(); // the hold's scrub timer is armed on the fake clock and never runs: a throttled background tab
+      const server = seeded();
+      issueAt(server, STORE_1, 3);
+      const r = rig(server);
+      render(<ServerIssuedInvoices {...r.props()} />);
+      fireEvent.click(tid('issued-show'));
+      await until(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'ready'));
+      fireEvent.change(tid('issued-store'), { target: { value: STORE_1 } });
+      await until(() => expect(listPhase()).toBe('ready'));
+      fireEvent.click(openButton(2));
+      await until(() => expect(tid('issued-view-void')).toBeInTheDocument());
+      fireEvent.click(tid('issued-view-void'));
+      await until(() => expect(box()).not.toBeNull());
+      fireEvent.click(tid('issued-void-reason-wrong_customer'));
+      server.voids.push('lose-before');
+      fireEvent.click(tid('issued-void-send'));
+      await until(() => expect(heldA(r)?.state).toBe('unresolved'));
+      r.clock.wall += 23 * HOUR;
+      expect(heldA(r)!.body).toBe(VBODY('wrong_customer')); // the timer has not run
+      fireEvent.click(tid('issued-void-confirm-check'));
+      await until(() => expect(heldA(r)!.body).toBe(''));
+      await flush();
+      expect(server.voidPosts()).toHaveLength(1);
+    }
+  });
+
+  it('SII-103. VOID-11 AC-09: a page load loses the attempt — a new hold and a remount show no card, and nothing is sent on mount, a focus, Show or an open; the next void is a fresh review (nothing waiting)', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r, page } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    page.unmount();
+    const reloaded = createVoidHoldStore({ now: () => r.clock.mono, wallNow: () => r.clock.wall });
+    render(<ServerIssuedInvoices {...r.props({ voidHolds: reloaded })} />);
+    expect(cardState()).toBe('none');
+    await focusEvents();
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await user().click(tid('issued-void-reason-other'));
+    expect(tid('issued-void-send')).toHaveAttribute('aria-disabled', 'false');
+    await settle();
+    expect(server.voidPosts()).toHaveLength(1);
+    expect(reloaded.get('uid-a')).toBeUndefined();
+  });
+
+  it('SII-104. VOID-12 AC-03 R11: a stale sign-in\'s 403 step_up_required (no key acquired) drops the attempt and offers an explicit sign-in group in the confirmation — nothing signs in on its own (a focus, a tab return); a wrong password says so; the sign-in keeps the dialog open, re-reads the invoice and its eligibility, clears the reason and asks for a NEW press, which is a NEW key under the NEW token', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, made, r } = await setup({}, (s) => { s.staleLogins = true; });
+    await openConfirm(2);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    expect(screen.getByRole('group', { name: VOID_TEXT.reauthTitle })).toBe(tid('issued-void-reauth-group'));
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.stepUp);
+    expect(tid('issued-void-reauth-explain')).toHaveTextContent(VOID_TEXT.reauthExplain);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-void-reauth-password')));
+    expect(heldA(r)).toBeUndefined();
+    expect(server.keys.size).toBe(0); // nothing acquired at the server
+    expect(buttons('issued-void-confirm')).toEqual(['Keep invoice', 'Confirm sign-in']);
+    const logins = server.logins().length;
+    await focusEvents();
+    expect(server.logins()).toHaveLength(logins);
+    type('issued-void-reauth-password', 'wrong');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.reauthFailed));
+    expect(server.logins()).toHaveLength(logins);
+    const mark = server.sent.length;
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed));
+    expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(['1']);
+    expect(apart(server, mark).sort()).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort());
+    expect(tid('issued-view')).toBeInTheDocument();
+    expect(radios().map((x) => x.checked)).toEqual([false, false, false, false, false, false]);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-void-reason-issued_in_error')));
+    expect(server.voidPosts()).toHaveLength(1);
+    await pressWith('duplicate');
+    await waitFor(() => expect(heldA(r)?.state).toBe('voided'));
+    const [first, second] = server.voidPosts();
+    expect(second.headers.get('idempotency-key')).toBe(r.keys[1]);
+    expect(r.keys[1]).not.toBe(r.keys[0]);
+    expect(second.headers.get('x-tmpos-session-csrf')).not.toBe(first.headers.get('x-tmpos-session-csrf'));
+    expect(second.body).toBe(VBODY('duplicate'));
+    expect(made[1].void?.reasonCode).toBe('duplicate');
+    expect(server.voidBodyViolations).toEqual([]);
+  });
+
+  it('SII-105. VOID-12 R13: a Check again met by step_up_required (decided before the key: nothing about the earlier request) leaves the attempt unresolved with that note and withdraws Check again for good — Check invoice and Dismiss stay, and no sign-in is offered from it', async () => {
+    const { server, r } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    const logins = server.logins().length;
+    server.voids.push(chain(403, 'step_up_required'));
+    await click('issued-void-check');
+    await waitFor(() => expect(tid('issued-void-card-note')).toHaveTextContent(VOID_NOTE_TEXT.stepUp));
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', retryable: false, body: VBODY('wrong_customer') });
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+    expect(screen.queryByTestId('issued-void-reauth-group')).toBeNull();
+    await settle();
+    expect(server.logins()).toHaveLength(logins);
+    expect(server.voidPosts()).toHaveLength(2);
+  });
+
+  it('SII-106. VOID-11 R15/R23: a 200 that arrives after the dialog closed still re-reads page one and says "Invoice 2 voided." while the same store is chosen; one that arrives after a store change re-reads no list and leaves only the card', async () => {
+    for (const after of ['closed', 'store changed'] as const) {
+      const { server, made, r } = await setup();
+      server.issued.set(STORE_2, [invoice(1, { id: uuid(0x2a01), customerName: 'Second store 1' })]);
+      await openConfirm(2);
+      server.hold.void = 1;
+      await pressWith('issued_in_error');
+      await waitFor(() => expect(server.held).toHaveLength(1));
+      if (after === 'closed') await closeAll();
+      else {
+        fireEvent.change(tid('issued-store'), { target: { value: STORE_2 } }); // the page behind is inert to a user; a change still reaches it
+        await listReady();
+      }
+      expect(screen.queryByTestId('issued-view')).toBeNull();
+      const lists = server.lists(STORE_1).length;
+      server.held.shift()!.release();
+      await waitFor(() => expect(cardState()).toBe('voided'));
+      await settle();
+      expect(made[1].void?.reasonCode, after).toBe('issued_in_error');
+      if (after === 'closed') {
+        expect(server.lists(STORE_1)).toHaveLength(lists + 1);
+        await waitFor(() => expect(screen.getAllByTestId('issued-row-status').map((p) => p.textContent)).toEqual(['Issued', 'Voided', 'Issued']));
+        expect(tid('issued-notice')).toHaveTextContent(VOID_TEXT.voided(2));
+      } else {
+        expect(server.lists(STORE_1)).toHaveLength(lists);
+        expect(screen.queryByTestId('issued-notice')).toBeNull();
+        expect(customersShown()).toEqual(['Second store 1']);
+      }
+      expect(heldA(r)).toMatchObject({ state: 'voided' });
+      cleanup();
+    }
+  });
+
+  it('SII-107. AC-11 R8: an attached attempt that is out has no control (no Dismiss while sending); Dismiss of an unresolved one only stops tracking — said, nothing sent, focus to the heading; no key, body, token or tenant reaches the DOM, storage, the address or a log, and the void sources use none of them', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const push = vi.spyOn(window.history, 'pushState');
+    const replace = vi.spyOn(window.history, 'replaceState');
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    const href = window.location.href;
+    const { server, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_seller_details');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(buttons('issued-void-card')).toEqual([]); // sending, attached
+    expect(cardStatus()).toBe('Voiding invoice 2 at Main Street on the server…');
+    server.held.shift()!.release(chain(503, 'service_unavailable'));
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    for (const secret of [r.keys[0], VBODY('wrong_seller_details'), 'expectedTenant', TENANT_A, 's'.repeat(40)]) expect(document.body.innerHTML).not.toContain(secret);
+    // The consequence's design-mandated negation ("It does not refund or record a payment") is the one named exception (F7).
+    expect(unvoided(box()!.textContent).split(VOID_TEXT.consequence).join('')).not.toMatch(FORBIDDEN);
+    await closeAll();
+    expect(unvoided(tid('issued-section').textContent)).not.toMatch(FORBIDDEN);
+    const mark = server.sent.length;
+    await click('issued-void-dismiss');
+    expect(cardState()).toBe('none');
+    expect(heldA(r)).toBeUndefined();
+    await waitFor(() => expect(document.activeElement).toBe(heading()));
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect([localStorage.length, sessionStorage.length]).toEqual([0, 0]);
+    expect(setItem).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(href);
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceVoidHold.ts']) {
+      const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
+      expect(source, file).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
+    }
+  });
+
+  it('SII-108. AC-10: the confirmation keeps Tab and Shift+Tab inside itself (from Keep invoice round to it again, and from Keep invoice back to "Void invoice"), with the issued dialog behind inert', async () => {
+    await setup();
+    await openConfirm(2);
+    await user().click(tid('issued-void-reason-other'));
+    act(() => tid('issued-void-keep').focus());
+    const seen: Element[] = [];
+    for (let i = 0; i < 12; i++) {
+      await user().tab();
+      expect(box()!.contains(document.activeElement)).toBe(true);
+      seen.push(document.activeElement!);
+    }
+    expect(seen).toContain(tid('issued-void-send'));
+    expect(seen).toContain(tid('issued-void-keep'));
+    expect(seen).toContain(tid('issued-void-total-scroll'));
+    act(() => tid('issued-void-keep').focus());
+    await user().tab({ shift: true });
+    expect(document.activeElement).toBe(tid('issued-void-send'));
+    expect(tid('issued-view').closest('[inert]')).not.toBeNull();
+  });
+
+  it('SII-109. VOID-08 R5: a first send\'s pre-key refusal that comes back after its confirmation was closed (a step-up here) keeps the attempt as refused — "Not voided: …" with Dismiss on the card — and offers no sign-in from the card', async () => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('issued-void-keep'); // Close while the POST is out: it is not cancelled
+    await waitFor(() => expect(box()).toBeNull());
+    const logins = server.logins().length;
+    server.held.shift()!.release(chain(403, 'step_up_required'));
+    await waitFor(() => expect(cardState()).toBe('refused'));
+    expect(heldA(r)).toMatchObject({ state: 'refused', refusal: 'step-up', body: '' });
+    expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_REFUSED_TEXT['step-up']);
+    expect(buttons('issued-void-card')).toEqual(['Dismiss']);
+    expect(screen.queryByTestId('issued-void-reauth-group')).toBeNull();
+    await settle();
+    expect(server.logins()).toHaveLength(logins);
+    expect(made[1].void).toBeUndefined();
+  });
+
+  it('SII-110. VOID-11 R12: the settings\' explicit sign-in (renew) adopts a new token, so a void sent under the old one is detached — it can never be checked again under the new session, and nothing is re-sent', async () => {
+    const { server, r } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    await openSettings();
+    await panelReady();
+    server.puts.push(chain(403, 'step_up_required'));
+    await renewBySignIn();
+    await waitFor(() => expect(heldA(r)).toMatchObject({ csrf: null, body: '', state: 'unresolved' }));
+    expect(cardState()).toBe('detached');
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+    await settle();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-111. VOID-11 R12: after leaving the page, the FIRST token a remounted section finds being another session\'s (another tab signed in meanwhile) detaches the held void at its Check again — nothing is sent under the new token', async () => {
+    const { server, r, page } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    page.unmount();
+    server.otherTab('uid-a');
+    render(<ServerIssuedInvoices {...r.props()} />);
+    expect(cardState()).toBe('unresolved'); // from memory: no token known yet
+    await click('issued-void-check');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ csrf: null, body: '' }));
+    await settle();
+    expect(cardState()).toBe('detached');
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-112. VOID-08 R1: a first send the client itself refuses to send (not-sent: nothing left) is never held or shown as out — the confirmation goes back to its review with "Not sent: …", and no POST reaches the server', async () => {
+    const server = seeded();
+    issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const real = createInvoiceIssuingClient({ fetch: server.fetch });
+    const voidInvoice = vi.fn(async (): Promise<VoidResult> => ({ kind: 'not-sent' }));
+    render(<ServerIssuedInvoices {...r.props({ issuing: { ...real, voidInvoice } })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await pressWith('other');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.notSendable));
+    expect(voidInvoice).toHaveBeenCalledTimes(1);
+    expect(heldA(r)).toBeUndefined();
+    expect(tid('issued-void-attempt')).toHaveAttribute('data-state', 'none');
+    expect(buttons('issued-void-confirm')).toEqual(['Keep invoice', 'Void invoice']);
+    expect(tid('issued-void-keep')).toHaveTextContent(/^Keep invoice$/);
+    expect(server.voidPosts()).toEqual([]);
+  });
+
+  // ---- Review B1 fix round 1 (reconcile.md F1–F9 and the accepted LOW list) ----
+
+  it('SII-113. Review B1 F1 (sequence A): an attempt for THIS invoice pressed from an earlier open is the dialog\'s too — reopened and reviewed while it is out (the confirmation held "Another void is waiting…"), its validated 200 closes that confirmation, hides the trigger and reads the detail ONCE; no second key is ever sent', async () => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await closeAll();
+    await openConfirm(2); // reopened and reviewed while K1 is out
+    await user().click(tid('issued-void-reason-duplicate'));
+    expect(tid('issued-void-send')).toHaveAccessibleDescription(VOID_TEXT.pending);
+    const details = server.details().length;
+    server.held.shift()!.release(); // K1's validated 200
+    await waitFor(() => expect(box()).toBeNull());
+    await waitFor(() => expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong customer$/));
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(tid('issued-view-void-status')).toHaveTextContent(VOID_TEXT.voided(2));
+    await settle();
+    expect(server.details()).toHaveLength(details + 1);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close')));
+    expect([server.voidPosts().length, r.keys.length]).toEqual([1, 1]);
+  });
+
+  it('SII-114. Review B1 F1 (sequence B): a review read answered with the invoice as it was BEFORE this open\'s void committed (it was out when the 200 came) never overwrites the voided detail read after it and never opens a confirmation — the detail reads of one open share one sequence', async () => {
+    const { server, made } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('issued-void-keep'); // only the confirmation closes
+    await waitFor(() => expect(box()).toBeNull());
+    server.hold.detail = 1;
+    await click('issued-view-void'); // a review read, out
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['void', 'detail']));
+    const before = new Response(JSON.stringify(detailOf(made[1])), { status: 200, headers: { 'content-type': 'application/json' } }); // what it read pre-commit
+    server.held.find((h) => h.kind === 'void')!.release();
+    await waitFor(() => expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong customer$/)); // the post-void read answered
+    server.held.find((h) => h.kind === 'detail')!.release(before);
+    await settle();
+    expect(box()).toBeNull();
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong customer$/);
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  const CLOSED = [
+    { name: 'an unknown answer (503)', kind: 'unknown' as const },
+    { name: 'a step-up (403 step_up_required)', kind: 'step-up' as const },
+    { name: 'a standing denial (403, confirmed by the fresh check)', kind: 'denied' as const },
+  ];
+  it.each(CLOSED)('SII-115. Review B1 F2: after only the confirmation was closed, $name is said in the still-open issued dialog (the card is behind it): out → "…on the server…", unknown → the unresolved sentence and where it is tracked, refused → its refusal; a standing denial also takes the action away', async ({ kind }) => {
+    const { server, made, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view-void-status')).toHaveTextContent(`Voiding invoice 2 at Main Street on the server… ${VOID_TEXT.heldOutside}`);
+    const held = server.held.shift()!;
+    if (kind === 'denied') { server.voidDenied.add('uid-a'); held.release(); } // decided now: 403 forbidden
+    else held.release(kind === 'unknown' ? chain(503, 'service_unavailable') : chain(403, 'step_up_required'));
+    if (kind === 'unknown') {
+      await waitFor(() => expect(tid('issued-view-void-status')).toHaveTextContent(`${UNRESOLVED_2} ${VOID_TEXT.heldOutside}`));
+      expect(tid('issued-view-void')).toBeInTheDocument();
+    } else if (kind === 'step-up') {
+      await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_REFUSED_TEXT['step-up']));
+      expect(tid('issued-view-void')).toBeInTheDocument();
+    } else {
+      await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.noLongerAllowed));
+      expect(screen.queryByTestId('issued-view-void')).toBeNull();
+      expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_REFUSED_TEXT.denied); // the check confirmed it
+      expect(heldA(r)).toMatchObject({ state: 'refused', refusal: 'denied' });
+    }
+    expect(made[1].void).toBeUndefined();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-116. Review B1 F4: a validated 200 that lands during the section\'s Retry-After wait owes page one — the list says the wait over its last known rows, with Try again held until the wait has passed; the countdown reads nothing, and only Try again reads page one (Voided)', async () => {
+    const { server } = await setup();
+    server.retryAfter = '30';
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await closeAll();
+    fakeClock();
+    server.detailStatus.push(429); // another read's 429 starts the section's wait
+    fireEvent.click(openButton(3));
+    await until(() => expect(viewPhase()).toBe('rate-limited'));
+    fireEvent.click(tid('issued-view-close'));
+    await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    const lists = server.lists(STORE_1).length;
+    server.held.shift()!.release();
+    await until(() => expect(cardState()).toBe('voided'));
+    await flush();
+    expect(server.lists(STORE_1)).toHaveLength(lists);
+    expect(listPhase()).toBe('rate-limited');
+    expect(tid('issued-last-known')).toBeInTheDocument();
+    expect(tid('issued-list-retry')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-notice')).toHaveTextContent(VOID_TEXT.voided(2));
+    await advance(31_000);
+    await until(() => expect(tid('issued-list-retry')).toHaveAttribute('aria-disabled', 'false'));
+    await flush();
+    expect(server.lists(STORE_1)).toHaveLength(lists); // the countdown reads nothing
+    fireEvent.click(tid('issued-list-retry'));
+    await until(() => expect(screen.getAllByTestId('issued-row-status').map((p) => p.textContent)).toEqual(['Issued', 'Voided', 'Issued']));
+    expect(server.lists(STORE_1)).toHaveLength(lists + 1);
+  });
+
+  it.each([503, 404, 403, 429] as const)('SII-117. Review B1 F8: a review read answered %s says what it is — an outage keeps the invoice and the trigger ("could not be checked"), a 404 "This invoice is no longer available." (the detail READ), a 403 after ONE fresh check the denied state, a 429 the wait with the trigger held — and no confirmation opens', async (status) => {
+    const { server, made } = await setup();
+    server.retryAfter = '30';
+    await openVoidable(2);
+    server.detailStatus.push(status);
+    await click('issued-view-void');
+    if (status === 503) {
+      await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.reviewFailed));
+      expect(tid('issued-view-total')).toHaveTextContent('Total $21.76');
+      expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
+    } else if (status === 404) {
+      await waitFor(() => expect(viewPhase()).toBe('not-found'));
+      expect(tid('issued-view-state')).toHaveTextContent(VOID_TEXT.gone);
+      expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    } else if (status === 403) {
+      await waitFor(() => expect(viewPhase()).toBe('denied'));
+      expect(tid('issued-view-state')).toHaveTextContent(VIEW_TEXT.denied);
+      const at = server.sent.map((x) => x.url).lastIndexOf(detailUrl(STORE_1, made[1].id));
+      expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    } else {
+      await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent('Wait 30 seconds'));
+      expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+      expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewWaiting);
+    }
+    await settle();
+    expect(box()).toBeNull();
+    expect(server.voidPosts()).toEqual([]);
+  });
+
+  it('SII-118. Review B1 F3/F8: a first send\'s sealed already-void whose re-read then fails says "The invoice could not be loaded again right now." with Load again, and the Status says Voided (the sealed answer proves it) with no void time or reason until a read gives them; the confirmation that pressed it keeps its refusal', async () => {
+    const { server } = await setup();
+    await openConfirm(2);
+    server.voids.push(sealed(409, 'invalid_state'));
+    server.detailStatus.push(503); // the re-read after the refusal
+    await pressWith('duplicate');
+    await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.afterUnread));
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_REFUSED_TEXT['already-void']);
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(screen.queryByTestId('issued-view-voided-at')).toBeNull();
+    expect(screen.queryByTestId('issued-view-void-reason')).toBeNull();
+    expect(tid('issued-view-void-load')).toBeInTheDocument();
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+  });
+
+  it('SII-119. Review B1 F8: a first send\'s 403 whose one fresh session check cannot answer says "Not voided: the server refused this request, and your session could not be checked right now." — the action is NOT taken away (nothing confirmed a denial) and nothing ran, so nothing is held', async () => {
+    const { server, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('other');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.voidDenied.add('uid-a');
+    server.currentStatus.push(503); // the one fresh check
+    server.held.shift()!.release(); // decided now: 403 forbidden
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.refusedUnchecked));
+    expect(heldA(r)).toBeUndefined();
+    expect(tid('issued-view-void')).toBeInTheDocument();
+    expect(buttons('issued-void-confirm')).toEqual(['Close']);
+  });
+
+  it('SII-120. Review B1 F8 / truth LOW-4: with no sign-in this page can offer, a step-up says "Not voided: your sign-in is too old to void invoices here." and only "Sign out and sign in again, then void this invoice." — no sign-in control, nothing signed in', async () => {
+    const server = seeded();
+    server.staleLogins = true;
+    issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const base = r.props().identity!;
+    render(<ServerIssuedInvoices {...r.props({ identity: { ...base, reauthMethod: () => null } })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    const logins = server.logins().length;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.stepUpNoMethod);
+    expect(tid('issued-void-confirm-alert').textContent).not.toContain('confirm your sign-in');
+    expect(tid('issued-void-reauth-explain')).toHaveTextContent(VOID_TEXT.reauthNone);
+    expect(screen.queryByTestId('issued-void-reauth-password')).toBeNull();
+    expect(screen.queryByTestId('issued-void-reauth-confirm')).toBeNull();
+    expect(buttons('issued-void-confirm')).toEqual(['Keep invoice']);
+    await settle();
+    expect(server.logins()).toHaveLength(logins);
+  });
+
+  it.each(['voided', 'missing', 'refused'] as const)('SII-121. Review B1 F8 / R11: after the step-up\'s explicit sign-in, a re-read that finds the invoice %s closes the confirmation and the dialog shows that state — never a press, never a POST', async (found) => {
+    const { server, made } = await setup({}, (s) => { s.staleLogins = true; });
+    await openConfirm(2);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    if (found === 'voided') made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    if (found === 'missing') server.issued.set(STORE_1, made.filter((i) => i !== made[1]));
+    if (found === 'refused') server.issuedDenied.add('uid-a');
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(box()).toBeNull());
+    if (found === 'voided') {
+      await waitFor(() => expect(tid('issued-view-void-status')).toHaveTextContent(VOID_TEXT.alreadyVoided));
+      expect(tid('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/);
+    } else if (found === 'missing') {
+      await waitFor(() => expect(viewPhase()).toBe('not-found'));
+      expect(tid('issued-view-state')).toHaveTextContent(VOID_TEXT.gone);
+    } else {
+      await waitFor(() => expect(viewPhase()).toBe('denied'));
+    }
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    await settle();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it.each(['a Check invoice', 'a list read'] as const)('SII-122. Review B1 F8 / iam 5 (R12): a 401 on %s — not a sign-out — ends the session and DETACHES the unconfirmed void: no token, no bytes, never sent again', async (where) => {
+    const { server, r } = await setup();
+    server.issued.set(STORE_2, [invoice(1, { id: uuid(0x2a01) })]);
+    await unresolvedOn(server, r);
+    await closeAll();
+    if (where === 'a Check invoice') {
+      server.detailStatus.push(401);
+      await click('issued-void-find');
+    } else {
+      server.listStatus.push(401);
+      fireEvent.change(tid('issued-store'), { target: { value: STORE_2 } });
+    }
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(heldA(r)).toMatchObject({ csrf: null, body: '', state: 'unresolved' });
+    expect(cardState()).toBe('detached');
+    expect(buttons('issued-void-card')).toEqual(['Check invoice', 'Dismiss']);
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-123. Review B1 iam 1: an open whose detail AND eligibility reads are both refused 403 gets ONE fresh session check between them, not two', async () => {
+    const { server, made } = await setup();
+    server.detailStatus.push(403);
+    server.eligStatus.push(403);
+    await user().click(openButton(2));
+    await waitFor(() => expect(viewPhase()).toBe('denied'));
+    await settle();
+    const first = server.sent.map((x) => x.url).lastIndexOf(detailUrl(STORE_1, made[1].id));
+    expect(sentFrom(server, first)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`, `GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(tid('issued-view-void-cell').children).toHaveLength(0); // L-1: the real cell (the invisible copy stays)
+  });
+
+  it('SII-124. Review B1 iam 2: a Check invoice whose session check finds another tab\'s token detaches the attempt AND still reads the invoice — under the new session, a new authorized read — instead of saying nothing', async () => {
+    const { server, made, r } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    server.otherTab('uid-a'); // no focus event: the section still holds the first token
+    const details = server.details().length;
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenIssued(2)));
+    expect(cardState()).toBe('detached');
+    expect(server.details()).toHaveLength(details + 1);
+    expect(server.detailRequests().at(-1)!.url).toBe(detailUrl(STORE_1, made[1].id));
+    expect(server.detailRequests().at(-1)!.headers.get('x-tmpos-session-csrf')).not.toBe(server.voidPosts()[0].headers.get('x-tmpos-session-csrf'));
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-125. Review B1 iam 3: a first send\'s 403 that no fresh check confirmed (the section had gone when it came back) is refused with the neutral "Not voided: the server refused this request." — never "you can no longer void invoices"', async () => {
+    const { server, r, page } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    page.unmount(); // the user left the page while the POST was out
+    server.voidDenied.add('uid-a');
+    const sent = server.sent.length;
+    server.held.shift()!.release(); // decided now: 403 forbidden
+    await waitFor(() => expect(heldA(r)?.state).toBe('refused'));
+    expect(sentFrom(server, sent)).toEqual([]); // no fresh check was run for it
+    render(<ServerIssuedInvoices {...r.props()} />);
+    expect(tid('issued-void-card-refused')).toHaveTextContent(VOID_TEXT.refusedPlain);
+    expect(tid('issued-void-card-refused').textContent).not.toContain('no longer');
+  });
+
+  it('SII-126. Review B1 L2 / R2-1a: while the void\'s own sign-in is out nothing new can be reviewed or sent — "Void invoice…" waits, said, and opens nothing — and once the sign-in completes the dialog still reads the invoice and its eligibility again, though its confirmation was closed meanwhile', async () => {
+    const server = seeded();
+    server.staleLogins = true;
+    const made = issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const base = r.props().identity!;
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    const identity: ShopIdentity = { ...base, reauthenticate: async (uid, password) => { await gate; return base.reauthenticate(uid, password); } };
+    render(<ServerIssuedInvoices {...r.props({ identity })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm'); // the sign-in is out
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    // Fix round 2 supersession (R2-1a; was: a second confirmation opened here and its press said "a sign-in is in
+    // progress"): no review can start while the sign-in is out — "Void invoice…" waits, said, and opens nothing. The send
+    // guard for it stays in sendVoid as a second line.
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewSignIn);
+    const before = server.sent.length;
+    await click('issued-view-void');
+    await settle();
+    expect(box()).toBeNull();
+    expect(sentFrom(server, before)).toEqual([]);
+    expect(server.voidPosts()).toHaveLength(1);
+    const mark = server.sent.length;
+    await act(async () => { release(); });
+    await waitFor(() => expect(apart(server, mark).sort()).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort()));
+    expect(server.logins().slice(-1)[0].headers.get('x-tmpos-reauthenticate')).toBe('1');
+    expect(tid('issued-view')).toBeInTheDocument();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-127. Review B1 L3: a press while an earlier send is still out (its attempt detached and dismissed meanwhile) is never a silent no-op — "Another void is waiting to be confirmed." — and nothing is sent', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('uid-a');
+    await focusEvents(); // another token: the dialogs go, the attempt is detached (its POST still out)
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    await click('issued-void-dismiss');
+    expect(cardState()).toBe('none');
+    await storesReady();
+    fireEvent.change(tid('issued-store'), { target: { value: STORE_1 } });
+    await listReady();
+    await openConfirm(2);
+    await pressWith('other');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.pending));
+    expect(server.voidPosts()).toHaveLength(1);
+    server.held.shift()!.release();
+    await settle();
+  });
+
+  it('SII-128. Review B1 L4 / truth LOW-1: a Check again starts afresh — an earlier Check invoice failure goes, an "issued" observation (perhaps out of date) goes; a "voided" one stays', async () => {
+    const { server, made, r } = await setup();
+    await unresolvedOn(server, r);
+    await closeAll();
+    server.detailStatus.push(503);
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.checkFailed));
+    server.voids.push('lose-before');
+    await click('issued-void-check');
+    await waitFor(() => expect(tid('issued-void-card-note')).toHaveTextContent(VOID_NOTE_TEXT.noAnswer));
+    expect(tid('issued-void-card-seen').textContent).toBe('');
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenIssued(2)));
+    server.voids.push('lose-before');
+    await click('issued-void-check');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    expect(heldA(r)).toMatchObject({ seen: null, seenReason: null });
+    expect(tid('issued-void-card-seen').textContent).toBe('');
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    await click('issued-void-find');
+    await waitFor(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenVoided(2)));
+    server.voids.push(chain(503, 'service_unavailable'));
+    await click('issued-void-check');
+    await waitFor(() => expect(tid('issued-void-card-note')).toHaveTextContent(VOID_NOTE_TEXT.answered));
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', seen: 'voided', seenReason: 'duplicate' });
+    expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.seenVoided(2));
+  });
+
+  it('SII-129. Review B1 M3: a late answer to a request sent under a token that has since been replaced and then come back (no sign-out between) speaks for an older generation — its 401 ends no session', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r } = await setup();
+    await openConfirm(2);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    const first = server.cookie; // the session (token A) the POST went with
+    server.otherTab('uid-a');
+    await focusEvents(); // token B: a new generation, the attempt detached
+    await waitFor(() => expect(heldA(r)?.csrf).toBeNull());
+    server.cookie = first;
+    await focusEvents(); // token A again: yet another generation
+    await storesReady();
+    server.held.shift()!.release(chain(401, 'unauthenticated')); // the old A request's late 401
+    await settle();
+    expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'ready');
+    expect(heldA(r)).toMatchObject({ csrf: null, state: 'sending' });
+  });
+
+  // ---- Review B1 fix round 2 (reconcile.md "Fix round 2": R2-1, R2-2, R2-3) ----
+
+  /** A rig whose sign-in is stale (the first POST meets step_up_required) and whose provider re-authentication waits for `release`. */
+  async function staleSignIn() {
+    const server = seeded();
+    server.staleLogins = true;
+    const made = issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const base = r.props().identity!;
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    const identity: ShopIdentity = { ...base, reauthenticate: async (uid, password) => { await gate; return base.reauthenticate(uid, password); } };
+    render(<ServerIssuedInvoices {...r.props({ identity })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    type('issued-void-reauth-password', 'correct horse');
+    return { server, made, r, release };
+  }
+
+  it.each(['voided', 'no longer allowed'] as const)('SII-130. Review B1 R2-1 (the reported sequence): confirmation A meets a step-up, its sign-in is out, A is closed — no confirmation B can be reviewed meanwhile ("Void invoice…" waits, said, opens nothing) — and when the renewal finds the invoice %s, no confirmation is open and nothing is ever sent', async (found) => {
+    const { server, made, release } = await staleSignIn();
+    await click('issued-void-reauth-confirm'); // the sign-in is out
+    await click('issued-void-keep'); // A closed
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewSignIn);
+    const before = server.sent.length;
+    await click('issued-view-void'); // B: refused while the sign-in is out
+    await settle();
+    expect(box()).toBeNull();
+    expect(sentFrom(server, before)).toEqual([]);
+    if (found === 'voided') made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    else server.voidDenied.add('uid-a');
+    await act(async () => { release(); });
+    if (found === 'voided') await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/));
+    else await waitFor(() => expect(server.eligReads()).toHaveLength(2));
+    await settle();
+    expect(box()).toBeNull();
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  /**
+   * The exported dialog over a stub capability (review B1 R2-1c/R3): the dialog's own layers, each alone — the section is
+   * not there, so `ctl` plays its generation, its sign-in and its held attempt; reads and eligibility can be held.
+   */
+  async function stubbed(send: (press: VoidPress) => Promise<VoidSendOutcome | null>, signIn: IssuedVoidCapability['signIn'] = async () => null, generation = 1) {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 1);
+    const session = createTenantSessionClient({ fetch: server.fetch });
+    const issuing = createInvoiceIssuingClient({ fetch: server.fetch });
+    const s = await session.ensure('uid-a', async () => 'tok-a');
+    if (s.kind !== 'ok') throw new Error('no session');
+    const got = await issuing.getIssued(STORE_1, made[0].id, s.csrf);
+    if (got.kind !== 'ok') throw new Error('no invoice');
+    const voidedInvoice = { ...got.invoice, status: 'voided', void: { voidedAt: '2026-10-17T08:30:05.000001Z', reasonCode: 'duplicate' } } as IssuedInvoice;
+    const ctl = { generation, held: undefined as HeldVoid | undefined, holdReads: false, holdElig: false, answerVoided: false };
+    const reads: Array<() => void> = [];
+    const eligs: Array<(answer: 'allowed' | 'not' | null) => void> = [];
+    const read = vi.fn(async (): Promise<IssuedReadAnswer | null> => {
+      const now = (): IssuedReadAnswer => ({ kind: 'ok', invoice: ctl.answerVoided ? voidedInvoice : got.invoice });
+      if (!ctl.holdReads) return now();
+      return new Promise((done) => { reads.push(() => done(now())); });
+    });
+    const eligibility = vi.fn(async (): Promise<'allowed' | 'not' | null> => (ctl.holdElig ? new Promise((done) => { eligs.push(done); }) : 'allowed'));
+    const capability = (): IssuedVoidCapability => ({
+      store: store(STORE_1, 'Main Street'), held: ctl.held, expired: false, cooling: false, finding: false, checkText: '', confirmedDenial: null,
+      reauthMethod: () => 'password', signingIn: false, generation: () => ctl.generation, eligibility, send, check: vi.fn(), find: vi.fn(), signIn,
+    });
+    const dialog = () => <IssuedInvoiceDialog storeId={STORE_1} invoiceId={made[0].id} read={read} current={() => true} waiting={false} onClose={() => {}} returnFocus={{ current: null }} voiding={capability()} />;
+    const page = render(dialog());
+    await viewReady(1);
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+    return { made, ctl, read, eligibility, reads, eligs, rerender: () => page.rerender(dialog()), heldOf: (over: Partial<HeldVoid>): HeldVoid => ({
+      key: 'k1', body: '', storeId: STORE_1, storeLabel: 'Main Street', invoiceId: made[0].id, number: 1, csrf: 'c', sentAt: 0, sentWall: 0,
+      state: 'sending', note: '', refusal: null, seen: null, seenReason: null, retryable: true, ...over,
+    }) };
+  }
+
+  it('SII-131. Review B1 R2-1c (+ R3-1b): a confirmation reviewed under an earlier session generation can never send — pressed after the generation changed it closes with "Not sent: this invoice was reviewed before the session changed…" and the send is never asked for, the action then waits (its eligibility is from the older generation); under a generation whose eligibility was read, the section\'s own final guard answering "stale" closes it the same way', async () => {
+    const send = vi.fn(async (_press: VoidPress): Promise<VoidSendOutcome | null> => ({ kind: 'stale' }));
+    const h = await stubbed(send);
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await user().click(tid('issued-void-reason-other'));
+    h.ctl.generation = 2; // the session was replaced after this review
+    await click('issued-void-send');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(send).not.toHaveBeenCalled();
+    expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.staleReview);
+    // Fix round 3 supersession (was: a review straight away under generation 2): the eligibility was read under generation 1,
+    // so it is not known again — the action waits, said as checking, and opens nothing (R3-1b).
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewing);
+    cleanup();
+    await stubbed(send, undefined, 2); // opened under generation 2: its eligibility is read under it
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await user().click(tid('issued-void-reason-other'));
+    await click('issued-void-send');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({ reviewGen: 2, reasonCode: 'other' });
+    expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.staleReview);
+  });
+
+  it('SII-132. Review B1 R2-1b / R3-1 (no longer allowed): A closed while the renewal\'s eligibility read is out — "Void invoice…" stays held (checking) and pressing it reviews nothing, so no B exists and nothing can be sent; the eligibility then says no longer allowed: the action goes; one POST, one key in all', async () => {
+    const { server, r, release } = await staleSignIn();
+    server.hold.elig = 1; // the renewal's eligibility read
+    await act(async () => { release(); });
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['elig']));
+    await click('issued-void-keep'); // A closed
+    await waitFor(() => expect(box()).toBeNull());
+    // Fix round 3 supersession (was: B reviewed here under the new session, then closed by the late refusal): no review can
+    // start before the renewal's reads are applied (R3-1a), and the older generation's "allowed" counts for nothing (R3-1b).
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewing);
+    const before = server.sent.length;
+    await click('issued-view-void');
+    await settle();
+    expect(box()).toBeNull();
+    expect(sentFrom(server, before)).toEqual([]);
+    server.voidDenied.add('uid-a');
+    server.held.shift()!.release(); // decided now: not allowed
+    await waitFor(() => expect(screen.queryByTestId('issued-view-void')).toBeNull());
+    expect(box()).toBeNull();
+    expect([server.voidPosts().length, r.keys.length]).toEqual([1, 1]);
+  });
+
+  it('SII-133. Review B1 R2-2: the renewal\'s detail answer is applied only if no newer detail read started — it answered Issued while its eligibility was out, this open\'s attempt then settled voided and its re-read answered Voided; when the eligibility finishes, Voided and its recorded reason stay and no action comes back', async () => {
+    // Fix round 3 supersession (was: the newer read was a review, which R3-1a now holds back during the renewal): the newer
+    // detail read is the post-void re-read of this open's attempt, which no hold stops. Over the stub capability.
+    const send = vi.fn(async (press: VoidPress): Promise<VoidSendOutcome | null> => { press.held('k1'); return { kind: 'step-up', method: 'password' }; });
+    const h = await stubbed(send, async () => ({ kind: 'renewed' }));
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    h.ctl.holdElig = true; // the renewal's eligibility read, held; its detail read answers Issued
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(h.eligs).toHaveLength(1));
+    await click('issued-void-keep');
+    h.ctl.answerVoided = true;
+    h.ctl.held = h.heldOf({ state: 'voided' }); // this open's attempt (k1) settled voided: its one re-read
+    h.rerender();
+    await waitFor(() => expect(tid('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/));
+    await act(async () => { h.eligs.shift()!('allowed'); });
+    await settle();
+    expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/);
+    expect(tid('issued-view-void-reason')).toHaveTextContent(/^Duplicate of another invoice$/);
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(box()).toBeNull();
+  });
+
+  it('SII-134. Review B1 R2-3: an owed page one outlives an older list read — page one was out, another request\'s 429 started the wait, the void\'s 200 owed page one, then the older read answered Issued: the list stays "wait" with Try again held; the countdown reads nothing; only Try again reads page one (Voided)', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 25);
+    const r = rig(server);
+    render(<ServerIssuedInvoices {...r.props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    server.retryAfter = '30';
+    const target = made.find((i) => i.number === 24)!;
+    await openConfirm(24);
+    server.hold.void = 1;
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    await closeAll();
+    server.listStatus.push(503);
+    await click('issued-load-more');
+    await waitFor(() => expect(listPhase()).toBe('unavailable')); // rows kept as last known, with Try again
+    const sorted = [...made].sort((a, b) => b.number - a.number);
+    const older = new Response(JSON.stringify({ invoices: sorted.slice(0, 20).map(summaryOf), nextCursor: cursorOf(sorted[19].id) }), { status: 200, headers: { 'content-type': 'application/json' } });
+    server.hold.list = 1;
+    await click('issued-list-retry'); // page one, out
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['void', 'list']));
+    fakeClock();
+    server.getStatus.push(429);
+    fireEvent.click(tid('issued-settings-open')); // another request's 429 starts the section's wait
+    await until(() => expect(panelPhase()).toBe('rate-limited'));
+    server.held.find((h) => h.kind === 'void')!.release(); // the void's 200: page one is owed
+    await until(() => expect(cardState()).toBe('voided'));
+    expect(listPhase()).toBe('rate-limited');
+    server.held.find((h) => h.kind === 'list')!.release(older); // the older read answers Issued
+    await flush();
+    await flush();
+    expect(listPhase()).toBe('rate-limited');
+    expect(tid('issued-list-retry')).toHaveAttribute('aria-disabled', 'true');
+    const lists = server.lists(STORE_1).length;
+    await advance(31_000);
+    await until(() => expect(tid('issued-list-retry')).toHaveAttribute('aria-disabled', 'false'));
+    await flush();
+    expect(server.lists(STORE_1)).toHaveLength(lists); // the countdown reads nothing
+    fireEvent.click(tid('issued-list-retry'));
+    await until(() => expect(within(screen.getAllByTestId('issued-row').find((li) => li.getAttribute('data-id') === target.id)!).getByTestId('issued-row-status')).toHaveTextContent('Voided'));
+    expect(server.lists(STORE_1)).toHaveLength(lists + 1);
+  });
+
+  // ---- Review B1 fix round 3 (reconcile.md "Fix round 3": R3-1a/b, R3-2, R3-3) ----
+
+  it('SII-135. Review B1 R3-1 (the reported sequence, still allowed): step-up, sign-in done, the renewal\'s detail answered Issued and its eligibility HELD, A closed — "Void invoice…" stays held and reviews nothing; once the eligibility answers allowed under the new session the action comes back, and only a new review and a new press send — a NEW key under the NEW token', async () => {
+    const { server, made, r, release } = await staleSignIn();
+    server.hold.elig = 1;
+    await act(async () => { release(); });
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['elig']));
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    const before = server.sent.length;
+    await click('issued-view-void');
+    await settle();
+    expect([box(), sentFrom(server, before)]).toEqual([null, []]);
+    server.held.shift()!.release(); // allowed, under the new session
+    await waitFor(() => expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false'));
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await pressWith('duplicate');
+    await waitFor(() => expect(server.voidPosts()).toHaveLength(2));
+    await waitFor(() => expect(made[1].void?.reasonCode).toBe('duplicate'));
+    const [first, second] = server.voidPosts();
+    expect(r.keys).toHaveLength(2);
+    expect(second.headers.get('idempotency-key')).toBe(r.keys[1]);
+    expect(second.headers.get('x-tmpos-session-csrf')).not.toBe(first.headers.get('x-tmpos-session-csrf'));
+  });
+
+  it('SII-136. Review B1 R3-1b: an eligibility "allowed" read under an older generation counts as not yet known — the action is held with the checking reason (never said as not allowed) and reviews nothing; and a send whose generation moved meanwhile is told the action is not allowed now (press.allowed())', async () => {
+    const seen: boolean[] = [];
+    const h = await stubbed(async (press) => {
+      h.ctl.generation = 2; // the generation moved while the press was being checked
+      seen.push(press.allowed());
+      return { kind: 'sent' };
+    });
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await pressWith('other');
+    await waitFor(() => expect(seen).toEqual([false]));
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    h.rerender();
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewing);
+    expect(tid('issued-view-void-alert').textContent).not.toContain('no longer');
+    const reads = h.read.mock.calls.length;
+    await click('issued-view-void');
+    await settle();
+    expect(box()).toBeNull();
+    expect(h.read.mock.calls.length).toBe(reads);
+  });
+
+  it('SII-137. Review B1 R3-1a: the renewal itself holds the action — signed in again with NO generation change, its detail and eligibility reads out, A closed: "Void invoice…" is held (checking) and reviews nothing until both reads are applied; then it comes back', async () => {
+    const h = await stubbed(async () => ({ kind: 'step-up', method: 'password' }), async () => ({ kind: 'renewed' }));
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    h.ctl.holdReads = true;
+    h.ctl.holdElig = true;
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect([h.reads.length, h.eligs.length]).toEqual([1, 1]));
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewing);
+    const reads = h.read.mock.calls.length;
+    await click('issued-view-void');
+    await settle();
+    expect([box(), h.read.mock.calls.length]).toEqual([null, reads]);
+    h.ctl.holdReads = false;
+    h.ctl.holdElig = false;
+    await act(async () => { h.reads.shift()!(); h.eligs.shift()!('allowed'); });
+    await waitFor(() => expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false'));
+  });
+
+  it('SII-138. Review B1 R3-3: a review read answered after the generation changed is dropped AND said — "Not sent: this invoice was reviewed before the session changed…" — and no confirmation opens', async () => {
+    const send = vi.fn(async (): Promise<VoidSendOutcome | null> => ({ kind: 'sent' }));
+    const h = await stubbed(send);
+    h.ctl.holdReads = true;
+    await click('issued-view-void');
+    await waitFor(() => expect(h.reads).toHaveLength(1));
+    h.ctl.generation = 2;
+    await act(async () => { h.reads.shift()!(); });
+    await waitFor(() => expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.staleReview));
+    expect(box()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  // ---- Review B1 fix round 4 (reconcile.md "Fix round 4": R4-1) ----
+
+  it('SII-139. Review B1 R4-1: a renewal whose eligibility read answers nothing (aborted, failed or superseded) leaves no Void action in this open — absent, not held for good on the older generation\'s "allowed" and never said as not allowed — and the confirmation says it could not check; nothing more is sent', async () => {
+    const send = vi.fn(async (): Promise<VoidSendOutcome | null> => ({ kind: 'step-up', method: 'password' }));
+    let h!: Awaited<ReturnType<typeof stubbed>>;
+    h = await stubbed(send, async () => { h.ctl.generation = 2; return { kind: 'renewed' }; }); // the renewal's new generation
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    h.ctl.holdElig = true;
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(h.eligs).toHaveLength(1));
+    await act(async () => { h.eligs.shift()!(null); }); // the renewal's eligibility: no answer
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.renewUnread));
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    h.rerender();
+    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(tid('issued-view-void-cell').children).toHaveLength(0); // L-1: the real cell (the invisible copy stays)
+    expect(tid('issued-view-void-alert').textContent).not.toContain('no longer');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- Review B1 layout round (reconcile.md "Layout round": L-1, L-2; layout itself is measured in the browser, B2) ----
+
+  it('SII-140. Review B1 L-1/L-2 (structure only): the void row\'s invisible copy of the trigger is there in every state of an open — while asking, offered, not offered (voided) — hidden (aria-hidden, invisible), with nothing focusable and nothing in the role tree, so Tab never reaches it; the confirmation\'s issue date and clock are no-wrap tokens', async () => {
+    const { server, made } = await setup();
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    const copyIsHidden = () => {
+      const placeholder = within(tid('issued-view-void-row')).getByTestId('issued-view-void-placeholder');
+      expect(placeholder).toHaveAttribute('aria-hidden', 'true');
+      expect(placeholder).toHaveClass('invisible');
+      expect(placeholder.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')).toHaveLength(0);
+      expect(placeholder.textContent).toBe(''); // generated content only: the DOM says nothing
+      expect(within(placeholder).queryAllByRole('button', { hidden: true })).toEqual([]);
+    };
+    server.hold.elig = 1;
+    await user().click(openButton(3));
+    await viewReady(3);
+    copyIsHidden(); // asking
+    server.held.shift()!.release();
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+    copyIsHidden(); // offered: the copy stays under the real trigger
+    expect(within(tid('issued-view')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    expect([...tid('issued-void-issued-at').querySelectorAll('span.whitespace-nowrap')].map((t) => t.textContent)).toEqual(['2026-10-16', '21:00:03']);
+    expect(tid('issued-void-issued-at').textContent).toBe('2026-10-16 21:00:03 UTC');
+    await closeAll();
+    await user().click(openButton(2)); // voided: not offered
+    await viewReady(2);
+    await settle();
+    copyIsHidden();
+    expect(tid('issued-view-void-cell').children).toHaveLength(0);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close'))); // the dialog's first focus (an effect)
+    await user().tab();
+    expect(document.activeElement).toBe(tid('issued-view-lines-scroll'));
+    await user().tab();
+    expect(document.activeElement).toBe(tid('issued-view-close')); // Close, the lines region, Close: the copy is no stop
   });
 });

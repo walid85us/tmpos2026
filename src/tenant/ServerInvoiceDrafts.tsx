@@ -393,7 +393,7 @@ export const ISSUE_TEXT = Object.freeze({
   title: 'Issue this invoice?',
   /** The one consequence sentence that describes the confirmation: no payment, no amount due, nothing undone. */
   consequence: (total: string | null) =>
-    `This issues the store's next invoice number${total === null ? '' : ` for ${total}`}; it closes the draft and cannot be changed or undone in the product. Void is not available. It does not record a payment.`,
+    `This issues the store's next invoice number${total === null ? '' : ` for ${total}`}; it closes the draft and cannot be changed or undone in the product. An issued invoice can later be voided, which keeps its number and contents. It does not record a payment.`,
   previewLoading: 'Loading the invoice to review from the server…',
   previewUnavailable: 'The invoice to review could not be loaded right now. Try again.',
   previewNotFound: 'This draft cannot be issued: it is no longer open at this store.',
@@ -3228,8 +3228,8 @@ const waitable = `aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`;
 
 /**
  * The issue confirmation (M7B-INVOICES-ISSUE-P2): an alertdialog over the reopen dialog, laid out from the top, named by
- * its title and described by ONE sentence — what issuing does (the Total once the preview has answered; no payment, no
- * void). "Keep draft" (its header, the first focus) closes it with nothing sent; once a key was minted in it it reads
+ * its title and described by ONE sentence — what issuing does (the Total once the preview has answered; no payment; an
+ * issued invoice can later be voided, M7B-INVOICES-VOID-P2). "Keep draft" (its header, the first focus) closes it with nothing sent; once a key was minted in it it reads
  * "Close", which says — while the attempt is out or unresolved — that closing does not cancel. What it reviews is the
  * server's preview only (InvoiceSnapshot). "Issue invoice" is there only while that preview is shown and nothing was sent
  * from it since; a refusal of the attempt is an alert that takes focus.

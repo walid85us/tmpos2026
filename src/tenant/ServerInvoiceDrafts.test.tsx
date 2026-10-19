@@ -5248,7 +5248,7 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     expect([server.previewReads(), server.issuePosts()]).toEqual([[], []]);
   });
 
-  it('SID-149. AC-04 ISS-23: the confirmation is an alertdialog named "Issue this invoice?", described by ONE consequence sentence (the Total the preview answered; "Void is not available."; no payment), first focus on Keep draft; opening it is ONE preview GET and no POST, and it shows only what that preview answered — the seller, the store name and address, the tax registration ID, the customer as the server holds it now (renamed since the reopen), the lines and version the server holds now (edited since), Subtotal, "Tax (8.875%)" and the Total — never a number or a time; Keep draft and Escape close it with nothing sent and give focus back to Issue invoice…; Tab stays inside', async () => {
+  it('SID-149. AC-04 ISS-23: the confirmation is an alertdialog named "Issue this invoice?", described by ONE consequence sentence (the Total the preview answered; that an issued invoice can later be voided, keeping its number and contents — VOID-P2, was "Void is not available."; no payment), first focus on Keep draft; opening it is ONE preview GET and no POST, and it shows only what that preview answered — the seller, the store name and address, the tax registration ID, the customer as the server holds it now (renamed since the reopen), the lines and version the server holds now (edited since), Subtotal, "Tax (8.875%)" and the Total — never a number or a time; Keep draft and Escape close it with nothing sent and give focus back to Issue invoice…; Tab stays inside', async () => {
     const { server, ada, draft } = await ready();
     await openDraft(server);
     // Since the reopen read: the customer renamed and the draft edited elsewhere — the review must be the server's now.
@@ -5264,7 +5264,10 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     expect(dialog).toHaveAccessibleName(ISSUE_TEXT.title);
     expect(dialog.getAttribute('aria-describedby')!.split(' ')).toHaveLength(1);
     expect(dialog).toHaveAccessibleDescription(ISSUE_TEXT.consequence('$21.76'));
-    expect(ISSUE_TEXT.consequence('$21.76')).toMatch(/Void is not available\. It does not record a payment\.$/);
+    // VOID-P2 supersession (was /Void is not available\. It does not record a payment\.$/): voiding exists now, so the
+    // sentence says an issued invoice can later be voided (number and contents kept) — and still records no payment.
+    expect(ISSUE_TEXT.consequence('$21.76')).toBe("This issues the store's next invoice number for $21.76; it closes the draft and cannot be changed or undone in the product. An issued invoice can later be voided, which keeps its number and contents. It does not record a payment.");
+    expect(ISSUE_TEXT.consequence('$21.76')).not.toMatch(/Void is not available/);
     expect(document.activeElement).toBe(screen.getByTestId('draft-issue-keep'));
     expect(screen.getByTestId('draft-issue-keep')).toHaveTextContent('Keep draft');
     expect(server.sent.slice(mark).map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${issuePreviewPathOf(STORE_1, draft.id)}`]);

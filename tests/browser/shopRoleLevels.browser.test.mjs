@@ -476,6 +476,8 @@
 //          ONE GET whose dialog shows the stored snapshot (seller, customer, ordered lines, Subtotal, the tax line, Total,
 //          the note), Close focused first, focus back on the row's Open after Close and Escape; no customer looked up, no
 //          payment wording or send/print/void/edit/delete control, nothing but reads sent, nothing in the address or storage.
+//          (VOID-P2 B2: the owner's dialog also reads ONE void eligibility and offers "Void invoice…" — the one exception to
+//          NOT_SAID's "void"; still ONE detail GET per open.)
 //   SIS-07 (AC-09, AC-10) 23 invoices: page one is 20; Load more (from the keyboard) sends exactly the cursor page one answered,
 //          adds the last 3 with no row twice and hands focus to the first row it brought; a store change shows only that
 //          store's invoices and choosing the first again reads page one afresh; a Load more answer held across a store
@@ -513,7 +515,30 @@
 //          the invoice was issued and has since been voided; View invoice and the list's Open show "Voided", the void time
 //          and the reason's label; the row says "Issued <time>" and "Voided"; NOT_SAID and the exact button sets hold; the
 //          voided row and dialog pass SIS-09's cells at UNCHANGED sizes (a regression is reported, never fixed by a
-//          larger viewport; DA-214 and DA-222 stay). The shop sends no void: its only POST is the lost issue.
+//          larger viewport; DA-214 and DA-222 stay). The shop sends no void: its only POST is the lost issue (since VOID-P2
+//          its only void reads are the Issued dialog's eligibility GETs, one per open).
+//   M7B-INVOICES-VOID-P2 (checkpoint B2) — VOIDING FROM THE SHOP (brief §9 items 1–9; design §7 R18–R23):
+//   SIS-17 (item 1; VOID-07, VOID-13) the review GET and the confirmation's five facts, six reasons in order, none chosen; an
+//          empty press, Keep invoice and Escape send nothing; ONE POST of the exact body under a v4 key, the sealed 200,
+//          ONE detail GET and page one again, focus on Close; one void record and one audit; invoice, counter, draft unchanged.
+//   SIS-18 (item 2; VOID-08) Invoices Edit: the eligibility 403 + ONE fresh check, nothing offered; the direct POST 403;
+//          Approve offers it; lowered to View with the confirmation open: the POST 403, ONE fresh check, nothing written.
+//   SIS-19 (item 3; VOID-12) a stale sign-in: 403 step_up_required, the sign-in group, nothing on a focus; ONE explicit
+//          reauthentication, ONE detail and ONE eligibility GET, the reason cleared; only a new press sends (new key, token).
+//   SIS-20 (items 4, 5; VOID-07, VOID-09) the 200 delivered and the detail GET lost: Load again is ONE GET; the 200 lost after
+//          the commit: unresolved, nothing on a focus, Check again is the SAME key, bytes and token, the replay.
+//   SIS-21 (items 6, 7 and the reload; VOID-09, VOID-11) the held attempt lost on a reload (no card, no POST); kept across
+//          Close, a reopen, an app page and a store change, Check again to the ORIGINAL store; a parked 200 across a session
+//          end: detached, the late answer changes nothing, ONE Reconnect login re-sends nothing, Check invoice not attributed.
+//          A token REPLACED by another tab while a send is out is component-layer evidence only (SII-100/101), not this file's.
+//   SIS-22 (items 8, 9; VOID-11, VOID-13) Check invoice: issued, then voided by another request's reason — the attempt stays
+//          unresolved, never attributed; Check again the sealed already-void. Then SIS-09's cells and LAST 320x600 at 24 px:
+//          the dialog holds still while its eligibility answers, the Tab and Escape order, Space/ArrowDown on the reasons,
+//          the confirmation, its unconfirmed state and the held card bounded (the Total whole, scrolled inside its own region
+//          where wider), the reserved row and the issue date held in every cell (B1 L-1/L-2); recorded only: L-3 pinned exactly
+//          and, in the DA-214 cells, card controls under TenantLayout's sidebar, each activated from the keyboard (report §9).
+//   The 23-hour cutoff and throttled timers are COMPONENT-layer evidence only (SII-102, controlled clocks); this file proves
+//   the reload loss with no automatic POST (SIS-21) and never waits on a clock.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
 //   issue POST — the browser's own, from SIS-10 on), and SIS-16's void through its void POST: this file inserts no issuing or
 //   void row.
@@ -1707,6 +1732,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
+  'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -4320,7 +4346,12 @@ const isStoresRead = (r) => r.method === 'GET' && r.path === STORES;
 /** The draft routes under a store (M7B-INVOICES-ISSUE-P2: never the issued-invoice READS under …/invoices — any other method
  * there, and a draft's issue routes, still count). */
 const isDraftsRoute = (r) => r.path.startsWith(`${STORES}/`) && !(r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices(?:\/|$)/.test(r.path));
-/** Every issuing route (M7B-INVOICES-ISSUE-P2), any method: the settings, a draft's issue eligibility, preview and issue, the issued reads. */
+/**
+ * Every issuing route (M7B-INVOICES-ISSUE-P2), any method: the settings, a draft's issue eligibility, preview and issue, the
+ * issued reads — and, since VOID-P2, a void's POST …/invoices/{id}/void and its GET …/void-eligibility (both under
+ * …/invoices/), so the pre-Show rule still holds for voiding: nothing is read or sent for it before "Show …" (a held void
+ * card renders from memory only).
+ */
 const isIssuingRoute = (r) => /^\/api\/v1\/(?:issuing-settings\/|stores\/[^/]+\/(?:invoices(?:\/|$)|invoice-drafts\/[^/]+\/issue(?:-eligibility|-preview)?$))/.test(r.path);
 const isDraftCreate = (r) => r.method === 'POST' && /^\/api\/v1\/stores\/[^/]+\/invoice-drafts$/.test(r.path);
 const isDraftList = (store) => (r) => r.method === 'GET' && r.path === draftsPath(store);
@@ -7976,6 +8007,30 @@ const secondOf = (iso) => `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
 const percentOf = (milli) => { const f = String(milli % 1000).padStart(3, '0').replace(/0+$/, ''); return `${Math.floor(milli / 1000)}${f === '' ? '' : `.${f}`}%`; };
 /** Words that name a payment state or an action the issued views must never offer. */
 const NOT_SAID = /\b(paid|unpaid|due|balance|payment|deposit|receivable|void|print|send|receipt|edit|delete)\b/i;
+// M7B-INVOICES-VOID-P2 (checkpoint B2): the issued dialog of the Issued section reads the server's void eligibility beside its
+// detail read, and offers the owner "Void invoice…" on an issued invoice. Its routes sit under …/invoices/{id}, so the
+// issued-read matcher above sees them too: the P1 pins that count reads per open now take the detail read and the void
+// eligibility read apart (still ONE detail GET per open, plus exactly one eligibility GET where the dialog offers voiding).
+/** A void route of any store: POST …/invoices/{id}/void or GET …/invoices/{id}/void-eligibility. */
+const isVoidRoute = (r) => /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/void(?:-eligibility)?$/.test(r.path);
+const isVoidEligibility = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/void-eligibility`;
+const isVoidPost = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/void`;
+/** An issued read that is no void route: a list page or one invoice's detail. */
+const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r);
+/** The shop's own void trigger (ServerIssuedInvoices.tsx VOID_TEXT.open). */
+const VOID_OPEN = 'Void invoice…';
+/**
+ * NOT_SAID's text with ONLY the exact void trigger text taken out (VOID-P2 supersession of the P1 "no void control" pin):
+ * the owner's issued dialog now offers "Void invoice…", and every other word NOT_SAID names stays forbidden there. innerText
+ * renders the button's CSS uppercase ("VOID INVOICE…"), so that rendering of the same text is taken out too.
+ */
+const unvoided = (text) => text.split(VOID_OPEN).join('').split(VOID_OPEN.toUpperCase()).join('');
+/** Wait until `page`'s void eligibility read of invoice `id` (sent from `from` on) is answered, then every request and two frames. */
+async function eligibilityAnswered(page, store, id, from) {
+  await page.waitFor(() => sentBy(page, isVoidEligibility(store, id), from).some((r) => r.status !== null), 30_000, `the void eligibility of ${id} answered`);
+  await quiet(page, from);
+  await page.settle();
+}
 
 /** The owner's settings written through the real PUT at the version its own read reports; the new version. */
 async function settingsVia(session, tenant, store, values) {
@@ -8094,7 +8149,7 @@ async function openIssuedInvoice(page, id, number, { keyboard = false } = {}) {
   await page.waitFor(`${q('issued-view-title')}?.textContent.trim() === ${JSON.stringify(`Invoice ${number}`)} && !!${q('issued-view-total')}`, 30_000, `the dialog shows invoice ${number}`);
 }
 
-scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES AND AN EXPLICIT 0 % — three invoices issued through the entry\'s own routes (the settings at 8.875 %, then "No tax calculated" and no tax registration ID, then an explicit 0 %): choosing the store reads ONE first page (limit 20), newest number first, and each row says "Invoice {number}", the customer as recorded (in <bdi>), the Total and the UTC second exactly as the database holds them, and "Issued"; each Open is ONE GET of that invoice and its dialog (Close focused first) shows the snapshot the database holds — the seller (the address on its own lines), the customer, the ordered lines, Subtotal, "Tax (8.875%) $1.77" / "No tax calculated" with no amount / "Tax (0%) $0.00", Total and the snapshot note; Close and Escape give focus back to the row\'s Open; no customer is looked up, no payment wording and no send, print, void, edit or delete control, nothing but reads sent, nothing in the address, storage or logs', async () => {
+scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES AND AN EXPLICIT 0 % — three invoices issued through the entry\'s own routes (the settings at 8.875 %, then "No tax calculated" and no tax registration ID, then an explicit 0 %): choosing the store reads ONE first page (limit 20), newest number first, and each row says "Invoice {number}", the customer as recorded (in <bdi>), the Total and the UTC second exactly as the database holds them, and "Issued"; each Open is ONE GET of that invoice and its dialog (Close focused first) shows the snapshot the database holds — the seller (the address on its own lines), the customer, the ordered lines, Subtotal, "Tax (8.875%) $1.77" / "No tax calculated" with no amount / "Tax (0%) $0.00", Total and the snapshot note; Close and Escape give focus back to the row\'s Open; no customer is looked up, no payment wording and no send, print, edit or delete control ("void" only in the owner\'s Void invoice…, offered on the ONE void eligibility GET beside the detail GET since VOID-P2), nothing but reads sent, nothing in the address, storage or logs', async () => {
   const { tenant, stores: [main], boss } = await draftShop('i6', ['main']);
   const direct = await directLogin(boss);
   const customer = await customerVia(direct, `M7SIS i6 Ada Customer ${SUFFIX}`);
@@ -8141,18 +8196,23 @@ scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES 
     const from = st.api.length;
     const keyboard = i === stored.length - 1;
     await openIssuedInvoice(page, row.id, row.number, { keyboard });
-    await quiet(page, from);
-    await page.settle();
+    await eligibilityAnswered(page, main.id, row.id, from); // VOID-P2: the barrier now includes the eligibility read beside the detail
     const view = await issuedViewOf(page);
     const focus = await focusOf(page);
     record('SIS-06', { phase: 'open', number: row.number, reads: sentBy(page, isIssuedRead, from).map(readLine), focus, tax: view.tax, total: view.total });
-    assert.deepEqual(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(main.id)}/${row.id} 200`], `invoice ${row.number}: ONE GET of exactly that invoice`);
+    // VOID-P2 supersession of "ONE GET": still ONE detail GET of exactly that invoice; the void eligibility is its own ONE
+    // GET per open (the owner: allowed), never a second detail read.
+    assert.deepEqual(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(main.id)}/${row.id} 200`], `invoice ${row.number}: ONE GET of exactly that invoice`);
+    assert.deepEqual(sentBy(page, isVoidRoute, from).map((r) => `${readLine(r)} ${r.replied.text}`), [`${issuedPath(main.id)}/${row.id}/void-eligibility 200 {"eligibility":"allowed"}`],
+      `invoice ${row.number}: ONE void eligibility GET, allowed for the owner, and no void POST`);
     assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
     const { text, buttons, shell, ...content } = view;
     assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
     assert.deepEqual(shell, { role: 'dialog', modal: 'true', name: `Invoice ${row.number}` }, 'a modal dialog named by its title');
-    assert.deepEqual(buttons, ['Close'], 'the dialog offers Close only');
-    assert.ok(!NOT_SAID.test(text), `invoice ${row.number}: no payment state or action named: ${text.match(NOT_SAID)?.[0]}`);
+    // VOID-P2 supersession of "Close only": an issued invoice the owner may void offers Close and Void invoice…, nothing else.
+    assert.deepEqual(buttons, ['Close', VOID_OPEN], 'the dialog offers Close and the owner\'s Void invoice…, nothing else');
+    // VOID-P2 supersession: "void" only in that exact control; no payment state or other action is named.
+    assert.ok(!NOT_SAID.test(unvoided(text)), `invoice ${row.number}: no payment state or action named: ${unvoided(text).match(NOT_SAID)?.[0]}`);
     if (keyboard) await page.press('Escape');
     else await page.click(by('issued-view-close'));
     await page.waitFor(`!${q('issued-view')}`, 10_000, `invoice ${row.number}: the dialog closed`);
@@ -8251,12 +8311,20 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   await waitIssuedRows(page, 1, 'the reader\'s list');
   assert.deepEqual(await issuedRowsOf(page), [rowShown(stored)], 'Invoices View and Customers View read the list');
   await openIssuedInvoice(page, invoiceId, 1);
+  await eligibilityAnswered(page, main.id, invoiceId, from); // VOID-P2: the open's void eligibility answered before the dialog is read
   const { text, buttons, shell, ...content } = await issuedViewOf(page);
   assert.deepEqual(content, viewShown(stored), 'and the invoice');
+  // VOID-P2: Invoices View may read but not void (void_issued_invoices needs Invoices Approve): the eligibility is the 403
+  // and the dialog offers Close only — no Void invoice…, nothing said about voiding.
+  assert.deepEqual(buttons, ['Close'], 'Invoices View: the dialog offers Close only, no Void invoice…');
+  assert.equal(await textOf(page, 'issued-view-void-row'), '', 'the reserved void row stays empty');
   await page.click(by('issued-view-close'));
   await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
   await quiet(page, from);
-  assert.deepEqual(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(main.id)}?limit=20 200`, `${issuedPath(main.id)}/${invoiceId} 200`]);
+  // VOID-P2 supersession of the exact manager read list: the list and the invoice, as before, plus the open's ONE void
+  // eligibility read, the server's 403 for this level.
+  assert.deepEqual(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(main.id)}?limit=20 200`, `${issuedPath(main.id)}/${invoiceId} 200`]);
+  assert.deepEqual(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/void-eligibility 403 forbidden`], 'ONE void eligibility read, refused for Invoices View');
 
   // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
   await levelVia(direct, 'manager', 'customers', 'none');
@@ -8425,6 +8493,11 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   const check = (ok, what) => { if (!ok) problems.push(what); };
   const same = (a, b) => { try { assert.deepEqual(a, b); return true; } catch { return false; } };
   const invoiceId = stored.id;
+  // VOID-P2 (R19): both callers open the dialog as the owner, whose void eligibility is allowed, so an ISSUED invoice offers
+  // "Void invoice…" in the row under the header — Tab from Close reaches it before the lines — and a VOIDED one (SIS-16)
+  // offers nothing there, its Tab order unchanged since P1.
+  const voidable = shown.status === 'Issued';
+  const tabOrder = voidable ? ['issued-view-void', 'issued-view-lines-scroll', 'issued-view-close'] : ['issued-view-lines-scroll', 'issued-view-close'];
   for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
     await page.setViewport(width, height);
     if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
@@ -8446,17 +8519,20 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     }
     const from = st.api.length;
     await openIssuedInvoice(page, invoiceId, stored.number, { keyboard: true });
-    await quiet(page, from);
-    await page.settle();
+    await eligibilityAnswered(page, store, invoiceId, from); // VOID-P2: measured once the eligibility answer has filled its row
     const b = await issuedBox(page);
     const { text, buttons, shell, ...content } = await issuedViewOf(page);
+    // The void trigger (VOID-P2): there exactly when the invoice is issued, and then in view and on top once scrolled to.
+    const trigger = await page.evaluate(`(() => { const t = ${q('issued-view-void')}; if (t === null) return null; t.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const r = t.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && t.contains(hit) }; })()`);
     const overflowed = b.scroller.scrollWidth > b.scroller.clientWidth + HOLD_TOLERANCE;
     const tabs = [];
     let scrolled = null;
-    for (let i = 0; i < 2; i += 1) {
+    for (let i = 0; i < tabOrder.length; i += 1) {
       await page.press('Tab');
       tabs.push(await focusOf(page));
-      if (i === 0 && overflowed) {
+      if (tabs.at(-1) === 'issued-view-lines-scroll' && scrolled === null && overflowed) {
         for (const type of ['rawKeyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 });
         await page.waitFor(`(${q('issued-view-lines-scroll')}?.scrollLeft ?? 0) > 0`, 5_000, 'the lines scrolled').catch(() => {});
         scrolled = await page.evaluate(`${q('issued-view-lines-scroll')}?.scrollLeft ?? null`);
@@ -8464,7 +8540,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     }
     const seen = await totalSeen(page);
     const sideways = await page.evaluate(`(() => { const p = ${q('issued-view')}; return { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`);
-    record(id, { cell, width, height, font: font ?? 16, box: b, overflowed, scrolled, tabs, seen, sideways, reads: sentBy(page, isIssuedRead, from).map(readLine) });
+    record(id, { cell, width, height, font: font ?? 16, box: b, overflowed, scrolled, tabs, seen, sideways, trigger, reads: sentBy(page, isIssuedRead, from).map(readLine) });
     // A cell that must overflow keeps the region's scroll path exercised; one measured to fit may still overflow by a few
     // pixels under other fonts (CI: a 629 px table in a 607 px region at D1440), and then it must scroll like the rest (below).
     if (overflows) assert.equal(overflowed, true, `${cell}: the lines table is not wider than its region ${JSON.stringify([b.table?.width, b.scroller.clientWidth])}`);
@@ -8481,8 +8557,11 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     if (overflowed) check(scrolled > 0, `${cell}: ArrowRight on the focused lines region did not scroll them (${scrolled})`);
     check(sideways.scrollLeft === 0 && sideways.scrollWidth <= sideways.clientWidth + HOLD_TOLERANCE, `${cell}: after Tab and the arrow keys the dialog scrolled or overflows sideways ${JSON.stringify(sideways)}`);
     check(same(content, shown), `${cell}: the dialog does not show the stored invoice whole`);
-    check(same(sentBy(page, isIssuedRead, from).map(readLine), [`${issuedPath(store)}/${invoiceId} 200`]), `${cell}: not ONE GET per open`);
-    check(same(tabs, ['issued-view-lines-scroll', 'issued-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
+    // VOID-P2 supersession of "ONE GET per open": ONE detail GET, and the open's ONE void eligibility GET (allowed: the owner).
+    check(same(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(store)}/${invoiceId} 200`]), `${cell}: not ONE GET per open`);
+    check(same(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/void-eligibility 200`]), `${cell}: not ONE void eligibility GET per open (and no void POST)`);
+    check(voidable ? trigger !== null && trigger.inView && trigger.onTop : trigger === null, `${cell}: the Void invoice… trigger ${voidable ? 'is not in view and on top' : 'is offered on a voided invoice'} ${JSON.stringify(trigger)}`);
+    check(same(tabs, tabOrder), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
     await alsoOpen(cell, check);
     await page.press('Escape');
     await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the dialog`);
@@ -8492,7 +8571,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   return problems;
 }
 
-scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened from the keyboard on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured with the section held by the test to the viewport less two 16 px gutters (288 px at 320 px: the page itself scrolls sideways at 320 px for an older reason, its main column grown by the demo invoices table), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open', async () => {
+scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened from the keyboard on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured with the section held by the test to the viewport less two 16 px gutters (288 px at 320 px: the page itself scrolls sideways at 320 px for an older reason, its main column grown by the demo invoices table), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open (since VOID-P2 beside ONE void eligibility GET, the owner\'s Void invoice… in view and on top and reached by Tab before the lines)', async () => {
   const { tenant, stores: [main], boss } = await draftShop('i9', ['main']);
   const direct = await directLogin(boss);
   const values = {
@@ -8532,7 +8611,9 @@ const isIssueEligibility = (store, id) => (r) => r.method === 'GET' && r.path ==
 const isIssuedDetail = (store) => (r) => r.method === 'GET' && new RegExp(`^${issuedPath(store)}/[0-9a-f-]{36}$`).test(r.path);
 const ISSUE_SAID = Object.freeze({
   title: 'Issue this invoice?',
-  consequence: (total) => `This issues the store's next invoice number for ${total}; it closes the draft and cannot be changed or undone in the product. Void is not available. It does not record a payment.`,
+  // VOID-P2 supersession (ServerInvoiceDrafts.tsx ISSUE_TEXT.consequence): "Void is not available." became the sentence that
+  // an issued invoice can later be voided; still nothing undone in the product and no payment recorded.
+  consequence: (total) => `This issues the store's next invoice number for ${total}; it closes the draft and cannot be changed or undone in the product. An issued invoice can later be voided, which keeps its number and contents. It does not record a payment.`,
   closeWarning: 'Closing does not cancel: the server may still issue this invoice.',
   unresolved: 'Not confirmed yet: the server may have issued this invoice. "Check again" sends the same request; it never issues it twice.',
   issued: (n, store) => `Issued as invoice ${n} at ${store}.`,
@@ -9021,7 +9102,7 @@ const timeLinesOf = (page, id) => page.evaluate(`(() => {
   return { date: part(0, 10), clock: part(11, 19) };
 })()`);
 
-scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHOP — SIS-12\'s lost browser response after a real committed issue (a draft with SIS-09\'s longest texts and largest Total): "Not confirmed yet", the attempt kept in the card; then the owner voids the invoice by a direct HTTP call (a directLogin with a fresh sign-in, ONE key, reason "duplicate"): the sealed 200, one void record by that owner, one void audit naming the invoice alone; "Find issued invoice" is ONE GET ?sourceDraft= of the draft and no POST, and the card says "Issued as invoice 1 at {store}; it has since been voided." with View invoice and Dismiss; View invoice and the issued list\'s Open are each ONE GET whose answer carries `void` last, and the dialog says "Voided", the void time and "Duplicate of another invoice" (Close only, focused first); the row says "Issued <time>" and "Voided" (Open only); NOT_SAID holds on the card, the row and the dialog; the voided row and dialog pass every SIS-09 cell at UNCHANGED sizes (1440x900, 768x1024, 320x640, 320x480, 768x1024 at 24 px text), the void time wrapping only at its spaces; the page sent ONE POST in all (the lost issue) and nothing to a void route: one invoice, one issue audit, one void, one void audit', async () => {
+scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHOP — SIS-12\'s lost browser response after a real committed issue (a draft with SIS-09\'s longest texts and largest Total): "Not confirmed yet", the attempt kept in the card; then the owner voids the invoice by a direct HTTP call (a directLogin with a fresh sign-in, ONE key, reason "duplicate"): the sealed 200, one void record by that owner, one void audit naming the invoice alone; "Find issued invoice" is ONE GET ?sourceDraft= of the draft and no POST, and the card says "Issued as invoice 1 at {store}; it has since been voided." with View invoice and Dismiss; View invoice and the issued list\'s Open are each ONE GET whose answer carries `void` last, and the dialog says "Voided", the void time and "Duplicate of another invoice" (Close only, focused first); the row says "Issued <time>" and "Voided" (Open only); NOT_SAID holds on the card, the row and the dialog; the voided row and dialog pass every SIS-09 cell at UNCHANGED sizes (1440x900, 768x1024, 320x640, 320x480, 768x1024 at 24 px text), the void time wrapping only at its spaces; the page sent ONE POST in all (the lost issue) and no void POST (since VOID-P2 its only void reads are the Issued dialog\'s eligibility GETs, one per open): one invoice, one issue audit, one void, one void audit', async () => {
   const { tenant, stores: [main], boss } = await draftShop('i16', ['main']);
   const direct = await directLogin(boss);
   const values = { // SIS-09's longest values and largest total
@@ -9087,9 +9168,13 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
   // 4. The voided dialog, from the card's View invoice and from the list's Open: ONE GET each, the same truth.
   const shown = { ...viewShown(stored), status: 'Voided' };
   const voidShown = { at: voidedAt, time: secondOf(voidedAt), reason: VOID_SAID.reason, labels: VOID_SAID.labels };
-  const assertVoidedDialog = async (label, since) => {
-    const reads = sentBy(page, isIssuedRead, since);
+  // VOID-P2 (R19): the drafts card's View invoice has no void row and reads no eligibility; the Issued list's Open reads
+  // its ONE void eligibility beside the detail (allowed: the owner) and offers nothing to void on a voided invoice.
+  const assertVoidedDialog = async (label, since, { eligibility }) => {
+    const reads = sentBy(page, isIssuedDetailOrList, since);
     assert.deepEqual(reads.map(readLine), [`${issuedPath(main.id)}/${stored.id} 200`], `${label}: ONE GET of the invoice`);
+    assert.deepEqual(sentBy(page, isVoidRoute, since).map(readLine), eligibility ? [`${issuedPath(main.id)}/${stored.id}/void-eligibility 200`] : [],
+      `${label}: ${eligibility ? 'ONE void eligibility GET' : 'no void route'}`);
     const answer = JSON.parse(reads[0].replied.text).invoice;
     assert.deepEqual([answer.status, Object.keys(answer).at(-1), JSON.stringify(answer.void)], ['voided', 'void', JSON.stringify({ voidedAt, reasonCode: 'duplicate' })], `${label}: the answer's lifecycle, \`void\` last`);
     const { text, buttons, shell, ...content } = await issuedViewOf(page);
@@ -9106,7 +9191,7 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
   await page.waitFor(`${q('issued-view-title')}?.textContent.trim() === 'Invoice 1' && !!${q('issued-view-total')}`, 30_000, 'View invoice: the dialog shows invoice 1');
   await quiet(page, view);
   await page.settle();
-  await assertVoidedDialog('View invoice', view);
+  await assertVoidedDialog('View invoice', view, { eligibility: false });
   await page.click(by('issued-view-close'));
   await page.waitFor(`!${q('issued-view')}`, 10_000, 'View invoice: closed');
   await page.waitFor(async () => (await focusOf(page)) === 'drafts-issue-view', 5_000, 'focus back on View invoice');
@@ -9128,9 +9213,8 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
   assert.deepEqual(area.buttons, ['Open'], 'the row offers Open, and nothing else');
   const open = st.api.length;
   await openIssuedInvoice(page, stored.id, 1);
-  await quiet(page, open);
-  await page.settle();
-  await assertVoidedDialog('the list\'s Open', open);
+  await eligibilityAnswered(page, main.id, stored.id, open);
+  await assertVoidedDialog('the list\'s Open', open, { eligibility: true });
   await page.press('Escape');
   await page.waitFor(`!${q('issued-view')}`, 10_000, 'the list\'s dialog closed');
   await page.waitFor(async () => (await focusOf(page)) === `issued-open-${stored.id}`, 5_000, 'focus back on the row\'s Open');
@@ -9146,10 +9230,1063 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
 
   // 6. What the page sent and what the database holds.
   assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && !isLogin(r)).map((r) => `${r.method} ${r.path}`), [`POST ${draftsPath(main.id)}/${id}/issue`], 'ONE POST in all: the lost issue');
-  assert.deepEqual(sentBy(page, (r) => /\/void(?:-eligibility)?$/.test(r.path)).map(apiLine), [], 'nothing to a void route: the shop offers no void in P1');
+  // VOID-P2 supersession of "nothing to a void route" (P1 offered no void): still NO void POST from the page; its only void
+  // reads are the Issued list dialog's eligibility GETs — one per open: the list's Open and SIS-09's five cells.
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && isVoidRoute(r)).map(apiLine), [], 'no void POST: the page voided nothing');
+  assert.deepEqual(sentBy(page, isVoidRoute).map(readLine), Array(1 + ISSUED_CELLS.length).fill(`${issuedPath(main.id)}/${stored.id}/void-eligibility 200`),
+    'exactly the list-open eligibility GETs: the Open and one per cell');
   assert.deepEqual([(await storedIssued(main.id)).map((r) => r.id), (await issueAudits(tenant)).length, (await storedVoids(main.id)).length, (await voidAudits(tenant)).length],
     [[stored.id], 1, 1, 1], 'ONE invoice, ONE issue audit, ONE void, ONE void audit');
   await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 2, L: 2 }, 'two completions, two idempotency records: the issue and the void');
   await assertDraftsNowhere([page], [voidKey, issuePosts[0].headers['idempotency-key'], 'invoice_void_duplicate', VOID_SAID.reason]);
   await assertNoLeak(page);
+}, 300_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-INVOICES-VOID-P2 (checkpoint B2) — voiding an issued invoice from the shop (SIS-17..22; brief §9's nine real-browser
+// items, design §7 R18–R23). Every invoice is issued through the entry's own routes by an owner session made outside the
+// browser (as SIS-06..16); every void the SHOP sends is the page's own POST …/invoices/{id}/void, and the only other void
+// (SIS-22's competing one) is the entry's own route by a direct call: this file inserts no issuing or void row. Faults are
+// the front's (st.lose before or after the entry, gate) — a response lost at the browser is not new COMMIT-acknowledgement
+// evidence (P1's IVH-09 covers that). The literals are the shop's own texts (ServerIssuedInvoices.tsx VOID_TEXT,
+// VOID_REFUSED_TEXT, invoiceVoidHold.ts VOID_NOTE_TEXT, invoiceIssuingClient.ts INVOICE_VOID_REASONS).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const VOIDING_SAID = Object.freeze({
+  title: (n) => `Void invoice ${n}?`,
+  facts: (n, store, customer, iso) => `Invoice ${n} at ${store}, for ${customer}, issued ${secondOf(iso)}.`,
+  consequence: 'Voiding is final in the shop: the invoice keeps its number, its contents and its history, and stays in the list as Voided. It does not refund or record a payment, and it is not a credit note or a tax correction.',
+  legend: 'Reason for voiding (required)',
+  codes: ['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other'],
+  labels: ['Issued by mistake', 'Wrong customer', 'Wrong lines or amounts', 'Wrong seller details', 'Duplicate of another invoice', 'Other reason'],
+  chooseReason: 'Choose a reason first.',
+  closeWarning: 'Closing does not cancel the void; the server may have voided it anyway.',
+  voided: (n) => `Invoice ${n} voided.`,
+  voidedUnread: (n) => `Invoice ${n} was voided. Its details could not be loaded.`,
+  stepUp: 'Not voided: confirm your sign-in to void this invoice.',
+  reauthTitle: 'Confirm your sign-in to void this invoice',
+  reauthExplain: 'Signing in again starts a new session. Other requests on this page that are still waiting to be confirmed can then only be dismissed.',
+  renewed: 'Signed in again. Choose a reason, then press Void invoice.',
+  noLongerAllowed: 'You can no longer void invoices at this store.',
+  unresolved: (n, store) => `Void of invoice ${n} at ${store} is not confirmed. The server may or may not have voided it.`,
+  heldOutside: 'The void is tracked under Issued invoices once this invoice is closed.',
+  cardVoided: (n, store) => `Invoice ${n} at ${store} was voided.`,
+  detached: 'This void could not be confirmed: your session changed. Open the invoice to see its current state.',
+  noAnswer: 'No answer from the server.',
+  seenIssued: (n) => `Invoice ${n} still shows as issued. That does not mean the void failed: the request may still be processed.`,
+  seenVoided: (n) => `Invoice ${n} is voided now. This does not show which request voided it.`,
+  seenReason: (label) => `The reason it records: ${label}.`,
+  alreadyVoid: 'Not voided: this invoice is already void.',
+});
+const reasonLabelOf = (code) => VOIDING_SAID.labels[VOIDING_SAID.codes.indexOf(code)];
+/** The exact body the shop sends (invoiceIssuingClient.ts voidBodyOf): these two keys, in this order, serialized once. */
+const voidBodyFor = (tenant, reasonCode) => JSON.stringify({ expectedTenant: tenant, reasonCode });
+/** The sealed 200 the entry answers a void (and its replay). */
+const voidedReply = (id) => JSON.stringify({ invoice: { id, status: 'voided' } });
+
+/**
+ * A store with `n` invoices issued through the entry (numbers 1..n, `ids` in that order) by the owner's direct session —
+ * SIS-09's longest values and largest Total when `long`. The direct session stays usable (a fresh sign-in) for later calls.
+ */
+async function voidShop(label, n, { stores = ['main'], long = false } = {}) {
+  const { tenant, stores: made, boss } = await draftShop(label, stores);
+  const [main] = made;
+  const direct = await directLogin(boss);
+  const values = long ? {
+    legalName: wordsOf(`Seller${SUFFIX}w`, 200), storeName: wordsOf(`Store${SUFFIX}w`, 120),
+    postalAddress: Array.from({ length: 8 }, (_, i) => wordsOf(`Line${i + 1}w`, 120)).join('\n'),
+    taxRegistrationId: `TX${SUFFIX}${'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(2)}`.slice(0, 64), tax: { mode: 'none' },
+  } : { legalName: `M7SIS ${label} Seller ${SUFFIX}`, storeName: `M7SIS ${label} Main ${SUFFIX}`, postalAddress: `${label} Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } };
+  const customer = await customerVia(direct, long ? `${'Customer'.repeat(5)}${SUFFIX} ${wordsOf('Named', 151)}` : `M7SIS ${label} Ada Customer ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, values);
+  const lines = long ? [{ description: wordsOf(`Work${SUFFIX}d`, 256), quantity: 1, unitPriceCents: Number.MAX_SAFE_INTEGER }]
+    : [{ description: `M7SIS ${label} Service ${SUFFIX}`, quantity: 1, unitPriceCents: 4200 }];
+  const ids = [];
+  for (let i = 0; i < n; i += 1) ids.push(await issueVia(direct, tenant, main.id, customer.id, lines));
+  return { tenant, stores: made, main, boss, direct, customer, values, ids };
+}
+/** `who` signed in on a new page (writes recorded first), Issued invoices shown and `store` chosen, its `n` invoices listed. */
+async function voidPage(who, store, n) {
+  const page = await recordWrites(await openPage());
+  await signIn(page, who);
+  await openIssued(page);
+  await pickIssuedStore(page, store);
+  await waitIssuedRows(page, n, 'the issued invoices listed');
+  return page;
+}
+/** Open row `id`'s dialog and wait for its detail AND its void eligibility answers; the record index the open began at. */
+async function openVoidable(page, store, id, number, options) {
+  const from = st.api.length;
+  await openIssuedInvoice(page, id, number, options);
+  await eligibilityAnswered(page, store, id, from);
+  return from;
+}
+/** Whether the issued dialog offers Void invoice… now: there, and not held back (aria-disabled). */
+const voidOffered = (page) => page.evaluate(`(() => { const b = ${q('issued-view-void')}; return b !== null && b.getAttribute('aria-disabled') !== 'true'; })()`);
+/** Void invoice… pressed (a click, or focus and Enter): the confirmation is open on its review read, Keep invoice focused. */
+async function openVoidConfirm(page, { keyboard = false } = {}) {
+  await page.waitFor(() => voidOffered(page), 30_000, 'Void invoice… is offered');
+  if (keyboard) {
+    await page.call(by('issued-view-void'), function () { this.focus(); });
+    await page.press('Enter');
+  } else await page.click(by('issued-view-void'));
+  await page.waitFor(`!!${q('issued-void-confirm')}`, 30_000, 'the void confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-void-keep', 10_000, 'Keep invoice has the first focus');
+}
+/** A reason chosen as a user does (its radio clicked), and seen chosen. */
+async function chooseReason(page, code) {
+  await page.click(by(`issued-void-reason-${code}`));
+  await page.waitFor(`${q(`issued-void-reason-${code}`)}?.checked === true`, 5_000, `the reason ${code} chosen`);
+}
+/** The void confirmation as shown: its name and description, the five facts, the reasons, the attempt's lines and its controls. */
+const voidConfirmOf = (page) => page.evaluate(`(() => {
+  const t = (id) => document.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  const d = document.querySelector('[data-testid="issued-void-confirm"]');
+  if (d === null) return null;
+  const set = d.querySelector('[data-testid="issued-void-reasons"]');
+  const radios = [...d.querySelectorAll('input[type="radio"]')];
+  return {
+    role: d.getAttribute('role'), name: document.getElementById(d.getAttribute('aria-labelledby'))?.textContent.trim() ?? null,
+    describedBy: d.getAttribute('aria-describedby'), facts: t('issued-void-facts'),
+    store: d.querySelector('bdi[data-testid="issued-void-store"]')?.textContent ?? null, customer: d.querySelector('bdi[data-testid="issued-void-customer"]')?.textContent ?? null,
+    at: d.querySelector('time[data-testid="issued-void-issued-at"]')?.getAttribute('datetime') ?? null, total: t('issued-void-total'), consequence: t('issued-void-consequence'),
+    reasons: {
+      role: set?.getAttribute('role') ?? null, required: set?.getAttribute('aria-required') ?? null, invalid: set?.getAttribute('aria-invalid') ?? null,
+      describedBy: set?.getAttribute('aria-describedby') ?? null, disabled: set?.disabled ?? null,
+      name: document.getElementById(set?.getAttribute('aria-labelledby'))?.textContent.trim() ?? null,
+      codes: radios.map((r) => r.value), labels: radios.map((r) => r.parentElement.textContent.trim()), names: [...new Set(radios.map((r) => r.name))],
+      checked: radios.find((r) => r.checked)?.value ?? null, error: t('issued-void-reason-error'),
+    },
+    attempt: d.querySelector('[data-testid="issued-void-attempt"]')?.dataset.state ?? null, attemptText: d.querySelector('[data-testid="issued-void-attempt"]')?.innerText ?? '',
+    status: t('issued-void-confirm-status'), note: t('issued-void-confirm-note'), seen: t('issued-void-confirm-seen'), seenReason: t('issued-void-confirm-seen-reason'),
+    alert: t('issued-void-confirm-alert'), warning: t('issued-void-close-warning'),
+    buttons: [...d.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  };
+})()`);
+/** The held card outside the dialogs: its state, heading, lines and controls (and its whole text). */
+const voidCardOf = (page) => page.evaluate(`(() => {
+  const t = (id) => document.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  const c = document.querySelector('[data-testid="issued-void-card"]');
+  return {
+    state: c?.dataset.state ?? null, heading: t('issued-void-card-heading'), status: t('issued-void-card-status'), refused: t('issued-void-card-refused'),
+    note: t('issued-void-card-note'), seen: t('issued-void-card-seen'), seenReason: t('issued-void-card-seen-reason'),
+    buttons: c === null ? [] : [...c.querySelectorAll('button')].map((b) => b.textContent.trim()), text: c?.innerText ?? '',
+  };
+})()`);
+/** Every POST `page` sends from now on (let through; `match` narrows it): the "nothing is sent on its own" claims. */
+function postWatch(page, match = () => true) {
+  const seen = [];
+  const watch = { phase: 'request', match: (r) => r.frameId === page.frameId && r.method === 'POST' && match(r), hit: (r) => { seen.push(`${r.method} ${r.path}`); st.gates.add(watch); }, released: Promise.resolve() };
+  st.gates.add(watch);
+  return { seen, disarm: () => { st.gates.delete(watch); return seen; } };
+}
+/** One key pressed and let go as raw CDP events (cdp.mjs press() knows only Tab, Enter and Escape): Space with its text. */
+async function rawKey(page, key, code, keyCode, text) {
+  await page.send('Input.dispatchKeyEvent', { type: text === undefined ? 'rawKeyDown' : 'keyDown', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, ...(text === undefined ? {} : { text, unmodifiedText: text }) });
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode });
+}
+/**
+ * B2 fix B-5b: assertDraftsNowhere searches write records and storage dumps that are JSON-stringified (WRITE_HOOKS,
+ * STORAGE_DUMP), where a stored string appears with its quotes escaped. A held body is therefore passed in both encodings:
+ * as sent, and as JSON.stringify renders it inside another string. The helper itself is unchanged for its other callers.
+ */
+const bothEncodings = (text) => [text, JSON.stringify(text).slice(1, -1)];
+/** Which texts hold a reason code as its body carries it (`"reasonCode":"other"`), in both encodings — no 8-character floor. */
+const reasonHits = (texts, codes) => texts.flatMap((t) => codes.flatMap((c) => bothEncodings(`"reasonCode":"${c}"`)).filter((n) => t.includes(n)).map((n) => `${t.slice(0, 24)}… holds ${n}`));
+/** Each held reason code is nowhere in `pages`' write records, storage, console, nor in the entries' log lines. */
+async function assertReasonsNowhere(pages, codes) {
+  const texts = [];
+  for (const page of pages) {
+    texts.push(...page.writes.map((w) => `write ${w}`));
+    for (const [where, text] of Object.entries(JSON.parse(await page.evaluate(STORAGE_DUMP)))) texts.push(`${where} ${text}`);
+    texts.push(...page.logs.filter((l) => l.startsWith('console.') || l.startsWith('exception:')));
+  }
+  texts.push(...(entry?.cap.lines ?? []), ...(entry2?.cap.lines ?? []));
+  assert.deepEqual(reasonHits(texts, codes), [], 'a held reason code is in the address, storage, console or entry logs');
+}
+/**
+ * The matcher's own proof (B-5b), on a synthetic page whose storage holds `body` as a string — escaped, as STORAGE_DUMP and
+ * WRITE_HOOKS render it: assertDraftsNowhere catches it given both encodings and misses it given the raw body alone (the gap
+ * both encodings close), and reasonHits finds `code`'s fragment in it.
+ */
+async function selfCheckEscapedBody(body, code) {
+  const session = JSON.stringify([['held', body]]);
+  const fake = { writes: ['address ["/invoices",null]', `storage ${JSON.stringify(['held', body])}`], logs: [],
+    evaluate: async () => JSON.stringify({ address: `${SHOP}/invoices`, local: '[]', session, indexedDB: '' }) };
+  assert.ok(!session.includes(body) && session.includes(bothEncodings(body)[1]), 'the synthetic dump holds the body escaped, not raw');
+  await assert.rejects(assertDraftsNowhere([fake], bothEncodings(body)), /holds draft data|written on the way/, 'both encodings: the escaped stored body is caught');
+  await assert.doesNotReject(assertDraftsNowhere([fake], [body]), 'the raw body alone misses it: why both encodings are passed');
+  assert.equal(reasonHits([`session ${session}`], [code]).length, 1, 'the escaped reason fragment is caught');
+  assert.equal(reasonHits([`session ${session}`], ['issued_in_error']).length, 0, 'and only the reason it holds');
+}
+/** What a store's issued state is: its invoices (snapshot and lines), its invoice-number counter, and the tenant's drafts. */
+const issuedStateOf = async (tenant, store) => ({ invoices: await storedIssued(store), counter: (await storedSettings(store))?.counter ?? null, drafts: await storedDrafts(tenant) });
+
+scenario('SIS-17', 'VOID-07 VOID-13 AC-01 AC-04 AC-05 AC-06 AC-12 ONE EXPLICIT VOID FROM THE SHOP (brief §9 item 1) — the owner opens an issued invoice: ONE detail GET and ONE void eligibility GET (allowed) offer Void invoice…; its press is ONE more GET (the review) and the confirmation (an alertdialog named "Void invoice 1?", Keep invoice focused first) names the number, the store, the customer, the UTC issue time and the exact Total from that read, says what voiding means, and asks for a required reason — six, in the pinned order, one name, none chosen; Void invoice with no reason sends nothing (aria-invalid, the error described, focus on the first reason); Keep invoice and Escape each close it with nothing sent (focus back on Void invoice…, the invoice still open behind, the reason never kept); then ONE POST of exactly {"expectedTenant","reasonCode"} under a fresh v4 key and the session token, the sealed 200; the confirmation and the trigger go together (focus on Close), ONE detail GET shows Voided, the void time and "Wrong customer", page one is read again (Voided), the notice and the card say so; ONE void record and ONE void audit naming the invoice alone, one completion, and the invoice, its lines, the counter and the source draft unchanged; nothing in the address, storage or logs', async () => {
+  const { tenant, main, boss, customer, values, ids: [id] } = await voidShop('i17', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const [stored] = await storedIssued(main.id);
+  const opened = await openVoidable(page, main.id, id, 1);
+  assert.deepEqual((await issuedViewOf(page)).buttons, ['Close', VOID_OPEN], 'the owner is offered Void invoice… on the server\'s eligibility');
+  assert.deepEqual(sentBy(page, isIssuedDetailOrList, opened).map(readLine), [`${issuedPath(main.id)}/${id} 200`], 'ONE detail GET per open');
+  assert.deepEqual(sentBy(page, isVoidRoute, opened).map((r) => `${readLine(r)} ${r.replied.text}`), [`${issuedPath(main.id)}/${id}/void-eligibility 200 {"eligibility":"allowed"}`], 'ONE eligibility GET per open');
+
+  // The review: ONE GET of the invoice, and the confirmation on exactly that read.
+  const reviewFrom = st.api.length;
+  await openVoidConfirm(page);
+  await quiet(page, reviewFrom);
+  const { attemptText, ...review } = await voidConfirmOf(page);
+  record('SIS-17', { phase: 'review', reads: sentBy(page, () => true, reviewFrom).map(apiLine), review: { ...review, customer: review.customer?.length }, attemptText });
+  assert.deepEqual(sentBy(page, isIssuedRead, reviewFrom).map(readLine), [`${issuedPath(main.id)}/${id} 200`], 'the press is ONE GET of the invoice (the review), never a POST');
+  assert.deepEqual(review, {
+    role: 'alertdialog', name: VOIDING_SAID.title(1), describedBy: 'issued-void-description', facts: VOIDING_SAID.facts(1, main.name, customer.name, stored.issuedAt),
+    store: main.name, customer: customer.name, at: stored.issuedAt, total: `Total ${usd(stored.total)}`, consequence: VOIDING_SAID.consequence,
+    reasons: { role: 'radiogroup', required: 'true', invalid: 'false', describedBy: null, disabled: false, name: VOIDING_SAID.legend, codes: VOIDING_SAID.codes, labels: VOIDING_SAID.labels, names: ['issued-void-reason'], checked: null, error: null },
+    attempt: 'none', status: '', note: null, seen: '', seenReason: null, alert: '', warning: null, buttons: ['Keep invoice', 'Void invoice'],
+  }, 'the five facts the review read, what voiding means, six reasons in the pinned order and none chosen');
+
+  // No reason: nothing is sent; the group says so and takes focus at its first reason.
+  const emptyFrom = st.api.length;
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => (await textOf(page, 'issued-void-reason-error')) === VOIDING_SAID.chooseReason, 10_000, 'the empty press says a reason is needed');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-void-reason-issued_in_error', 5_000, 'focus on the first reason');
+  await page.settle();
+  const empty = await voidConfirmOf(page);
+  assert.deepEqual({ invalid: empty.reasons.invalid, describedBy: empty.reasons.describedBy, attempt: empty.attempt, sent: sentBy(page, () => true, emptyFrom).map(apiLine) },
+    { invalid: 'true', describedBy: 'issued-void-reason-error', attempt: 'none', sent: [] }, 'an empty press: aria-invalid, the error described, nothing sent (no session check, no key)');
+
+  // Keep invoice, then Escape: each closes the confirmation alone, with nothing sent and focus back on Void invoice….
+  const cancelFrom = st.api.length;
+  await page.click(by('issued-void-keep'));
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'Keep invoice closed the confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-view-void', 5_000, 'Keep invoice: focus back on Void invoice…');
+  await openVoidConfirm(page);
+  assert.equal((await voidConfirmOf(page)).reasons.checked, null, 'reopened: no reason kept from before');
+  await chooseReason(page, 'wrong_customer');
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'Escape closed the confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-view-void', 5_000, 'Escape: focus back on Void invoice…');
+  await quiet(page, cancelFrom);
+  assert.equal(await has(page, 'issued-view'), true, 'Escape closed the top dialog only: the invoice is still open');
+  assert.deepEqual(sentBy(page, (r) => !isSessionRead(r), cancelFrom).map(readLine), [`${issuedPath(main.id)}/${id} 200`], 'cancelled twice: nothing sent but the reopen\'s ONE review GET');
+  assert.deepEqual([await storedVoids(main.id), await voidAudits(tenant)], [[], []], 'nothing voided by a cancellation');
+
+  // The one void: reopened (the reason chosen before Escape is not kept), a reason chosen and ONE press.
+  await openVoidConfirm(page);
+  assert.equal((await voidConfirmOf(page)).reasons.checked, null, 'reopened after Escape: the reason chosen before is not kept');
+  await chooseReason(page, 'wrong_customer');
+  const was = await issuedStateOf(tenant, main.id);
+  const before = await counts();
+  const sendFrom = st.api.length;
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => !(await has(page, 'issued-void-confirm')) && (await textOf(page, 'issued-view-status')) === 'Voided' && (await voidViewOf(page)).reason === reasonLabelOf('wrong_customer'), 30_000, 'voided: the confirmation closed and the re-read shows the void');
+  await page.waitFor(async () => (await issuedRowsOf(page))[0]?.status === 'Voided', 30_000, 'page one read again: Voided');
+  await quiet(page, sendFrom);
+  await page.settle();
+  const posts = sentBy(page, isVoidPost(main.id, id), sendFrom);
+  const postAt = st.api.indexOf(posts[0]);
+  const voids = await storedVoids(main.id);
+  const after = {
+    posts: posts.map(answered), reads: sentBy(page, isIssuedDetailOrList, postAt + 1).map(readLine).sort(), focus: await focusOf(page), buttons: (await issuedViewOf(page)).buttons,
+    status: await textOf(page, 'issued-view-void-status'), notice: await textOf(page, 'issued-notice'), card: await voidCardOf(page), void: await voidViewOf(page),
+  };
+  record('SIS-17', { phase: 'voided', sent: sentBy(page, () => true, sendFrom).map(apiLine), after: { ...after, card: after.card.state } });
+  assert.equal(posts.length, 1, `ONE POST: ${posts.map(apiLine).join('; ')}`);
+  assert.equal(posts[0].body, voidBodyFor(tenant, 'wrong_customer'), 'exactly {"expectedTenant","reasonCode"}, serialized once: no version, no free text');
+  assert.match(posts[0].headers['idempotency-key'] ?? '', UUID_V4_RE, 'under a fresh v4 key');
+  assert.ok(typeof posts[0].headers[SESSION_CSRF] === 'string' && posts[0].headers[SESSION_CSRF] !== '', 'under the session token');
+  assert.equal(posts[0].headers[CSRF_HEADER], CSRF_HEADER_VALUE, 'with the request-intent header');
+  assert.deepEqual([posts[0].status, posts[0].replied.text, posts[0].replied.headers['idempotent-replayed'] ?? null], [200, voidedReply(id), null], 'the sealed 200, not a replay');
+  assert.deepEqual(after, {
+    posts: ['200'], reads: [`${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}?limit=20 200`].sort(), focus: 'issued-view-close', buttons: ['Close'],
+    status: VOIDING_SAID.voided(1), notice: VOIDING_SAID.voided(1),
+    card: { state: 'voided', heading: 'Void of invoice 1', status: VOIDING_SAID.cardVoided(1, main.name), refused: null, note: null, seen: '', seenReason: null, buttons: ['Dismiss'], text: after.card.text },
+    void: { at: voids[0]?.at ?? null, time: voids[0] ? secondOf(voids[0].at) : null, reason: reasonLabelOf('wrong_customer'), labels: VOID_SAID.labels },
+  }, 'acknowledged: ONE detail GET (the void time and reason the server records) and page one again; the trigger gone with the confirmation, focus on Close; said in the dialog, the notice and the card');
+  assert.deepEqual(await issuedRowsOf(page), [{ ...rowShown(stored), status: 'Voided' }], 'the row: the same number, customer, Total and issue time, now Voided');
+  assert.deepEqual(voids.map((v) => [v.id, v.reason, v.by]), [[id, 'wrong_customer', boss.id]], 'ONE void record, by the owner, with the chosen reason');
+  assert.deepEqual(await voidAudits(tenant), [{ scope: 'store', store: main.id, invoice: id, draft: null, customer: null, subject: null, tenant: null, reason: 'invoice_void_wrong_customer' }], 'ONE void audit, naming the invoice alone');
+  assert.deepEqual(await issuedStateOf(tenant, main.id), was, 'the invoice, its lines, the counter and the source draft unchanged: no new number, nothing removed');
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'one completion, one idempotency record, one audit (the void)');
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await page.waitFor(async () => (await focusOf(page)) === `issued-open-${id}`, 5_000, 'focus back on the row\'s Open');
+  const dismissFrom = st.api.length;
+  await page.click(by('issued-void-dismiss'));
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, 'Dismiss: the card goes');
+  assert.deepEqual([await focusOf(page), sentBy(page, () => true, dismissFrom).map(apiLine)], ['issued-title', []], 'Dismiss sends nothing; focus on the section heading');
+  assert.deepEqual(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 1, 'ONE void POST in all');
+  // AC-11 (B2 fix B-5): the key, the exact body, the reason code and the synthetic invoice, customer, store and seller values
+  // are nowhere in the address, storage, IndexedDB, console or entry logs.
+  await assertDraftsNowhere([page], [posts[0].headers['idempotency-key'], ...bothEncodings(posts[0].body), 'invoice_void_wrong_customer', 'wrong_customer', id, customer.id, customer.name, main.name, values.legalName]);
+  await assertReasonsNowhere([page], ['wrong_customer']); // B-5b: the reason as its body carries it, both encodings
+  await selfCheckEscapedBody(posts[0].body, 'wrong_customer'); // B-5b: the matcher catches an escaped stored body
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-18', 'VOID-08 AC-02 AUTHORITY FROM THE STORED LEVELS: A REFUSAL, THEN A NARROWING WHILE THE CONFIRMATION IS OPEN (brief §9 item 2) — a manager at Invoices Edit (Customers View, set through the real PUT): the void eligibility is the 403, ONE fresh session check, and the dialog offers Close only with nothing said (no login); the manager\'s direct void POST is the 403 with nothing written; raised to Approve the eligibility allows Void invoice…; with the confirmation open and a reason chosen the owner lowers Invoices to View: the POST is the 403, ONE fresh check, "You can no longer void invoices at this store." with Close only, the action taken away and focus on the dialog\'s Close once the confirmation closes — no void record, no audit, no completion, no second POST, no login', async () => {
+  const { tenant, main, direct, ids: [id] } = await voidShop('i18', 1);
+  const manager = await actor('i18-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  await levelVia(direct, 'manager', 'customers', 'view');
+  await levelVia(direct, 'manager', 'invoices', 'edit');
+  const page = await voidPage(manager, main.id, 1);
+  const from = await openVoidable(page, main.id, id, 1);
+  const eligAt = st.api.indexOf(sentBy(page, isVoidEligibility(main.id, id), from)[0]);
+  await page.waitFor(() => sentBy(page, isSessionRead, eligAt + 1).some((r) => r.status !== null), 15_000, 'the 403\'s fresh session check answered');
+  await quiet(page, from);
+  await page.settle();
+  const refused = {
+    eligibility: sentBy(page, isVoidEligibility(main.id, id), from).map(answered), freshChecks: sentBy(page, isSessionRead, eligAt + 1).length, logins: sentBy(page, isLogin, from).length,
+    buttons: (await issuedViewOf(page)).buttons, row: await textOf(page, 'issued-view-void-row'), status: await textOf(page, 'issued-view-void-status'), alert: await textOf(page, 'issued-view-void-alert'),
+  };
+  record('SIS-18', { phase: 'edit', ...refused, sent: sentBy(page, () => true, from).map(apiLine) });
+  assert.deepEqual(refused, { eligibility: ['403 forbidden'], freshChecks: 1, logins: 0, buttons: ['Close'], row: '', status: '', alert: '' },
+    'Invoices Edit: the eligibility 403 and ONE fresh check; no Void invoice… and nothing said, no login');
+  const m = await directLogin(manager);
+  const beforeDirect = await counts();
+  const directVoid = await call('POST', `${issuedPath(main.id)}/${id}/void`, { session: m, key: randomUUID(), body: { expectedTenant: tenant, reasonCode: 'other' } });
+  assert.deepEqual([directVoid.status, JSON.parse(directVoid.text).error], [403, 'forbidden'], 'the manager\'s own direct void POST is refused by the server');
+  await assertDelta(beforeDirect, REFUSED, 'the refused direct void');
+
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await levelVia(direct, 'manager', 'invoices', 'approve');
+  await openVoidable(page, main.id, id, 1);
+  assert.deepEqual((await issuedViewOf(page)).buttons, ['Close', VOID_OPEN], 'Invoices Approve: Void invoice… offered on the server\'s eligibility');
+  await openVoidConfirm(page);
+  await chooseReason(page, 'issued_in_error');
+  await levelVia(direct, 'manager', 'invoices', 'view'); // lowered while the confirmation is open
+  const before = await counts();
+  const sendFrom = st.api.length;
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.alert === VOIDING_SAID.noLongerAllowed, 30_000, 'the refusal said in the confirmation');
+  await quiet(page, sendFrom);
+  await page.settle();
+  const sent = sentBy(page, () => true, sendFrom);
+  const postAt = sent.findIndex((r) => r.method === 'POST');
+  const lowered = { confirm: await voidConfirmOf(page), trigger: await has(page, 'issued-view-void'), dialogAlert: await textOf(page, 'issued-view-void-alert'), card: (await voidCardOf(page)).state };
+  record('SIS-18', { phase: 'lowered', sent: sent.map(apiLine), confirm: lowered.confirm.attempt, trigger: lowered.trigger });
+  assert.deepEqual(sent[postAt] && `${sent[postAt].path} ${answered(sent[postAt])}`, `${issuedPath(main.id)}/${id}/void 403 forbidden`, 'the POST is the server\'s 403');
+  assert.deepEqual(sent.slice(postAt + 1).map((r) => `${r.method} ${r.path}`), ['GET /api/v1/session'], 'then ONE fresh session check — no login, no second POST');
+  assert.deepEqual({ alert: lowered.confirm.alert, buttons: lowered.confirm.buttons, attempt: lowered.confirm.attempt, trigger: lowered.trigger, dialogAlert: lowered.dialogAlert, card: lowered.card },
+    { alert: VOIDING_SAID.noLongerAllowed, buttons: ['Close'], attempt: 'none', trigger: false, dialogAlert: VOIDING_SAID.noLongerAllowed, card: 'none' },
+    'refused before anything ran: said, Close only, the action taken away, nothing held');
+  await assertDelta(before, REFUSED, 'the refused void');
+  await page.click(by('issued-void-keep'));
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'the confirmation closed');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-view-close', 5_000, 'focus falls back to the dialog\'s Close (the trigger is gone)');
+  assert.deepEqual([await storedVoids(main.id), await voidAudits(tenant), (await domainState(tenant, 'manager', 'invoices')).level], [[], [], 'view'], 'nothing voided; the stored level is View');
+  assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 1, 'ONE void POST in all from the page: the refused one'); // B-8
+}, 240_000);
+
+scenario('SIS-19', 'VOID-12 AC-03 A STALE SIGN-IN, AN EXPLICIT SIGN-IN, A FRESH REVIEW (brief §9 item 3) — the owner\'s page signed in "long ago" (past the 10-minute recent sign-in): the eligibility (no recent sign-in needed) offers Void invoice…; the press is the 403 step_up_required with nothing written and nothing held, said in the confirmation with its sign-in group (named, the password field focused); a window focus and a tab return send nothing (no sign-in, no POST); the explicit sign-in is ONE reauthentication login, then ONE detail GET and ONE eligibility GET, the confirmation kept with "Signed in again…", its reason cleared and focus on the first reason, and still no POST across a focus; only a new press sends — the same bytes under a NEW key and the NEW session token — and voids once', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i19', 1);
+  ACCOUNTS.get(boss.email).staleOnce = true;
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'issued_in_error');
+  const before = await counts();
+  const sendFrom = st.api.length;
+  const idpFrom = st.idp.length; // B2 fix B-4: the identity provider's own log (no front gate sees it), from before the press
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.alert === VOIDING_SAID.stepUp, 30_000, 'the step-up said in the confirmation');
+  await page.waitFor(`document.activeElement === ${q('issued-void-reauth-password')}`, 10_000, 'the password field has focus');
+  await quiet(page, sendFrom);
+  const stepped = await voidConfirmOf(page);
+  record('SIS-19', { phase: 'step-up', sent: sentBy(page, () => true, sendFrom).map(apiLine), buttons: stepped.buttons });
+  assert.equal((await page.axNodes({ role: 'group', name: VOIDING_SAID.reauthTitle })).length, 1, 'the sign-in is a labelled group');
+  assert.deepEqual({ posts: sentBy(page, isVoidPost(main.id, id), sendFrom).map(answered), buttons: stepped.buttons, attempt: stepped.attempt, explain: await textOf(page, 'issued-void-reauth-explain'), card: (await voidCardOf(page)).state },
+    { posts: ['403 step_up_required'], buttons: ['Keep invoice', 'Confirm sign-in'], attempt: 'none', explain: VOIDING_SAID.reauthExplain, card: 'none' }, 'refused before the key: nothing held, the sign-in offered (never run on its own)');
+  await assertDelta(before, NOTHING, 'the stale sign-in'); // as SIS-03: no record of any kind but what a refusal may audit
+  const watch = postWatch(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual([...watch.seen], [], 'no sign-in and no POST on a focus or a tab return');
+  // Nothing automatic at the identity provider either, from before the press through the focus and the tab return: no
+  // sign-in, lookup or token request, and no tenant login.
+  assert.deepEqual({ idp: st.idp.slice(idpFrom), logins: sentBy(page, isLogin, sendFrom).length }, { idp: [], logins: 0 }, 'no identity-provider request and no tenant login before the explicit sign-in');
+
+  const signInAt = st.api.length;
+  const idpAt = st.idp.length;
+  await page.fill(by('issued-void-reauth-password'), boss.password);
+  await page.click(by('issued-void-reauth-confirm'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.status === VOIDING_SAID.renewed, 30_000, 'signed in again, the invoice and its eligibility read again');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-void-reason-issued_in_error', 5_000, 'focus on the first reason');
+  // The renewal's detail and eligibility reads are applied when Void invoice… (behind the confirmation) is offered again:
+  // it is held ("Checking this invoice…") until then, and only an eligibility read under the new generation counts.
+  await page.waitFor(() => voidOffered(page), 15_000, 'Void invoice… offered again after the renewal\'s reads');
+  await quiet(page, signInAt);
+  const idpExplicit = st.idp.slice(idpAt); // the explicit sign-in's own IdP requests: all answered before its tenant login
+  await focusAndSettle(page, 'focus');
+  const renewed = sentBy(page, () => true, signInAt);
+  const unprompted = watch.disarm();
+  const fresh = await voidConfirmOf(page);
+  record('SIS-19', { phase: 'renewed', renewed: renewed.map(apiLine), unprompted });
+  assert.deepEqual(renewed.filter(isLogin).map((r) => `${answered(r)} ${r.headers['x-tmpos-reauthenticate'] ?? '-'}`), ['200 1'], 'ONE login: the explicit reauthentication');
+  record('SIS-19', { phase: 'identity provider', idp: st.idp.slice(idpAt) });
+  // The ONE explicit re-authentication, as the identity provider sees it: the password credential, the SDK's reload of the
+  // user, and the fresh ID token the shop presents to its tenant login — then nothing more on a focus.
+  assert.deepEqual({ explicit: idpExplicit, afterFocus: st.idp.slice(idpAt + idpExplicit.length) },
+    { explicit: [`POST ${IDP_HOST}/v1/accounts:signInWithPassword`, `POST ${IDP_HOST}/v1/accounts:lookup`, `POST ${STS_HOST}/v1/token`], afterFocus: [] },
+    'exactly the one explicit re-authentication at the identity provider, and nothing after it on its own');
+  assert.deepEqual([renewed.filter(isIssuedDetailOrList).map(readLine), renewed.filter(isVoidRoute).map(readLine)], [[`${issuedPath(main.id)}/${id} 200`], [`${issuedPath(main.id)}/${id}/void-eligibility 200`]],
+    'a fresh review: ONE detail GET and ONE eligibility GET under the new session');
+  assert.deepEqual(unprompted, [`POST ${LOGIN}`], 'the only POST since the refusal is the sign-in\'s own login: no void on its own, across a focus');
+  assert.deepEqual({ checked: fresh.reasons.checked, disabled: fresh.reasons.disabled, buttons: fresh.buttons, attempt: fresh.attempt, view: await has(page, 'issued-view') },
+    { checked: null, disabled: false, buttons: ['Keep invoice', 'Void invoice'], attempt: 'none', view: true }, 'the confirmation kept for a new press: its reason cleared, the invoice still open');
+
+  const pressFrom = st.api.length;
+  await chooseReason(page, 'issued_in_error');
+  await page.waitFor(`${q('issued-void-send')}?.getAttribute('aria-disabled') === 'false'`, 10_000, 'Void invoice ready to press');
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => !(await has(page, 'issued-void-confirm')) && (await voidViewOf(page)).reason === reasonLabelOf('issued_in_error'), 30_000, 'the new press voided it');
+  await quiet(page, pressFrom);
+  const posts = sentBy(page, isVoidPost(main.id, id), sendFrom);
+  record('SIS-19', { phase: 'pressed', posts: posts.map(apiLine) });
+  assert.deepEqual(posts.map(answered), ['403 step_up_required', '200'], 'two POSTs in all: the refused one and the new press');
+  assert.equal(posts[1].body, posts[0].body, 'the same bytes');
+  assert.equal(posts[1].body, voidBodyFor(tenant, 'issued_in_error'));
+  assert.notEqual(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'a NEW key (the refused one acquired nothing)');
+  assert.notEqual(posts[1].headers[SESSION_CSRF], posts[0].headers[SESSION_CSRF], 'under the NEW session token');
+  assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]), [[id, 'issued_in_error']], 'voided once');
+  assert.equal((await voidAudits(tenant)).length, 1, 'ONE void audit');
+  assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 2, 'two void POSTs in all: the refused press and the new one'); // B-8
+}, 240_000);
+
+scenario('SIS-20', 'VOID-07 VOID-09 AC-06 AC-07 AN ACKNOWLEDGED VOID WHOSE DETAILS ARE LOST, THEN A LOST ANSWER AFTER A REAL COMMIT (brief §9 items 4 and 5) — invoice 1: the void\'s 200 reaches the page and the detail GET after it is lost at the front (st.lose, before the entry): "Invoice 1 was voided. Its details could not be loaded." with Load again (Status Voided, no void time or reason from the held attempt); Load again is ONE GET and no POST, then the void time and the recorded reason. Invoice 2: the POST commits at the entry and its 200 is dropped at the front (st.lose, after the entry answered): the confirmation says the void is not confirmed, with the close warning, Check again and Check invoice — never "voided"; a focus and a tab return send nothing; Check again is ONE more POST with the SAME key, the byte-identical body and the same session token, the entry\'s replay (Idempotent-Replayed: true) of the sealed 200: one void and one audit for it, one completion. This proves lost BROWSER delivery only, not a lost COMMIT acknowledgement (P1\'s IVH-09)', async () => {
+  const { tenant, main, boss, ids: [first, second] } = await voidShop('i20', 2);
+  const page = await voidPage(boss, main.id, 2);
+
+  // 4. Acknowledged, its details lost: only the GET is retried.
+  await openVoidable(page, main.id, first, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'wrong_seller_details');
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isIssuedDetail(main.id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-void-send'));
+    await page.waitFor(async () => (await textOf(page, 'issued-view-void-alert')) === VOIDING_SAID.voidedUnread(1), 30_000, 'voided, its details not loaded');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, from);
+  await page.settle();
+  const unread = {
+    posts: sentBy(page, isVoidPost(main.id, first), from).map(answered), details: sentBy(page, isIssuedDetail(main.id), from).map((r) => `${r.status} ${r.lost ?? 'delivered'}`),
+    status: await textOf(page, 'issued-view-void-status'), shown: await textOf(page, 'issued-view-status'), void: await voidViewOf(page), buttons: (await issuedViewOf(page)).buttons, confirm: await has(page, 'issued-void-confirm'),
+  };
+  record('SIS-20', { phase: 'details lost', ...unread, sent: sentBy(page, () => true, from).map(apiLine) });
+  assert.deepEqual(unread, {
+    posts: ['200'], details: ['0 request'], status: VOIDING_SAID.voided(1), shown: 'Voided', void: { at: null, time: null, reason: null, labels: ['Status', 'Issued at'] }, buttons: ['Close', 'Load again'], confirm: false,
+  }, 'acknowledged (Voided), its details unavailable: the void time and reason are not taken from the held attempt; Load again offered');
+  const loadFrom = st.api.length;
+  await page.click(by('issued-view-void-load'));
+  await page.waitFor(async () => (await voidViewOf(page)).reason === reasonLabelOf('wrong_seller_details'), 30_000, 'Load again: the recorded reason');
+  await quiet(page, loadFrom);
+  const [v1] = await storedVoids(main.id);
+  assert.deepEqual({ reads: sentBy(page, () => true, loadFrom).filter((r) => !isSessionRead(r)).map(readLine), void: await voidViewOf(page), alert: await textOf(page, 'issued-view-void-alert'), load: await has(page, 'issued-view-void-load') },
+    { reads: [`${issuedPath(main.id)}/${first} 200`], void: { at: v1.at, time: secondOf(v1.at), reason: reasonLabelOf('wrong_seller_details'), labels: VOID_SAID.labels }, alert: '', load: false },
+    'Load again: ONE GET and no POST; the void time and the reason the server records');
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await page.click(by('issued-void-dismiss'));
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, 'the card dismissed');
+
+  // 5. The answer lost after a real commit: the same request again, by hand only.
+  await openVoidable(page, main.id, second, 2);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'other');
+  const before = await counts();
+  const from2 = st.api.length;
+  lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isVoidPost(main.id, second)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-void-send'));
+    await waitData(page, 'issued-void-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, from2);
+  await page.settle();
+  const committed = { voids: (await storedVoids(main.id)).filter((v) => v.id === second).map((v) => v.reason), audits: (await voidAudits(tenant)).length };
+  const open = await voidConfirmOf(page);
+  record('SIS-20', { phase: 'answer lost', committed, posts: sentBy(page, isVoidPost(main.id, second), from2).map(apiLine), buttons: open.buttons });
+  assert.deepEqual({ committed, posts: sentBy(page, isVoidPost(main.id, second), from2).map((r) => `${r.status} ${r.lost ?? 'delivered'}`), status: open.status, note: open.note, warning: open.warning, alert: open.alert, buttons: open.buttons, notice: (await textOf(page, 'issued-notice')) === VOIDING_SAID.voided(2) },
+    { committed: { voids: ['other'], audits: 2 }, posts: ['200 response'], status: VOIDING_SAID.unresolved(2, main.name), note: VOIDING_SAID.noAnswer, warning: VOIDING_SAID.closeWarning, alert: '', buttons: ['Close', 'Check again', 'Check invoice'], notice: false },
+    'committed once, its answer lost at the front: not confirmed, never "voided"');
+  const watch = postWatch(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual(watch.disarm(), [], 'nothing re-sent on a focus or a tab return');
+  await page.click(by('issued-void-confirm-check'));
+  await page.waitFor(async () => !(await has(page, 'issued-void-confirm')) && (await voidViewOf(page)).reason === reasonLabelOf('other'), 30_000, 'the replay is the void, read back');
+  await quiet(page, from2);
+  const posts = sentBy(page, isVoidPost(main.id, second), from2);
+  record('SIS-20', { phase: 'check again', posts: posts.map(apiLine), replayed: posts[1]?.replied?.headers['idempotent-replayed'] ?? null });
+  assert.equal(posts.length, 2, `two POSTs: the lost answer's and Check again (${posts.map(apiLine).join('; ')})`);
+  assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
+  assert.equal(posts[1].body, voidBodyFor(tenant, 'other'));
+  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.equal(posts[1].headers[SESSION_CSRF], posts[0].headers[SESSION_CSRF], 'under the session token it was sent with');
+  assert.deepEqual([posts[1].status, posts[1].replied.text, posts[1].replied.headers['idempotent-replayed']], [200, voidedReply(second), 'true'], 'the entry\'s replay of the sealed 200');
+  assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]).sort(), [[first, 'wrong_seller_details'], [second, 'other']].sort(), 'ONE void for each invoice');
+  assert.deepEqual((await voidAudits(tenant)).map((a) => [a.invoice, a.reason]).sort(), [[first, 'invoice_void_wrong_seller_details'], [second, 'invoice_void_other']].sort(), 'ONE void audit each, naming its invoice'); // B-7
+  await assertDelta(before, { C: 0, A: 0, E: 0, U: 0, K: 1, L: 1, T: 1 }, 'invoice 2: one completion, one idempotency record, one audit — the replay added none');
+  assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 3, 'three void POSTs in all: one for invoice 1, two (one key) for invoice 2');
+}, 240_000);
+
+scenario('SIS-21', 'VOID-09 VOID-11 AC-09 AC-11 THE HELD ATTEMPT ACROSS CLOSE, NAVIGATION, A STORE CHANGE, A RELOAD AND A SESSION END (brief §9 items 6 and 7, and the reload) — a void lost before the entry is held: a reload loses it (memory only) and nothing is sent on its own — no card, no POST on the reload, Show, the store, the invoice or a focus, the invoice still issued. Another lost before the entry: Escape closes the confirmation only, the dialog reopened says the attempt is tracked outside it, an app page away and back shows the card before anything is read (nothing issuing sent before Show), another store chosen; no POST on its own; the card\'s Check again is the SAME key and bytes to the ORIGINAL store and invoice, the sealed 200, with no notice or list read for the store not chosen. A third, its 200 parked at the front after the commit, then the session ended in the store: a focus finds the end and detaches it (no login, no POST); the late answer released changes nothing but a detached card; ONE Reconnect login keeps it detached and re-sends nothing; Check invoice is ONE GET of the original store\'s invoice — voided now, never attributed', async () => {
+  const { tenant, stores: [main, other], boss, customer, values, ids: [first, second] } = await voidShop('i21', 2, { stores: ['main', 'other'] });
+  const page = await watchNetwork(await voidPage(boss, main.id, 2));
+  const loseOnce = (match) => { let lost = 0; st.lose = (rec, phase) => phase === 'request' && match(rec) && rec.frameId === page.frameId && lost++ === 0; };
+
+  // A reload loses the held attempt: nothing is rebuilt or re-sent.
+  await openVoidable(page, main.id, first, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'other');
+  const fromA = st.api.length;
+  try {
+    loseOnce(isVoidPost(main.id, first));
+    await page.click(by('issued-void-send'));
+    await waitData(page, 'issued-void-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'Escape closed the pressed confirmation (Close)');
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  assert.deepEqual((await voidCardOf(page)).status, VOIDING_SAID.unresolved(1, main.name), 'held on the card');
+  const reloadWatch = postWatch(page);
+  const reloadFrom = st.api.length;
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'the reloaded Invoices page');
+  await page.settle();
+  const reloadedCard = (await voidCardOf(page)).state;
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 2, 'listed again after the reload');
+  await openVoidable(page, main.id, first, 1);
+  const reloaded = { card: reloadedCard, status: await textOf(page, 'issued-view-status'), offered: await voidOffered(page), dialogStatus: await textOf(page, 'issued-view-void-status') };
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await focusAndSettle(page, 'focus');
+  const reloadPosts = reloadWatch.disarm();
+  record('SIS-21', { phase: 'reload', reloaded, posts: reloadPosts, logins: sentBy(page, isLogin, reloadFrom).map(answered) });
+  assert.deepEqual({ ...reloaded, posts: reloadPosts, logins: sentBy(page, isLogin, reloadFrom).length, voids: await storedVoids(main.id), lostPosts: sentBy(page, isVoidPost(main.id, first), fromA).map((r) => `${r.status} ${r.lost ?? 'delivered'}`) },
+    { card: 'none', status: 'Issued', offered: true, dialogStatus: '', posts: [], logins: 0, voids: [], lostPosts: ['0 request'] },
+    'a reload loses the held attempt (memory only): no card, no POST at all on its own (no login, no void), the invoice still issued and offered afresh');
+
+  // Close and reopen, an app page away and back, a store change: the attempt survives, scoped to its store and invoice.
+  await openVoidable(page, main.id, second, 2);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'wrong_seller_details');
+  const fromB = st.api.length;
+  try {
+    loseOnce(isVoidPost(main.id, second));
+    await page.click(by('issued-void-send'));
+    await waitData(page, 'issued-void-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const watch = postWatch(page);
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'Escape closed the confirmation');
+  assert.equal(await has(page, 'issued-view'), true, 'Escape closed the top dialog only');
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await openVoidable(page, main.id, second, 2);
+  const reopened = await textOf(page, 'issued-view-void-status');
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed again');
+  await go(page, '/');
+  await page.waitFor(`!${q('issued-section')}`, 15_000, 'another app page');
+  const backFrom = st.api.length;
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('issued-show')}`, 30_000, 'back on the Invoices page');
+  await page.settle();
+  const back = { card: await voidCardOf(page), issuing: sentBy(page, isIssuingRoute, backFrom).map(apiLine) };
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, other.id);
+  await waitIssuedRows(page, 0, 'the other store: no invoice');
+  await focusAndSettle(page, 'focus');
+  const unprompted = watch.disarm();
+  record('SIS-21', { phase: 'survived', reopened, back: back.card.state, issuing: back.issuing, unprompted });
+  assert.deepEqual({ reopened, card: back.card.status, state: back.card.state, buttons: back.card.buttons, issuing: back.issuing, unprompted, after: (await voidCardOf(page)).status },
+    { reopened: `${VOIDING_SAID.unresolved(2, main.name)} ${VOIDING_SAID.heldOutside}`, card: VOIDING_SAID.unresolved(2, main.name), state: 'unresolved', buttons: ['Check again', 'Check invoice', 'Dismiss'],
+      issuing: [], unprompted: [], after: VOIDING_SAID.unresolved(2, main.name) },
+    'kept across Close, a reopen, an app page and a store change; shown from memory before Show; nothing sent on its own');
+  const checkFrom = st.api.length;
+  await page.click(by('issued-void-check'));
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'voided', 30_000, 'Check again: voided');
+  await quiet(page, checkFrom);
+  await page.settle();
+  const posts = sentBy(page, isVoidPost(main.id, second), fromB);
+  const checked = { posts: posts.map((r) => `${r.status} ${r.lost ?? 'delivered'}`), voidRoutes: sentBy(page, isVoidRoute, checkFrom).map((r) => `${r.method} ${r.path}`), card: (await voidCardOf(page)).status, notice: await textOf(page, 'issued-notice'), mainList: sentBy(page, isIssuedList(main.id), checkFrom).length };
+  record('SIS-21', { phase: 'checked', ...checked });
+  assert.deepEqual(checked, { posts: ['0 request', '200 delivered'], voidRoutes: [`POST ${issuedPath(main.id)}/${second}/void`], card: VOIDING_SAID.cardVoided(2, main.name), notice: null, mainList: 0 },
+    'Check again goes to the ORIGINAL store and invoice while another is chosen; no notice and no list read for the store not chosen (R23)');
+  assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
+  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.equal(posts[1].headers[SESSION_CSRF], posts[0].headers[SESSION_CSRF], 'the same session token');
+  assert.deepEqual([posts[1].replied.text, posts[1].replied.headers['idempotent-replayed'] ?? null], [voidedReply(second), null], 'the first to reach the entry: the sealed 200');
+  assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]), [[second, 'wrong_seller_details']]);
+  await page.click(by('issued-void-dismiss'));
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, 'the card dismissed');
+
+  // An unconfirmed send, then the session ended: detached for good; its late answer, Reconnect and Check invoice.
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 2, 'this store again');
+  await openVoidable(page, main.id, first, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'duplicate');
+  const path = `${issuedPath(main.id)}/${first}/void`;
+  const mark = page.net.mark(path);
+  const held = gate((r) => r.frameId === page.frameId && isVoidPost(main.id, first)(r), 'response');
+  const fromC = st.api.length;
+  await page.click(by('issued-void-send'));
+  await held.reached; // the entry has answered (and committed); the answer is parked at the front
+  await waitData(page, 'issued-void-attempt', 'state', 'sending');
+  // The action's own reads (its session check) answered first. The parked POST already carries the entry's status, so it
+  // never holds this barrier; then the end is the focus's to find.
+  await quiet(page, fromC);
+  await page.settle();
+  await endSessions(boss);
+  const endFrom = st.api.length;
+  await focusAndSettle(page, 'focus');
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'detached', 15_000, 'the attempt detached');
+  const ended = { card: await voidCardOf(page), dialogs: [await has(page, 'issued-view'), await has(page, 'issued-void-confirm')], phase: await page.evaluate(`${q('issued-stores-state')}?.dataset.phase ?? null`), sent: sentBy(page, () => true, endFrom).map(apiLine) };
+  record('SIS-21', { phase: 'ended', card: ended.card.state, sent: ended.sent, parked: sentBy(page, isVoidPost(main.id, first), fromC).map(apiLine) });
+  assert.deepEqual({ ...ended, card: { ...ended.card, text: undefined } }, {
+    card: { state: 'detached', heading: 'Void of invoice 1', status: VOIDING_SAID.detached, refused: null, note: null, seen: '', seenReason: null, buttons: ['Check invoice', 'Dismiss'], text: undefined },
+    dialogs: [false, false], phase: 'signed-out', sent: ['GET /api/v1/session -> 401 unauthenticated'],
+  }, 'the focus\'s ONE check finds the end: the attempt detached (its store not named, no Check again), the dialogs closed, no login and no POST');
+  assert.ok(!ended.card.text.includes(main.name), 'a detached card names no store');
+  held.release();
+  assert.equal(await page.net.endOfParked(path, mark), 'finished', 'the late 200 reached the page');
+  await page.settle();
+  await page.settle();
+  const late = {
+    card: await voidCardOf(page), notice: await textOf(page, 'issued-notice'), sent: sentBy(page, () => true, endFrom).map(apiLine),
+    dialogs: [await has(page, 'issued-view'), await has(page, 'issued-void-confirm')], phase: await page.evaluate(`${q('issued-stores-state')}?.dataset.phase ?? null`), rows: (await issuedRowsOf(page)).length,
+  };
+  assert.deepEqual(late, { card: ended.card, notice: null, sent: ended.sent, dialogs: [false, false], phase: 'signed-out', rows: 0 },
+    'the late 200 changes nothing: the card stays detached, no notice, no dialog or list back, nothing read or sent');
+  const reFrom = st.api.length;
+  await page.click(by('issued-retry'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await focusAndSettle(page, 'focus');
+  await quiet(page, reFrom);
+  const reconnected = { logins: sentBy(page, isLogin, reFrom).map(answered), posts: sentBy(page, (r) => r.method === 'POST' && !isLogin(r), reFrom).map(apiLine), card: (await voidCardOf(page)).state };
+  record('SIS-21', { phase: 'reconnected', ...reconnected });
+  assert.deepEqual(reconnected, { logins: ['200'], posts: [], card: 'detached' }, 'ONE login on Reconnect; the attempt stays detached; nothing re-sent');
+  // B2 fix B-6, a state barrier for the late answer: Reconnect's own requests (its login, the stores read, a focus check)
+  // were sent and answered AFTER the page received the late 200, so whatever that answer did is done — still the same
+  // detached card, no notice, no issued or void request since the session ended, nothing chosen.
+  const isolated = { card: await voidCardOf(page), notice: await textOf(page, 'issued-notice'), issued: sentBy(page, (r) => isIssuedRead(r) || isVoidRoute(r), endFrom).map(apiLine), rows: (await issuedRowsOf(page)).length };
+  assert.deepEqual(isolated, { card: ended.card, notice: null, issued: [], rows: 0 }, 'after Reconnect\'s own reads: the late 200 changed nothing — the card detached as before, no notice, no issued or void request');
+  const findFrom = st.api.length;
+  await page.click(by('issued-void-find'));
+  await page.waitFor(async () => (await voidCardOf(page)).seen === VOIDING_SAID.seenVoided(1), 15_000, 'Check invoice: voided now');
+  await quiet(page, findFrom);
+  const found = { reads: sentBy(page, (r) => !isSessionRead(r), findFrom).map(readLine), card: await voidCardOf(page) };
+  assert.deepEqual({ reads: found.reads, state: found.card.state, seen: found.card.seen, seenReason: found.card.seenReason, buttons: found.card.buttons },
+    { reads: [`${issuedPath(main.id)}/${first} 200`], state: 'detached', seen: VOIDING_SAID.seenVoided(1), seenReason: VOIDING_SAID.seenReason(reasonLabelOf('duplicate')), buttons: ['Check invoice', 'Dismiss'] },
+    'Check invoice: ONE GET of the original store\'s invoice under the new session — voided now, not attributed, the attempt still detached');
+  assert.deepEqual(sentBy(page, isVoidPost(main.id, first), fromC).map(answered), ['200'], 'the parked POST was the one send; nothing re-sent after Reconnect');
+  assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]).sort(), [[first, 'duplicate'], [second, 'wrong_seller_details']].sort(), 'one void each');
+  assert.deepEqual((await voidAudits(tenant)).map((a) => [a.invoice, a.reason]).sort(), [[first, 'invoice_void_duplicate'], [second, 'invoice_void_wrong_seller_details']].sort(), 'one void audit each, naming its invoice'); // B-7
+  // AC-11 (B2 fix B-5): the three attempts — lost then reloaded away, recovered across navigation, detached — leave none of
+  // their keys, exact bodies or reason codes, nor the invoice, customer, store or seller values, in the address, storage,
+  // IndexedDB, console or entry logs (writes recorded from before the sign-in, across the reload).
+  const attempts = [sentBy(page, isVoidPost(main.id, first), fromA)[0], sentBy(page, isVoidPost(main.id, second), fromB)[0], sentBy(page, isVoidPost(main.id, first), fromC)[0]];
+  await assertDraftsNowhere([page], [...attempts.flatMap((r) => [r.headers['idempotency-key'], ...bothEncodings(r.body)]), 'wrong_seller_details', 'invoice_void_duplicate', first, second, customer.id, customer.name, main.name, other.name, values.legalName]);
+  await assertReasonsNowhere([page], ['other', 'wrong_seller_details', 'duplicate']); // B-5b: each attempt's reason fragment, both encodings
+  await selfCheckEscapedBody(attempts[0].body, 'other');
+  await assertNoLeak(page);
+}, 300_000);
+
+/**
+ * SIS-22's measurement of the open void confirmation: the viewport, the panel, Keep invoice, what reaches past the panel's
+ * content box outside the Total's own region, the Total (its text, its lines, its region), the issue time's date and clock
+ * in lines, and — after Keep is measured, since scrolling moves the panel — each reason and Void invoice scrolled into view.
+ */
+const voidBoxOf = (page) => page.evaluate(`(() => {
+  const el = (id) => document.querySelector('[data-testid="' + id + '"]');
+  const panel = el('issued-void-confirm'), keep = el('issued-void-keep'), region = el('issued-void-total-scroll'), total = el('issued-void-total'), time = el('issued-void-issued-at');
+  const rect = (n) => { const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
+  const linesIn = (node) => { const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+  const part = (node, from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+  const seen = (n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5 && hit !== null && (hit === n || n.contains(hit)); };
+  const k = keep.getBoundingClientRect(), kHit = document.elementFromPoint(k.left + k.width / 2, k.top + k.height / 2);
+  const p = panel.getBoundingClientRect(), cs = getComputedStyle(panel);
+  const content = { left: p.left + panel.clientLeft + parseFloat(cs.paddingLeft), right: p.left + panel.clientLeft + panel.clientWidth - parseFloat(cs.paddingRight) };
+  // Visually hidden text (Tailwind sr-only: absolutely placed, clipped to nothing) takes no room: it is not counted.
+  const hidden = (n) => {
+    for (let m = n; m !== null && m !== panel; m = m.parentElement) {
+      const c = getComputedStyle(m), r = m.getBoundingClientRect();
+      if (c.clip === 'rect(0px, 0px, 0px, 0px)' || c.clipPath === 'inset(50%)' || (c.position === 'absolute' && c.overflow === 'hidden' && r.width <= 1 && r.height <= 1)) return true;
+    }
+    return false;
+  };
+  const out = [...panel.querySelectorAll('*')].filter((n) => !region.contains(n) && !hidden(n) && (n.getBoundingClientRect().right > content.right + 0.5 || n.getBoundingClientRect().left < content.left - 0.5))
+    .map((n) => (n.dataset && n.dataset.testid) || n.tagName.toLowerCase()).slice(0, 8);
+  const result = {
+    innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize, pageScrollWidth: document.documentElement.scrollWidth,
+    panel: { ...rect(panel), scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, scrollLeft: panel.scrollLeft },
+    keep: { focused: document.activeElement === keep, onTop: kHit !== null && keep.contains(kHit), inView: k.left >= -0.5 && k.top >= -0.5 && k.right <= innerWidth + 0.5 && k.bottom <= innerHeight + 0.5 },
+    outside: out,
+    total: { text: total.textContent, lines: linesIn(total), whiteSpace: getComputedStyle(total).whiteSpace,
+      region: { role: region.getAttribute('role'), name: document.getElementById(region.getAttribute('aria-labelledby'))?.textContent ?? null, tabIndex: region.tabIndex,
+        overflowX: getComputedStyle(region).overflowX, scrollWidth: region.scrollWidth, clientWidth: region.clientWidth, ...rect(region) } },
+    time: (() => {
+      // By text offsets across the time's own nodes (since B1 L-2 its date and clock are spans of their own).
+      const walker = document.createTreeWalker(time, NodeFilter.SHOW_TEXT), nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      const at = (offset) => { let left = offset; for (const node of nodes) { if (left <= node.length) return [node, left]; left -= node.length; } return null; };
+      const span = (from, to) => { const a = at(from), b = at(to); if (a === null || b === null) return null; const range = document.createRange(); range.setStart(a[0], a[1]); range.setEnd(b[0], b[1]);
+        return new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size; };
+      return nodes.length === 0 ? null : { date: span(0, 10), clock: span(11, 19), text: time.textContent };
+    })(),
+  };
+  result.reasons = [...panel.querySelectorAll('input[type="radio"]')].map((r) => seen(r));
+  const send = el('issued-void-send');
+  result.send = send === null ? null : seen(send);
+  panel.scrollTop = 0;
+  return result;
+})()`);
+/** The Total's first character at the start of its region's scroll and its last at the end: inside the region and the viewport, on top. */
+const totalEnds = (page) => page.evaluate(`(() => {
+  const region = document.querySelector('[data-testid="issued-void-total-scroll"]'), total = document.querySelector('[data-testid="issued-void-total"]');
+  const walker = document.createTreeWalker(total, NodeFilter.SHOW_TEXT), nodes = [];
+  while (walker.nextNode()) if (walker.currentNode.length > 0) nodes.push(walker.currentNode);
+  const charAt = (node, i) => { const range = document.createRange(); range.setStart(node, i); range.setEnd(node, i + 1); return range.getBoundingClientRect(); };
+  const visible = (r) => { const g = region.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return r.left >= g.left - 0.5 && r.right <= g.right + 0.5 && r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5 && hit !== null && total.contains(hit); };
+  region.scrollIntoView({ block: 'nearest' });
+  const was = region.scrollLeft;
+  region.scrollLeft = 0;
+  const first = visible(charAt(nodes[0], 0));
+  region.scrollLeft = region.scrollWidth;
+  const last = nodes[nodes.length - 1];
+  const end = visible(charAt(last, last.length - 1));
+  region.scrollLeft = was;
+  return { first, last: end, digits: total.textContent.slice(6) };
+})()`);
+/** The issued dialog's Close, the reserved void row and the invoice below it (its Status), and whether the trigger is in the row. */
+const voidRowStill = (page) => page.evaluate(`(() => {
+  const el = (id) => document.querySelector('[data-testid="' + id + '"]');
+  const rect = (n) => { if (n === null) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; };
+  const t = el('issued-view-void');
+  return { close: rect(el('issued-view-close')), row: rect(el('issued-view-void-row')), status: rect(el('issued-view-status')), trigger: t !== null, triggerBox: rect(t),
+    rowMinHeight: el('issued-view-void-row') === null ? null : getComputedStyle(el('issued-view-void-row')).minHeight };
+})()`);
+/**
+ * The held card now, with the section held (by this test only, then let go) to `column` CSS px, as SIS-09 holds it for a row
+ * (DA-214: the page's main column is widened by the demo invoices table at 320 px): what of it reaches past the section's
+ * content box, what clips (an ellipsis, a box narrower than its content), the store the status names, and each control
+ * scrolled into view — in view, on top, inside the section.
+ */
+const voidCardBox = (page, column) => page.evaluate(`(() => {
+  const section = document.querySelector('[data-testid="issued-section"]'), card = document.querySelector('[data-testid="issued-void-card"]');
+  if (section === null || card === null) return null;
+  const was = section.style.maxWidth;
+  section.style.maxWidth = '${column}px';
+  try {
+    const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
+    const box = () => { const t = section.getBoundingClientRect(); return { left: t.left + section.clientLeft + parseFloat(cs.paddingLeft), right: t.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight) }; };
+    const b = box();
+    const outside = [card, ...card.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.width > 0 && (r.right > b.right + 0.5 || r.left < b.left - 0.5); })
+      .map((n) => (n.dataset && n.dataset.testid) || n.tagName.toLowerCase()).slice(0, 8);
+    const name = (n) => (n === null ? null : (n.dataset && n.dataset.testid) || n.tagName.toLowerCase() + '.' + String(n.className).split(' ').slice(0, 3).join('.'));
+    const clipped = [card, ...card.querySelectorAll('*')].filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || (n.clientWidth > 0 && n.scrollWidth > n.clientWidth + 0.5); })
+      .map((n) => ({ node: name(n), scrollWidth: n.scrollWidth, clientWidth: n.clientWidth }));
+    const store = card.querySelector('[data-testid="issued-void-card-status"] bdi')?.textContent ?? null;
+    const controls = [...card.querySelectorAll('button')].map((n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), a = box();
+      return { text: n.textContent.trim(), inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && n.contains(hit), inSection: r.left >= a.left - 0.5 && r.right <= a.right + 0.5,
+        hit: hit !== null && n.contains(hit) ? null : name(hit), coveredInSection: hit !== null && !n.contains(hit) && section.contains(hit),
+        sidebar: hit !== null && !n.contains(hit) && hit.closest('aside.fixed.left-0.top-0.w-64') !== null, // TenantLayout's own sidebar (TenantLayout.tsx <aside>)
+        box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) } }; });
+    return { section: Math.round(s.width), outside, clipped, store, controls };
+  } finally {
+    section.style.maxWidth = was;
+  }
+})()`);
+/** SIS-22's cells: SIS-09's five (unchanged) and one 600 px tall at 320 px with a 24 px default text size (design R18), LAST. */
+const VOID_CELLS = Object.freeze([...ISSUED_CELLS, { cell: 'S320H600', width: 320, height: 600, font: 24 }]);
+
+scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDED LAYOUT (brief §9 items 8 and 9) — invoice 1, SIS-09\'s longest texts and largest Total: a void lost before the entry is held; Check invoice (in the confirmation) is ONE GET and says the invoice still shows as issued — still unresolved, Check again kept; another request voids it ("duplicate", a direct call): Check invoice says voided now without saying which request, with the reason it records — the attempt stays unresolved and the held reason is never shown as recorded; Check again (the SAME key and bytes) is the sealed 409 already-void, never "voided by this request": the dialog read again shows the competing reason. Invoice 2, in SIS-09\'s five cells and LAST 320x600 at a 24 px default text size: with its eligibility answer parked, Close and the invoice under the reserved row are measured, then again once Void invoice… fills it (within 0.5 px); Tab from Close reaches Void invoice…, Enter opens the confirmation on ONE review GET, Keep invoice focused, in view and on top; the confirmation never lies outside the viewport nor scrolls sideways, nothing reaches past its content box, the Total ($90,071,992,547,409.91) is on one line in its own named region — scrolled inside it where wider, every digit reachable — the issue time breaks only at its spaces, every reason and Void invoice in view and on top once scrolled to; Tab goes Keep → Total → reasons → Void invoice → Keep; Space chooses a reason and ArrowDown the next (first cell); in every cell an unconfirmed send (lost before the entry) leaves the confirmation\'s Close, Check again and Check invoice whole and in view, Escape closes the confirmation alone (focus back on Void invoice…) and Escape again the dialog (focus on the row\'s Open), the held card names its store with its controls in view and uncovered by the section (held to the viewport less two gutters), and Dismiss, reached by Tab, sends nothing; Shift+Tab cycles back inside the confirmation (first and last cells); nothing is posted but those sends. Recorded, not failed: L-3 (S320H600 only, pinned exactly: the card\'s button row 2 ± 1 px wider than the card under the DA-214 hold) and, in the DA-214 cells only, a card control under TenantLayout\'s own sidebar — each such control then reached by Tab and activated with Enter', async () => {
+  const { tenant, main, boss, customer, ids: [first, second] } = await voidShop('i22', 2, { long: true });
+  const page = await voidPage(boss, main.id, 2);
+  const stored = await storedIssued(main.id);
+  const two = stored.find((r) => r.id === second);
+
+  // 8. Check invoice says the invoice's state now, never who voided it.
+  await openVoidable(page, main.id, first, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'issued_in_error');
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isVoidPost(main.id, first)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-void-send'));
+    await waitData(page, 'issued-void-attempt', 'state', 'unresolved');
+  } finally {
+    st.lose = null;
+  }
+  const find1 = st.api.length;
+  await page.click(by('issued-void-confirm-find'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.seen === VOIDING_SAID.seenIssued(1), 15_000, 'Check invoice: still issued');
+  await quiet(page, find1);
+  const stillIssued = await voidConfirmOf(page);
+  assert.deepEqual({ reads: sentBy(page, (r) => !isSessionRead(r), find1).map(readLine), attempt: stillIssued.attempt, status: stillIssued.status, buttons: stillIssued.buttons, seenReason: stillIssued.seenReason },
+    { reads: [`${issuedPath(main.id)}/${first} 200`], attempt: 'unresolved', status: VOIDING_SAID.unresolved(1, main.name), buttons: ['Close', 'Check again', 'Check invoice'], seenReason: null },
+    'Check invoice: ONE GET, no POST; "still shows as issued" settles nothing and Check again stays');
+  const competing = await call('POST', `${issuedPath(main.id)}/${first}/void`, { session: await directLogin(boss), key: randomUUID(), body: { expectedTenant: tenant, reasonCode: 'duplicate' } });
+  assert.deepEqual([competing.status, competing.text], [200, voidedReply(first)], 'another request voids it, with another reason');
+  const find2 = st.api.length;
+  await page.click(by('issued-void-confirm-find'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.seen === VOIDING_SAID.seenVoided(1), 15_000, 'Check invoice: voided now');
+  await quiet(page, find2);
+  const nowVoided = await voidConfirmOf(page);
+  const card8 = await voidCardOf(page);
+  record('SIS-22', { phase: 'attribution', confirm: { attempt: nowVoided.attempt, seen: nowVoided.seen, seenReason: nowVoided.seenReason }, card: card8.state });
+  assert.deepEqual({ reads: sentBy(page, (r) => !isSessionRead(r), find2).map(readLine), attempt: nowVoided.attempt, seenReason: nowVoided.seenReason, buttons: nowVoided.buttons, card: card8.state, cardSeen: card8.seen, notice: await textOf(page, 'issued-notice') },
+    { reads: [`${issuedPath(main.id)}/${first} 200`], attempt: 'unresolved', seenReason: VOIDING_SAID.seenReason(reasonLabelOf('duplicate')), buttons: ['Close', 'Check again', 'Check invoice'], card: 'unresolved', cardSeen: VOIDING_SAID.seenVoided(1), notice: null },
+    'voided now, not attributed: the reason the invoice records (the other request\'s), the attempt still unresolved, no "voided" notice');
+  assert.ok(!nowVoided.attemptText.includes(reasonLabelOf('issued_in_error')) && !card8.text.includes(reasonLabelOf('issued_in_error')), 'the held reason is never shown as the recorded one');
+  await page.click(by('issued-void-confirm-check'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.alert === VOIDING_SAID.alreadyVoid, 30_000, 'the sealed already-void said');
+  await page.waitFor(async () => (await voidViewOf(page)).reason === reasonLabelOf('duplicate'), 30_000, 'the dialog read again: the recorded reason');
+  await quiet(page, from);
+  const posts = sentBy(page, isVoidPost(main.id, first), from);
+  const refused = await voidConfirmOf(page);
+  record('SIS-22', { phase: 'check again', posts: posts.map(apiLine) });
+  assert.deepEqual({ posts: posts.map((r) => `${answered(r)} ${r.lost ?? 'delivered'}`), attempt: refused.attempt, buttons: refused.buttons, status: await textOf(page, 'issued-view-status'), notice: await textOf(page, 'issued-notice'), card: (await voidCardOf(page)).refused },
+    { posts: ['0 request', '409 invalid_state delivered'], attempt: 'refused', buttons: ['Close'], status: 'Voided', notice: null, card: VOIDING_SAID.alreadyVoid },
+    'Check again: the sealed already-void — never "voided by this request"; the dialog shows the invoice as the server records it');
+  assert.deepEqual([posts[1].body, posts[1].headers['idempotency-key']], [posts[0].body, posts[0].headers['idempotency-key']], 'the SAME key and bytes');
+  const [v1] = await storedVoids(main.id);
+  assert.deepEqual([v1.id, v1.reason, (await voidAudits(tenant)).map((a) => a.reason)], [first, 'duplicate', ['invoice_void_duplicate']], 'ONE void: the competing request\'s');
+  assert.deepEqual(await voidViewOf(page), { at: v1.at, time: secondOf(v1.at), reason: reasonLabelOf('duplicate'), labels: VOID_SAID.labels }, 'the void time and the reason it records');
+  await page.click(by('issued-void-keep'));
+  await page.waitFor(`!${q('issued-void-confirm')}`, 10_000, 'the confirmation closed');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-view-close', 5_000, 'focus falls back to Close (the trigger is gone)');
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+  await page.click(by('issued-void-dismiss'));
+  await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, 'the card dismissed');
+
+  // 9. Keyboard and bounded layout, cell by cell (the 24 px cells last: font sizes are never reset).
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  // B2 fix round 1: the reserved row's stability and the issue date on one line are hard checks in every cell again (B1 L-1,
+  // L-2). Recorded, not failed, are only (a) L-3: the held card's button row 2 px wider than the card under SIS-09's DA-214
+  // section hold, pinned EXACTLY (that row, that cell, 2 ± 1 px — any change fails), and (b) the carried DA-214 navigation
+  // limitation: a card control under TenantLayout's own fixed sidebar once scrolled into view, in the DA-214 cells only, each
+  // then activated from the keyboard. Anything else lying over a control fails.
+  const findings = [];
+  const DA214_CELLS = new Set(['N320', 'S320', 'T768', 'S320H600']);
+  const underSidebar = [];
+  let cardSends = 0;
+  const same = (a, b) => { try { assert.deepEqual(a, b); return true; } catch { return false; } };
+  const moved = (a, b) => (a === null || b === null ? Infinity : Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.width - b.width), Math.abs(a.height - b.height)));
+  const facts = VOIDING_SAID.facts(2, main.name, customer.name, two.issuedAt);
+  const seenNow = (id) => page.evaluate(`(() => { const n = ${q(id)}; if (n === null) return null; n.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5 && hit !== null && n.contains(hit); })()`);
+  for (const [n, { cell, width, height, font }] of VOID_CELLS.entries()) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    const setUp = await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })');
+    assert.deepEqual(setUp, { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
+    const cellFrom = st.api.length;
+    // The dialog holds still while its eligibility answers: measured with the answer parked, then with Void invoice… in.
+    const parked = gate((r) => r.frameId === page.frameId && isVoidEligibility(main.id, second)(r), 'response');
+    await openIssuedInvoice(page, second, 2, { keyboard: true });
+    await parked.reached;
+    await page.settle();
+    const asking = await voidRowStill(page);
+    parked.release();
+    await page.waitFor(() => voidOffered(page), 15_000, `${cell}: Void invoice… offered`);
+    await quiet(page, cellFrom);
+    await page.settle();
+    const answered_ = await voidRowStill(page);
+    check(!asking.trigger && answered_.trigger, `${cell}: the trigger was not absent while asking and present once allowed ${JSON.stringify([asking.trigger, answered_.trigger])}`);
+    check(moved(asking.close, answered_.close) <= HOLD_TOLERANCE, `${cell}: the eligibility answer moved Close ${JSON.stringify({ asking: asking.close, answered: answered_.close })}`);
+    check(moved(asking.status, answered_.status) <= HOLD_TOLERANCE && moved(asking.row, answered_.row) <= HOLD_TOLERANCE,
+      `${cell}: the eligibility answer moved the dialog ${JSON.stringify({ asking, answered: answered_ })}`);
+    // Tab from Close reaches Void invoice…; Enter opens the confirmation on ONE review GET.
+    await page.press('Tab');
+    const toTrigger = await focusOf(page);
+    check(toTrigger === 'issued-view-void', `${cell}: Tab from Close went to ${toTrigger}, not Void invoice…`);
+    const reviewFrom = st.api.length;
+    await page.press('Enter');
+    await page.waitFor(`!!${q('issued-void-confirm')}`, 30_000, `${cell}: the confirmation`);
+    await page.waitFor(async () => (await focusOf(page)) === 'issued-void-keep', 10_000, `${cell}: Keep invoice focused first`);
+    await quiet(page, reviewFrom);
+    await page.settle();
+    const box = await voidBoxOf(page);
+    const review = await voidConfirmOf(page);
+    const overflowed = box.total.region.scrollWidth > box.total.region.clientWidth + HOLD_TOLERANCE;
+    const tabs = [];
+    let scrolled = null;
+    for (let i = 0; i < 4; i += 1) {
+      await page.press('Tab');
+      tabs.push(await focusOf(page));
+      if (tabs.at(-1) === 'issued-void-total-scroll' && overflowed && scrolled === null) {
+        await rawKey(page, 'ArrowRight', 'ArrowRight', 39);
+        await page.waitFor(`(${q('issued-void-total-scroll')}?.scrollLeft ?? 0) > 0`, 5_000, 'the Total scrolled').catch(() => {});
+        scrolled = await page.evaluate(`${q('issued-void-total-scroll')}?.scrollLeft ?? null`);
+      }
+    }
+    const ends = await totalEnds(page);
+    const sideways = await page.evaluate(`(() => { const p = ${q('issued-void-confirm')}; return { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`);
+    record('SIS-22', { cell, width, height, font: font ?? 16, box, overflowed, scrolled, tabs, ends, sideways, asking, answered: answered_ });
+    check(review.role === 'alertdialog' && review.name === VOIDING_SAID.title(2) && review.facts === facts && review.customer === customer.name && review.at === two.issuedAt
+      && review.total === 'Total $90,071,992,547,409.91' && review.reasons.checked === null, `${cell}: the confirmation does not name the reviewed invoice whole, or a reason is preselected`);
+    check(box.panel.x >= -HOLD_TOLERANCE && box.panel.x + box.panel.width <= width + HOLD_TOLERANCE, `${cell}: the confirmation lies outside the viewport ${JSON.stringify([box.panel.x, box.panel.width])}`);
+    check(box.panel.scrollWidth <= box.panel.clientWidth + HOLD_TOLERANCE && box.outside.length === 0, `${cell}: the confirmation overflows sideways (${box.panel.scrollWidth} > ${box.panel.clientWidth}): ${JSON.stringify(box.outside)}`);
+    check(box.keep.inView && box.keep.onTop && box.keep.focused, `${cell}: Keep invoice is not in view, on top and focused first ${JSON.stringify(box.keep)}`);
+    check(box.total.text === 'Total $90,071,992,547,409.91' && box.total.lines === 1 && box.total.whiteSpace === 'nowrap', `${cell}: the Total breaks or is not exact ${JSON.stringify(box.total)}`);
+    check(box.total.region.role === 'region' && box.total.region.name === 'Total $90,071,992,547,409.91' && box.total.region.tabIndex === 0 && ['auto', 'scroll'].includes(box.total.region.overflowX),
+      `${cell}: the Total is not in a named, focusable, scrollable region ${JSON.stringify(box.total.region)}`);
+    check(box.total.region.x >= box.panel.x - HOLD_TOLERANCE && box.total.region.x + box.total.region.width <= box.panel.x + box.panel.width + HOLD_TOLERANCE, `${cell}: the Total's region is wider than the confirmation`);
+    check(ends.first && ends.last && ends.digits === '$90,071,992,547,409.91', `${cell}: a digit of the Total is not reachable inside its region ${JSON.stringify(ends)}`);
+    if (overflowed) check(scrolled > 0, `${cell}: ArrowRight on the focused Total region did not scroll it (${scrolled})`);
+    check(sideways.scrollLeft === 0 && sideways.scrollWidth <= sideways.clientWidth + HOLD_TOLERANCE, `${cell}: after Tab and the arrow key the confirmation scrolled or overflows sideways ${JSON.stringify(sideways)}`);
+    check(box.time !== null && box.time.date === 1 && box.time.clock === 1, `${cell}: the issue time breaks inside its date or clock ${JSON.stringify(box.time)}`);
+    check(box.reasons.length === 6 && box.reasons.every(Boolean) && box.send === true, `${cell}: a reason or Void invoice is not in view and on top once scrolled to ${JSON.stringify([box.reasons, box.send])}`);
+    check(same(tabs, ['issued-void-total-scroll', 'issued-void-reason-issued_in_error', 'issued-void-send', 'issued-void-keep']), `${cell}: Tab from Keep invoice went ${JSON.stringify(tabs)}`);
+    if (n === 0 || cell === 'S320H600') {
+      // B2 fix B-3: the reverse cycle (raw Shift+Tab), focus never leaving the confirmation.
+      const back = [];
+      for (let i = 0; i < 4; i += 1) {
+        await page.press('Tab', { shift: true });
+        back.push({ at: await focusOf(page), inside: await page.evaluate(`${q('issued-void-confirm')}?.contains(document.activeElement) === true`) });
+      }
+      record('SIS-22', { cell, shiftTab: back });
+      // An unchecked radio group is entered at its first radio from either side (the browser's own group navigation).
+    check(same(back.map((b) => b.at), ['issued-void-send', 'issued-void-reason-issued_in_error', 'issued-void-total-scroll', 'issued-void-keep']) && back.every((b) => b.inside),
+        `${cell}: Shift+Tab from Keep invoice went ${JSON.stringify(back)}`);
+    }
+    if (n === 0) {
+      // The reasons from the keyboard: Tab reaches the group at its first reason, Space chooses it, ArrowDown chooses the next.
+      await page.press('Tab');
+      await page.press('Tab');
+      const atReasons = await focusOf(page);
+      await rawKey(page, ' ', 'Space', 32, ' ');
+      await page.waitFor(`${q('issued-void-reason-issued_in_error')}?.checked === true`, 5_000, 'Space chose the first reason').catch(() => {});
+      const spaced = (await voidConfirmOf(page)).reasons.checked;
+      await rawKey(page, 'ArrowDown', 'ArrowDown', 40);
+      await page.waitFor(`${q('issued-void-reason-wrong_customer')}?.checked === true`, 5_000, 'ArrowDown chose the next reason').catch(() => {});
+      const keyboard = { atReasons, spaced, arrowed: (await voidConfirmOf(page)).reasons.checked, focus: await focusOf(page) };
+      record('SIS-22', { cell, keyboard });
+      check(same(keyboard, { atReasons: 'issued-void-reason-issued_in_error', spaced: 'issued_in_error', arrowed: 'wrong_customer', focus: 'issued-void-reason-wrong_customer' }), `${cell}: the reasons from the keyboard ${JSON.stringify(keyboard)}`);
+    }
+    // An unconfirmed send (lost before the entry: nothing committed) in every cell: the confirmation's recovery controls and
+    // then the held card stay whole and in view; Dismiss lets it go before the next cell (one attempt per user).
+    await chooseReason(page, 'wrong_lines_or_amounts');
+    let lostSend = 0;
+    try {
+      st.lose = (rec, phase) => phase === 'request' && isVoidPost(main.id, second)(rec) && rec.frameId === page.frameId && lostSend++ === 0;
+      await page.click(by('issued-void-send'));
+      await waitData(page, 'issued-void-attempt', 'state', 'unresolved');
+    } finally {
+      st.lose = null;
+    }
+    await page.settle();
+    const unconfirmed = {
+      close: await seenNow('issued-void-keep'), check: await seenNow('issued-void-confirm-check'), find: await seenNow('issued-void-confirm-find'), warning: await seenNow('issued-void-close-warning'),
+      ...(await page.evaluate(`(() => { const p = ${q('issued-void-confirm')}; const out = { scrollLeft: p.scrollLeft, scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; p.scrollTop = 0; return out; })()`)),
+    };
+    check(unconfirmed.close && unconfirmed.check && unconfirmed.find && unconfirmed.warning && unconfirmed.scrollLeft === 0 && unconfirmed.scrollWidth <= unconfirmed.clientWidth + HOLD_TOLERANCE,
+      `${cell}: the unconfirmed confirmation's Close, Check again, Check invoice or warning is not whole and in view ${JSON.stringify(unconfirmed)}`);
+    // Escape (Close, once sent) closes the confirmation alone (focus back on Void invoice…), then the dialog (focus on the row's Open).
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-void-confirm')}`, 5_000, `${cell}: Escape closed the confirmation`);
+    const toTriggerBack = await page.waitFor(async () => (await focusOf(page)) === 'issued-view-void', 5_000, `${cell}: focus back`).then(() => true, () => false);
+    check(toTriggerBack && (await has(page, 'issued-view')), `${cell}: Escape did not close the confirmation alone with focus back on Void invoice… (${await focusOf(page)})`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the dialog`);
+    const toRow = await page.waitFor(async () => (await focusOf(page)) === `issued-open-${second}`, 5_000, `${cell}: focus on the row`).then(() => true, () => false);
+    check(toRow, `${cell}: focus went to ${await focusOf(page)}, not the row's Open`);
+    // The held card, with the section held to the viewport less two gutters (SIS-09's DA-214 hold).
+    const cardBox = await voidCardBox(page, width - 32);
+    const card = await voidCardOf(page);
+    record('SIS-22', { cell, unconfirmed, card: cardBox });
+    check(card.state === 'unresolved' && card.status === VOIDING_SAID.unresolved(2, main.name), `${cell}: the card does not hold the unconfirmed void ${JSON.stringify([card.state, card.status])}`);
+    check(cardBox !== null && cardBox.outside.length === 0 && cardBox.store === main.name, `${cell}: the card reaches past its section or does not name its store ${JSON.stringify(cardBox && { outside: cardBox.outside, section: cardBox.section })}`);
+    const clipped = cardBox?.clipped ?? null;
+    const l3 = cell === 'S320H600' && clipped !== null && clipped.length === 1 && clipped[0].node === 'div.flex.flex-wrap.items-center' && Math.abs(clipped[0].scrollWidth - clipped[0].clientWidth - 2) <= 1;
+    if (l3) findings.push(`${cell}: L-3, the held card's button row ${clipped[0].scrollWidth - clipped[0].clientWidth} px wider than the card under the DA-214 hold`);
+    check(cell === 'S320H600' ? l3 : same(clipped, []), `${cell}: the card's clipping ${cell === 'S320H600' ? 'is not exactly L-3 (its button row 2 ± 1 px)' : 'is not none'} ${JSON.stringify(clipped)}`);
+    check(cardBox !== null && same(cardBox.controls.map((c) => c.text), ['Check again', 'Check invoice', 'Dismiss']) && cardBox.controls.every((c) => c.inView && c.inSection && !c.coveredInSection),
+      `${cell}: a card control is not in view, inside the section and uncovered by it ${JSON.stringify(cardBox?.controls)}`);
+    // On top, except under TenantLayout's own sidebar in a DA-214 cell (the carried navigation defect, outside this stage):
+    // recorded, and then that control is reached by Tab from the card's heading and activated with Enter.
+    const demoted = [];
+    for (const c of cardBox?.controls ?? []) {
+      if (c.onTop) continue;
+      if (c.sidebar && DA214_CELLS.has(cell)) demoted.push(c.text);
+      else check(false, `${cell}: "${c.text}" is covered by ${c.hit}, which is not TenantLayout's sidebar in a DA-214 cell`);
+    }
+    if (demoted.length > 0) underSidebar.push(`${cell}: ${demoted.join(', ')}`);
+    const tabTo = async (testid) => {
+      await page.call(by('issued-void-card-heading'), function () { this.focus(); });
+      for (let i = 0; i < 4 && (await focusOf(page)) !== testid; i += 1) await page.press('Tab');
+      return (await focusOf(page)) === testid;
+    };
+    let extraRead = 0;
+    if (demoted.includes('Check invoice')) {
+      const findFrom = st.api.length;
+      check(await tabTo('issued-void-find'), `${cell}: Tab from the card's heading does not reach Check invoice`);
+      await page.press('Enter');
+      await page.waitFor(async () => (await voidCardOf(page)).seen === VOIDING_SAID.seenIssued(2), 15_000, `${cell}: Check invoice from the keyboard`);
+      await quiet(page, findFrom);
+      check(same(sentBy(page, (r) => !isSessionRead(r), findFrom).map(readLine), [`${issuedPath(main.id)}/${second} 200`]), `${cell}: Check invoice from the keyboard is not ONE GET`);
+      extraRead = 1;
+    }
+    let extraSend = 0;
+    if (demoted.includes('Check again')) {
+      const againFrom = st.api.length;
+      check(await tabTo('issued-void-check'), `${cell}: Tab from the card's heading does not reach Check again`);
+      let lostAgain = 0;
+      try {
+        st.lose = (rec, phase) => phase === 'request' && isVoidPost(main.id, second)(rec) && rec.frameId === page.frameId && lostAgain++ === 0;
+        await page.press('Enter');
+        await page.waitFor(async () => sentBy(page, isVoidPost(main.id, second), againFrom).some((r) => r.status !== null) && (await voidCardOf(page)).state === 'unresolved', 15_000, `${cell}: Check again from the keyboard`);
+      } finally {
+        st.lose = null;
+      }
+      const [firstSend, again] = [sentBy(page, isVoidPost(main.id, second), cellFrom)[0], sentBy(page, isVoidPost(main.id, second), againFrom)[0]];
+      check(again !== undefined && again.headers['idempotency-key'] === firstSend.headers['idempotency-key'] && again.body === firstSend.body, `${cell}: Check again from the keyboard is not the same key and bytes`);
+      extraSend = 1;
+    }
+    // Dismiss, reached by Tab and pressed with Enter in every cell: the card goes, nothing is sent.
+    const dismissFrom = st.api.length;
+    check(await tabTo('issued-void-dismiss'), `${cell}: Tab from the card's heading does not reach Dismiss`);
+    await page.press('Enter');
+    await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, `${cell}: Dismiss`);
+    check(sentBy(page, () => true, dismissFrom).length === 0, `${cell}: Dismiss sent something`);
+    cardSends += 1 + extraSend;
+    check(same(sentBy(page, isIssuedDetailOrList, cellFrom).map(readLine), Array(2 + extraRead).fill(`${issuedPath(main.id)}/${second} 200`)), `${cell}: not ONE detail GET for the open and ONE for the review (and Check invoice's)`);
+    check(same(sentBy(page, isVoidRoute, cellFrom).map(readLine), [`${issuedPath(main.id)}/${second}/void-eligibility 200`, ...Array(1 + extraSend).fill(`${issuedPath(main.id)}/${second}/void 0`)]),
+      `${cell}: not ONE eligibility GET and only the lost send(s) ${JSON.stringify(sentBy(page, isVoidRoute, cellFrom).map(readLine))}`);
+  }
+  record('SIS-22', { findings, underSidebar });
+  note('findings', findings);
+  note('underSidebar', underSidebar);
+  console.log(`SIS-22 recorded: ${findings.join(' | ') || 'no L-3'}; under TenantLayout's sidebar (DA-214, keyboard-activated): ${underSidebar.join(' | ') || 'none'}`);
+  assert.deepEqual(problems, [], 'the void confirmation and the held card hold their bounds and keyboard order in every cell');
+  assert.deepEqual(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).map((r) => `${r.path} ${r.status}`),
+    [`${issuedPath(main.id)}/${first}/void 0`, `${issuedPath(main.id)}/${first}/void 409`, ...Array(cardSends).fill(`${issuedPath(main.id)}/${second}/void 0`)],
+    'the page posted only invoice 1\'s send and its Check again, and per cell one lost send (and a keyboard Check again where demoted), all lost');
+  assert.deepEqual((await storedVoids(main.id)).map((v) => v.id), [first], 'invoice 2 was never voided');
 }, 300_000);

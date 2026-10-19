@@ -8,7 +8,8 @@
 //     section's precedent); "Load more" sends the nextCursor this client decoded for THAT store under THAT generation only,
 //     and a store change, a new generation or a session end discards every page (a late page finds nothing to join). A row
 //     says the store's number, the customer's name as the invoice recorded it, the Total and the UTC issue time, and
-//     "Issued" or "Voided" (its current state, M7B-INVOICES-VOID-P1) — nothing about payment, and no send, print, void, edit or delete. Nothing is looked up in this browser's
+//     "Issued" or "Voided" (its current state, M7B-INVOICES-VOID-P1) — nothing about payment, and no send, print, edit or delete on a row (voiding is the
+//     dialog's, below). Nothing is looked up in this browser's
 //     customers. A 403 gets the reads' ONE fresh check, then "You cannot view issued invoices at this store." (no loop).
 //   - Open reads ONE issued invoice in the exported IssuedInvoiceDialog: the version-1 snapshot (seller, customer, ordered
 //     lines, subtotal, the tax meaning, Total) exactly as the server answered it. The dialog owns its GET (one per open and
@@ -57,22 +58,41 @@
 //     unconfirmed one leaves only a note that a change could not be confirmed. A late answer finds nothing under its key.
 //   - The session token sits only in refs (tenantSessionClient.ts lists the holders): never browser storage, a URL, the
 //     DOM or a log; no key or body reaches any of those either, and settings values and issued invoices only the DOM.
+//
+//   - Voiding (M7B-INVOICES-VOID-P2, doc 13 §5 G and §12, ADR-51; design R9–R23): only this section's dialog offers "Void
+//     invoice…" (the drafts card's View invoice never does), and only when the action-only eligibility read — sent with the
+//     detail read when the dialog opens, never before — answered allowed AND the detail says issued, in a row reserved from
+//     the asking on. Pressing it re-reads the detail once (the dialog stays as it is); a voided answer says so, otherwise a
+//     stacked alertdialog confirms exactly that read: the number, the store, the customer, the exact Total and the UTC issue
+//     time, what voiding means, and a required reason (none chosen). One press is ONE POST under ONE new key: a ref holds a
+//     second activation back, the context is checked again, and the body (built once) and key are held in the void hold
+//     (invoiceVoidHold.ts, memory only) BEFORE the request leaves; answers settle there BY KEY, whatever is mounted. "Voided"
+//     is said only after the validated 200, and the reason and time shown are always the detail read's, never the held
+//     reason. An unconfirmed attempt is held outside every dialog (its card): only "Check again" re-sends — the same key
+//     and bytes, under the token it went with, within 23 hours of the first send — and "Check invoice" is an ordinary GET
+//     that shows the invoice's state now, never which request caused it. A token change, a sign-out or another user
+//     detaches it for good. A 403 step_up_required on a first send (nothing ran) offers an explicit sign-in that keeps the
+//     dialog, re-reads the invoice and its eligibility and asks for a NEW press; nothing signs in or sends on its own.
 
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
-  INVOICE_VOID_REASONS, invoiceIssuing as issuingClient, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText,
-  type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
-  type IssuedStatus, type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues,
+  INVOICE_VOID_REASONS, VOID_REASON_CODES, invoiceIssuing as issuingClient, isVoidTarget, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText, voidBodyOf,
+  type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
+  type IssuedStatus, type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
 } from './invoiceIssuingClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
 import { button, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
+import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 
 const DEFAULT_WAIT_SECONDS = 60;
+/** How long Check again waits after the server said the same request is still in progress (no Retry-After): it only re-enables. */
+const IN_PROGRESS_WAIT_MS = 5_000;
+const waitable = 'aria-disabled:opacity-50 aria-disabled:cursor-not-allowed';
 /** An issued invoice's current state as the server's read says it (never which request made it so). */
 export const STATUS_TEXT: Readonly<Record<IssuedStatus, string>> = Object.freeze({ issued: 'Issued', voided: 'Voided' });
 
@@ -184,6 +204,124 @@ const fieldsOf = (s: IssuingSettings): IssuingSettingsFields => (!s.configured ?
 }));
 const taxText = (s: Extract<IssuingSettings, { configured: true }>): string => (s.tax.mode === 'none' ? 'No tax calculated' : `Exclusive rate ${rateText(s.tax.rateMilliPercent)}`);
 
+/**
+ * The void workflow's texts (M7B-INVOICES-VOID-P2, doc 13 §5 G, design §4): "voided" only after the server's validated 200
+ * for that key or a read that shows it; a read showing it voided never says which request did it; nothing says "cancelled"
+ * or "rolled back".
+ */
+export const VOID_TEXT = Object.freeze({
+  open: 'Void invoice…',
+  reviewing: 'Checking this invoice…',
+  reviewWaiting: 'Too many requests: Void invoice… comes back once the wait has passed.',
+  reviewFailed: 'This invoice could not be checked right now. Try again.',
+  alreadyVoided: 'This invoice is already voided.',
+  /** A 404 from the detail READ (never from the POST alone, design R21). */
+  gone: 'This invoice is no longer available.',
+  title: (n: number) => `Void invoice ${n}?`,
+  consequence: 'Voiding is final in the shop: the invoice keeps its number, its contents and its history, and stays in the list as Voided. It does not refund or record a payment, and it is not a credit note or a tax correction.',
+  reasonLegend: 'Reason for voiding (required)',
+  chooseReason: 'Choose a reason first.',
+  sendChecking: 'Checking your session before sending…',
+  pending: 'Another void is waiting to be confirmed.',
+  sendWaiting: 'Too many requests: Void invoice comes back once the wait has passed.',
+  closeWarning: 'Closing does not cancel the void; the server may have voided it anyway.',
+  sending: 'Voiding the invoice on the server…',
+  finding: 'Checking the invoice…',
+  voided: (n: number) => `Invoice ${n} voided.`,
+  voidedUnread: (n: number) => `Invoice ${n} was voided. Its details could not be loaded.`,
+  afterUnread: 'The invoice could not be loaded again right now.',
+  noLongerAllowed: 'You can no longer void invoices at this store.',
+  refusedUnchecked: 'Not voided: the server refused this request, and your session could not be checked right now.',
+  /** A first send's 403 that no fresh check confirmed (review B1 iam 3): it names no lack of access. */
+  refusedPlain: 'Not voided: the server refused this request.',
+  /** A send or a check pressed while the void's own sign-in is out (review B1 L2): nothing is sent. */
+  signingIn: 'Not sent: a sign-in is in progress.',
+  /** In the open dialog, beside an attempt for its invoice that is out or unconfirmed (review B1 F2): where it is tracked. */
+  heldOutside: 'The void is tracked under Issued invoices once this invoice is closed.',
+  /** Why "Void invoice…" waits while the void's own sign-in is out (review B1 R2-1a): no review under the session it replaces. */
+  reviewSignIn: 'A sign-in is in progress: Void invoice… comes back once it has finished.',
+  /** A confirmation reviewed under an earlier session generation never sends (R2-1c): it closes, and the user reviews again. */
+  staleReview: 'Not sent: this invoice was reviewed before the session changed. Press Void invoice… to review it again.',
+  notSendable: 'Not sent: this store could not be confirmed for voiding. Close this and choose the store again.',
+  rateLimited: 'Not voided: too many requests. Wait, then press Void invoice again.',
+  stepUp: 'Not voided: confirm your sign-in to void this invoice.',
+  /** The same step-up when this page has no sign-in to offer (review B1 truth LOW-4): it never asks for one it cannot take. */
+  stepUpNoMethod: 'Not voided: your sign-in is too old to void invoices here.',
+  reauthTitle: 'Confirm your sign-in to void this invoice',
+  reauthExplain: 'Signing in again starts a new session. Other requests on this page that are still waiting to be confirmed can then only be dismissed.',
+  /** No sign-in method this page can ask for (the settings precedent, adapted): nothing is offered but this. */
+  reauthNone: 'Sign out and sign in again, then void this invoice.',
+  reauthFailed: 'Not signed in: your sign-in was not confirmed. Try again.',
+  reauthUnconfirmed: 'Not signed in: the store server did not confirm your sign-in. Try again.',
+  renewing: 'Signed in again. Checking this invoice with the server…',
+  renewed: 'Signed in again. Choose a reason, then press Void invoice.',
+  renewUnread: 'Signed in again, but this invoice could not be checked. Close this and open the invoice again.',
+  dismissWarning: 'Dismissing only stops tracking it here. It does not cancel the request, which may still void the invoice.',
+  seenVoided: (n: number) => `Invoice ${n} is voided now. This does not show which request voided it.`,
+  seenIssued: (n: number) => `Invoice ${n} still shows as issued. That does not mean the void failed: the request may still be processed.`,
+  /** The reason the invoice records now (a Check invoice read): another request may have voided it with it. */
+  seenReason: (label: string) => `The reason it records: ${label}.`,
+  checkFailed: 'The invoice could not be checked right now.',
+  checkMissing: 'This invoice is not available to this account now. That does not show whether the void went through.',
+  checkDenied: 'You cannot view issued invoices at this store now, so the invoice could not be checked.',
+  detached: 'This void could not be confirmed: your session changed. Open the invoice to see its current state.',
+  coolDown: 'The server is still working on it: Check again comes back in a moment.',
+  waiting: 'Too many requests: this comes back once the wait has passed.',
+});
+
+/** What a refused void attempt says: this request did not void the invoice — never "rolled back", never another request's outcome. */
+export const VOID_REFUSED_TEXT: Readonly<Record<VoidRefusal, string>> = Object.freeze({
+  'already-void': 'Not voided: this invoice is already void.',
+  'version-conflict': 'Not voided: this invoice changed on the server since it was reviewed.',
+  'tenant-conflict': "Not voided: this store isn't part of that tenant any more.",
+  /** A chain 404 on the POST may be the host's refusal before any route ran (design R21): it names no invoice state. */
+  'not-found': 'Not voided: the server refused this request.',
+  'key-reused': 'Not voided: the server rejected this request.',
+  invalid: 'Not voided: the server did not accept this request.',
+  'step-up': 'Not voided: your sign-in was too old. Open the invoice to void it again.',
+  denied: 'Not voided: you can no longer void invoices at this store.',
+  /** R22: the request was sent and refused before anything ran (review B1 truth LOW-3: never "before it was sent"). */
+  'signed-out': 'Not voided: your session had ended when it reached the server.',
+  'rate-limited': 'Not voided: too many requests. Open the invoice to void it again once the wait has passed.',
+});
+/** A first send's refusals after which the dialog that sent it reads the invoice again (its state now, never the request's). */
+const AFTER_REFUSALS: ReadonlySet<VoidRefusal> = new Set(['already-void', 'not-found', 'version-conflict']);
+
+/**
+ * A refused attempt's text: a first send's 403 says "you can no longer void…" only when the one fresh check confirmed it
+ * (`confirmedDenial` is that attempt's key), else the neutral refusal (review B1 iam 3).
+ */
+function refusalTextOf(held: HeldVoid, confirmedDenial: string | null): string {
+  if (held.refusal === null) return '';
+  return held.refusal === 'denied' && confirmedDenial !== held.key ? VOID_TEXT.refusedPlain : VOID_REFUSED_TEXT[held.refusal];
+}
+/** Whether a held attempt proves the invoice is voided now: a validated 200 for its key, or its key's sealed already-void. */
+const voidedBy = (held: HeldVoid | undefined): held is HeldVoid =>
+  held !== undefined && (held.state === 'voided' || (held.state === 'refused' && held.refusal === 'already-void'));
+
+/** What an attempt is doing, as its card and its confirmation say it (a detached one never names its store, design R6). */
+function voidStateText(held: HeldVoid, old: boolean): ReactNode {
+  const n = held.number;
+  const at = <bdi className="break-words">{held.storeLabel}</bdi>;
+  if (held.csrf === null) return held.state === 'voided' ? `Invoice ${n} was voided.` : held.state === 'refused' ? `Void of invoice ${n}` : VOID_TEXT.detached;
+  switch (held.state) {
+    case 'sending': return <>Voiding invoice {n} at {at} on the server…</>;
+    case 'checking': return <>Checking the void of invoice {n} at {at} with the server…</>;
+    case 'voided': return <>Invoice {n} at {at} was voided.</>;
+    case 'refused': return <>Void of invoice {n} at {at}</>;
+    default:
+      return old
+        ? <>Void of invoice {n} at {at} is not confirmed, and it was sent too long ago to check again here. Use Check invoice to see the invoice's current state.</>
+        : <>Void of invoice {n} at {at} is not confirmed. The server may or may not have voided it.</>;
+  }
+}
+/** What the last Check invoice read showed (the invoice now, never this attempt's outcome), or nothing. */
+function voidSeenText(held: HeldVoid): string {
+  if (held.seen === 'voided') return VOID_TEXT.seenVoided(held.number);
+  if (held.seen === 'issued') return VOID_TEXT.seenIssued(held.number);
+  return '';
+}
+
 export interface ServerIssuedInvoicesProps {
   /** The signed-in shop user's UID, or null: nothing is shown without one. */
   readonly uid: string | null;
@@ -198,12 +336,18 @@ export interface ServerIssuedInvoicesProps {
   readonly wallNow?: () => number;
   /** A new Idempotency-Key (default `crypto.randomUUID()`). */
   readonly newKey?: () => string;
+  /** The void hold (default the shop's one, invoiceVoidHold.ts): tests give each rig its own; a new store and a remount is a page load. */
+  readonly voidHolds?: VoidHoldStore;
 }
 
 /** One section per signed-in user (keyed by UID): nothing a previous user's reads answer ever reaches it. */
 export function ServerIssuedInvoices(props: ServerIssuedInvoicesProps) {
+  const holds = props.voidHolds ?? shopVoidHolds; // read at render, never at this module's top level (design R3)
+  // Another user (or none): every other user's void attempt is detached before anything of this one runs (design R12; a
+  // layout effect, so before a late answer of the previous section's request).
+  useLayoutEffect(() => { holds.detachOthers(props.uid); }, [holds, props.uid]);
   if (props.uid === null) return null;
-  return <IssuedSection key={props.uid} {...props} uid={props.uid} />;
+  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -249,8 +393,8 @@ interface ListState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'denied' | 'rate-limited' | 'unavailable';
   readonly text: string; readonly rows: readonly IssuedSummary[]; readonly next: string | null; readonly note: string;
 }
-/** The open issued-invoice dialog: which open it is, and what it reads. */
-interface ViewOpen { readonly id: number; readonly storeId: string; readonly invoiceId: string }
+/** The open issued-invoice dialog: which open it is, what it reads, and its store as the server's list named it (null: none). */
+interface ViewOpen { readonly id: number; readonly storeId: string; readonly invoiceId: string; readonly store: StoreEntry | null }
 
 const STORES_IDLE: StoresState = Object.freeze({ phase: 'idle', text: '', stores: [] });
 const listOf = (gen: number, storeId: string, phase: ListState['phase'] = 'idle', text = ''): ListState =>
@@ -268,7 +412,7 @@ function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
 }
 
 function IssuedSection({
-  uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey,
+  uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds,
 }: ServerIssuedInvoicesProps & { readonly uid: string }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -293,8 +437,28 @@ function IssuedSection({
   const listRef = useRef<ListState>(list);
   const viewRef = useRef<ViewOpen | null>(null);
   const viewSeq = useRef(0); // which dialog open is the latest
-  const seq = useRef({ stores: 0, settings: 0, list: 0 });
-  const ctl = useRef<Record<'stores' | 'settings' | 'list', AbortController | null>>({ stores: null, settings: null, list: null });
+  const seq = useRef({ stores: 0, settings: 0, list: 0, find: 0 });
+  const ctl = useRef<Record<'stores' | 'settings' | 'list' | 'find', AbortController | null>>({ stores: null, settings: null, list: null, find: null });
+  // The void attempt (M7B-INVOICES-VOID-P2): held in the void hold for this uid, outside every dialog. What its last Check
+  // invoice read could not say (by key), the key a Check invoice is out for, the key whose Check again waits after an
+  // in-progress answer — and refs that hold a second press back while a send, a check, a read or a sign-in is out.
+  const voidHeld = useSyncExternalStore(holds.subscribe, () => holds.get(uid));
+  const [voidCheck, setVoidCheck] = useState<{ readonly key: string; readonly text: string } | null>(null);
+  const [voidFinding, setVoidFinding] = useState<string | null>(null);
+  const [voidCool, setVoidCool] = useState<string | null>(null);
+  const voidCoolRef = useRef<string | null>(null);
+  const voidCoolTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voidSending = useRef(false);
+  const voidChecking = useRef<string | null>(null);
+  const voidReading = useRef<string | null>(null);
+  const signingIn = useRef(false); // the void's explicit sign-in is out: a tab return checks nothing meanwhile (R11)
+  const [voidSigning, setVoidSigning] = useState(false); // the same, for the dialog's "Void invoice…" (R2-1a)
+  const eligChecked = useRef(new Set<number>()); // the opens whose eligibility 403 had its one fresh check (R14)
+  // One fresh check per open shared by its detail and eligibility reads when both are refused (review B1 iam 1).
+  const viewDenial = useRef(new Map<number, Promise<'denied' | Failure | null>>());
+  // The attempt whose first-send 403 the one fresh check confirmed: only it says "you can no longer void…" (iam 3).
+  const [voidDenied, setVoidDenied] = useState<string | null>(null);
+  const voidCardHeading = useRef<HTMLHeadingElement | null>(null);
   const waitRef = useRef(false);
   const waitUntil = useRef(0);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -391,14 +555,37 @@ function IssuedSection({
     ctl.current.stores?.abort();
     ctl.current.settings?.abort();
     ctl.current.list?.abort();
-    seq.current = { stores: seq.current.stores + 1, settings: seq.current.settings + 1, list: seq.current.list + 1 };
+    ctl.current.find?.abort();
+    seq.current = { stores: seq.current.stores + 1, settings: seq.current.settings + 1, list: seq.current.list + 1, find: seq.current.find + 1 };
     busyBy.current += 1;
     setBusy(false);
+  }
+
+  /**
+   * A token this section now holds that the void attempt was not sent with (design R12: the first and every later token
+   * `adopt` finds, `begin`, `renew`, `renewKeepingView`): that attempt — live or settled — is detached, never sent again.
+   */
+  function judgeVoid(csrf: string): void {
+    const h = holds.get(uid);
+    if (h !== undefined && h.csrf !== null && h.csrf !== csrf) holds.detach(uid);
+  }
+  /** Past the cutoff, the bytes go (a focus, a tab return; the hold's own timer too). Never a send. */
+  function scrubVoid(): void {
+    const h = holds.get(uid);
+    if (h !== undefined && h.body !== '' && voidExpired(h, clock(), wall())) holds.change(uid, h.key, { body: '' });
+  }
+  /** After an in-progress answer Check again waits a moment; the timer only gives it back. */
+  function coolVoid(key: string): void {
+    if (voidCoolTimer.current !== null) clearTimeout(voidCoolTimer.current);
+    voidCoolRef.current = key;
+    setVoidCool(key);
+    voidCoolTimer.current = setTimeout(() => { voidCoolTimer.current = null; voidCoolRef.current = null; setVoidCool(null); }, IN_PROGRESS_WAIT_MS);
   }
 
   /** A new generation: everything read under the previous token goes, and the stores are read again. */
   function begin(csrf: string): void {
     gen.current = { n: gen.current.n + 1, csrf };
+    judgeVoid(csrf);
     abortReads();
     clearWait();
     dropPanel();
@@ -412,7 +599,7 @@ function IssuedSection({
   /** Take a confirmed token: the first fixes the generation, the same changes nothing, another starts a new one (true). */
   function adopt(csrf: string): boolean {
     if (gen.current.csrf === csrf) return false;
-    if (gen.current.csrf === null) { gen.current.csrf = csrf; return false; }
+    if (gen.current.csrf === null) { gen.current.csrf = csrf; judgeVoid(csrf); return false; }
     begin(csrf);
     return true;
   }
@@ -425,6 +612,7 @@ function IssuedSection({
   function renew(csrf: string): void {
     if (gen.current.csrf === csrf) return;
     gen.current = { n: gen.current.n + 1, csrf };
+    judgeVoid(csrf);
     abortReads();
     // What was read under the old token goes (DESIGN §2): the open invoice, and the list's pages and cursor — the store stays
     // chosen and the list says so, with Try again (page one under this token). Nothing is read on its own.
@@ -432,9 +620,23 @@ function IssuedSection({
     const l = listRef.current;
     if (l.storeId !== '') putList({ ...listOf(gen.current.n, l.storeId), phase: 'unavailable', text: LIST_TEXT.renewed });
   }
+  /**
+   * The void's own explicit sign-in renewed the session (design R11): its token is adopted and every void attempt sent with
+   * the old one detached, as `renew` does — but the open dialog STAYS (it re-reads the invoice and its eligibility itself);
+   * the list read under the old token goes as `renew`'s does.
+   */
+  function renewKeepingView(csrf: string): void {
+    if (gen.current.csrf === csrf) return;
+    gen.current = { n: gen.current.n + 1, csrf };
+    judgeVoid(csrf);
+    abortReads();
+    const l = listRef.current;
+    if (l.storeId !== '') putList({ ...listOf(gen.current.n, l.storeId), phase: 'unavailable', text: LIST_TEXT.renewed });
+  }
 
   /** A refusal of the session clears every view (Reconnect then). */
   function failSession(failure: Failure): void {
+    if (failure.kind === 'signed-out') holds.detach(uid); // design R12: a sent void can never be checked again under a later session
     abortReads();
     setChanged(false);
     putStores({ phase: failure.kind, text: failure.text, stores: [] });
@@ -468,6 +670,19 @@ function IssuedSection({
     if (again.kind === 'signed-out') { failSession(again); return null; }
     if (again.seconds !== undefined) return { kind: 'rate-limited', text: pickerWaitText(waited ?? startWait(again.seconds)), seconds: again.seconds };
     return UNAVAILABLE;
+  }
+
+  /** A 403 of one open's reads: ONE in-flight fresh check shared by its detail and eligibility reads (iam 1); each asks its own `stale` after. */
+  async function viewDenialOf(viewId: number, stale: () => boolean): Promise<'denied' | Failure | null> {
+    let check = viewDenial.current.get(viewId);
+    if (check === undefined) {
+      const started = denialOf(() => false);
+      check = started;
+      viewDenial.current.set(viewId, started);
+      void started.finally(() => { if (viewDenial.current.get(viewId) === started) viewDenial.current.delete(viewId); });
+    }
+    const verdict = await check;
+    return stale() ? null : verdict;
   }
 
   async function readStores(reconnect = false): Promise<void> {
@@ -626,7 +841,8 @@ function IssuedSection({
   /** Open: the dialog reads the invoice itself; a new open replaces nothing (the page behind is inert while it is up). */
   function openView(row: IssuedSummary): void {
     if (viewRef.current !== null || listRef.current.storeId !== storeRef.current) return;
-    const next: ViewOpen = { id: ++viewSeq.current, storeId: storeRef.current, invoiceId: row.id };
+    const store = storesRef.current.stores.find((entry) => entry.id === storeRef.current) ?? null;
+    const next: ViewOpen = { id: ++viewSeq.current, storeId: storeRef.current, invoiceId: row.id, store };
     viewRef.current = next;
     setViewState(next);
   }
@@ -656,12 +872,305 @@ function IssuedSection({
     if (answer.kind === 'ok' || answer.kind === 'not-found') return answer;
     if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
     if (answer.kind === 'denied') {
-      const verdict = await denialOf(stale);
+      const verdict = await viewDenialOf(viewId, stale);
       if (verdict === null) return null;
       return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
     }
     if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
     return { kind: 'unavailable' };
+  }
+
+  // ---- voiding an issued invoice (M7B-INVOICES-VOID-P2) ----
+
+  /**
+   * The dialog's action-only eligibility read (design R14), under the dialog read's context: 'allowed' only for the
+   * server's exact allowed; every other answer is 'not' (the dialog then shows nothing but its reserved row) — a 401 ends
+   * the session, a 429 starts the section's wait, and a 403 gets the reads' ONE fresh check at most once per open. During a
+   * wait nothing is sent. Null when the context that asked is gone.
+   */
+  async function readVoidEligibility(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<'allowed' | 'not' | null> {
+    if (waitRef.current) return 'not';
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || storeId !== storeRef.current || since !== sessionEndsSoFar()
+      || viewRef.current?.id !== viewId || viewRef.current.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const s = await connect();
+    if (stale()) return null;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') { failSession(failure); return null; }
+      if (failure.seconds !== undefined) startWait(failure.seconds);
+      return 'not';
+    }
+    if (adopt(s.csrf)) return null; // a new generation closed the dialog
+    const answer = await issuing.voidEligibility(storeId, invoiceId, s.csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'allowed') return 'allowed';
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+    if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return 'not'; }
+    if (answer.kind === 'denied' && !eligChecked.current.has(viewId)) {
+      eligChecked.current.add(viewId);
+      return (await viewDenialOf(viewId, stale)) === null ? null : 'not';
+    }
+    return 'not';
+  }
+
+  /**
+   * One press of a confirmation's "Void invoice": ONE POST under ONE new key (design §4 "The press"). A ref holds a second
+   * activation back; after the session check the context is checked again — the same generation, store, dialog and
+   * invoice, the confirmation still open, its eligibility, no live void attempt of this user — then the body is built ONCE
+   * (the store's own tenant from the server's store list, R2) and validated, the key minted, and the attempt held BEFORE
+   * the request leaves. The POST has no signal: closing a dialog never cancels it. Null when nothing was sent and the
+   * context that pressed is gone (another generation, a session end — they close the dialog themselves).
+   */
+  async function sendVoid(viewId: number, store: StoreEntry, press: VoidPress): Promise<VoidSendOutcome | null> {
+    const notSent = (text: string): VoidSendOutcome => ({ kind: 'not-sent', text });
+    // Never a silent no-op (review B1 L3): an earlier send still out, the void's sign-in out (L2), a wait, a live attempt,
+    // or this invoice already known voided by an attempt of this user (F1) — each said, nothing sent.
+    if (voidSending.current) return notSent(VOID_TEXT.pending);
+    if (signingIn.current) return notSent(VOID_TEXT.signingIn);
+    if (press.reviewGen !== gen.current.n) return { kind: 'stale' }; // reviewed under a replaced session (R2-1c)
+    if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+    if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
+    const voidedHere = (): boolean => { const h = holds.get(uid); return voidedBy(h) && h.storeId === store.id && h.invoiceId === press.invoiceId; };
+    if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided);
+    voidSending.current = true; // a ref: a second activation in the same task sends nothing
+    try {
+      const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      const viewStands = (): boolean => alive.current && viewRef.current?.id === viewId && viewRef.current.invoiceId === press.invoiceId && storeRef.current === store.id;
+      const s = await connect();
+      if (!viewStands() || since !== sessionEndsSoFar()) return null;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') { failSession(failure); return null; }
+        return notSent(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : ISSUED_TEXT.unavailable}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== mine) return null; // another session: its new generation closed the dialog
+      if (press.reviewGen !== gen.current.n) return { kind: 'stale' }; // the final guard: never a key for a stale review (R2-1c)
+      if (!press.open()) return null; // Keep invoice or Escape while the session was checked: nothing is sent
+      if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+      if (!press.allowed()) return notSent(VOID_TEXT.noLongerAllowed);
+      if (signingIn.current) return notSent(VOID_TEXT.signingIn);
+      if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
+      if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided); // settled voided meanwhile (F1): never a second key for it
+      const body = voidBodyOf(store.tenantId, press.reasonCode);
+      if (body === null || !isVoidTarget(press.invoiceId)) return notSent(VOID_TEXT.notSendable); // nothing held for what cannot go (R1)
+      const key = nextKey();
+      const attempt: HeldVoid = {
+        key, body, storeId: store.id, storeLabel: storeLabel(store), invoiceId: press.invoiceId, number: press.number, csrf: s.csrf,
+        sentAt: clock(), sentWall: wall(), state: 'sending', note: '', refusal: null, seen: null, seenReason: null, retryable: true,
+      };
+      if (!holds.put(uid, attempt)) return notSent(VOID_TEXT.pending); // HELD BEFORE IT LEAVES
+      setVoidCheck(null);
+      press.held(key);
+      const answer = await issuing.voidInvoice(attempt.storeId, attempt.invoiceId, key, body, s.csrf); // NO AbortSignal
+      return await answerVoid(key, answer, true, { csrf: s.csrf, since, mine }, { open: press.open, stale: () => !viewStands() });
+    } finally {
+      voidSending.current = false;
+    }
+  }
+
+  /**
+   * One void answer: settled BY KEY in the hold (settleVoid: a token or sign-out change since it was sent detaches it,
+   * a settled attempt is final), then what the section does about it — only while the session it was sent with still
+   * stands: a 429 starts the section's wait, a 401 ends the session (R22; after the settle, so a closed confirmation's
+   * attempt keeps its refusal), a first send's 403 gets the one fresh check BEFORE it is settled, an in-progress answer
+   * holds Check again a moment. A validated 200 re-reads page one and says so — only while the same generation and the
+   * attempt's store are still chosen (R23), whether or not the dialog is open. `view`: the confirmation that pressed (a
+   * first send); what it is to say comes back.
+   */
+  async function answerVoid(
+    key: string, answer: VoidResult, first: boolean, sent: { readonly csrf: string; readonly since: number; readonly mine: number },
+    view: { readonly open: () => boolean; readonly stale: () => boolean } | null,
+  ): Promise<VoidSendOutcome | null> {
+    // The same session AND generation (review B1 M3): a token that came back after another one never speaks for it.
+    const same = (): boolean => alive.current && gen.current.n === sent.mine && gen.current.csrf === sent.csrf && sent.since === sessionEndsSoFar();
+    const before = holds.get(uid);
+    const wasVoided = before?.key === key && before.state === 'voided';
+    let verdict: 'denied' | Failure | null = null;
+    // The check's verdict counts whether or not the dialog is still there (a closed confirmation's card says it, iam 3).
+    if (first && answer.kind === 'denied' && same()) verdict = await denialOf(() => false);
+    if (verdict === 'denied' && alive.current) setVoidDenied(key);
+    settleVoid(holds, uid, key, answer, first, { csrf: sent.csrf, since: sent.since }, view?.open() ?? false);
+    const h = holds.get(uid);
+    if (answer.kind === 'rate-limited' && same()) startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'in-progress' && h?.key === key && alive.current) coolVoid(key);
+    if (answer.kind === 'signed-out' && same()) failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+    if (answer.kind === 'denied' && !first && same()) void denialOf(() => true); // the check's 403: its one fresh check (a new token detaches)
+    // Only the answer that made the transition says it (a duplicate never re-announces), and only under the same generation
+    // with the attempt's store chosen (R23). During a wait page one is owed: the list says so with its Try again, given
+    // back when the wait has passed (review B1 F4) — never a read on its own.
+    if (h?.key === key && h.state === 'voided' && !wasVoided && alive.current && gen.current.n === sent.mine && storeRef.current === h.storeId) {
+      setNotice(VOID_TEXT.voided(h.number));
+      const l = listRef.current;
+      if (!waitRef.current) void readList('first');
+      else if (l.storeId === h.storeId) {
+        // Owed: a list read still out (asked before the void) is cancelled and its answer stale, so no older snapshot can
+        // replace this — only the user's page-one read after the wait does (review B1 R2-3).
+        ctl.current.list?.abort();
+        seq.current.list += 1;
+        busyBy.current += 1;
+        setBusy(false);
+        putList({ ...l, phase: 'rate-limited', text: pickerWaitText(waitLeft()), note: '' });
+      }
+    }
+    if (!first || view === null) return { kind: 'sent' };
+    switch (answer.kind) {
+      case 'not-sent': return { kind: 'not-sent', text: VOID_TEXT.notSendable }; // the client refused it: nothing left (only a defect gets here, R1)
+      case 'step-up': return { kind: 'step-up', method: identity.reauthMethod(uid) };
+      case 'rate-limited': return { kind: 'rate-limited', text: VOID_TEXT.rateLimited };
+      case 'signed-out': return null;
+      case 'denied':
+        if (view.stale()) return null;
+        if (verdict === 'denied') return { kind: 'denied', text: VOID_TEXT.noLongerAllowed, gone: true };
+        if (verdict === null) return { kind: 'denied', text: VOID_TEXT.refusedPlain, gone: false }; // no check confirmed it
+        return { kind: 'denied', text: verdict.kind === 'rate-limited' ? `Not voided: ${verdict.text}` : VOID_TEXT.refusedUnchecked, gone: false };
+      default: return { kind: 'sent' };
+    }
+  }
+
+  /**
+   * "Check again": the SAME key and bytes to the attempt's own store and invoice, under the token it was sent with — only on
+   * the user's press, never while detached, withdrawn (retryable), past the cutoff (judged before the session check and
+   * again just before it leaves) or in the moment after an in-progress answer. A different current token detaches it (R12).
+   * Every path ends unresolved or settled: an attached attempt is never left checking.
+   */
+  async function checkVoid(): Promise<void> {
+    const h = holds.get(uid);
+    if (h === undefined || h.state !== 'unresolved' || !h.retryable || h.csrf === null || voidChecking.current !== null || waitRef.current || voidCoolRef.current === h.key) return;
+    if (signingIn.current) return void setVoidCheck({ key: h.key, text: VOID_TEXT.signingIn }); // L2: nothing sent beside the sign-in
+    if (h.body === '' || voidExpired(h, clock(), wall())) { if (h.body !== '') holds.change(uid, h.key, { body: '' }); return; }
+    const { key, csrf } = h;
+    voidChecking.current = key;
+    const since = sessionEndsSoFar();
+    const mine = gen.current.n;
+    // A check starts afresh (review B1 L4): an earlier Check invoice failure, and an "issued" observation that may be out of
+    // date, go; a "voided" one stays (it is terminal).
+    setVoidCheck(null);
+    holds.change(uid, key, h.seen === 'issued' ? { state: 'checking', note: '', seen: null, seenReason: null } : { state: 'checking', note: '' });
+    let settled = false;
+    const leave = (note: string): void => { settled = true; holds.change(uid, key, { state: 'unresolved', note }); };
+    try {
+      const s = await connect();
+      const now = holds.get(uid);
+      if (now?.key !== key || now.csrf === null || since !== sessionEndsSoFar() || !alive.current) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') { leave(VOID_NOTE_TEXT.signedOut); return failSession(failure); }
+        if (failure.seconds !== undefined) startWait(failure.seconds);
+        return leave(failure.seconds !== undefined ? VOID_NOTE_TEXT.rateLimited(failure.seconds) : VOID_NOTE_TEXT.noAnswer);
+      }
+      if (adopt(s.csrf)) return; // another token: its new generation detached the attempt
+      if (s.csrf !== csrf) { holds.detach(uid); return; }
+      if (voidExpired(h, clock(), wall())) { settled = true; holds.change(uid, key, { state: 'unresolved', body: '' }); return; } // judged again, just before it leaves
+      const answer = await issuing.voidInvoice(h.storeId, h.invoiceId, key, h.body, csrf);
+      settled = true;
+      await answerVoid(key, answer, false, { csrf, since, mine }, null);
+    } finally {
+      if (voidChecking.current === key) voidChecking.current = null;
+      const now = holds.get(uid);
+      if (!settled && now?.key === key && now.state === 'checking' && now.csrf !== null) holds.change(uid, key, { state: 'unresolved', note: '' });
+    }
+  }
+
+  /**
+   * "Check invoice": ONE ordinary GET of the attempt's own store and invoice under the CURRENT session — never another void
+   * attempt, and it settles nothing: what it shows is the invoice's state now (`seen`, and the reason it records), never which
+   * request caused it. A failure says only that the check failed.
+   */
+  async function findVoid(): Promise<void> {
+    const h = holds.get(uid);
+    if (h === undefined || voidReading.current !== null || waitRef.current) return;
+    const { key } = h;
+    voidReading.current = key;
+    setVoidFinding(key);
+    setVoidCheck(null);
+    let n = ++seq.current.find;
+    ctl.current.find?.abort();
+    let controller = new AbortController();
+    ctl.current.find = controller;
+    let mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || n !== seq.current.find || mine !== gen.current.n || since !== sessionEndsSoFar() || holds.get(uid)?.key !== key;
+    const say = (text: string): void => setVoidCheck({ key, text });
+    try {
+      const s = await connect();
+      if (stale()) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') return failSession(failure);
+        return say(failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : VOID_TEXT.checkFailed);
+      }
+      if (adopt(s.csrf)) {
+        // Another token: its new generation detached the attempt; this read goes on under it — a new authorized read of the
+        // invoice's state, never a rebinding of the request (review B1 iam 2).
+        mine = gen.current.n;
+        n = ++seq.current.find;
+        controller = new AbortController();
+        ctl.current.find = controller;
+      }
+      const answer = await issuing.getIssued(h.storeId, h.invoiceId, s.csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        if (answer.invoice.id !== h.invoiceId) return say(VOID_TEXT.checkFailed);
+        holds.change(uid, key, { seen: answer.invoice.status, seenReason: answer.invoice.void?.reasonCode ?? null });
+        return;
+      }
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+      if (answer.kind === 'not-found') return say(VOID_TEXT.checkMissing);
+      if (answer.kind === 'denied') {
+        const verdict = await denialOf(stale);
+        if (verdict === null) return;
+        return say(verdict === 'denied' ? VOID_TEXT.checkDenied : verdict.kind === 'rate-limited' ? verdict.text : VOID_TEXT.checkFailed);
+      }
+      if (answer.kind === 'rate-limited') return say(pickerWaitText(startWait(answer.retryAfterSeconds)));
+      say(VOID_TEXT.checkFailed);
+    } finally {
+      if (voidReading.current === key) voidReading.current = null;
+      if (alive.current) setVoidFinding((was) => (was === key ? null : was));
+    }
+  }
+
+  /** "Dismiss": stop tracking it here — never a cancel and never a resend. Not while an attached attempt is out (R8). */
+  function dismissVoid(): void {
+    const h = holds.get(uid);
+    if (h === undefined || (h.csrf !== null && (h.state === 'sending' || h.state === 'checking')) || voidReading.current === h.key) return;
+    heading.current?.focus(); // the card goes
+    holds.remove(uid, h.key);
+    setVoidCheck(null);
+  }
+
+  /**
+   * The void's explicit sign-in after a first send's 403 step_up_required (nothing ran): the provider's re-authentication,
+   * then the session's — its new token adopted WITHOUT closing the dialog (renewKeepingView, R11). The dialog re-reads and
+   * asks for a new press itself; nothing is sent here. Null when the dialog's context went meanwhile.
+   */
+  async function signInForVoid(viewId: number, secret: string | null): Promise<VoidSignIn | null> {
+    if (signingIn.current || waitRef.current) return null;
+    signingIn.current = true;
+    setVoidSigning(true);
+    const since = sessionEndsSoFar();
+    const mine = gen.current.n;
+    const here = (): boolean => alive.current && viewRef.current?.id === viewId && since === sessionEndsSoFar() && mine === gen.current.n;
+    try {
+      let fresh: string | null;
+      try { fresh = await identity.reauthenticate(uid, secret); } catch { fresh = null; }
+      if (!here()) return null;
+      if (fresh === null) return { kind: 'failed', text: VOID_TEXT.reauthFailed };
+      const renewed = await session.reauthenticate(uid, fresh);
+      if (!here()) return null;
+      if (renewed.kind !== 'ok') {
+        const failure = sessionFailure(renewed);
+        if (failure.kind === 'signed-out') { failSession(failure); return null; }
+        return { kind: 'failed', text: failure.seconds !== undefined ? `Not signed in: ${pickerWaitText(startWait(failure.seconds))}` : VOID_TEXT.reauthUnconfirmed };
+      }
+      renewKeepingView(renewed.csrf);
+      return { kind: 'renewed' };
+    } finally {
+      signingIn.current = false;
+      if (alive.current) setVoidSigning(false);
+    }
   }
 
   // ---- the settings panel ----
@@ -989,6 +1498,7 @@ function IssuedSection({
    * saves, and never signs in after a confirmed end.
    */
   function checkSession(): void {
+    if (signingIn.current) return; // the void's sign-in is out: its own answer decides (design R11)
     if (document.visibilityState === 'hidden' || gen.current.csrf === null || storesRef.current.phase === 'signed-out') return;
     const mine = gen.current.n;
     void connect().then((s) => {
@@ -1031,7 +1541,8 @@ function IssuedSection({
     (stepUpMethod === 'password' ? passwordRef.current : confirmRef.current)?.focus();
   }, [stepUpMethod]);
   useEffect(() => {
-    const check = (): void => checkSession();
+    // A held void past its cutoff loses its bytes on a return too (a throttled timer may not have run); never a send.
+    const check = (): void => { scrubVoid(); checkSession(); };
     window.addEventListener('focus', check);
     document.addEventListener('visibilitychange', check);
     // A sign-out, heard where it starts, while this section is mounted: a new generation with no token, every read
@@ -1050,7 +1561,9 @@ function IssuedSection({
       ctl.current.stores?.abort();
       ctl.current.settings?.abort();
       ctl.current.list?.abort();
+      ctl.current.find?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
+      if (voidCoolTimer.current !== null) clearTimeout(voidCoolTimer.current);
     };
     // A section serves one UID (see ServerIssuedInvoices); the clients are fixed for its life.
   }, []);
@@ -1065,6 +1578,19 @@ function IssuedSection({
   // Why Load more and Try again wait: the section's rate-limit wait, or a list read still out.
   const listHold = waiting ? 'issued-list-wait' : busy ? 'issued-list-busy' : undefined;
   const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
+  /** The Issued section's void action for the dialog it opened (the drafts card's View invoice never gets one). */
+  const voidingOf = (v: ViewOpen, store: StoreEntry): IssuedVoidCapability => ({
+    store, held: voidHeld, expired: voidHeld !== undefined && voidExpired(voidHeld, clock(), wall()),
+    cooling: voidHeld !== undefined && voidCool === voidHeld.key, finding: voidHeld !== undefined && voidFinding === voidHeld.key,
+    checkText: voidHeld !== undefined && voidCheck?.key === voidHeld.key ? voidCheck.text : '', confirmedDenial: voidDenied,
+    reauthMethod: () => identity.reauthMethod(uid), signingIn: voidSigning, generation: () => gen.current.n,
+    eligibility: (signal) => readVoidEligibility(v.id, v.storeId, v.invoiceId, signal),
+    send: (press) => sendVoid(v.id, store, press),
+    check: () => { if (!waitRef.current && voidCoolRef.current === null) void checkVoid(); },
+    find: () => { if (!waitRef.current) void findVoid(); },
+    signIn: (secret) => signInForVoid(v.id, secret),
+  });
+  const cardHeld = voidHeld?.state === 'refused' && voidHeld.refusal === 'signed-out' && signedOut ? undefined : voidHeld;
   const track = (target: EventTarget | null): void => {
     if (target instanceof Element && section.current?.contains(target) === true) keepFocus.current = { from: target, inPanel: target.closest('[data-testid="issued-settings"]') !== null };
   };
@@ -1085,6 +1611,16 @@ function IssuedSection({
           <button type="button" data-testid="issued-detached-dismiss" onClick={() => { heading.current?.focus(); setDetached(false); }} className={quiet}>Dismiss</button>
         </div>
       )}
+      <VoidCard
+        // R22: a first send refused because the session had ended is said once Reconnect has begun a session again, never
+        // beside the signed-out section (review B1 iam 4).
+        held={cardHeld} confirmedDenial={voidDenied}
+        expired={voidHeld !== undefined && voidExpired(voidHeld, clock(), wall())} waiting={waiting} cooling={voidHeld !== undefined && voidCool === voidHeld.key}
+        finding={voidHeld !== undefined && voidFinding === voidHeld.key} checkText={voidHeld !== undefined && voidCheck?.key === voidHeld.key ? voidCheck.text : ''} headingRef={voidCardHeading}
+        onCheck={() => { if (waitRef.current || voidCoolRef.current !== null) return; voidCardHeading.current?.focus(); void checkVoid(); }}
+        onFind={() => { if (waitRef.current) return; voidCardHeading.current?.focus(); void findVoid(); }}
+        onDismiss={dismissVoid}
+      />
 
       {open && (
         <div className="space-y-4">
@@ -1227,6 +1763,7 @@ function IssuedSection({
         <IssuedInvoiceDialog
           key={view.id} storeId={view.storeId} invoiceId={view.invoiceId} read={(s, i, signal) => readView(view.id, s, i, signal)} waiting={waiting} onClose={closeView} returnFocus={heading}
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
+          voiding={view.store === null ? undefined : voidingOf(view, view.store)}
         />
       )}
     </section>
@@ -1242,13 +1779,68 @@ export type IssuedReadAnswer =
   | { readonly kind: 'not-found' | 'denied' | 'unavailable' }
   | { readonly kind: 'rate-limited'; readonly text: string };
 
+/** One press of the void confirmation's "Void invoice" (M7B-INVOICES-VOID-P2): what is voided, why, and the confirmation's callbacks. */
+export interface VoidPress {
+  readonly invoiceId: string;
+  readonly number: number;
+  readonly reasonCode: InvoiceVoidReasonCode;
+  /** Whether the confirmation that pressed is still open: closed before the send, nothing is sent; a pre-key refusal is said there. */
+  readonly open: () => boolean;
+  /** Whether the dialog's eligibility still says allowed. */
+  readonly allowed: () => boolean;
+  /** Told the key the moment the attempt is held, before the POST leaves. */
+  readonly held: (key: string) => void;
+  /** The section generation its review read was made under: another one now, and nothing is sent (review B1 R2-1c). */
+  readonly reviewGen: number;
+}
+/** What a press comes back with for its confirmation to say. 'sent': the server answered — the hold says what, by key. */
+export type VoidSendOutcome =
+  | { readonly kind: 'not-sent'; readonly text: string }
+  | { readonly kind: 'sent' }
+  | { readonly kind: 'step-up'; readonly method: 'password' | 'google' | null }
+  | { readonly kind: 'rate-limited'; readonly text: string }
+  | { readonly kind: 'denied'; readonly text: string; readonly gone: boolean }
+  /** Reviewed under an earlier generation (R2-1c): nothing sent; the confirmation closes. */
+  | { readonly kind: 'stale' };
+export type VoidSignIn = { readonly kind: 'renewed' } | { readonly kind: 'failed'; readonly text: string };
+
+/** The Issued section's void action for the one dialog it opened (design §4): the drafts card's View invoice never has one. */
+export interface IssuedVoidCapability {
+  /** The dialog's store as the server's store list named it when it was opened: its label and its tenant (the body's). */
+  readonly store: StoreEntry;
+  /** The user's void attempt now (the section's hold), whatever invoice it is for. */
+  readonly held: HeldVoid | undefined;
+  /** Whether that attempt is past its 23-hour cutoff (the section's clocks). */
+  readonly expired: boolean;
+  /** Check again waits a moment after an in-progress answer. */
+  readonly cooling: boolean;
+  /** A Check invoice read of that attempt is out. */
+  readonly finding: boolean;
+  /** What that attempt's last Check invoice read could not say ('' for none). */
+  readonly checkText: string;
+  /** The attempt whose first-send 403 the one fresh check confirmed (its refusal then says the access is gone), or null. */
+  readonly confirmedDenial: string | null;
+  readonly reauthMethod: () => 'password' | 'google' | null;
+  /** The void's own sign-in is out: no new review may start until it has finished (review B1 R2-1a). */
+  readonly signingIn: boolean;
+  /** The section's generation now (a review records it; a send under another is refused, R2-1c). */
+  readonly generation: () => number;
+  /** The action-only eligibility read (one per call): null when the context that asked is gone. */
+  readonly eligibility: (signal: AbortSignal) => Promise<'allowed' | 'not' | null>;
+  readonly send: (press: VoidPress) => Promise<VoidSendOutcome | null>;
+  readonly check: () => void;
+  readonly find: () => void;
+  readonly signIn: (secret: string | null) => Promise<VoidSignIn | null>;
+}
+
 export interface IssuedInvoiceDialogProps {
   readonly storeId: string;
   readonly invoiceId: string;
   /**
    * ONE read of the invoice under the owner's session and context — its session check, a 401, a 403's one fresh check, a
    * 429's wait — or null when the context that asked is gone. The dialog calls it once when it opens and on its own Try
-   * again; never on a timer, a focus or a re-render.
+   * again; never on a timer, a focus or a re-render. With `voiding`, also on the user's "Void invoice…" (the review), after
+   * a void's answer, on "Load again" and after the void's sign-in — each its own read that keeps what is shown.
    */
   readonly read: (storeId: string, invoiceId: string, signal: AbortSignal) => Promise<IssuedReadAnswer | null>;
   /**
@@ -1262,6 +1854,8 @@ export interface IssuedInvoiceDialogProps {
   readonly onClose: () => void;
   /** Where focus goes on close when the control that opened the dialog is gone (its row left the list). */
   readonly returnFocus: RefObject<HTMLElement | null>;
+  /** The void action (M7B-INVOICES-VOID-P2): only the Issued section gives one; without it the dialog is exactly the read-only one. */
+  readonly voiding?: IssuedVoidCapability;
 }
 
 type ViewState =
@@ -1270,6 +1864,38 @@ type ViewState =
 const VIEW_LOADING: ViewState = Object.freeze({ phase: 'loading', text: VIEW_TEXT.loading, invoice: null });
 /** The first render: loading, with its status region in place but still empty — the loading text is then a change to it (announced). */
 const VIEW_OPENING: ViewState = Object.freeze({ phase: 'loading', text: '', invoice: null });
+const UNAVAILABLE_READ: IssuedReadAnswer = Object.freeze({ kind: 'unavailable' });
+
+/** The void confirmation over the dialog: which open it is, exactly what it confirms (the review read's invoice), the reason, and where it is. */
+interface VoidConfirm {
+  readonly id: number;
+  readonly invoice: IssuedInvoice;
+  readonly reason: InvoiceVoidReasonCode | null;
+  /** An empty press: the reasons say "Choose a reason first.". */
+  readonly invalid: boolean;
+  /** The section generation its review read was made under (R2-1c). */
+  readonly gen: number;
+  /** The attempt this confirmation pressed (held before it left), or null. */
+  readonly key: string | null;
+  /** Its press is out (the session check, before any key). */
+  readonly saving: boolean;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+  /** A first send's 403 step_up_required (nothing ran): the sign-in group. */
+  readonly stepUp: { readonly method: 'password' | 'google' | null } | null;
+  readonly confirming: boolean;
+  /** The re-read after a sign-in is out. */
+  readonly renewing: boolean;
+  /** A decisive answer said outside the hold (no longer allowed, not checked): Close only. */
+  readonly decided: boolean;
+}
+/** Each void-side read of the dialog has its own abort (design R9); the detail reads among them share one sequence (F1). */
+type VoidReadKind = 'elig' | 'review' | 'after' | 'load' | 'renew' | 'renewElig';
+/**
+ * The detail reads of one open — its first read and Try again, the review, the post-void read, Load again and the sign-in's
+ * re-read — share ONE sequence: only the latest started may set what is shown, so a review answered before a void's commit
+ * can never overwrite the voided detail read after it, nor open a confirmation (review B1 F1).
+ */
+const DETAIL_KINDS: ReadonlySet<VoidReadKind> = new Set(['review', 'after', 'load', 'renew']);
 
 /**
  * The issued invoice as the server recorded it (snapshot version 1): number, "Issued" or "Voided" (with the UTC void time
@@ -1279,15 +1905,64 @@ const VIEW_OPENING: ViewState = Object.freeze({ phase: 'loading', text: '', invo
  * (whitespace-nowrap; text-sm below sm, SDB-23's rule) and the lines table scrolls sideways in its own named region. Laid
  * out from the top (anchor="top"): an answer that grows the dialog never moves Close, which has the first focus. Escape and
  * Close close it; focus goes back to the row's Open, or `returnFocus` when that row is gone.
+ *
+ * With `voiding` (the Issued section's only; M7B-INVOICES-VOID-P2): a row under the header, reserved from the open on,
+ * where "Void invoice…" shows once the eligibility read (sent with the detail read) answered allowed and the invoice is
+ * issued; its own status and alert regions; the review re-read, the confirmation (VoidConfirmDialog) and, once this
+ * dialog's attempt is voided or refused for a reason that names the invoice, ONE re-read of the detail ("Load again"
+ * retries only that GET). A late answer of any of these reads changes nothing once its open, its kind's latest read or
+ * its context is gone.
  */
-export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus }: IssuedInvoiceDialogProps) {
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding }: IssuedInvoiceDialogProps) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<ViewState>(VIEW_OPENING);
   const alive = useRef(false);
   const seq = useRef(0);
   const ctl = useRef<AbortController | null>(null);
-  const owner = useRef({ read, current });
-  useLayoutEffect(() => { owner.current = { read, current }; });
+  const owner = useRef({ read, current, voiding });
+  useLayoutEffect(() => { owner.current = { read, current, voiding }; });
+  // The void action (idle, and nothing of it rendered, without `voiding`).
+  // The eligibility answer AND the section generation it was read under (review B1 R3-1b): only an 'allowed' read under
+  // the generation that stands now permits the action; an older one counts as not yet known.
+  const [elig, setEligState] = useState<{ readonly value: 'asking' | 'allowed' | 'not'; readonly gen: number }>({ value: 'asking', gen: -1 });
+  const eligRef = useRef<{ readonly value: 'asking' | 'allowed' | 'not'; readonly gen: number }>({ value: 'asking', gen: -1 });
+  // The renewal's own re-reads are out (review B1 R3-1a): no new review or send until they are applied.
+  const [renewalOut, setRenewalOutState] = useState(false);
+  const renewalRef = useRef(false);
+  const [gone, setGoneState] = useState(false); // the action was taken away (a refusal that stands)
+  const goneRef = useRef(false);
+  const [reviewing, setReviewing] = useState(false);
+  const reviewingRef = useRef(false); // a second press of "Void invoice…" sends no second review GET
+  const [say, setSay] = useState<{ readonly alert: boolean; readonly text: string } | null>(null);
+  const [after, setAfter] = useState<{ readonly busy: boolean; readonly failed: string | null }>({ busy: false, failed: null });
+  const [confirm, setConfirmState] = useState<VoidConfirm | null>(null);
+  const confirmRef = useRef<VoidConfirm | null>(null);
+  const confirmSeq = useRef(0);
+  const [voidKey, setVoidKey] = useState<string | null>(null); // the attempt pressed from this open (it may outlive its confirmation)
+  const [password, setPassword] = useState('');
+  const [focusReasons, setFocusReasons] = useState(0);
+  const [focusSignIn, setFocusSignIn] = useState(0);
+  const pressing = useRef(false);
+  const afterFor = useRef<string | null>(null);
+  const liveSeen = useRef(new Set<string>()); // attempts for this invoice seen out (or pressed) while this dialog was open
+  const vseq = useRef<Record<VoidReadKind, number>>({ elig: 0, review: 0, after: 0, load: 0, renew: 0, renewElig: 0 });
+  const vctl = useRef<Record<VoidReadKind, AbortController | null>>({ elig: null, review: null, after: null, load: null, renew: null, renewElig: null });
+  const setElig = (value: 'allowed' | 'not', gen: number): void => { const next = { value, gen }; eligRef.current = next; setEligState(next); };
+  const setRenewal = (out: boolean): void => { renewalRef.current = out; if (alive.current) setRenewalOutState(out); };
+  /** An 'allowed' eligibility read under the generation that stands now (R3-1b). */
+  const allowedNow = (): boolean => {
+    const v = owner.current.voiding;
+    return v !== undefined && eligRef.current.value === 'allowed' && eligRef.current.gen === v.generation();
+  };
+  const takeAway = (): void => { goneRef.current = true; setGoneState(true); };
+  const putConfirm = (next: VoidConfirm | null): void => { confirmRef.current = next; setConfirmState(next); };
+  /** Change the open confirmation when it is still the one `id` names (a closed or replaced one's continuation changes nothing). */
+  const patchConfirm = (id: number, next: Partial<VoidConfirm>): boolean => {
+    const c = confirmRef.current;
+    if (c === null || c.id !== id) return false;
+    putConfirm({ ...c, ...next });
+    return true;
+  };
 
   // Never two reads at once: Try again is offered only once a read has ended, so the effect's cleanup is what cancels one.
   async function load(): Promise<void> {
@@ -1305,60 +1980,603 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     setState({ phase: answer.kind, text: answer.kind === 'not-found' ? VIEW_TEXT.notFound : answer.kind === 'denied' ? VIEW_TEXT.denied : VIEW_TEXT.unavailable, invoice: null });
   }
 
+  /** One void-side read of kind `kind`; null when a later read of that kind took over, the dialog closed or its context is gone. */
+  async function voidRead<T>(kind: VoidReadKind, run: (signal: AbortSignal) => Promise<T | null>): Promise<T | null> {
+    const detail = DETAIL_KINDS.has(kind);
+    const n = detail ? ++seq.current : ++vseq.current[kind];
+    vctl.current[kind]?.abort();
+    const controller = new AbortController();
+    vctl.current[kind] = controller;
+    let answer: T | null;
+    try { answer = await run(controller.signal); } catch { answer = null; }
+    const latest = detail ? n === seq.current : n === vseq.current[kind];
+    if (!alive.current || !latest || answer === null || !owner.current.current()) return null;
+    return answer;
+  }
+  /** The detail again, keeping what is shown until it answers (never "Loading" over it). */
+  const readDetail = (kind: VoidReadKind): Promise<IssuedReadAnswer | null> =>
+    voidRead<IssuedReadAnswer>(kind, (signal) => owner.current.read(storeId, invoiceId, signal).catch(() => UNAVAILABLE_READ));
+  const readEligibility = (kind: VoidReadKind): Promise<'allowed' | 'not' | null> => {
+    const v = owner.current.voiding;
+    return v === undefined ? Promise.resolve(null) : voidRead(kind, (signal) => v.eligibility(signal));
+  };
+
   useEffect(() => {
     alive.current = true;
     // The one read of this open. Closing cancels it; so does StrictMode's first unmount — before its session check has
-    // answered, so the client sends nothing for it (an aborted signal never reaches fetch): one open, one GET.
+    // answered, so the client sends nothing for it (an aborted signal never reaches fetch): one open, one GET. The void
+    // eligibility, when the owner offers the action, is read beside it (its own read, cancelled the same way).
     void load();
-    return () => { alive.current = false; ctl.current?.abort(); };
+    const opened = owner.current.voiding?.generation();
+    if (opened !== undefined) void readEligibility('elig').then((answer) => { if (answer !== null) setElig(answer, opened); });
+    return () => {
+      alive.current = false;
+      ctl.current?.abort();
+      for (const controller of Object.values(vctl.current)) controller?.abort();
+    };
     // One dialog per open: its store and invoice are fixed for its life.
   }, []);
 
+  // This invoice's attempt, whichever open pressed it (review B1 F1): the user's held attempt for this store and invoice.
+  // `watched`: pressed here or seen out while this dialog was open — only its settling makes the dialog read again or say
+  // what its key got. `terminal`: a validated 200 or a sealed already-void for it — the invoice is voided now.
+  const held = voiding?.held;
+  const mine = held !== undefined && held.storeId === storeId && held.invoiceId === invoiceId ? held : undefined;
+  if (mine !== undefined && isLiveVoid(mine)) liveSeen.current.add(mine.key); // idempotent, so safe during a render
+  const watched = mine !== undefined && (mine.key === voidKey || liveSeen.current.has(mine.key));
+  const terminal = voidedBy(mine);
+  const voidedHere = watched && mine.state === 'voided';
+  const afterKey = watched && (mine.state === 'voided' || (mine.state === 'refused' && mine.refusal !== null && AFTER_REFUSALS.has(mine.refusal))) ? mine.key : null;
+  useEffect(() => {
+    // Once per settled attempt (afterFor guards it), so `reread` and the confirmation read here are this render's own.
+    if (afterKey === null || afterFor.current === afterKey) return;
+    afterFor.current = afterKey;
+    const settled = owner.current.voiding?.held;
+    const c = confirmRef.current;
+    // Voided now: no confirmation stays open — but the one that pressed a sealed already-void, which says so (F1).
+    if (voidedBy(settled) && c !== null && (settled.state === 'voided' || c.key !== settled.key)) putConfirm(null);
+    void reread('after'); // its shared sequence drops a review answer still out (F1)
+  }, [afterKey]);
+
+  /** The re-read after a void's answer, and its "Load again": a GET only, never another POST. */
+  async function reread(kind: 'after' | 'load'): Promise<void> {
+    setAfter((was) => ({ busy: true, failed: was.failed })); // Load again and its alert stay until this read answers
+    const answer = await readDetail(kind);
+    if (answer === null) { if (alive.current) setAfter((was) => ({ ...was, busy: false })); return; }
+    if (answer.kind === 'ok') setState({ phase: 'ready', text: '', invoice: answer.invoice });
+    else if (answer.kind === 'not-found') setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null });
+    else if (answer.kind === 'denied') setState({ phase: 'denied', text: VIEW_TEXT.denied, invoice: null });
+    setAfter({ busy: false, failed: answer.kind === 'unavailable' ? '' : answer.kind === 'rate-limited' ? answer.text : null });
+  }
+
+  /**
+   * "Void invoice…": the current context checked and the detail read ONCE more (the review), while the shown invoice and
+   * the trigger stay. Voided by now: said, no confirmation. Otherwise the confirmation opens on exactly that read's invoice.
+   */
+  async function review(): Promise<void> {
+    const v = owner.current.voiding;
+    // Not during the sign-in (R2-1a) nor its re-reads (R3-1a), and only on this generation's 'allowed' (R3-1b).
+    if (v === undefined || reviewingRef.current || confirmRef.current !== null || waiting || v.signingIn || renewalRef.current) return;
+    if (!allowedNow() || goneRef.current || state.invoice?.status !== 'issued') return;
+    reviewingRef.current = true;
+    setReviewing(true);
+    setSay(null);
+    const reviewGen = v.generation();
+    try {
+      const answer = await readDetail('review');
+      if (answer === null) return;
+      if (answer.kind === 'ok') {
+        setState({ phase: 'ready', text: '', invoice: answer.invoice });
+        if (answer.invoice.status !== 'issued') return setSay({ alert: false, text: VOID_TEXT.alreadyVoided });
+        // Read under a generation that is no longer this one: said, and the user reviews again (review B1 R3-3).
+        if (owner.current.voiding?.generation() !== reviewGen) return setSay({ alert: true, text: VOID_TEXT.staleReview });
+        return putConfirm({
+          id: ++confirmSeq.current, invoice: answer.invoice, reason: null, invalid: false, gen: reviewGen, key: null, saving: false, status: null, stepUp: null, confirming: false, renewing: false, decided: false,
+        });
+      }
+      if (answer.kind === 'not-found') return setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null });
+      if (answer.kind === 'denied') return setState({ phase: 'denied', text: VIEW_TEXT.denied, invoice: null });
+      setSay({ alert: true, text: answer.kind === 'rate-limited' ? answer.text : VOID_TEXT.reviewFailed });
+    } finally {
+      reviewingRef.current = false;
+      if (alive.current) setReviewing(false);
+    }
+  }
+
+  /** "Void invoice": an empty press only says a reason is needed; otherwise ONE send through the owner (a ref holds a second back). */
+  async function press(): Promise<void> {
+    const v = owner.current.voiding;
+    const c = confirmRef.current;
+    if (v === undefined || c === null || pressing.current || c.key !== null || c.saving || c.stepUp !== null || c.decided || c.renewing) return;
+    // Reviewed under a replaced session: it can never send, and it says so — before anything else holds it back (R2-1c).
+    if (c.gen !== v.generation()) {
+      putConfirm(null);
+      return setSay({ alert: true, text: VOID_TEXT.staleReview });
+    }
+    if (c.reason === null) {
+      patchConfirm(c.id, { invalid: true });
+      setFocusReasons((x) => x + 1);
+      return; // nothing is sent and no key is minted
+    }
+    if (waiting || isLiveVoid(v.held) || !allowedNow() || goneRef.current || renewalRef.current) return; // held back: its reason is said
+    pressing.current = true;
+    const { id } = c;
+    patchConfirm(id, { saving: true, status: null, invalid: false });
+    try {
+      const out = await v.send({
+        invoiceId, number: c.invoice.number, reasonCode: c.reason,
+        open: () => alive.current && confirmRef.current?.id === id,
+        allowed: () => alive.current && allowedNow() && !goneRef.current, // this generation's 'allowed' only (R3-1b)
+        held: (key) => { patchConfirm(id, { key }); if (alive.current) setVoidKey(key); },
+        reviewGen: c.gen,
+      });
+      if (!alive.current || out === null) return;
+      // A standing denial takes the action away whether or not its confirmation is still open (review B1 F2).
+      if (out.kind === 'denied' && out.gone) {
+        takeAway();
+        setSay({ alert: true, text: out.text });
+      }
+      if (confirmRef.current?.id !== id) return;
+      if (out.kind === 'stale') { putConfirm(null); return setSay({ alert: true, text: VOID_TEXT.staleReview }); } // nothing sent (R2-1c)
+      if (out.kind === 'not-sent') return void patchConfirm(id, { key: null, status: { alert: true, text: out.text } }); // nothing held or sent
+      if (out.kind === 'step-up') {
+        // With no sign-in this page can offer, the alert never asks for one (review B1 truth LOW-4).
+        patchConfirm(id, { key: null, stepUp: { method: out.method }, status: { alert: true, text: out.method === null ? VOID_TEXT.stepUpNoMethod : VOID_TEXT.stepUp } });
+        return setFocusSignIn((x) => x + 1);
+      }
+      if (out.kind === 'rate-limited') return void patchConfirm(id, { key: null, status: { alert: true, text: out.text } });
+      if (out.kind === 'denied') return void patchConfirm(id, { key: null, decided: true, status: { alert: true, text: out.text } });
+    } finally {
+      pressing.current = false;
+      if (alive.current) patchConfirm(id, { saving: false });
+    }
+  }
+
+  /**
+   * The void's explicit sign-in (after a first send's step_up_required): the owner renews the session keeping this dialog;
+   * then the invoice and its eligibility are read again — voided, missing or no longer allowed closes the confirmation and
+   * the dialog says so; otherwise the confirmation stays, its reason cleared, for a NEW press (a new key). Never a send.
+   */
+  async function signIn(): Promise<void> {
+    const v = owner.current.voiding;
+    const c = confirmRef.current;
+    if (v === undefined || c === null || c.stepUp === null || c.stepUp.method === null || c.confirming || waiting) return;
+    const secret = c.stepUp.method === 'password' ? password : null;
+    if (secret === '') return; // nothing typed: the control says so, and nothing is asked
+    const { id } = c;
+    const open = (): boolean => confirmRef.current?.id === id;
+    setPassword('');
+    patchConfirm(id, { confirming: true, status: null });
+    let out: VoidSignIn | null;
+    try { out = await v.signIn(secret); } catch { out = { kind: 'failed', text: VOID_TEXT.reauthFailed }; }
+    if (!alive.current) return;
+    if (out === null) return void patchConfirm(id, { confirming: false });
+    if (out.kind === 'failed') {
+      if (!open()) return;
+      patchConfirm(id, { confirming: false, status: { alert: true, text: out.text } });
+      return setFocusSignIn((x) => x + 1);
+    }
+    // The renewal's generation, taken BEFORE its reads (review B1 R3-2), and the second hold on the action until both are
+    // applied (R3-1a) — on every exit, including a closed confirmation or the dialog going.
+    const renewGen = v.generation();
+    setRenewal(true);
+    try {
+      await applyRenewal(id, open, renewGen);
+    } finally {
+      setRenewal(false);
+    }
+  }
+
+  /** The renewal's re-reads (the detail and the eligibility under the new session) and what they decide. */
+  async function applyRenewal(id: number, open: () => boolean, renewGen: number): Promise<void> {
+    patchConfirm(id, { confirming: false, stepUp: null, renewing: true, reason: null, invalid: false, status: { alert: false, text: VOID_TEXT.renewing } });
+    // The invoice and its eligibility are read again under the new session even when Keep invoice was pressed during the
+    // sign-in (review B1 L2): the dialog never keeps showing what the old session read.
+    const detailRead = readDetail('renew');
+    const detailRev = seq.current; // this read's place in the shared detail sequence
+    const [answered, allowed] = await Promise.all([detailRead, readEligibility('renewElig')]);
+    if (!alive.current) return;
+    // Applied only if no newer detail read started meanwhile (review B1 R2-2): a newer one's answer is what stands.
+    const detail = answered !== null && detailRev === seq.current ? answered : null;
+    if (detail?.kind === 'ok') setState({ phase: 'ready', text: '', invoice: detail.invoice });
+    if (detail?.kind === 'not-found') setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null });
+    if (detail?.kind === 'denied') setState({ phase: 'denied', text: VIEW_TEXT.denied, invoice: null });
+    if (detail?.kind === 'ok' && detail.invoice.status !== 'issued') setSay({ alert: false, text: VOID_TEXT.alreadyVoided });
+    // An unread renewal eligibility (aborted, failed, superseded) is 'not' under the renewal generation, the R14 way as at
+    // open (review B1 R4-1): no action in this open, never held for good on the older generation's 'allowed', never said
+    // as "not allowed"; the confirmation keeps its renewUnread text below.
+    setElig(allowed ?? 'not', renewGen);
+    // Voided, missing, refused or no longer allowed: WHATEVER confirmation this dialog has open closes (review B1 R2-1b),
+    // not only the one that asked for the sign-in, and the dialog shows that state.
+    const closes = allowed === 'not' || detail?.kind === 'not-found' || detail?.kind === 'denied' || (detail?.kind === 'ok' && detail.invoice.status !== 'issued');
+    if (closes) return putConfirm(null);
+    if (!open()) return;
+    if (detail === null || allowed === null) return void patchConfirm(id, { renewing: false, decided: true, status: { alert: true, text: VOID_TEXT.renewUnread } });
+    if (detail.kind !== 'ok') {
+      return void patchConfirm(id, { renewing: false, decided: true, status: { alert: true, text: detail.kind === 'rate-limited' ? `${VOID_TEXT.renewUnread} ${detail.text}` : VOID_TEXT.renewUnread } });
+    }
+    // Reviewed again under the new generation: a new press (a new key) may send from it (R2-1c).
+    patchConfirm(id, { renewing: false, invoice: detail.invoice, gen: renewGen, status: { alert: false, text: VOID_TEXT.renewed } });
+    setFocusReasons((x) => x + 1);
+  }
+
+  function closeConfirm(): void {
+    putConfirm(null);
+    setPassword('');
+  }
+
   const invoice = state.invoice;
+  // Allowed under this generation; or allowed under an older one — not yet known again (a renewal's read is out): the
+  // trigger is then shown but held with the checking reason, never as "not allowed" (review B1 R3-1b).
+  const eligNow = voiding !== undefined && elig.value === 'allowed' && elig.gen === voiding.generation();
+  const eligOld = voiding !== undefined && elig.value === 'allowed' && elig.gen !== voiding.generation();
+  const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal;
+  // Once this invoice is known voided (a 200 or a sealed already-void for an attempt of this user), no confirmation is
+  // shown — but the one that pressed an already-void, which says so — and it goes in the commit that hides the trigger
+  // (design R17): focus then goes to Close, never to a control that is gone.
+  const showConfirm = confirm !== null && !(terminal && (mine.state === 'voided' || confirm.key !== mine.key));
+  const triggerWhy = reviewing ? 'issued-view-void-busy' : voiding?.signingIn === true ? 'issued-view-void-signin'
+    : renewalOut || eligOld ? 'issued-view-void-busy' : waiting ? 'issued-view-void-wait' : undefined;
+  const old = mine !== undefined && mine.state === 'unresolved' && (voiding?.expired === true || mine.body === '');
+  // What the dialog says on top (review B1 F2/F5): its review being out, this invoice's attempt — out or unconfirmed (where
+  // it is tracked once the dialog closes), voided, or refused — whether or not the confirmation that sent it is still open.
+  const voidStatus: ReactNode = voidedHere ? VOID_TEXT.voided(mine.number)
+    : reviewing ? VOID_TEXT.reviewing
+      : say !== null && !say.alert ? say.text
+        : mine !== undefined && isLiveVoid(mine) ? <>{voidStateText(mine, old)} {VOID_TEXT.heldOutside}</> : '';
+  const voidAlert = after.failed !== null
+    ? `${voidedHere ? VOID_TEXT.voidedUnread(mine.number) : VOID_TEXT.afterUnread}${after.failed === '' ? '' : ` ${after.failed}`}`
+    : say?.alert === true ? say.text
+      : watched && mine.state === 'refused' ? refusalTextOf(mine, voiding?.confirmedDenial ?? null) : '';
+  // Known voided while no read has said so yet (a re-read failed or is still out): the status says Voided; the void time
+  // and reason come only from a read, never from the held attempt (review B1 F3).
+  const statusShown: IssuedStatus | null = invoice === null ? null : terminal && invoice.status === 'issued' ? 'voided' : invoice.status;
   return (
-    <DialogFrame labelledBy="issued-view-title" testId="issued-view" anchor="top" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
-      <div className="flex items-start justify-between gap-3">
-        <h2 id="issued-view-title" data-testid="issued-view-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">
-          {invoice === null ? VIEW_TEXT.title : `Invoice ${invoice.number}`}
-        </h2>
-        <button ref={closeButton} type="button" data-testid="issued-view-close" onClick={onClose} className={quiet}>Close</button>
-      </div>
-      {state.phase !== 'ready' && (
-        <p data-testid="issued-view-state" data-phase={state.phase} role={state.phase === 'loading' ? 'status' : 'alert'} className="text-sm font-bold text-slate-600">{state.text}</p>
-      )}
-      {(state.phase === 'unavailable' || state.phase === 'rate-limited') && (
-        <>
-          <button
-            type="button" data-testid="issued-view-retry" aria-disabled={waiting} aria-describedby={waiting ? 'issued-view-wait' : undefined}
-            aria-label="Try again: load this invoice" onClick={() => { if (!waiting) void load(); }}
-            className={`${quiet} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
-          >
-            Try again
-          </button>
-          {waiting && <span id="issued-view-wait" className="sr-only">{VIEW_TEXT.waiting}</span>}
-        </>
-      )}
-      {invoice !== null && (
-        <div className="space-y-4">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-            <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">{STATUS_TEXT[invoice.status]}</dd>
-            <dt className={labelClass}>Issued at</dt>
-            {/* The time may wrap at its spaces (never inside the date or the clock): at 320 px it is wider than its column (SIS-09). */}
-            <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-issued-at" dateTime={invoice.issuedAt}>{utcText(invoice.issuedAt)}</time></dd>
-            {invoice.void !== null && (
-              <>
-                <dt className={labelClass}>Voided at</dt>
-                <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-voided-at" dateTime={invoice.void.voidedAt}>{utcText(invoice.void.voidedAt)}</time></dd>
-                <dt className={labelClass}>Reason</dt>
-                <dd data-testid="issued-view-void-reason" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_VOID_REASONS[invoice.void.reasonCode]}</dd>
-              </>
+    <>
+      <DialogFrame labelledBy="issued-view-title" testId="issued-view" anchor="top" busy={state.phase === 'loading'} onClose={onClose} initialFocus={closeButton} returnFocus={returnFocus}>
+        <div className="flex items-start justify-between gap-3">
+          <h2 id="issued-view-title" data-testid="issued-view-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">
+            {invoice === null ? VIEW_TEXT.title : `Invoice ${invoice.number}`}
+          </h2>
+          <button ref={closeButton} type="button" data-testid="issued-view-close" onClick={onClose} className={quiet}>Close</button>
+        </div>
+        {voiding !== undefined && (
+          // Under the header, before the invoice (design R14): the row's height is held from the open on, so a late
+          // eligibility answer moves nothing; only "allowed" and an issued invoice put the action in it. Its status and alert
+          // regions are in place, empty, before their first text.
+          <div data-testid="issued-view-void-area">
+            {/* The row's height is the trigger's own, at any text size and wrap, in every state of this open (review B1 L-1):
+                an invisible copy of it shares the grid cell from the open on — aria-hidden, nothing focusable, its text
+                generated content so the DOM says nothing (the drafts' discard row's pattern) — so the eligibility answer,
+                whatever it is, and the trigger going later move nothing below it. No fixed min-height. */}
+            <div data-testid="issued-view-void-row" className="grid">
+              <div aria-hidden="true" data-testid="issued-view-void-placeholder" className="invisible col-start-1 row-start-1 flex flex-wrap items-center gap-3">
+                <span data-reserve={VOID_TEXT.open} className={`${quiet} before:content-[attr(data-reserve)]`} />
+              </div>
+              <div data-testid="issued-view-void-cell" className="col-start-1 row-start-1 flex flex-wrap items-center gap-3">
+              {showTrigger && (
+                <button
+                  type="button" data-testid="issued-view-void" aria-haspopup="dialog" aria-disabled={triggerWhy !== undefined} aria-describedby={triggerWhy}
+                  onClick={() => { void review(); }} className={`${quiet} ${waitable}`}
+                >
+                  {VOID_TEXT.open}
+                </button>
+              )}
+              {showTrigger && triggerWhy === 'issued-view-void-busy' && <span id={triggerWhy} className="sr-only">{VOID_TEXT.reviewing}</span>}
+              {showTrigger && triggerWhy === 'issued-view-void-wait' && <span id={triggerWhy} className="sr-only">{VOID_TEXT.reviewWaiting}</span>}
+              {showTrigger && triggerWhy === 'issued-view-void-signin' && <span id={triggerWhy} className="sr-only">{VOID_TEXT.reviewSignIn}</span>}
+              </div>
+            </div>
+            <p data-testid="issued-view-void-status" role="status" className="text-sm font-bold text-emerald-800">{voidStatus}</p>
+            <p data-testid="issued-view-void-alert" role="alert" className="text-sm font-bold text-rose-800">{voidAlert}</p>
+            {after.failed !== null && (
+              // Stays mounted through its own read (aria-disabled, said why): focus never falls off it (review B1 react).
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button" data-testid="issued-view-void-load" aria-disabled={waiting || after.busy}
+                  aria-describedby={after.busy ? 'issued-view-void-load-busy' : waiting ? 'issued-view-void-load-wait' : undefined}
+                  onClick={() => { if (!waiting && !after.busy) void reread('load'); }} className={`${quiet} ${waitable}`}
+                >
+                  Load again
+                </button>
+                {after.busy && <span id="issued-view-void-load-busy" className="sr-only">{VIEW_TEXT.loading}</span>}
+                {waiting && !after.busy && <span id="issued-view-void-load-wait" className="sr-only">{VIEW_TEXT.waiting}</span>}
+              </div>
             )}
-          </dl>
-          <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
-          <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>
+          </div>
+        )}
+        {state.phase !== 'ready' && (
+          <p data-testid="issued-view-state" data-phase={state.phase} role={state.phase === 'loading' ? 'status' : 'alert'} className="text-sm font-bold text-slate-600">{state.text}</p>
+        )}
+        {(state.phase === 'unavailable' || state.phase === 'rate-limited') && (
+          <>
+            <button
+              type="button" data-testid="issued-view-retry" aria-disabled={waiting} aria-describedby={waiting ? 'issued-view-wait' : undefined}
+              aria-label="Try again: load this invoice" onClick={() => { if (!waiting) void load(); }}
+              className={`${quiet} aria-disabled:opacity-50 aria-disabled:cursor-not-allowed`}
+            >
+              Try again
+            </button>
+            {waiting && <span id="issued-view-wait" className="sr-only">{VIEW_TEXT.waiting}</span>}
+          </>
+        )}
+        {invoice !== null && (
+          <div className="space-y-4">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+              <dt className={labelClass}>Status</dt><dd data-testid="issued-view-status" className="font-bold text-slate-700">{STATUS_TEXT[statusShown ?? invoice.status]}</dd>
+              <dt className={labelClass}>Issued at</dt>
+              {/* The time may wrap at its spaces (never inside the date or the clock): at 320 px it is wider than its column (SIS-09). */}
+              <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-issued-at" dateTime={invoice.issuedAt}>{utcText(invoice.issuedAt)}</time></dd>
+              {invoice.void !== null && (
+                <>
+                  <dt className={labelClass}>Voided at</dt>
+                  <dd className="font-bold text-slate-700 min-w-0"><time data-testid="issued-view-voided-at" dateTime={invoice.void.voidedAt}>{utcText(invoice.void.voidedAt)}</time></dd>
+                  <dt className={labelClass}>Reason</dt>
+                  <dd data-testid="issued-view-void-reason" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_VOID_REASONS[invoice.void.reasonCode]}</dd>
+                </>
+              )}
+            </dl>
+            <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
+            <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>
+          </div>
+        )}
+      </DialogFrame>
+      {voiding !== undefined && showConfirm && confirm !== null && (
+        <VoidConfirmDialog
+          c={confirm} store={storeLabel(voiding.store)} held={voiding.held} confirmedDenial={voiding.confirmedDenial} expired={voiding.expired} waiting={waiting} cooling={voiding.cooling}
+          finding={voiding.finding} checkText={voiding.checkText} password={password} focusReasons={focusReasons} focusSignIn={focusSignIn}
+          onPassword={setPassword}
+          onReason={(code) => {
+            const c = confirmRef.current;
+            if (c !== null && c.key === null && !c.saving && c.stepUp === null && !c.decided && !c.renewing) patchConfirm(c.id, { reason: code, invalid: false });
+          }}
+          onPress={() => { void press(); }} onClose={closeConfirm} onCheck={voiding.check} onFind={voiding.find} onSignIn={() => { void signIn(); }} returnFocus={closeButton}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * The void confirmation (M7B-INVOICES-VOID-P2, doc 13 §5 G, design §4 and R16): an alertdialog over the issued dialog,
+ * laid out from the top, named "Void invoice N?" and described by ONE element — what it voids (the number, the store, the
+ * customer, the UTC issue time and the exact Total, from the review read) and what voiding means. A required reason, none
+ * chosen, in the pinned order; "Keep invoice" (its header, the first focus) and Escape close it with nothing sent. Once its
+ * attempt is held it reads "Close", which says closing does not cancel; the reasons are locked; the attempt's state, note,
+ * Check again and Check invoice are said here as on the card. A step-up dropped the attempt: the sign-in group instead.
+ */
+function VoidConfirmDialog({
+  c, store, held, confirmedDenial, expired, waiting, cooling, finding, checkText, password, focusReasons, focusSignIn, onPassword, onReason, onPress, onClose, onCheck, onFind, onSignIn, returnFocus,
+}: {
+  readonly c: VoidConfirm; readonly store: string; readonly held: HeldVoid | undefined; readonly confirmedDenial: string | null; readonly expired: boolean; readonly waiting: boolean;
+  readonly cooling: boolean; readonly finding: boolean; readonly checkText: string; readonly password: string;
+  /** Counters: a change moves focus to the first reason (an empty press, a renewed sign-in) or into the sign-in group. */
+  readonly focusReasons: number; readonly focusSignIn: number;
+  readonly onPassword: (value: string) => void; readonly onReason: (code: InvoiceVoidReasonCode) => void; readonly onPress: () => void;
+  readonly onClose: () => void; readonly onCheck: () => void; readonly onFind: () => void; readonly onSignIn: () => void;
+  readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const firstReason = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<HTMLInputElement | null>(null);
+  const signInButton = useRef<HTMLButtonElement | null>(null);
+  // Only a change of a counter after this confirmation opened moves focus: its first focus is Keep invoice.
+  const reasonsSeen = useRef(focusReasons);
+  const signInSeen = useRef(focusSignIn);
+  useEffect(() => {
+    if (focusReasons === reasonsSeen.current) return;
+    reasonsSeen.current = focusReasons;
+    firstReason.current?.focus();
+  }, [focusReasons]);
+  const method = c.stepUp?.method;
+  useEffect(() => {
+    if (focusSignIn === signInSeen.current) return;
+    signInSeen.current = focusSignIn;
+    (method === 'password' ? passwordRef.current : signInButton.current)?.focus();
+  }, [focusSignIn, method]);
+
+  const own = c.key !== null && held?.key === c.key ? held : undefined;
+  const pressed = c.key !== null;
+  const phase: 'review' | 'sending' | 'unresolved' | 'stepup' | 'decided' = c.decided ? 'decided'
+    : pressed ? (own === undefined || own.state === 'sending' ? 'sending' : own.state === 'unresolved' || own.state === 'checking' ? 'unresolved' : 'decided')
+      : c.stepUp !== null ? 'stepup' : 'review';
+  const out = phase === 'sending' || phase === 'unresolved';
+  const attached = own !== undefined && own.csrf !== null;
+  const old = own?.state === 'unresolved' && (expired || own.body === '');
+  const checking = own?.state === 'checking';
+  const locked = pressed || c.saving || c.stepUp !== null || c.decided || c.renewing || c.confirming;
+  const pending = !pressed && isLiveVoid(held);
+  // Why "Void invoice" waits (aria-disabled, never disabled: it keeps focus): the first that applies.
+  const why = c.saving ? VOID_TEXT.sendChecking : c.renewing ? VOID_TEXT.reviewing : waiting ? VOID_TEXT.sendWaiting : pending ? VOID_TEXT.pending : c.reason === null ? VOID_TEXT.chooseReason : '';
+  const whyShown = why !== '' && why !== VOID_TEXT.chooseReason && why !== VOID_TEXT.sendChecking; // the rest are for screen readers
+  // The press's session check is said in the live region, not only behind aria-describedby (review B1 F5).
+  const statusText: ReactNode = own !== undefined && out ? voidStateText(own, old) : phase === 'sending' ? VOID_TEXT.sending
+    : phase === 'review' && c.saving ? VOID_TEXT.sendChecking : c.status !== null && !c.status.alert ? c.status.text : '';
+  const alertText = own?.state === 'refused' && own.refusal !== null ? refusalTextOf(own, confirmedDenial) : c.status?.alert === true ? c.status.text : '';
+  const note = own !== undefined && phase === 'unresolved' && !checking && attached ? own.note : '';
+  const seenText = own === undefined || phase !== 'unresolved' ? '' : finding ? VOID_TEXT.finding : checkText !== '' ? checkText : voidSeenText(own);
+  const signInBlocked = c.confirming || waiting || (method === 'password' && password.length === 0);
+  const invalid = c.invalid && c.reason === null;
+  const [issuedDate, issuedClock, issuedZone] = utcText(c.invoice.issuedAt).split(' ');
+  return (
+    <DialogFrame
+      // Never aria-busy: a busy subtree may hold back its own status region (review B1 F5); its controls say what is out.
+      role="alertdialog" labelledBy="issued-void-title" describedBy="issued-void-description" testId="issued-void-confirm" anchor="top"
+      busy={false} onClose={onClose} initialFocus={keep} returnFocus={returnFocus}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h2 id="issued-void-title" data-testid="issued-void-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">{VOID_TEXT.title(c.invoice.number)}</h2>
+        <button ref={keep} type="button" data-testid="issued-void-keep" aria-describedby={out ? 'issued-void-close-warning' : undefined} onClick={onClose} className={quiet}>
+          {pressed || phase === 'decided' ? 'Close' : 'Keep invoice'}
+        </button>
+      </div>
+      <div id="issued-void-description" data-testid="issued-void-description" className="space-y-2 text-sm font-medium text-slate-700">
+        <p data-testid="issued-void-facts" className="break-words">
+          Invoice {c.invoice.number} at <bdi data-testid="issued-void-store" className="break-words">{store}</bdi>, for{' '}
+          <bdi data-testid="issued-void-customer" className="break-words">{c.invoice.customer.name}</bdi>, issued{' '}
+          {/* The date and the clock each stay whole: the time breaks only at its spaces (review B1 L-2). */}
+          <time data-testid="issued-void-issued-at" dateTime={c.invoice.issuedAt}>
+            <span className="whitespace-nowrap">{issuedDate}</span> <span className="whitespace-nowrap">{issuedClock}</span> {issuedZone}
+          </time>.
+        </p>
+        {/* The Total on its own line, never broken (design R18): wider than a narrow dialog, it scrolls inside this named region, never the page. */}
+        {/* Named by its own text (aria-labelledby): the dialog's description, and the region's name, read the amount itself. */}
+        <div role="region" aria-labelledby="issued-void-total" tabIndex={0} data-testid="issued-void-total-scroll" className={`overflow-x-auto ${focusRing}`}>
+          <p id="issued-void-total" data-testid="issued-void-total" className="font-black text-primary whitespace-nowrap">Total {formatCents(c.invoice.amounts.totalCents)}</p>
+        </div>
+        <p data-testid="issued-void-consequence">{VOID_TEXT.consequence}</p>
+      </div>
+      {out && <p id="issued-void-close-warning" data-testid="issued-void-close-warning" className={hintClass}>{VOID_TEXT.closeWarning}</p>}
+      <fieldset
+        role="radiogroup" aria-labelledby="issued-void-reason-legend" aria-required="true" aria-invalid={invalid} aria-describedby={invalid ? 'issued-void-reason-error' : undefined}
+        disabled={locked} data-testid="issued-void-reasons" className="space-y-2"
+      >
+        <legend id="issued-void-reason-legend" className={labelClass}>{VOID_TEXT.reasonLegend}</legend>
+        {VOID_REASON_CODES.map((code, i) => (
+          <label key={code} className="flex items-center gap-2 text-sm font-bold text-slate-700">
+            <input
+              ref={i === 0 ? firstReason : undefined} type="radio" name="issued-void-reason" value={code} data-testid={`issued-void-reason-${code}`}
+              checked={c.reason === code} onChange={() => onReason(code)} className={focusRing}
+            />
+            {INVOICE_VOID_REASONS[code]}
+          </label>
+        ))}
+        {invalid && <p id="issued-void-reason-error" data-testid="issued-void-reason-error" className="text-xs font-bold text-rose-700">{VOID_TEXT.chooseReason}</p>}
+      </fieldset>
+      {phase === 'stepup' && c.stepUp !== null && (
+        <div role="group" aria-labelledby="issued-void-reauth-title" data-testid="issued-void-reauth-group" className="flex flex-wrap items-end gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100">
+          <p id="issued-void-reauth-title" className="w-full text-xs font-black text-amber-900">{VOID_TEXT.reauthTitle}</p>
+          <p data-testid="issued-void-reauth-explain" className="w-full text-[11px] font-medium text-amber-800">{method === null ? VOID_TEXT.reauthNone : VOID_TEXT.reauthExplain}</p>
+          {method === 'password' && (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="issued-void-reauth-password" className={labelClass}>Your password</label>
+              <input
+                ref={passwordRef} id="issued-void-reauth-password" data-testid="issued-void-reauth-password" type="password" autoComplete="current-password"
+                value={password} readOnly={c.confirming} onChange={(e) => onPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!signInBlocked) onSignIn(); } }}
+                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white ${focusRing}`}
+              />
+            </div>
+          )}
+          {method !== null && method !== undefined && (
+            <>
+              <button
+                ref={signInButton} type="button" data-testid="issued-void-reauth-confirm" aria-disabled={signInBlocked} aria-describedby="issued-void-reauth-hint"
+                onClick={() => { if (!signInBlocked) onSignIn(); }}
+                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing}`}
+              >
+                {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
+              </button>
+              <p id="issued-void-reauth-hint" data-testid="issued-void-reauth-hint" className="w-full text-[11px] font-medium text-amber-800 min-h-[1rem]">
+                {c.confirming ? SETTINGS_TEXT.confirmingSignIn : waiting ? SETTINGS_TEXT.signInWaiting : method === 'google' ? 'A Google sign-in window opens.' : password.length === 0 ? 'Enter your password to confirm your sign-in.' : ''}
+              </p>
+            </>
+          )}
+        </div>
+      )}
+      {/* The attempt this confirmation sent: its status line is mounted (empty) from the start. */}
+      <div
+        data-testid="issued-void-attempt" data-state={own === undefined ? (pressed ? 'sending' : 'none') : own.csrf === null ? 'detached' : own.state}
+        className={out ? 'p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2' : 'mb-0'}
+      >
+        <p data-testid="issued-void-confirm-status" role="status" className="text-sm font-bold text-amber-900">{statusText}</p>
+        {note !== '' && <p data-testid="issued-void-confirm-note" className="text-xs font-bold text-amber-900">{note}</p>}
+        <p data-testid="issued-void-confirm-seen" role="status" className="text-xs font-bold text-slate-700">{seenText}</p>
+        {seenText !== '' && own?.seen === 'voided' && own.seenReason !== null && !finding && checkText === '' && (
+          <p data-testid="issued-void-confirm-seen-reason" className="text-xs font-bold text-slate-700">{VOID_TEXT.seenReason(INVOICE_VOID_REASONS[own.seenReason])}</p>
+        )}
+        {phase === 'unresolved' && !checking && !finding && own !== undefined && (
+          <div className="flex flex-wrap items-center gap-3">
+            {attached && own.retryable && !old && (
+              <button
+                type="button" data-testid="issued-void-confirm-check" aria-disabled={waiting || cooling}
+                aria-describedby={waiting ? 'issued-void-confirm-wait' : cooling ? 'issued-void-confirm-cool' : undefined}
+                onClick={() => { if (!waiting && !cooling) onCheck(); }} className={`${button} ${waitable}`}
+              >
+                Check again
+              </button>
+            )}
+            <button
+              type="button" data-testid="issued-void-confirm-find" aria-disabled={waiting} aria-describedby={waiting ? 'issued-void-confirm-wait' : undefined}
+              onClick={() => { if (!waiting) onFind(); }} className={`${quiet} ${waitable}`}
+            >
+              Check invoice
+            </button>
+            {waiting && <span id="issued-void-confirm-wait" className="sr-only">{VOID_TEXT.waiting}</span>}
+            {cooling && !waiting && <span id="issued-void-confirm-cool" className="sr-only">{VOID_TEXT.coolDown}</span>}
+          </div>
+        )}
+      </div>
+      <p data-testid="issued-void-confirm-alert" role="alert" className="text-sm font-bold text-rose-800">{alertText}</p>
+      {phase === 'review' && (
+        <div className="flex flex-wrap justify-end items-center gap-3">
+          {why !== '' && <span id="issued-void-send-why" data-testid="issued-void-send-why" className={whyShown ? hintClass : 'sr-only'}>{why}</span>}
+          <button
+            type="button" data-testid="issued-void-send" aria-disabled={why !== ''} aria-describedby={why !== '' ? 'issued-void-send-why' : undefined}
+            onClick={onPress} className={`${button} ${waitable}`}
+          >
+            Void invoice
+          </button>
         </div>
       )}
     </DialogFrame>
+  );
+}
+
+/**
+ * The user's void attempt outside every dialog (M7B-INVOICES-VOID-P2, design §4 "The held card"): from the hold for this
+ * uid, so it outlives a dialog, a store change and the section itself (memory only: a page load ends it). It is scoped to
+ * the attempt's own store and invoice — Check again and Check invoice never use the store chosen now. Unresolved: its
+ * state and note, "Check again" (while it may), "Check invoice" and "Dismiss" (which only stops tracking it, and says so).
+ * Voided or refused: what its key's answer said, and Dismiss. Detached: that it could not be confirmed, without its store,
+ * never Check again. Its status line is always mounted (empty and taking no space with no attempt).
+ */
+function VoidCard({ held, confirmedDenial, expired, waiting, cooling, finding, checkText, headingRef, onCheck, onFind, onDismiss }: {
+  readonly held: HeldVoid | undefined; readonly confirmedDenial: string | null; readonly expired: boolean; readonly waiting: boolean; readonly cooling: boolean; readonly finding: boolean;
+  readonly checkText: string; readonly headingRef: RefObject<HTMLHeadingElement | null>;
+  readonly onCheck: () => void; readonly onFind: () => void; readonly onDismiss: () => void;
+}) {
+  const detached = held !== undefined && held.csrf === null;
+  const live = isLiveVoid(held);
+  const old = held?.state === 'unresolved' && (expired || held.body === '');
+  // An attached attempt that is out has no control at all (design R8); a Check invoice read out shows none either.
+  const busy = held === undefined || finding || (!detached && (held.state === 'sending' || held.state === 'checking'));
+  const seenText = held === undefined ? '' : finding ? VOID_TEXT.finding : checkText !== '' ? checkText : live ? voidSeenText(held) : '';
+  const hold = waiting ? 'issued-void-wait' : cooling ? 'issued-void-cool' : undefined;
+  return (
+    <div
+      data-testid="issued-void-card" data-state={held === undefined ? 'none' : detached ? 'detached' : held.state}
+      className={held === undefined ? 'mb-0' : 'p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2'}
+    >
+      {held !== undefined && (
+        <h4 ref={headingRef} tabIndex={-1} data-testid="issued-void-card-heading" className={`text-xs font-black text-amber-900 uppercase tracking-widest ${focusRing}`}>
+          Void of invoice {held.number}
+        </h4>
+      )}
+      <p data-testid="issued-void-card-status" role="status" className="text-sm font-bold text-amber-900">{held === undefined ? '' : voidStateText(held, old)}</p>
+      {held?.state === 'refused' && held.refusal !== null && <p data-testid="issued-void-card-refused" role="alert" className="text-sm font-bold text-rose-800">{refusalTextOf(held, confirmedDenial)}</p>}
+      {held !== undefined && !detached && held.state === 'unresolved' && held.note !== '' && <p data-testid="issued-void-card-note" className="text-xs font-bold text-amber-900">{held.note}</p>}
+      <p data-testid="issued-void-card-seen" role="status" className="text-xs font-bold text-slate-700">{seenText}</p>
+      {seenText !== '' && held?.seen === 'voided' && held.seenReason !== null && !finding && checkText === '' && (
+        <p data-testid="issued-void-card-seen-reason" className="text-xs font-bold text-slate-700">{VOID_TEXT.seenReason(INVOICE_VOID_REASONS[held.seenReason])}</p>
+      )}
+      {held !== undefined && !busy && (
+        <div className="flex flex-wrap items-center gap-3">
+          {!detached && held.state === 'unresolved' && held.retryable && !old && (
+            <button type="button" data-testid="issued-void-check" aria-disabled={waiting || cooling} aria-describedby={hold} onClick={onCheck} className={`${button} ${waitable}`}>Check again</button>
+          )}
+          {live && (
+            <button type="button" data-testid="issued-void-find" aria-disabled={waiting} aria-describedby={waiting ? 'issued-void-wait' : undefined} onClick={onFind} className={`${quiet} ${waitable}`}>
+              Check invoice
+            </button>
+          )}
+          <button type="button" data-testid="issued-void-dismiss" aria-describedby={live ? 'issued-void-dismiss-warning' : undefined} onClick={onDismiss} className={quiet}>Dismiss</button>
+          {live && <span id="issued-void-dismiss-warning" data-testid="issued-void-dismiss-warning" className={`w-full ${hintClass}`}>{VOID_TEXT.dismissWarning}</span>}
+          {waiting && <span id="issued-void-wait" className="sr-only">{VOID_TEXT.waiting}</span>}
+          {cooling && !waiting && <span id="issued-void-cool" className="sr-only">{VOID_TEXT.coolDown}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 
