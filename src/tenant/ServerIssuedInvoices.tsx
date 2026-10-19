@@ -93,6 +93,12 @@ const DEFAULT_WAIT_SECONDS = 60;
 /** How long Check again waits after the server said the same request is still in progress (no Retry-After): it only re-enables. */
 const IN_PROGRESS_WAIT_MS = 5_000;
 const waitable = 'aria-disabled:opacity-50 aria-disabled:cursor-not-allowed';
+/**
+ * Every void control fits its row in any font (CI SIS-22 at 320×600 / 24 px text: "Check invoice" was wider than the held
+ * card): it may shrink below its longest word, which then wraps inside it (overflow-wrap anywhere lowers its min-content),
+ * so a row never runs past its card or dialog. A flex row still wraps whole controls first; text, order and names unchanged.
+ */
+const fitsRow = 'min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]';
 /** An issued invoice's current state as the server's read says it (never which request made it so). */
 export const STATUS_TEXT: Readonly<Record<IssuedStatus, string>> = Object.freeze({ issued: 'Issued', voided: 'Voided' });
 
@@ -2251,13 +2257,13 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
                 whatever it is, and the trigger going later move nothing below it. No fixed min-height. */}
             <div data-testid="issued-view-void-row" className="grid">
               <div aria-hidden="true" data-testid="issued-view-void-placeholder" className="invisible col-start-1 row-start-1 flex flex-wrap items-center gap-3">
-                <span data-reserve={VOID_TEXT.open} className={`${quiet} before:content-[attr(data-reserve)]`} />
+                <span data-reserve={VOID_TEXT.open} className={`${quiet} ${fitsRow} before:content-[attr(data-reserve)]`} />
               </div>
               <div data-testid="issued-view-void-cell" className="col-start-1 row-start-1 flex flex-wrap items-center gap-3">
               {showTrigger && (
                 <button
                   type="button" data-testid="issued-view-void" aria-haspopup="dialog" aria-disabled={triggerWhy !== undefined} aria-describedby={triggerWhy}
-                  onClick={() => { void review(); }} className={`${quiet} ${waitable}`}
+                  onClick={() => { void review(); }} className={`${quiet} ${waitable} ${fitsRow}`}
                 >
                   {VOID_TEXT.open}
                 </button>
@@ -2275,7 +2281,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
                 <button
                   type="button" data-testid="issued-view-void-load" aria-disabled={waiting || after.busy}
                   aria-describedby={after.busy ? 'issued-view-void-load-busy' : waiting ? 'issued-view-void-load-wait' : undefined}
-                  onClick={() => { if (!waiting && !after.busy) void reread('load'); }} className={`${quiet} ${waitable}`}
+                  onClick={() => { if (!waiting && !after.busy) void reread('load'); }} className={`${quiet} ${waitable} ${fitsRow}`}
                 >
                   Load again
                 </button>
@@ -2406,7 +2412,7 @@ function VoidConfirmDialog({
     >
       <div className="flex items-start justify-between gap-3">
         <h2 id="issued-void-title" data-testid="issued-void-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">{VOID_TEXT.title(c.invoice.number)}</h2>
-        <button ref={keep} type="button" data-testid="issued-void-keep" aria-describedby={out ? 'issued-void-close-warning' : undefined} onClick={onClose} className={quiet}>
+        <button ref={keep} type="button" data-testid="issued-void-keep" aria-describedby={out ? 'issued-void-close-warning' : undefined} onClick={onClose} className={`${quiet} ${fitsRow}`}>
           {pressed || phase === 'decided' ? 'Close' : 'Keep invoice'}
         </button>
       </div>
@@ -2448,13 +2454,13 @@ function VoidConfirmDialog({
           <p id="issued-void-reauth-title" className="w-full text-xs font-black text-amber-900">{VOID_TEXT.reauthTitle}</p>
           <p data-testid="issued-void-reauth-explain" className="w-full text-[11px] font-medium text-amber-800">{method === null ? VOID_TEXT.reauthNone : VOID_TEXT.reauthExplain}</p>
           {method === 'password' && (
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1 min-w-0 max-w-full">
               <label htmlFor="issued-void-reauth-password" className={labelClass}>Your password</label>
               <input
                 ref={passwordRef} id="issued-void-reauth-password" data-testid="issued-void-reauth-password" type="password" autoComplete="current-password"
                 value={password} readOnly={c.confirming} onChange={(e) => onPassword(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!signInBlocked) onSignIn(); } }}
-                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white ${focusRing}`}
+                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white min-w-0 max-w-full ${focusRing}`}
               />
             </div>
           )}
@@ -2463,7 +2469,7 @@ function VoidConfirmDialog({
               <button
                 ref={signInButton} type="button" data-testid="issued-void-reauth-confirm" aria-disabled={signInBlocked} aria-describedby="issued-void-reauth-hint"
                 onClick={() => { if (!signInBlocked) onSignIn(); }}
-                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing}`}
+                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing} ${fitsRow}`}
               >
                 {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
               </button>
@@ -2491,14 +2497,14 @@ function VoidConfirmDialog({
               <button
                 type="button" data-testid="issued-void-confirm-check" aria-disabled={waiting || cooling}
                 aria-describedby={waiting ? 'issued-void-confirm-wait' : cooling ? 'issued-void-confirm-cool' : undefined}
-                onClick={() => { if (!waiting && !cooling) onCheck(); }} className={`${button} ${waitable}`}
+                onClick={() => { if (!waiting && !cooling) onCheck(); }} className={`${button} ${waitable} ${fitsRow}`}
               >
                 Check again
               </button>
             )}
             <button
               type="button" data-testid="issued-void-confirm-find" aria-disabled={waiting} aria-describedby={waiting ? 'issued-void-confirm-wait' : undefined}
-              onClick={() => { if (!waiting) onFind(); }} className={`${quiet} ${waitable}`}
+              onClick={() => { if (!waiting) onFind(); }} className={`${quiet} ${waitable} ${fitsRow}`}
             >
               Check invoice
             </button>
@@ -2513,7 +2519,7 @@ function VoidConfirmDialog({
           {why !== '' && <span id="issued-void-send-why" data-testid="issued-void-send-why" className={whyShown ? hintClass : 'sr-only'}>{why}</span>}
           <button
             type="button" data-testid="issued-void-send" aria-disabled={why !== ''} aria-describedby={why !== '' ? 'issued-void-send-why' : undefined}
-            onClick={onPress} className={`${button} ${waitable}`}
+            onClick={onPress} className={`${button} ${waitable} ${fitsRow}`}
           >
             Void invoice
           </button>
@@ -2563,14 +2569,14 @@ function VoidCard({ held, confirmedDenial, expired, waiting, cooling, finding, c
       {held !== undefined && !busy && (
         <div className="flex flex-wrap items-center gap-3">
           {!detached && held.state === 'unresolved' && held.retryable && !old && (
-            <button type="button" data-testid="issued-void-check" aria-disabled={waiting || cooling} aria-describedby={hold} onClick={onCheck} className={`${button} ${waitable}`}>Check again</button>
+            <button type="button" data-testid="issued-void-check" aria-disabled={waiting || cooling} aria-describedby={hold} onClick={onCheck} className={`${button} ${waitable} ${fitsRow}`}>Check again</button>
           )}
           {live && (
-            <button type="button" data-testid="issued-void-find" aria-disabled={waiting} aria-describedby={waiting ? 'issued-void-wait' : undefined} onClick={onFind} className={`${quiet} ${waitable}`}>
+            <button type="button" data-testid="issued-void-find" aria-disabled={waiting} aria-describedby={waiting ? 'issued-void-wait' : undefined} onClick={onFind} className={`${quiet} ${waitable} ${fitsRow}`}>
               Check invoice
             </button>
           )}
-          <button type="button" data-testid="issued-void-dismiss" aria-describedby={live ? 'issued-void-dismiss-warning' : undefined} onClick={onDismiss} className={quiet}>Dismiss</button>
+          <button type="button" data-testid="issued-void-dismiss" aria-describedby={live ? 'issued-void-dismiss-warning' : undefined} onClick={onDismiss} className={`${quiet} ${fitsRow}`}>Dismiss</button>
           {live && <span id="issued-void-dismiss-warning" data-testid="issued-void-dismiss-warning" className={`w-full ${hintClass}`}>{VOID_TEXT.dismissWarning}</span>}
           {waiting && <span id="issued-void-wait" className="sr-only">{VOID_TEXT.waiting}</span>}
           {cooling && !waiting && <span id="issued-void-cool" className="sr-only">{VOID_TEXT.coolDown}</span>}

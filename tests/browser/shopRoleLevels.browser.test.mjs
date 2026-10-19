@@ -535,8 +535,8 @@
 //          unresolved, never attributed; Check again the sealed already-void. Then SIS-09's cells and LAST 320x600 at 24 px:
 //          the dialog holds still while its eligibility answers, the Tab and Escape order, Space/ArrowDown on the reasons,
 //          the confirmation, its unconfirmed state and the held card bounded (the Total whole, scrolled inside its own region
-//          where wider), the reserved row and the issue date held in every cell (B1 L-1/L-2); recorded only: L-3 pinned exactly
-//          and, in the DA-214 cells, card controls under TenantLayout's sidebar, each activated from the keyboard (report §9).
+//          where wider), the reserved row, the issue date and no clipping held in every cell (B1 L-1/L-2, fitsRow); recorded
+//          only: in the DA-214 cells, card controls under TenantLayout's sidebar, each activated from the keyboard (report §9).
 //   The 23-hour cutoff and throttled timers are COMPONENT-layer evidence only (SII-102, controlled clocks); this file proves
 //   the reload loss with no automatic POST (SIS-21) and never waits on a clock.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
@@ -10020,7 +10020,7 @@ const voidCardBox = (page, column) => page.evaluate(`(() => {
 /** SIS-22's cells: SIS-09's five (unchanged) and one 600 px tall at 320 px with a 24 px default text size (design R18), LAST. */
 const VOID_CELLS = Object.freeze([...ISSUED_CELLS, { cell: 'S320H600', width: 320, height: 600, font: 24 }]);
 
-scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDED LAYOUT (brief §9 items 8 and 9) — invoice 1, SIS-09\'s longest texts and largest Total: a void lost before the entry is held; Check invoice (in the confirmation) is ONE GET and says the invoice still shows as issued — still unresolved, Check again kept; another request voids it ("duplicate", a direct call): Check invoice says voided now without saying which request, with the reason it records — the attempt stays unresolved and the held reason is never shown as recorded; Check again (the SAME key and bytes) is the sealed 409 already-void, never "voided by this request": the dialog read again shows the competing reason. Invoice 2, in SIS-09\'s five cells and LAST 320x600 at a 24 px default text size: with its eligibility answer parked, Close and the invoice under the reserved row are measured, then again once Void invoice… fills it (within 0.5 px); Tab from Close reaches Void invoice…, Enter opens the confirmation on ONE review GET, Keep invoice focused, in view and on top; the confirmation never lies outside the viewport nor scrolls sideways, nothing reaches past its content box, the Total ($90,071,992,547,409.91) is on one line in its own named region — scrolled inside it where wider, every digit reachable — the issue time breaks only at its spaces, every reason and Void invoice in view and on top once scrolled to; Tab goes Keep → Total → reasons → Void invoice → Keep; Space chooses a reason and ArrowDown the next (first cell); in every cell an unconfirmed send (lost before the entry) leaves the confirmation\'s Close, Check again and Check invoice whole and in view, Escape closes the confirmation alone (focus back on Void invoice…) and Escape again the dialog (focus on the row\'s Open), the held card names its store with its controls in view and uncovered by the section (held to the viewport less two gutters), and Dismiss, reached by Tab, sends nothing; Shift+Tab cycles back inside the confirmation (first and last cells); nothing is posted but those sends. Recorded, not failed: L-3 (S320H600 only, pinned exactly: the card\'s button row 2 ± 1 px wider than the card under the DA-214 hold) and, in the DA-214 cells only, a card control under TenantLayout\'s own sidebar — each such control then reached by Tab and activated with Enter', async () => {
+scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDED LAYOUT (brief §9 items 8 and 9) — invoice 1, SIS-09\'s longest texts and largest Total: a void lost before the entry is held; Check invoice (in the confirmation) is ONE GET and says the invoice still shows as issued — still unresolved, Check again kept; another request voids it ("duplicate", a direct call): Check invoice says voided now without saying which request, with the reason it records — the attempt stays unresolved and the held reason is never shown as recorded; Check again (the SAME key and bytes) is the sealed 409 already-void, never "voided by this request": the dialog read again shows the competing reason. Invoice 2, in SIS-09\'s five cells and LAST 320x600 at a 24 px default text size: with its eligibility answer parked, Close and the invoice under the reserved row are measured, then again once Void invoice… fills it (within 0.5 px); Tab from Close reaches Void invoice…, Enter opens the confirmation on ONE review GET, Keep invoice focused, in view and on top; the confirmation never lies outside the viewport nor scrolls sideways, nothing reaches past its content box, the Total ($90,071,992,547,409.91) is on one line in its own named region — scrolled inside it where wider, every digit reachable — the issue time breaks only at its spaces, every reason and Void invoice in view and on top once scrolled to; Tab goes Keep → Total → reasons → Void invoice → Keep; Space chooses a reason and ArrowDown the next (first cell); in every cell an unconfirmed send (lost before the entry) leaves the confirmation\'s Close, Check again and Check invoice whole and in view, Escape closes the confirmation alone (focus back on Void invoice…) and Escape again the dialog (focus on the row\'s Open), the held card names its store with its controls in view and uncovered by the section (held to the viewport less two gutters), and Dismiss, reached by Tab, sends nothing; Shift+Tab cycles back inside the confirmation (first and last cells); nothing is posted but those sends. Recorded, not failed: in the DA-214 cells only, a card control under TenantLayout\'s own sidebar — each such control then reached by Tab and activated with Enter', async () => {
   const { tenant, main, boss, customer, ids: [first, second] } = await voidShop('i22', 2, { long: true });
   const page = await voidPage(boss, main.id, 2);
   const stored = await storedIssued(main.id);
@@ -10085,12 +10085,10 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
   // 9. Keyboard and bounded layout, cell by cell (the 24 px cells last: font sizes are never reset).
   const problems = [];
   const check = (ok, what) => { if (!ok) problems.push(what); };
-  // B2 fix round 1: the reserved row's stability and the issue date on one line are hard checks in every cell again (B1 L-1,
-  // L-2). Recorded, not failed, are only (a) L-3: the held card's button row 2 px wider than the card under SIS-09's DA-214
-  // section hold, pinned EXACTLY (that row, that cell, 2 ± 1 px — any change fails), and (b) the carried DA-214 navigation
-  // limitation: a card control under TenantLayout's own fixed sidebar once scrolled into view, in the DA-214 cells only, each
-  // then activated from the keyboard. Anything else lying over a control fails.
-  const findings = [];
+  // The reserved row's stability, the issue date on one line and no clipping in the card are hard checks in every cell (B1
+  // L-1, L-2 and fitsRow; the L-3 exception is gone since checkpoint B's CI). Recorded, not failed, is only the carried DA-214
+  // navigation limitation: a card control under TenantLayout's own fixed sidebar once scrolled into view, in the DA-214 cells
+  // only, each then activated from the keyboard. Anything else lying over a control fails.
   const DA214_CELLS = new Set(['N320', 'S320', 'T768', 'S320H600']);
   const underSidebar = [];
   let cardSends = 0;
@@ -10223,10 +10221,7 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
     record('SIS-22', { cell, unconfirmed, card: cardBox });
     check(card.state === 'unresolved' && card.status === VOIDING_SAID.unresolved(2, main.name), `${cell}: the card does not hold the unconfirmed void ${JSON.stringify([card.state, card.status])}`);
     check(cardBox !== null && cardBox.outside.length === 0 && cardBox.store === main.name, `${cell}: the card reaches past its section or does not name its store ${JSON.stringify(cardBox && { outside: cardBox.outside, section: cardBox.section })}`);
-    const clipped = cardBox?.clipped ?? null;
-    const l3 = cell === 'S320H600' && clipped !== null && clipped.length === 1 && clipped[0].node === 'div.flex.flex-wrap.items-center' && Math.abs(clipped[0].scrollWidth - clipped[0].clientWidth - 2) <= 1;
-    if (l3) findings.push(`${cell}: L-3, the held card's button row ${clipped[0].scrollWidth - clipped[0].clientWidth} px wider than the card under the DA-214 hold`);
-    check(cell === 'S320H600' ? l3 : same(clipped, []), `${cell}: the card's clipping ${cell === 'S320H600' ? 'is not exactly L-3 (its button row 2 ± 1 px)' : 'is not none'} ${JSON.stringify(clipped)}`);
+    check(cardBox !== null && same(cardBox.clipped, []), `${cell}: something in the card is wider than its box ${JSON.stringify(cardBox?.clipped)}`);
     check(cardBox !== null && same(cardBox.controls.map((c) => c.text), ['Check again', 'Check invoice', 'Dismiss']) && cardBox.controls.every((c) => c.inView && c.inSection && !c.coveredInSection),
       `${cell}: a card control is not in view, inside the section and uncovered by it ${JSON.stringify(cardBox?.controls)}`);
     // On top, except under TenantLayout's own sidebar in a DA-214 cell (the carried navigation defect, outside this stage):
@@ -10280,10 +10275,9 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
     check(same(sentBy(page, isVoidRoute, cellFrom).map(readLine), [`${issuedPath(main.id)}/${second}/void-eligibility 200`, ...Array(1 + extraSend).fill(`${issuedPath(main.id)}/${second}/void 0`)]),
       `${cell}: not ONE eligibility GET and only the lost send(s) ${JSON.stringify(sentBy(page, isVoidRoute, cellFrom).map(readLine))}`);
   }
-  record('SIS-22', { findings, underSidebar });
-  note('findings', findings);
+  record('SIS-22', { underSidebar });
   note('underSidebar', underSidebar);
-  console.log(`SIS-22 recorded: ${findings.join(' | ') || 'no L-3'}; under TenantLayout's sidebar (DA-214, keyboard-activated): ${underSidebar.join(' | ') || 'none'}`);
+  console.log(`SIS-22 recorded: under TenantLayout's sidebar (DA-214, keyboard-activated): ${underSidebar.join(' | ') || 'none'}`);
   assert.deepEqual(problems, [], 'the void confirmation and the held card hold their bounds and keyboard order in every cell');
   assert.deepEqual(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).map((r) => `${r.path} ${r.status}`),
     [`${issuedPath(main.id)}/${first}/void 0`, `${issuedPath(main.id)}/${first}/void 409`, ...Array(cardSends).fill(`${issuedPath(main.id)}/${second}/void 0`)],

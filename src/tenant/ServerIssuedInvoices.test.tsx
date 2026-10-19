@@ -2911,6 +2911,13 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
   const radios = () => within(tid('issued-void-reasons')).getAllByRole('radio') as HTMLInputElement[];
   const LABELS = ['Issued by mistake', 'Wrong customer', 'Wrong lines or amounts', 'Wrong seller details', 'Duplicate of another invoice', 'Other reason'];
   const UNRESOLVED_2 = 'Void of invoice 2 at Main Street is not confirmed. The server may or may not have voided it.';
+  /**
+   * CI fix (SIS-22 S320H600: the held card's "Check invoice" was 7 px wider than its card on CI's fonts): every void control
+   * may shrink below its longest word, which then wraps inside it. jsdom has no layout, so this pins the classes only —
+   * the browser measures the result; no red/green is possible for the layout itself here.
+   */
+  const FITS = ['min-w-0', 'max-w-full', 'whitespace-normal', '[overflow-wrap:anywhere]'];
+  const fits = (el: HTMLElement, name = el.getAttribute('data-testid') ?? el.tagName) => { for (const c of FITS) expect(el, `${name} ${c}`).toHaveClass(c); };
 
   async function setup(over: Partial<ServerIssuedInvoicesProps> = {}, prepare: (server: Server) => void = () => {}) {
     const server = seeded();
@@ -3258,6 +3265,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     // Through its own read Load again stays (aria-disabled, said why) and so does what it answers (review B1 react).
     expect(tid('issued-view-void-load')).toHaveAttribute('aria-disabled', 'true');
     expect(tid('issued-view-void-load')).toHaveAccessibleDescription(VIEW_TEXT.loading);
+    fits(tid('issued-view-void-load')); // CI fix: never wider than its row
     expect(document.activeElement).toBe(tid('issued-view-void-load'));
     expect(tid('issued-view-void-alert')).toHaveTextContent(VOID_TEXT.voidedUnread(2));
     server.held.shift()!.release();
@@ -3704,6 +3712,9 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(heldA(r)).toBeUndefined();
     expect(server.keys.size).toBe(0); // nothing acquired at the server
     expect(buttons('issued-void-confirm')).toEqual(['Keep invoice', 'Confirm sign-in']);
+    // CI fix: the step-up row cannot run past the confirmation — its button wraps inside itself, its password column and field shrink.
+    fits(tid('issued-void-reauth-confirm'));
+    for (const el of [tid('issued-void-reauth-password'), tid('issued-void-reauth-password').parentElement!]) for (const c of ['min-w-0', 'max-w-full']) expect(el, c).toHaveClass(c);
     const logins = server.logins().length;
     await focusEvents();
     expect(server.logins()).toHaveLength(logins);
@@ -4655,5 +4666,28 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(document.activeElement).toBe(tid('issued-view-lines-scroll'));
     await user().tab();
     expect(document.activeElement).toBe(tid('issued-view-close')); // Close, the lines region, Close: the copy is no stop
+  });
+
+  // ---- CI fix after checkpoint B (SIS-22 S320H600: a held-card button wider than its card) ----
+
+  it('SII-141. CI fix (structure only; jsdom has no layout): every void control can never be wider than its row — the trigger and its invisible copy (the same box), the confirmation\'s Keep invoice / Close, Void invoice, Check again and Check invoice, and the held card\'s Check again, Check invoice and Dismiss each may shrink and wrap inside itself; their text, order and names are unchanged', async () => {
+    const { server, r } = await setup();
+    await openVoidable(2);
+    fits(tid('issued-view-void'));
+    fits(tid('issued-view-void-placeholder').querySelector('span')!, 'placeholder copy');
+    await click('issued-view-void');
+    await waitFor(() => expect(box()).not.toBeNull());
+    fits(tid('issued-void-keep'));
+    fits(tid('issued-void-send'));
+    expect(buttons('issued-void-confirm')).toEqual(['Keep invoice', 'Void invoice']);
+    server.voids.push('lose-before');
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    for (const id of ['issued-void-keep', 'issued-void-confirm-check', 'issued-void-confirm-find']) fits(tid(id));
+    expect(buttons('issued-void-confirm')).toEqual(['Close', 'Check again', 'Check invoice']);
+    await closeAll();
+    for (const id of ['issued-void-check', 'issued-void-find', 'issued-void-dismiss']) fits(tid(id));
+    expect(buttons('issued-void-card')).toEqual(['Check again', 'Check invoice', 'Dismiss']);
+    expect(screen.getByRole('button', { name: 'Check invoice' })).toBe(tid('issued-void-find'));
   });
 });
