@@ -505,7 +505,7 @@ const LIVE: ReadonlySet<HeldDraft['state']> = new Set(['sending', 'unresolved', 
 export const isLiveHold = (held: HeldDraft | undefined): held is HeldDraft => held !== undefined && LIVE.has(held.state);
 
 /** What every hold store keeps of an attempt: its key, its exact body, the token it went with and its state. */
-interface HoldBase { readonly key: string; readonly body: string; readonly csrf: string | null; readonly state: string }
+export interface HoldBase { readonly key: string; readonly body: string; readonly csrf: string | null; readonly state: string }
 
 export interface HoldStore<T extends HoldBase> {
   get(uid: string): T | undefined;
@@ -530,7 +530,7 @@ export function createDraftHoldStore(): DraftHoldStore {
 }
 
 /** One hold store: at most one attempt per user, `live` telling which may not be replaced (M7B-INVOICES-ISSUE-P2: shared by the issue's). */
-function holdStoreOf<T extends HoldBase>(live: (held: T | undefined) => boolean): HoldStore<T> {
+export function holdStoreOf<T extends HoldBase>(live: (held: T | undefined) => boolean): HoldStore<T> {
   const held = new Map<string, T>();
   const listeners = new Set<() => void>();
   const tell = (): void => { for (const listener of [...listeners]) listener(); };

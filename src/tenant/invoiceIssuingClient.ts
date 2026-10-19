@@ -5,6 +5,10 @@
 // review and, in `expected`, the exact issue body), POST …/invoice-drafts/{id}/issue (the idempotent issue: a 201 names
 // the invoice, never its number), GET /api/v1/stores/{storeId}/invoices (newest number first; `?sourceDraft=` is a
 // separate one-item lookup mode) and GET /api/v1/stores/{storeId}/invoices/{id} (the issued snapshot, version 1).
+// M7B-INVOICES-VOID-P2 adds the void's two (docs/phase-4/13 §12, ADR-51): GET …/invoices/{id}/void-eligibility (whether
+// this session may void at that store now — action-only and target-blind: it reads no invoice, so it never proves the
+// invoice exists or is still issued, and it asks for no recent sign-in) and POST …/invoices/{id}/void (the idempotent void
+// on a recent sign-in: exactly `{ expectedTenant, reasonCode }`, no version; a 200 names the invoice and "voided" only).
 //
 //   - The server is the authority for everything: who may read, write or issue, which tenant a store belongs to, the
 //     amounts, the number and what was stored. This client reports what the server answered and decides nothing.
@@ -21,10 +25,17 @@
 //     and a `Location` that is exactly that invoice's path at the store asked — compared, never followed. A 503, any
 //     other status, a body this client cannot name, a missing or different Location or no answer at all is `unknown`: the
 //     outcome is undecided, and only the same key and the same bytes can ask again. Nothing here retries, ever: each
-//     method is one fetch.
-//   - The body of a command is the caller's exact string, built ONCE (`issuingSettingsBody`, `issueBodyOf`): the server
-//     fingerprints the raw bytes, so this module never re-serializes it — and never sends one the server's planner would
-//     refuse (`invalid`, nothing sent). It never mints a key either: the caller owns the key's policy.
+//     method is one fetch. The void is `voided` only on an exact 200 naming the invoice asked (`{ invoice: { id, status:
+//     "voided" } }`, the replay header absent or "true"); its sealed 409s (`invalid_state` already void, `write_conflict`
+//     the version) are the key's recorded completion, its chain refusals each one kind by status AND word — a 403
+//     `step_up_required` is `step-up` (decided before any key: nothing ran), any other chain 403 `denied` — and a 503, an
+//     unnamed word or shape, a mismatched or malformed 200 or no answer is `unknown`. It takes no AbortSignal: never
+//     aborted by its caller; the module's own timeout ends only the wait (unknown, responded:false), never the server's
+//     work. Its invoice id must be the planner's target grammar (an RFC uuid, `isVoidTarget`), or nothing is sent.
+//   - The body of a command is the caller's exact string, built ONCE (`issuingSettingsBody`, `issueBodyOf`, `voidBodyOf`):
+//     the server fingerprints the raw bytes, so this module never re-serializes it — and never sends one the server's
+//     planner would refuse (`invalid`, nothing sent; the void's is `not-sent`, which no server answer can be, and its body
+//     must be byte for byte what `voidBodyOf` builds). It never mints a key either: the caller owns the key's policy.
 //   - The value rules restate the server's (server/runtime/issuingSettings.ts, customerCreate.ts normalizePlainText): text
 //     trimmed, one visible scalar, no control, U+2028/U+2029, lone surrogate or Bidi_Control; legal name 1-200 scalars,
 //     store name 1-120, tax registration id null or 1-64; the postal address 1-8 LF-separated lines of 1-120 (no CR
@@ -50,6 +61,9 @@ export const issuePathOf = (storeId: string, draftId: string): string => `${draf
 export const issuedInvoicesPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/invoices`;
 /** One issued invoice of one store: what an issue's 201 `Location` must be exactly. */
 export const issuedInvoicePathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicesPathOf(storeId)}/${invoiceId}`;
+/** The void's two routes, under the issued invoice's own path (server/runtime/invoiceVoid.ts). */
+export const voidEligibilityPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/void-eligibility`;
+export const voidPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/void`;
 
 export const LEGAL_NAME_MAX_CHARACTERS = 200;
 export const ISSUING_STORE_NAME_MAX_CHARACTERS = 120;
@@ -74,7 +88,15 @@ export const INVOICE_VOID_REASONS = Object.freeze({
   other: 'Other reason',
 } as const);
 export type InvoiceVoidReasonCode = keyof typeof INVOICE_VOID_REASONS;
+/** The six codes in that one order (the map's own keys: no second list to drift). */
+export const VOID_REASON_CODES: readonly InvoiceVoidReasonCode[] = Object.freeze(Object.keys(INVOICE_VOID_REASONS) as InvoiceVoidReasonCode[]);
 const isVoidReasonCode = (value: unknown): value is InvoiceVoidReasonCode => typeof value === 'string' && Object.prototype.hasOwnProperty.call(INVOICE_VOID_REASONS, value);
+/**
+ * The void planner's target grammar (server/runtime/outbox.ts UUID_RE, restated: src/ never imports server/): an RFC uuid,
+ * version 1-8 and variant 10xx. Any other id would only take a key to be refused 400, so it is never sent.
+ */
+const VOID_TARGET_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export const isVoidTarget = (value: unknown): value is string => typeof value === 'string' && VOID_TARGET_RE.test(value);
 /** The lifecycle a read reports: its current state only — never which request made it so. */
 export type IssuedStatus = 'issued' | 'voided';
 const MAX = Number.MAX_SAFE_INTEGER;
@@ -162,6 +184,19 @@ export type IssuedPageResult =
 /** The sourceDraft lookup: the one issued invoice of that draft, or null — "none found yet", never proof it was not issued. */
 export type FindIssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedSummary | null } | ReadRefusal;
 export type IssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedInvoice } | { readonly kind: 'not-found' } | ReadRefusal;
+/**
+ * One void answer (M7B-INVOICES-VOID-P2). `voided`: the exact 200 for the invoice asked — it says nothing of when or why
+ * (a read does). Sealed: `already-void` (invalid_state), `version-conflict` (write_conflict). The chain's: `tenant-conflict`
+ * (409 write_conflict), `in-progress`, `key-reused` (422), `not-found`, `step-up` (403 step_up_required), `denied` (any other
+ * 403), `signed-out`, `invalid` (400/413/415) and the 429. `not-sent`: refused here, nothing sent. Anything else `unknown`.
+ */
+export type VoidResult =
+  | { readonly kind: 'voided'; readonly replayed: boolean }
+  | {
+    readonly kind: 'already-void' | 'version-conflict' | 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'step-up' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
+  }
+  | RateLimited
+  | { readonly kind: 'unknown'; readonly responded: boolean };
 
 // ---- text, rates and times ----
 
@@ -249,6 +284,15 @@ export function issueBodyOf(expected: IssueExpected): string | null {
     || !isCount(expectedCustomerVersion, 1, MAX)) return null;
   const body = JSON.stringify({ expectedTenant, expectedVersion, expectedSettingsVersion, expectedCustomerVersion });
   return bytesOf(body) <= ISSUE_BODY_MAX_BYTES ? body : null;
+}
+
+/**
+ * The POST body of one void, built ONCE: exactly `{"expectedTenant":…,"reasonCode":…}` in that order — the store's tenant
+ * as GET /api/v1/stores answered it and one of the six codes, no version or other key (well inside the server's 1 KiB) —
+ * or null when the planner would refuse it.
+ */
+export function voidBodyOf(expectedTenant: string, reasonCode: string): string | null {
+  return isCustomerId(expectedTenant) && isVoidReasonCode(reasonCode) ? JSON.stringify({ expectedTenant, reasonCode }) : null;
 }
 
 // ---- strict answer parsers ----
@@ -499,6 +543,17 @@ function issueSentOf(body: string): { readonly expectedVersion: number } | null 
   }
 }
 
+/** Whether a void body is byte for byte what voidBodyOf builds from the values it carries (no other key, order or spacing). */
+function isVoidBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return isPlain(parsed) && typeof parsed.expectedTenant === 'string' && typeof parsed.reasonCode === 'string'
+      && voidBodyOf(parsed.expectedTenant, parsed.reasonCode) === body;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether two settings carry exactly the same values. */
 export function sameSettingsValues(a: SettingsValues, b: SettingsValues): boolean {
   return a.legalName === b.legalName && a.storeName === b.storeName && a.postalAddress === b.postalAddress && a.taxRegistrationId === b.taxRegistrationId
@@ -533,6 +588,19 @@ export interface InvoiceIssuingClient {
   findIssued(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<FindIssuedResult>;
   /** One issued invoice of `storeId`; a malformed id is `not-found` and nothing is sent. Never rejects. */
   getIssued(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<IssuedResult>;
+  /**
+   * Whether this session may void at `storeId` now — action-only (the invoice id names the route only; nothing about that
+   * invoice) and with no recent sign-in asked; a malformed store id or an invoice id that is not `isVoidTarget` is
+   * `denied`, nothing sent. Never rejects.
+   */
+  voidEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
+  /**
+   * One void attempt of `invoiceId`: `body` exactly as voidBodyOf built it, under `idempotencyKey`; never aborted by its
+   * caller (no signal) — the module's own timeout ends only the wait (unknown, responded:false), never the server's work.
+   * A body not byte for byte voidBodyOf's, a malformed store id or an invoice id that is not `isVoidTarget` is `not-sent`,
+   * nothing sent. Never rejects.
+   */
+  voidInvoice(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<VoidResult>;
 }
 
 interface Answer { readonly status: number; readonly body: unknown; readonly header: (name: string) => string | null }
@@ -756,7 +824,48 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return readRefusal(answer) ?? UNAVAILABLE;
   }
 
-  return Object.freeze({ getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued });
+  async function voidEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
+    const answer = await read(voidEligibilityPathOf(storeId, invoiceId), csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const allowed = isPlain(answer.body) && hasKeys(answer.body, ['eligibility']) && answer.body.eligibility === 'allowed';
+      return allowed ? Object.freeze({ kind: 'allowed' }) : UNAVAILABLE;
+    }
+    // Any chain 403 is a refusal of the action (forbidden, a missing context — never a sign-in: this read asks for none).
+    if (answer.status === 403 && refusalOf(answer.body)?.sealed === false) return Object.freeze({ kind: 'denied' });
+    return readRefusal(answer) ?? UNAVAILABLE;
+  }
+
+  async function voidInvoice(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<VoidResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || !isVoidBody(body)) return Object.freeze({ kind: 'not-sent' });
+    // No caller's signal: only the module's own timeout ends the wait (unknown, responded:false), never the server's work.
+    const answer = await command('POST', voidPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return Object.freeze({ kind: 'unknown', responded: false });
+    const { status, body: got } = answer;
+    const { sealed, chain } = shapes(answer);
+    if (status === 200) {
+      const replayed = replayOf(answer);
+      const invoice = isPlain(got) && hasKeys(got, ['invoice']) ? got.invoice : undefined;
+      if (isPlain(invoice) && hasKeys(invoice, ['id', 'status']) && invoice.id === invoiceId && invoice.status === 'voided' && replayed !== null) {
+        return Object.freeze({ kind: 'voided', replayed });
+      }
+      return Object.freeze({ kind: 'unknown', responded: true }); // a 200 this client cannot name (or for another invoice): only the key can say
+    }
+    // The sealed 409s are the key's recorded completion (replayed under it); the chain's answers were rolled back or never
+    // reached the key — a 401, 403 or 429 is decided before it is acquired, so nothing ran.
+    if (status === 409 && sealed('invalid_state')) return Object.freeze({ kind: 'already-void' });
+    if (status === 409 && sealed('write_conflict')) return Object.freeze({ kind: 'version-conflict' });
+    if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-conflict' });
+    if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
+    if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });
+    if (status === 404 && chain('not_found')) return Object.freeze({ kind: 'not-found' });
+    if (status === 403 && chain('step_up_required')) return Object.freeze({ kind: 'step-up' });
+    if (status === 403 && refusalOf(got)?.sealed === false) return Object.freeze({ kind: 'denied' }); // forbidden, a missing context
+    return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
+  }
+
+  return Object.freeze({ getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, voidEligibility, voidInvoice });
 }
 
 /** The shop's one issuing client. */

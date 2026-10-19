@@ -16,9 +16,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ISSUED_TEXT, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, type ServerIssuedInvoicesProps } from './ServerIssuedInvoices';
-import { createInvoiceIssuingClient, issuingSettingsPathOf, type IssuedSummary } from './invoiceIssuingClient';
+import { createInvoiceIssuingClient, issuingSettingsPathOf, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
-import { TENANT_SESSION_PATHS, createTenantSessionClient } from './tenantSessionClient';
+import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
+import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidRefusal } from './invoiceVoidHold';
 import type { ShopIdentity } from './ServerCustomerLevels';
 import { pickerWaitText } from './ServerCustomerPicker';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
@@ -972,7 +973,7 @@ describe('Issued invoices — an unconfirmed settings write (M7B-INVOICES-ISSUE-
     expect(document.body.innerHTML).not.toContain('s'.repeat(40));
     expect(document.body.innerHTML).not.toContain(r.keys[0]);
     expect(document.body.innerHTML).not.toContain('expectedVersion');
-    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts']) {
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts', 'invoiceVoidHold.ts']) { // M7B-INVOICES-VOID-P2: the held void attempt too
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
     }
@@ -2416,5 +2417,379 @@ describe('Issued invoices — review fixes: continuations, late answers, refusal
     await waitFor(() => expect(viewPhase()).toBe('unavailable'));
     expect(screen.queryByTestId('issued-view-status')).toBeNull();
     expect(server.writes()).toEqual([]);
+  });
+});
+
+// M7B-INVOICES-VOID-P2 checkpoint A — the held void attempt below any UI (src/tenant/invoiceVoidHold.ts; design §3 and
+// R4–R8): one live attempt per user in its own store; every answer settled BY KEY, a first send's and a Check again's
+// apart; a late answer for a detached or replaced attempt changes nothing but the detach; detached is for good; the
+// 23-hour cutoff counted from the FIRST send by the larger of the monotonic and wall-clock time, and its scrub timer
+// clearing only the bytes. The clocks are injected and moved by hand; only the scrub timer runs on the fake clock.
+describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-VOID-P2 checkpoint A)', () => {
+  const T0 = Object.freeze({ mono: 1_000, wall: Date.UTC(2026, 9, 18, 12) });
+  const CSRF = `${'s'.repeat(40)}001`;
+  const BODY = `{"expectedTenant":"${TENANT_A}","reasonCode":"duplicate"}`;
+  const voidKey = (n: number) => ['5e1f0000', '1d2f', '4a6b', '9c8d', String(n).padStart(12, '0')].join('-');
+  const held = (n: number, over: Partial<HeldVoid> = {}): HeldVoid => ({
+    key: voidKey(n), body: BODY, storeId: STORE_1, storeLabel: 'Main Street', invoiceId: uuid(0x1a00 + n), number: n, csrf: CSRF,
+    sentAt: T0.mono, sentWall: T0.wall, state: 'sending', note: '', refusal: null, seen: null, seenReason: null, retryable: true, ...over,
+  });
+  const voidRig = () => {
+    const clock = { ...T0 };
+    return { clock, holds: createVoidHoldStore({ now: () => clock.mono, wallNow: () => clock.wall }) };
+  };
+  /** What the request went with: the attempt's own token and the sign-out count read before it. */
+  const sent = () => ({ csrf: CSRF, since: sessionEndsSoFar() });
+  const refusedAs = (refusal: VoidRefusal): Partial<HeldVoid> => ({ state: 'refused', refusal, body: '', note: '' });
+  const holdSource = () => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'invoiceVoidHold.ts'), 'utf8');
+  /** The hold module cannot send anything: it takes the issuing client's types only, and names no network API. */
+  const sendsNothing = () => {
+    const source = holdSource();
+    const fromClient = (source.match(/^import [^;]*;$/gm) ?? []).filter((line) => line.includes("from './invoiceIssuingClient'"));
+    expect(fromClient.length).toBeGreaterThan(0);
+    for (const line of fromClient) expect(line).toMatch(/^import type \{/);
+    expect(source).not.toMatch(/\bfetch\b|XMLHttpRequest|sendBeacon|WebSocket|EventSource|\bimport\(/);
+  };
+
+  it('SII-72. VOID-P2 hold: one live void attempt per user in its own store — a second is refused while one is sending, unresolved or checking, a settled one is replaced, another user\'s is apart; it keeps only the key, the bytes, its store and invoice, the token and the first send\'s times; a stale key changes and removes nothing; removing it only stops tracking it', () => {
+    fakeClock();
+    const { holds } = voidRig();
+    expect(holds.put('uid-a', held(1))).toBe(true);
+    expect(Object.keys(holds.get('uid-a')!).sort()).toEqual(['body', 'csrf', 'invoiceId', 'key', 'note', 'number', 'refusal', 'retryable', 'seen', 'seenReason', 'sentAt', 'sentWall', 'state', 'storeId', 'storeLabel']);
+    expect(Object.isFrozen(holds.get('uid-a'))).toBe(true);
+    for (const state of ['sending', 'unresolved', 'checking'] as const) {
+      expect(holds.change('uid-a', voidKey(1), { state })).toBe(true);
+      expect(isLiveVoid(holds.get('uid-a'))).toBe(true);
+      expect(holds.put('uid-a', held(2))).toBe(false); // never silently replaced while it may still void
+      expect(holds.get('uid-a')!.key).toBe(voidKey(1));
+    }
+    expect(holds.put('uid-b', held(3))).toBe(true);
+    expect(holds.change('uid-a', voidKey(3), { state: 'voided' })).toBe(false); // another attempt's key
+    expect(holds.remove('uid-a', voidKey(3))).toBe(false);
+    expect(holds.get('uid-a')!.state).toBe('checking');
+    for (const [state, next] of [['voided', 4], ['refused', 5]] as const) {
+      holds.change('uid-a', holds.get('uid-a')!.key, { state, body: '' });
+      expect(isLiveVoid(holds.get('uid-a'))).toBe(false);
+      expect(holds.put('uid-a', held(next))).toBe(true);
+      expect(holds.get('uid-a')!.key).toBe(voidKey(next));
+    }
+    expect(holds.remove('uid-a', voidKey(5))).toBe(true);
+    expect(holds.get('uid-a')).toBeUndefined();
+    expect(holds.get('uid-b')).toEqual(held(3));
+    expect(isLiveVoid(undefined)).toBe(false);
+  });
+
+  it('SII-73. VOID-P2 hold: a FIRST send\'s answer settles its attempt by key — the exact 200 voided with its bytes gone; a sealed or rolled-back refusal refused with its kind; unknown and in-progress unresolved with a note, key and bytes kept; a refusal decided before the key (401, 429, step-up, 403) removes it while its confirmation is still open and settles it refused once that confirmation is gone; one never sent leaves nothing held', () => {
+    fakeClock();
+    const unresolved = (note: string): Partial<HeldVoid> => ({ state: 'unresolved', note });
+    const rows: Array<[VoidResult, Partial<HeldVoid> | 'removed', Partial<HeldVoid> | 'removed']> = [
+      [{ kind: 'voided', replayed: false }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
+      [{ kind: 'voided', replayed: true }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
+      ...(['already-void', 'version-conflict', 'tenant-conflict', 'not-found', 'key-reused', 'invalid'] as const)
+        .map((kind): [VoidResult, Partial<HeldVoid>, Partial<HeldVoid>] => [{ kind }, refusedAs(kind), refusedAs(kind)]),
+      [{ kind: 'unknown', responded: true }, unresolved(VOID_NOTE_TEXT.answered), unresolved(VOID_NOTE_TEXT.answered)],
+      [{ kind: 'unknown', responded: false }, unresolved(VOID_NOTE_TEXT.noAnswer), unresolved(VOID_NOTE_TEXT.noAnswer)],
+      [{ kind: 'in-progress' }, unresolved(VOID_NOTE_TEXT.inProgress), unresolved(VOID_NOTE_TEXT.inProgress)],
+      [{ kind: 'rate-limited', retryAfterSeconds: 30 }, 'removed', refusedAs('rate-limited')],
+      ...(['signed-out', 'step-up', 'denied'] as const).map((kind): [VoidResult, 'removed', Partial<HeldVoid>] => [{ kind }, 'removed', refusedAs(kind)]),
+      [{ kind: 'not-sent' }, 'removed', 'removed'], // never sent (the section validates before put): there is nothing to track
+    ];
+    for (const [answer, whenOpen, whenClosed] of rows) {
+      for (const [open, expected] of [[true, whenOpen], [false, whenClosed]] as const) {
+        const { holds } = voidRig();
+        holds.put('uid-a', held(1));
+        settleVoid(holds, 'uid-a', voidKey(1), answer, true, sent(), open);
+        if (expected === 'removed') expect(holds.get('uid-a'), `${answer.kind}, open ${open}`).toBeUndefined();
+        else expect(holds.get('uid-a'), `${answer.kind}, open ${open}`).toEqual({ ...held(1), ...expected });
+      }
+    }
+    // A caller that cannot say whether its confirmation is open keeps the refusal visible: it settles, never vanishes.
+    const { holds } = voidRig();
+    holds.put('uid-a', held(1));
+    settleVoid(holds, 'uid-a', voidKey(1), { kind: 'step-up' }, true, sent());
+    expect(holds.get('uid-a')).toEqual({ ...held(1), ...refusedAs('step-up') });
+  });
+
+  it('SII-74. VOID-P2 hold: a Check again is decided ONLY by its key\'s sealed answers (voided, already void, the version); a step-up, a 422, a 403, a 401, a 429, a 404, another tenant, no answer — anything unsealed, decided before or apart from the key — leaves it unresolved with a note about that CHECK alone, the same key, bytes and first-send times, an open confirmation or not; a step-up or a 422 also withdraws Check again', () => {
+    fakeClock();
+    const decided: Array<[VoidResult, Partial<HeldVoid>]> = [
+      [{ kind: 'voided', replayed: true }, { state: 'voided', body: '', note: '' }],
+      [{ kind: 'already-void' }, refusedAs('already-void')],
+      [{ kind: 'version-conflict' }, refusedAs('version-conflict')],
+    ];
+    const unresolved: Array<[VoidResult, string]> = [
+      [{ kind: 'step-up' }, VOID_NOTE_TEXT.stepUp],
+      [{ kind: 'key-reused' }, VOID_NOTE_TEXT.keyReused], // unsealed: an integrity failure, never the outcome (D-VOID-5)
+      [{ kind: 'denied' }, VOID_NOTE_TEXT.denied],
+      [{ kind: 'signed-out' }, VOID_NOTE_TEXT.signedOut],
+      [{ kind: 'rate-limited', retryAfterSeconds: 9 }, 'Too many requests. Wait 9 seconds.'],
+      [{ kind: 'rate-limited', retryAfterSeconds: 1 }, 'Too many requests. Wait 1 second.'],
+      [{ kind: 'not-found' }, VOID_NOTE_TEXT.notAccepted],
+      [{ kind: 'tenant-conflict' }, VOID_NOTE_TEXT.notAccepted],
+      [{ kind: 'invalid' }, VOID_NOTE_TEXT.notAccepted],
+      [{ kind: 'not-sent' }, VOID_NOTE_TEXT.notSent], // refused here: the server heard nothing
+      [{ kind: 'in-progress' }, VOID_NOTE_TEXT.inProgress],
+      [{ kind: 'unknown', responded: true }, VOID_NOTE_TEXT.answered],
+      [{ kind: 'unknown', responded: false }, VOID_NOTE_TEXT.noAnswer],
+    ];
+    expect(VOID_NOTE_TEXT.stepUp).toBe("Your sign-in is too old to check this request again here. Signing in again starts a new session that cannot send it. Use Check invoice to see the invoice's current state.");
+    const checking = held(1, { state: 'checking', note: VOID_NOTE_TEXT.noAnswer, seen: 'issued' });
+    const withdrawn = (a: VoidResult) => a.kind === 'step-up' || a.kind === 'key-reused';
+    for (const [answer, expected] of [...decided, ...unresolved.map(([a, note]): [VoidResult, Partial<HeldVoid>] => [a, { state: 'unresolved', note, retryable: !withdrawn(a) }])]) {
+      for (const open of [true, false]) {
+        const { holds } = voidRig();
+        holds.put('uid-a', checking);
+        settleVoid(holds, 'uid-a', voidKey(1), answer, false, sent(), open);
+        expect(holds.get('uid-a'), `${answer.kind}, open ${open}`).toEqual({ ...checking, ...expected }); // seen, key, times untouched
+      }
+    }
+    for (const note of Object.values(VOID_NOTE_TEXT).map((t) => (typeof t === 'string' ? t : t(2)))) expect(note).not.toMatch(/\b(not voided|cancel|rolled back|failed)\b/i);
+  });
+
+  it('SII-75. VOID-P2 hold: a late answer never settles or removes an attempt it no longer speaks for — sent with another token, sent before a sign-out began, or already detached, the attempt is DETACHED (state kept) and nothing else changes; an answer for a replaced key changes nothing at all', () => {
+    fakeClock();
+    const answers: VoidResult[] = [{ kind: 'voided', replayed: false }, { kind: 'already-void' }, { kind: 'step-up' }, { kind: 'rate-limited', retryAfterSeconds: 5 }, { kind: 'unknown', responded: false }];
+    for (const answer of answers) {
+      for (const first of [true, false]) {
+        const start = held(1, { state: first ? 'sending' : 'checking' });
+        const detached = { ...start, csrf: null, body: '' };
+        const other = voidRig(); // the request went with another session's token
+        other.holds.put('uid-a', start);
+        settleVoid(other.holds, 'uid-a', voidKey(1), answer, first, { csrf: `${'s'.repeat(40)}002`, since: sessionEndsSoFar() }, true);
+        expect(other.holds.get('uid-a'), `${answer.kind} other token`).toEqual(detached);
+        const ended = voidRig(); // a sign-out began after it was sent
+        ended.holds.put('uid-a', start);
+        const before = sent();
+        createTenantSessionClient().reset();
+        settleVoid(ended.holds, 'uid-a', voidKey(1), answer, first, before, true);
+        expect(ended.holds.get('uid-a'), `${answer.kind} sign-out`).toEqual(detached);
+        const gone = voidRig(); // already detached (a token change found by the section, a user change)
+        gone.holds.put('uid-a', start);
+        gone.holds.detach('uid-a');
+        settleVoid(gone.holds, 'uid-a', voidKey(1), answer, first, sent(), true);
+        expect(gone.holds.get('uid-a'), `${answer.kind} detached`).toEqual(detached);
+      }
+      const replaced = voidRig(); // a settled attempt replaced by a newer one: the old key's late answer is no-one's
+      replaced.holds.put('uid-a', held(1, { state: 'voided', body: '' }));
+      replaced.holds.put('uid-a', held(2));
+      settleVoid(replaced.holds, 'uid-a', voidKey(1), answer, true, sent(), true);
+      expect(replaced.holds.get('uid-a')).toEqual(held(2));
+    }
+  });
+
+  it('SII-76. VOID-P2 hold: detaching keeps what its card needs — the state (live or settled), the note, what Check invoice saw, its store and invoice — and drops the token and the bytes for good: no change gives either back (none moves what was sent, attached or not; no change re-keys it, sets a field to undefined, adds a field or gives Check again back), its scrub timer goes, and a detached live attempt still holds a new void back until it is dismissed; detachOthers spares only the user named', () => {
+    fakeClock();
+    const { holds } = voidRig();
+    holds.put('uid-a', held(1));
+    holds.change('uid-a', voidKey(1), { state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer, seen: 'voided', seenReason: 'other' });
+    expect(vi.getTimerCount()).toBe(1);
+    for (const sentChange of [
+      { body: `{"expectedTenant":"${TENANT_A}","reasonCode":"other"}` }, { csrf: `${'s'.repeat(40)}002` }, { csrf: null }, { sentAt: T0.mono + HOUR }, { sentWall: T0.wall + HOUR },
+      { storeId: STORE_2 }, { invoiceId: uuid(0x1aff) }, { number: 9 }, { storeLabel: 'Kiosk' }, { state: 'checking' as const, body: BODY },
+      { key: voidKey(9) } as never, { unknownField: 1 } as never, { body: undefined }, { state: undefined }, { note: undefined, state: 'checking' as const },
+      { refusal: undefined }, { retryable: true },
+    ]) expect(holds.change('uid-a', voidKey(1), sentChange), `${Object.keys(sentChange)} ${JSON.stringify(sentChange)}`).toBe(false); // what was sent is the put's for good
+    expect(holds.get('uid-a')).toEqual({ ...held(1), state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer, seen: 'voided', seenReason: 'other' });
+    holds.detach('uid-a');
+    const detached = { ...held(1), state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer, seen: 'voided', seenReason: 'other', csrf: null, body: '' };
+    expect(holds.get('uid-a')).toEqual(detached);
+    expect(vi.getTimerCount()).toBe(0);
+    for (const revive of [{ csrf: CSRF }, { body: BODY }, { csrf: CSRF, body: BODY, state: 'checking' as const }]) {
+      expect(holds.change('uid-a', voidKey(1), revive)).toBe(false); // changing back cannot revive it
+    }
+    expect(holds.get('uid-a')).toEqual(detached);
+    expect(holds.change('uid-a', voidKey(1), { seen: 'issued', seenReason: null })).toBe(true); // a later read may still say what it saw
+    expect(holds.put('uid-a', held(2))).toBe(false); // still live: it may still void, so Dismiss comes first
+    expect(holds.remove('uid-a', voidKey(1))).toBe(true);
+    holds.put('uid-a', held(3, { state: 'voided', body: '' }));
+    holds.detach('uid-a');
+    expect(holds.get('uid-a')).toEqual({ ...held(3, { state: 'voided' }), csrf: null, body: '' }); // settled: its state stays
+    holds.put('uid-b', held(4));
+    holds.put('uid-m', held(5, { state: 'unresolved' }));
+    expect(vi.getTimerCount()).toBe(2);
+    holds.detachOthers('uid-b'); // a user change to uid-b
+    expect(holds.get('uid-b')).toEqual(held(4));
+    expect(holds.get('uid-m')).toEqual({ ...held(5, { state: 'unresolved' }), csrf: null, body: '' });
+    expect(vi.getTimerCount()).toBe(1);
+    holds.detachOthers(null); // a sign-out
+    expect(holds.get('uid-b')).toEqual({ ...held(4), csrf: null, body: '' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('SII-77. VOID-P2 hold: the shop\'s one void store is bound to the sign-out — at the start of every logout and reset each user\'s attempt is detached, its state kept — and the module can send nothing for it', async () => {
+    fakeClock();
+    const real = (n: number, over: Partial<HeldVoid> = {}) => held(n, { sentAt: performance.now(), sentWall: Date.now(), ...over }); // the singleton's own clocks
+    try {
+      const a = real(1);
+      const b = real(2, { state: 'unresolved' });
+      expect(voidHolds.put('uid-a', a)).toBe(true);
+      expect(voidHolds.put('uid-b', b)).toBe(true);
+      expect(voidHolds.get('uid-a')!.body).toBe(BODY);
+      createTenantSessionClient().reset();
+      expect(voidHolds.get('uid-a')).toEqual({ ...a, csrf: null, body: '' });
+      expect(voidHolds.get('uid-b')).toEqual({ ...b, csrf: null, body: '' });
+      voidHolds.remove('uid-a', a.key);
+      voidHolds.remove('uid-b', b.key);
+      const c = real(3, { state: 'checking' });
+      voidHolds.put('uid-a', c);
+      const session = createTenantSessionClient({ fetch: (async () => new Response(null, { status: 401 })) as typeof globalThis.fetch });
+      const ending = session.logout(); // heard synchronously, before anything is sent or awaited
+      expect(voidHolds.get('uid-a')).toEqual({ ...c, csrf: null, body: '' });
+      await ending;
+      voidHolds.remove('uid-a', c.key);
+      expect(vi.getTimerCount()).toBe(0);
+      sendsNothing();
+    } finally {
+      for (const uid of ['uid-a', 'uid-b']) { const h = voidHolds.get(uid); if (h !== undefined) voidHolds.remove(uid, h.key); } // the singleton is shared: leave it empty
+    }
+  });
+
+  it('SII-78. VOID-P2 hold: the cutoff is 23 hours from the FIRST send by the larger of the monotonic and wall-clock time elapsed — a wall clock set back or a suspended monotonic clock never extends it, nor does a Check again\'s answer; the scrub timer armed at put clears only the bytes when it is due, keeps what the card needs, and sends nothing', () => {
+    fakeClock();
+    const h = held(1);
+    expect(voidExpired(h, T0.mono, T0.wall)).toBe(false);
+    expect(voidExpired(h, T0.mono + 23 * HOUR - 1, T0.wall + 23 * HOUR - 1)).toBe(false);
+    expect(voidExpired(h, T0.mono + 23 * HOUR, T0.wall - 5 * HOUR)).toBe(true); // the wall clock set back: the monotonic one says it
+    expect(voidExpired(h, T0.mono, T0.wall + 23 * HOUR)).toBe(true); // a suspended device: the wall clock says it
+    const { clock, holds } = voidRig();
+    holds.put('uid-a', h);
+    expect(vi.getTimerCount()).toBe(1);
+    const pass = (ms: number) => { clock.mono += ms; clock.wall += ms; vi.advanceTimersByTime(ms); };
+    pass(22 * HOUR);
+    holds.change('uid-a', h.key, { state: 'checking' }); // a Check again at 22 hours, its answer undecided
+    settleVoid(holds, 'uid-a', h.key, { kind: 'unknown', responded: false }, false, sent());
+    expect(holds.get('uid-a')).toMatchObject({ state: 'unresolved', body: BODY, sentAt: T0.mono, sentWall: T0.wall });
+    pass(HOUR - 1);
+    expect(holds.get('uid-a')!.body).toBe(BODY);
+    pass(1);
+    expect(holds.get('uid-a')).toEqual({ ...h, state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer, body: '' }); // key, state, store, invoice and token stay
+    expect(vi.getTimerCount()).toBe(0);
+    sendsNothing();
+  });
+
+  it('SII-79. VOID-P2 hold: the scrub timer judges the clocks again when it fires — early it re-arms for what is left; late (timers held back while the wall clock ran on) it scrubs then, voidExpired already closing the send in between and any change of the attempt scrubbing it at once — and a timer exists exactly while the attempt holds bytes: none after a voided or decided settle, a removal, a pre-key removal or a detach, one while unresolved', () => {
+    fakeClock();
+    const early = voidRig();
+    early.holds.put('uid-a', held(1));
+    vi.advanceTimersByTime(23 * HOUR); // due, but neither clock has moved 23 hours (a test-only skew): nothing scrubbed
+    expect(early.holds.get('uid-a')!.body).toBe(BODY);
+    expect(vi.getTimerCount()).toBe(1); // armed again
+    early.clock.mono += 23 * HOUR;
+    vi.advanceTimersByTime(23 * HOUR);
+    expect(early.holds.get('uid-a')!.body).toBe('');
+    const late = voidRig();
+    late.holds.put('uid-b', held(2, { state: 'unresolved' }));
+    late.clock.wall += 23 * HOUR; // suspended: the timer has not fired
+    expect(voidExpired(late.holds.get('uid-b')!, late.clock.mono, late.clock.wall)).toBe(true); // a send handler refuses already
+    expect(late.holds.get('uid-b')!.body).toBe(BODY); // the recorded limit: the bytes wait for the timer, a change or the section's focus scrub
+    vi.advanceTimersByTime(23 * HOUR); // the held-back timer finally runs
+    expect(late.holds.get('uid-b')).toEqual({ ...held(2, { state: 'unresolved' }), body: '' });
+    const touched = voidRig();
+    touched.holds.put('uid-m', held(3, { state: 'unresolved' }));
+    touched.clock.wall += 23 * HOUR;
+    touched.holds.change('uid-m', voidKey(3), { seen: 'issued', seenReason: null }); // e.g. a Check invoice read's answer
+    expect(touched.holds.get('uid-m')!.body).toBe('');
+    expect(vi.getTimerCount()).toBe(0);
+    const { holds } = voidRig();
+    holds.put('uid-a', held(4));
+    expect(vi.getTimerCount()).toBe(1);
+    settleVoid(holds, 'uid-a', voidKey(4), { kind: 'voided', replayed: false }, true, sent());
+    expect(vi.getTimerCount()).toBe(0);
+    holds.put('uid-a', held(5));
+    holds.remove('uid-a', voidKey(5)); // a removal (the card's Dismiss, where it is offered)
+    expect(vi.getTimerCount()).toBe(0);
+    holds.put('uid-a', held(6));
+    settleVoid(holds, 'uid-a', voidKey(6), { kind: 'step-up' }, true, sent(), true); // removed: nothing ran
+    expect(vi.getTimerCount()).toBe(0);
+    holds.put('uid-a', held(7));
+    settleVoid(holds, 'uid-a', voidKey(7), { kind: 'in-progress' }, true, sent());
+    expect(vi.getTimerCount()).toBe(1); // unresolved: still sendable, still timed
+    settleVoid(holds, 'uid-a', voidKey(7), { kind: 'already-void' }, false, sent());
+    expect(vi.getTimerCount()).toBe(0);
+    holds.put('uid-a', held(8));
+    holds.detach('uid-a');
+    expect(vi.getTimerCount()).toBe(0);
+    sendsNothing();
+  });
+
+  it('SII-80. VOID-P2 hold: a Check again\'s 422 (key reused, an UNSEALED chain answer) is an integrity failure that ends nothing — the attempt stays unresolved and live with its key, bytes and timer and the key-reused note, and Check again is withdrawn one way (no change and no later answer gives it back); its sealed answer still settles it; a step-up withdraws it the same way; a FIRST send\'s 422 (a fresh key: nothing ran) is refused', () => {
+    fakeClock();
+    expect(VOID_NOTE_TEXT.keyReused).toBe("The server reports this request key was already used for a different request. That is unexpected: the outcome of the original request is still unknown. Use Check invoice to see the invoice's current state.");
+    const { holds } = voidRig();
+    holds.put('uid-a', held(1, { state: 'checking' }));
+    settleVoid(holds, 'uid-a', voidKey(1), { kind: 'key-reused' }, false, sent());
+    expect(holds.get('uid-a')).toEqual({ ...held(1), state: 'unresolved', note: VOID_NOTE_TEXT.keyReused, retryable: false });
+    expect(isLiveVoid(holds.get('uid-a'))).toBe(true); // it may still void: a new void waits for Dismiss, no key is rotated
+    expect(holds.put('uid-a', held(2))).toBe(false);
+    expect(vi.getTimerCount()).toBe(1); // its bytes stay, timed to the cutoff
+    expect(holds.change('uid-a', voidKey(1), { retryable: true })).toBe(false); // one way
+    holds.change('uid-a', voidKey(1), { state: 'checking' });
+    settleVoid(holds, 'uid-a', voidKey(1), { kind: 'unknown', responded: false }, false, sent());
+    expect(holds.get('uid-a')).toMatchObject({ state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer, retryable: false, body: BODY }); // no later answer sets it back
+    settleVoid(holds, 'uid-a', voidKey(1), { kind: 'voided', replayed: true }, false, sent());
+    expect(holds.get('uid-a')).toMatchObject({ state: 'voided', body: '' });
+    const stepped = voidRig();
+    stepped.holds.put('uid-a', held(3, { state: 'checking' }));
+    settleVoid(stepped.holds, 'uid-a', voidKey(3), { kind: 'step-up' }, false, sent());
+    expect(stepped.holds.get('uid-a')).toEqual({ ...held(3), state: 'unresolved', note: VOID_NOTE_TEXT.stepUp, retryable: false });
+    const fresh = voidRig();
+    fresh.holds.put('uid-a', held(4));
+    settleVoid(fresh.holds, 'uid-a', voidKey(4), { kind: 'key-reused' }, true, sent());
+    expect(fresh.holds.get('uid-a')).toEqual({ ...held(4), ...refusedAs('key-reused') });
+  });
+
+  it('SII-81. VOID-P2 hold: a settled attempt is final — a late or duplicate answer for its own key (a 200, a sealed or unsealed refusal, an undecided one, a pre-key refusal, one never sent) changes nothing, first send or check, open or not; and a stamp or clock that is not a finite number counts as past the cutoff, the bytes scrubbed at once with no timer left to re-arm', () => {
+    fakeClock();
+    const late: VoidResult[] = [
+      { kind: 'voided', replayed: true }, { kind: 'already-void' }, { kind: 'key-reused' }, { kind: 'unknown', responded: false }, { kind: 'in-progress' }, { kind: 'step-up' },
+      { kind: 'signed-out' }, { kind: 'not-sent' },
+    ];
+    for (const settled of [held(1, { state: 'voided', body: '' }), held(1, refusedAs('tenant-conflict'))]) {
+      for (const answer of late) {
+        for (const first of [true, false]) {
+          for (const open of [true, false]) {
+            const { holds } = voidRig();
+            holds.put('uid-a', settled);
+            settleVoid(holds, 'uid-a', voidKey(1), answer, first, sent(), open);
+            expect(holds.get('uid-a'), `${settled.state} then ${answer.kind}, first ${first}, open ${open}`).toEqual(settled);
+          }
+        }
+      }
+    }
+    const NaN_ = Number.NaN;
+    const INF = Number.POSITIVE_INFINITY;
+    for (const [sentAt, sentWall, mono, wall] of [
+      [NaN_, T0.wall, T0.mono, T0.wall], [T0.mono, NaN_, T0.mono, T0.wall], [-INF, T0.wall, T0.mono, T0.wall], [INF, INF, T0.mono, T0.wall],
+      [T0.mono, T0.wall, NaN_, T0.wall], [T0.mono, T0.wall, T0.mono, NaN_],
+    ]) expect(voidExpired({ sentAt, sentWall }, mono, wall), `${sentAt} ${sentWall} ${mono} ${wall}`).toBe(true);
+    const broken = voidRig();
+    broken.holds.put('uid-a', held(1, { sentAt: NaN_ }));
+    expect(broken.holds.get('uid-a')!.body).toBe(''); // scrubbed at put: closed, never open
+    const clockless = createVoidHoldStore({ now: () => NaN_, wallNow: () => T0.wall });
+    clockless.put('uid-b', held(2));
+    expect(clockless.get('uid-b')!.body).toBe('');
+    expect(vi.getTimerCount()).toBe(0); // no NaN delay re-arming itself
+    vi.advanceTimersByTime(HOUR);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('SII-82. VOID-P2 hold: dispose (the end of a store a hot reload replaces) clears every scrub timer and detaches every attempt — token and bytes gone, state kept, live and settled alike — and nothing can give them back; the module disposes its one store together with its sign-out listener', () => {
+    fakeClock();
+    const { holds } = voidRig();
+    holds.put('uid-a', held(1));
+    holds.put('uid-b', held(2, { state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer }));
+    holds.put('uid-m', held(3, { state: 'voided', body: '' }));
+    expect(vi.getTimerCount()).toBe(2);
+    holds.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(holds.get('uid-a')).toEqual({ ...held(1), csrf: null, body: '' });
+    expect(holds.get('uid-b')).toEqual({ ...held(2, { state: 'unresolved', note: VOID_NOTE_TEXT.noAnswer }), csrf: null, body: '' });
+    expect(holds.get('uid-m')).toEqual({ ...held(3, { state: 'voided' }), csrf: null, body: '' });
+    expect(holds.change('uid-a', voidKey(1), { body: BODY })).toBe(false);
+    vi.advanceTimersByTime(24 * HOUR);
+    expect(vi.getTimerCount()).toBe(0);
+    // import.meta.hot is undefined under the test runner, so the module's own wiring is pinned in its source.
+    expect(holdSource()).toContain('import.meta.hot?.dispose(() => { unbindVoidHolds(); voidHolds.dispose(); });');
+    sendsNothing();
   });
 });

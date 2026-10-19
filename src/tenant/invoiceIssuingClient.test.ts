@@ -12,9 +12,9 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  INVOICE_VOID_REASONS, ISSUE_BODY_MAX_BYTES, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf,
-  issuedInvoicePathOf, issuedInvoicesPathOf, issuingSettingsBody, issuingSettingsPathOf, normalizePostalAddress, parseRatePercent, rateDigits, rateText,
-  sameSettingsValues, utcText, type IssuingSettingsFields,
+  INVOICE_VOID_REASONS, ISSUE_BODY_MAX_BYTES, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, VOID_REASON_CODES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf,
+  issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf, issuingSettingsBody, issuingSettingsPathOf, normalizePostalAddress, parseRatePercent, rateDigits, rateText,
+  isVoidTarget, sameSettingsValues, utcText, voidBodyOf, voidEligibilityPathOf, voidPathOf, type IssuingSettingsFields,
 } from './invoiceIssuingClient';
 import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
@@ -840,4 +840,225 @@ test('IIC-25. the shop\'s six void reasons are the server\'s (server/runtime/inv
   assert.deepEqual(Object.keys(INVOICE_VOID_REASONS), [...INVOICE_VOID_REASON_CODES]);
   assert.deepEqual(Object.keys(INVOICE_VOID_REASON_LABELS), [...INVOICE_VOID_REASON_CODES]);
   assert.deepEqual(Object.entries(INVOICE_VOID_REASONS), Object.entries(INVOICE_VOID_REASON_LABELS));
+});
+
+// M7B-INVOICES-VOID-P2 — the void's two routes (server/runtime/invoiceVoid.ts, doc 13 §12.4): the action-only eligibility
+// read and the void command. The body is exactly {"expectedTenant","reasonCode"} (no version), sent byte for byte or not at
+// all; the 200 counts only for the invoice asked; a refusal only by status AND word AND envelope; one fetch per call, the
+// POST never aborted by its caller.
+const VOID_BODY = `{"expectedTenant":"${TENANT}","reasonCode":"wrong_customer"}`;
+const VOID_PATH = `/api/v1/stores/${STORE}/invoices/${INVOICE}/void`;
+const voidedAnswer = (over: Record<string, unknown> = {}) => ({ invoice: { id: INVOICE, status: 'voided', ...over } });
+/** Canonical lowercase uuids the void planner still refuses (server/runtime/outbox.ts UUID_RE: version 1-8, variant 10xx). */
+const NOT_VOID_TARGETS = [
+  '00000000-0000-0000-0000-000000000000', // the nil uuid
+  '000001a1-0000-0000-8000-0000000001a1', '000001a1-0000-9000-8000-0000000001a1', '000001a1-0000-f000-8000-0000000001a1', // version 0, 9, f
+  '000001a1-0000-4000-7000-0000000001a1', '000001a1-0000-4000-c000-0000000001a1', '000001a1-0000-4000-f000-0000000001a1', // variant 0xxx, 110x, 111x
+];
+/** A table row's name for its assertion message: the status, the exact body and any header but the content type. */
+const rowName = async (reply: Response | Error): Promise<string> => (reply instanceof Response
+  ? `${reply.status} ${await reply.clone().text()}${[...reply.headers].filter(([name]) => name !== 'content-type').map(([name, value]) => ` ${name}: ${value}`).join('')}`
+  : `no answer (${reply.message})`);
+
+test('IIC-26. the void\'s two requests: GET …/void-eligibility with the session token alone, POST …/void with exactly the five command headers and the body\'s exact bytes — same-origin, credentialed, uncached, never redirected, no referrer; one fetch each; the POST takes no signal of its caller\'s', async () => {
+  const { calls, client } = scripted(refused(503, 'service_unavailable'), refused(503, 'service_unavailable'));
+  await client.voidEligibility(STORE, INVOICE, CSRF);
+  await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF);
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url}`), [`GET ${VOID_PATH}-eligibility`, `POST ${VOID_PATH}`]);
+  assert.equal(voidEligibilityPathOf(STORE, INVOICE), `${issuedInvoicePathOf(STORE, INVOICE)}/void-eligibility`);
+  assert.equal(voidPathOf(STORE, INVOICE), VOID_PATH);
+  for (const call of calls) {
+    assert.equal(call.init.credentials, 'include');
+    assert.equal(call.init.mode, 'same-origin');
+    assert.equal(call.init.cache, 'no-store');
+    assert.equal(call.init.redirect, 'error');
+    assert.equal(call.init.referrerPolicy, 'no-referrer');
+    assert.ok(call.init.signal instanceof AbortSignal); // the client's own timeout, never the caller's
+    assert.ok(!call.url.includes(CSRF) && !call.url.includes('?'));
+  }
+  const [read, post] = calls.map(headersOf);
+  assert.deepEqual([...read.entries()], [['accept', 'application/json'], ['x-tmpos-session-csrf', CSRF]]);
+  assert.deepEqual([...post.entries()], [
+    ['accept', 'application/json'], ['content-type', 'application/json'], ['idempotency-key', KEY], ['x-tmpos-csrf', '1'], ['x-tmpos-session-csrf', CSRF],
+  ]);
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[1].init.body, VOID_BODY); // the caller's string itself, never re-serialized
+  assert.equal(client.voidInvoice.length, 5); // (storeId, invoiceId, key, body, csrf): no AbortSignal parameter
+  // An aborted signal sends no eligibility read.
+  const aborted = new AbortController();
+  aborted.abort();
+  const none = scripted();
+  assert.deepEqual(await none.client.voidEligibility(STORE, INVOICE, CSRF, aborted.signal), { kind: 'unavailable' });
+  assert.equal(none.calls.length, 0);
+});
+
+test('IIC-27. the void body is built ONCE in its fixed key order — exactly {"expectedTenant","reasonCode"}, no version or other key — for a canonical tenant and one of the six codes in their one order; anything else is null', () => {
+  assert.equal(voidBodyOf(TENANT, 'wrong_customer'), VOID_BODY);
+  assert.deepEqual([...VOID_REASON_CODES], ['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']);
+  assert.deepEqual([...VOID_REASON_CODES], [...INVOICE_VOID_REASON_CODES]); // the server's order
+  assert.deepEqual([...VOID_REASON_CODES], Object.keys(INVOICE_VOID_REASONS)); // the label map's own keys
+  assert.ok(Object.isFrozen(VOID_REASON_CODES));
+  for (const code of VOID_REASON_CODES) {
+    const body = voidBodyOf(TENANT, code);
+    assert.equal(body, `{"expectedTenant":"${TENANT}","reasonCode":"${code}"}`);
+    assert.deepEqual(Object.keys(JSON.parse(body ?? '{}')), ['expectedTenant', 'reasonCode']);
+    assert.ok(new TextEncoder().encode(body ?? '').length <= 1024);
+  }
+  for (const [tenant, code] of [
+    [TENANT.toUpperCase(), 'other'], ['t-1', 'other'], ['', 'other'], [` ${TENANT}`, 'other'], [`${TENANT}x`, 'other'],
+    [TENANT, ''], [TENANT, 'Other reason'], [TENANT, 'Other'], [TENANT, ' other'], [TENANT, 'invoice_void_other'], [TENANT, 'refunded'], [TENANT, 'toString'],
+    [TENANT, '__proto__'], [TENANT, 'void'],
+  ]) assert.equal(voidBodyOf(tenant, code), null, `${tenant} ${code}`);
+  assert.equal(voidBodyOf(TENANT, 7 as unknown as string), null);
+  assert.equal(voidBodyOf(null as unknown as string, 'other'), null);
+});
+
+test('IIC-28. a void sends NOTHING (`not-sent`, which no server answer can be) unless its body is byte for byte voidBodyOf\'s, its store id canonical and its invoice id the planner\'s target grammar (version 1-8, variant 10xx) — the nil uuid, another version or variant, or (body, key) swapped included; the exact body is ONE POST', async () => {
+  const good = { expectedTenant: TENANT, reasonCode: 'wrong_customer' };
+  const { calls, client } = scripted();
+  for (const body of [
+    '', 'nope', '[]', 'null', JSON.stringify({ reasonCode: 'wrong_customer', expectedTenant: TENANT }), JSON.stringify(good, null, 1), `${VOID_BODY} `, ` ${VOID_BODY}`, `${VOID_BODY}\n`,
+    JSON.stringify({ ...good, expectedVersion: 1 }), JSON.stringify({ ...good, snapshotVersion: 1 }), JSON.stringify({ ...good, note: '' }), JSON.stringify({ expectedTenant: TENANT }),
+    JSON.stringify({ reasonCode: 'other' }), JSON.stringify({ ...good, expectedTenant: TENANT.toUpperCase() }), JSON.stringify({ ...good, reasonCode: 'Wrong customer' }),
+    JSON.stringify({ ...good, reasonCode: 'toString' }), JSON.stringify({ ...good, reasonCode: ['other'] }), VOID_BODY.replace('"wrong_customer"', '"wrong\\u005fcustomer"'),
+    ISSUE_BODY, settingsBody(2), `${VOID_BODY}${' '.repeat(1024)}`,
+  ]) assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, body, CSRF), { kind: 'not-sent' }, body.slice(0, 60));
+  for (const [store, invoice] of [
+    ['s', INVOICE], [STORE, 'i-1'], [STORE.toUpperCase(), INVOICE], [STORE, INVOICE.toUpperCase()], [STORE, `${INVOICE}/`], [`${STORE}/x`, INVOICE],
+    ...NOT_VOID_TARGETS.map((id) => [STORE, id]), // the planner's target grammar: it would take the key only to answer 400
+  ]) {
+    assert.deepEqual(await client.voidInvoice(store, invoice, KEY, VOID_BODY, CSRF), { kind: 'not-sent' }, `${store} ${invoice}`);
+  }
+  assert.deepEqual(await client.voidInvoice(STORE, INVOICE, VOID_BODY, KEY, CSRF), { kind: 'not-sent' }); // (body, key) swapped: a key is never a body
+  assert.equal(calls.length, 0);
+  for (const id of NOT_VOID_TARGETS) assert.equal(isVoidTarget(id), false, id);
+  const once = scripted(json(200, voidedAnswer()));
+  assert.deepEqual(await once.client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), { kind: 'voided', replayed: false });
+  assert.equal(once.calls.length, 1);
+  assert.equal(once.calls[0].init.body, VOID_BODY);
+  // Versions 1-8 with a variant of 10xx are the planner's: each is sent, once.
+  const targets = ['000001a1-0000-1000-8000-0000000001a1', '000001a1-0000-8000-b000-0000000001a1', '000001a1-0000-7fff-9fff-0000000001a1'];
+  const sent = scripted(...targets.map((id) => json(200, { invoice: { id, status: 'voided' } })));
+  for (const id of targets) {
+    assert.equal(isVoidTarget(id), true, id);
+    assert.deepEqual(await sent.client.voidInvoice(STORE, id, KEY, VOID_BODY, CSRF), { kind: 'voided', replayed: false }, id);
+  }
+  assert.deepEqual(sent.calls.map((c) => c.url), targets.map((id) => voidPathOf(STORE, id)));
+});
+
+test('IIC-29. voided ONLY on an exact 200 { invoice: { id, status: "voided" } } naming the invoice asked, the replay header absent or exactly "true"; any other 200 (another id, an extra key, another status, another replay header, no JSON) is unknown, never success', async () => {
+  const first = scripted(json(200, voidedAnswer()), json(200, voidedAnswer(), { 'idempotent-replayed': 'true' }));
+  assert.deepEqual(await first.client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), { kind: 'voided', replayed: false });
+  assert.deepEqual(await first.client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), { kind: 'voided', replayed: true });
+  const unnamed: Response[] = [
+    json(200, voidedAnswer({ id: uuid(0x1a2) })), // another invoice
+    json(200, voidedAnswer({ id: INVOICE.toUpperCase() })),
+    json(200, voidedAnswer({ status: 'issued' })), json(200, voidedAnswer({ status: 'void' })), json(200, voidedAnswer({ status: 'Voided' })),
+    json(200, voidedAnswer({ voidedAt: '2026-10-17T08:00:00.000001Z' })), json(200, voidedAnswer({ reasonCode: 'other' })), // the 200 carries neither
+    json(200, { ...voidedAnswer(), requestId: 'req-synthetic' }), json(200, { invoice: { id: INVOICE } }), json(200, { id: INVOICE, status: 'voided' }),
+    json(200, { invoice: [INVOICE, 'voided'] }), json(200, {}), json(200, null),
+    json(200, voidedAnswer(), { 'idempotent-replayed': 'false' }), json(200, voidedAnswer(), { 'idempotent-replayed': 'TRUE' }),
+    json(200, voidedAnswer(), { 'idempotent-replayed': '1' }), json(200, voidedAnswer(), { 'idempotent-replayed': '' }),
+    json(201, voidedAnswer()), new Response(JSON.stringify(voidedAnswer()), { status: 200 }), // no JSON content type
+    new Response('{"invoice":', { status: 200, headers: { 'content-type': 'application/json' } }), // malformed
+  ];
+  const { calls, client } = scripted(...unnamed);
+  for (let i = 0; i < unnamed.length; i++) assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), { kind: 'unknown', responded: true }, `case ${i}`);
+  assert.equal(calls.length, unnamed.length);
+  assert.ok(calls.every((c) => c.init.method === 'POST' && c.url === VOID_PATH && c.init.body === VOID_BODY));
+});
+
+test('IIC-30. every other void answer is ONE outcome by status AND word AND envelope: sealed 409 invalid_state already-void and write_conflict version-conflict (replayed too), never confused with the chain\'s; the chain\'s 409s, 422, 404, 403 step_up_required vs any other 403, 401, 429 with its wait, 400/413/415; a 503, an unnamed word or shape, no answer or a timeout is unknown — each ONE fetch, never retried', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [sealed(409, 'invalid_state'), { kind: 'already-void' }],
+    [json(409, { error: 'invalid_state' }, { 'idempotent-replayed': 'true' }), { kind: 'already-void' }], // its replay under the key
+    [refused(409, 'invalid_state'), { kind: 'unknown', responded: true }], // the chain never says it: not "already void"
+    [sealed(409, 'write_conflict'), { kind: 'version-conflict' }],
+    [json(409, { error: 'write_conflict' }, { 'idempotent-replayed': 'true' }), { kind: 'version-conflict' }],
+    [refused(409, 'write_conflict'), { kind: 'tenant-conflict' }], // the chain's: another tenant, rolled back — never the sealed one
+    [refused(409, 'request_in_progress'), { kind: 'in-progress' }],
+    [sealed(409, 'request_in_progress'), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'invalid_state', requestId: 7 }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'write_conflict', requestId: 'req-synthetic', more: 1 }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'invalid_state', more: 1 }), { kind: 'unknown', responded: true }],
+    [refused(409, 'conflict'), { kind: 'unknown', responded: true }], // an unnamed word
+    [refused(422, 'idempotency_key_reused'), { kind: 'key-reused' }],
+    [sealed(422, 'idempotency_key_reused'), { kind: 'unknown', responded: true }],
+    [refused(422, 'invalid_request'), { kind: 'unknown', responded: true }],
+    [refused(404, 'not_found'), { kind: 'not-found' }],
+    [sealed(404, 'not_found'), { kind: 'unknown', responded: true }],
+    [refused(404, 'forbidden'), { kind: 'unknown', responded: true }],
+    [refused(403, 'step_up_required'), { kind: 'step-up' }],
+    [sealed(403, 'step_up_required'), { kind: 'unknown', responded: true }],
+    [refused(403, 'forbidden'), { kind: 'denied' }],
+    [refused(403, 'authz_context_missing'), { kind: 'denied' }],
+    [refused(403, 'csrf_invalid'), { kind: 'denied' }], // any other chain 403
+    [sealed(403, 'forbidden'), { kind: 'unknown', responded: true }],
+    [new Response('Forbidden', { status: 403 }), { kind: 'unknown', responded: true }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }],
+    [refused(401, 'forbidden'), { kind: 'unknown', responded: true }],
+    [sealed(401, 'unauthenticated'), { kind: 'unknown', responded: true }],
+    [refused(429, 'rate_limited', { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [refused(429, 'rate_limited'), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    [refused(429, 'rate_limited', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }), { kind: 'rate-limited', retryAfterSeconds: 60 }],
+    [refused(429, 'forbidden', { 'retry-after': '7' }), { kind: 'unknown', responded: true }],
+    [sealed(429, 'rate_limited'), { kind: 'unknown', responded: true }],
+    [refused(400, 'invalid_request'), { kind: 'invalid' }],
+    [refused(413, 'content_too_large'), { kind: 'invalid' }],
+    [refused(415, 'unsupported_media_type'), { kind: 'invalid' }],
+    [sealed(400, 'invalid_request'), { kind: 'unknown', responded: true }],
+    [refused(413, 'invalid_request'), { kind: 'unknown', responded: true }],
+    [sealed(413, 'content_too_large'), { kind: 'unknown', responded: true }],
+    [refused(415, 'invalid_request'), { kind: 'unknown', responded: true }],
+    [sealed(415, 'unsupported_media_type'), { kind: 'unknown', responded: true }],
+    [refused(503, 'service_unavailable'), { kind: 'unknown', responded: true }],
+    [sealed(503, 'service_unavailable'), { kind: 'unknown', responded: true }],
+    [refused(500, 'internal_error'), { kind: 'unknown', responded: true }],
+    [new Response(null, { status: 502 }), { kind: 'unknown', responded: true }],
+    [new Response('{"error":', { status: 409, headers: { 'content-type': 'application/json' } }), { kind: 'unknown', responded: true }],
+    [network(), { kind: 'unknown', responded: false }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), outcome, name);
+    assert.equal(calls.length, 1, name); // one fetch: nothing re-sends on its own
+  }
+  // A timeout is no answer too (the outcome is unknown, never "cancelled"), and is not retried.
+  let hung = 0;
+  const hanging = createInvoiceIssuingClient({ timeoutMs: 5, fetch: (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    hung += 1;
+    return new Promise<Response>((_resolve, reject) => { init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))); });
+  }) as typeof globalThis.fetch });
+  assert.deepEqual(await hanging.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), { kind: 'unknown', responded: false });
+  assert.equal(hung, 1);
+});
+
+test('IIC-31. the void eligibility: allowed ONLY for a 200 exactly { eligibility: "allowed" }; any chain 403 is denied whatever its word (it asks for no recent sign-in); 401 signed-out, 429 its wait; anything else unavailable; a store id outside its grammar or an invoice id outside the planner\'s target grammar sends nothing', async () => {
+  const answers: Array<[Response | Error, unknown]> = [
+    [json(200, { eligibility: 'allowed' }), { kind: 'allowed' }],
+    [json(200, { eligibility: 'denied' }), { kind: 'unavailable' }], [json(200, { eligibility: 'allowed', invoice: INVOICE }), { kind: 'unavailable' }],
+    [json(200, { eligibility: true }), { kind: 'unavailable' }], [json(200, {}), { kind: 'unavailable' }], [json(200, ['allowed']), { kind: 'unavailable' }],
+    [new Response('{"eligibility":"allowed"}', { status: 200 }), { kind: 'unavailable' }], // no JSON content type
+    [json(201, { eligibility: 'allowed' }), { kind: 'unavailable' }],
+    [refused(403, 'forbidden'), { kind: 'denied' }], [refused(403, 'authz_context_missing'), { kind: 'denied' }], [refused(403, 'step_up_required'), { kind: 'denied' }],
+    [sealed(403, 'forbidden'), { kind: 'unavailable' }], [new Response('Forbidden', { status: 403 }), { kind: 'unavailable' }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(401, 'forbidden'), { kind: 'unavailable' }],
+    [refused(429, 'rate_limited', { 'retry-after': '4' }), { kind: 'rate-limited', retryAfterSeconds: 4 }],
+    [refused(404, 'not_found'), { kind: 'unavailable' }], [refused(400, 'invalid_request'), { kind: 'unavailable' }],
+    [refused(503, 'service_unavailable'), { kind: 'unavailable' }], [network(), { kind: 'unavailable' }],
+  ];
+  for (const [reply, outcome] of answers) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.voidEligibility(STORE, INVOICE, CSRF), outcome, name);
+    assert.equal(calls.length, 1, name);
+    assert.equal(calls[0].url, `${VOID_PATH}-eligibility`);
+  }
+  const { calls, client } = scripted();
+  assert.deepEqual(await client.voidEligibility('x', INVOICE, CSRF), { kind: 'denied' });
+  assert.deepEqual(await client.voidEligibility(STORE, INVOICE.toUpperCase(), CSRF), { kind: 'denied' });
+  assert.deepEqual(await client.voidEligibility(STORE, `${INVOICE}?x=1`, CSRF), { kind: 'denied' });
+  for (const id of NOT_VOID_TARGETS) assert.deepEqual(await client.voidEligibility(STORE, id, CSRF), { kind: 'denied' }, id);
+  assert.equal(calls.length, 0);
 });
