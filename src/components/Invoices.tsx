@@ -738,16 +738,16 @@ export default function Invoices() {
 
   return (
     <div className="space-y-8">
-      <header className="flex items-end justify-between">
+      <header className="flex flex-wrap gap-4 items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Billing & Sales</span>
           <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Manage Invoices</h2>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="relative">
+        <div className="flex flex-wrap items-center gap-4 max-w-full">
+          <div className="relative max-w-full">
             <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
             <input type="text" placeholder="Search invoices..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm" />
+              className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 max-w-full shadow-sm" />
           </div>
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
             className="px-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-600 shadow-sm appearance-none">
@@ -773,15 +773,15 @@ export default function Invoices() {
             <div className={`w-12 h-12 rounded-2xl bg-slate-50 flex items-center justify-center ${stat.color}`}>
               <span className="material-symbols-outlined">{stat.icon}</span>
             </div>
-            <div>
+            <div className="max-md:min-w-0">
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{stat.label}</p>
-              <p className={`text-2xl font-black ${stat.color}`}>{stat.value}</p>
+              <p className={`text-2xl font-black break-words ${stat.color}`}>{stat.value}</p>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-x-auto shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/50">

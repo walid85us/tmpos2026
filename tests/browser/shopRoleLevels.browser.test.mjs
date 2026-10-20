@@ -399,8 +399,8 @@
 //          whole) under a long description of many words — is reopened with both answers in: its table fits at 1440 px
 //          and overflows elsewhere (asserted), where it scrolls inside the region, which Tab reaches and ArrowRight
 //          scrolls; the dialog is not scrolled sideways, also after Tab and ArrowRight, and no amount breaks (at 600 px this dialog outgrows
-//          90vh, so it is not used for the hold). The rows are opened from the keyboard (at 320 px the shop's sidebar
-//          lies over the list). Last, in each cell (review D5), the edit-eligibility answer is parked while the
+//          90vh, so it is not used for the hold). The rows are opened from the keyboard (a keyboard path the
+//          cell keeps, Open focused then Enter). Last, in each cell (review D5), the edit-eligibility answer is parked while the
 //          discard's and the issue's answer first, then lands late — lost at the front (unavailable: its text and Try
 //          again) and allowed (Edit draft): since M7B-INVOICES-ISSUE-P2 the edit row holds the height of its tallest
 //          answer from the asking on, so the discard row, Issue invoice… and Close each hold within 0.5 px. Close, the
@@ -535,8 +535,14 @@
 //          unresolved, never attributed; Check again the sealed already-void. Then SIS-09's cells and LAST 320x600 at 24 px:
 //          the dialog holds still while its eligibility answers, the Tab and Escape order, Space/ArrowDown on the reasons,
 //          the confirmation, its unconfirmed state and the held card bounded (the Total whole, scrolled inside its own region
-//          where wider), the reserved row, the issue date and no clipping held in every cell (B1 L-1/L-2, fitsRow); recorded
-//          only: in the DA-214 cells, card controls under TenantLayout's sidebar, each activated from the keyboard (report §9).
+//          where wider), the reserved row, the issue date and no clipping held in every cell (B1 L-1/L-2, fitsRow); since
+//          M7B-INVOICES-VOID-P2-R1 the held card on the real page (no section hold): every control on top and focus-visible
+//          by Tab in every cell, and in the DA-214 cells no sideways page scroll and ordinary pointer clicks proven by what
+//          they send; recorded only: M768's older page overflow (the md layout).
+//   SIS-23 (M7B-INVOICES-VOID-P2-R1, the shared layout change) a bounded navigation smoke: at 320x640 and at 768x1024 with
+//          24 px text TenantLayout's nav is in normal flow above the content, ordinary clicks on its Customer Directory and
+//          Invoices links open them without sideways scroll, the Employees Permissions tab renders (its own grid's overflow
+//          and the dashboard's recorded only); at 1440 the sidebar stays the fixed 256 px one.
 //   The 23-hour cutoff and throttled timers are COMPONENT-layer evidence only (SII-102, controlled clocks); this file proves
 //   the reload loss with no automatic POST (SIS-21) and never waits on a clock.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
@@ -1732,7 +1738,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
-  'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22',
+  'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -7016,8 +7022,8 @@ const holdBox = (page) => page.evaluate(`(() => {
   };
 })()`);
 /**
- * Open row `id` from the keyboard (its Open button focused, Enter): at 320 CSS px the shop's own sidebar lies over the
- * drafts list (an unrelated screen, left as it is), so SDB-23 reaches the row the way a keyboard user does, in every cell.
+ * Open row `id` from the keyboard (its Open button focused, Enter): SDB-23 reaches the row the way a keyboard user does,
+ * in every cell (a legitimate keyboard path; the sidebar no longer lies over the list below md).
  */
 async function reopenByKey(page, id, customerName) {
   await page.call(`${by('drafts-row')}[data-id="${id}"] ${by('drafts-open')}`, function () { this.focus(); });
@@ -8370,6 +8376,12 @@ const ISSUED_CELLS = Object.freeze([
   { cell: 'S320', width: 320, height: 480, font: null, overflows: true },
   { cell: 'T768', width: 768, height: 1024, font: 24, overflows: true },
 ]);
+/**
+ * The one cell whose dialogs SIS-09, SIS-15, SIS-16 and SIS-22 open from the keyboard (Open focused, Enter); every other
+ * cell opens them with an ordinary pointer click. Until M7B-INVOICES-VOID-P2-R1 they were all opened from the keyboard
+ * (the keyboard path stays proven here, in N320 only).
+ */
+const KEYBOARD_OPEN_CELL = 'N320';
 /** Exactly `n` characters of numbered words of `stem` (ASCII, so characters are scalars), never ending in a space. */
 const wordsOf = (stem, n) => {
   let s = '';
@@ -8429,62 +8441,57 @@ const issuedBox = (page) => dialogBox(page, ISSUED_BOX);
 const totalSeen = (page) => amountSeen(page, ISSUED_BOX);
 
 /**
- * The issued row `id` now (SIS-09, before its dialog opens), measured with the section held (by this test only, then let go)
- * to `column` CSS px — the viewport less two 16 px gutters — because the page itself is wider than a phone's viewport for an
- * older reason (TenantLayout's main column grows to the demo invoices table's width), which would leave the section ~1028 px
- * wide at 320 px: what reaches past the section's content box, the Total's amount in lines, the issue time's date and clock
+ * The issued row `id` now (SIS-09, before its dialog opens), on the real page (since M7B-INVOICES-VOID-P2-R1 no section
+ * hold: below md the section is the real column): the section's border box in page coordinates against the viewport's
+ * client width, what reaches past the section's content box, the Total's amount in lines, the issue time's date and clock
  * in lines, Open scrolled into view (on top, in the viewport) and the customer as shown — its text, and whether any of its
  * boxes leaves the row's content box or is clipped (an ellipsis, or a box from the name up to the row that overflows).
  */
-const issuedRowBox = (page, id, column) => page.evaluate(`(() => {
+const issuedRowBox = (page, id) => page.evaluate(`(() => {
   const li = document.querySelector(${JSON.stringify(`${by('issued-row')}[data-id="${id}"]`)}), section = ${q('issued-section')};
   if (li === null || section === null) return null;
-  const was = section.style.maxWidth;
-  section.style.maxWidth = '${column}px';
-  try {
-    const linesIn = (node) => { if (!node) return null; const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
-    // The section's content box, now and again after Open is scrolled into view (scrolling moves every box alike).
-    const content = () => { const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
-      return { left: s.left + section.clientLeft + parseFloat(cs.paddingLeft), right: s.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight), width: s.width }; };
-    const box = content();
-    const outside = [li, ...li.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 0.5 || r.left < box.left - 0.5; })
-      .map((n) => ({ node: n.dataset?.testid ?? n.tagName.toLowerCase(), left: Math.round(n.getBoundingClientRect().left - box.left), right: Math.round(n.getBoundingClientRect().right - box.right) })).slice(0, 8);
-    const time = li.querySelector(${JSON.stringify(by('issued-row-issued'))}), node = time?.firstChild ?? null;
-    const part = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
-    const totalLines = linesIn(li.querySelector(${JSON.stringify(by('issued-row-total'))})?.lastElementChild);
-    const name = li.querySelector('bdi${by('issued-row-customer')}');
-    const customer = (() => {
-      if (name === null) return null;
-      const l = li.getBoundingClientRect(), cs = getComputedStyle(li);
-      const inner = { left: l.left + li.clientLeft + parseFloat(cs.paddingLeft), right: l.left + li.clientLeft + li.clientWidth - parseFloat(cs.paddingRight) };
-      const rects = [...name.getClientRects()];
-      const boxes = [];
-      for (let n = name; n !== null && n !== li.parentElement; n = n.parentElement) boxes.push(n);
-      return {
-        text: name.textContent, lines: new Set(rects.map((r) => Math.round(r.top))).size,
-        inRow: rects.length > 0 && rects.every((r) => r.left >= inner.left - 0.5 && r.right <= inner.right + 0.5 && r.top >= l.top - 0.5 && r.bottom <= l.bottom + 0.5),
-        clipped: boxes.filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || n.scrollWidth > n.clientWidth || (c.overflowY !== 'visible' && n.scrollHeight > n.clientHeight); })
-          .map((n) => n.dataset?.testid ?? n.tagName.toLowerCase()),
-      };
-    })();
-    const open = li.querySelector(${JSON.stringify(by('issued-open'))});
-    open.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    const o = open.getBoundingClientRect(), after = content();
-    const hit = document.elementFromPoint(o.left + o.width / 2, o.top + o.height / 2);
+  const whole = section.getBoundingClientRect();
+  const page = { left: whole.left + scrollX, right: whole.right + scrollX, clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth };
+  const linesIn = (node) => { if (!node) return null; const range = document.createRange(); range.selectNodeContents(node); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+  // The section's content box, now and again after Open is scrolled into view (scrolling moves every box alike).
+  const content = () => { const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
+    return { left: s.left + section.clientLeft + parseFloat(cs.paddingLeft), right: s.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight), width: s.width }; };
+  const box = content();
+  const outside = [li, ...li.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 0.5 || r.left < box.left - 0.5; })
+    .map((n) => ({ node: n.dataset?.testid ?? n.tagName.toLowerCase(), left: Math.round(n.getBoundingClientRect().left - box.left), right: Math.round(n.getBoundingClientRect().right - box.right) })).slice(0, 8);
+  const time = li.querySelector(${JSON.stringify(by('issued-row-issued'))}), node = time?.firstChild ?? null;
+  const part = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; };
+  const totalLines = linesIn(li.querySelector(${JSON.stringify(by('issued-row-total'))})?.lastElementChild);
+  const name = li.querySelector('bdi${by('issued-row-customer')}');
+  const customer = (() => {
+    if (name === null) return null;
+    const l = li.getBoundingClientRect(), cs = getComputedStyle(li);
+    const inner = { left: l.left + li.clientLeft + parseFloat(cs.paddingLeft), right: l.left + li.clientLeft + li.clientWidth - parseFloat(cs.paddingRight) };
+    const rects = [...name.getClientRects()];
+    const boxes = [];
+    for (let n = name; n !== null && n !== li.parentElement; n = n.parentElement) boxes.push(n);
     return {
-      section: { left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width) }, outside, totalLines,
-      time: node === null ? null : { date: part(0, 10), clock: part(11, 19) },
-      open: { onTop: hit !== null && open.contains(hit), inView: o.left >= -0.5 && o.top >= -0.5 && o.right <= innerWidth + 0.5 && o.bottom <= innerHeight + 0.5, inSection: o.right <= after.right + 0.5 },
-      customer,
+      text: name.textContent, lines: new Set(rects.map((r) => Math.round(r.top))).size,
+      inRow: rects.length > 0 && rects.every((r) => r.left >= inner.left - 0.5 && r.right <= inner.right + 0.5 && r.top >= l.top - 0.5 && r.bottom <= l.bottom + 0.5),
+      clipped: boxes.filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || n.scrollWidth > n.clientWidth || (c.overflowY !== 'visible' && n.scrollHeight > n.clientHeight); })
+        .map((n) => n.dataset?.testid ?? n.tagName.toLowerCase()),
     };
-  } finally {
-    section.style.maxWidth = was;
-  }
+  })();
+  const open = li.querySelector(${JSON.stringify(by('issued-open'))});
+  open.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const o = open.getBoundingClientRect(), after = content();
+  const hit = document.elementFromPoint(o.left + o.width / 2, o.top + o.height / 2);
+  return {
+    section: { left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width) }, page, outside, totalLines,
+    time: node === null ? null : { date: part(0, 10), clock: part(11, 19) },
+    open: { onTop: hit !== null && open.contains(hit), inView: o.left >= -0.5 && o.top >= -0.5 && o.right <= innerWidth + 0.5 && o.bottom <= innerHeight + 0.5, inSection: o.right <= after.right + 0.5 },
+    customer,
+  };
 })()`);
 
 /**
  * SIS-09's cells, run on the issued invoice `stored` (already listed on `page`, at store `store`): in each ISSUED_CELLS cell
- * its row, measured with the section held, then its dialog opened from the keyboard, measured and closed by Escape — every
+ * its row, measured on the real page, then its dialog opened (by pointer; from the keyboard in KEYBOARD_OPEN_CELL), measured and closed by Escape — every
  * check SIS-09's title states, `shown` being the dialog content the stored rows mean. `alsoOpen(cell, check)` adds checks
  * while the dialog is open (SIS-16: the void time and reason). Evidence is recorded under `id`. The problems, in order.
  */
@@ -8505,7 +8512,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     const setUp = await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })');
     // Preconditions, asserted: a cell that did not take its configuration proves nothing.
     assert.deepEqual(setUp, { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
-    const row = await issuedRowBox(page, invoiceId, width - 32);
+    const row = await issuedRowBox(page, invoiceId);
     record(id, { cell, phase: 'row', row });
     check(row !== null, `${cell}: the row is not shown`);
     if (row !== null) {
@@ -8513,12 +8520,14 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
       check(row.totalLines === 1, `${cell}: the row's Total breaks (${row.totalLines} lines)`);
       check(row.time !== null && row.time.date === 1 && row.time.clock === 1, `${cell}: the row's issue time breaks inside its date or clock ${JSON.stringify(row.time)}`);
       check(row.open.onTop && row.open.inView && row.open.inSection, `${cell}: the row's Open is not in view, on top and inside the section ${JSON.stringify(row.open)} (section ${JSON.stringify(row.section)})`);
-      check(row.section.width <= width - 32, `${cell}: the section was not held to ${width - 32} px for the row ${JSON.stringify(row.section)}`);
+      // Since R1 the real column, not a test hold: the section lies inside the viewport's client width (no sideways scroll to
+      // reach it), except at M768, whose md layout keeps the older page overflow (recorded with the row).
+      if (cell !== 'M768') check(row.page.left >= -0.5 && row.page.right <= row.page.clientWidth + 0.5, `${cell}: the section does not fit the viewport ${JSON.stringify({ section: row.section, page: row.page })}`);
       check(row.customer !== null && row.customer.text === stored.customerName, `${cell}: the row does not show the customer as stored`);
       check(row.customer !== null && row.customer.inRow && row.customer.clipped.length === 0, `${cell}: the row's customer is not shown whole inside the row ${JSON.stringify(row.customer && { lines: row.customer.lines, inRow: row.customer.inRow, clipped: row.customer.clipped })}`);
     }
     const from = st.api.length;
-    await openIssuedInvoice(page, invoiceId, stored.number, { keyboard: true });
+    await openIssuedInvoice(page, invoiceId, stored.number, { keyboard: cell === KEYBOARD_OPEN_CELL }); // by pointer since R1, from the keyboard in one cell
     await eligibilityAnswered(page, store, invoiceId, from); // VOID-P2: measured once the eligibility answer has filled its row
     const b = await issuedBox(page);
     const { text, buttons, shell, ...content } = await issuedViewOf(page);
@@ -8571,7 +8580,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   return problems;
 }
 
-scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened from the keyboard on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured with the section held by the test to the viewport less two 16 px gutters (288 px at 320 px: the page itself scrolls sideways at 320 px for an older reason, its main column grown by the demo invoices table), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open (since VOID-P2 beside ONE void eligibility GET, the owner\'s Void invoice… in view and on top and reached by Tab before the lines)', async () => {
+scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened by an ordinary pointer click (from the keyboard at 320x640) on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured on the real page (since M7B-INVOICES-VOID-P2-R1 no section hold: the section lies inside the viewport, except at 768x1024 with 16 px text, whose md layout keeps the older page overflow, recorded), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open (since VOID-P2 beside ONE void eligibility GET, the owner\'s Void invoice… in view and on top and reached by Tab before the lines)', async () => {
   const { tenant, stores: [main], boss } = await draftShop('i9', ['main']);
   const direct = await directLogin(boss);
   const values = {
@@ -9012,7 +9021,7 @@ scenario('SIS-15', 'AC-10 ISS-23 BOUNDED LAYOUT AND KEYBOARD OF THE ISSUE CONFIR
     const opener = await page.evaluate(`(() => { const b = ${q('draft-issue-open')}; b.scrollIntoView({ block: 'nearest' }); const r = b.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
       return { inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && b.contains(hit) }; })()`);
     check(opener.inView && opener.onTop, `${cell}: Issue invoice… is not in view and on top ${JSON.stringify(opener)}`);
-    await openIssueReview(page, id, customer.name, { keyboard: true });
+    await openIssueReview(page, id, customer.name, { keyboard: cell === KEYBOARD_OPEN_CELL }); // by pointer since R1, from the keyboard in one cell
     await quiet(page, from);
     await page.settle();
     const b = await dialogBox(page, ISSUE_BOX);
@@ -9987,40 +9996,50 @@ const voidRowStill = (page) => page.evaluate(`(() => {
     rowMinHeight: el('issued-view-void-row') === null ? null : getComputedStyle(el('issued-view-void-row')).minHeight };
 })()`);
 /**
- * The held card now, with the section held (by this test only, then let go) to `column` CSS px, as SIS-09 holds it for a row
- * (DA-214: the page's main column is widened by the demo invoices table at 320 px): what of it reaches past the section's
- * content box, what clips (an ellipsis, a box narrower than its content), the store the status names, and each control
- * scrolled into view — in view, on top, inside the section.
+ * The held card now, on the real page (since M7B-INVOICES-VOID-P2-R1 no section hold: below md TenantLayout's sidebar is
+ * in normal flow above the content, so the section is the real column): what of it reaches past the section's content box,
+ * what clips (an ellipsis, a box narrower than its content), the store the status names, each control scrolled into view —
+ * in view, on top, inside the section, and what lies over it when not — the page's own sideways scroll and the sidebar.
  */
-const voidCardBox = (page, column) => page.evaluate(`(() => {
+const voidCardBox = (page) => page.evaluate(`(() => {
   const section = document.querySelector('[data-testid="issued-section"]'), card = document.querySelector('[data-testid="issued-void-card"]');
   if (section === null || card === null) return null;
-  const was = section.style.maxWidth;
-  section.style.maxWidth = '${column}px';
-  try {
-    const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
-    const box = () => { const t = section.getBoundingClientRect(); return { left: t.left + section.clientLeft + parseFloat(cs.paddingLeft), right: t.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight) }; };
-    const b = box();
-    const outside = [card, ...card.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.width > 0 && (r.right > b.right + 0.5 || r.left < b.left - 0.5); })
-      .map((n) => (n.dataset && n.dataset.testid) || n.tagName.toLowerCase()).slice(0, 8);
-    const name = (n) => (n === null ? null : (n.dataset && n.dataset.testid) || n.tagName.toLowerCase() + '.' + String(n.className).split(' ').slice(0, 3).join('.'));
-    const clipped = [card, ...card.querySelectorAll('*')].filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || (n.clientWidth > 0 && n.scrollWidth > n.clientWidth + 0.5); })
-      .map((n) => ({ node: name(n), scrollWidth: n.scrollWidth, clientWidth: n.clientWidth }));
-    const store = card.querySelector('[data-testid="issued-void-card-status"] bdi')?.textContent ?? null;
-    const controls = [...card.querySelectorAll('button')].map((n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), a = box();
-      return { text: n.textContent.trim(), inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && n.contains(hit), inSection: r.left >= a.left - 0.5 && r.right <= a.right + 0.5,
-        hit: hit !== null && n.contains(hit) ? null : name(hit), coveredInSection: hit !== null && !n.contains(hit) && section.contains(hit),
-        sidebar: hit !== null && !n.contains(hit) && hit.closest('aside.fixed.left-0.top-0.w-64') !== null, // TenantLayout's own sidebar (TenantLayout.tsx <aside>)
-        box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) } }; });
-    return { section: Math.round(s.width), outside, clipped, store, controls };
-  } finally {
-    section.style.maxWidth = was;
-  }
+  const s = section.getBoundingClientRect(), cs = getComputedStyle(section);
+  const box = () => { const t = section.getBoundingClientRect(); return { left: t.left + section.clientLeft + parseFloat(cs.paddingLeft), right: t.left + section.clientLeft + section.clientWidth - parseFloat(cs.paddingRight) }; };
+  const b = box();
+  const outside = [card, ...card.querySelectorAll('*')].filter((n) => { const r = n.getBoundingClientRect(); return r.width > 0 && (r.right > b.right + 0.5 || r.left < b.left - 0.5); })
+    .map((n) => (n.dataset && n.dataset.testid) || n.tagName.toLowerCase()).slice(0, 8);
+  const name = (n) => (n === null ? null : (n.dataset && n.dataset.testid) || n.tagName.toLowerCase() + '.' + String(n.className).split(' ').slice(0, 3).join('.'));
+  const clipped = [card, ...card.querySelectorAll('*')].filter((n) => { const c = getComputedStyle(n); return c.textOverflow === 'ellipsis' || (n.clientWidth > 0 && n.scrollWidth > n.clientWidth + 0.5); })
+    .map((n) => ({ node: name(n), scrollWidth: n.scrollWidth, clientWidth: n.clientWidth }));
+  const store = card.querySelector('[data-testid="issued-void-card-status"] bdi')?.textContent ?? null;
+  const aside = document.querySelector('aside'), ar = aside?.getBoundingClientRect() ?? null;
+  const controls = [...card.querySelectorAll('button')].map((n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), a = box();
+    return { text: n.textContent.trim(), inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && n.contains(hit), inSection: r.left >= a.left - 0.5 && r.right <= a.right + 0.5,
+      hit: hit !== null && n.contains(hit) ? null : name(hit), coveredInSection: hit !== null && !n.contains(hit) && section.contains(hit),
+      sidebar: hit !== null && !n.contains(hit) && aside !== null && aside.contains(hit), // TenantLayout's own sidebar (TenantLayout.tsx <aside>)
+      box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) } }; });
+  const page = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
+  return { section: Math.round(s.width), outside, clipped, store, controls, page,
+    sidebar: aside === null ? null : { position: getComputedStyle(aside).position, x: ar.x, width: ar.width } };
 })()`);
+/**
+ * Control `id` scrolled to the centre of the viewport, as the harness's click does it (cdp.mjs click), and what the
+ * browser hit-tests at that centre — the point the next ordinary page.click presses: on top when it is the control itself.
+ */
+const pointAt = (page, id) => page.evaluate(`(() => { const n = ${q(id)}; if (n === null) return null; n.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return { onTop: hit !== null && n.contains(hit), hit: hit === null || n.contains(hit) ? null : (hit.dataset?.testid ?? hit.tagName.toLowerCase()),
+    inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, disabled: n.getAttribute('aria-disabled') === 'true' }; })()`);
+/** The focused element now: its test id, whether it is whole in the viewport and on top, and its focus indicator (outline or box-shadow). */
+const focusSeen = (page) => page.evaluate(`(() => { const n = document.activeElement; if (n === null || n === document.body) return null;
+  const r = n.getBoundingClientRect(), c = getComputedStyle(n), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return { at: n.dataset?.testid ?? n.tagName, inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, onTop: hit !== null && n.contains(hit),
+    indicator: (c.outlineStyle !== 'none' && parseFloat(c.outlineWidth) > 0) || c.boxShadow !== 'none', outline: c.outlineStyle + ' ' + c.outlineWidth, boxShadow: c.boxShadow }; })()`);
 /** SIS-22's cells: SIS-09's five (unchanged) and one 600 px tall at 320 px with a 24 px default text size (design R18), LAST. */
 const VOID_CELLS = Object.freeze([...ISSUED_CELLS, { cell: 'S320H600', width: 320, height: 600, font: 24 }]);
 
-scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDED LAYOUT (brief §9 items 8 and 9) — invoice 1, SIS-09\'s longest texts and largest Total: a void lost before the entry is held; Check invoice (in the confirmation) is ONE GET and says the invoice still shows as issued — still unresolved, Check again kept; another request voids it ("duplicate", a direct call): Check invoice says voided now without saying which request, with the reason it records — the attempt stays unresolved and the held reason is never shown as recorded; Check again (the SAME key and bytes) is the sealed 409 already-void, never "voided by this request": the dialog read again shows the competing reason. Invoice 2, in SIS-09\'s five cells and LAST 320x600 at a 24 px default text size: with its eligibility answer parked, Close and the invoice under the reserved row are measured, then again once Void invoice… fills it (within 0.5 px); Tab from Close reaches Void invoice…, Enter opens the confirmation on ONE review GET, Keep invoice focused, in view and on top; the confirmation never lies outside the viewport nor scrolls sideways, nothing reaches past its content box, the Total ($90,071,992,547,409.91) is on one line in its own named region — scrolled inside it where wider, every digit reachable — the issue time breaks only at its spaces, every reason and Void invoice in view and on top once scrolled to; Tab goes Keep → Total → reasons → Void invoice → Keep; Space chooses a reason and ArrowDown the next (first cell); in every cell an unconfirmed send (lost before the entry) leaves the confirmation\'s Close, Check again and Check invoice whole and in view, Escape closes the confirmation alone (focus back on Void invoice…) and Escape again the dialog (focus on the row\'s Open), the held card names its store with its controls in view and uncovered by the section (held to the viewport less two gutters), and Dismiss, reached by Tab, sends nothing; Shift+Tab cycles back inside the confirmation (first and last cells); nothing is posted but those sends. Recorded, not failed: in the DA-214 cells only, a card control under TenantLayout\'s own sidebar — each such control then reached by Tab and activated with Enter', async () => {
+scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDED LAYOUT (brief §9 items 8 and 9) — invoice 1, SIS-09\'s longest texts and largest Total: a void lost before the entry is held; Check invoice (in the confirmation) is ONE GET and says the invoice still shows as issued — still unresolved, Check again kept; another request voids it ("duplicate", a direct call): Check invoice says voided now without saying which request, with the reason it records — the attempt stays unresolved and the held reason is never shown as recorded; Check again (the SAME key and bytes) is the sealed 409 already-void, never "voided by this request": the dialog read again shows the competing reason. Invoice 2, in SIS-09\'s five cells and LAST 320x600 at a 24 px default text size, opened by pointer (from the keyboard at 320x640): with its eligibility answer parked, Close and the invoice under the reserved row are measured, then again once Void invoice… fills it (within 0.5 px); Tab from Close reaches Void invoice…, Enter opens the confirmation on ONE review GET, Keep invoice focused, in view and on top; the confirmation never lies outside the viewport nor scrolls sideways, nothing reaches past its content box, the Total ($90,071,992,547,409.91) is on one line in its own named region — scrolled inside it where wider, every digit reachable — the issue time breaks only at its spaces, every reason and Void invoice in view and on top once scrolled to; Tab goes Keep → Total → reasons → Void invoice → Keep; Space chooses a reason and ArrowDown the next (first cell); in every cell an unconfirmed send (lost before the entry) leaves the confirmation\'s Close, Check again and Check invoice whole and in view, Escape closes the confirmation alone (focus back on Void invoice…) and Escape again the dialog (focus on the row\'s Open), the held card on the real page (no section hold since M7B-INVOICES-VOID-P2-R1) names its store with every control in view, inside and uncovered by the section and on top in EVERY cell, each reached by Tab whole in view with a visible focus indicator; in the narrow cells (320x640, 320x480, 768x1024 and 320x600 at 24 px) the page never scrolls sideways and an ordinary pointer click, hit-tested where it presses, makes Check invoice ONE GET of invoice 2 and Check again ONE POST with the SAME key and bytes (lost before the entry) (and, outside 320x640, Dismiss nothing); in 320x640 and the desktop cells Dismiss, reached by Tab and pressed with Enter, sends nothing (the other narrow cells press it with the pointer); in the desktop cells TenantLayout\'s sidebar is the fixed 256 px one at x 0; Shift+Tab cycles back inside the confirmation (first and last cells); nothing is posted but those sends. Recorded, not failed: the page\'s older sideways overflow at 768x1024 with 16 px text (the md layout)', async () => {
   const { tenant, main, boss, customer, ids: [first, second] } = await voidShop('i22', 2, { long: true });
   const page = await voidPage(boss, main.id, 2);
   const stored = await storedIssued(main.id);
@@ -10086,11 +10105,12 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
   const problems = [];
   const check = (ok, what) => { if (!ok) problems.push(what); };
   // The reserved row's stability, the issue date on one line and no clipping in the card are hard checks in every cell (B1
-  // L-1, L-2 and fitsRow; the L-3 exception is gone since checkpoint B's CI). Recorded, not failed, is only the carried DA-214
-  // navigation limitation: a card control under TenantLayout's own fixed sidebar once scrolled into view, in the DA-214 cells
-  // only, each then activated from the keyboard. Anything else lying over a control fails.
-  const DA214_CELLS = new Set(['N320', 'S320', 'T768', 'S320H600']);
-  const underSidebar = [];
+  // L-1, L-2 and fitsRow; the L-3 exception is gone since checkpoint B's CI). Since M7B-INVOICES-VOID-P2-R1 nothing lies over
+  // a card control in any cell (TenantLayout's sidebar is in normal flow below md): every control on top is a hard check, and
+  // in the narrow cells (DA-214's) the page does not scroll sideways and each control is pressed by an ordinary pointer
+  // click. M768 (768 px, 16 px text) keeps the md layout and its older page overflow: recorded there, not judged.
+  const NARROW_CELLS = new Set(['N320', 'S320', 'T768', 'S320H600']);
+  const pageOverflow = [];
   let cardSends = 0;
   const same = (a, b) => { try { assert.deepEqual(a, b); return true; } catch { return false; } };
   const moved = (a, b) => (a === null || b === null ? Infinity : Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.width - b.width), Math.abs(a.height - b.height)));
@@ -10107,7 +10127,7 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
     const cellFrom = st.api.length;
     // The dialog holds still while its eligibility answers: measured with the answer parked, then with Void invoice… in.
     const parked = gate((r) => r.frameId === page.frameId && isVoidEligibility(main.id, second)(r), 'response');
-    await openIssuedInvoice(page, second, 2, { keyboard: true });
+    await openIssuedInvoice(page, second, 2, { keyboard: cell === KEYBOARD_OPEN_CELL }); // by pointer since R1, from the keyboard in one cell
     await parked.reached;
     await page.settle();
     const asking = await voidRowStill(page);
@@ -10215,8 +10235,8 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
     await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the dialog`);
     const toRow = await page.waitFor(async () => (await focusOf(page)) === `issued-open-${second}`, 5_000, `${cell}: focus on the row`).then(() => true, () => false);
     check(toRow, `${cell}: focus went to ${await focusOf(page)}, not the row's Open`);
-    // The held card, with the section held to the viewport less two gutters (SIS-09's DA-214 hold).
-    const cardBox = await voidCardBox(page, width - 32);
+    // The held card on the real page (no section hold since R1).
+    const cardBox = await voidCardBox(page);
     const card = await voidCardOf(page);
     record('SIS-22', { cell, unconfirmed, card: cardBox });
     check(card.state === 'unresolved' && card.status === VOIDING_SAID.unresolved(2, main.name), `${cell}: the card does not hold the unconfirmed void ${JSON.stringify([card.state, card.status])}`);
@@ -10224,63 +10244,138 @@ scenario('SIS-22', 'VOID-11 VOID-13 AC-08 AC-10 ATTRIBUTION, KEYBOARD AND BOUNDE
     check(cardBox !== null && same(cardBox.clipped, []), `${cell}: something in the card is wider than its box ${JSON.stringify(cardBox?.clipped)}`);
     check(cardBox !== null && same(cardBox.controls.map((c) => c.text), ['Check again', 'Check invoice', 'Dismiss']) && cardBox.controls.every((c) => c.inView && c.inSection && !c.coveredInSection),
       `${cell}: a card control is not in view, inside the section and uncovered by it ${JSON.stringify(cardBox?.controls)}`);
-    // On top, except under TenantLayout's own sidebar in a DA-214 cell (the carried navigation defect, outside this stage):
-    // recorded, and then that control is reached by Tab from the card's heading and activated with Enter.
-    const demoted = [];
-    for (const c of cardBox?.controls ?? []) {
-      if (c.onTop) continue;
-      if (c.sidebar && DA214_CELLS.has(cell)) demoted.push(c.text);
-      else check(false, `${cell}: "${c.text}" is covered by ${c.hit}, which is not TenantLayout's sidebar in a DA-214 cell`);
-    }
-    if (demoted.length > 0) underSidebar.push(`${cell}: ${demoted.join(', ')}`);
+    for (const c of cardBox?.controls ?? []) check(c.onTop, `${cell}: "${c.text}" is covered by ${c.hit}${c.sidebar ? " (TenantLayout's sidebar)" : ''} once scrolled into view`);
+    // The page's own sideways scroll: none where judged; M768's older overflow recorded.
+    if (cell === 'M768') pageOverflow.push(`${cell}: ${cardBox?.page.scrollWidth} / ${cardBox?.page.clientWidth}`);
+    else check(cardBox !== null && cardBox.page.scrollWidth <= cardBox.page.clientWidth + 0.5, `${cell}: the page scrolls sideways ${JSON.stringify(cardBox?.page)}`);
+    // The desktop layout (md and up) keeps its fixed 256 px sidebar at x 0; below md it is in normal flow.
+    if (NARROW_CELLS.has(cell)) check(cardBox?.sidebar?.position === 'static', `${cell}: TenantLayout's sidebar is not in normal flow ${JSON.stringify(cardBox?.sidebar)}`);
+    else check(same(cardBox?.sidebar, { position: 'fixed', x: 0, width: 256 }), `${cell}: TenantLayout's sidebar is not the desktop one ${JSON.stringify(cardBox?.sidebar)}`);
+    // Each control reached by Tab from the card's heading: whole in the viewport, on top, with a visible focus indicator.
     const tabTo = async (testid) => {
       await page.call(by('issued-void-card-heading'), function () { this.focus(); });
       for (let i = 0; i < 4 && (await focusOf(page)) !== testid; i += 1) await page.press('Tab');
       return (await focusOf(page)) === testid;
     };
-    let extraRead = 0;
-    if (demoted.includes('Check invoice')) {
-      const findFrom = st.api.length;
-      check(await tabTo('issued-void-find'), `${cell}: Tab from the card's heading does not reach Check invoice`);
-      await page.press('Enter');
-      await page.waitFor(async () => (await voidCardOf(page)).seen === VOIDING_SAID.seenIssued(2), 15_000, `${cell}: Check invoice from the keyboard`);
-      await quiet(page, findFrom);
-      check(same(sentBy(page, (r) => !isSessionRead(r), findFrom).map(readLine), [`${issuedPath(main.id)}/${second} 200`]), `${cell}: Check invoice from the keyboard is not ONE GET`);
-      extraRead = 1;
+    for (const id of ['issued-void-check', 'issued-void-find', 'issued-void-dismiss']) {
+      const reached = await tabTo(id);
+      const f = await focusSeen(page);
+      record('SIS-22', { cell, focus: f });
+      check(reached && f !== null && f.inView && f.onTop && f.indicator, `${cell}: ${id}, reached by Tab, is not whole in view and on top with a visible focus indicator ${JSON.stringify(f)}`);
     }
-    let extraSend = 0;
-    if (demoted.includes('Check again')) {
+    if (NARROW_CELLS.has(cell)) {
+      // Ordinary pointer clicks (cdp click: scrolled to the centre, real mouse events; no force, no DOM click), each first
+      // hit-tested at the very point it presses, and each proven by what it sends: Check invoice ONE GET of this invoice;
+      // Check again ONE POST with the SAME key and bytes to this store's and invoice's void route (lost before the entry, as
+      // the first send); Dismiss nothing.
+      const findAt = await pointAt(page, 'issued-void-find');
+      check(findAt !== null && findAt.onTop && findAt.inView && !findAt.disabled, `${cell}: Check invoice is not on top where it is clicked ${JSON.stringify(findAt)}`);
+      const findFrom = st.api.length;
+      await page.click(by('issued-void-find'));
+      await page.waitFor(async () => (await voidCardOf(page)).seen === VOIDING_SAID.seenIssued(2), 15_000, `${cell}: Check invoice by pointer`).catch(() => {});
+      await quiet(page, findFrom);
+      check(same(sentBy(page, (r) => !isSessionRead(r), findFrom).map(readLine), [`${issuedPath(main.id)}/${second} 200`]) && (await voidCardOf(page)).seen === VOIDING_SAID.seenIssued(2),
+        `${cell}: Check invoice by pointer is not ONE GET of invoice 2 saying it still shows as issued ${JSON.stringify(sentBy(page, (r) => !isSessionRead(r), findFrom).map(readLine))}`);
+      const againAt = await pointAt(page, 'issued-void-check');
+      check(againAt !== null && againAt.onTop && againAt.inView && !againAt.disabled, `${cell}: Check again is not on top where it is clicked ${JSON.stringify(againAt)}`);
       const againFrom = st.api.length;
-      check(await tabTo('issued-void-check'), `${cell}: Tab from the card's heading does not reach Check again`);
       let lostAgain = 0;
       try {
         st.lose = (rec, phase) => phase === 'request' && isVoidPost(main.id, second)(rec) && rec.frameId === page.frameId && lostAgain++ === 0;
-        await page.press('Enter');
-        await page.waitFor(async () => sentBy(page, isVoidPost(main.id, second), againFrom).some((r) => r.status !== null) && (await voidCardOf(page)).state === 'unresolved', 15_000, `${cell}: Check again from the keyboard`);
+        await page.click(by('issued-void-check'));
+        await page.waitFor(async () => sentBy(page, isVoidPost(main.id, second), againFrom).some((r) => r.status !== null) && (await voidCardOf(page)).state === 'unresolved', 15_000, `${cell}: Check again by pointer`).catch(() => {});
       } finally {
         st.lose = null;
       }
-      const [firstSend, again] = [sentBy(page, isVoidPost(main.id, second), cellFrom)[0], sentBy(page, isVoidPost(main.id, second), againFrom)[0]];
-      check(again !== undefined && again.headers['idempotency-key'] === firstSend.headers['idempotency-key'] && again.body === firstSend.body, `${cell}: Check again from the keyboard is not the same key and bytes`);
-      extraSend = 1;
+      const [firstSend, ...again] = sentBy(page, isVoidPost(main.id, second), cellFrom);
+      check(again.length === 1 && again[0].headers['idempotency-key'] === firstSend.headers['idempotency-key'] && again[0].body === firstSend.body && (await voidCardOf(page)).state === 'unresolved',
+        `${cell}: Check again by pointer is not ONE POST with the same key and bytes to invoice 2's void, still unresolved ${JSON.stringify(again.map(apiLine))}`);
     }
-    // Dismiss, reached by Tab and pressed with Enter in every cell: the card goes, nothing is sent.
+    // Dismiss: reached by Tab and pressed with Enter in the desktop cells and in KEYBOARD_OPEN_CELL (N320, the one narrow
+    // cell that keeps the keyboard path), by an ordinary pointer click in the other narrow cells. The card goes, nothing is sent.
     const dismissFrom = st.api.length;
-    check(await tabTo('issued-void-dismiss'), `${cell}: Tab from the card's heading does not reach Dismiss`);
-    await page.press('Enter');
-    await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, `${cell}: Dismiss`);
+    if (NARROW_CELLS.has(cell) && cell !== KEYBOARD_OPEN_CELL) {
+      const dismissAt = await pointAt(page, 'issued-void-dismiss');
+      check(dismissAt !== null && dismissAt.onTop && dismissAt.inView, `${cell}: Dismiss is not on top where it is clicked ${JSON.stringify(dismissAt)}`);
+      await page.click(by('issued-void-dismiss'));
+      await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, `${cell}: Dismiss by pointer`);
+    } else {
+      check(await tabTo('issued-void-dismiss'), `${cell}: Tab from the card's heading does not reach Dismiss`);
+      await page.press('Enter');
+      await page.waitFor(async () => (await voidCardOf(page)).state === 'none', 5_000, `${cell}: Dismiss`);
+    }
     check(sentBy(page, () => true, dismissFrom).length === 0, `${cell}: Dismiss sent something`);
-    cardSends += 1 + extraSend;
-    check(same(sentBy(page, isIssuedDetailOrList, cellFrom).map(readLine), Array(2 + extraRead).fill(`${issuedPath(main.id)}/${second} 200`)), `${cell}: not ONE detail GET for the open and ONE for the review (and Check invoice's)`);
-    check(same(sentBy(page, isVoidRoute, cellFrom).map(readLine), [`${issuedPath(main.id)}/${second}/void-eligibility 200`, ...Array(1 + extraSend).fill(`${issuedPath(main.id)}/${second}/void 0`)]),
+    const pointer = NARROW_CELLS.has(cell) ? 1 : 0;
+    cardSends += 1 + pointer;
+    check(same(sentBy(page, isIssuedDetailOrList, cellFrom).map(readLine), Array(2 + pointer).fill(`${issuedPath(main.id)}/${second} 200`)), `${cell}: not ONE detail GET for the open and ONE for the review (and Check invoice's)`);
+    check(same(sentBy(page, isVoidRoute, cellFrom).map(readLine), [`${issuedPath(main.id)}/${second}/void-eligibility 200`, ...Array(1 + pointer).fill(`${issuedPath(main.id)}/${second}/void 0`)]),
       `${cell}: not ONE eligibility GET and only the lost send(s) ${JSON.stringify(sentBy(page, isVoidRoute, cellFrom).map(readLine))}`);
   }
-  record('SIS-22', { underSidebar });
-  note('underSidebar', underSidebar);
-  console.log(`SIS-22 recorded: under TenantLayout's sidebar (DA-214, keyboard-activated): ${underSidebar.join(' | ') || 'none'}`);
+  record('SIS-22', { pageOverflow });
+  note('pageOverflow', pageOverflow);
+  console.log(`SIS-22 recorded: the page's sideways overflow where not judged (M768, the md layout): ${pageOverflow.join(' | ') || 'none'}`);
   assert.deepEqual(problems, [], 'the void confirmation and the held card hold their bounds and keyboard order in every cell');
   assert.deepEqual(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).map((r) => `${r.path} ${r.status}`),
     [`${issuedPath(main.id)}/${first}/void 0`, `${issuedPath(main.id)}/${first}/void 409`, ...Array(cardSends).fill(`${issuedPath(main.id)}/${second}/void 0`)],
-    'the page posted only invoice 1\'s send and its Check again, and per cell one lost send (and a keyboard Check again where demoted), all lost');
+    'the page posted only invoice 1\'s send and its Check again, and per cell one lost send (and the pointer\'s Check again in a narrow cell), all lost');
   assert.deepEqual((await storedVoids(main.id)).map((v) => v.id), [first], 'invoice 2 was never voided');
 }, 300_000);
+
+/** TenantLayout's sidebar and main now: the sidebar's position and box, main's box, and the page's sideways scroll. */
+const shellOf = (page) => page.evaluate(`(() => { const a = document.querySelector('aside'), m = document.querySelector('main'); if (a === null || m === null) return null;
+  const r = (n) => { const b = n.getBoundingClientRect(); return { x: b.x + scrollX, y: b.y + scrollY, width: b.width, height: b.height, bottom: b.bottom + scrollY }; };
+  return { position: getComputedStyle(a).position, aside: r(a), main: r(m), scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }; })()`);
+
+scenario('SIS-23', 'M7B-INVOICES-VOID-P2-R1 NAVIGATION SMOKE AFTER THE SHARED LAYOUT CHANGE — an owner\'s shop at 1440x900, then 320x640 (16 px) and 768x1024 with a 24 px default text size (Page.setFontSizes): at 1440 TenantLayout\'s sidebar is the fixed 256 px one at x 0 beside main; in the two narrow cells it is in normal flow ABOVE the content (its bottom at or above main\'s top: never over it); in every cell the sidebar\'s Customer Directory and Invoices links are on top where an ordinary pointer click presses them, and the clicks open /customers/directory (its heading) and /invoices (its server sections), each without the page scrolling sideways in the narrow cells; the Employees page\'s Permissions tab, opened by its own click, renders its content. Recorded, not failed: the dashboard\'s and the Permissions grid\'s own sideways overflow at the narrow cells (their page content, outside this correction). Only reads and the page\'s own tenant sign-in are sent', async () => {
+  const { boss } = await shop('i23');
+  const page = await openPage();
+  await signIn(page, boss);
+  const from = st.api.length;
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  const linkTo = (href, label) => `[...document.querySelectorAll('aside a[href="${href}"]')].find((a) => a.textContent.trim().endsWith(${JSON.stringify(label)}))`;
+  // A sidebar link, hit-tested at the point an ordinary click presses (cdp click: scrolled to the centre, real mouse events), then clicked.
+  const navBy = async (href, label, ready) => {
+    const link = linkTo(href, label);
+    await page.waitFor(`!!${link}`, 15_000, `the ${label} sidebar link`);
+    await page.evaluate(`${link}.setAttribute('data-r1-nav', ${JSON.stringify(href)})`);
+    const at = await page.evaluate(`(() => { const n = ${link}; n.scrollIntoView({ block: 'center', inline: 'center' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { onTop: hit !== null && n.contains(hit), inView: r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5 }; })()`);
+    await page.click(`[data-r1-nav="${href}"]`);
+    await page.waitFor(`location.pathname === ${JSON.stringify(href)} && (${ready})`, 30_000, `${label} opened by its sidebar link`);
+    await page.settle();
+    return { at, path: await page.evaluate('location.pathname'), shell: await shellOf(page) };
+  };
+  for (const { cell, width, height, font } of [{ cell: 'D1440', width: 1440, height: 900, font: null }, { cell: 'N320', width: 320, height: 640, font: null }, { cell: 'T768', width: 768, height: 1024, font: 24 }]) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await go(page, '/');
+    await page.waitFor(`location.pathname === '/' && !!${linkTo(DIRECTORY, 'Customer Directory')}`, 30_000, `${cell}: the dashboard and its sidebar`);
+    await page.settle();
+    assert.deepEqual(await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })'), { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
+    const shell = await shellOf(page);
+    const directory = await navBy(DIRECTORY, 'Customer Directory', `!!${q('customer-directory')} && ${q('directory-state')}?.dataset.phase === 'ready'`);
+    directory.heading = await page.evaluate(`document.getElementById('customer-directory-title')?.textContent.trim() ?? null`);
+    const invoices = await navBy('/invoices', 'Invoices', `!!${q('issued-show')} && !!${q('drafts-show')}`);
+    await openPermissions(page);
+    await page.settle();
+    const permissions = await shellOf(page);
+    record('SIS-23', { cell, shell, directory, invoices, permissions });
+    check(directory.at.onTop && directory.at.inView && directory.path === DIRECTORY && directory.heading === 'Customer directory', `${cell}: the Customer Directory link, clicked, did not open the directory ${JSON.stringify({ at: directory.at, path: directory.path, heading: directory.heading })}`);
+    check(invoices.at.onTop && invoices.at.inView && invoices.path === '/invoices', `${cell}: the Invoices link, clicked, did not open the Invoices page ${JSON.stringify({ at: invoices.at, path: invoices.path })}`);
+    if (cell === 'D1440') {
+      check(shell.position === 'fixed' && shell.aside.x === 0 && shell.aside.width === 256 && shell.main.x === 256, `${cell}: the sidebar is not the fixed desktop one ${JSON.stringify(shell)}`);
+    } else {
+      check(shell.position === 'static' && shell.aside.bottom <= shell.main.y + 0.5 && shell.aside.x === 0 && shell.main.x === 0, `${cell}: the nav is not in normal flow above the content ${JSON.stringify(shell)}`);
+      for (const [where, s] of [['the directory', directory.shell], ['the Invoices page', invoices.shell]]) {
+        check(s.scrollWidth <= s.clientWidth + 0.5, `${cell}: ${where} scrolls sideways ${JSON.stringify([s.scrollWidth, s.clientWidth])}`);
+      }
+      note(`overflow ${cell}`, { dashboard: [shell.scrollWidth, shell.clientWidth], permissions: [permissions.scrollWidth, permissions.clientWidth] });
+      console.log(`SIS-23 recorded ${cell}: page content wider than the viewport (scrollWidth / clientWidth): dashboard ${shell.scrollWidth} / ${shell.clientWidth}, Permissions tab ${permissions.scrollWidth} / ${permissions.clientWidth}`);
+    }
+  }
+  await quiet(page, from);
+  const writes = sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), from);
+  check(writes.length === 0, `something but reads and the tenant sign-in was sent ${JSON.stringify(writes.map(apiLine))}`);
+  assert.deepEqual(problems, [], 'navigation works and the shared layout holds at the narrow cells, the desktop sidebar unchanged');
+});

@@ -114,4 +114,22 @@ describe('TenantLayout — the Customer Directory entry (M7A-CUSTOMERS-P5)', () 
     expect(document.querySelectorAll('[title="Complete activation to unlock"]')).toHaveLength(0);
     expect(screen.queryByText('Customer Directory')).toBeNull();
   });
+
+  it('NAV-05. the sidebar is fixed beside the content only from md up, in normal flow above it below md (M7B-INVOICES-VOID-P2-R1)', () => {
+    // jsdom applies no media queries: this pins the classes; the real geometry is proven in the browser (SIS-22, SIS-23).
+    h.allowed = new Set(ALL);
+    const { container } = at('/');
+    const shell = container.firstElementChild as HTMLElement;
+    const aside = container.querySelector('aside') as HTMLElement;
+    const main = container.querySelector('main') as HTMLElement;
+    const cls = (el: HTMLElement) => el.className.split(/\s+/);
+    expect(cls(shell)).toContain('md:flex');
+    expect(cls(aside)).toEqual(expect.arrayContaining(['md:fixed', 'md:left-0', 'md:top-0', 'md:z-50', 'md:w-64', 'md:h-screen']));
+    expect(cls(main)).toContain('md:ml-64');
+    // No unprefixed positioning, width or offset is left to cover the content at a narrow width.
+    for (const c of ['fixed', 'left-0', 'top-0', 'z-50', 'w-64', 'h-screen']) expect(cls(aside), c).not.toContain(c);
+    expect(cls(shell)).not.toContain('flex');
+    expect(cls(main)).not.toContain('ml-64');
+    expect(aside.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy(); // nav before the content in DOM and Tab order
+  });
 });

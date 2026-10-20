@@ -71,9 +71,11 @@ export default function TenantLayout() {
       )
     : [];
 
+  // The sidebar is fixed beside the content only from md up; below md it is in normal flow above the content, which a
+  // fixed rem-wide sidebar would otherwise cover (DA-214: 256/384 px at 16/24 px text of a 320 px viewport).
   return (
-    <div className="min-h-screen bg-surface flex">
-      <aside className="bg-teal-950 font-sans antialiased tracking-tight h-screen w-64 fixed left-0 top-0 overflow-y-auto flex flex-col py-6 shadow-2xl z-50">
+    <div className="min-h-screen bg-surface md:flex">
+      <aside className="bg-teal-950 font-sans antialiased tracking-tight md:h-screen md:w-64 md:fixed md:left-0 md:top-0 overflow-y-auto flex flex-col py-6 shadow-2xl md:z-50">
         <div className="px-6 mb-8">
           <h1 className="text-xl font-bold tracking-tighter text-white">Teal Metrics</h1>
           <p className="text-[10px] uppercase tracking-[0.2em] text-lime-400/70 font-bold mt-1">Main Branch</p>
@@ -121,10 +123,10 @@ export default function TenantLayout() {
         </nav>
       </aside>
 
-      <main className="ml-64 flex-1 min-h-screen flex flex-col">
+      <main className="md:ml-64 flex-1 min-h-screen flex flex-col">
         <AccountStatusBanner />
         <TenantHeader />
-        <div className="p-8 max-w-7xl mx-auto w-full">
+        <div className="p-8 max-md:px-2 max-w-7xl mx-auto w-full">
           <StoreLocalStateProvider>
             <Outlet />
           </StoreLocalStateProvider>

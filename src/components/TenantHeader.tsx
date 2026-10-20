@@ -65,7 +65,7 @@ const TenantHeader: React.FC = () => {
 
   return (
     <>
-      <div className="bg-white border-b border-slate-200 px-8 py-4 flex justify-between items-center">
+      <div className="bg-white border-b border-slate-200 px-8 max-md:px-4 py-4 flex flex-wrap gap-3 justify-between items-center">
         <div>
           <h1 className="text-xl font-black text-primary">{tenant.name}</h1>
           <div className="flex gap-2 mt-1">
@@ -74,7 +74,7 @@ const TenantHeader: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5">
             <button
               onClick={handleAttendanceAction}
