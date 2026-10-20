@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_TEXT, type IssuedVoidCapability, type IssuedReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
+import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedVoidCapability, type IssuedReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
 import { INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
@@ -3039,7 +3039,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     const eligibility = vi.fn(async () => 'not' as const);
     const voiding: IssuedVoidCapability = {
       store: store(STORE_1, 'Main Street'), held: undefined, expired: false, cooling: false, finding: false, checkText: '', confirmedDenial: null, reauthMethod: () => 'password', signingIn: false, generation: () => 1,
-      eligibility, send: vi.fn(async () => null), check: vi.fn(), find: vi.fn(), signIn: vi.fn(async () => null),
+      eligibility, send: vi.fn(async () => null), check: vi.fn(), find: vi.fn(), signIn: vi.fn(async () => null), stopSignIn: vi.fn(),
     };
     render(<IssuedInvoiceDialog {...base} voiding={voiding} />);
     await viewReady(1);
@@ -4203,10 +4203,10 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(tid('issued-void-card-refused').textContent).not.toContain('no longer');
   });
 
-  it('SII-126. Review B1 L2 / R2-1a: while the void\'s own sign-in is out nothing new can be reviewed or sent — "Void invoice…" waits, said, and opens nothing — and once the sign-in completes the dialog still reads the invoice and its eligibility again, though its confirmation was closed meanwhile', async () => {
+  it('SII-126. Review B1 L2 / R2-1a: while the void\'s own sign-in is out nothing new can be reviewed or sent — "Void invoice…" waits, said — and Keep invoice during it ends the wait at once (R1): the action comes back, and the sign-in\'s late completion signs nothing in and reads nothing', async () => {
     const server = seeded();
     server.staleLogins = true;
-    const made = issueAt(server, STORE_1, 3);
+    issueAt(server, STORE_1, 3);
     const r = rig(server);
     const base = r.props().identity!;
     let release!: () => void;
@@ -4220,23 +4220,24 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
     type('issued-void-reauth-password', 'correct horse');
     await click('issued-void-reauth-confirm'); // the sign-in is out
-    await click('issued-void-keep');
-    await waitFor(() => expect(box()).toBeNull());
-    // Fix round 2 supersession (R2-1a; was: a second confirmation opened here and its press said "a sign-in is in
-    // progress"): no review can start while the sign-in is out — "Void invoice…" waits, said, and opens nothing. The send
-    // guard for it stays in sendVoid as a second line.
+    // Fix round 2 (R2-1a): no review can start while the sign-in is out — the dialog's "Void invoice…" behind the
+    // confirmation waits, said. The send guard for it stays in sendVoid as a second line.
     expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
     expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewSignIn);
-    const before = server.sent.length;
-    await click('issued-view-void');
-    await settle();
-    expect(box()).toBeNull();
-    expect(sentFrom(server, before)).toEqual([]);
-    expect(server.voidPosts()).toHaveLength(1);
+    await click('issued-void-keep');
+    await waitFor(() => expect(box()).toBeNull());
+    // R1 supersession (was: Keep invoice left the sign-in out — "Void invoice…" held, opening nothing, until the provider
+    // answered — and its late success then renewed the session and read the invoice and its eligibility again): Keep
+    // invoice ends the wait here at once. The provider is not cancelled; its late success applies nothing — no
+    // re-authentication login, no re-read (a session it did renew is found by the next session check, SII-151).
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
+    expect(describedBy('issued-view-void')).toBe('');
     const mark = server.sent.length;
+    const logins = server.logins().length;
     await act(async () => { release(); });
-    await waitFor(() => expect(apart(server, mark).sort()).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort()));
-    expect(server.logins().slice(-1)[0].headers.get('x-tmpos-reauthenticate')).toBe('1');
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect(server.logins()).toHaveLength(logins);
     expect(tid('issued-view')).toBeInTheDocument();
     expect(server.voidPosts()).toHaveLength(1);
   });
@@ -4334,26 +4335,27 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     return { server, made, r, release };
   }
 
-  it.each(['voided', 'no longer allowed'] as const)('SII-130. Review B1 R2-1 (the reported sequence): confirmation A meets a step-up, its sign-in is out, A is closed — no confirmation B can be reviewed meanwhile ("Void invoice…" waits, said, opens nothing) — and when the renewal finds the invoice %s, no confirmation is open and nothing is ever sent', async (found) => {
+  it('SII-130. Review B1 R2-1 (the reported sequence): confirmation A meets a step-up, its sign-in is out, A is closed — R1: closing A ends that wait, so its sign-in can never renew the session under a confirmation B: B is reviewed under the session that stands, and the provider\'s late answer (the invoice voided meanwhile) signs nothing in, reads nothing and changes no confirmation; nothing is ever sent', async () => {
     const { server, made, release } = await staleSignIn();
     await click('issued-void-reauth-confirm'); // the sign-in is out
     await click('issued-void-keep'); // A closed
     await waitFor(() => expect(box()).toBeNull());
-    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
-    expect(tid('issued-view-void')).toHaveAccessibleDescription(VOID_TEXT.reviewSignIn);
+    // R1 supersession (was: while A's sign-in was still out "Void invoice…" waited, said, and opened nothing — so no B could
+    // be reviewed under the session that sign-in would replace — and its late renewal then found the invoice voided or no
+    // longer allowed): closing A ended the wait, and a sign-in this page no longer waits for renews nothing here.
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
     const before = server.sent.length;
-    await click('issued-view-void'); // B: refused while the sign-in is out
-    await settle();
-    expect(box()).toBeNull();
-    expect(sentFrom(server, before)).toEqual([]);
-    if (found === 'voided') made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
-    else server.voidDenied.add('uid-a');
+    await click('issued-view-void'); // B: a review under the session that stands
+    await waitFor(() => expect(box()).not.toBeNull());
+    expect(apart(server, before)).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`]);
+    made[1].void = { voidedAt: server.voidAt, reasonCode: 'duplicate' };
+    const mark = server.sent.length;
     await act(async () => { release(); });
-    if (found === 'voided') await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent(/^Voided$/));
-    else await waitFor(() => expect(server.eligReads()).toHaveLength(2));
     await settle();
-    expect(box()).toBeNull();
-    expect(screen.queryByTestId('issued-view-void')).toBeNull();
+    expect(sentFrom(server, mark)).toEqual([]); // no re-authentication login, no re-read
+    expect(tid('issued-void-title')).toHaveTextContent(VOID_TEXT.title(2));
+    expect(tid('issued-void-confirm-status').textContent).toBe(''); // B as reviewed: nothing said to it
+    expect(tid('issued-void-confirm-alert').textContent).toBe('');
     expect(server.voidPosts()).toHaveLength(1);
   });
 
@@ -4382,7 +4384,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     const eligibility = vi.fn(async (): Promise<'allowed' | 'not' | null> => (ctl.holdElig ? new Promise((done) => { eligs.push(done); }) : 'allowed'));
     const capability = (): IssuedVoidCapability => ({
       store: store(STORE_1, 'Main Street'), held: ctl.held, expired: false, cooling: false, finding: false, checkText: '', confirmedDenial: null,
-      reauthMethod: () => 'password', signingIn: false, generation: () => ctl.generation, eligibility, send, check: vi.fn(), find: vi.fn(), signIn,
+      reauthMethod: () => 'password', signingIn: false, generation: () => ctl.generation, eligibility, send, check: vi.fn(), find: vi.fn(), signIn, stopSignIn: vi.fn(),
     });
     const dialog = () => <IssuedInvoiceDialog storeId={STORE_1} invoiceId={made[0].id} read={read} current={() => true} waiting={false} onClose={() => {}} returnFocus={{ current: null }} voiding={capability()} />;
     const page = render(dialog());
@@ -4689,5 +4691,308 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     for (const id of ['issued-void-check', 'issued-void-find', 'issued-void-dismiss']) fits(tid(id));
     expect(buttons('issued-void-card')).toEqual(['Check again', 'Check invoice', 'Dismiss']);
     expect(screen.getByRole('button', { name: 'Check invoice' })).toBe(tid('issued-void-find'));
+  });
+
+  // ---- M7B-INVOICES-VOID-P2-R1: the void's sign-in is waited for at most 30 s from Confirm sign-in, by one owner ----
+
+  /**
+   * A stale sign-in's step-up over a provider whose re-authentications are each held until the test answers them (`calls`,
+   * in order): the fake clock goes on BEFORE the press (the deadline is the fake's), then Confirm sign-in is pressed — the
+   * sign-in is out. `press` presses it again (a new attempt).
+   */
+  async function stalled() {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const server = seeded();
+    server.staleLogins = true;
+    const made = issueAt(server, STORE_1, 3);
+    const r = rig(server);
+    const calls: Array<{ readonly resolve: (token: string | null) => void; readonly reject: (error: Error) => void }> = [];
+    const identity: ShopIdentity = { ...r.props().identity!, reauthenticate: () => new Promise<string | null>((resolve, reject) => { calls.push({ resolve, reject }); }) };
+    const page = render(<ServerIssuedInvoices {...r.props({ identity })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openConfirm(2);
+    await pressWith('wrong_customer');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    fakeClock();
+    const press = async (): Promise<void> => {
+      type('issued-void-reauth-password', 'correct horse');
+      fireEvent.click(tid('issued-void-reauth-confirm'));
+      await until(() => expect(tid('issued-void-reauth-hint')).toHaveTextContent(SETTINGS_TEXT.confirmingSignIn));
+    };
+    await press();
+    return { server, made, r, page, calls, press };
+  }
+  const OTHER_KEY = '5e1f0000-1d2f-4a6b-9c8d-0000000000aa';
+  /** An unresolved attempt for invoice 3 under the session that stands, put in the rig's own hold (no shop path holds one beside a step-up's sign-in). */
+  function holdOther(server: Server, made: Issued[], r: Rig): HeldVoid {
+    const other: HeldVoid = {
+      key: OTHER_KEY, body: VBODY('duplicate'), storeId: STORE_1, storeLabel: 'Main Street', invoiceId: made[2].id, number: 3,
+      csrf: server.voidPosts()[0].headers.get('x-tmpos-session-csrf'), sentAt: r.clock.mono, sentWall: r.clock.wall,
+      state: 'unresolved', note: '', refusal: null, seen: null, seenReason: null, retryable: true,
+    };
+    act(() => { expect(r.holds.put('uid-a', other)).toBe(true); });
+    return other;
+  }
+  /** The fake timers still pending once those due now have run (jsdom's own 0 ms selectionchange, a dialog's focus return and the selectionchange that focus queues). */
+  const timersLeft = async (): Promise<number> => { for (let i = 0; i < 3; i++) await advance(0); return vi.getTimerCount(); };
+  const renewalReads = (made: Issued[]) => [`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort();
+
+  it('SII-142. R1 AC-04 (the R1-probe, kept): a provider re-authentication that never settles is waited for 30 s from Confirm sign-in and no longer — at 29 999 ms still "Confirming your sign-in…" (the field read-only, Stop waiting offered, "Void invoice…" and Check again held, a tab return checks nothing); at exactly 30 000 ms the wait is over without a remount: the confirmation says this page stopped waiting and sent nothing, the field is empty, editable and focused, a tab return checks the session again, Check again sends its own request, and Keep invoice, Close and reopen leave "Void invoice…" usable — nothing is sent on its own: no void POST, no re-authentication login, no second provider call', async () => {
+    const { server, made, r, calls } = await stalled();
+    const other = holdOther(server, made, r);
+    const logins = server.logins().length;
+    const mark = server.sent.length;
+    await advance(29_999);
+    expect(tid('issued-void-reauth-hint')).toHaveTextContent(SETTINGS_TEXT.confirmingSignIn);
+    expect(tid('issued-void-reauth-password')).toHaveAttribute('readonly');
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(describedBy('issued-view-void')).toBe(VOID_TEXT.reviewSignIn);
+    fireEvent.click(tid('issued-void-check'));
+    await until(() => expect(tid('issued-void-card-seen')).toHaveTextContent(VOID_TEXT.signingIn));
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([]); // no tab-return check, nothing for Check again
+    await advance(1); // exactly 30 000 ms after the press
+    expect(tid('issued-void-reauth-hint')).not.toHaveTextContent(SETTINGS_TEXT.confirmingSignIn);
+    expect(tid('issued-void-reauth-password')).not.toHaveAttribute('readonly');
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut);
+    expect(tid('issued-void-reauth-password')).toHaveValue('');
+    await until(() => expect(document.activeElement).toBe(tid('issued-void-reauth-password')));
+    expect(screen.queryByTestId('issued-void-reauth-stop')).toBeNull();
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
+    expect(sentFrom(server, mark)).toEqual([]); // the deadline itself sends nothing
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // the tab return checks the session again
+    expect(server.voidPosts()).toHaveLength(1); // only the press that met step_up_required
+    fireEvent.click(tid('issued-void-check')); // the user's own Check again: the held attempt's key and bytes
+    await until(() => expect(server.voidPosts()).toHaveLength(2));
+    expect(server.voidPosts()[1].headers.get('idempotency-key')).toBe(OTHER_KEY);
+    expect(server.voidPosts()[1].body).toBe(other.body);
+    fireEvent.click(tid('issued-void-keep'));
+    await until(() => expect(box()).toBeNull());
+    fireEvent.click(tid('issued-view-void'));
+    await until(() => expect(box()).not.toBeNull()); // a new review, without a remount
+    fireEvent.click(tid('issued-void-keep'));
+    await until(() => expect(box()).toBeNull());
+    fireEvent.click(tid('issued-view-close'));
+    await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    fireEvent.click(openButton(2));
+    await until(() => expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false'));
+    expect(server.logins()).toHaveLength(logins); // no re-authentication login, no automatic sign-in
+    expect(calls).toHaveLength(1); // no second provider call
+    expect(server.voidPosts()).toHaveLength(2);
+    expect(VOID_SIGNIN_WAIT_MS).toBe(30_000);
+    expect(VOID_TEXT.signInTimedOut).toMatch(/^Not voided: this page stopped waiting for your sign-in after 30 seconds /);
+  });
+
+  it('SII-143. R1 AC-04: a provider re-authentication that fails within the 30 s (at 10 s here) takes today\'s path — "Not signed in: your sign-in was not confirmed. Try again." with the field focused — and its deadline goes with it: nothing fires later and nothing is sent; Stop waiting, offered only while it was waited for, is gone', async () => {
+    const { server, calls } = await stalled();
+    expect(tid('issued-void-reauth-stop')).toHaveTextContent(VOID_TEXT.stopWaiting);
+    const logins = server.logins().length;
+    const mark = server.sent.length;
+    await advance(10_000);
+    await act(async () => { calls[0].reject(new Error('synthetic provider failure')); });
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.reauthFailed));
+    await until(() => expect(document.activeElement).toBe(tid('issued-void-reauth-password')));
+    expect(screen.queryByTestId('issued-void-reauth-stop')).toBeNull();
+    expect(await timersLeft()).toBe(0);
+    await advance(60_000);
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.reauthFailed);
+    expect(tid('issued-void-confirm-alert')).not.toHaveTextContent(VOID_TEXT.signInTimedOut);
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect(server.logins()).toHaveLength(logins);
+  });
+
+  it('SII-144. R1 AC-08: a sign-in that answers 1 ms before the deadline goes on exactly as before — one re-authentication login, the invoice and its eligibility read again under the new session, the reason cleared, then a NEW press with a NEW key under the NEW token — and its deadline is gone: nothing fires later', async () => {
+    const { server, made, r, calls } = await stalled();
+    const logins = server.logins().length;
+    await advance(29_999);
+    expect(tid('issued-void-reauth-stop')).toBeInTheDocument(); // still waited for
+    const mark = server.sent.length;
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await until(() => expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed));
+    expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(['1']);
+    expect(apart(server, mark).sort()).toEqual(renewalReads(made));
+    expect(radios().map((x) => x.checked)).toEqual([false, false, false, false, false, false]);
+    expect(await timersLeft()).toBe(0);
+    await advance(60_000);
+    expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed);
+    expect(tid('issued-void-confirm-alert').textContent).toBe('');
+    expect(server.voidPosts()).toHaveLength(1);
+    fireEvent.click(tid('issued-void-reason-duplicate'));
+    fireEvent.click(tid('issued-void-send'));
+    await until(() => expect(heldA(r)?.state).toBe('voided'));
+    const [first, second] = server.voidPosts();
+    expect(second.headers.get('idempotency-key')).toBe(r.keys[1]);
+    expect(r.keys[1]).not.toBe(r.keys[0]);
+    expect(second.headers.get('x-tmpos-session-csrf')).not.toBe(first.headers.get('x-tmpos-session-csrf'));
+  });
+
+  it('SII-145. R1 AC-06: a provider success that comes after the deadline applies nothing — the session is never asked to renew for it (no re-authentication login), nothing is read again, the list stays, the confirmation\'s "stopped waiting" alert and the focus the user moved stay; nothing is sent', async () => {
+    const { server, calls } = await stalled();
+    const logins = server.logins().length;
+    await advance(30_000);
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut));
+    act(() => { tid('issued-void-keep').focus(); });
+    const mark = server.sent.length;
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect(server.logins()).toHaveLength(logins);
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut);
+    expect(tid('issued-void-confirm-status').textContent).toBe('');
+    expect(tid('issued-void-reauth-group')).toBeInTheDocument(); // still the sign-in, never the renewed review
+    expect(document.activeElement).toBe(tid('issued-void-keep'));
+    expect(listPhase()).toBe('ready'); // no renewal took the list read under the old token
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it.each(['succeeds', 'fails'] as const)('SII-146. R1 AC-06: a new attempt after the deadline owns the wait alone — the timed-out attempt\'s provider then %s late and changes nothing of it: the new one is still "Confirming your sign-in…" with Stop waiting, its field read-only and "Void invoice…" held; only the new attempt\'s answer renews — one re-authentication login', async (late) => {
+    const { server, made, calls, press } = await stalled();
+    const logins = server.logins().length;
+    await advance(30_000);
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut));
+    await press(); // the explicit new try
+    expect(calls).toHaveLength(2);
+    const mark = server.sent.length;
+    await act(async () => { if (late === 'succeeds') calls[0].resolve('tok-a'); else calls[0].reject(new Error('synthetic late failure')); });
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([]);
+    expect(tid('issued-void-reauth-hint')).toHaveTextContent(SETTINGS_TEXT.confirmingSignIn);
+    expect(tid('issued-void-reauth-stop')).toBeInTheDocument();
+    expect(tid('issued-void-reauth-password')).toHaveAttribute('readonly');
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-void-confirm-alert').textContent).toBe('');
+    await act(async () => { calls[1].resolve('tok-a'); });
+    await until(() => expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed));
+    expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(['1']);
+    expect(apart(server, mark).sort()).toEqual(renewalReads(made));
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-147. R1 AC-05: Stop waiting ends the wait at once, long before the deadline — the confirmation says this page stopped waiting and sent nothing (never that anything was cancelled or failed), the field is editable and focused, its deadline is gone, a tab return checks the session again; the provider\'s late success then signs nothing in; nothing is sent', async () => {
+    const { server, calls } = await stalled();
+    const logins = server.logins().length;
+    const mark = server.sent.length;
+    await advance(5_000);
+    expect(tid('issued-void-reauth-stop')).toHaveTextContent(VOID_TEXT.stopWaiting);
+    fireEvent.click(tid('issued-void-reauth-stop'));
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInStopped));
+    expect(tid('issued-void-reauth-hint')).not.toHaveTextContent(SETTINGS_TEXT.confirmingSignIn);
+    expect(tid('issued-void-reauth-password')).not.toHaveAttribute('readonly');
+    await until(() => expect(document.activeElement).toBe(tid('issued-void-reauth-password')));
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
+    expect(await timersLeft()).toBe(0);
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await settle();
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(server.logins()).toHaveLength(logins);
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInStopped);
+    expect(server.voidPosts()).toHaveLength(1);
+    for (const text of [VOID_TEXT.signInTimedOut, VOID_TEXT.signInStopped, VOID_TEXT.stopWaitingHint]) expect(text).not.toMatch(/cancel|revoke|failed|signed out/i);
+  });
+
+  it('SII-148. R1 AC-05: Escape during the wait closes the confirmation and ends the wait at once; the invoice then closes and reopens without a remount, "Void invoice…" usable and reviewing again, and a tab return checks the session; the provider\'s late success signs nothing in and reads nothing; nothing is sent', async () => {
+    const { server, calls } = await stalled();
+    const logins = server.logins().length;
+    fireEvent.keyDown(tid('issued-void-reauth-password'), { key: 'Escape' });
+    await until(() => expect(box()).toBeNull());
+    expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false');
+    fireEvent.click(tid('issued-view-close'));
+    await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    fireEvent.click(openButton(2));
+    await until(() => expect(tid('issued-view-void')).toHaveAttribute('aria-disabled', 'false'));
+    const mark = server.sent.length;
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    fireEvent.click(tid('issued-view-void'));
+    await until(() => expect(box()).not.toBeNull());
+    const late = server.sent.length;
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await settle();
+    expect(sentFrom(server, late)).toEqual([]);
+    expect(server.logins()).toHaveLength(logins);
+    expect(tid('issued-void-confirm-status').textContent).toBe(''); // the new review's confirmation, untouched
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-149. R1 AC-05: leaving the page during the wait (the section unmounts) takes its deadline with it, and the provider\'s late answer — a failure here — changes nothing: no state update, no unhandled rejection, nothing sent', async () => {
+    const rejections: unknown[] = [];
+    const heard = (reason: unknown): void => { rejections.push(reason); };
+    process.on('unhandledRejection', heard);
+    try {
+      const { server, page, calls } = await stalled();
+      expect(await timersLeft()).toBe(1); // the deadline, armed at the press
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const mark = server.sent.length;
+      page.unmount();
+      expect(await timersLeft()).toBe(0);
+      await act(async () => { calls[0].reject(new Error('synthetic late failure')); });
+      await advance(60_000);
+      await settle();
+      expect(sentFrom(server, mark)).toEqual([]);
+      expect(rejections).toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', heard);
+    }
+  });
+
+  it.each(['a sign-out', 'another session'] as const)('SII-150. R1 AC-07: %s during the wait is a real session change and keeps its normal handling — the invoice closes, the held attempt is detached for good — and it ends the wait: afterwards a tab return checks the session again, and the provider\'s late success rebinds nothing (no re-authentication login, nothing re-read); nothing is sent', async (change) => {
+    const { server, made, r, calls } = await stalled();
+    holdOther(server, made, r);
+    const logins = server.logins().length;
+    if (change === 'a sign-out') {
+      await act(async () => { await r.props().session!.logout(); });
+    } else {
+      server.otherTab('uid-a');
+      fireEvent.click(tid('issued-void-find')); // a Check invoice's session check finds the other session's token
+    }
+    await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(heldA(r)?.csrf).toBeNull(); // detached: never checked again under a later session
+    if (change === 'a sign-out') {
+      fireEvent.click(tid('issued-retry')); // Reconnect
+      await until(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'ready'));
+    } else {
+      await until(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'ready'));
+    }
+    await settle(); // the Check invoice read goes on under the new session (SII-124)
+    const mark = server.sent.length;
+    await focusEvents();
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    const plain = server.logins().length; // a Reconnect's plain login only
+    expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(change === 'a sign-out' ? [null] : []);
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await settle();
+    expect(server.logins()).toHaveLength(plain);
+    expect(sentFrom(server, mark)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(server.voidPosts()).toHaveLength(1);
+  });
+
+  it('SII-151. R1 AC-07: a session renewal still in flight at the deadline is not applied to the dialog — its late "ok" reads nothing again and the "stopped waiting" alert stays — but the session it installed is real: the next session check (a tab return) adopts it as a new generation, which closes the invoice and detaches the attempt sent under the old token, as any session change does', async () => {
+    const { server, made, r, calls } = await stalled();
+    holdOther(server, made, r);
+    const logins = server.logins().length;
+    await advance(20_000);
+    server.hold.current = 1; // the renewal's confirming session read, held at the server
+    await act(async () => { calls[0].resolve('tok-a'); });
+    await until(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(['1']); // sent before the deadline
+    await advance(10_000); // 30 000 ms after the press (the session read's own 15 s bound is not reached)
+    await until(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut));
+    const mark = server.sent.length;
+    await act(async () => { server.held.shift()!.release(); }); // the renewal's late "ok"
+    await settle();
+    expect(apart(server, mark)).toEqual([]); // no detail or eligibility read again
+    expect(tid('issued-void-confirm-alert')).toHaveTextContent(VOID_TEXT.signInTimedOut);
+    expect(tid('issued-void-reauth-group')).toBeInTheDocument();
+    expect(listPhase()).toBe('ready');
+    expect(heldA(r)?.csrf).not.toBeNull();
+    await focusEvents(); // the next session check finds the renewed session
+    await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(heldA(r)?.csrf).toBeNull();
+    expect(server.voidPosts()).toHaveLength(1);
   });
 });

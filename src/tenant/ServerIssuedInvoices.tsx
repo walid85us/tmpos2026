@@ -92,6 +92,12 @@ import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopV
 const DEFAULT_WAIT_SECONDS = 60;
 /** How long Check again waits after the server said the same request is still in progress (no Retry-After): it only re-enables. */
 const IN_PROGRESS_WAIT_MS = 5_000;
+/**
+ * How long the void's explicit sign-in is waited for (M7B-INVOICES-VOID-P2-R1), from the press of Confirm sign-in — never
+ * while typing — over the provider's leg, the session's and the hand-back to the dialog. After it this page stops waiting:
+ * nothing at the provider is cancelled (it cannot be) and a late answer applies nothing here.
+ */
+export const VOID_SIGNIN_WAIT_MS = 30_000;
 const waitable = 'aria-disabled:opacity-50 aria-disabled:cursor-not-allowed';
 /**
  * Every void control fits its row in any font (CI SIS-22 at 320×600 / 24 px text: "Check invoice" was wider than the held
@@ -259,6 +265,11 @@ export const VOID_TEXT = Object.freeze({
   reauthNone: 'Sign out and sign in again, then void this invoice.',
   reauthFailed: 'Not signed in: your sign-in was not confirmed. Try again.',
   reauthUnconfirmed: 'Not signed in: the store server did not confirm your sign-in. Try again.',
+  /** R1: this page's own wait ended — never "cancelled" or "failed": the provider may still answer, and that answer applies nothing here. */
+  signInTimedOut: `Not voided: this page stopped waiting for your sign-in after ${VOID_SIGNIN_WAIT_MS / 1000} seconds and sent nothing for this invoice. You can try again.`,
+  signInStopped: 'Not voided: this page stopped waiting for your sign-in and sent nothing for this invoice. You can try again.',
+  stopWaiting: 'Stop waiting',
+  stopWaitingHint: 'This only stops waiting here: nothing is sent for this invoice.',
   renewing: 'Signed in again. Checking this invoice with the server…',
   renewed: 'Signed in again. Choose a reason, then press Void invoice.',
   renewUnread: 'Signed in again, but this invoice could not be checked. Close this and open the invoice again.',
@@ -457,7 +468,9 @@ function IssuedSection({
   const voidSending = useRef(false);
   const voidChecking = useRef<string | null>(null);
   const voidReading = useRef<string | null>(null);
-  const signingIn = useRef(false); // the void's explicit sign-in is out: a tab return checks nothing meanwhile (R11)
+  // The void's explicit sign-in this section is waiting for (R11; R1: one owner at a time, bounded): a tab return checks
+  // nothing meanwhile. Only that owner releases it — at its own end, its deadline, a stop, a close or a session change.
+  const signingIn = useRef<VoidSignInOwner | null>(null);
   const [voidSigning, setVoidSigning] = useState(false); // the same, for the dialog's "Void invoice…" (R2-1a)
   const eligChecked = useRef(new Set<number>()); // the opens whose eligibility 403 had its one fresh check (R14)
   // One fresh check per open shared by its detail and eligibility reads when both are refused (review B1 iam 1).
@@ -499,8 +512,8 @@ function IssuedSection({
     session.ensure(uid, () => identity.idToken(uid), mode === 'fresh' ? { fresh: true } : mode === 'reconnect' ? { reconnect: true } : undefined);
   const putStores = (next: StoresState): void => { storesRef.current = next; setStoresState(next); };
   const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
-  /** Close the issued-invoice dialog (its own read's late answer then finds nothing: it is unmounted). */
-  const closeView = (): void => { viewRef.current = null; setViewState(null); };
+  /** Close the issued-invoice dialog (its own read's late answer then finds nothing: it is unmounted), and stop waiting for its sign-in (R1). */
+  const closeView = (): void => { dropSignIn(null); viewRef.current = null; setViewState(null); };
   const putPanel = (next: SettingsPanel | null): void => {
     panelRef.current = next;
     if (next?.attempt?.key !== attemptToken.current?.key) attemptToken.current = null; // the token goes with its attempt
@@ -934,7 +947,7 @@ function IssuedSection({
     // Never a silent no-op (review B1 L3): an earlier send still out, the void's sign-in out (L2), a wait, a live attempt,
     // or this invoice already known voided by an attempt of this user (F1) — each said, nothing sent.
     if (voidSending.current) return notSent(VOID_TEXT.pending);
-    if (signingIn.current) return notSent(VOID_TEXT.signingIn);
+    if (signingIn.current !== null) return notSent(VOID_TEXT.signingIn);
     if (press.reviewGen !== gen.current.n) return { kind: 'stale' }; // reviewed under a replaced session (R2-1c)
     if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
     if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
@@ -957,7 +970,7 @@ function IssuedSection({
       if (!press.open()) return null; // Keep invoice or Escape while the session was checked: nothing is sent
       if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
       if (!press.allowed()) return notSent(VOID_TEXT.noLongerAllowed);
-      if (signingIn.current) return notSent(VOID_TEXT.signingIn);
+      if (signingIn.current !== null) return notSent(VOID_TEXT.signingIn);
       if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
       if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided); // settled voided meanwhile (F1): never a second key for it
       const body = voidBodyOf(store.tenantId, press.reasonCode);
@@ -1045,7 +1058,7 @@ function IssuedSection({
   async function checkVoid(): Promise<void> {
     const h = holds.get(uid);
     if (h === undefined || h.state !== 'unresolved' || !h.retryable || h.csrf === null || voidChecking.current !== null || waitRef.current || voidCoolRef.current === h.key) return;
-    if (signingIn.current) return void setVoidCheck({ key: h.key, text: VOID_TEXT.signingIn }); // L2: nothing sent beside the sign-in
+    if (signingIn.current !== null) return void setVoidCheck({ key: h.key, text: VOID_TEXT.signingIn }); // L2: nothing sent beside the sign-in
     if (h.body === '' || voidExpired(h, clock(), wall())) { if (h.body !== '') holds.change(uid, h.key, { body: '' }); return; }
     const { key, csrf } = h;
     voidChecking.current = key;
@@ -1151,32 +1164,52 @@ function IssuedSection({
    * The void's explicit sign-in after a first send's 403 step_up_required (nothing ran): the provider's re-authentication,
    * then the session's — its new token adopted WITHOUT closing the dialog (renewKeepingView, R11). The dialog re-reads and
    * asks for a new press itself; nothing is sent here. Null when the dialog's context went meanwhile.
+   *
+   * R1: one owner at a time, waited for at most VOID_SIGNIN_WAIT_MS from this press. Its deadline, Stop waiting, Keep
+   * invoice, a close, a store or session change, or unmount ends the wait AT ONCE (releaseSignIn): the dialog gets its one
+   * answer then. The provider's and the session's calls cannot be aborted; they run on, observed, and apply nothing once
+   * this owner is gone — a session they renewed late is found by the next session check (adopt, then begin).
    */
-  async function signInForVoid(viewId: number, secret: string | null): Promise<VoidSignIn | null> {
-    if (signingIn.current || waitRef.current) return null;
-    signingIn.current = true;
-    setVoidSigning(true);
-    const since = sessionEndsSoFar();
-    const mine = gen.current.n;
-    const here = (): boolean => alive.current && viewRef.current?.id === viewId && since === sessionEndsSoFar() && mine === gen.current.n;
-    try {
-      let fresh: string | null;
-      try { fresh = await identity.reauthenticate(uid, secret); } catch { fresh = null; }
-      if (!here()) return null;
-      if (fresh === null) return { kind: 'failed', text: VOID_TEXT.reauthFailed };
-      const renewed = await session.reauthenticate(uid, fresh);
-      if (!here()) return null;
-      if (renewed.kind !== 'ok') {
-        const failure = sessionFailure(renewed);
-        if (failure.kind === 'signed-out') { failSession(failure); return null; }
-        return { kind: 'failed', text: failure.seconds !== undefined ? `Not signed in: ${pickerWaitText(startWait(failure.seconds))}` : VOID_TEXT.reauthUnconfirmed };
-      }
-      renewKeepingView(renewed.csrf);
-      return { kind: 'renewed' };
-    } finally {
-      signingIn.current = false;
-      if (alive.current) setVoidSigning(false);
+  function signInForVoid(viewId: number, secret: string | null): Promise<VoidSignIn | null> {
+    if (signingIn.current !== null || waitRef.current) return Promise.resolve(null);
+    // A new try after the deadline may overlap the previous, uncancellable provider call (e.g. a Google popup the provider then cancels itself); its stale chain applies nothing here (owns()).
+    return new Promise((answer) => {
+      const t: VoidSignInOwner = { viewId, gen: gen.current.n, since: sessionEndsSoFar(), timer: null, answer };
+      signingIn.current = t;
+      setVoidSigning(true);
+      t.timer = setTimeout(() => releaseSignIn(t, { kind: 'failed', text: VOID_TEXT.signInTimedOut }), VOID_SIGNIN_WAIT_MS);
+      runSignIn(t, secret).catch(() => releaseSignIn(t, { kind: 'failed', text: VOID_TEXT.reauthFailed }));
+    });
+  }
+  /** The sign-in's own chain: each step goes on only while `t` still owns it — never the session's renewal for a stopped wait. */
+  async function runSignIn(t: VoidSignInOwner, secret: string | null): Promise<void> {
+    const owns = (): boolean => alive.current && signingIn.current === t && viewRef.current?.id === t.viewId && t.since === sessionEndsSoFar() && t.gen === gen.current.n;
+    let fresh: string | null;
+    try { fresh = await identity.reauthenticate(uid, secret); } catch { fresh = null; }
+    if (!owns()) return releaseSignIn(t, null);
+    if (fresh === null) return releaseSignIn(t, { kind: 'failed', text: VOID_TEXT.reauthFailed });
+    const renewed = await session.reauthenticate(uid, fresh);
+    if (!owns()) return releaseSignIn(t, null);
+    if (renewed.kind !== 'ok') {
+      const failure = sessionFailure(renewed);
+      if (failure.kind === 'signed-out') return failSession(failure); // its closeView ends the wait
+      return releaseSignIn(t, { kind: 'failed', text: failure.seconds !== undefined ? `Not signed in: ${pickerWaitText(startWait(failure.seconds))}` : VOID_TEXT.reauthUnconfirmed });
     }
+    renewKeepingView(renewed.csrf);
+    releaseSignIn(t, { kind: 'renewed' });
+  }
+  /** End the wait for `t` with its one answer — only while `t` owns it: a released or older attempt never touches a newer one's. */
+  function releaseSignIn(t: VoidSignInOwner, out: VoidSignIn | null): void {
+    if (signingIn.current !== t) return;
+    if (t.timer !== null) clearTimeout(t.timer);
+    signingIn.current = null;
+    if (alive.current) setVoidSigning(false);
+    t.answer(out);
+  }
+  /** Stop waiting for the sign-in out — any (a close, a session change) or only the one of dialog open `viewId` (its Stop waiting, Keep invoice). */
+  function dropSignIn(out: VoidSignIn | null, viewId?: number): void {
+    const t = signingIn.current;
+    if (t !== null && (viewId === undefined || t.viewId === viewId)) releaseSignIn(t, out);
   }
 
   // ---- the settings panel ----
@@ -1504,7 +1537,7 @@ function IssuedSection({
    * saves, and never signs in after a confirmed end.
    */
   function checkSession(): void {
-    if (signingIn.current) return; // the void's sign-in is out: its own answer decides (design R11)
+    if (signingIn.current !== null) return; // the void's sign-in is waited for: its own answer decides (design R11), for its bounded wait only (R1)
     if (document.visibilityState === 'hidden' || gen.current.csrf === null || storesRef.current.phase === 'signed-out') return;
     const mine = gen.current.n;
     void connect().then((s) => {
@@ -1570,6 +1603,7 @@ function IssuedSection({
       ctl.current.find?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
       if (voidCoolTimer.current !== null) clearTimeout(voidCoolTimer.current);
+      dropSignIn(null); // its deadline goes; a late answer finds no owner (and `alive` already false: no state is set)
     };
     // A section serves one UID (see ServerIssuedInvoices); the clients are fixed for its life.
   }, []);
@@ -1595,6 +1629,7 @@ function IssuedSection({
     check: () => { if (!waitRef.current && voidCoolRef.current === null) void checkVoid(); },
     find: () => { if (!waitRef.current) void findVoid(); },
     signIn: (secret) => signInForVoid(v.id, secret),
+    stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
   });
   const cardHeld = voidHeld?.state === 'refused' && voidHeld.refusal === 'signed-out' && signedOut ? undefined : voidHeld;
   const track = (target: EventTarget | null): void => {
@@ -1809,6 +1844,14 @@ export type VoidSendOutcome =
   /** Reviewed under an earlier generation (R2-1c): nothing sent; the confirmation closes. */
   | { readonly kind: 'stale' };
 export type VoidSignIn = { readonly kind: 'renewed' } | { readonly kind: 'failed'; readonly text: string };
+/** The one void sign-in a section waits for (R1): the open, generation and sign-out count it was pressed under, its deadline, its one answer. */
+interface VoidSignInOwner {
+  readonly viewId: number;
+  readonly gen: number;
+  readonly since: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  readonly answer: (out: VoidSignIn | null) => void;
+}
 
 /** The Issued section's void action for the one dialog it opened (design §4): the drafts card's View invoice never has one. */
 export interface IssuedVoidCapability {
@@ -1837,6 +1880,8 @@ export interface IssuedVoidCapability {
   readonly check: () => void;
   readonly find: () => void;
   readonly signIn: (secret: string | null) => Promise<VoidSignIn | null>;
+  /** Stop waiting here for this dialog's sign-in (R1): its answer says so at once; nothing is cancelled at the provider and nothing is sent. */
+  readonly stopSignIn: () => void;
 }
 
 export interface IssuedInvoiceDialogProps {
@@ -2176,8 +2221,9 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   /** The renewal's re-reads (the detail and the eligibility under the new session) and what they decide. */
   async function applyRenewal(id: number, open: () => boolean, renewGen: number): Promise<void> {
     patchConfirm(id, { confirming: false, stepUp: null, renewing: true, reason: null, invalid: false, status: { alert: false, text: VOID_TEXT.renewing } });
-    // The invoice and its eligibility are read again under the new session even when Keep invoice was pressed during the
-    // sign-in (review B1 L2): the dialog never keeps showing what the old session read.
+    // The invoice and its eligibility are read again under the new session even when Keep invoice is pressed during these
+    // reads (review B1 L2): the dialog never keeps showing what the old session read. (Pressed during the sign-in itself, it
+    // ends the wait (R1): no renewal comes back to this dialog then.)
     const detailRead = readDetail('renew');
     const detailRev = seq.current; // this read's place in the shared detail sequence
     const [answered, allowed] = await Promise.all([detailRead, readEligibility('renewElig')]);
@@ -2207,6 +2253,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   }
 
   function closeConfirm(): void {
+    owner.current.voiding?.stopSignIn(); // Keep invoice or Escape while its sign-in is waited for: the wait ends here (R1)
     putConfirm(null);
     setPassword('');
   }
@@ -2336,7 +2383,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             const c = confirmRef.current;
             if (c !== null && c.key === null && !c.saving && c.stepUp === null && !c.decided && !c.renewing) patchConfirm(c.id, { reason: code, invalid: false });
           }}
-          onPress={() => { void press(); }} onClose={closeConfirm} onCheck={voiding.check} onFind={voiding.find} onSignIn={() => { void signIn(); }} returnFocus={closeButton}
+          onPress={() => { void press(); }} onClose={closeConfirm} onCheck={voiding.check} onFind={voiding.find} onSignIn={() => { void signIn(); }} onStopSignIn={voiding.stopSignIn} returnFocus={closeButton}
         />
       )}
     </>
@@ -2352,14 +2399,14 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
  * Check again and Check invoice are said here as on the card. A step-up dropped the attempt: the sign-in group instead.
  */
 function VoidConfirmDialog({
-  c, store, held, confirmedDenial, expired, waiting, cooling, finding, checkText, password, focusReasons, focusSignIn, onPassword, onReason, onPress, onClose, onCheck, onFind, onSignIn, returnFocus,
+  c, store, held, confirmedDenial, expired, waiting, cooling, finding, checkText, password, focusReasons, focusSignIn, onPassword, onReason, onPress, onClose, onCheck, onFind, onSignIn, onStopSignIn, returnFocus,
 }: {
   readonly c: VoidConfirm; readonly store: string; readonly held: HeldVoid | undefined; readonly confirmedDenial: string | null; readonly expired: boolean; readonly waiting: boolean;
   readonly cooling: boolean; readonly finding: boolean; readonly checkText: string; readonly password: string;
   /** Counters: a change moves focus to the first reason (an empty press, a renewed sign-in) or into the sign-in group. */
   readonly focusReasons: number; readonly focusSignIn: number;
   readonly onPassword: (value: string) => void; readonly onReason: (code: InvoiceVoidReasonCode) => void; readonly onPress: () => void;
-  readonly onClose: () => void; readonly onCheck: () => void; readonly onFind: () => void; readonly onSignIn: () => void;
+  readonly onClose: () => void; readonly onCheck: () => void; readonly onFind: () => void; readonly onSignIn: () => void; readonly onStopSignIn: () => void;
   readonly returnFocus: RefObject<HTMLElement | null>;
 }) {
   const keep = useRef<HTMLButtonElement | null>(null);
@@ -2473,6 +2520,13 @@ function VoidConfirmDialog({
               >
                 {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
               </button>
+              {/* R1: while its sign-in is waited for, the wait can be ended here at once (the deadline ends it too). */}
+              {c.confirming && (
+                <button type="button" data-testid="issued-void-reauth-stop" aria-describedby="issued-void-reauth-stop-hint" onClick={onStopSignIn} className={`${quiet} ${fitsRow}`}>
+                  {VOID_TEXT.stopWaiting}
+                </button>
+              )}
+              {c.confirming && <p id="issued-void-reauth-stop-hint" data-testid="issued-void-reauth-stop-hint" className="w-full text-[11px] font-medium text-amber-800">{VOID_TEXT.stopWaitingHint}</p>}
               <p id="issued-void-reauth-hint" data-testid="issued-void-reauth-hint" className="w-full text-[11px] font-medium text-amber-800 min-h-[1rem]">
                 {c.confirming ? SETTINGS_TEXT.confirmingSignIn : waiting ? SETTINGS_TEXT.signInWaiting : method === 'google' ? 'A Google sign-in window opens.' : password.length === 0 ? 'Enter your password to confirm your sign-in.' : ''}
               </p>

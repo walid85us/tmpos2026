@@ -545,6 +545,11 @@
 //          and the dashboard's recorded only); at 1440 the sidebar stays the fixed 256 px one.
 //   The 23-hour cutoff and throttled timers are COMPONENT-layer evidence only (SII-102, controlled clocks); this file proves
 //   the reload loss with no automatic POST (SIS-21) and never waits on a clock.
+//   M7B-INVOICES-VOID-P2-R1 — THE BOUNDED SIGN-IN (brief §4, §6 items 3 and 4):
+//   SIS-24 (AC-05, AC-06, AC-08) the step-up's sign-in with its identity-provider request held (idpGate): busy, Stop
+//          waiting gives the confirmation back at once (no void POST, no login); the held answer released late changes
+//          nothing (no login, no read, the same confirmation and focus); a timely sign-in still re-reads and needs a new
+//          press. The 30 s deadline itself is component-layer evidence only (SII-142, a controlled clock).
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
 //   issue POST — the browser's own, from SIS-10 on), and SIS-16's void through its void POST: this file inserts no issuing or
 //   void row.
@@ -1370,7 +1375,17 @@ async function route(ev) {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   if (st === null) return null;
   if (u.protocol === 'https:' && u.host === SHOP_HOST) return isApiPath(u.pathname) ? shopApi(ev, u) : shopStatic(ev, u);
-  if (u.protocol === 'https:' && (u.host === IDP_HOST || u.host === STS_HOST)) return identityProvider(ev.request, u);
+  if (u.protocol === 'https:' && (u.host === IDP_HOST || u.host === STS_HOST)) {
+    const s = st;
+    for (const g of [...s.idpGates]) {
+      if (!g.match(ev, u)) continue;
+      s.idpGates.delete(g);
+      g.hit();
+      await g.released;
+      if (st !== s) return null; // released at its scenario's end: refused, never answered into the next one
+    }
+    return identityProvider(ev.request, u);
+  }
   // The shop's stylesheet @imports Google Fonts; a failed @import fails Vite's CSS preload and with it the app chunk.
   if (u.protocol === 'https:' && u.host === 'fonts.googleapis.com') return { status: 200, headers: [['content-type', 'text/css; charset=utf-8'], ...corsFor(ev.request)], body: '' };
   if (u.protocol === 'https:' && u.host === FS_HOST) {
@@ -1473,6 +1488,25 @@ function profileGate(page, uid) {
   st.profileGates.add({ match, hit, released: Promise.race([released, delay(30_000)]) }); // a bound, never a result
   st.releases.push(release);
   return { reached, release };
+}
+
+/**
+ * Hold `page`'s next identity-provider POST to `pathname` (R1: a stalled sign-in — accounts:signInWithPassword) until
+ * release(): the page's request stays open, and its answer is made only then (identityProvider logs it in st.idp then).
+ * Bounded (25 s: under the SDK's own 30 s REST timeout), its bound timer cleared once released, and released at scenario end.
+ */
+function idpGate(page, pathname) {
+  let hit;
+  let release;
+  const reached = new Promise((r) => { hit = r; });
+  const released = new Promise((r) => { release = r; });
+  const match = (ev, u) => ev.frameId === page.frameId && ev.request.method === 'POST' && u.host === IDP_HOST && u.pathname === pathname;
+  const bound = setTimeout(() => release(), 25_000); // a bound, never a result
+  bound.unref(); // never keeps the process alive
+  const free = () => { clearTimeout(bound); release(); };
+  st.idpGates.add({ match, hit, released }); // `released` settles by release() or the bound
+  st.releases.push(free);
+  return { reached, release: free };
 }
 
 const apiLine = (r) => `${r.via === 2 ? '[entry2] ' : ''}${r.method} ${r.path}${r.query} -> ${r.status ?? 'held'}${r.error ? ` ${r.error}` : ''}${r.lost ? ` (${r.lost} lost at the front)` : ''}`;
@@ -1738,7 +1772,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SDB-23', 'SSE-01', 'SSE-02', 'SSE-03', 'SSE-04',
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
-  'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23',
+  'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -1747,7 +1781,7 @@ function scenario(id, title, fn, timeout = 180_000) {
   if (registered.has(id)) repeated.push(id);
   registered.add(id);
   test(`${id}: ${title}`, { timeout }, async () => {
-    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), profileGates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
+    st = { id, api: [], idp: [], firestore: [], blocked: [], gates: new Set(), profileGates: new Set(), idpGates: new Set(), releases: [], tamper: null, lose: null, pages: [], tabs: [], second: new Set(), secrets: new Set(), notes: {} };
     const s = st;
     const errorsBefore = browser.interceptErrors.length;
     let outcome = 'fail';
@@ -9276,6 +9310,9 @@ const VOIDING_SAID = Object.freeze({
   reauthTitle: 'Confirm your sign-in to void this invoice',
   reauthExplain: 'Signing in again starts a new session. Other requests on this page that are still waiting to be confirmed can then only be dismissed.',
   renewed: 'Signed in again. Choose a reason, then press Void invoice.',
+  confirmingSignIn: 'Confirming your sign-in…',
+  stopWaiting: 'Stop waiting',
+  signInStopped: 'Not voided: this page stopped waiting for your sign-in and sent nothing for this invoice. You can try again.',
   noLongerAllowed: 'You can no longer void invoices at this store.',
   unresolved: (n, store) => `Void of invoice ${n} at ${store} is not confirmed. The server may or may not have voided it.`,
   heldOutside: 'The void is tracked under Issued invoices once this invoice is closed.',
@@ -10379,3 +10416,78 @@ scenario('SIS-23', 'M7B-INVOICES-VOID-P2-R1 NAVIGATION SMOKE AFTER THE SHARED LA
   check(writes.length === 0, `something but reads and the tenant sign-in was sent ${JSON.stringify(writes.map(apiLine))}`);
   assert.deepEqual(problems, [], 'navigation works and the shared layout holds at the narrow cells, the desktop sidebar unchanged');
 });
+
+scenario('SIS-24', 'R1 AC-05 AC-06 AC-08 A STALLED SIGN-IN, STOPPED, ITS LATE ANSWER AND A TIMELY ONE (brief §6 items 3 and 4; the 30 s deadline itself is component-layer evidence only, SII-142 on a controlled clock — this scenario never waits on it) — the owner\'s stale sign-in meets step_up_required; Confirm sign-in with the identity provider\'s password request held at the gate: "Confirming your sign-in…", the field read-only, Stop waiting offered; Stop waiting gives the confirmation back without a remount — said, the field editable and focused, Void invoice… behind it offered again, a focus checks the session again — with no void POST and no tenant login; the held provider answer then released late: the SDK finishes its own requests, and the page sends no tenant login, no detail or eligibility read and no void POST, the confirmation, the dialog, the focus and the notice unchanged; then a timely explicit sign-in is ONE reauthentication login, ONE detail GET and ONE eligibility GET, the reason cleared, and nothing is posted (no new press is made)', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i24', 1);
+  ACCOUNTS.get(boss.email).staleOnce = true;
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await openVoidConfirm(page);
+  await chooseReason(page, 'wrong_customer');
+  const sendFrom = st.api.length;
+  await page.click(by('issued-void-send'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.alert === VOIDING_SAID.stepUp, 30_000, 'the step-up said in the confirmation');
+  await page.waitFor(`document.activeElement === ${q('issued-void-reauth-password')}`, 10_000, 'the password field has focus');
+  await quiet(page, sendFrom);
+  assert.deepEqual(sentBy(page, isVoidPost(main.id, id), sendFrom).map(answered), ['403 step_up_required'], 'the press met the step-up');
+
+  // 1. Stalled: the provider's password request is held open at the gate.
+  const held = idpGate(page, '/v1/accounts:signInWithPassword');
+  const signInAt = st.api.length;
+  const idpAt = st.idp.length;
+  await page.fill(by('issued-void-reauth-password'), boss.password);
+  await page.click(by('issued-void-reauth-confirm'));
+  await held.reached;
+  await page.waitFor(`${q('issued-void-reauth-hint')}?.textContent.trim() === ${JSON.stringify(VOIDING_SAID.confirmingSignIn)}`, 10_000, 'the sign-in is busy');
+  const busy = await page.evaluate(`({ readOnly: ${q('issued-void-reauth-password')}?.readOnly ?? null, value: ${q('issued-void-reauth-password')}?.value ?? null, stop: ${q('issued-void-reauth-stop')}?.textContent.trim() ?? null, trigger: ${q('issued-view-void')}?.getAttribute('aria-disabled') ?? null })`);
+  record('SIS-24', { phase: 'stalled', busy, idp: st.idp.slice(idpAt) });
+  assert.deepEqual({ ...busy, idp: st.idp.slice(idpAt) }, { readOnly: true, value: '', stop: VOIDING_SAID.stopWaiting, trigger: 'true', idp: [] },
+    'busy while the provider is waited for: the field read-only and cleared, Stop waiting offered, Void invoice… held; the held request not yet answered');
+
+  // 2. Stop waiting: the confirmation is usable again without a remount, and nothing is sent for the invoice.
+  await page.click(by('issued-void-reauth-stop'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.alert === VOIDING_SAID.signInStopped, 10_000, 'stopped waiting, said');
+  await page.waitFor(`document.activeElement === ${q('issued-void-reauth-password')}`, 10_000, 'the password field has focus again');
+  const stopped = await page.evaluate(`({ readOnly: ${q('issued-void-reauth-password')}?.readOnly ?? null, hint: ${q('issued-void-reauth-hint')}?.textContent.trim() ?? null, stop: !!${q('issued-void-reauth-stop')} })`);
+  assert.deepEqual(stopped, { readOnly: false, hint: 'Enter your password to confirm your sign-in.', stop: false }, 'the field editable, no longer busy, Stop waiting gone');
+  assert.equal(await voidOffered(page), true, 'Void invoice… behind the confirmation offered again (no sign-in held)');
+  await focusAndSettle(page, 'focus'); // its own session check runs again (it is skipped only while a sign-in is waited for)
+  const afterStop = st.api.length;
+  assert.deepEqual({ logins: sentBy(page, isLogin, signInAt).length, voids: sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r), signInAt).length },
+    { logins: 0, voids: 0 }, 'no tenant login and no void POST since Confirm sign-in');
+
+  // 3. The held provider answer, released late: it may finish at the provider, and it applies nothing here.
+  const shown = async () => ({ confirm: await voidConfirmOf(page), focus: await focusOf(page), status: await textOf(page, 'issued-view-void-status'), alert: await textOf(page, 'issued-view-void-alert'), notice: await textOf(page, 'issued-notice'), view: await has(page, 'issued-view') });
+  const was = await shown();
+  held.release();
+  await page.waitFor(() => st.idp.slice(idpAt).includes(`POST ${STS_HOST}/v1/token`), 15_000, 'the SDK finished the late re-authentication (its token request)');
+  await quiet(page, afterStop);
+  await page.settle();
+  await page.settle();
+  const late = sentBy(page, () => true, afterStop);
+  record('SIS-24', { phase: 'late answer', idp: st.idp.slice(idpAt), sent: late.map(apiLine) });
+  assert.deepEqual(st.idp.slice(idpAt), [`POST ${IDP_HOST}/v1/accounts:signInWithPassword`, `POST ${IDP_HOST}/v1/accounts:lookup`, `POST ${STS_HOST}/v1/token`],
+    'the provider\'s own late completion (never cancelled at the provider)');
+  assert.deepEqual(late.map(apiLine), [], 'the late answer: no tenant login, no detail or eligibility read, no void POST');
+  assert.deepEqual(await shown(), was, 'the confirmation, the dialog, the focus and the notice unchanged');
+
+  // 4. A timely explicit sign-in still takes the fresh-review path, and nothing is posted on its own.
+  const renewAt = st.api.length;
+  const idpRenew = st.idp.length;
+  await page.fill(by('issued-void-reauth-password'), boss.password);
+  assert.equal(await page.evaluate(`${q('issued-void-reauth-confirm')}?.getAttribute('aria-disabled')`), 'false', 'Confirm sign-in usable');
+  await page.click(by('issued-void-reauth-confirm'));
+  await page.waitFor(async () => (await voidConfirmOf(page))?.status === VOIDING_SAID.renewed, 30_000, 'signed in again, the invoice and its eligibility read again');
+  await page.waitFor(() => voidOffered(page), 15_000, 'Void invoice… offered again after the renewal\'s reads');
+  await quiet(page, renewAt);
+  const renewed = sentBy(page, () => true, renewAt);
+  const fresh = await voidConfirmOf(page);
+  record('SIS-24', { phase: 'renewed', sent: renewed.map(apiLine), idp: st.idp.slice(idpRenew) });
+  assert.deepEqual(renewed.filter(isLogin).map((r) => `${answered(r)} ${r.headers['x-tmpos-reauthenticate'] ?? '-'}`), ['200 1'], 'ONE login: the explicit reauthentication');
+  assert.deepEqual(st.idp.slice(idpRenew), [`POST ${IDP_HOST}/v1/accounts:signInWithPassword`, `POST ${IDP_HOST}/v1/accounts:lookup`, `POST ${STS_HOST}/v1/token`], 'its one re-authentication at the provider');
+  assert.deepEqual([renewed.filter(isIssuedDetailOrList).map(readLine), renewed.filter(isVoidRoute).map(readLine)], [[`${issuedPath(main.id)}/${id} 200`], [`${issuedPath(main.id)}/${id}/void-eligibility 200`]],
+    'a fresh review: ONE detail GET and ONE eligibility GET under the new session');
+  assert.deepEqual({ checked: fresh.reasons.checked, buttons: fresh.buttons, alert: fresh.alert }, { checked: null, buttons: ['Keep invoice', 'Void invoice'], alert: '' }, 'the reason cleared, for a new press');
+  assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 1, 'ONE void POST in all: the press that met the step-up');
+  assert.deepEqual([await storedVoids(main.id), (await voidAudits(tenant)).length], [[], 0], 'nothing voided');
+}, 240_000);
