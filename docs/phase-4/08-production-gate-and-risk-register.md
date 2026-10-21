@@ -946,6 +946,36 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 
 **The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The VOID-P2-R1 documentation change (C) changes no gate's status.
 
+**QA-PREVIEW-R1 and QA-DEPENDENCIES-R1 keep every gate `OPEN`.** Two environment stages for the owner's Manual QA: the development Preview restored, then the dependency audit repaired. Neither changes product behaviour.
+- **Preview (`cc089fe`, `cc089fefa7b73555c1639a9b3090c16743b1f454`).** The Replit Preview's `npm run dev` reached "ready" and was then killed by the VM's out-of-memory killer (8 GB, no swap) on the first stylesheet request.
+  - The cause was Tailwind's automatic source detection walking two local, non-product trees: `.workflow/` (untracked and not ignored) and `.cache/` (ignored only by the host's global gitignore, which the scanner does not read).
+  - The fix: `src/index.css` gains `@source not "../.workflow"` and `@source not "../.cache"`, and `vite.config.ts` adds `**/.workflow/**` to `server.watch.ignored`.
+  - A clean-checkout build is byte-identical before and after.
+  - Its exact-commit CI, 39561390325, **FAILED** at the dependency audit alone, on three High advisories that GitHub's database added on 2026-10-20 (18:26–20:06Z), after `f01ea45`'s green run. That run stays failed.
+- **Dependencies (`2f5ec3a`, `2f5ec3af18deb1ea1548acc3610f10dbfe328dae`, `package-lock.json` only).** Two lock entries move within their existing declared ranges: `vite`'s own `^6.4.3`, and the SDK's introducers' `^1.24.0` and `^1.25.2`. `package.json` is unchanged, the URLs are canonical, and the integrity values equal the registry's.
+  - `vite` moves from 6.4.3 to 6.4.4 for GHSA-587h-7wmj-h5pm. Publisher disclosure 2026-10-06; it concerns the `launch-editor` bundled in Vite.
+  - `@modelcontextprotocol/sdk` moves from 1.31.0 to 1.32.1 for GHSA-22jm-h49p-29qw (disclosed 2026-10-02) and GHSA-46jr-4wx8-v453 (disclosed 2026-10-15). It is reached only through `firebase-tools` 15.23.0 (devDependency) and `@google/genai` 1.46.0 (optional peer). 1.32.1 differs from 1.32.0 only in its README and version field.
+  - `vite` 6.4.5, released 2026-10-21 with a further `server.fs` check, was deliberately not taken.
+  - The audit checker, its manifest and CI are unchanged.
+  - Exact-commit CI 39587840612 succeeded on attempt 1: appsec 10:53:11–10:56:25Z; quality 10:53:11–11:15:57Z. The audit had prod 0 High and full 12 High (development-only, not gated); the browser file ran 87/87 under the Firestore emulator.
+- **SDK applicability, separate from the audit.**
+  - No first-party code imports the SDK or `@google/genai`, and `@google/genai` never imports the SDK.
+  - `firebase-tools` builds an MCP server only for `firebase mcp`: stdio by default; with `--mode sse`, HTTP on 127.0.0.1:3000 with open CORS and no `maxToolInputElements`. Neither this repository nor CI runs it; they run only `firebase emulators:exec`. Nothing uses `taskStore`.
+  - GHSA-22jm therefore does not apply.
+  - GHSA-46jr is cleared at the version and audit level only. Its protection also needs `maxToolInputElements` and a smaller body limit, which `firebase-tools` does not set, so a developer who runs `firebase mcp --mode sse` by hand stays exposed. That is open upstream.
+- **Local verification (`2f5ec3a`'s lockfile, CI's Node 20.20.0 / npm 10.8.2, in a clean worktree).**
+  - Install and graph: `npm ci` was clean, with one copy of each package; `npm ls` was clean.
+  - Gates and builds: `lockfile:check` OK, both typechecks 0, both server builds 0, `security:gates` OK, Firestore static 0, and `build:check` PASS with the main bundle's size unchanged (3,860,989 bytes).
+  - Suites: the main runner 175/175 and frontend 30/1195.
+  - The browser file ran **86/87** under its stated Firestore stand-in. SDB-17's second sign-in timed out after 30 s, the class P2-R1 recorded for SDB-16. It passed alone on a rerun, which is recorded as a rerun, not a repair; CI's emulator run passed 87/87.
+- **Preview after the update.** One instance, `npm run dev` (Node 22.22.0), serves Vite 6.4.4 on port 5000. Three reloads and more than two minutes of navigation (336 requests) gave no failure and no OOM kill. A headless render with live hosts blocked showed the styled sign-in page. The owner confirmed rendering at the earlier baseline.
+- **Not claimed.** Authenticated business QA. The Preview has no tenant API, database or synthetic identity: `/api/*` is a bounded 404, and the development persona panel holds no server session. Other untested items:
+  - the 320 px and 768 px large-text cells and the persona flow;
+  - stability under every workload: four further VM out-of-memory kills of unidentified processes (not the Preview, the session or Replit's supervisor) were observed while idle after the update;
+  - `allowedHosts: true` being acceptable for that use.
+- **Still open.** Any new large root tree that is untracked or ignored only globally recreates the scanning failure. GHSA-46jr's upstream configuration gap. `vite` 6.4.5. An isolated interactive backend QA session, the next stage. The owner's Manual QA, PENDING. All 37 gates OPEN.
+- **Nothing deployed.** No managed database, live secret or configuration, real sign-in, provider, managed migration or deployment was touched. The recorded network actions are CI and advisory reads, registry metadata and package fetches, and the fast-forward pushes of `cc089fe`, `2f5ec3a` and this record.
+
 - **M0 carry-forward gates still open:** G-EMU, G-HIST, G-4USER.
 - **M2's lockfile recovery is now proven on a CI runner.** Every push to `main` runs the lockfile-portability gate before a public-registry `npm ci`, then the typecheck contract and the typecheck ratchet (`ci.yml` quality job); all were green on `8883473d` (run 34779503875), the runner whose missing internal mirror caused the original failure. No M2 gate changes state here: moving G-EMU, G-APPSEC or G-COVERAGE is the owner's decision against each gate's own pass rule.
 - **Go-live rule:** every `BLOCKER` must be `PASS` and every `HIGH` must be `PASS` or explicitly owner-waived (with documented risk) before G-GOLIVE can be requested.
