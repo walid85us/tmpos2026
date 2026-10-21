@@ -1,4 +1,10 @@
 @import "tailwindcss";
+/* Local, non-product trees that automatic source detection would otherwise read: .workflow is untracked
+   work/scratch (~573k files) and .cache holds tool caches (~4 GB) ignored only by the host's global
+   gitignore, which the scanner does not honour. Scanning either on the first stylesheet request
+   exhausted the Replit VM's memory and the dev server was killed. Neither exists in a clean checkout. */
+@source not "../.workflow";
+@source not "../.cache";
 
 @theme {
   --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;

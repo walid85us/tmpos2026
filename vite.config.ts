@@ -65,6 +65,9 @@ export default defineConfig(({mode}) => {
           '**/docs/**',
           '**/scripts/**',
           '**/goose-x86_64-unknown-linux-gnu.tar.bz2',
+          // Local, untracked work/scratch tree (~200k directories): watching it alone held
+          // ~197k inotify watches in one dev server.
+          '**/.workflow/**',
         ],
       },
       proxy: {
