@@ -24,6 +24,12 @@ function apiPathGuard(): Plugin {
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  // Exact Host names only: the Replit dev URL, from Replit's own non-secret metadata. Only plain host names are kept (a
+  // leading-dot entry would be a wildcard to Vite). Vite still admits localhost and IP literals by itself; with neither
+  // variable set (CI, a plain shell) no other name is served.
+  const allowedHosts = [process.env.REPLIT_DEV_DOMAIN, ...(process.env.REPLIT_DOMAINS ?? '').split(',')]
+    .map((host) => host?.trim().toLowerCase() ?? '')
+    .filter((host, i, all) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host) && all.indexOf(host) === i);
   return {
     plugins: [apiPathGuard(), react(), tailwindcss()],
     define: {
@@ -37,7 +43,7 @@ export default defineConfig(({mode}) => {
     server: {
       host: '0.0.0.0',
       port: 5000,
-      allowedHosts: true,
+      allowedHosts,
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: {
         ignored: [
